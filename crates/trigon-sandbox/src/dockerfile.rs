@@ -1,0 +1,119 @@
+//! The container pattern, rendered.
+//!
+//! Setup, source and deps run at **image-build** time; the build itself is written to `/build` and
+//! run afterwards. Taken from the prior art, because it is right, and it buys three things:
+//!
+//! 1. **Layer caching** across sibling versions of a package, which is often the difference between
+//!    a 20-second build and a 200-second one.
+//! 2. **Clean phase boundaries** for timing. Each phase is a layer, so per-phase durations come
+//!    from layer metadata rather than from instrumenting the build.
+//! 3. **A retained image and container** an agent can `exec` into and a human can pull when
+//!    triaging.
+//!
+//! Where this departs from the prior art is *how* a phase's script reaches the image. They inline
+//! it in a heredoc (`RUN <<'EOF' | sh`), which is a BuildKit parser feature. Podman 4.x builds with
+//! `imagebuilder`, which does not implement it and parses the heredoc body as Dockerfile
+//! instructions: the first line of a build script becomes an unknown instruction and the error
+//! names it. Requiring BuildKit would make "runs on a laptop with Podman" false, so each phase is
+//! a file in the build context instead, copied in and run.
+//!
+//! That turns out to be the better shape anyway. There is no shell quoting to get wrong, the
+//! scripts are inspectable files rather than bytes embedded in a Dockerfile, and the whole context
+//! hashes as a unit for the run key.
+//!
+//! Rendering is a pure function of the plan, with no clock and no environment, so the bytes that
+//! describe a build can be read before anything executes.
+
+use std::collections::BTreeMap;
+
+use crate::model::OciPlan;
+
+/// Everything needed to build the image: the Dockerfile and the files it copies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildContext {
+    pub dockerfile: String,
+    /// Relative path to contents. `BTreeMap` so the context hashes the same every time.
+    pub files: BTreeMap<String, String>,
+}
+
+impl BuildContext {
+    /// Write the context to a directory.
+    pub fn write(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("Dockerfile"), &self.dockerfile)?;
+        for (name, body) in &self.files {
+            std::fs::write(dir.join(name), body)?;
+        }
+        Ok(())
+    }
+}
+
+/// The package manager for a base image, chosen by what the image name says it is.
+///
+/// A guess, and it is allowed to be: a wrong guess fails in the setup phase with the package
+/// manager's own error, which is a legible failure. Silently skipping the install is not, because
+/// the build then fails later for a reason that looks like the package's fault.
+fn install_command(base_image: &str, deps: &[String]) -> String {
+    let img = base_image.to_ascii_lowercase();
+    let joined = deps.join(" ");
+    if img.contains("alpine") {
+        format!("apk add --no-cache {joined}")
+    } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
+        format!("dnf install -y {joined}")
+    } else {
+        format!("apt-get update && apt-get install -y --no-install-recommends {joined}")
+    }
+}
+
+/// Render the build context for a plan.
+pub fn render(plan: &OciPlan) -> BuildContext {
+    let mut files = BTreeMap::new();
+    let mut f = String::new();
+    f.push_str(&format!("FROM {}\n\n", plan.base_image));
+
+    let phase = |f: &mut String, files: &mut BTreeMap<String, String>, name: &str, body: &str| {
+        if body.trim().is_empty() {
+            return;
+        }
+        let file = format!("{name}.sh");
+        // `set -eu` on every phase. Without `-e` a failing command in the middle of a phase leaves
+        // the build running with a half-prepared tree, and the failure surfaces somewhere else.
+        files.insert(file.clone(), format!("set -eu\n{}\n", body.trim()));
+        f.push_str(&format!(
+            "# {name}\nCOPY {file} /trigon/{file}\nRUN /bin/sh /trigon/{file}\n\n"
+        ));
+    };
+
+    if !plan.system_deps.is_empty() {
+        let deps: Vec<String> = plan.system_deps.iter().cloned().collect();
+        phase(
+            &mut f,
+            &mut files,
+            "setup",
+            &install_command(&plan.base_image, &deps),
+        );
+    }
+
+    f.push_str("RUN mkdir -p /src /out\nWORKDIR /src\n\n");
+
+    phase(&mut f, &mut files, "source", &plan.source);
+    phase(&mut f, &mut files, "deps", &plan.deps);
+
+    // The build is written, not run. This is the whole point of the pattern: everything above is a
+    // cacheable layer, and only this happens fresh under the runtime's isolation.
+    let mut build = String::from("set -eux\n");
+    build.push_str(plan.build.trim());
+    build.push('\n');
+    build.push_str("mkdir -p /out\n");
+    // Unquoted on purpose: `output_path` is frequently a glob such as `dist/*`, and quoting it
+    // would make the shell look for a file with an asterisk in its name.
+    build.push_str(&format!("cp -r /src/{} /out/\n", plan.output_path));
+    files.insert("build.sh".into(), build);
+    f.push_str("# build: written, not run\nCOPY build.sh /build\n");
+    f.push_str("ENTRYPOINT [\"/bin/sh\", \"/build\"]\n");
+
+    BuildContext {
+        dockerfile: f,
+        files,
+    }
+}

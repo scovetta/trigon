@@ -1,0 +1,22 @@
+[package]
+name = "trigon-sandbox"
+version = "0.0.0"
+description = "Running a build in isolation: the runner abstraction and its OCI implementation."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+trigon-strategy.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

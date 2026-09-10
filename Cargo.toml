@@ -7,6 +7,7 @@ members = [
     "crates/trigon-stabilize",
     "crates/trigon-compare",
     "crates/trigon-strategy",
+    "crates/trigon-sandbox",
     "crates/trigon",
     "xtask",
 ]
@@ -24,6 +25,7 @@ trigon-archive = { path = "crates/trigon-archive", version = "0.0.0" }
 trigon-stabilize = { path = "crates/trigon-stabilize", version = "0.0.0" }
 trigon-compare = { path = "crates/trigon-compare", version = "0.0.0" }
 trigon-strategy = { path = "crates/trigon-strategy", version = "0.0.0" }
+trigon-sandbox = { path = "crates/trigon-sandbox", version = "0.0.0" }
 
 # Judgement half: sync, no tokio, no reqwest. See docs/01-architecture.md §2.2.
 serde = { version = "1", features = ["derive"] }
@@ -45,7 +47,11 @@ serde_yaml_ng = "0.10"
 serde_path_to_error = "0.1"
 minijinja = { version = "2", default-features = false, features = ["builtins", "loader", "serde"] }
 
-# Search half and tooling only.
+# Search half and tooling only. Nothing above the judgement line may reach these: the policy test
+# in xtask enforces it, and `cargo tree` on the shipped verifier is the claim a sceptic can check.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs"] }
+async-trait = "0.1"
+futures = "0.3"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
