@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 
 mod corpus;
 mod differential;
+mod golden;
 
 #[derive(Parser, Debug)]
 #[command(name = "xtask")]
@@ -28,6 +29,20 @@ enum Cmd {
     Corpus {
         #[command(subcommand)]
         cmd: CorpusCmd,
+    },
+    /// Check, or re-record, the golden stabilized digests for a corpus.
+    Golden {
+        #[arg(long, default_value = "corpora/m0-smoke.toml")]
+        manifest: std::path::PathBuf,
+        /// Re-record rather than check.
+        #[arg(long)]
+        write: bool,
+        /// Why the digests moved. Required to write.
+        #[arg(long, default_value = "")]
+        reason: String,
+        /// Allow a re-record with no change to the code that produces digests.
+        #[arg(long)]
+        force: bool,
     },
     /// Compare our stabilizer against the reference over a corpus.
     Differential {
@@ -62,6 +77,21 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Cmd::Golden {
+            manifest,
+            write,
+            reason,
+            force,
+        } => {
+            let bin = std::env::var("TRIGON_BIN").unwrap_or_else(|_| "target/debug/trigon".into());
+            let out = if write {
+                golden::write(&manifest, &bin, &reason, force)?
+            } else {
+                golden::check(&manifest, &bin)?
+            };
+            print!("{out}");
+            Ok(())
+        }
         Cmd::Differential {
             manifest,
             deviations,

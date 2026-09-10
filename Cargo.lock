@@ -746,7 +746,10 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "flate2",
  "serde_json",
+ "sha2",
+ "tar",
  "trigon-archive",
  "trigon-compare",
  "trigon-core",
@@ -774,8 +777,10 @@ dependencies = [
 name = "trigon-compare"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "serde",
  "sha2",
+ "tar",
  "thiserror",
  "trigon-archive",
  "trigon-core",

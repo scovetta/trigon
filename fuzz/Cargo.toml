@@ -1,0 +1,37 @@
+[package]
+name = "trigon-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+trigon-core = { path = "../crates/trigon-core" }
+trigon-archive = { path = "../crates/trigon-archive" }
+trigon-stabilize = { path = "../crates/trigon-stabilize" }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stabilize"
+path = "fuzz_targets/stabilize.rs"
+test = false
+doc = false
+bench = false

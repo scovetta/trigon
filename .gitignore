@@ -3,3 +3,7 @@
 *.profraw
 /corpora/cache
 .DS_Store
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/Cargo.lock
