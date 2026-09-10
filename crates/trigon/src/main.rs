@@ -80,7 +80,21 @@ enum OutputFormat {
     Json,
 }
 
+/// Die quietly when the reader goes away, rather than panicking.
+///
+/// Rust masks SIGPIPE at startup, so a write to a closed pipe returns EPIPE, `println!` panics on
+/// it, and `trigon verify x y | head -3` exits 101 with a backtrace instead of 0. That matters more
+/// here than in most tools, because the exit code carries the verdict: 0 for a match and 1 for a
+/// divergence. A panic in the middle of a pipeline is indistinguishable from a real failure.
+fn die_quietly_on_sigpipe() {
+    // SAFETY: restoring a signal to its default disposition, before any thread is spawned.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 fn main() -> Result<()> {
+    die_quietly_on_sigpipe();
     match Cli::parse().cmd {
         Cmd::Verify {
             upstream,

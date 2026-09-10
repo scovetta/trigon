@@ -173,3 +173,34 @@ fn stabilize_writes_a_file_and_honours_pass_selection() {
     assert_ne!(with, without, "disabling every pass must change the output");
     assert!(!with.is_empty() && !without.is_empty());
 }
+
+#[test]
+fn piping_into_head_does_not_panic() {
+    // Rust masks SIGPIPE at startup, so a write to a closed pipe returns EPIPE and `println!`
+    // panics on it. `trigon verify a b | head -3` then exits 101 with a backtrace. That is worse
+    // here than in most tools because the exit code carries the verdict, and a panic mid-pipeline
+    // is indistinguishable from a real failure.
+    let a = write_tgz("pipe-a.tgz", b"hello", 1_700_000_000);
+    let b = write_tgz("pipe-b.tgz", b"hello", 1_800_000_000);
+
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "{} verify {} {} | head -2",
+            bin(),
+            a.display(),
+            b.display()
+        ))
+        .output()
+        .expect("sh runs");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "the CLI panicked when its reader went away:\n{stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("normalized"),
+        "the first lines should still arrive"
+    );
+}
