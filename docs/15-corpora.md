@@ -89,9 +89,42 @@ xtask corpus scan --ecosystem npm --limit 50000 \
       --out candidates.jsonl
 ```
 
-The scanner streams each artifact, parses headers, records which strata it satisfies, and discards
-the bytes. It never keeps an artifact it does not need. Expect to scan tens of thousands of artifacts
-to fill the 100-target duplicate-path stratum, which is why this runs once and the result is frozen.
+The scanner streams each artifact, parses it with the production parser, records which strata it
+satisfies, and discards the bytes. It never keeps an artifact it does not need. Expect to scan tens
+of thousands of artifacts to fill the 100-target duplicate-path stratum, which is why this runs once
+and the result is frozen.
+
+**Where this actually stands.** A first scan of 526 artifacts across npm, PyPI, crates.io and
+RubyGems produced `corpora/m0.toml`, 58 artifacts selected rarest stratum first:
+
+| Stratum | Found in 526 | Selected |
+|---|---:|---:|
+| plain | 316 | 8 |
+| empty-members | 88 | 8 |
+| tiny | 84 | 8 |
+| nested-archives | 35 | 8 |
+| long-names | 17 | 8 |
+| many-members | 8 | 8 |
+| large | 5 | 5 |
+| stored-entries | 3 | 3 |
+| pax-records | 1 | 1 |
+| zip64 | 1 | 1 |
+| **duplicate-paths** | **0** | 0 |
+| **non-regular-entries** | **0** | 0 |
+| **non-utf8-paths** | **0** | 0 |
+
+The three empty rows are the ones the table above calls the point, and 526 artifacts did not turn up
+a single instance of any of them. That is the predicted result rather than a surprise, and it is why
+the target counts assume a scan two orders of magnitude larger. Until that scan runs, those three
+strata are covered by hand-built fixtures in the unit tests and by nothing in the corpus, which is
+the honest description of the current state: the differential is far stronger than it was at five
+artifacts and it still does not exercise duplicate paths, symlinks or non-UTF-8 names against the
+reference.
+
+Two enumeration notes worth keeping. npm's `_changes` replicate feed returns mostly deletions, so
+the search API is the usable enumerator and it carries the version inline, which saves a packument
+fetch per candidate. And a published artifact our parser rejects is a finding rather than scan noise,
+so the scanner reports fetch failures and parse failures separately.
 
 **Malformed inputs are synthesized, not found.** `xtask corpus synth` mutates known-good artifacts
 under a recorded seed: truncate at a header boundary, corrupt a CRC, nest an archive five deep, point
