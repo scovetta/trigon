@@ -14,6 +14,7 @@ mod corpus;
 mod differential;
 mod golden;
 mod scan;
+mod signature;
 
 #[derive(Parser, Debug)]
 #[command(name = "xtask")]

@@ -5,10 +5,17 @@
 # difference fails the build. Every entry carries a test and a sentence, and adding one is a
 # reviewed change rather than a way to make a red build green.
 #
-# `artifacts` names the corpus files a deviation is known to explain. Attribution is per artifact
-# rather than per format, because a list that matches by class lets a genuine bug hide behind an
-# unrelated entry. A new artifact that mismatches is unexplained until someone looks at it and says
-# which deviation covers it.
+# `signature` names the difference codes a deviation explains, as patterns where `*` matches any
+# run of characters. Attribution is by what the difference IS, not by which file it turned up in.
+# A list of filenames grows with every corpus and is trivial to extend without thinking, so a real
+# bug in one wheel hides the moment some other wheel is exempt. A pattern cannot hide one: a wheel
+# that differs in a field no deviation claims stays unexplained, however many wheels are covered.
+#
+# An entry with no patterns makes no claim about the corpus. It records a writer property pinned by
+# the test it names, and is exempt from the stale check for that reason.
+#
+# `xtask differential` prints the codes it could not attribute, grouped by class with counts, which
+# is what these patterns are written from. Run it and read the report.
 #
 # See docs/05-archive-and-normalization.md §6.
 
@@ -16,7 +23,14 @@ schema = 1
 
 [[deviation]]
 id = "zip-writer-defaults"
-artifacts = ["six-1.16.0-py2.py3-none-any.whl"]
+signature = [
+  "entry:zip.creator_version@*",
+  "entry:zip.reader_version@*",
+  "entry:zip.flags@*",
+  "entry:zip.extra@*",
+  "entry:zip.dos_datetime@*",
+  "entry:mtime@*",
+]
 applies_to = ["zip"]
 test = "crates/trigon-archive/tests/zip_roundtrip.rs::stored_output_carries_no_compression"
 summary = "We zero the zip fields their writer leaves at its own defaults."
@@ -33,7 +47,7 @@ another language's writer conventions into a digest we sign.
 
 [[deviation]]
 id = "cargo-vcs-surgical"
-artifacts = ["itoa-1.0.11.crate"]
+signature = ["body@*/.cargo_vcs_info.json", "entry:size@*/.cargo_vcs_info.json"]
 applies_to = ["crate"]
 test = "crates/trigon-stabilize/tests/passes.rs::the_crate_profile_is_capped_by_cargo_vcs_hash"
 summary = "We replace the sha1 in place; the reference re-serializes the whole JSON."
@@ -48,7 +62,7 @@ also mask a genuine difference in a neighbouring field.
 
 [[deviation]]
 id = "nested-parse-errors"
-artifacts = []
+signature = []
 applies_to = ["gem", "tar"]
 test = "crates/trigon-archive/tests/nested.rs::a_malformed_inner_archive_notes_rather_than_guessing"
 summary = "A malformed inner archive produces a note here and silence there."
@@ -61,7 +75,7 @@ inner archive we cannot read, and ours says so.
 
 [[deviation]]
 id = "duplicate-path-ordering"
-artifacts = []
+signature = []
 applies_to = ["tar", "zip"]
 test = "crates/trigon-archive/tests/tar_roundtrip.rs::duplicate_paths_are_noted_and_ordering_is_total"
 summary = "Our sort key is (path, ordinal); theirs is path alone."
@@ -74,19 +88,54 @@ only one of the two orderings is reproducible.
 
 [[deviation]]
 id = "long-names-always-pax"
-artifacts = []
+signature = []
 applies_to = ["tar"]
 test = "crates/trigon-archive/tests/tar_roundtrip.rs::long_names_are_re_encoded_as_pax"
-summary = "We emit PAX for every long name; Go's writer may choose GNU."
+summary = "We never use the ustar prefix field: every long name takes a PAX path record."
 detail = """
-A name over 100 bytes that the ustar prefix field cannot carry needs an extension record, and tar has
-two incompatible ones. Go's writer chooses per entry. We always emit PAX, with records ordered by
-keyword, which removes a per-entry choice from a signed digest.
+A name over 100 bytes can be carried three ways: a GNU L-typeflag entry, a PAX path record, or the
+ustar prefix field joined to the name with a '/'. The prefix only works when a '/' falls in the right
+place, so it makes the framing a property of where the slashes are rather than of the length, and two
+paths of the same length are encoded differently.
+
+We always emit PAX, with records ordered by keyword, and leave the prefix field NUL. A writer pinned
+to the PAX format does the same, so this agrees with the reference. It is listed here because it is a
+writer property worth pinning with a test, not because the digests differ.
+"""
+
+[[deviation]]
+id = "pyc-source-mtime"
+signature = [
+  "body@*.pyc",
+  "entry:zip.crc32@*.pyc",
+  "body@*.dist-info/RECORD",
+  "entry:zip.crc32@*.dist-info/RECORD",
+]
+applies_to = ["wheel"]
+test = "crates/trigon-stabilize/tests/pyc_header.rs"
+summary = "We zero the source mtime embedded in a timestamp-validated .pyc; the reference has no .pyc pass."
+detail = """
+A PEP 552 header is 16 bytes: magic, a flags word, and 8 bytes whose meaning bit 0 of the flags
+selects. With the bit clear those are the source mtime and the source size. The mtime is the mtime
+of the .py file on the machine that compiled it, so two builds of identical source from different
+checkouts produce different .pyc bytes. That is exactly the nondeterminism a stabilizer removes, and
+the reference's stabilizer list for wheels has nothing that touches a .pyc.
+
+We zero the four mtime bytes and nothing else. Not the magic, which identifies the bytecode version.
+Not the flags, which say how to read the rest. Not the source size or the source hash, which are
+derived from the source and cannot differ while it matches.
+
+RECORD is listed here too, and the reason is a chain rather than a second decision: RECORD is a
+manifest of sha256 over the members, so any member whose bytes we change shows up there. That does
+make the RECORD patterns broader than the .pyc ones, and a RECORD-only difference from some other
+cause would be absorbed by them. The narrower alternative is to compare RECORD against the members
+it describes rather than against the reference, which belongs with the wheel-record pass rather than
+here.
 """
 
 [[deviation]]
 id = "gem-metadata-yaml"
-artifacts = ["rake-13.2.1.gem"]
+signature = ["body@metadata.gz!payload", "entry:size@metadata.gz", "entry:size@metadata.gz!payload"]
 applies_to = ["gem"]
 test = "crates/trigon-stabilize/tests/gem_metadata.rs"
 summary = "We normalize the three gemspec fields that carry build noise; the reference also reformats the document."
