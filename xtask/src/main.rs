@@ -187,6 +187,17 @@ const REQUIRE_NO_FEATURES: &[&str] = &[
 ];
 
 pub fn check_policy() -> Result<String> {
+    check_policy_with(FORBID_TRANSITIVE, REQUIRE_NO_FEATURES)
+}
+
+/// The policy check, with its table as a parameter so a test can hand it a rule that must fail.
+///
+/// A checker nobody has seen fail is a checker nobody knows works. Passing the table in is what
+/// makes the negative test possible without adding a forbidden dependency to a real crate.
+fn check_policy_with(
+    forbid_transitive: &[(&str, &[&str])],
+    require_no_features: &[&str],
+) -> Result<String> {
     let meta = cargo_metadata()?;
     let packages = meta["packages"].as_array().context("packages")?;
     let nodes = meta["resolve"]["nodes"]
@@ -223,7 +234,7 @@ pub fn check_policy() -> Result<String> {
     let mut violations: Vec<String> = Vec::new();
     let mut lines: Vec<String> = Vec::new();
 
-    for (crate_name, forbidden) in FORBID_TRANSITIVE {
+    for (crate_name, forbidden) in forbid_transitive {
         let Some(root) = id_for(crate_name) else {
             continue;
         };
@@ -244,7 +255,7 @@ pub fn check_policy() -> Result<String> {
         ));
     }
 
-    for crate_name in REQUIRE_NO_FEATURES {
+    for crate_name in require_no_features {
         let Some(p) = packages
             .iter()
             .find(|p| p["name"].as_str() == Some(crate_name))
@@ -346,5 +357,29 @@ mod tests {
             Ok(report) => println!("{report}"),
             Err(e) => panic!("{e}"),
         }
+    }
+
+    /// And the check is not vacuous.
+    ///
+    /// `serde` is a real, normal, transitive dependency of `trigon-core`, so forbidding it must
+    /// produce a violation naming the path. Without this, a graph walk that silently found nothing
+    /// (a renamed field in `cargo metadata`, an id format change) would report every crate clean
+    /// and the M0 exit criterion would be met by a checker that cannot fail.
+    #[test]
+    fn the_policy_check_fails_on_a_deliberate_violation() {
+        let err = super::check_policy_with(&[("trigon-core", &["serde"])], &[])
+            .expect_err("forbidding a dependency that exists must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("trigon-core reaches `serde` transitively"), "{msg}");
+        assert!(msg.contains("->"), "the violation must name the path: {msg}");
+    }
+
+    /// The feature rule is not vacuous either. `serde` declares features; a judgement-half crate
+    /// must not, and pointing the rule at a crate that does proves the arm runs.
+    #[test]
+    fn the_feature_rule_fails_on_a_crate_that_declares_features() {
+        let err = super::check_policy_with(&[], &["serde"])
+            .expect_err("serde declares features, so requiring none must fail");
+        assert!(err.to_string().contains("serde declares"), "{err}");
     }
 }
