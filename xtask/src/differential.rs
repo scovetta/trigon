@@ -54,12 +54,15 @@ pub fn run(manifest: &Path, deviations: &Path, reference: &str) -> Result<String
     let work = tempdir()?;
 
     let ours = std::env::var("TRIGON_BIN").unwrap_or_else(|_| "target/debug/trigon".into());
-    if which(reference).is_none() {
+    // Resolve once. `which` also searches $GOPATH/bin, which `Command::new` does not, so passing
+    // the bare name on would look up a binary we already found and then fail to exec it.
+    let Some(reference) = which(reference) else {
         bail!(
-            "reference implementation `{reference}` not on PATH.\n  \
+            "reference implementation `{reference}` not on PATH or in $GOPATH/bin.\n  \
              go install github.com/google/oss-rebuild/cmd/stabilize@latest"
         );
-    }
+    };
+    let reference = reference.as_str();
 
     let mut rows = Vec::new();
     let (mut matched, mut explained, mut unexplained, mut errored) = (0, 0, 0, 0);
