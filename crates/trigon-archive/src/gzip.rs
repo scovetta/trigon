@@ -152,13 +152,39 @@ pub fn write<W: Write>(
         w.write_all(&[0])?;
     }
 
-    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), level);
-    enc.write_all(payload)?;
-    let deflated = enc.finish()?;
-    w.write_all(&deflated)?;
+    if level.level() == 0 {
+        // Stored deflate, written by us. The design says the stabilized stream never passes through
+        // a deflate encoder; routing it through one that happens to choose stored blocks made that
+        // almost true. Twenty lines make it true, and they also remove the one byte-level deviation
+        // the differential test found in every tar.gz: an encoder is free to set BFINAL on the last
+        // data block or to append an empty final block, and the reference does the latter.
+        write_stored_deflate(payload, w)?;
+    } else {
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), level);
+        enc.write_all(payload)?;
+        w.write_all(&enc.finish()?)?;
+    }
 
     w.write_all(&crc32fast::hash(payload).to_le_bytes())?;
     w.write_all(&(payload.len() as u32).to_le_bytes())?;
+    Ok(())
+}
+
+/// Deflate with no entropy coding: stored blocks, then an empty final block.
+///
+/// A stored block is a 3-bit header padded to a byte boundary, then LEN and its complement, then the
+/// bytes. 65535 is the largest LEN the format allows.
+fn write_stored_deflate<W: Write>(payload: &[u8], w: &mut W) -> Result<()> {
+    const MAX: usize = 65535;
+    for chunk in payload.chunks(MAX) {
+        w.write_all(&[0u8])?; // BFINAL=0, BTYPE=00, padded to the byte
+        w.write_all(&(chunk.len() as u16).to_le_bytes())?;
+        w.write_all(&(!(chunk.len() as u16)).to_le_bytes())?;
+        w.write_all(chunk)?;
+    }
+    // The final block is empty rather than the last data block being marked final. Both are legal;
+    // this is the one the reference emits.
+    w.write_all(&[1u8, 0, 0, 0xff, 0xff])?;
     Ok(())
 }
 

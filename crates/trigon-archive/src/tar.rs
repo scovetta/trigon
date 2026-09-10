@@ -336,10 +336,15 @@ fn write_pax_header<W: Write>(
         body.extend_from_slice(&pax_record(k, v));
     }
 
+    // A PAX extended header entry is built minimally: name, typeflag, mode, uid, gid, size,
+    // mtime, magic. Everything else stays NUL. In particular the device fields are left untouched
+    // rather than octal-formatted, and the mode is 0 rather than a plausible file mode. Both are
+    // reference behaviour, and both showed up as byte differences the first time the differential
+    // test ran. See `docs/05-archive-and-normalization.md` §6.
     let name = pax_header_name(for_name);
     let mut hdr = [0u8; BLOCK];
     put_bytes(&mut hdr[0..100], &name);
-    put_octal(&mut hdr[100..108], 0o644);
+    put_octal(&mut hdr[100..108], 0);
     put_octal(&mut hdr[108..116], 0);
     put_octal(&mut hdr[116..124], 0);
     put_octal(&mut hdr[124..136], body.len() as u64);
@@ -347,8 +352,6 @@ fn write_pax_header<W: Write>(
     hdr[156] = b'x';
     hdr[257..263].copy_from_slice(b"ustar\0");
     hdr[263..265].copy_from_slice(b"00");
-    put_octal(&mut hdr[329..337], 0);
-    put_octal(&mut hdr[337..345], 0);
     finish_checksum(&mut hdr);
 
     w.write_all(&hdr)?;
@@ -388,6 +391,9 @@ fn pax_header_name(name: &[u8]) -> Vec<u8> {
     out.extend_from_slice(b"PaxHeaders.0/");
     out.extend_from_slice(file);
     out.truncate(NAME_LEN);
+    while out.last() == Some(&b'/') {
+        out.pop();
+    }
     out
 }
 
