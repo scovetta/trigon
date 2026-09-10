@@ -131,7 +131,7 @@ fn classify(bytes: &[u8], format: Format) -> Option<Vec<String>> {
     if a.entries.iter().any(|e| !matches!(e.kind, EntryKind::Regular | EntryKind::Directory)) {
         s.push("non-regular-entries".into());
     }
-    if a.entries.iter().any(|e| matches!(e.body, Body::Nested(_))) {
+    if a.entries.iter().any(|e| matches!(e.body, Body::Nested { .. })) {
         s.push("nested-archives".into());
     }
     if a.entries.iter().any(|e| e.meta.size == 0 && matches!(e.kind, EntryKind::Regular)) {

@@ -58,18 +58,22 @@ local file header, the name, the raw bytes, a central directory header, and an
 end-of-central-directory record, plus zip64 where needed. No compressor fidelity required.
 
 **Long names take PAX, always.** A path over 100 bytes, or a linkname over 100 bytes, needs an
-extension record, and tar has two incompatible ones: GNU `L`-typeflag entries and PAX `path=` /
-`linkpath=` records. Go's writer chooses on its own, per entry, which makes it the first place a
-differential test diverges for no interesting reason.
+extension record, and tar has three ways to carry one: a GNU `L`-typeflag entry, a PAX `path=` /
+`linkpath=` record, or the ustar `prefix` field, which holds 155 bytes and joins to the name with a
+`/`. The third is the trap. It works only when a `/` falls in the right place, so whether a name is
+representable depends on where its slashes are rather than on how long it is, and two paths of the
+same length end up framed differently.
 
-Our writer emits **PAX for every long name and long linkname**, with no GNU fallback, and orders PAX
-records lexicographically by keyword. We already force PAX for timestamps, so this costs nothing and
-removes a whole class of ambiguity. The rule is a stabilizer-independent property of the writer: it
-applies whether or not `tar-time` ran.
+Our writer emits **PAX for every long name and long linkname**, with no GNU fallback and no use of
+the `prefix` field, which stays NUL on every header we write. PAX records are ordered
+lexicographically by keyword. We already force PAX for timestamps, so this costs nothing and removes
+a whole class of ambiguity. The rule is a stabilizer-independent property of the writer: it applies
+whether or not `tar-time` ran.
 
-Where the input used GNU long names, the output uses PAX, so the stabilized form differs from the
-input encoding by design. That is a deviation to expect against the Go implementation and a row in
-the §6 deviation list.
+Where the input used a GNU long name or a prefix split, the output uses PAX, so the stabilized form
+differs from the input encoding by design. Each such entry carries a `LongNameReencoded` note. A
+writer pinned to the PAX format behaves the same way, so this agrees with the reference rather than
+deviating from it.
 
 Budget about 800 to 1000 lines and two weeks including fuzzing. **Byte-exact output is the product,
 so this is the wrong place to economize.**
@@ -147,6 +151,25 @@ which the differential test in §6 depends on.
 it, so no stabilizer is involved. That fixes a real bug in the prior art, where gem inner-archive
 recursion lives *as* a stabilizer and swallows its error: a malformed `data.tar.gz` yields a
 different stabilized digest with no signal at all. In Trigon a nested parse failure leaves the body unparsed, wherever it already lived, and emits `NoteCode::NestedParseFailed`. The bytes still reach the digest untouched, and the run reports that it could not see inside rather than changing its answer without telling anyone.
+
+**(4a) Descending is not licence to rewrite.** A `.gem` member like `data.tar.gz` is framing the
+format defines. A `banner.json.gz` inside an npm tarball is a file the package ships. The parser
+cannot tell them apart, because both are gzip members of an outer tar, and treating the second like
+the first rewrites a deliverable: re-serializing it stores what was deflated and drops the header
+fields the file legitimately carries. One npm tarball in the corpus grew a 4,887-byte member to
+66,090 that way.
+
+Two rules keep the distinction. `Body::Nested` carries the bytes it was parsed from alongside the
+parsed inner archive, and an inner archive nothing changed writes those bytes back rather than a
+re-serialization. And the container passes, the ones that act on the trailer, apply at depth 0 or
+where the **profile** says the nesting is structural, which for gems is exactly `data.tar.gz`,
+`metadata.gz` and `checksums.yaml.gz`. Entry passes still apply at every depth, so the tar inside a
+gem's `data.tar.gz` is normalized as usual.
+
+A pass that hashes members must then ask for `Entry::stabilized_bytes` rather than
+`Entry::body_bytes`, because a nested archive has no bytes of its own until it is written. The
+alternative, skipping the members it cannot read, is silent membership deletion, and membership
+deletion is how a stabilizer turns a real difference into a false match.
 
 **(5) Limits, which the prior art lacks.** We decompress attacker-controlled bytes:
 
@@ -536,22 +559,55 @@ npm, PyPI, crates.io, RubyGems and NuGet, and compare stabilized digests for eve
 returns as much.
 
 The exit criterion is **equality except a checked-in deviation list**, and it cannot be plain
-equality. The list lives at `corpora/deviations.toml`, attribution is **per artifact rather than per
-format** (a list that matches by class lets a genuine bug hide behind an unrelated entry), and a
-**stale exemption fails the build** too, because an artifact that now matches while still carrying an
-exemption is a place a future regression can hide.
+equality. The list lives at `corpora/deviations.toml`.
 
-The first run of this test on a five-artifact corpus found three real bugs and three deviations. The
-bugs were fixed:
+**Attribution is by what the difference is, not by which file it turned up in.** Each mismatch is
+reduced to a set of codes naming the fields that differ, and a deviation declares the codes it
+explains:
+
+```
+body@*/.cargo_vcs_info.json          the bytes of a member
+entry:zip.creator_version@*          a central-directory field
+entry:tar.pax.SCHILY.ino@pkg/x       one PAX keyword, named individually
+member-only-in-reference@pkg/x       membership
+container:gzip.os                    the outer gzip header
+```
+
+An artifact is explained when every code it produced is claimed by some deviation. The first version
+of this test keyed exemptions on filenames, which does not survive a real corpus: a filename list
+grows with every artifact and is trivial to extend without thinking, so a genuine bug in one wheel
+hides the moment some other wheel is exempt. A pattern cannot hide one. When the corpus grew from 5
+artifacts to 58, the filename scheme would have marked 26 mismatches "known"; the signature scheme
+marked 3 of them as new and they were all real bugs.
+
+Two further rules. A **stale exemption fails the build**: a deviation that explained nothing anywhere
+in the corpus was either closed by a fix nobody recorded or is written in patterns that no longer
+match, and both are places a regression can hide. And a mismatch that produces **no codes at all**
+fails too, rather than passing: the signature is computed over parsed archives, so a difference in
+something the parser does not represent is invisible to it. That is a gap in the test, and the run
+says so instead of going green.
+
+The report groups uncovered codes by class with counts and example paths, which is what makes a
+mismatch readable: `entry:zip.creator_version 33 members` and `body 8 members` in the same wheel are
+two different findings, and the second one is the bug.
+
+The first run on a five-artifact corpus found three real bugs. Scaling to 58 artifacts selected by
+structure ([`15-corpora.md`](15-corpora.md) §2) found four more. All seven were fixed:
 
 | Bug | What was wrong |
 |---|---|
 | PAX header mode | We wrote 0o644 into a PAX extended-header entry; the reference builds those minimally with mode 0. |
 | PAX header device fields | We octal-formatted devmajor and devminor; the reference leaves them NUL. |
 | Stored-deflate framing | We let `flate2` frame the no-compression case, which sets BFINAL on the last data block. The reference appends an empty final block. Twenty lines of our own stored-deflate writer fixed it, and made the claim that the stabilized stream never reaches a deflate encoder literally true rather than nearly true. |
+| PAX records survived stabilization | `tar-xattrs` stripped only `SCHILY.xattr.*`. Real npm tarballs carry `SCHILY.ino` and `SCHILY.dev` (inode and device numbers from the packing machine) and a `NODETAR.*` record per field of the packed `package.json`. Keeping any of them made the stabilized digest a function of where the package was built. The keyword set is open, so the pass now clears the map. |
+| Nested archives were rewritten | Descending into a `.gz` a package ships is for seeing inside it, not licence to rewrite it. Every nested archive was re-serialized store-only, which decompressed one 4,887-byte npm member to 66,090. `Body::Nested` now keeps the bytes it was parsed from and writes them back unless a pass changed something inside (§2.2 (4a)). |
+| A truncated tar name could end in `/` | A name too long for the 100-byte field is truncated, and a truncation landing just after a separator makes a regular file read as a directory to anything that infers the kind from the name. The trailing slash is now dropped and the NUL terminates the field. |
+| `wheel-record` dropped members it could not read | A `.gz` inside a wheel parses as a nested archive and has no bytes of its own, so `RECORD` regeneration skipped it. That is silent membership deletion presented as a normalization, and membership deletion is how a stabilizer turns a real difference into a false match. Members now contribute `Entry::stabilized_bytes`, and a member that genuinely cannot be read leaves `RECORD` untouched rather than producing a manifest of an archive that does not exist. |
 
-After those, **both npm tarballs are byte-identical to the reference.** The deviations that remain
-are decisions rather than defects, with one exception that records a gap:
+After those, **34 of 58 artifacts are byte-identical to the reference** and the other 24 are covered
+by the deviations below. Every npm tarball in the corpus matches exactly.
+
+The deviations that remain are decisions rather than defects:
 
 | Deviation | Why ours differs |
 |---|---|
@@ -559,8 +615,9 @@ are decisions rather than defects, with one exception that records a gap:
 | `cargo-vcs-surgical` | The reference round-trips `.cargo_vcs_info.json` through a JSON serializer, compacting 94 bytes to 76. We replace the 40 hex characters and touch nothing else, so `bytes_changed: 40` means it. |
 | `nested-parse-errors` | Their gem recursion swallows a parse error; ours emits a note (§2.2 (4)). |
 | `duplicate-path-ordering` | Our sort key is `(path, ordinal)`; theirs is path alone (§2.2 (6)). |
-| `long-names-always-pax` | We emit PAX for every long name; Go's writer chooses per entry (§2.1). |
-| `gem-metadata-yaml` | **Open.** Their four gem metadata YAML passes are not implemented here. This entry records a missing feature rather than a considered difference, and it closes when those passes land. |
+| `long-names-always-pax` | We never use the ustar `prefix` field, so a long name always takes a PAX `path` record and the framing does not depend on where the slashes fall (§2.1). A writer pinned to PAX does the same, so the digests agree. |
+| `gem-metadata-yaml` | We normalize the three gemspec fields that carry build noise, and match the reference's substitutions exactly. Its fourth pass re-serializes the whole document through a YAML writer, re-indenting every list; we decline for the `cargo-vcs-surgical` reason. |
+| `pyc-source-mtime` | A timestamp-validated `.pyc` embeds the mtime of the `.py` it was compiled from, so identical source from two checkouts produces different bytes. The reference has no `.pyc` pass; we zero those four bytes and nothing else, leaving the flags word that says how to read the rest and the source size that cannot differ while the source matches. |
 
 Every entry carries a test and a sentence. An unexplained difference fails the build, and the list is
 a deliverable of M0 rather than a by-product.
