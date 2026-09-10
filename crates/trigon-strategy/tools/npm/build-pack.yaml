@@ -1,0 +1,18 @@
+# The plain case: set the version if asked, then pack.
+id: npm/build/pack
+params:
+  npm_version:
+    required: true
+  version_override:
+    required: false
+steps:
+  - uses: npm/version-override
+    with:
+      version: "{{ with.version_override }}"
+      dir: "{{ location.subdir }}"
+  - uses: npm/npx
+    with:
+      command: npm pack
+      npm_version: "{{ with.npm_version }}"
+      dir: "{{ location.subdir }}"
+      locator: /usr/bin/

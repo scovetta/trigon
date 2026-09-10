@@ -1,0 +1,17 @@
+# Set the manifest version before packing.
+#
+# Some packages are published from a tree whose package.json still carries the previous version,
+# with the release version supplied at publish time. `--ignore-scripts` because this is metadata
+# surgery, not a build step, and a version hook here would run outside the phase that declared it.
+id: npm/version-override
+needs: [npm]
+params:
+  version:
+    required: false
+  dir:
+    required: false
+steps:
+  - runs: >-
+      {%- if with.version %}
+      PATH=/usr/bin:/bin:/usr/local/bin npm version --ignore-scripts{% if with.dir and with.dir != '.' %} --prefix {{ with.dir }}{% endif %} --no-git-tag-version {{ with.version }}
+      {%- endif %}

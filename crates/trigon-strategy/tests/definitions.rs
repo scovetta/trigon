@@ -44,7 +44,7 @@ fn cx_for(s: &Strategy) -> Context {
         location: LocationCtx {
             repo: l.repo,
             git_ref: l.git_ref,
-            subdir: l.subdir,
+            subdir: l.subdir.unwrap_or_default(),
         },
         env: EnvCtx {
             arch: "x86_64".into(),
@@ -146,4 +146,48 @@ fn the_definitions_corpus_imports_and_renders() {
         "expected at least 50 of {} to render, got {rendered}",
         files.len()
     );
+}
+
+#[test]
+fn the_npm_override_renders_the_script_its_definition_describes() {
+    // One npm definition in the corpus, and it is the interesting shape: a package whose publish
+    // ran a script before packing. Asserted line by line, because the ported npm tools have no
+    // other check on them until a sandbox exists to run one.
+    let Some(root) = definitions_root() else {
+        eprintln!("skipped: ../oss-rebuild/definitions is not checked out");
+        return;
+    };
+    let f = all_build_yaml(&root)
+        .into_iter()
+        .find(|p| p.display().to_string().contains("app-route"))
+        .expect("the app-route definition");
+    let imported = import(&std::fs::read_to_string(f).unwrap()).unwrap();
+    let i = render(
+        &imported.strategy,
+        &cx_for(&imported.strategy),
+        &ToolRegistry::builtin().unwrap(),
+    )
+    .unwrap();
+    println!("--- deps ---\n{}\n--- build ---\n{}", i.deps, i.build);
+
+    // node_version: 8.16.0, npm_version: 6.4.1, registry_time: 2018-09-13T19:55:58Z
+    assert!(
+        i.deps.contains("node-v8.16.0-linux-x64-musl.tar.gz"),
+        "{}",
+        i.deps
+    );
+    assert!(i.deps.contains("npx --package=npm@6.4.1"), "{}", i.deps);
+    assert!(
+        i.deps
+            .contains("npm_config_registry=http://npm:2018-09-13T19:55:58Z@timewarp"),
+        "the install has to resolve against the mirror: {}",
+        i.deps
+    );
+    // command: prepare
+    assert!(
+        i.build.contains("npm run prepare && npm pack"),
+        "{}",
+        i.build
+    );
+    assert!(i.requires.system_deps.contains("npm"), "{:?}", i.requires);
 }

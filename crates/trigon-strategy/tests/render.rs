@@ -9,7 +9,7 @@ fn cx() -> Context {
         location: LocationCtx {
             repo: "https://github.com/requests/toolbelt".into(),
             git_ref: "b7d1a1fcdda9ebcd9afe5011690ab860fce780c2".into(),
-            subdir: None,
+            subdir: String::new(),
         },
         target: TargetCtx {
             ecosystem: "pypi".into(),

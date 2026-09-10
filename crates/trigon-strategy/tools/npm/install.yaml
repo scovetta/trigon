@@ -1,0 +1,20 @@
+# Install dependencies against the mirror.
+#
+# `--force` because a rebuild resolves a tree that was valid on the publish date and may violate a
+# peer-dependency constraint that tightened since. `--no-audit` because the audit endpoint is a
+# network call that changes nothing about the output.
+id: npm/install
+params:
+  npm_version:
+    required: true
+  registry_time:
+    required: false
+  locator:
+    required: false
+steps:
+  - uses: npm/npx
+    with:
+      command: "{% if with.registry_time %}npm_config_registry={{ timewarp_url('npm', with.registry_time) }} {% endif %}npm install --force --no-audit"
+      npm_version: "{{ with.npm_version }}"
+      dir: "{{ location.subdir }}"
+      locator: "{{ with.locator }}"

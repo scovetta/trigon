@@ -30,7 +30,11 @@ pub struct LocationCtx {
     pub repo: String,
     #[serde(rename = "ref")]
     pub git_ref: String,
-    pub subdir: Option<String>,
+    /// Empty means the repository root, rather than `None`.
+    ///
+    /// A template that prints an absent `Option` renders `none`, and `cd none` in a build script is
+    /// a failure three steps removed from its cause. Empty string still answers `{% if %}`.
+    pub subdir: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

@@ -1,0 +1,13 @@
+# Point npm at the time-filtered mirror, and put it back afterwards.
+#
+# The trap matters: the setting is global, and a later phase that needs the live registry would
+# otherwise inherit a mirror pinned to the publish date.
+id: npm/setup-registry
+needs: [npm]
+params:
+  registry_time:
+    required: true
+steps:
+  - runs: |
+      /usr/bin/npm config --location-global set registry {{ timewarp_url("npm", with.registry_time) }}
+      trap '/usr/bin/npm config --location-global delete registry' EXIT

@@ -1,0 +1,18 @@
+# The npm dependency phase: a pinned Node, then an install against the mirror.
+id: npm/deps/custom
+params:
+  node_version:
+    required: true
+  npm_version:
+    required: true
+  registry_time:
+    required: false
+steps:
+  - uses: npm/install-node
+    with:
+      node_version: "{{ with.node_version }}"
+  - uses: npm/install
+    with:
+      npm_version: "{{ with.npm_version }}"
+      registry_time: "{{ with.registry_time }}"
+      locator: /usr/local/bin/

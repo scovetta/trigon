@@ -1,0 +1,28 @@
+# A package whose publish ran a script first.
+#
+# `keep_root` sets unsafe-perm, for packages whose prepack hooks assume they run as root.
+# `remove_deps` drops node_modules before packing, for packages whose published tarball does not
+# contain the dependency tree their prepack step installed.
+id: npm/build/custom
+params:
+  npm_version:
+    required: true
+  version_override:
+    required: false
+  command:
+    required: false
+  keep_root:
+    required: false
+  remove_deps:
+    required: false
+steps:
+  - uses: npm/version-override
+    with:
+      version: "{{ with.version_override }}"
+      dir: "{{ location.subdir }}"
+  - uses: npm/npx
+    with:
+      command: "{% if with.keep_root == 'true' %}npm config set unsafe-perm true && {% endif %}{% if with.command %}npm run {{ with.command }} && {% endif %}{% if with.remove_deps == 'true' %}rm -rf node_modules && {% endif %}npm pack"
+      npm_version: "{{ with.npm_version }}"
+      dir: "{{ location.subdir }}"
+      locator: /usr/local/bin/

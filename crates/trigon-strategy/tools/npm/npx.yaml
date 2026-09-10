@@ -1,0 +1,14 @@
+# Run a command under a pinned npm, in the package directory.
+id: npm/npx
+needs: [npm]
+params:
+  command:
+    required: true
+  npm_version:
+    required: true
+  dir:
+    required: false
+  locator:
+    required: false
+steps:
+  - runs: "{{ with.locator }}npx --package=npm@{{ with.npm_version }} -c '{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'"

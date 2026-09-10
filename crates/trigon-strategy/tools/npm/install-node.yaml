@@ -1,0 +1,13 @@
+# Fetch a specific Node build into /usr/local.
+#
+# The musl build, because the base image varies and the musl one runs on both glibc and musl hosts.
+# Pinned by version: the toolchain that produced a package is part of what we are reproducing, and
+# "whatever Node the image has" is not a description of a build.
+id: npm/install-node
+params:
+  node_version:
+    required: true
+steps:
+  - runs: >-
+      wget -O - https://unofficial-builds.nodejs.org/download/release/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64-musl.tar.gz
+      | tar xzf - --strip-components=1 -C /usr/local/

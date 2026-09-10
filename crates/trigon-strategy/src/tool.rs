@@ -179,4 +179,12 @@ const BUILTIN_TOOLS: &[&str] = &[
     include_str!("../tools/pypi/install-deps.yaml"),
     include_str!("../tools/pypi/deps-basic.yaml"),
     include_str!("../tools/pypi/build-wheel.yaml"),
+    include_str!("../tools/npm/install-node.yaml"),
+    include_str!("../tools/npm/setup-registry.yaml"),
+    include_str!("../tools/npm/npx.yaml"),
+    include_str!("../tools/npm/version-override.yaml"),
+    include_str!("../tools/npm/install.yaml"),
+    include_str!("../tools/npm/deps-custom.yaml"),
+    include_str!("../tools/npm/build-pack.yaml"),
+    include_str!("../tools/npm/build-custom.yaml"),
 ];

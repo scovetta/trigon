@@ -84,6 +84,8 @@ pub fn import(src: &str) -> Result<Imported, StrategyError> {
     let strategy = match kind.as_str() {
         "flow" => flow(body)?,
         "pypi_pure_wheel_build" => pypi_pure_wheel(body)?,
+        "npm_custom_build" => npm_custom(body)?,
+        "npm_pack_build" => npm_pack(body)?,
         "rebuild_location_hint" => Strategy::LocationHint(LocationHint {
             location: location(body.get("location").unwrap_or(&Value::Null))?,
             note: Some("imported from oss-rebuild definitions".into()),
@@ -166,6 +168,83 @@ fn pypi_pure_wheel(body: &Value) -> Result<Strategy, StrategyError> {
         output_dir: Some(output_dir),
         output_path: None,
     }))
+}
+
+/// `npm_custom_build`: a package whose publish ran a script before packing.
+fn npm_custom(body: &Value) -> Result<Strategy, StrategyError> {
+    let loc = location(body.get("location").unwrap_or(&Value::Null))?;
+    let mut deps = BTreeMap::from([
+        ("node_version".to_string(), required(body, "node_version")?),
+        ("npm_version".to_string(), required(body, "npm_version")?),
+    ]);
+    if let Some(t) = string(body.get("registry_time")) {
+        deps.insert("registry_time".into(), t);
+    }
+
+    let mut build = BTreeMap::from([("npm_version".to_string(), required(body, "npm_version")?)]);
+    for (theirs, ours) in [
+        ("version_override", "version_override"),
+        ("command", "command"),
+    ] {
+        if let Some(v) = string(body.get(theirs)) {
+            build.insert(ours.into(), v);
+        }
+    }
+    // Their booleans are optional and default false. Absent and false are the same build, so an
+    // absent key is not carried through as the string "false".
+    for (theirs, ours) in [
+        ("keep_root", "keep_root"),
+        ("prepack_remove_deps", "remove_deps"),
+    ] {
+        if body.get(theirs).and_then(Value::as_bool) == Some(true) {
+            build.insert(ours.into(), "true".into());
+        }
+    }
+
+    let output_dir = loc.subdir.clone().unwrap_or_else(|| ".".into());
+    Ok(Strategy::Flow(FlowStrategy {
+        location: loc,
+        src: vec![uses("git-checkout", BTreeMap::new())],
+        deps: vec![uses("npm/deps/custom", deps)],
+        build: vec![uses("npm/build/custom", build)],
+        output_dir: Some(output_dir),
+        output_path: None,
+    }))
+}
+
+/// `npm_pack_build`: the plain case, `npm pack` with no publish script.
+fn npm_pack(body: &Value) -> Result<Strategy, StrategyError> {
+    let loc = location(body.get("location").unwrap_or(&Value::Null))?;
+    let mut deps = BTreeMap::from([
+        ("node_version".to_string(), required(body, "node_version")?),
+        ("npm_version".to_string(), required(body, "npm_version")?),
+    ]);
+    if let Some(t) = string(body.get("registry_time")) {
+        deps.insert("registry_time".into(), t);
+    }
+    let mut build = BTreeMap::from([("npm_version".to_string(), required(body, "npm_version")?)]);
+    if let Some(v) = string(body.get("version_override")) {
+        build.insert("version_override".into(), v);
+    }
+    let output_dir = loc.subdir.clone().unwrap_or_else(|| ".".into());
+    Ok(Strategy::Flow(FlowStrategy {
+        location: loc,
+        src: vec![uses("git-checkout", BTreeMap::new())],
+        deps: vec![uses("npm/deps/custom", deps)],
+        build: vec![uses("npm/build/pack", build)],
+        output_dir: Some(output_dir),
+        output_path: None,
+    }))
+}
+
+/// A field the lowering cannot invent a default for.
+fn required(body: &Value, key: &str) -> Result<String, StrategyError> {
+    string(body.get(key)).filter(|s| !s.is_empty()).ok_or_else(|| {
+        StrategyError::Invalid(format!(
+            "`{key}` is required and absent. Guessing one would pin a toolchain the definition did \
+             not ask for, which is a different build reported under this definition's name."
+        ))
+    })
 }
 
 fn uses(tool: &str, with: BTreeMap<String, String>) -> Step {
