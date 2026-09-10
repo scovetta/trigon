@@ -1,0 +1,26 @@
+[package]
+name = "trigon-archive"
+version = "0.0.0"
+description = "Mutable, recursive archive model with byte-exact tar, zip and gzip writers."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+memmap2.workspace = true
+tempfile.workspace = true
+tar.workspace = true
+flate2.workspace = true
+crc32fast.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tar = "0.4"
+flate2 = "1"
+zip_crate = { package = "zip", version = "2", default-features = false, features = ["deflate"] }
