@@ -1,0 +1,60 @@
+# Trigon
+
+**Semantic rebuild verification for open-source packages.**
+
+Trigon takes a published package artifact, finds the source it claims to come from, rebuilds it in a
+controlled environment, and decides whether the rebuild and the published artifact are the same
+thing. It signs an attestation either way.
+
+It supports npm, PyPI, crates.io, RubyGems, NuGet, and arbitrary GitHub projects behind a single
+extension seam. It runs as one binary on a laptop or as a fleet on any cloud. It uses LLMs hard for
+the parts that are a search problem, and not at all for the parts that are a correctness problem.
+
+---
+
+## The thesis
+
+Rebuild verification is a search problem wrapped in an equivalence problem. Finding the source,
+guessing the build, and repairing a failure are search. Deciding whether two artifacts are the same
+thing is equivalence. Models handle search well. They have no place in the equivalence.
+
+Everything in this design follows from that split. See [`00-overview.md`](00-overview.md).
+
+---
+
+## Document set
+
+| Doc | Read it for |
+|---|---|
+| [`00-overview.md`](00-overview.md) | The problem, what the prior art got right and wrong, the thesis, goals and non-goals, glossary |
+| [`01-architecture.md`](01-architecture.md) | Pipeline, crate graph, dependency policy and its CI enforcement, the trait catalogue |
+| [`02-domain-model.md`](02-domain-model.md) | The types: `Target`, `Verdict`, `Match`, `Comparison`, `Run`, `Evidence` |
+| [`03-ecosystems.md`](03-ecosystems.md) | One chapter per ecosystem: resolution, source discovery, build, nondeterminism, expected rates |
+| [`04-strategies.md`](04-strategies.md) | The strategy schema, the flow DSL, template rules, versioning, the definitions repo |
+| [`05-archive-and-normalization.md`](05-archive-and-normalization.md) | The mutable archive model, the stabilizer catalogue, the comparison outcomes |
+| [`06-ci-awareness.md`](06-ci-awareness.md) | Reading GitHub Actions, action allowlists, ingesting trusted-publishing provenance |
+| [`07-ai.md`](07-ai.md) | Provider abstraction, the three AI roles, caching keys, the repair flywheel, evaluation |
+| [`08-execution.md`](08-execution.md) | Sandboxing, image policy, egress tiers, dependency-state pinning, observability tiers |
+| [`09-attestations.md`](09-attestations.md) | Predicate schemas with example JSON, signing, verification, storage, divergence publication |
+| [`10-scale.md`](10-scale.md) | Sizing and cost arithmetic, the queue, mirrors and caches, scheduling, DB schema |
+| [`11-interfaces.md`](11-interfaces.md) | CLI, API, and the web UI views, with the personas they serve |
+| [`12-security.md`](12-security.md) | The threat model, centred on the attack that shapes the design |
+| [`13-roadmap.md`](13-roadmap.md) | M0 to M5 with exit criteria |
+| [`14-worked-examples.md`](14-worked-examples.md) | Four targets traced end to end, including the ones that come out messy |
+| [`15-corpora.md`](15-corpora.md) | The five test corpora, the manifest format, and how to fetch them without getting blocked |
+| [`adr/`](adr/) | Short records for the load-bearing decisions |
+
+## Suggested reading order
+
+- **Evaluating the design?** `00`, `01`, `05`, `12`.
+- **Implementing?** `13` for what to build first, then `05` for the hard part, then `15` for the corpus it needs, then `02` and `04`.
+- **Operating it?** `10`, `08`, `11`.
+- **Consuming its output?** `09`, then run `trigon verify-attestation --rerun-comparison`.
+- **Sceptical?** `14`, where two of the four examples come out with caveats.
+
+## Status
+
+Design phase. No implementation yet. We checked every claim in these documents about the prior art
+against the source of [google/oss-rebuild](https://github.com/google/oss-rebuild) and
+[microsoft/OSSGadget](https://github.com/microsoft/OSSGadget), and cite every claim about ecosystem
+reproducibility rates in [`03-ecosystems.md`](03-ecosystems.md).

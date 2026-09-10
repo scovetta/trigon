@@ -1,0 +1,451 @@
+# 09. Attestations
+
+## 1. What we are willing to sign
+
+Every Trigon attestation is an [in-toto Statement v1](https://in-toto.io/Statement/v1) wrapped in a
+[DSSE](https://github.com/secure-systems-lab/dsse) envelope with payload type
+`application/vnd.in-toto+json`, published as a JSONL bundle.
+
+A verifier **who has never heard of a language model** has to be able to check the claim:
+
+> Recipe **R**, executed in fully described environment **E**, produced artifact **A** whose
+> stabilized form under versioned stabilizer set **S** equals the stabilized form of published
+> artifact **P**.
+
+Every noun there is deterministic. Whether a model helped derive **R** appears beside the claim as a
+provenance fact and stays out of it.
+
+## 2. Predicates
+
+| Predicate type | Emitted when | Subject |
+|---|---|---|
+| `https://trigon.dev/rebuild/v1` | a build ran | the rebuilt artifact |
+| `https://trigon.dev/equivalence/v1` | a comparison ran | the **upstream** artifact |
+| `https://trigon.dev/divergence/v1` | the verdict is `Divergent` | the upstream artifact |
+| `https://trigon.dev/buildobservation/v1` | observability tier ≥ 1 | the rebuilt artifact |
+
+We **also** emit a conformant `https://slsa.dev/provenance/v1` statement alongside `rebuild/v1`, so
+existing SLSA tooling consumes our output without knowing anything about Trigon.
+
+### 2.1 `rebuild/v1`
+
+```json
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    { "name": "rebuild/left-pad-1.3.0.tgz",
+      "digest": { "sha256": "b1946ac92492d2347c6235b4d2611184…" } }
+  ],
+  "predicateType": "https://trigon.dev/rebuild/v1",
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "https://trigon.dev/builds/Rebuild@v1",
+      "externalParameters": {
+        "target": {
+          "purl": "pkg:npm/left-pad@1.3.0",
+          "artifact": "left-pad-1.3.0.tgz",
+          "upstreamDigest": { "sha256": "e9f1a3b0…" },
+          "selectionPolicy": "bulk-default@3"
+        }
+      },
+      "internalParameters": {
+        "strategy": {
+          "digest": { "sha256": "9c1185a5c5e9fc54612808977ee8f5…" },
+          "kind": "flow",
+          "derivation": "ci_derived",
+          "trustTier": "typed",
+          "inline": "<base64 of the canonical JCS strategy>"
+        },
+        "renderedInstructions": {
+          "sourceScript": { "sha256": "…" },
+          "depsScript":   { "sha256": "…" },
+          "buildScript":  { "sha256": "…" },
+          "outputPath": "left-pad-1.3.0.tgz"
+        },
+        "environment": {
+          "baseImage": "trigon/base-node@sha256:5f2b…",
+          "runner": "k8s-job",
+          "isolation": "gvisor",
+          "egressTier": "mirror-only",
+          "observabilityTier": 1,
+          "registryMoment": { "kind": "timestamp", "value": "2018-11-22T17:00:04Z" },
+          "sourceDateEpoch": 1542906004,
+          "locale": "C.UTF-8", "timezone": "UTC", "umask": "0022",
+          "arch": "x86_64",
+          "toolchains": { "node": "10.17.0", "npm": "6.11.3" }
+        },
+        "confirmation": {
+          "policy": "two-agreeing-attempts",
+          "cacheKey": { "sha256": "c41f…" },
+          "attempts": [
+            { "runId": "01J…A", "ordinal": 0, "purpose": "initial",
+              "worker": "w-17", "finishedOn": "2026-09-08T02:11:40Z" },
+            { "runId": "01J…B", "ordinal": 1, "purpose": "confirmation",
+              "worker": "w-42", "finishedOn": "2026-09-08T06:35:02Z" }
+          ]
+        }
+      },
+      "resolvedDependencies": [
+        { "uri": "git+https://github.com/stringandstring/left-pad",
+          "digest": { "sha1": "ea6b26bb8b3f01a1b3f6b0b2d3a7…" } },
+        { "uri": "trigon/base-node", "digest": { "sha256": "5f2b…" } },
+        { "name": "definitions", "uri": "git+https://github.com/trigon-dev/trigon-definitions",
+          "digest": { "sha1": "77c1b0…" } }
+      ]
+    },
+    "runDetails": {
+      "builder": { "id": "https://trigon.dev/builder/v1",
+                   "version": { "trigon": "0.4.2", "stabilizers": "sha256:2b7c…" } },
+      "metadata": { "invocationId": "01J…A",
+                    "startedOn": "2026-09-08T02:09:12Z",
+                    "finishedOn": "2026-09-08T02:11:40Z" },
+      "byproducts": [
+        { "name": "build.log",     "digest": { "sha256": "…" } },
+        { "name": "Dockerfile",    "digest": { "sha256": "…" } },
+        { "name": "network.jsonl", "digest": { "sha256": "…" } }
+      ]
+    },
+    "derivation": {
+      "method": "ci_derived",
+      "transcript": null,
+      "reviewedBy": null
+    }
+  }
+}
+```
+
+Note `derivation`. When a model was involved it reads:
+
+```json
+"derivation": {
+  "method": "model_assisted",
+  "transcript": { "sha256": "3fa1…" },
+  "models": ["claude-opus-5"],
+  "reviewedBy": null
+}
+```
+
+**Method records provenance rather than trust.** A consumer who wants to filter on "no model
+touched this" can, and offering that capability costs one field.
+
+### 2.2 `equivalence/v1`
+
+The load-bearing one.
+
+```json
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    { "name": "left-pad-1.3.0.tgz",
+      "digest": { "sha256": "e9f1a3b0…" } }
+  ],
+  "predicateType": "https://trigon.dev/equivalence/v1",
+  "predicate": {
+    "outcome": "normalized",
+    "containerBitIdentical": false,
+    "archiveFormat": "tar+gzip",
+    "artifacts": {
+      "upstream": { "sha256": "e9f1a3b0…", "sha512": "…", "bytes": 2412 },
+      "rebuild":  { "sha256": "b1946ac9…", "sha512": "…", "bytes": 2455 }
+    },
+    "container": {
+      "upstream": { "sha256": "1f0c2d44…" },
+      "rebuild":  { "sha256": "1f0c2d44…" }
+    },
+    "stabilized": {
+      "upstream": { "sha256": "7d865e95…" },
+      "rebuild":  { "sha256": "7d865e95…" }
+    },
+    "stabilizerSet": {
+      "id": "npm-tarball",
+      "digest": { "sha256": "2b7c4f…" },
+      "members": [
+        "tar-entry-order", "tar-time", "tar-mode", "tar-owners", "tar-xattrs", "tar-device",
+        "gzip-compression", "gzip-name", "gzip-time", "gzip-misc",
+        "npm-prefix", "npm-install-fields"
+      ]
+    },
+    "applied": [
+      { "id": "tar-time",           "risk": "metadata",   "provenance": "builtin",
+        "entriesTouched": 41, "bytesChanged": 0 },
+      { "id": "gzip-compression",   "risk": "structural", "provenance": "builtin",
+        "entriesTouched": 0,  "bytesChanged": 0 },
+      { "id": "npm-install-fields", "risk": "metadata",   "provenance": "builtin",
+        "entriesTouched": 1,  "bytesChanged": 78 }
+    ],
+    "provenanceCap": {
+      "applied": true,
+      "maxRiskApplied": "metadata",
+      "allBuiltin": true
+    },
+    "comparator": { "digest": { "sha256": "8e1f…" } },
+    "diffReport": { "sha256": "0000…" },
+    "rebuildAttestation": { "sha256": "<digest of the rebuild/v1 statement>" }
+  }
+}
+```
+
+`outcome` is a **string** rather than an ordinal. `provenanceCap` states the invariant from
+[`00-overview.md`](00-overview.md) §3.1 outright, so a consumer never re-derives it from `applied`.
+
+`archiveFormat` is there because a verifier holding an attestation and two artifacts has no
+`EcosystemSpec` to ask. The stabilizer profile implies the format in most cases and not in all, and a
+verifier that guesses wrong reads a `.gem` as a plain tar and produces a different digest for a
+correct artifact. Naming it costs one string.
+
+The `container` digests are present for a compressed container and absent otherwise. They are what
+`container_bit_identical` derives from ([`05`](05-archive-and-normalization.md) §4.2), and they let a
+verifier tell "the tar matched, the gzip framing did not" without re-running the pipeline.
+
+### 2.3 `divergence/v1`
+
+Negative results are first-class. The predicate carries the **deterministic** difference signature
+and no model prose.
+
+```json
+{
+  "predicateType": "https://trigon.dev/divergence/v1",
+  "predicate": {
+    "outcome": "divergent",
+    "stabilizerSet": { "id": "wheel", "digest": { "sha256": "…" } },
+    "summary": { "onlyUpstream": 0, "onlyRebuild": 0, "differs": 3 },
+    "differences": [
+      { "path": "pkg/_version.py", "kind": "source",
+        "ruleIds": ["embedded-vcs-describe"],
+        "upstreamDigest": { "sha256": "…" }, "rebuildDigest": { "sha256": "…" },
+        "byteRanges": [[112, 148]] },
+      { "path": "pkg/_speedups.abi3.so", "kind": "executable",
+        "ruleIds": [], "note": "executable-content-differs",
+        "upstreamDigest": { "sha256": "…" }, "rebuildDigest": { "sha256": "…" } }
+    ],
+    "diffReport": { "sha256": "…" },
+    "confirmation": { "policy": "two-agreeing-attempts",
+                      "attempts": [ { "runId": "01J…A" }, { "runId": "01J…B" } ] },
+    "disputes": "https://trigon.dev/dispute/01J…A",
+    "reverify": "trigon verify-attestation trigon.intoto.jsonl --rerun-comparison"
+  }
+}
+```
+
+### 2.4 `buildobservation/v1`
+
+```json
+{
+  "predicateType": "https://trigon.dev/buildobservation/v1",
+  "predicate": {
+    "tier": 1,
+    "egressTier": "mirror-only",
+    "networkTranscript": { "sha256": "…", "requests": 214, "bytes": 18244912 },
+    "hosts": ["mirror.internal", "registry.internal"],
+    "violations": [],
+    "artifactHashCheck": {
+      "performed": true,
+      "matched": false,
+      "guardManifest": { "sha256": "aa71…" },
+      "guardedMembers": 34,
+      "mirrorRefusedTargetUrl": true
+    }
+  }
+}
+```
+
+`artifactHashCheck.matched: true` means the upstream artifact entered the sandbox. In that case we
+emit no `equivalence/v1` and no `divergence/v1` statement, and the verdict is `Void`.
+
+## 3. Signing
+
+```rust
+#[async_trait]
+pub trait Signer: Send + Sync {
+    fn key_id(&self) -> &str;
+    async fn sign(&self, pae: &[u8]) -> Result<Signature, SignError>;
+}
+```
+
+| Implementation | Use |
+|---|---|
+| **sigstore keyless** (Fulcio and Rekor, **including Rekor v2**) | The default for public instances |
+| **cloud KMS** (AWS, GCP, Azure) | Enterprise deployments with existing key management |
+| **local file key** (`ed25519-dalek`, `p256`) | Development and air-gapped use |
+| **unsigned** | `--no-sign`. We still emit statements, and they still help locally. |
+| **`cosign` subprocess** | An escape hatch, because the Rust sigstore crate is incomplete |
+
+Rekor v2 publication takes one HTTPS POST, and it puts us ahead of the prior art, whose
+transparency log is a public object-storage bucket.
+
+**We hand-write the attestation layer.** The Rust `in-toto` crate does not work, the `sigstore`
+crate is incomplete and churning, and RFC 8785 JCS canonicalization sits in the signing path, so we
+vendor it at about 150 lines rather than depend on it. in-toto Statement v1 and SLSA Provenance v1
+come to about 200 lines of plain serde structs, and DSSE PAE takes five. Owning this costs little,
+and the alternative puts a supply-chain dependency in the one place we can least afford one.
+
+### 3.1 The attestor process
+
+Signing happens outside the build sandbox, and outside any process that has executed
+sandbox-derived code.
+
+```
+build worker ──writes blobs by content hash──▶ CAS
+                                                │
+                                    attestor process (separate pod, holds the key)
+                                                │  reads by hash
+                                                │  RE-DERIVES the equivalence claim independently
+                                                │  signs only if its own derivation agrees
+                                                ▼
+                                          attestation bundle
+```
+
+Having the attestor run the same comparison a client would run is the cheapest defence against a
+compromised judge worker, and it costs one stabilize-and-compare pass over blobs that are already
+local.
+
+Under sigstore keyless the workload identity is the crown jewel, so tokens stay **run-scoped with
+minute-scale TTLs** and no worker holds a long-lived credential.
+
+## 4. Model output never enters a signed document
+
+We state this as a rule because the temptation is real. Put an advisory annotation inside a signed
+statement and someone reads it as a claim.
+
+| Goes in the signed statement | Stays in the database and UI |
+|---|---|
+| deterministic difference signature | the Explainer's prose |
+| rule ids matched, byte ranges | confidence scores |
+| which stabilizers fired, with risk and provenance | suggested stabilizers |
+| `derivation.method` and transcript digest | the transcript's content |
+
+We sign the transcript **digest**, which makes the derivation auditable and tamper-evident. Its
+*content* makes no claim about the artifact.
+
+## 5. Publishing, including divergences
+
+Attestations publish automatically. A divergence makes a public claim about someone else's
+package, so the technical safeguards run strict:
+
+1. **Two agreeing attempts** before anything publishes, divergences and matches alike
+   ([`07-ai.md`](07-ai.md) §3). Attempts share a cache key and differ in `Attempt`
+   ([`01-architecture.md`](01-architecture.md) §1.1), so the deduplication rule does not collapse the
+   second one.
+2. A run publishes as `Void`, or waits for review, and **never as a divergence**, when:
+   - the egress tier was `Open`, or
+   - the **artifact-hash check tripped**, or
+   - any applied stabilizer was non-`Builtin`, or
+   - the two attempts disagreed.
+3. Every published divergence carries a **machine-readable dispute pointer** and the exact
+   `trigon verify-attestation --rerun-comparison` command that would falsify it.
+4. Maintainer notification fires at publish time, best-effort, via registry contact metadata.
+5. **False-mismatch rate is an SLO with a publication kill-switch.** Cross the threshold and
+   divergence publication stops until a human clears it.
+
+We built in that asymmetry. A false `Reproduced` is an error. A false `Divergent` is an
+accusation.
+
+## 6. Storage layout
+
+Content-addressed and cloud-agnostic (`object_store` over S3, GCS, Azure, or a local filesystem):
+
+```
+blobs/sha256/<aa>/<full-digest>                       artifacts, diff reports, logs, transcripts
+attestations/<eco>/<pkg>/<ver>/<artifact>/trigon.intoto.jsonl
+runs/<run-id>/manifest.json
+runs/<run-id>/{build.log.gz,network.jsonl,transcript.json}
+```
+
+Path-addressing matches the definitions repository layout, so a downstream analyzer parses an
+object-storage notification straight back into a `Target`.
+
+**Retention:** on a match, store the rebuilt artifact's digests rather than the artifact. Keep bytes
+on divergence, where they are the evidence. That one rule accounts for most of the storage budget
+([`10-scale.md`](10-scale.md) §2).
+
+## 7. Verification
+
+```
+trigon verify-attestation trigon.intoto.jsonl \
+    --identity 'https://github.com/trigon-dev/.github/workflows/sign.yml@refs/heads/main' \
+    --rerun-comparison
+```
+
+Steps:
+
+1. **Decode** the JSONL bundle; verify each DSSE envelope.
+2. **Check the signing identity** against policy, whether a Fulcio certificate identity, a KMS key
+   id, or a pinned public key.
+3. **Check Rekor inclusion**, if the bundle claims it.
+4. **Select statements** with a small typed filter (by predicate type, by build type, by subject
+   digest).
+5. **`--rerun-comparison`**: fetch the upstream artifact by digest and the rebuilt artifact by
+   digest, load the stabilizer set named in the attestation, run both through it, and check that the
+   stabilized digests match what the statement claims.
+
+Step 5 is the flagship, and it explains several other decisions.
+
+An attestation from a **rebuilder**, rather than from the original builder, is worth something only
+to someone who distrusts the rebuilder. `--rerun-comparison` makes the equivalence claim
+**falsifiable by a third party holding two artifacts and our stabilizer implementation.**
+
+Three consequences, all binding:
+
+- The stabilizer set must be identified by **id and digest** in every attestation.
+- **A verifier has to be able to obtain the exact stabilizer implementation**, three years later,
+  without trusting us. Naming the set digest is necessary and not sufficient. §7.1 says how.
+- `trigon verify` **refuses to compare across differing set digests**. It either loads the named set
+  and verifies the original claim, or it re-derives under today's set and labels the result as a new
+  claim rather than a verification.
+
+The binary that does it builds `--no-default-features` from
+`core + archive + stabilize + compare + attest`, with no network client beyond artifact fetch, no
+model code, and nothing from the search half. That is the claim a sceptic can check, and it beats any
+architecture diagram.
+
+### 7.1 Getting the implementation that produced the claim
+
+The set digest identifies *which* stabilizers ran. Verifying the original claim needs the *code* that
+ran, and a 2029 binary carrying 2029 stabilizers cannot reproduce a 2026 digest. Saying "we archive
+every stabilizer version permanently" names a requirement without naming a mechanism, so here is the
+mechanism.
+
+**Stabilizer sets ship as content-addressed WASM modules.** A set is a manifest of member ids plus
+the digest of one `stabilizers.wasm` component that implements them. We publish that component
+alongside the attestation bundle and mirror it into the same object store:
+
+```
+stabilizers/sha256/<set-digest>.wasm        the component
+stabilizers/sha256/<set-digest>.json        member ids, risk tiers, provenance, build provenance
+```
+
+`trigon verify-attestation --rerun-comparison` reads the set digest from the attestation, fetches the
+matching component (or takes `--stabilizers ./set.wasm` for an offline verifier), instantiates it
+under `wasmtime`, and runs the comparison through it. The component is pure, total, and has no
+network or filesystem access, which is what made stabilizers the right first WASM guest in the first
+place ([`01-architecture.md`](01-architecture.md) §4).
+
+Three consequences to accept with open eyes:
+
+- **The WASM host moves from v2 to v1**, at least for the verifier. `trigon verify` links `wasmtime`;
+  the fleet keeps running native stabilizers compiled from the same source, and a CI test asserts the
+  two produce identical digests over the M0 corpus.
+- **The component is itself attested**, built reproducibly from a tagged commit, so a verifier can
+  check that the code they fetched matches the source they can read.
+- **A verifier who declines to run our WASM** can rebuild the component from that tagged commit, or
+  fall back to `--stabilizers` with their own build. Neither path requires trusting the binary we
+  published.
+
+The fallback, if the WASM host proves impractical, is to name a `trigon` release version in every
+attestation and require that release to verify. It works, it keeps every historical binary alive
+forever, and it is the option we take only if §7.1 fails.
+
+## 8. Bundle format
+
+One JSONL file per target artifact, each line a DSSE envelope:
+
+```
+{"payloadType":"application/vnd.in-toto+json","payload":"…","signatures":[…]}   ← rebuild/v1
+{"payloadType":"application/vnd.in-toto+json","payload":"…","signatures":[…]}   ← slsa provenance v1
+{"payloadType":"application/vnd.in-toto+json","payload":"…","signatures":[…]}   ← equivalence/v1
+{"payloadType":"application/vnd.in-toto+json","payload":"…","signatures":[…]}   ← buildobservation/v1
+```
+
+Appending is allowed. A later run against a newer stabilizer set adds lines rather than replacing
+the file, which preserves the history of what we claimed and when. Existing lines stay as they
+are.

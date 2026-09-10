@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+*.profraw
+/corpora/cache
+.DS_Store
