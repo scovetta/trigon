@@ -9,6 +9,7 @@
 //!
 //! This crate is pure: no network, no clock, no filesystem beyond what a caller hands it.
 
+mod compat;
 mod context;
 mod digest;
 mod error;
@@ -18,6 +19,7 @@ mod parse;
 mod render;
 mod tool;
 
+pub use compat::{CustomStabilizer, Imported, import};
 pub use context::{Context, EnvCtx, IntrinsicsCtx, LocationCtx, TargetCtx};
 pub use digest::{canonical, strategy_digest};
 pub use error::StrategyError;
