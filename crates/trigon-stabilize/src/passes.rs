@@ -662,7 +662,10 @@ fn in_gem_metadata(cx: &Cx) -> bool {
 /// Line-anchored rather than a regex: three fixed patterns do not justify a dependency in the crate
 /// whose claim is that it depends on nothing that can perform I/O.
 fn replace_line(text: &str, prefix: &str, replacement: &str) -> Option<String> {
-    if !text.lines().any(|l| l.starts_with(prefix) && l != replacement) {
+    if !text
+        .lines()
+        .any(|l| l.starts_with(prefix) && l != replacement)
+    {
         return None;
     }
     let mut out = String::with_capacity(text.len());
@@ -678,10 +681,15 @@ fn replace_line(text: &str, prefix: &str, replacement: &str) -> Option<String> {
 }
 
 fn rewrite_body(e: &mut Entry, f: impl Fn(&str) -> Option<String>) -> Touched {
-    let Ok(text) = e.body_bytes().map(|b| String::from_utf8_lossy(&b).into_owned()) else {
+    let Ok(text) = e
+        .body_bytes()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+    else {
         return Touched::NONE;
     };
-    let Some(new) = f(&text) else { return Touched::NONE };
+    let Some(new) = f(&text) else {
+        return Touched::NONE;
+    };
     let before = text.len() as u64;
     match e.body_mut() {
         Ok(b) => {
@@ -724,9 +732,7 @@ entry_pass!(
     |e| {
         rewrite_body(e, |t| {
             // `cert_chain:` followed by its block: continuation lines start with a space or a dash.
-            let Some(start) = t.lines().position(|l| l.starts_with("cert_chain:")) else {
-                return None;
-            };
+            let start = t.lines().position(|l| l.starts_with("cert_chain:"))?;
             let lines: Vec<&str> = t.lines().collect();
             if lines[start] == "cert_chain: []" {
                 return None;

@@ -172,7 +172,9 @@ fn entry(r: &Entry, o: &Entry, prefix: &str, out: &mut BTreeSet<String>) {
     // A nested archive descends, so a difference inside a gem's data.tar.gz is named by its inner
     // path rather than collapsing to "the member differs".
     match (&r.body, &o.body) {
-        (Body::Nested { inner: a, .. }, Body::Nested { inner: b, .. }) => collect(a, b, &format!("{path}!"), out),
+        (Body::Nested { inner: a, .. }, Body::Nested { inner: b, .. }) => {
+            collect(a, b, &format!("{path}!"), out)
+        }
         _ => {
             let (Ok(a), Ok(b)) = (r.body_bytes(), o.body_bytes()) else {
                 out.insert(format!("body-unreadable@{path}"));
@@ -258,8 +260,14 @@ mod tests {
 
     #[test]
     fn patterns_are_anchored_at_both_ends() {
-        assert!(matches("body@*/.cargo_vcs_info.json", "body@pkg-1.0/.cargo_vcs_info.json"));
-        assert!(!matches("body@*/.cargo_vcs_info.json", "body@pkg/.cargo_vcs_info.json.bak"));
+        assert!(matches(
+            "body@*/.cargo_vcs_info.json",
+            "body@pkg-1.0/.cargo_vcs_info.json"
+        ));
+        assert!(!matches(
+            "body@*/.cargo_vcs_info.json",
+            "body@pkg/.cargo_vcs_info.json.bak"
+        ));
         assert!(matches("entry:zip.*@*", "entry:zip.creator_version@a/b.py"));
         assert!(!matches("entry:zip.*@*", "entry:tar.uid@a/b.py"));
         assert!(matches("entry-order", "entry-order"));

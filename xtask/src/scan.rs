@@ -47,7 +47,10 @@ pub fn scan(ecosystem: &str, limit: usize, out: &Path, delay_ms: u64) -> Result<
         other => bail!("unknown ecosystem `{other}`; try npm, cargo, pypi or rubygems"),
     };
 
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(out)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(out)?;
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut ok = 0usize;
     // A fetch failure is the registry's business. A parse failure on a real published artifact is
@@ -125,25 +128,46 @@ fn classify(bytes: &[u8], format: Format) -> Option<Vec<String>> {
     if a.entries.iter().any(|e| e.path.len() > 100) {
         s.push("long-names".into());
     }
-    if a.entries.iter().any(|e| std::str::from_utf8(e.path.as_bytes()).is_err()) {
+    if a.entries
+        .iter()
+        .any(|e| std::str::from_utf8(e.path.as_bytes()).is_err())
+    {
         s.push("non-utf8-paths".into());
     }
-    if a.entries.iter().any(|e| !matches!(e.kind, EntryKind::Regular | EntryKind::Directory)) {
+    if a.entries
+        .iter()
+        .any(|e| !matches!(e.kind, EntryKind::Regular | EntryKind::Directory))
+    {
         s.push("non-regular-entries".into());
     }
-    if a.entries.iter().any(|e| matches!(e.body, Body::Nested { .. })) {
+    if a.entries
+        .iter()
+        .any(|e| matches!(e.body, Body::Nested { .. }))
+    {
         s.push("nested-archives".into());
     }
-    if a.entries.iter().any(|e| e.meta.size == 0 && matches!(e.kind, EntryKind::Regular)) {
+    if a.entries
+        .iter()
+        .any(|e| e.meta.size == 0 && matches!(e.kind, EntryKind::Regular))
+    {
         s.push("empty-members".into());
     }
-    if a.entries.iter().any(|e| matches!(&e.raw, RawMeta::Tar(t) if !t.pax.is_empty())) {
+    if a.entries
+        .iter()
+        .any(|e| matches!(&e.raw, RawMeta::Tar(t) if !t.pax.is_empty()))
+    {
         s.push("pax-records".into());
     }
-    if a.entries.iter().any(|e| matches!(&e.raw, RawMeta::Zip(z) if z.flags & 0x8 != 0)) {
+    if a.entries
+        .iter()
+        .any(|e| matches!(&e.raw, RawMeta::Zip(z) if z.flags & 0x8 != 0))
+    {
         s.push("data-descriptors".into());
     }
-    if a.entries.iter().any(|e| matches!(&e.raw, RawMeta::Zip(z) if z.method == 0)) {
+    if a.entries
+        .iter()
+        .any(|e| matches!(&e.raw, RawMeta::Zip(z) if z.method == 0))
+    {
         s.push("stored-entries".into());
     }
     // Zip64 is a property of the container framing rather than of any member, so it is read from
@@ -196,9 +220,10 @@ fn enumerate_npm(limit: usize) -> Result<Vec<Target>> {
                 break;
             }
             for o in objects {
-                let (Some(name), Some(version)) =
-                    (o["package"]["name"].as_str(), o["package"]["version"].as_str())
-                else {
+                let (Some(name), Some(version)) = (
+                    o["package"]["name"].as_str(),
+                    o["package"]["version"].as_str(),
+                ) else {
                     continue;
                 };
                 // The tarball path uses the unscoped basename even for a scoped package.
@@ -262,7 +287,9 @@ fn enumerate_pypi(limit: usize) -> Result<Vec<Target>> {
 
     let mut out = Vec::new();
     for name in names.iter().step_by(stride) {
-        let Ok(v) = get_json(&format!("https://pypi.org/pypi/{name}/json")) else { continue };
+        let Ok(v) = get_json(&format!("https://pypi.org/pypi/{name}/json")) else {
+            continue;
+        };
         let urls = v["urls"].as_array().cloned().unwrap_or_default();
         // One artifact per project: prefer a wheel, since that is the zip path.
         let pick = urls
@@ -270,10 +297,15 @@ fn enumerate_pypi(limit: usize) -> Result<Vec<Target>> {
             .find(|u| u["packagetype"] == "bdist_wheel")
             .or_else(|| urls.first());
         let Some(u) = pick else { continue };
-        let (Some(url), Some(file)) = (u["url"].as_str(), u["filename"].as_str()) else { continue };
+        let (Some(url), Some(file)) = (u["url"].as_str(), u["filename"].as_str()) else {
+            continue;
+        };
         let version = v["info"]["version"].as_str().unwrap_or("0");
-        let (format, profile) =
-            if file.ends_with(".whl") { (Format::Zip, "wheel") } else { (Format::TarGz, "tar-gzip") };
+        let (format, profile) = if file.ends_with(".whl") {
+            (Format::Zip, "wheel")
+        } else {
+            (Format::TarGz, "tar-gzip")
+        };
         out.push(Target {
             purl: format!("pkg:pypi/{name}@{version}"),
             file: file.to_string(),
@@ -292,7 +324,9 @@ fn enumerate_rubygems(limit: usize) -> Result<Vec<Target>> {
     let v: serde_json::Value = get_json("https://rubygems.org/api/v1/activity/just_updated.json")?;
     let mut out = Vec::new();
     for g in v.as_array().cloned().unwrap_or_default() {
-        let (Some(name), Some(ver)) = (g["name"].as_str(), g["version"].as_str()) else { continue };
+        let (Some(name), Some(ver)) = (g["name"].as_str(), g["version"].as_str()) else {
+            continue;
+        };
         out.push(Target {
             purl: format!("pkg:gem/{name}@{ver}"),
             file: format!("{name}-{ver}.gem"),
@@ -314,10 +348,13 @@ fn enumerate_rubygems(limit: usize) -> Result<Vec<Target>> {
 /// Rare strata are the point, so they are filled first: an artifact that satisfies
 /// `duplicate-paths` is taken before one that only satisfies `plain`.
 pub fn select(from: &Path, out: &Path, per_stratum: usize, name: &str) -> Result<String> {
-    let text = std::fs::read_to_string(from)
-        .with_context(|| format!("reading {}", from.display()))?;
-    let all: Vec<Candidate> =
-        text.lines().filter(|l| !l.trim().is_empty()).map(serde_json::from_str).collect::<Result<_, _>>()?;
+    let text =
+        std::fs::read_to_string(from).with_context(|| format!("reading {}", from.display()))?;
+    let all: Vec<Candidate> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
 
     // Rarest first, so a scarce stratum claims its artifacts before a common one takes them.
     let mut freq: BTreeMap<&str, usize> = BTreeMap::new();
@@ -366,12 +403,20 @@ pub fn select(from: &Path, out: &Path, per_stratum: usize, name: &str) -> Result
             c.bytes,
             c.format,
             c.profile,
-            c.strata.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(", ")
+            c.strata
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     std::fs::write(out, doc)?;
 
-    let mut report = format!("selected {} artifacts into {}\n", picked.len(), out.display());
+    let mut report = format!(
+        "selected {} artifacts into {}\n",
+        picked.len(),
+        out.display()
+    );
     for s in &strata {
         report.push_str(&format!(
             "  {s:<22} {} of {} available\n",
@@ -407,7 +452,9 @@ fn hex(b: &[u8]) -> String {
 }
 
 fn today() -> String {
-    let o = std::process::Command::new("date").args(["-u", "+%Y-%m-%d"]).output();
+    let o = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%d"])
+        .output();
     o.ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())

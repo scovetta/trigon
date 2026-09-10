@@ -23,8 +23,8 @@ fn pyc(flags: u32, tail: [u8; 8]) -> Vec<u8> {
 /// A minimal wheel holding one member.
 fn wheel(name: &str, body: &[u8]) -> Vec<u8> {
     let mut w = zip_crate::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let opts: zip_crate::write::FileOptions<'_, ()> =
-        zip_crate::write::FileOptions::default().compression_method(zip_crate::CompressionMethod::Stored);
+    let opts: zip_crate::write::FileOptions<'_, ()> = zip_crate::write::FileOptions::default()
+        .compression_method(zip_crate::CompressionMethod::Stored);
     w.start_file(name, opts).unwrap();
     w.write_all(body).unwrap();
     w.finish().unwrap().into_inner()
@@ -33,7 +33,13 @@ fn wheel(name: &str, body: &[u8]) -> Vec<u8> {
 /// Run the real `wheel` profile and return the member's bytes.
 fn stabilized(name: &str, body: &[u8]) -> Vec<u8> {
     let mut notes: Vec<Note> = Vec::new();
-    let mut p = parse(wheel(name, body), Format::Zip, &Limits::default(), &mut notes).unwrap();
+    let mut p = parse(
+        wheel(name, body),
+        Format::Zip,
+        &Limits::default(),
+        &mut notes,
+    )
+    .unwrap();
     apply(&profile("wheel").unwrap(), &mut p.archive);
     let e = p
         .archive
@@ -49,7 +55,10 @@ const PYC: &str = "pkg/__pycache__/m.cpython-38.pyc";
 #[test]
 fn a_timestamp_pyc_loses_its_mtime_and_keeps_its_source_size() {
     // Flags bit 0 clear: bytes 8..12 are the source mtime, 12..16 the source size.
-    let out = stabilized(PYC, &pyc(0, [0xf5, 0x9a, 0xc3, 0x5f, 0x79, 0x06, 0x00, 0x00]));
+    let out = stabilized(
+        PYC,
+        &pyc(0, [0xf5, 0x9a, 0xc3, 0x5f, 0x79, 0x06, 0x00, 0x00]),
+    );
     assert_eq!(&out[0..4], &[0x55, 0x0d, 0x0d, 0x0a], "magic is content");
     assert_eq!(&out[8..12], &[0, 0, 0, 0], "the source mtime is host state");
     assert_eq!(
@@ -87,7 +96,10 @@ fn a_member_that_is_not_a_pyc_is_not_touched() {
 
 #[test]
 fn the_pass_is_idempotent() {
-    let once = stabilized(PYC, &pyc(0, [0xf5, 0x9a, 0xc3, 0x5f, 0x79, 0x06, 0x00, 0x00]));
+    let once = stabilized(
+        PYC,
+        &pyc(0, [0xf5, 0x9a, 0xc3, 0x5f, 0x79, 0x06, 0x00, 0x00]),
+    );
     assert_eq!(stabilized(PYC, &once), once);
 }
 

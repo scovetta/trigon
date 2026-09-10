@@ -101,11 +101,21 @@ fn main() -> Result<()> {
                 println!("{}", corpus::fetch(&manifest)?);
                 Ok(())
             }
-            CorpusCmd::Scan { ecosystem, limit, out, delay_ms } => {
+            CorpusCmd::Scan {
+                ecosystem,
+                limit,
+                out,
+                delay_ms,
+            } => {
                 print!("{}", scan::scan(&ecosystem, limit, &out, delay_ms)?);
                 Ok(())
             }
-            CorpusCmd::Select { from, out, per_stratum, name } => {
+            CorpusCmd::Select {
+                from,
+                out,
+                per_stratum,
+                name,
+            } => {
                 print!("{}", scan::select(&from, &out, per_stratum, &name)?);
                 Ok(())
             }

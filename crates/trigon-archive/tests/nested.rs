@@ -215,7 +215,10 @@ fn an_untouched_nested_archive_keeps_its_original_bytes() {
         .iter()
         .find(|e| e.path.to_lossy() == "data.tar.gz")
         .unwrap();
-    let Body::Nested { original: after, .. } = &after.body else {
+    let Body::Nested {
+        original: after, ..
+    } = &after.body
+    else {
         panic!("still nested");
     };
     assert_eq!(
