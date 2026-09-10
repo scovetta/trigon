@@ -368,9 +368,17 @@ fn stabilizers(prof: &str) -> Result<()> {
     })?;
     println!("{} ({})", set.id, set.digest());
     println!();
+    // Sized to the longest id present rather than to a guess: `gem-metadata-rubygems-version` is
+    // 29 characters and a fixed width silently breaks the alignment of every row after it.
+    let w = set
+        .members
+        .iter()
+        .map(|m| m.id().as_str().len())
+        .max()
+        .unwrap_or(0);
     for m in &set.members {
         println!(
-            "  {:<24} {:<11} {:<9} {:?}",
+            "  {:<w$} {:<11} {:<9} {:?}",
             m.id().as_str(),
             format!("{:?}", m.risk()).to_lowercase(),
             format!("{:?}", m.stage()).to_lowercase(),
