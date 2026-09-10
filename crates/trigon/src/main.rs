@@ -72,6 +72,34 @@ enum Cmd {
         #[arg(long, default_value = "tar-gzip")]
         profile: String,
     },
+    /// Work with strategy documents.
+    #[command(subcommand)]
+    Strategy(StrategyCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum StrategyCmd {
+    /// Render a strategy to the scripts an executor would run.
+    ///
+    /// Rendering is a pure function of the strategy, the target and the environment, so this is
+    /// exactly what a build would receive: no part of it is decided later.
+    Render {
+        /// A strategy document, or an oss-rebuild `build.yaml` with `--import`.
+        file: PathBuf,
+        /// Read the prior art's format and lower it into ours.
+        #[arg(long)]
+        import: bool,
+        /// Base host of the time-filtering registry mirror.
+        #[arg(long, default_value = "timewarp")]
+        timewarp: String,
+        /// Treat the working tree as already checked out, as a cached image layer would.
+        #[arg(long)]
+        has_repo: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output: OutputFormat,
+    },
+    /// List the registered tools.
+    Tools,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
@@ -129,6 +157,14 @@ fn main() -> Result<()> {
             report,
         ),
         Cmd::Stabilizers { profile: prof } => stabilizers(&prof),
+        Cmd::Strategy(StrategyCmd::Render {
+            file,
+            import,
+            timewarp,
+            has_repo,
+            output,
+        }) => strategy_render(&file, import, &timewarp, has_repo, output),
+        Cmd::Strategy(StrategyCmd::Tools) => strategy_tools(),
     }
 }
 
@@ -385,5 +421,121 @@ fn stabilizers(prof: &str) -> Result<()> {
             m.provenance()
         );
     }
+    Ok(())
+}
+
+fn strategy_render(
+    file: &Path,
+    import: bool,
+    timewarp: &str,
+    has_repo: bool,
+    output: OutputFormat,
+) -> Result<()> {
+    let src =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+
+    let (strategy, custom) = if import {
+        let i = trigon_strategy::import(&src)
+            .with_context(|| format!("importing {}", file.display()))?;
+        (i.strategy, i.custom_stabilizers)
+    } else {
+        (
+            trigon_strategy::from_yaml(&src)
+                .with_context(|| format!("parsing {}", file.display()))?,
+            Vec::new(),
+        )
+    };
+
+    let tools = trigon_strategy::ToolRegistry::builtin()?;
+    let loc = strategy.location().cloned().unwrap_or_default();
+    let cx = trigon_strategy::Context {
+        location: trigon_strategy::LocationCtx {
+            repo: loc.repo,
+            git_ref: loc.git_ref,
+            subdir: loc.subdir.unwrap_or_default(),
+        },
+        env: trigon_strategy::EnvCtx {
+            arch: "x86_64".into(),
+            platform: "linux".into(),
+            has_repo,
+            timewarp_base: Some(timewarp.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let instructions = trigon_strategy::render(&strategy, &cx, &tools)?;
+    let digest = trigon_strategy::strategy_digest(&strategy, &tools)?;
+
+    match output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "strategy_digest": digest,
+                "instructions": instructions,
+                "custom_stabilizers": custom,
+            }))?
+        ),
+        OutputFormat::Text => {
+            println!("strategy {}", &digest[..16]);
+            println!("  repo    {}", instructions.location.repo);
+            println!("  commit  {}", instructions.location.commit);
+            println!("  output  {}", instructions.output_path);
+            if !instructions.requires.system_deps.is_empty() {
+                println!(
+                    "  needs   {}",
+                    instructions
+                        .requires
+                        .system_deps
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            for (name, script) in [
+                ("source", &instructions.source),
+                ("deps", &instructions.deps),
+                ("build", &instructions.build),
+            ] {
+                if script.trim().is_empty() {
+                    continue;
+                }
+                println!("\n# {name}");
+                println!("{script}");
+            }
+            for cs in &custom {
+                // Printed, never silently dropped: the definition says the comparison needs it, so
+                // a run without it reports a divergence its author already explained.
+                println!("\n# custom stabilizer: {} (not yet executed)", cs.kind);
+                for line in cs.reason.lines() {
+                    println!("#   {line}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn strategy_tools() -> Result<()> {
+    let tools = trigon_strategy::ToolRegistry::builtin()?;
+    let ids: Vec<&str> = tools.ids().collect();
+    let w = ids.iter().map(|i| i.len()).max().unwrap_or(0);
+    for id in &ids {
+        let t = tools.get(id).expect("just listed");
+        let params: Vec<String> = t
+            .params
+            .iter()
+            .map(|(n, p)| {
+                if p.required {
+                    format!("{n}*")
+                } else {
+                    n.clone()
+                }
+            })
+            .collect();
+        println!("  {id:<w$}  {}", params.join(", "));
+    }
+    println!("\n  {} tools, * marks a required parameter", ids.len());
     Ok(())
 }

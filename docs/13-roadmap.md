@@ -70,11 +70,15 @@ This milestone retires the project's risk, so over-invest in it.
 
 M1 needs **two** corpora, and conflating them was a mistake in an earlier draft.
 
-- [ ] **The DSL corpus: the prior art's `definitions/`, imported verbatim.** 53 files, and the
+- [~] **The DSL corpus: the prior art's `definitions/`, imported verbatim.** 53 files, and the
       distribution matters: 51 PyPI, 1 npm, 1 maven. These are overrides written for packages where
       *inference failed*, so they are the pathological tail. They exercise the flow DSL, the template
       engine, the named-tool registry and `custom_stabilizers` harder than anything we would write,
       and they say nothing about the common path. Executing them validates the DSL. Nothing more.
+      **All 53 import; 51 render to scripts, 1 is location-only, 1 is maven and refused by name.**
+      Rendering is not executing: there is no sandbox yet, so what this currently validates is the
+      schema, the lowering, the tool registry and the template engine. The `custom_stabilizers` on
+      four of them are carried and printed, not applied, so those four cannot match until they are.
 - [ ] **The common-path corpus: 400 targets sampled by prevalence**, 200 npm and 200 PyPI, stratified
       by build system rather than by popularity alone ([`15-corpora.md`](15-corpora.md) §3). This is
       what a reproduction rate can be quoted from, and it is the number M1 reports.

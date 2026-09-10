@@ -204,3 +204,82 @@ fn piping_into_head_does_not_panic() {
         "the first lines should still arrive"
     );
 }
+
+#[test]
+fn strategy_render_lowers_and_renders_a_definition() {
+    let src = r#"
+flow:
+  location:
+    repo: https://github.com/a/b
+    ref: cafebabe
+  src:
+    - uses: git-checkout
+  deps:
+    - uses: pypi/deps/basic
+      with:
+        venv: /deps
+        registryTime: "2023-05-01T04:11:28Z"
+        requirements: '["wheel==0.40.0"]'
+  build:
+    - runs: /deps/bin/python3 -m build --wheel -n
+  output_dir: dist
+custom_stabilizers:
+  - replace_pattern:
+      paths: ["*/METADATA"]
+      pattern: "\r\n"
+      replace: "\n"
+    reason: |
+      Upstream built on Windows; METADATA embeds a CRLF README.
+"#;
+    let p = tmp().join("import-me.yaml");
+    std::fs::write(&p, src).unwrap();
+
+    let out = Command::new(bin())
+        .args(["strategy", "render", "--import"])
+        .arg(&p)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(text.contains("git checkout --force 'cafebabe'"), "{text}");
+    assert!(
+        text.contains("PIP_INDEX_URL=http://pypi:2023-05-01T04:11:28Z@timewarp/simple"),
+        "{text}"
+    );
+    assert!(
+        text.contains("/deps/bin/pip install 'wheel==0.40.0'"),
+        "{text}"
+    );
+    // A custom stabilizer is surfaced with its reason, never silently dropped: the definition says
+    // the comparison needs it, so a run without it reports a divergence its author explained.
+    assert!(
+        text.contains("custom stabilizer: replace_pattern"),
+        "{text}"
+    );
+    assert!(text.contains("not yet executed"), "{text}");
+    assert!(text.contains("built on Windows"), "{text}");
+}
+
+#[test]
+fn strategy_render_reports_a_bad_document_with_its_path() {
+    let p = tmp().join("bad.yaml");
+    std::fs::write(
+        &p,
+        "kind: flow\nlocation: { repo: r, ref: c }\nbuild:\n  - needs: [git]\n",
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .args(["strategy", "render"])
+        .arg(&p)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("build[0]"), "the path locates the step: {err}");
+    assert!(err.contains("exactly one of"), "{err}");
+}

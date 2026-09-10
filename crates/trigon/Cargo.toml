@@ -18,6 +18,7 @@ trigon-core.workspace = true
 trigon-archive.workspace = true
 trigon-stabilize.workspace = true
 trigon-compare.workspace = true
+trigon-strategy.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true

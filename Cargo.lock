@@ -833,6 +833,7 @@ dependencies = [
  "trigon-compare",
  "trigon-core",
  "trigon-stabilize",
+ "trigon-strategy",
 ]
 
 [[package]]
