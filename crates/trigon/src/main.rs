@@ -63,6 +63,9 @@ enum Cmd {
         /// Comma-separated pass ids, or `all`, or `none`.
         #[arg(long, value_delimiter = ',', default_value = "none")]
         disable_passes: Vec<String>,
+        /// Print a JSON summary of the result to stdout.
+        #[arg(long)]
+        report: bool,
     },
     /// List the stabilizers in a profile, with risk tiers and the set digest.
     Stabilizers {
@@ -101,6 +104,7 @@ fn main() -> Result<()> {
             profile: prof,
             enable_passes,
             disable_passes,
+            report,
         } => stabilize_one(
             &infile,
             &outfile,
@@ -108,6 +112,7 @@ fn main() -> Result<()> {
             prof.as_deref(),
             &enable_passes,
             &disable_passes,
+            report,
         ),
         Cmd::Stabilizers { profile: prof } => stabilizers(&prof),
     }
@@ -149,6 +154,7 @@ fn stabilize_one(
     prof: Option<&str>,
     enable: &[String],
     disable: &[String],
+    report: bool,
 ) -> Result<()> {
     let fmt = resolve_format(infile, format)?;
     let base = match prof {
@@ -164,8 +170,28 @@ fn stabilize_one(
     let out = trigon_archive::serialize(&parsed.archive, true)?;
     std::fs::write(outfile, &out).with_context(|| format!("writing {}", outfile.display()))?;
 
-    for a in &applied {
-        eprintln!("applied {} ({} entries)", a.id, a.entries_touched);
+    if report {
+        // Machine-readable, so `xtask golden` can group a digest move by the pass that moved it
+        // instead of by guesswork.
+        let summary = serde_json::json!({
+            "stabilized": trigon_core::Digest::from_bytes(
+                <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&out))
+            ).to_hex(),
+            "bytes": out.len(),
+            "set": { "id": set.id.as_str(), "digest": set.digest().to_hex() },
+            "applied": applied.iter().map(|a| serde_json::json!({
+                "id": a.id.as_str(),
+                "risk": format!("{:?}", a.risk).to_lowercase(),
+                "entries_touched": a.entries_touched,
+                "bytes_changed": a.bytes_changed,
+            })).collect::<Vec<_>>(),
+            "notes": notes.iter().map(|n| format!("{:?}", n.code)).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string(&summary)?);
+    } else {
+        for a in &applied {
+            eprintln!("applied {} ({} entries)", a.id, a.entries_touched);
+        }
     }
     Ok(())
 }
