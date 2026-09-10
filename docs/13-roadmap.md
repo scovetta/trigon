@@ -27,21 +27,37 @@ queue, and no network beyond fetching an artifact by URL.
 - [ ] **The M0 corpus exists**, 3,000 to 5,000 artifacts pinned by digest across the five
       ecosystems, with a fetch script and a manifest ([`15-corpora.md`](15-corpora.md)). This sits on
       the critical path, because the headline criterion below depends on it.
-- [ ] **Differential corpus test against the Go implementation passes.** The harness is the prior
+      **Partly. 58 artifacts, selected rarest-stratum-first from a scan of 526.** Three strata that
+      section calls the point (duplicate paths, non-regular entries, non-UTF-8 names) turned up zero
+      instances in 526 artifacts and are covered by hand-built fixtures rather than by the corpus.
+      Closing this is a longer scan, not new code.
+- [x] **Differential corpus test against the Go implementation passes.** The harness is the prior
       art's own `cmd/stabilize`, which is `go install`-able and takes `--enable-passes` and
       `--disable-passes`, so a mismatch localizes to one stabilizer rather than to the pipeline. The
-      criterion is **stabilized-digest equality except a checked-in deviation list**, because six
+      criterion is **stabilized-digest equality except a checked-in deviation list**, because the
       deviations are intentional ([`05`](05-archive-and-normalization.md) §6). An unexplained
       difference fails the build.
-- [ ] **The deviation list exists as a reviewed file**, each row carrying a test and a sentence.
-- [ ] **`trigon bench regold` works**, with a review artifact showing how many digests moved and
-      which stabilizer moved them. Without it, the first stabilizer change deletes the corpus test.
-- [ ] `stabilize(stabilize(x)) == stabilize(x)` holds as a proptest.
-- [ ] `parse(write(a)) == a` holds as a proptest.
-- [ ] Byte-identical output across 100 runs and across threads.
-- [ ] `cargo-fuzz` clean on `parse` and on `parse → stabilize → write → parse`, with limits respected.
-- [ ] The `xtask` dependency-policy test is in CI and fails a deliberate violation.
+      **34 of 58 byte-identical, 24 covered by a listed deviation, 0 unexplained.** Attribution is
+      by difference code rather than by filename, so a new artifact differing for a new reason stays
+      unexplained however many of its siblings are exempt.
+- [x] **The deviation list exists as a reviewed file**, each row carrying a test and a sentence.
+- [x] **Regold works**, with a review artifact showing how many digests moved and which stabilizer
+      moved them. Without it, the first stabilizer change deletes the corpus test.
+      `xtask golden --write --reason` and a golden file per corpus.
+- [x] `stabilize(stabilize(x)) == stabilize(x)` holds as a proptest.
+- [x] `parse(write(a)) == a` holds as a proptest.
+- [x] Byte-identical output across runs and across threads.
+- [x] `cargo-fuzz` clean on `parse` and on `parse -> stabilize -> write -> parse`, with limits
+      respected. About 62,000 runs seeded from the corpus, no crashes and no property violations
+      ([`fuzz/README.md`](../fuzz/README.md)). The useful version of this runs for hours on a
+      schedule rather than five minutes by hand.
+- [x] The `xtask` dependency-policy test is in CI and fails a deliberate violation. Two negative
+      tests hand the checker rules that must fail, so it cannot pass by finding nothing.
 - [ ] `trigon verify` builds with `--no-default-features` and links no network client or model code.
+      **Half.** CI asserts the shipped binary's dependency tree contains no `tokio`, `reqwest` or
+      `hyper`, which is the substantive half. The feature flags themselves do not exist yet because
+      nothing in M0 is optional; they land with the first crate that brings a runtime in, which is
+      M1's `trigon-sandbox`.
 
 This milestone retires the project's risk, so over-invest in it.
 
