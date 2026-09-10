@@ -1,0 +1,23 @@
+[package]
+name = "trigon"
+version = "0.0.0"
+description = "Semantic rebuild verification for open-source packages."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+default-run = "trigon"
+
+[[bin]]
+name = "trigon"
+path = "src/main.rs"
+
+[dependencies]
+trigon-core.workspace = true
+trigon-archive.workspace = true
+trigon-stabilize.workspace = true
+trigon-compare.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
