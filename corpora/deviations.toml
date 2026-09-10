@@ -1,0 +1,101 @@
+# Deviations from the reference implementation.
+#
+# The M0 differential test asserts stabilized-digest equality against google/oss-rebuild's
+# `cmd/stabilize` for every corpus artifact, EXCEPT the deviations listed here. An unexplained
+# difference fails the build. Every entry carries a test and a sentence, and adding one is a
+# reviewed change rather than a way to make a red build green.
+#
+# `artifacts` names the corpus files a deviation is known to explain. Attribution is per artifact
+# rather than per format, because a list that matches by class lets a genuine bug hide behind an
+# unrelated entry. A new artifact that mismatches is unexplained until someone looks at it and says
+# which deviation covers it.
+#
+# See docs/05-archive-and-normalization.md §6.
+
+schema = 1
+
+[[deviation]]
+id = "zip-writer-defaults"
+artifacts = ["six-1.16.0-py2.py3-none-any.whl"]
+applies_to = ["zip"]
+test = "crates/trigon-archive/tests/zip_roundtrip.rs::stored_output_carries_no_compression"
+summary = "We zero the zip fields their writer leaves at its own defaults."
+detail = """
+The reference's stabilized wheel carries version-made-by 20, version-needed 20, the data-descriptor
+flag, and a 0x5455 extended-timestamp extra field, none of which its stabilizers ask for. They are
+Go's archive/zip writer defaults. Its DOS date comes out as 31 December 2097, which is what a zero
+time.Time degrades to.
+
+We zero all of it: no writer-specific extra field, no descriptor flag we do not use, and no date at
+all. That is what a stabilized form should look like, and matching Go here would mean carrying
+another language's writer conventions into a digest we sign.
+"""
+
+[[deviation]]
+id = "cargo-vcs-surgical"
+artifacts = ["itoa-1.0.11.crate"]
+applies_to = ["crate"]
+test = "crates/trigon-stabilize/tests/passes.rs::the_crate_profile_is_capped_by_cargo_vcs_hash"
+summary = "We replace the sha1 in place; the reference re-serializes the whole JSON."
+detail = """
+The reference round-trips .cargo_vcs_info.json through a JSON serializer, which compacts whitespace
+and normalizes key order along the way: 94 bytes in, 76 bytes out.
+
+We replace the 40 hex characters and touch nothing else, so bytes_changed is 40 and means it. A pass
+that reports Content risk should change the bytes it says it changes. Reformatting the file would
+also mask a genuine difference in a neighbouring field.
+"""
+
+[[deviation]]
+id = "nested-parse-errors"
+artifacts = []
+applies_to = ["gem", "tar"]
+test = "crates/trigon-archive/tests/nested.rs::a_malformed_inner_archive_notes_rather_than_guessing"
+summary = "A malformed inner archive produces a note here and silence there."
+detail = """
+The reference implements gem inner-archive recursion as a stabilizer and discards the error, so a
+malformed data.tar.gz yields a different stabilized digest with no signal. We leave the body
+unparsed and emit NoteCode::NestedParseFailed. Digests therefore differ for any artifact with an
+inner archive we cannot read, and ours says so.
+"""
+
+[[deviation]]
+id = "duplicate-path-ordering"
+artifacts = []
+applies_to = ["tar", "zip"]
+test = "crates/trigon-archive/tests/tar_roundtrip.rs::duplicate_paths_are_noted_and_ordering_is_total"
+summary = "Our sort key is (path, ordinal); theirs is path alone."
+detail = """
+Both formats permit duplicate member paths. Sorting by path alone is not a total order over a
+multiset, so an archive with duplicates can serialize two ways. We break ties on parse order and emit
+a note. Any artifact with duplicate paths can therefore order differently from the reference, and
+only one of the two orderings is reproducible.
+"""
+
+[[deviation]]
+id = "long-names-always-pax"
+artifacts = []
+applies_to = ["tar"]
+test = "crates/trigon-archive/tests/tar_roundtrip.rs::long_names_are_re_encoded_as_pax"
+summary = "We emit PAX for every long name; Go's writer may choose GNU."
+detail = """
+A name over 100 bytes that the ustar prefix field cannot carry needs an extension record, and tar has
+two incompatible ones. Go's writer chooses per entry. We always emit PAX, with records ordered by
+keyword, which removes a per-entry choice from a signed digest.
+"""
+
+[[deviation]]
+id = "gem-metadata-yaml"
+artifacts = ["rake-13.2.1.gem"]
+applies_to = ["gem"]
+test = "none yet"
+open = true
+summary = "The reference normalizes gem metadata YAML; we do not yet."
+detail = """
+gem-metadata-date, gem-metadata-rubygems-version, gem-metadata-cert-chain and
+gem-metadata-yaml-normalize are not implemented here. Until they are, a gem's metadata.gz differs
+from the reference for reasons that are a gap rather than a decision.
+
+This entry is open: it records a missing feature, not a considered difference, and it closes when
+those four passes land.
+"""

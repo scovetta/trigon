@@ -44,6 +44,26 @@ enum Cmd {
         #[arg(long)]
         explain: bool,
     },
+    /// Stabilize one artifact and write the result.
+    ///
+    /// Flags mirror the reference implementation's, so a differential run can enable one pass at a
+    /// time on both sides and localize a digest mismatch to the pass that caused it.
+    Stabilize {
+        #[arg(long)]
+        infile: PathBuf,
+        #[arg(long)]
+        outfile: PathBuf,
+        #[arg(long)]
+        format: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        /// Comma-separated pass ids, or `all`, or `none`.
+        #[arg(long, value_delimiter = ',', default_value = "all")]
+        enable_passes: Vec<String>,
+        /// Comma-separated pass ids, or `all`, or `none`.
+        #[arg(long, value_delimiter = ',', default_value = "none")]
+        disable_passes: Vec<String>,
+    },
     /// List the stabilizers in a profile, with risk tiers and the set digest.
     Stabilizers {
         #[arg(long, default_value = "tar-gzip")]
@@ -74,6 +94,21 @@ fn main() -> Result<()> {
             output,
             explain,
         ),
+        Cmd::Stabilize {
+            infile,
+            outfile,
+            format,
+            profile: prof,
+            enable_passes,
+            disable_passes,
+        } => stabilize_one(
+            &infile,
+            &outfile,
+            format.as_deref(),
+            prof.as_deref(),
+            &enable_passes,
+            &disable_passes,
+        ),
         Cmd::Stabilizers { profile: prof } => stabilizers(&prof),
     }
 }
@@ -103,6 +138,34 @@ fn verify(
     // Exit non-zero on divergence so this drops into a pipeline without a wrapper.
     if c.outcome == Match::Divergent {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn stabilize_one(
+    infile: &Path,
+    outfile: &Path,
+    format: Option<&str>,
+    prof: Option<&str>,
+    enable: &[String],
+    disable: &[String],
+) -> Result<()> {
+    let fmt = resolve_format(infile, format)?;
+    let base = match prof {
+        Some(p) => profile(p).with_context(|| format!("unknown profile `{p}`"))?,
+        None => default_for(fmt),
+    };
+    let set = base.filtered(enable, disable);
+
+    let bytes = std::fs::read(infile).with_context(|| format!("reading {}", infile.display()))?;
+    let mut notes = Vec::new();
+    let mut parsed = trigon_archive::parse(bytes, fmt, &Limits::default(), &mut notes)?;
+    let applied = trigon_stabilize::apply(&set, &mut parsed.archive);
+    let out = trigon_archive::serialize(&parsed.archive, true)?;
+    std::fs::write(outfile, &out).with_context(|| format!("writing {}", outfile.display()))?;
+
+    for a in &applied {
+        eprintln!("applied {} ({} entries)", a.id, a.entries_touched);
     }
     Ok(())
 }

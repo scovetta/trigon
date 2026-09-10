@@ -10,6 +10,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
+mod corpus;
+mod differential;
+
 #[derive(Parser, Debug)]
 #[command(name = "xtask")]
 struct Cli {
@@ -21,13 +24,50 @@ struct Cli {
 enum Cmd {
     /// Check the dependency policy. Fails the build on a violation.
     Policy,
+    /// Fetch a corpus into the local cache, verifying every artifact against its pinned digest.
+    Corpus {
+        #[command(subcommand)]
+        cmd: CorpusCmd,
+    },
+    /// Compare our stabilizer against the reference over a corpus.
+    Differential {
+        #[arg(long, default_value = "corpora/m0-smoke.toml")]
+        manifest: std::path::PathBuf,
+        #[arg(long, default_value = "corpora/deviations.toml")]
+        deviations: std::path::PathBuf,
+        /// The reference binary. `go install github.com/google/oss-rebuild/cmd/stabilize@latest`
+        #[arg(long, default_value = "stabilize")]
+        reference: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CorpusCmd {
+    /// Download and verify. Artifacts land in the cache, never in the repository.
+    Fetch {
+        #[arg(long, default_value = "corpora/m0-smoke.toml")]
+        manifest: std::path::PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Policy => {
-            let report = check_policy()?;
-            print!("{report}");
+            print!("{}", check_policy()?);
+            Ok(())
+        }
+        Cmd::Corpus { cmd } => match cmd {
+            CorpusCmd::Fetch { manifest } => {
+                println!("{}", corpus::fetch(&manifest)?);
+                Ok(())
+            }
+        },
+        Cmd::Differential {
+            manifest,
+            deviations,
+            reference,
+        } => {
+            print!("{}", differential::run(&manifest, &deviations, &reference)?);
             Ok(())
         }
     }

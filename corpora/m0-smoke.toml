@@ -1,0 +1,63 @@
+schema = 1
+name = "m0-smoke"
+description = """
+A five-artifact smoke corpus for the differential test. Small enough to fetch in seconds and wide
+enough to cover every container shape M0 handles: npm tar+gzip, a crate, a wheel, and a gem with
+nested archives. The full M0 corpus stratified by structure is specified in docs/15-corpora.md §2.
+"""
+created = "2026-09-10"
+
+[provenance]
+method = "hand-picked, one per container shape"
+source = "the ecosystems' own registries"
+script = "xtask/src/corpus.rs"
+
+[[artifact]]
+purl = "pkg:npm/left-pad@1.3.0"
+file = "left-pad-1.3.0.tgz"
+url = "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"
+sha256 = "870c0fe1096223a58d4f8832d08a7e651ea2fcadb8e6877b2fdc26b662d481dd"
+bytes = 3619
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["tiny", "pure", "long-names"]
+
+[[artifact]]
+purl = "pkg:npm/ms@2.1.3"
+file = "ms-2.1.3.tgz"
+url = "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz"
+sha256 = "f6616e15e530ed552f9daa2d3ce71963947c6bc7c98c9b64fd3e673fd02622c6"
+bytes = 2967
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["tiny", "pure"]
+
+[[artifact]]
+purl = "pkg:cargo/itoa@1.0.11"
+file = "itoa-1.0.11.crate"
+url = "https://static.crates.io/crates/itoa/1.0.11/download"
+sha256 = "49f1f14873335454500d59611f1cf4a4b0f786f9ac11f4312a78e4cf2566695b"
+bytes = 10563
+format = "tar+gzip"
+profile = "crate"
+tags = ["cargo-vcs-info"]
+
+[[artifact]]
+purl = "pkg:pypi/six@1.16.0"
+file = "six-1.16.0-py2.py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/py2.py3/s/six/six-1.16.0-py2.py3-none-any.whl"
+sha256 = "8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254"
+bytes = 11053
+format = "zip"
+profile = "wheel"
+tags = ["pure-wheel", "record"]
+
+[[artifact]]
+purl = "pkg:gem/rake@13.2.1"
+file = "rake-13.2.1.gem"
+url = "https://rubygems.org/downloads/rake-13.2.1.gem"
+sha256 = "46cb38dae65d7d74b6020a4ac9d48afed8eb8149c040eccf0523bec91907059d"
+bytes = 85504
+format = "tar"
+profile = "gem"
+tags = ["nested:2", "yaml-metadata"]
