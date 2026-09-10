@@ -1,8 +1,9 @@
 //! `trigon`, the single binary.
 //!
-//! M0 ships `verify` and `stabilizers`. The verify path links no network client and no model code:
-//! `cargo build -p trigon --no-default-features` produces a binary that reproduces a verdict from
-//! two artifacts and nothing else, which is the claim a sceptic can check for themselves.
+//! Two builds from one source. The default one can build packages; `--no-default-features` drops
+//! the async runtime and everything that needs one, leaving a binary that reproduces a verdict from
+//! two artifacts and nothing else. That second build is the claim a sceptic can check with
+//! `cargo tree` rather than take on trust, and the `verifier` CI job checks it on every commit.
 
 use std::path::{Path, PathBuf};
 
@@ -75,6 +76,30 @@ enum Cmd {
     /// Work with strategy documents.
     #[command(subcommand)]
     Strategy(StrategyCmd),
+    /// Build a package from a strategy, in a container.
+    #[cfg(feature = "build")]
+    Build {
+        /// A strategy document, or an oss-rebuild `build.yaml` with `--import`.
+        file: PathBuf,
+        #[arg(long)]
+        import: bool,
+        /// Base image, pinned by digest. A tag is refused: it resolves to different bytes on
+        /// different days, which makes the run unreproducible.
+        #[arg(long)]
+        image: String,
+        /// Where the built artifact lands.
+        #[arg(long, default_value = "./out")]
+        out: PathBuf,
+        /// What the build may reach. `deny-all` is the strongest claim available.
+        #[arg(long, default_value = "deny-all")]
+        egress: String,
+        /// Seconds before the build is killed.
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// Keep the image afterwards, to exec into or pull.
+        #[arg(long)]
+        retain: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -165,6 +190,118 @@ fn main() -> Result<()> {
             output,
         }) => strategy_render(&file, import, &timewarp, has_repo, output),
         Cmd::Strategy(StrategyCmd::Tools) => strategy_tools(),
+        #[cfg(feature = "build")]
+        Cmd::Build {
+            file,
+            import,
+            image,
+            out,
+            egress,
+            timeout,
+            retain,
+        } => build::run(&file, import, &image, &out, &egress, timeout, retain),
+    }
+}
+
+#[cfg(feature = "build")]
+mod build {
+    use super::*;
+    use trigon_sandbox::{
+        BuildPlan, BuildRunner, EgressTier, Limits, OciPlan, PodmanRunner, RunOpts,
+    };
+
+    fn egress_tier(s: &str) -> Result<EgressTier> {
+        Ok(match s {
+            "deny-all" => EgressTier::DenyAll,
+            "mirror-only" => EgressTier::MirrorOnly,
+            "git-and-mirror" => EgressTier::GitAndMirror,
+            "open" => EgressTier::Open,
+            other => bail!(
+                "unknown egress tier `{other}`; one of: deny-all, mirror-only, git-and-mirror, open"
+            ),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run(
+        file: &Path,
+        import: bool,
+        image: &str,
+        out: &Path,
+        egress: &str,
+        timeout: u64,
+        retain: bool,
+    ) -> Result<()> {
+        let (instructions, digest, _custom) =
+            crate::render_strategy(file, import, "timewarp", false)?;
+        let egress = egress_tier(egress)?;
+
+        let plan = BuildPlan::Oci(OciPlan {
+            base_image: image.to_string(),
+            system_deps: instructions.requires.system_deps.clone(),
+            source: instructions.source.clone(),
+            deps: instructions.deps.clone(),
+            build: instructions.build.clone(),
+            output_path: instructions.output_path.clone(),
+            egress,
+            privileged: instructions.requires.privileged,
+        });
+
+        let run_id = format!("{}-{}", &digest[..12], std::process::id());
+        let runner = PodmanRunner::new(out);
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async move {
+            runner.health().await.context("podman is not usable")?;
+
+            let opts = RunOpts {
+                run_id: run_id.clone(),
+                limits: Limits {
+                    wall_clock: std::time::Duration::from_secs(timeout),
+                    ..Default::default()
+                },
+                retain,
+            };
+            let handle = runner.start(&plan, &opts).await?;
+            let outcome = handle.wait().await?;
+
+            println!("strategy {}", &digest[..16]);
+            println!("  egress    {}", outcome.egress);
+            println!("  isolation {:?}", outcome.isolation);
+            for (phase, d) in &outcome.timings {
+                match d {
+                    // `None` means no data, never zero. A timing we failed to read is not a fast
+                    // phase, and reporting it as one poisons every average downstream.
+                    Some(d) => println!("  {phase:?}{:>10.1}s", d.as_secs_f64()),
+                    None => println!("  {phase:?}      no data"),
+                }
+            }
+            if !outcome.attestable {
+                println!(
+                    "\n  not attestable: this runner enforces no mirror and records no network \
+                     transcript, so it cannot claim the build fetched nothing it should not have"
+                );
+            }
+            match (&outcome.artifact, outcome.succeeded()) {
+                (Some(p), _) => println!("\n  artifact  {}", p.display()),
+                (None, true) => println!(
+                    "\n  the build succeeded but produced no single artifact. Check output_path: \
+                     a glob matching several files does not identify one."
+                ),
+                (None, false) => {}
+            }
+            if !outcome.succeeded() {
+                eprintln!("\n{}", outcome.log_tail);
+                bail!(
+                    "build failed in {:?} with exit {}",
+                    outcome.failed_in,
+                    outcome.exit_code
+                );
+            }
+            Ok(())
+        })
     }
 }
 
@@ -424,13 +561,21 @@ fn stabilizers(prof: &str) -> Result<()> {
     Ok(())
 }
 
-fn strategy_render(
+/// Read a strategy document, lower it if it is the prior art's format, and render it.
+///
+/// Shared by `strategy render` and `build`, so the script a build runs is byte-for-byte the one
+/// `strategy render` prints. Two code paths here would let them drift, and the difference would
+/// only show up as an unexplained divergence.
+fn render_strategy(
     file: &Path,
     import: bool,
     timewarp: &str,
     has_repo: bool,
-    output: OutputFormat,
-) -> Result<()> {
+) -> Result<(
+    trigon_strategy::Instructions,
+    String,
+    Vec<trigon_strategy::CustomStabilizer>,
+)> {
     let src =
         std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
 
@@ -466,6 +611,17 @@ fn strategy_render(
 
     let instructions = trigon_strategy::render(&strategy, &cx, &tools)?;
     let digest = trigon_strategy::strategy_digest(&strategy, &tools)?;
+    Ok((instructions, digest, custom))
+}
+
+fn strategy_render(
+    file: &Path,
+    import: bool,
+    timewarp: &str,
+    has_repo: bool,
+    output: OutputFormat,
+) -> Result<()> {
+    let (instructions, digest, custom) = render_strategy(file, import, timewarp, has_repo)?;
 
     match output {
         OutputFormat::Json => println!(

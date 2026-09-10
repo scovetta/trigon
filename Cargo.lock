@@ -987,9 +987,11 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "tokio",
  "trigon-archive",
  "trigon-compare",
  "trigon-core",
+ "trigon-sandbox",
  "trigon-stabilize",
  "trigon-strategy",
 ]

@@ -53,11 +53,11 @@ queue, and no network beyond fetching an artifact by URL.
       schedule rather than five minutes by hand.
 - [x] The `xtask` dependency-policy test is in CI and fails a deliberate violation. Two negative
       tests hand the checker rules that must fail, so it cannot pass by finding nothing.
-- [ ] `trigon verify` builds with `--no-default-features` and links no network client or model code.
-      **Half.** CI asserts the shipped binary's dependency tree contains no `tokio`, `reqwest` or
-      `hyper`, which is the substantive half. The feature flags themselves do not exist yet because
-      nothing in M0 is optional; they land with the first crate that brings a runtime in, which is
-      M1's `trigon-sandbox`.
+- [x] `trigon verify` builds with `--no-default-features` and links no network client or model code.
+      The `build` feature is on by default and gates `trigon-sandbox` and `tokio`; without it the
+      binary resolves 125 crates against 175 and none of them is a runtime or a network client.
+      Enforced by the `xtask` policy check, which resolves that build separately rather than walking
+      the default graph, and by the `verifier` CI job.
 
 This milestone retires the project's risk, so over-invest in it.
 

@@ -1,6 +1,6 @@
 //! The binary's contract: exit codes, output shape, and the errors it gives a person.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn bin() -> &'static str {
@@ -282,4 +282,130 @@ fn strategy_render_reports_a_bad_document_with_its_path() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("build[0]"), "the path locates the step: {err}");
     assert!(err.contains("exactly one of"), "{err}");
+}
+
+/// The pinned base image the container tests use. Pinned by digest because `build` refuses a tag.
+const ALPINE: &str = "docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e";
+
+fn podman_usable() -> bool {
+    let ok = std::process::Command::new("podman")
+        .args(["image", "exists", ALPINE])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipped: podman or the pinned base image is unavailable");
+    }
+    ok
+}
+
+#[cfg(feature = "build")]
+#[test]
+fn build_produces_an_artifact_the_verifier_can_compare() {
+    if !podman_usable() {
+        return;
+    }
+    // The whole M1 loop in one test: a strategy renders, a container builds it with no network at
+    // all, and the judgement half compares two independent runs. The two builds differ byte for
+    // byte because tar records mtimes, and they must still compare as normalized.
+    let strategy = r#"
+schema: 1
+kind: flow
+location:
+  repo: https://example.invalid/not-cloned
+  ref: cafebabecafebabecafebabecafebabecafebabe
+src:
+  - runs: |
+      mkdir -p pkg
+      printf 'module.exports = 1;\n' > pkg/index.js
+build:
+  - runs: |
+      mkdir -p dist
+      tar -C pkg -cf dist/demo.tar .
+output_dir: dist
+"#;
+    let s = tmp().join("e2e.yaml");
+    std::fs::write(&s, strategy).unwrap();
+
+    let mut artifacts = Vec::new();
+    for run in ["e2e-a", "e2e-b"] {
+        let out = tmp().join(run);
+        let status = Command::new(bin())
+            .arg("build")
+            .arg(&s)
+            .args([
+                "--image",
+                ALPINE,
+                "--egress",
+                "deny-all",
+                "--timeout",
+                "300",
+            ])
+            .arg("--out")
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "build failed:\n{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let found = walk_for_tar(&out).expect("the build collected an artifact");
+        artifacts.push(found);
+    }
+
+    assert_ne!(
+        std::fs::read(&artifacts[0]).unwrap(),
+        std::fs::read(&artifacts[1]).unwrap(),
+        "two container builds should differ byte for byte, or this proves nothing"
+    );
+
+    let v = Command::new(bin())
+        .arg("verify")
+        .arg(&artifacts[0])
+        .arg(&artifacts[1])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&v.stdout);
+    assert!(
+        v.status.success(),
+        "{text}\n{}",
+        String::from_utf8_lossy(&v.stderr)
+    );
+    assert!(text.contains("normalized"), "{text}");
+}
+
+#[cfg(feature = "build")]
+#[test]
+fn build_refuses_an_unpinned_image_before_running_anything() {
+    let s = tmp().join("unpinned.yaml");
+    std::fs::write(
+        &s,
+        "schema: 1\nkind: flow\nlocation: { repo: r, ref: c }\nbuild:\n  - runs: \"true\"\n",
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .arg("build")
+        .arg(&s)
+        .args(["--image", "docker.io/library/alpine:3.20"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not pinned by digest"), "{err}");
+}
+
+fn walk_for_tar(dir: &Path) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).ok()?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "tar") {
+                return Some(p);
+            }
+        }
+    }
+    None
 }

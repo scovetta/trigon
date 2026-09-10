@@ -43,9 +43,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p trigon --release
+      # The verifier is the --no-default-features build. The default one can build packages and
+      # therefore links a runtime; this one reproduces a verdict from two artifacts and nothing
+      # else, which is what someone who does not trust us can check for themselves.
+      - run: cargo build -p trigon --no-default-features --release
       - name: the verifier links nothing from the search half
         run: |
-          cargo tree -p trigon --edges normal --prefix none \
-            | grep -Ei '^(tokio|reqwest|hyper) ' && exit 1
+          if cargo tree -p trigon --no-default-features --edges normal --prefix none \
+              | grep -Ei '^(tokio|reqwest|hyper|trigon-sandbox) '; then
+            echo "::error::the verifier build links a runtime or a network client"
+            exit 1
+          fi
           echo "clean"
+      # And the default build still compiles, since nothing else in CI exercises the feature.
+      - run: cargo build -p trigon --release

@@ -288,6 +288,19 @@ fn check_policy_with(
         }
     }
 
+    match verifier_tree() {
+        Ok(found) if !found.is_empty() => violations.push(format!(
+            "the verifier build (`-p trigon --no-default-features`) links {}. That build is the \
+             claim a sceptic checks instead of trusting us, so a runtime or a network client in it \
+             is not a dependency change, it is the claim becoming false.",
+            found.join(", ")
+        )),
+        Ok(_) => lines.push(
+            "  trigon (verifier)  links no runtime, no network client, no sandbox".to_string(),
+        ),
+        Err(e) => violations.push(format!("could not resolve the verifier build: {e}")),
+    }
+
     for crate_name in FORBID_HASHMAP {
         match hashmap_uses(crate_name) {
             Ok(found) if !found.is_empty() => violations.push(format!(
@@ -348,6 +361,49 @@ fn hashmap_uses(crate_name: &str) -> Result<Vec<String>> {
     }
     out.sort();
     Ok(out)
+}
+
+/// Forbidden crates present in the verifier build.
+///
+/// A separate resolve rather than a walk of the default graph: the whole point of the feature is
+/// that the two builds have different dependency trees, so asking the default one proves nothing.
+fn verifier_tree() -> Result<Vec<String>> {
+    const FORBIDDEN: &[&str] = &[
+        "tokio",
+        "reqwest",
+        "hyper",
+        "trigon-sandbox",
+        "trigon-ai",
+        "trigon-registry",
+    ];
+    let out = std::process::Command::new(env!("CARGO"))
+        .current_dir(workspace_root())
+        .args([
+            "tree",
+            "-p",
+            "trigon",
+            "--no-default-features",
+            "--edges",
+            "normal",
+            "--prefix",
+            "none",
+        ])
+        .output()
+        .context("running cargo tree")?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut found: Vec<String> = FORBIDDEN
+        .iter()
+        .filter(|f| {
+            text.lines()
+                .any(|l| l.split_whitespace().next() == Some(*f))
+        })
+        .map(|s| s.to_string())
+        .collect();
+    found.sort();
+    Ok(found)
 }
 
 fn cargo_metadata() -> Result<serde_json::Value> {
