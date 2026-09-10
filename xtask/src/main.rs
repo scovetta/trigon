@@ -13,6 +13,7 @@ use clap::{Parser, Subcommand};
 mod corpus;
 mod differential;
 mod golden;
+mod scan;
 
 #[derive(Parser, Debug)]
 #[command(name = "xtask")]
@@ -63,6 +64,29 @@ enum CorpusCmd {
         #[arg(long, default_value = "corpora/m0-smoke.toml")]
         manifest: std::path::PathBuf,
     },
+    /// Walk a registry, record which strata each artifact satisfies, discard the bytes.
+    Scan {
+        #[arg(long)]
+        ecosystem: String,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long, default_value = "corpora/candidates.jsonl")]
+        out: std::path::PathBuf,
+        /// Pause between requests. Registries owe us nothing.
+        #[arg(long, default_value_t = 250)]
+        delay_ms: u64,
+    },
+    /// Turn scanned candidates into a manifest, rarest strata first.
+    Select {
+        #[arg(long, default_value = "corpora/candidates.jsonl")]
+        from: std::path::PathBuf,
+        #[arg(long, default_value = "corpora/m0.toml")]
+        out: std::path::PathBuf,
+        #[arg(long, default_value_t = 25)]
+        per_stratum: usize,
+        #[arg(long, default_value = "m0")]
+        name: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -74,6 +98,14 @@ fn main() -> Result<()> {
         Cmd::Corpus { cmd } => match cmd {
             CorpusCmd::Fetch { manifest } => {
                 println!("{}", corpus::fetch(&manifest)?);
+                Ok(())
+            }
+            CorpusCmd::Scan { ecosystem, limit, out, delay_ms } => {
+                print!("{}", scan::scan(&ecosystem, limit, &out, delay_ms)?);
+                Ok(())
+            }
+            CorpusCmd::Select { from, out, per_stratum, name } => {
+                print!("{}", scan::select(&from, &out, per_stratum, &name)?);
                 Ok(())
             }
         },

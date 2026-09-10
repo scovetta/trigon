@@ -1,0 +1,591 @@
+schema = 1
+name = "m0"
+description = """
+Stratified by structure rather than by popularity: a download-ranked sample is unusually clean, and the cases where two writers disagree live in the tail. Selected by `xtask corpus select` from a scan of 526 candidates.
+"""
+created = "2026-09-10"
+
+[provenance]
+method = "stratified-by-structure"
+source = "registry enumeration, see xtask/src/scan.rs"
+script = "xtask corpus scan | select"
+
+[[artifact]]
+purl = "pkg:cargo/A-Mazed@0.1.0"
+file = "A-Mazed-0.1.0.crate"
+url = "https://static.crates.io/crates/A-Mazed/0.1.0/download"
+sha256 = "c3de45adcf3212f4a0edc847c34aeb28b7473910a984fbe71c7437a26e006101"
+bytes = 59074
+format = "tar+gzip"
+profile = "crate"
+tags = ["plain"]
+
+[[artifact]]
+purl = "pkg:cargo/A2VConverter@0.1.1"
+file = "A2VConverter-0.1.1.crate"
+url = "https://static.crates.io/crates/A2VConverter/0.1.1/download"
+sha256 = "4c2418e252c19330786c8dd40397d1d3550c5e36eb012f2cb0a614784cbcaaf6"
+bytes = 1825
+format = "tar+gzip"
+profile = "crate"
+tags = ["tiny"]
+
+[[artifact]]
+purl = "pkg:cargo/ABC-ECS@0.2.1"
+file = "ABC-ECS-0.2.1.crate"
+url = "https://static.crates.io/crates/ABC-ECS/0.2.1/download"
+sha256 = "d656589febd691e58765a02e91b51cc4f5a64a9610bdd7c9ba2121e61063722a"
+bytes = 14872
+format = "tar+gzip"
+profile = "crate"
+tags = ["plain"]
+
+[[artifact]]
+purl = "pkg:cargo/ABC_Game_Engine@0.1.2"
+file = "ABC_Game_Engine-0.1.2.crate"
+url = "https://static.crates.io/crates/ABC_Game_Engine/0.1.2/download"
+sha256 = "dad83073761eba675ffbe8b4b0e4855810c8842ded8e8f27328ebc567aa8c815"
+bytes = 26508
+format = "tar+gzip"
+profile = "crate"
+tags = ["empty-members"]
+
+[[artifact]]
+purl = "pkg:cargo/ABC_lumenpyx@0.1.0"
+file = "ABC_lumenpyx-0.1.0.crate"
+url = "https://static.crates.io/crates/ABC_lumenpyx/0.1.0/download"
+sha256 = "99b0edf9e26911aa063efdeb2b8873e3954eb6293fff9213b751c0ffb007770c"
+bytes = 13232
+format = "tar+gzip"
+profile = "crate"
+tags = ["plain"]
+
+[[artifact]]
+purl = "pkg:cargo/ABtree@0.8.0"
+file = "ABtree-0.8.0.crate"
+url = "https://static.crates.io/crates/ABtree/0.8.0/download"
+sha256 = "b8cac1e199e5e1b8c190c5daeb8f61f2a5e5fb9d5add095cc40682a9d0ed90fb"
+bytes = 16312
+format = "tar+gzip"
+profile = "crate"
+tags = ["plain"]
+
+[[artifact]]
+purl = "pkg:cargo/ADA_Standards@1.2.2"
+file = "ADA_Standards-1.2.2.crate"
+url = "https://static.crates.io/crates/ADA_Standards/1.2.2/download"
+sha256 = "fcbb11f518f5044af6328bbc63f6af4569e839395096186affac1515b2383468"
+bytes = 48311
+format = "tar+gzip"
+profile = "crate"
+tags = ["plain"]
+
+[[artifact]]
+purl = "pkg:cargo/ADuCM302x@0.1.0"
+file = "ADuCM302x-0.1.0.crate"
+url = "https://static.crates.io/crates/ADuCM302x/0.1.0/download"
+sha256 = "91e4504f0f9acc3358e4813aec1fc4eea540fbd14735a37fe42cfc08b1d78e50"
+bytes = 192237
+format = "tar+gzip"
+profile = "crate"
+tags = ["plain"]
+
+[[artifact]]
+purl = "pkg:cargo/AISHub-data-collector@2.0.0"
+file = "AISHub-data-collector-2.0.0.crate"
+url = "https://static.crates.io/crates/AISHub-data-collector/2.0.0/download"
+sha256 = "4464bffa1a865942154b4ad5ee1a4853343742cbb0cefe965a9580be97820553"
+bytes = 32842
+format = "tar+gzip"
+profile = "crate"
+tags = ["plain"]
+
+[[artifact]]
+purl = "pkg:cargo/AJ_find@0.1.0"
+file = "AJ_find-0.1.0.crate"
+url = "https://static.crates.io/crates/AJ_find/0.1.0/download"
+sha256 = "5e65cf6cdfe5dd328f4d81637791c37af782bfd356f462ef1191e5212470bdfd"
+bytes = 3336
+format = "tar+gzip"
+profile = "crate"
+tags = ["tiny"]
+
+[[artifact]]
+purl = "pkg:cargo/AJ_jmp@0.1.0"
+file = "AJ_jmp-0.1.0.crate"
+url = "https://static.crates.io/crates/AJ_jmp/0.1.0/download"
+sha256 = "1b7ba0698cfd1c54f6949647486472879786d22a9b6bbe5726d6e967be00eea9"
+bytes = 3902
+format = "tar+gzip"
+profile = "crate"
+tags = ["tiny"]
+
+[[artifact]]
+purl = "pkg:cargo/ARGenus@0.4.0"
+file = "ARGenus-0.4.0.crate"
+url = "https://static.crates.io/crates/ARGenus/0.4.0/download"
+sha256 = "60e3fb856452e1ce99278de27e7844ef08de8052412e63cc00ecaae3eed310a3"
+bytes = 4543995
+format = "tar+gzip"
+profile = "crate"
+tags = ["plain"]
+
+[[artifact]]
+purl = "pkg:cargo/Acatsama0871@0.1.0"
+file = "Acatsama0871-0.1.0.crate"
+url = "https://static.crates.io/crates/Acatsama0871/0.1.0/download"
+sha256 = "83b90c42db2c20c6da63a2e6fdd917d70ff8d19cce11957d629634ce70b9ff6e"
+bytes = 1012
+format = "tar+gzip"
+profile = "crate"
+tags = ["tiny"]
+
+[[artifact]]
+purl = "pkg:cargo/AccountingCenter@0.1.0"
+file = "AccountingCenter-0.1.0.crate"
+url = "https://static.crates.io/crates/AccountingCenter/0.1.0/download"
+sha256 = "22c3a2288755db071e0562c674fca5f3af5fb449d11e788dfc7a69fd6f01f765"
+bytes = 1479
+format = "tar+gzip"
+profile = "crate"
+tags = ["tiny"]
+
+[[artifact]]
+purl = "pkg:cargo/Actix-rs@0.1.0"
+file = "Actix-rs-0.1.0.crate"
+url = "https://static.crates.io/crates/Actix-rs/0.1.0/download"
+sha256 = "672ee2c855587fd07e6f9a75327d018d1df3e00e5eb6ad3b314683b4be72d432"
+bytes = 1301
+format = "tar+gzip"
+profile = "crate"
+tags = ["tiny"]
+
+[[artifact]]
+purl = "pkg:cargo/Actor-rs@0.1.0"
+file = "Actor-rs-0.1.0.crate"
+url = "https://static.crates.io/crates/Actor-rs/0.1.0/download"
+sha256 = "43b40d21c9014296fa6a51a52f71fe74857dfd693822a9aef40a63e88c5791cc"
+bytes = 1300
+format = "tar+gzip"
+profile = "crate"
+tags = ["tiny"]
+
+[[artifact]]
+purl = "pkg:cargo/Actorize@0.1.0"
+file = "Actorize-0.1.0.crate"
+url = "https://static.crates.io/crates/Actorize/0.1.0/download"
+sha256 = "c76667aaf23e46f979a969943ed8d0679988806d0f6b4084c1244b6ec1618894"
+bytes = 1300
+format = "tar+gzip"
+profile = "crate"
+tags = ["tiny"]
+
+[[artifact]]
+purl = "pkg:cargo/AmanitaMuscaria@0.0.5"
+file = "AmanitaMuscaria-0.0.5.crate"
+url = "https://static.crates.io/crates/AmanitaMuscaria/0.0.5/download"
+sha256 = "19669a248939c564a0fd7c9f07cf30f4c6ca7dee6c3d134e2504e8f709d27d5d"
+bytes = 18738
+format = "tar+gzip"
+profile = "crate"
+tags = ["empty-members"]
+
+[[artifact]]
+purl = "pkg:cargo/Arknights@0.1.2"
+file = "Arknights-0.1.2.crate"
+url = "https://static.crates.io/crates/Arknights/0.1.2/download"
+sha256 = "dd3d5911e247d8cc96cacd528dd5a42d165252988c540aae55548c4763a492ce"
+bytes = 6292
+format = "tar+gzip"
+profile = "crate"
+tags = ["empty-members"]
+
+[[artifact]]
+purl = "pkg:gem/ai_git@2.0.0"
+file = "ai_git-2.0.0.gem"
+url = "https://rubygems.org/downloads/ai_git-2.0.0.gem"
+sha256 = "f2cac74901b6a5de7915e1a2af30f24b0ef75e4251353c1cf9c623cbc45871dd"
+bytes = 23040
+format = "tar"
+profile = "gem"
+tags = ["nested-archives"]
+
+[[artifact]]
+purl = "pkg:gem/ballistics-engine@0.37.0"
+file = "ballistics-engine-0.37.0.gem"
+url = "https://rubygems.org/downloads/ballistics-engine-0.37.0.gem"
+sha256 = "d026c19f257b24bb881ad1a0e1d7701dd866b1ef8ca5a4a77af5671a441e0c48"
+bytes = 26112
+format = "tar"
+profile = "gem"
+tags = ["nested-archives"]
+
+[[artifact]]
+purl = "pkg:gem/branchproof@0.7.0"
+file = "branchproof-0.7.0.gem"
+url = "https://rubygems.org/downloads/branchproof-0.7.0.gem"
+sha256 = "93f1bfa0c7098e2ba52be2bf734c50883f6b8d3d5eda603098c8ad0e6ec7977d"
+bytes = 94208
+format = "tar"
+profile = "gem"
+tags = ["nested-archives"]
+
+[[artifact]]
+purl = "pkg:gem/enumy@0.10.0"
+file = "enumy-0.10.0.gem"
+url = "https://rubygems.org/downloads/enumy-0.10.0.gem"
+sha256 = "53e2446c7b1ad6efd4598773cb3eb4567f2ec17ad8ce521bab02067af95a8c09"
+bytes = 11776
+format = "tar"
+profile = "gem"
+tags = ["nested-archives"]
+
+[[artifact]]
+purl = "pkg:gem/git@4.4.4"
+file = "git-4.4.4.gem"
+url = "https://rubygems.org/downloads/git-4.4.4.gem"
+sha256 = "029c3bff362f838f796cd0bab5571bb99baea455b23fee9e58ea808b3be1fa10"
+bytes = 134144
+format = "tar"
+profile = "gem"
+tags = ["nested-archives"]
+
+[[artifact]]
+purl = "pkg:gem/git@5.5.0"
+file = "git-5.5.0.gem"
+url = "https://rubygems.org/downloads/git-5.5.0.gem"
+sha256 = "6e9cbafa7e75d7406e2575de7778f6d275cc6bae26f3d44297fc74fed37ef8a9"
+bytes = 398848
+format = "tar"
+profile = "gem"
+tags = ["nested-archives"]
+
+[[artifact]]
+purl = "pkg:gem/kryptic-daemon-client@1.1.1"
+file = "kryptic-daemon-client-1.1.1.gem"
+url = "https://rubygems.org/downloads/kryptic-daemon-client-1.1.1.gem"
+sha256 = "9845aff63fc8a12d8103c987f2bdb613fdf2464491f7940694496f9ee476608d"
+bytes = 10752
+format = "tar"
+profile = "gem"
+tags = ["nested-archives"]
+
+[[artifact]]
+purl = "pkg:npm/@alwaysmeticulous/cli@2.337.1"
+file = "cli-2.337.1.tgz"
+url = "https://registry.npmjs.org/@alwaysmeticulous/cli/-/cli-2.337.1.tgz"
+sha256 = "f2cd66940429741e079a0395df3986611fa94a00711088b223314a42e82e9456"
+bytes = 512314
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names"]
+
+[[artifact]]
+purl = "pkg:npm/@aws-amplify/cli-internal@14.5.1"
+file = "cli-internal-14.5.1.tgz"
+url = "https://registry.npmjs.org/@aws-amplify/cli-internal/-/cli-internal-14.5.1.tgz"
+sha256 = "8f5bcb9b609e7d97527dc5b49819677710f54b05eaaafa62323bc7d094170de9"
+bytes = 899798
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names", "many-members"]
+
+[[artifact]]
+purl = "pkg:npm/@backstage/cli-module-new@0.1.6"
+file = "cli-module-new-0.1.6.tgz"
+url = "https://registry.npmjs.org/@backstage/cli-module-new/-/cli-module-new-0.1.6.tgz"
+sha256 = "20ce2d9109bb33b875246f7a41027660ccfbbfef1619145319e0db8257123fc0"
+bytes = 67981
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names"]
+
+[[artifact]]
+purl = "pkg:npm/@botpress/cli@7.1.3"
+file = "cli-7.1.3.tgz"
+url = "https://registry.npmjs.org/@botpress/cli/-/cli-7.1.3.tgz"
+sha256 = "46e9d94541f2e6f57101712b033240b8a7f754c6abca2d46f49b3a558ea41ec3"
+bytes = 342723
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names"]
+
+[[artifact]]
+purl = "pkg:npm/@catladder/cli@5.1.3"
+file = "cli-5.1.3.tgz"
+url = "https://registry.npmjs.org/@catladder/cli/-/cli-5.1.3.tgz"
+sha256 = "4e53d2a9b1e13e5737c0dd3c9c40c7ff2a002dad653b39df001ad4ad2c922b51"
+bytes = 4932121
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names", "many-members"]
+
+[[artifact]]
+purl = "pkg:npm/@coana-tech/cli@15.10.39"
+file = "cli-15.10.39.tgz"
+url = "https://registry.npmjs.org/@coana-tech/cli/-/cli-15.10.39.tgz"
+sha256 = "9ebbe29bc34e51c873eedeab89f56554b6284c1d4ab150c2e8efc0f5095646a8"
+bytes = 117970558
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names", "nested-archives", "empty-members", "large"]
+
+[[artifact]]
+purl = "pkg:npm/@dbml/cli@10.1.1"
+file = "cli-10.1.1.tgz"
+url = "https://registry.npmjs.org/@dbml/cli/-/cli-10.1.1.tgz"
+sha256 = "a7c188851bb7c62e9a0be69a710be7b31c61c35aeed07a3e3d5f75659ad00855"
+bytes = 151696
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["empty-members"]
+
+[[artifact]]
+purl = "pkg:npm/@expo/cli@57.0.23"
+file = "cli-57.0.23.tgz"
+url = "https://registry.npmjs.org/@expo/cli/-/cli-57.0.23.tgz"
+sha256 = "a767f4d0abe78ba7a5f12d873d5e7e05872a24531a9601cebcdbe52e901eec8c"
+bytes = 1304031
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names"]
+
+[[artifact]]
+purl = "pkg:npm/@github/copilot-linux-x64@1.0.83"
+file = "copilot-linux-x64-1.0.83.tgz"
+url = "https://registry.npmjs.org/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.83.tgz"
+sha256 = "23906ffd14c5e29fc1325138fba7d8ea1a397e02ffdcd36383fe66e4d196ba46"
+bytes = 143935526
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["nested-archives", "empty-members", "large"]
+
+[[artifact]]
+purl = "pkg:npm/@google/gemini-cli-core@0.59.0"
+file = "gemini-cli-core-0.59.0.tgz"
+url = "https://registry.npmjs.org/@google/gemini-cli-core/-/gemini-cli-core-0.59.0.tgz"
+sha256 = "d1db759e87f36d225d9d098bd6c9ae464641c56fa6e8e2d07594c0b86c50fb6e"
+bytes = 10911053
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names", "empty-members", "many-members"]
+
+[[artifact]]
+purl = "pkg:npm/@google/gemini-cli@0.59.0"
+file = "gemini-cli-0.59.0.tgz"
+url = "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.59.0.tgz"
+sha256 = "59dc2cdb098b3000d36e34a185fc873932df4fd9d00900e817f2b19cd349d98b"
+bytes = 20727247
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names"]
+
+[[artifact]]
+purl = "pkg:npm/@microsoft/m365agentstoolkit-cli@1.1.16"
+file = "m365agentstoolkit-cli-1.1.16.tgz"
+url = "https://registry.npmjs.org/@microsoft/m365agentstoolkit-cli/-/m365agentstoolkit-cli-1.1.16.tgz"
+sha256 = "8163fa7de23f1b8e496120ee884a43ac84287cc8413798cf3fc1adb630bc471f"
+bytes = 34217006
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["empty-members"]
+
+[[artifact]]
+purl = "pkg:npm/@mintlify/cli@4.0.1487"
+file = "cli-4.0.1487.tgz"
+url = "https://registry.npmjs.org/@mintlify/cli/-/cli-4.0.1487.tgz"
+sha256 = "844229afef873ed1137e874f7046dc1c0f2db1a6d3519bacd24eb15c3ac1c747"
+bytes = 399906
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["empty-members"]
+
+[[artifact]]
+purl = "pkg:npm/@sanity/cli@8.10.0"
+file = "cli-8.10.0.tgz"
+url = "https://registry.npmjs.org/@sanity/cli/-/cli-8.10.0.tgz"
+sha256 = "c1d6213c00021f93c3c873451377709c0ccd24ecb3b0522729102164b4481ce0"
+bytes = 1220628
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names", "empty-members", "many-members"]
+
+[[artifact]]
+purl = "pkg:npm/@shopify/cli@4.8.0"
+file = "cli-4.8.0.tgz"
+url = "https://registry.npmjs.org/@shopify/cli/-/cli-4.8.0.tgz"
+sha256 = "67a7975c3a324c8cf173f3adcc49984429501f637ef51c1cb6f940a68671e388"
+bytes = 7939724
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names", "empty-members"]
+
+[[artifact]]
+purl = "pkg:npm/@socketsecurity/cli@1.1.170"
+file = "cli-1.1.170.tgz"
+url = "https://registry.npmjs.org/@socketsecurity/cli/-/cli-1.1.170.tgz"
+sha256 = "5bacbef569db910991cfccc9b8da1ad85c1986e18046b5b3b5b4ecf7d6eac8f5"
+bytes = 5640693
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["many-members"]
+
+[[artifact]]
+purl = "pkg:npm/@supabase/cli-linux-x64-musl@2.117.0"
+file = "cli-linux-x64-musl-2.117.0.tgz"
+url = "https://registry.npmjs.org/@supabase/cli-linux-x64-musl/-/cli-linux-x64-musl-2.117.0.tgz"
+sha256 = "b21d626e8dd6e9f81331243d6268ddf3036701e8392fc2dfc45d1121edd58c98"
+bytes = 54000284
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["large"]
+
+[[artifact]]
+purl = "pkg:npm/@supabase/cli-linux-x64@2.117.0"
+file = "cli-linux-x64-2.117.0.tgz"
+url = "https://registry.npmjs.org/@supabase/cli-linux-x64/-/cli-linux-x64-2.117.0.tgz"
+sha256 = "5552b92287eae9dd508f86d8632dbec0c8310fcbbe81aa90a07789e32c468976"
+bytes = 56603705
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["large"]
+
+[[artifact]]
+purl = "pkg:npm/@ui5/cli@4.0.66"
+file = "cli-4.0.66.tgz"
+url = "https://registry.npmjs.org/@ui5/cli/-/cli-4.0.66.tgz"
+sha256 = "d1ec592c7e9a96c0ec39afabfbc7c069932bbe4d13a1dd30b68eb3633e2ff21a"
+bytes = 14048220
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names", "empty-members", "many-members"]
+
+[[artifact]]
+purl = "pkg:npm/byterover-cli@3.16.1"
+file = "byterover-cli-3.16.1.tgz"
+url = "https://registry.npmjs.org/byterover-cli/-/byterover-cli-3.16.1.tgz"
+sha256 = "14039b1ff40820e699484c4db994ee837be66d3919971ce0bc3026287b42dd00"
+bytes = 18510260
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names", "empty-members", "many-members"]
+
+[[artifact]]
+purl = "pkg:npm/devextreme-cli@1.17.0"
+file = "devextreme-cli-1.17.0.tgz"
+url = "https://registry.npmjs.org/devextreme-cli/-/devextreme-cli-1.17.0.tgz"
+sha256 = "1a644e9ed4251a1a84ac1f7d8c98c7641de97ec8108bf8d51a8966746546e1dd"
+bytes = 99731
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["long-names", "empty-members"]
+
+[[artifact]]
+purl = "pkg:npm/react-native-cli@2.0.1"
+file = "react-native-cli-2.0.1.tgz"
+url = "https://registry.npmjs.org/react-native-cli/-/react-native-cli-2.0.1.tgz"
+sha256 = "f1039232c86c29fa0b0c85ad2bfe0ff455c3d3cd9af9d9ddb8e9c560231a8322"
+bytes = 5924
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["pax-records"]
+
+[[artifact]]
+purl = "pkg:npm/trpc-cli@0.16.0"
+file = "trpc-cli-0.16.0.tgz"
+url = "https://registry.npmjs.org/trpc-cli/-/trpc-cli-0.16.0.tgz"
+sha256 = "8aed336f00ebb044e88ce7e8eec4514b7b6a9fa44563053c43541b13a1d3ed76"
+bytes = 419152
+format = "tar+gzip"
+profile = "npm-tarball"
+tags = ["many-members"]
+
+[[artifact]]
+purl = "pkg:pypi/acid-vault@2.1.0"
+file = "acid_vault-2.1.0-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/f8/42/847b6fdeb140a2fe870bbd7ccd844e43e5fb07a8859d3e58028a9b1210a9/acid_vault-2.1.0-py3-none-any.whl"
+sha256 = "347ba5223fbfc713926c7c58e810450084eeb1fc5182353a5caf70cfb3f6adc5"
+bytes = 59855
+format = "zip"
+profile = "wheel"
+tags = ["empty-members"]
+
+[[artifact]]
+purl = "pkg:pypi/aegisx@0.0.4"
+file = "aegisx-0.0.4.tar.gz"
+url = "https://files.pythonhosted.org/packages/4b/99/952501a829d83fc09a9d6e838005d6149179a8707bd1a67c6b9964a6fa9a/aegisx-0.0.4.tar.gz"
+sha256 = "f68868c1be19953db8ad8d9e1386a51037472489f9703cdc9dfad303fe274ef4"
+bytes = 3142
+format = "tar+gzip"
+profile = "tar-gzip"
+tags = ["empty-members", "tiny"]
+
+[[artifact]]
+purl = "pkg:pypi/djangocms-terminal@0.0.14"
+file = "djangocms-terminal-0.0.14.tar.gz"
+url = "https://files.pythonhosted.org/packages/33/76/fbe9933f25655bd2710cbe08f40911f84295d0019a98ea9c75a9410ff09a/djangocms-terminal-0.0.14.tar.gz"
+sha256 = "a23b4bf7c1bb6f113d6fd8046f0ded4eedd154cecc788da24d3ce738c4a1b935"
+bytes = 37807
+format = "tar+gzip"
+profile = "tar-gzip"
+tags = ["long-names", "empty-members"]
+
+[[artifact]]
+purl = "pkg:pypi/econml@0.17.0"
+file = "econml-0.17.0-cp310-cp310-macosx_11_0_arm64.whl"
+url = "https://files.pythonhosted.org/packages/03/b3/e40ab0bcd2fa074e44624c2a0e7b3f000dab3d17deaa20c253ecded7b3a2/econml-0.17.0-cp310-cp310-macosx_11_0_arm64.whl"
+sha256 = "7dacaa9a1e7490ed30dd1e51e7577a1bde66697edebd3637995a65b203312b01"
+bytes = 2401593
+format = "zip"
+profile = "wheel"
+tags = ["empty-members", "stored-entries"]
+
+[[artifact]]
+purl = "pkg:pypi/feagi-bv-windows@2.3.37"
+file = "feagi_bv_windows-2.3.37-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/e7/c0/10ed9f3486dcc061dd4e95aec57aa552ed05998e348aa6baef357a077522/feagi_bv_windows-2.3.37-py3-none-any.whl"
+sha256 = "798250abac3dced6475c951e606de763b01e63bd1e7c3015e2467ba676e245de"
+bytes = 80773484
+format = "zip"
+profile = "wheel"
+tags = ["large"]
+
+[[artifact]]
+purl = "pkg:pypi/homecom-alt@1.7.2"
+file = "homecom_alt-1.7.2-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/00/fe/b494914368dfbab74b49e6e09b201689c6f5091eb1a4276bd8564ae7f64f/homecom_alt-1.7.2-py3-none-any.whl"
+sha256 = "887ea903ffdc8a7ef3f35045b30d7c78d1d7e1c849b496cfd570e23e82175d65"
+bytes = 49030
+format = "zip"
+profile = "wheel"
+tags = ["empty-members", "stored-entries"]
+
+[[artifact]]
+purl = "pkg:pypi/ipumspy@0.8.2"
+file = "ipumspy-0.8.2-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/33/f2/18c5d6aaa21f86eca4cad979a256e1ba54fefc0a4e6434fcba541c5fbdb4/ipumspy-0.8.2-py3-none-any.whl"
+sha256 = "a3127301ec711eea7230f36a4c3b752ae4ad20d12ff0fd843624344e18592ffd"
+bytes = 76518
+format = "zip"
+profile = "wheel"
+tags = ["nested-archives", "empty-members"]
+
+[[artifact]]
+purl = "pkg:pypi/pdspy@2.0.8"
+file = "pdspy-2.0.8-cp310-cp310-macosx_11_0_arm64.whl"
+url = "https://files.pythonhosted.org/packages/0d/7f/6948e16b46ef7a9a792553d6220e589a626de3a4e74dfe287c49bc2e3330/pdspy-2.0.8-cp310-cp310-macosx_11_0_arm64.whl"
+sha256 = "1da26d02376a092aba134c681d731897e37f1b87bba5ff69de47e875d0dc06c1"
+bytes = 10862814
+format = "zip"
+profile = "wheel"
+tags = ["stored-entries"]
+
+[[artifact]]
+purl = "pkg:pypi/your@0.6.7"
+file = "your-0.6.7-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/25/54/738a7ab66ae55b1f956ecf2988f8dacb31253f199fa74a7675ca796c62ae/your-0.6.7-py3-none-any.whl"
+sha256 = "03d53933cf9d9b41e38e669abe09729dbc96ace6ba2b7b394f87beb6c65a5f9b"
+bytes = 85942
+format = "zip"
+profile = "wheel"
+tags = ["empty-members", "zip64"]
