@@ -88,14 +88,18 @@ keyword, which removes a per-entry choice from a signed digest.
 id = "gem-metadata-yaml"
 artifacts = ["rake-13.2.1.gem"]
 applies_to = ["gem"]
-test = "none yet"
-open = true
-summary = "The reference normalizes gem metadata YAML; we do not yet."
+test = "crates/trigon-stabilize/tests/gem_metadata.rs"
+summary = "We normalize the three gemspec fields that carry build noise; the reference also reformats the document."
 detail = """
-gem-metadata-date, gem-metadata-rubygems-version, gem-metadata-cert-chain and
-gem-metadata-yaml-normalize are not implemented here. Until they are, a gem's metadata.gz differs
-from the reference for reasons that are a gap rather than a decision.
+gem-metadata-date, gem-metadata-rubygems-version and gem-metadata-cert-chain are implemented and
+match the reference's substitutions exactly: the same replacement date, the same 0.0.0, the same
+empty cert chain.
 
-This entry is open: it records a missing feature, not a considered difference, and it closes when
-those four passes land.
+gem-metadata-yaml-normalize is not, and will not be. It round-trips the whole gemspec through a YAML
+serializer, which re-indents every list and drops the document marker. Our metadata.gz has the same
+120 lines as theirs and differs on 78 of them for that reason alone.
+
+This is the cargo-vcs-surgical argument again. A pass that reports Metadata risk should change the
+fields it says it changes. Reformatting the surrounding document inflates bytes_changed into
+meaninglessness and would mask a genuine difference in a neighbouring field.
 """

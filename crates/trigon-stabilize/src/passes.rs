@@ -584,3 +584,111 @@ fn base64url_nopad(bytes: &[u8]) -> String {
     }
     out
 }
+
+// --- gem metadata --------------------------------------------------------------------------------
+//
+// These run inside `metadata.gz`, which the archive model has already descended into, so `applies`
+// asks where this archive was found rather than what it contains.
+//
+// A note on tiers. A gemspec `date` is a build timestamp and a `rubygems_version` is the tool that
+// packaged it: both are environment noise that happens to be serialized inside a file rather than
+// stored in a header. The tier is about *what* is normalized, not *where* it lives, so both are
+// `Metadata`. `cert_chain` is a certificate chain over content we are rebuilding, which is the same
+// argument that puts signature exclusion at `Structural`.
+
+fn in_gem_metadata(cx: &Cx) -> bool {
+    cx.archive_path_ends_with(b"metadata.gz")
+}
+
+/// Replace the whole of a line beginning `prefix`, returning `None` when there is nothing to do.
+///
+/// Line-anchored rather than a regex: three fixed patterns do not justify a dependency in the crate
+/// whose claim is that it depends on nothing that can perform I/O.
+fn replace_line(text: &str, prefix: &str, replacement: &str) -> Option<String> {
+    if !text.lines().any(|l| l.starts_with(prefix) && l != replacement) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if line.starts_with(prefix) {
+            out.push_str(replacement);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    Some(out)
+}
+
+fn rewrite_body(e: &mut Entry, f: impl Fn(&str) -> Option<String>) -> Touched {
+    let Ok(text) = e.body_bytes().map(|b| String::from_utf8_lossy(&b).into_owned()) else {
+        return Touched::NONE;
+    };
+    let Some(new) = f(&text) else { return Touched::NONE };
+    let before = text.len() as u64;
+    match e.body_mut() {
+        Ok(b) => {
+            *b = new.into_bytes();
+            e.meta.size = b.len() as u64;
+            Touched::entry_bytes(before.abs_diff(e.meta.size).max(1))
+        }
+        Err(_) => Touched::NONE,
+    }
+}
+
+entry_pass!(
+    /// The date the gem was packaged.
+    GemMetadataDate,
+    "gem-metadata-date",
+    RiskTier::Metadata,
+    in_gem_metadata,
+    |e| {
+        rewrite_body(e, |t| {
+            replace_line(t, "date:", "date: 1980-01-02 00:00:00.000000000 Z")
+        })
+    }
+);
+
+entry_pass!(
+    /// The RubyGems version that packaged the gem, which is a property of the build host.
+    GemMetadataRubygemsVersion,
+    "gem-metadata-rubygems-version",
+    RiskTier::Metadata,
+    in_gem_metadata,
+    |e| { rewrite_body(e, |t| replace_line(t, "rubygems_version:", "rubygems_version: 0.0.0")) }
+);
+
+entry_pass!(
+    /// A certificate chain over members we are rebuilding, made with a key we will never hold.
+    GemMetadataCertChain,
+    "gem-metadata-cert-chain",
+    RiskTier::Structural,
+    in_gem_metadata,
+    |e| {
+        rewrite_body(e, |t| {
+            // `cert_chain:` followed by its block: continuation lines start with a space or a dash.
+            let Some(start) = t.lines().position(|l| l.starts_with("cert_chain:")) else {
+                return None;
+            };
+            let lines: Vec<&str> = t.lines().collect();
+            if lines[start] == "cert_chain: []" {
+                return None;
+            }
+            let mut end = start + 1;
+            while end < lines.len() && lines[end].starts_with([' ', '-']) {
+                end += 1;
+            }
+            let mut out = String::with_capacity(t.len());
+            for l in &lines[..start] {
+                out.push_str(l);
+                out.push('\n');
+            }
+            out.push_str("cert_chain: []\n");
+            for l in &lines[end..] {
+                out.push_str(l);
+                out.push('\n');
+            }
+            Some(out)
+        })
+    }
+);

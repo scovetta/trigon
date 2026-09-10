@@ -800,6 +800,7 @@ dependencies = [
 name = "trigon-stabilize"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "proptest",
  "serde",
  "sha2",
@@ -908,6 +909,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "toml",
+ "trigon-archive",
+ "trigon-core",
 ]
 
 [[package]]

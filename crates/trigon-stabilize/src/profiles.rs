@@ -61,6 +61,9 @@ pub fn profile(id: &str) -> Option<StabilizerSet> {
             vec![
                 Arc::new(GemExcludeChecksums) as Arc<dyn Stabilizer>,
                 Arc::new(GemExcludeSignatures) as Arc<dyn Stabilizer>,
+                Arc::new(GemMetadataDate) as Arc<dyn Stabilizer>,
+                Arc::new(GemMetadataRubygemsVersion) as Arc<dyn Stabilizer>,
+                Arc::new(GemMetadataCertChain) as Arc<dyn Stabilizer>,
             ],
         ]
         .concat(),
