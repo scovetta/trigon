@@ -1,0 +1,20 @@
+[package]
+name = "trigon-stabilize"
+version = "0.0.0"
+description = "Stabilizer registry and profiles. Pure, total, no I/O."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+trigon-archive.workspace = true
+serde.workspace = true
+smallvec.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tar = "0.4"

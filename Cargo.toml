@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/trigon-core",
     "crates/trigon-archive",
+    "crates/trigon-stabilize",
 ]
 
 [workspace.package]
