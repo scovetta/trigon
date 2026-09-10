@@ -18,3 +18,4 @@ sha2.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tar = "0.4"
+zip_crate = { package = "zip", version = "2", default-features = false, features = ["deflate"] }

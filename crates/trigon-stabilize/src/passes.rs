@@ -9,13 +9,15 @@
 
 use std::sync::Arc;
 
+use sha2::{Digest as _, Sha256};
 use trigon_archive::{Archive, Entry, EntryKind, RawMeta, Trailer};
 use trigon_core::{Format, RiskTier, StabilizerId};
 
-use crate::{Cx, Stabilizer, Touched};
+use crate::{Cx, Stabilizer, Stage, Touched};
 
 macro_rules! archive_pass {
-    ($name:ident, $id:literal, $risk:expr, $applies:expr, |$a:ident| $body:block) => {
+    ($(#[$doc:meta])* $name:ident, $id:literal, $risk:expr, $applies:expr, |$a:ident| $body:block) => {
+        $(#[$doc])*
         #[derive(Debug)]
         pub struct $name;
         impl Stabilizer for $name {
@@ -28,7 +30,8 @@ macro_rules! archive_pass {
 }
 
 macro_rules! entry_pass {
-    ($name:ident, $id:literal, $risk:expr, $applies:expr, |$e:ident| $body:block) => {
+    ($(#[$doc:meta])* $name:ident, $id:literal, $risk:expr, $applies:expr, |$e:ident| $body:block) => {
+        $(#[$doc])*
         #[derive(Debug)]
         pub struct $name;
         impl Stabilizer for $name {
@@ -421,4 +424,163 @@ pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
         Arc::new(GemExcludeChecksums),
         Arc::new(GemExcludeSignatures),
     ]
+}
+
+// --- wheel ---------------------------------------------------------------------------------------
+
+archive_pass!(
+    /// `direct_url.json` records where pip installed a wheel from, not what the wheel contains.
+    ///
+    /// `Lossy`, and it earns the tier: this removes a file a consumer would otherwise receive. Contrast
+    /// the gem and nupkg signature passes, which remove integrity metadata over content we are
+    /// rebuilding and so sit at `Structural`.
+
+    WheelDirectUrl,
+    "wheel-direct-url",
+    RiskTier::Lossy,
+    is_zip,
+    |a| {
+        let before = a.entries.len();
+        a.entries
+            .retain(|e| e.path.file_name() != b"direct_url.json");
+        match before - a.entries.len() {
+            0 => Touched::NONE,
+            n => Touched {
+                entries: n as u32,
+                bytes: 0,
+            },
+        }
+    }
+);
+
+entry_pass!(
+    /// The four bytes after the magic in a `.pyc` are a timestamp or a source hash, depending on the
+    /// PEP 552 flag. Either way they say when or from what the file was compiled.
+    PycHeader, "pyc-header", RiskTier::Content, is_zip, |e| {
+    if !e.path.ends_with(b".pyc") {
+        return Touched::NONE;
+    }
+    let Ok(body) = e.body_bytes() else {
+        return Touched::NONE;
+    };
+    if body.len() < 16 || body[4..16].iter().all(|b| *b == 0) {
+        return Touched::NONE;
+    }
+    match e.body_mut() {
+        Ok(b) => {
+            // Leave the magic alone: it identifies the bytecode version, which is content.
+            b[4..16].fill(0);
+            Touched::entry_bytes(12)
+        }
+        Err(_) => Touched::NONE,
+    }
+});
+
+/// Regenerate `*.dist-info/RECORD` from the members that are actually present.
+///
+/// This is why `Stage::Finalize` exists. `RECORD` is a manifest *of* membership, and earlier passes
+/// change membership: `wheel-direct-url` removes a file, and a definitions-supplied `exclude_path`
+/// can remove any file at all. Regenerating it at `Default` would produce a manifest of the wheel as
+/// it arrived rather than the wheel as it stands.
+#[derive(Debug)]
+pub struct WheelRecord;
+
+impl Stabilizer for WheelRecord {
+    fn id(&self) -> StabilizerId {
+        StabilizerId::new("wheel-record")
+    }
+    fn stage(&self) -> Stage {
+        Stage::Finalize
+    }
+    fn risk(&self) -> RiskTier {
+        RiskTier::Content
+    }
+    fn applies(&self, cx: &Cx) -> bool {
+        is_zip(cx)
+    }
+    fn on_archive(&self, a: &mut Archive, _cx: &Cx) -> Touched {
+        let Some(idx) = a
+            .entries
+            .iter()
+            .position(|e| e.path.ends_with(b".dist-info/RECORD"))
+        else {
+            return Touched::NONE;
+        };
+        let record_path = a.entries[idx].path.clone();
+
+        // PEP 376: one line per member. Archive order is unstable, so the other entries sort
+        // lexicographically. RECORD's own line carries an empty digest and size and goes last,
+        // outside the sort, which is what every wheel builder and the reference implementation do.
+        let mut rows: Vec<String> = Vec::with_capacity(a.entries.len());
+        for (i, e) in a.entries.iter().enumerate() {
+            if i == idx {
+                continue;
+            }
+            let Ok(body) = e.body_bytes() else { continue };
+            rows.push(format!(
+                "{},sha256={},{}",
+                csv_quote(&e.path.to_lossy()),
+                base64url_nopad(&Sha256::digest(&body)),
+                body.len()
+            ));
+        }
+        rows.sort();
+        rows.push(format!("{},,", csv_quote(&a.entries[idx].path.to_lossy())));
+
+        let mut out = rows.join("\n");
+        out.push('\n');
+        let new = out.into_bytes();
+
+        let entry = &mut a.entries[idx];
+        let old_len = entry.body_bytes().map(|b| b.len()).unwrap_or(0);
+        if entry
+            .body_bytes()
+            .map(|b| b.as_ref() == new.as_slice())
+            .unwrap_or(false)
+        {
+            return Touched::NONE;
+        }
+        match entry.body_mut() {
+            Ok(b) => {
+                *b = new;
+                let n = b.len() as u64;
+                entry.meta.size = n;
+                let _ = record_path;
+                Touched::entry_bytes(old_len as u64)
+            }
+            Err(_) => Touched::NONE,
+        }
+    }
+}
+
+/// PEP 376 quotes a path only when it has to, which keeps the common case byte-identical to what
+/// every wheel builder emits.
+fn csv_quote(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// URL-safe base64 without padding, which is the form `RECORD` uses.
+///
+/// Hand-rolled rather than pulled in: twenty lines against a dependency in the crate whose whole
+/// claim is that it depends on nothing that can perform I/O.
+fn base64url_nopad(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        let take = chunk.len() + 1;
+        for i in 0..take {
+            out.push(A[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
+        }
+    }
+    out
 }

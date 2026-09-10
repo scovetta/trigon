@@ -83,6 +83,31 @@ impl StabilizerSet {
         Digest::from_bytes(h.finalize().into())
     }
 
+    /// Narrow a set to a chosen list of passes.
+    ///
+    /// `enable` of `["all"]` keeps everything and `["none"]` keeps nothing; otherwise it names the
+    /// passes to keep. `disable` then removes from whatever survived. This mirrors the reference
+    /// implementation's flags so a differential run can bisect a digest mismatch down to one pass
+    /// rather than to "somewhere in the pipeline".
+    pub fn filtered(&self, enable: &[String], disable: &[String]) -> StabilizerSet {
+        let keep_all = enable.iter().any(|e| e == "all");
+        let keep_none = enable.len() == 1 && enable[0] == "none";
+        let drop_all = disable.iter().any(|d| d == "all");
+
+        let members = self
+            .members
+            .iter()
+            .filter(|m| {
+                let id = m.id().as_str().to_string();
+                let enabled = keep_all || (!keep_none && enable.contains(&id));
+                let disabled = drop_all || disable.contains(&id);
+                enabled && !disabled
+            })
+            .cloned()
+            .collect();
+        StabilizerSet::new(self.id.as_str(), members)
+    }
+
     pub fn ids(&self) -> Vec<StabilizerId> {
         self.members.iter().map(|m| m.id()).collect()
     }
