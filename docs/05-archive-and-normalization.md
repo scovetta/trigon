@@ -536,20 +536,34 @@ npm, PyPI, crates.io, RubyGems and NuGet, and compare stabilized digests for eve
 returns as much.
 
 The exit criterion is **equality except a checked-in deviation list**, and it cannot be plain
-equality, because some deviations are intentional:
+equality. The list lives at `corpora/deviations.toml`, attribution is **per artifact rather than per
+format** (a list that matches by class lets a genuine bug hide behind an unrelated entry), and a
+**stale exemption fails the build** too, because an artifact that now matches while still carrying an
+exemption is a place a future regression can hide.
+
+The first run of this test on a five-artifact corpus found three real bugs and three deviations. The
+bugs were fixed:
+
+| Bug | What was wrong |
+|---|---|
+| PAX header mode | We wrote 0o644 into a PAX extended-header entry; the reference builds those minimally with mode 0. |
+| PAX header device fields | We octal-formatted devmajor and devminor; the reference leaves them NUL. |
+| Stored-deflate framing | We let `flate2` frame the no-compression case, which sets BFINAL on the last data block. The reference appends an empty final block. Twenty lines of our own stored-deflate writer fixed it, and made the claim that the stabilized stream never reaches a deflate encoder literally true rather than nearly true. |
+
+After those, **both npm tarballs are byte-identical to the reference.** The deviations that remain
+are decisions rather than defects, with one exception that records a gap:
 
 | Deviation | Why ours differs |
 |---|---|
-| Nested archives (`.gem`) | We fix their swallowed-error recursion bug (§2.2), so a malformed inner archive produces a different digest and a note rather than a quiet match |
-| Duplicate paths | Our sort key is `(path, ordinal)` and theirs is `path` alone, so an archive with duplicate members can order differently (§2.2 (6)) |
-| Long names | We emit PAX for every long name and linkname; Go's writer may choose GNU (§2.1) |
-| Non-regular entries | We apply mode and owner normalization to symlinks, devices and FIFOs under a stated table; theirs follows Go's writer defaults (§2.2 (7)) |
-| Limits | We stop at the recursion, size and entry limits in §2.2, and they have none |
-| Risk-tier reclassification | Signature and checksum exclusion moved from `Lossy` to `Structural` (§3), which changes no bytes and changes the reported outcome |
+| `zip-writer-defaults` | The reference's stabilized wheel carries version-made-by 20, the data-descriptor flag, a 0x5455 extended-timestamp extra field, and a DOS date of 31 December 2097, which is what a zero `time.Time` degrades to. None of that is asked for by its stabilizers; all of it is Go's `archive/zip` writer. We zero it. |
+| `cargo-vcs-surgical` | The reference round-trips `.cargo_vcs_info.json` through a JSON serializer, compacting 94 bytes to 76. We replace the 40 hex characters and touch nothing else, so `bytes_changed: 40` means it. |
+| `nested-parse-errors` | Their gem recursion swallows a parse error; ours emits a note (§2.2 (4)). |
+| `duplicate-path-ordering` | Our sort key is `(path, ordinal)`; theirs is path alone (§2.2 (6)). |
+| `long-names-always-pax` | We emit PAX for every long name; Go's writer chooses per entry (§2.1). |
+| `gem-metadata-yaml` | **Open.** Their four gem metadata YAML passes are not implemented here. This entry records a missing feature rather than a considered difference, and it closes when those passes land. |
 
-Every entry carries a test and a sentence. An unexplained difference fails the build, an explained
-one is a row in a file a reviewer can read, and the list is a deliverable of M0 rather than a
-by-product.
+Every entry carries a test and a sentence. An unexplained difference fails the build, and the list is
+a deliverable of M0 rather than a by-product.
 
 **(1a) Golden digests, and how to change them.** The corpus test and the `smoke` eval tier
 ([`07-ai.md`](07-ai.md) §6) both compare against recorded digests, so **any stabilizer change fails
