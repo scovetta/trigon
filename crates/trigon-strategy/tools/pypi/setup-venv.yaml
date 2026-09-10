@@ -1,0 +1,23 @@
+# Create the virtual environment the build runs in.
+#
+# `uv` when a Python version is named, because it can fetch that interpreter; the stdlib module
+# otherwise, which can only use the interpreter already present.
+id: pypi/setup-venv
+needs: [python3, uv]
+params:
+  path:
+    required: true
+    doc: Where the environment is created.
+  locator:
+    required: false
+    doc: Directory prefix for the interpreter, for images where it is not on PATH.
+  python_version:
+    required: false
+    doc: The interpreter to fetch. Omit to use whichever one the image has.
+steps:
+  - runs: |
+      {%- if with.python_version %}
+      {{ with.locator }}uvx uv venv {{ with.path }} --seed --python {{ with.python_version }}
+      {%- else %}
+      {{ with.locator }}python3 -m venv {{ with.path }}
+      {%- endif %}

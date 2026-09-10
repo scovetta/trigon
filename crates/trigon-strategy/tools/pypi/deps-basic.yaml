@@ -1,0 +1,28 @@
+# The common PyPI dependency phase: an environment, a build frontend, the mirror, the requirements.
+#
+# Order matters. The PEP 517 frontend is fetched from the live index *before* the mirror is set,
+# because the frontend does not affect the output and contemporary versions lacked flags we rely on.
+id: pypi/deps/basic
+params:
+  venv:
+    required: true
+  python_version:
+    required: false
+  registry_time:
+    required: false
+  requirements:
+    required: false
+steps:
+  - uses: pypi/setup-venv
+    with:
+      locator: /usr/bin/
+      path: "{{ with.venv }}"
+      python_version: "{{ with.python_version }}"
+  - runs: "{{ with.venv }}/bin/pip install build"
+  - uses: pypi/setup-registry
+    with:
+      registry_time: "{{ with.registry_time }}"
+  - uses: pypi/install-deps
+    with:
+      requirements: "{{ with.requirements }}"
+      locator: "{{ with.venv }}/bin/"

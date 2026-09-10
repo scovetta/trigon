@@ -1,0 +1,14 @@
+# Install a pinned requirement list, one at a time so a failure names the requirement.
+id: pypi/install-deps
+params:
+  requirements:
+    required: false
+    doc: A JSON array of requirement specifiers.
+  locator:
+    required: false
+    doc: Directory prefix for pip.
+steps:
+  - runs: |
+      {%- for req in with.requirements | from_json %}
+      {{ with.locator }}pip install '{{ req | shell_single_quote }}'
+      {%- endfor %}

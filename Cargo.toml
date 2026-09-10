@@ -43,7 +43,7 @@ smallvec = { version = "1", features = ["union"] }
 # act on, which docs/04 §2.2 argues is the highest-return dependency in the design.
 serde_yaml_ng = "0.10"
 serde_path_to_error = "0.1"
-minijinja = { version = "2", default-features = false, features = ["builtins", "loader"] }
+minijinja = { version = "2", default-features = false, features = ["builtins", "loader", "serde"] }
 
 # Search half and tooling only.
 anyhow = "1"
@@ -52,6 +52,7 @@ serde_json = "1"
 proptest = "1"
 toml = "0.8"
 libc = "0.2"
+regex = "1"
 
 [profile.release]
 debug = 1

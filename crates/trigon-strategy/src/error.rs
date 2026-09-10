@@ -21,6 +21,9 @@ pub enum StrategyError {
     )]
     SchemaTooNew { found: u32, known: u32 },
 
+    #[error("template: {0}")]
+    Template(String),
+
     #[error("{0}")]
     Invalid(String),
 }
@@ -33,6 +36,7 @@ impl Classify for StrategyError {
             StrategyError::Yaml(_)
             | StrategyError::Field { .. }
             | StrategyError::MissingKind
+            | StrategyError::Template(_)
             | StrategyError::Invalid(_) => Fault::Policy,
             StrategyError::SchemaTooNew { .. } => Fault::Infra,
         }

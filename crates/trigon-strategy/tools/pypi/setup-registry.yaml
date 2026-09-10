@@ -1,0 +1,15 @@
+# Point pip at the time-filtered mirror.
+#
+# Without this, any package with a floating dependency range is unreproducible by construction: the
+# rebuild resolves against today's index and the original resolved against the index as it was on
+# the publish date. See docs/08-execution.md.
+id: pypi/setup-registry
+params:
+  registry_time:
+    required: false
+    doc: RFC 3339 moment to filter the index to. Omitted means the live index, which is rarely right.
+steps:
+  - runs: |
+      {%- if with.registry_time %}
+      export PIP_INDEX_URL={{ timewarp_url("pypi", with.registry_time) }}/simple
+      {%- endif %}

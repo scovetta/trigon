@@ -9,13 +9,23 @@
 //!
 //! This crate is pure: no network, no clock, no filesystem beyond what a caller hands it.
 
+mod context;
+mod digest;
 mod error;
+mod instructions;
 mod model;
 mod parse;
+mod render;
+mod tool;
 
+pub use context::{Context, EnvCtx, IntrinsicsCtx, LocationCtx, TargetCtx};
+pub use digest::{canonical, strategy_digest};
 pub use error::StrategyError;
+pub use instructions::{Instructions, Requirements, Script, SourceProvenance};
 pub use model::{
     CURRENT_SCHEMA, FlowStrategy, Location, LocationHint, ManualStrategy, PrebuiltStrategy, Step,
     StepBody, StepRaw, Strategy,
 };
 pub use parse::{from_yaml, to_yaml};
+pub use render::render;
+pub use tool::{Tool, ToolParam, ToolRegistry};

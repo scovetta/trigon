@@ -1,0 +1,19 @@
+# Fetch the working tree at a pinned commit.
+#
+# `--force` because the image may carry a tree from a cached layer, and a checkout that quietly
+# fails leaves the previous revision in place. That is a rebuild of the wrong commit reported as a
+# rebuild of the right one.
+id: git-checkout
+needs: [git]
+params:
+  crlf:
+    required: false
+    doc: >-
+      Set core.autocrlf on clone. For packages published from a Windows working tree, where the
+      line endings in the artifact came from the checkout rather than from the repository.
+steps:
+  - runs: |
+      {%- if not env.has_repo %}
+      git clone {% if with.crlf == "true" %}-c core.autocrlf=true {% endif %}{{ location.repo }} .
+      {%- endif %}
+      git checkout --force '{{ location.ref }}'

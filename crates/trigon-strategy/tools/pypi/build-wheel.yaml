@@ -1,0 +1,13 @@
+# Build a wheel with no network access and no isolated environment.
+#
+# `-n` because the dependencies were installed in the deps phase, from the mirror. Letting the
+# frontend build its own isolated environment would reach the live index and undo the pinning.
+id: pypi/build/wheel
+params:
+  locator:
+    required: false
+  dir:
+    required: false
+    doc: Project directory, when it is not the working tree root.
+steps:
+  - runs: "{{ with.locator }}python3 -m build --wheel -n{% if with.dir and with.dir != '.' %} {{ with.dir }}{% endif %}"
