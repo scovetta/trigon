@@ -118,9 +118,7 @@ fn an_empty_phase_emits_no_layer() {
 
 #[test]
 fn the_package_manager_follows_the_base_image() {
-    let mut p = match plan(EgressTier::DenyAll) {
-        BuildPlan::Oci(p) => p,
-    };
+    let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
     p.base_image = "docker.io/library/alpine@sha256:abc".into();
     assert!(render_context(&p).files["setup.sh"].contains("apk add --no-cache"));
     p.base_image = "docker.io/library/fedora@sha256:abc".into();
