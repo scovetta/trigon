@@ -1,0 +1,17 @@
+[package]
+name = "trigon-compare"
+version = "0.0.0"
+description = "One-pass multi-digest comparison and the diff report model."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+trigon-archive.workspace = true
+trigon-stabilize.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

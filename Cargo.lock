@@ -582,6 +582,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "trigon-compare"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "sha2",
+ "thiserror",
+ "trigon-archive",
+ "trigon-core",
+ "trigon-stabilize",
+]
+
+[[package]]
 name = "trigon-core"
 version = "0.0.0"
 dependencies = [

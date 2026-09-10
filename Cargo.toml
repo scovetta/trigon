@@ -4,6 +4,7 @@ members = [
     "crates/trigon-core",
     "crates/trigon-archive",
     "crates/trigon-stabilize",
+    "crates/trigon-compare",
 ]
 
 [workspace.package]
