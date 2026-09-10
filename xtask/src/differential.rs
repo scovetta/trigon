@@ -306,12 +306,13 @@ fn source_newer_than(bin: &str) -> Option<std::path::PathBuf> {
     let built = std::fs::metadata(bin).ok()?.modified().ok()?;
     // Only `src`. A test file cannot change the binary under test, and treating one as staleness
     // makes the guard fire on every edit that is not the one it exists to catch.
-    let mut stack: Vec<std::path::PathBuf> = std::fs::read_dir("crates")
-        .ok()?
-        .flatten()
-        .map(|e| e.path().join("src"))
-        .filter(|p| p.is_dir())
-        .collect();
+    let mut stack: Vec<std::path::PathBuf> =
+        std::fs::read_dir(crate::workspace_root().join("crates"))
+            .ok()?
+            .flatten()
+            .map(|e| e.path().join("src"))
+            .filter(|p| p.is_dir())
+            .collect();
     while let Some(dir) = stack.pop() {
         for e in std::fs::read_dir(&dir).ok()?.flatten() {
             let p = e.path();

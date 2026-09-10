@@ -175,6 +175,10 @@ const FORBID_TRANSITIVE: &[(&str, &[&str])] = &[
         ],
     ),
     ("trigon-core", &["trigon-ai", "tokio", "reqwest", "hyper"]),
+    (
+        "trigon-strategy",
+        &["trigon-ai", "trigon-registry", "tokio", "reqwest", "hyper"],
+    ),
 ];
 
 /// Judgement-half crates declare no cargo features of their own, which leaves feature unification
@@ -184,7 +188,16 @@ const REQUIRE_NO_FEATURES: &[&str] = &[
     "trigon-archive",
     "trigon-stabilize",
     "trigon-compare",
+    "trigon-strategy",
 ];
+
+/// Crates where a `HashMap` in the source is a policy violation rather than a style preference.
+///
+/// Rendering order feeds `strategy_digest`. `minijinja` preserves insertion order when it ranges a
+/// map, so a `HashMap` in a template context makes the rendered script, and therefore the digest,
+/// vary between runs of the same binary against the same input. `BTreeMap` everywhere removes the
+/// question. See `docs/04-strategies.md` §3.2 (2).
+const FORBID_HASHMAP: &[&str] = &["trigon-strategy"];
 
 pub fn check_policy() -> Result<String> {
     check_policy_with(FORBID_TRANSITIVE, REQUIRE_NO_FEATURES)
@@ -275,6 +288,18 @@ fn check_policy_with(
         }
     }
 
+    for crate_name in FORBID_HASHMAP {
+        match hashmap_uses(crate_name) {
+            Ok(found) if !found.is_empty() => violations.push(format!(
+                "{crate_name} names HashMap at {}. Rendering order feeds strategy_digest, and a \
+                 hash map makes it vary between runs. Use BTreeMap.",
+                found.join(", ")
+            )),
+            Ok(_) => lines.push(format!("  {crate_name:<18} names no HashMap")),
+            Err(e) => violations.push(format!("could not scan {crate_name}: {e}")),
+        }
+    }
+
     if !violations.is_empty() {
         bail!(
             "dependency policy violated:\n  - {}",
@@ -282,6 +307,47 @@ fn check_policy_with(
         );
     }
     Ok(format!("dependency policy ok\n{}", lines.join("\n")))
+}
+
+/// The workspace root, however xtask was invoked.
+///
+/// `cargo run -p xtask` starts at the workspace root and `cargo test -p xtask` starts at the crate
+/// directory, so anything resolving a repository path relative to the current directory works in
+/// one and not the other.
+pub fn workspace_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask lives one level below the workspace root")
+        .to_path_buf()
+}
+
+/// Every `file:line` in a crate's `src` that names `HashMap`.
+fn hashmap_uses(crate_name: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let root = workspace_root();
+    let mut stack = vec![root.join("crates").join(crate_name).join("src")];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir)?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().is_none_or(|x| x != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p)?;
+            let shown = p.strip_prefix(&root).unwrap_or(&p).to_path_buf();
+            for (i, line) in text.lines().enumerate() {
+                // A line that says why it is banned is documentation, not a use.
+                if line.contains("HashMap") && !line.trim_start().starts_with("//") {
+                    out.push(format!("{}:{}", shown.display(), i + 1));
+                }
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 fn cargo_metadata() -> Result<serde_json::Value> {
@@ -370,8 +436,25 @@ mod tests {
         let err = super::check_policy_with(&[("trigon-core", &["serde"])], &[])
             .expect_err("forbidding a dependency that exists must fail");
         let msg = err.to_string();
-        assert!(msg.contains("trigon-core reaches `serde` transitively"), "{msg}");
-        assert!(msg.contains("->"), "the violation must name the path: {msg}");
+        assert!(
+            msg.contains("trigon-core reaches `serde` transitively"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("->"),
+            "the violation must name the path: {msg}"
+        );
+    }
+
+    /// Nor is the HashMap rule. `trigon-stabilize` is not on the list and does not name one, so
+    /// the scanner must come back empty for it rather than erroring, and it must find the uses in
+    /// a crate that has them.
+    #[test]
+    fn the_hashmap_scan_finds_what_is_there_and_nothing_else() {
+        assert!(super::hashmap_uses("trigon-strategy").unwrap().is_empty());
+        // xtask itself uses BTreeMap throughout; a crate that does not exist must error rather
+        // than silently report clean, which is the failure mode that would make the rule vacuous.
+        assert!(super::hashmap_uses("trigon-does-not-exist").is_err());
     }
 
     /// The feature rule is not vacuous either. `serde` declares features; a judgement-half crate

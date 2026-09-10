@@ -1,0 +1,20 @@
+[package]
+name = "trigon-strategy"
+version = "0.0.0"
+description = "The strategy schema, the flow DSL, and rendering to executable instructions."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+serde.workspace = true
+serde_yaml_ng.workspace = true
+serde_path_to_error.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

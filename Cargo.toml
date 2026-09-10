@@ -6,6 +6,7 @@ members = [
     "crates/trigon-archive",
     "crates/trigon-stabilize",
     "crates/trigon-compare",
+    "crates/trigon-strategy",
     "crates/trigon",
     "xtask",
 ]
@@ -22,6 +23,7 @@ trigon-core = { path = "crates/trigon-core", version = "0.0.0" }
 trigon-archive = { path = "crates/trigon-archive", version = "0.0.0" }
 trigon-stabilize = { path = "crates/trigon-stabilize", version = "0.0.0" }
 trigon-compare = { path = "crates/trigon-compare", version = "0.0.0" }
+trigon-strategy = { path = "crates/trigon-strategy", version = "0.0.0" }
 
 # Judgement half: sync, no tokio, no reqwest. See docs/01-architecture.md §2.2.
 serde = { version = "1", features = ["derive"] }
@@ -35,6 +37,13 @@ tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 smallvec = { version = "1", features = ["union"] }
+
+# Strategy documents. `serde_yaml` is archived; `serde_yaml_ng` is the maintained fork.
+# `serde_path_to_error` is what turns "data did not match any variant" into a path a repair loop can
+# act on, which docs/04 §2.2 argues is the highest-return dependency in the design.
+serde_yaml_ng = "0.10"
+serde_path_to_error = "0.1"
+minijinja = { version = "2", default-features = false, features = ["builtins", "loader"] }
 
 # Search half and tooling only.
 anyhow = "1"
