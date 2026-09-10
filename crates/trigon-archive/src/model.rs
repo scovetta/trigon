@@ -9,6 +9,9 @@ pub struct Archive {
     pub format: Format,
     pub entries: Vec<Entry>,
     pub trailer: Trailer,
+    /// Set when a pass changes the container itself, as distinct from any of its members. Only the
+    /// trailer lives there, so only a trailer pass sets it.
+    pub(crate) trailer_dirty: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,7 +193,17 @@ pub enum Body {
         off: u64,
         len: u64,
     },
-    Nested(Box<Archive>),
+    /// A parsed inner archive, alongside the bytes it was parsed from.
+    ///
+    /// `original` is what gets written back when nothing inside `inner` changed. Without it every
+    /// nested archive is re-serialized, and re-serialization is not the identity: the stabilized
+    /// form stores rather than deflates, so an untouched `.gz` asset a package ships would be
+    /// decompressed and rewritten. One npm tarball in the corpus grew a 4,887-byte member to 66,090
+    /// that way. Descending is for seeing inside; it is not licence to rewrite.
+    Nested {
+        inner: Box<Archive>,
+        original: Box<Body>,
+    },
 }
 
 impl Body {
@@ -203,12 +216,41 @@ impl Body {
             Body::Original { len, .. } | Body::Spilled { len, .. } => *len,
             Body::Inline(v) => v.len() as u64,
             // A nested archive's length is only known once it is re-serialized.
-            Body::Nested(_) => 0,
+            Body::Nested { .. } => 0,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0 && !matches!(self, Body::Nested(_))
+        self.len() == 0 && !matches!(self, Body::Nested { .. })
+    }
+
+    /// The bytes this body holds.
+    ///
+    /// A nested archive has none until it is re-serialized, so it is an error rather than an empty
+    /// slice: returning nothing would silently drop an inner archive from the digest.
+    pub fn bytes(&self) -> Result<std::borrow::Cow<'_, [u8]>, crate::ArchiveError> {
+        use std::borrow::Cow;
+        use std::io::{Read, Seek, SeekFrom};
+        match self {
+            Body::Inline(v) => Ok(Cow::Borrowed(v)),
+            Body::Original { src, off, len } => src
+                .slice(*off, *len)
+                .map(Cow::Borrowed)
+                .ok_or_else(|| crate::ArchiveError::Malformed {
+                    format: "archive",
+                    detail: format!("body range {off}..{} out of bounds", off + len),
+                }),
+            Body::Spilled { file, off, len } => {
+                let mut f = file.file.try_clone()?;
+                f.seek(SeekFrom::Start(*off))?;
+                let mut buf = vec![0u8; usize::try_from(*len).unwrap_or(0)];
+                f.read_exact(&mut buf)?;
+                Ok(Cow::Owned(buf))
+            }
+            Body::Nested { .. } => Err(crate::ArchiveError::Unsupported(
+                "bytes() on a nested archive; re-serialize it first".into(),
+            )),
+        }
     }
 }
 
@@ -269,7 +311,29 @@ impl Archive {
             format,
             entries: Vec::new(),
             trailer,
+            trailer_dirty: false,
         }
+    }
+
+    /// Mark the container itself as changed. A pass that edits the trailer calls this; a pass that
+    /// edits a member marks the entry instead.
+    pub fn mark_trailer_dirty(&mut self) {
+        self.trailer_dirty = true;
+    }
+
+    /// Did any pass change this archive, at any depth?
+    ///
+    /// Drives the one decision that needs it: whether a nested archive is re-serialized or written
+    /// back as the bytes it arrived as.
+    pub fn is_dirty(&self) -> bool {
+        self.trailer_dirty
+            || self.entries.iter().any(|e| {
+                e.dirty
+                    || match &e.body {
+                        Body::Nested { inner, .. } => inner.is_dirty(),
+                        _ => false,
+                    }
+            })
     }
 
     /// Sort by `(path bytes, ordinal)`. The ordinal makes the order total over a multiset, so an
@@ -308,27 +372,30 @@ impl Entry {
 
     /// Bytes of this entry's body.
     pub fn body_bytes(&self) -> Result<std::borrow::Cow<'_, [u8]>, crate::ArchiveError> {
-        use std::borrow::Cow;
-        use std::io::{Read, Seek, SeekFrom};
+        self.body.bytes()
+    }
+
+    /// The bytes this entry will contribute to a *stabilized* archive.
+    ///
+    /// Differs from [`Entry::body_bytes`] on exactly one case: a nested archive, which has no bytes
+    /// of its own until it is written. An inner archive nothing changed yields the bytes it arrived
+    /// as; a changed one is re-serialized store-only, which is what the stabilized form does with
+    /// it either way.
+    ///
+    /// A pass that hashes members must use this. `body_bytes` returns an error for a nested
+    /// archive, and a caller that skips the members it cannot read writes a manifest of an archive
+    /// that does not exist. Silent membership deletion is how a stabilizer turns a real difference
+    /// into a false match, which is the most expensive mistake in the system.
+    pub fn stabilized_bytes(&self) -> Result<std::borrow::Cow<'_, [u8]>, crate::ArchiveError> {
         match &self.body {
-            Body::Inline(v) => Ok(Cow::Borrowed(v)),
-            Body::Original { src, off, len } => src
-                .slice(*off, *len)
-                .map(Cow::Borrowed)
-                .ok_or_else(|| crate::ArchiveError::Malformed {
-                    format: "archive",
-                    detail: format!("body range {off}..{} out of bounds", off + len),
-                }),
-            Body::Spilled { file, off, len } => {
-                let mut f = file.file.try_clone()?;
-                f.seek(SeekFrom::Start(*off))?;
-                let mut buf = vec![0u8; usize::try_from(*len).unwrap_or(0)];
-                f.read_exact(&mut buf)?;
-                Ok(Cow::Owned(buf))
+            Body::Nested { inner, original } => {
+                if inner.is_dirty() {
+                    Ok(std::borrow::Cow::Owned(crate::serialize(inner, true)?))
+                } else {
+                    original.bytes()
+                }
             }
-            Body::Nested(_) => Err(crate::ArchiveError::Unsupported(
-                "body_bytes on a nested archive; re-serialize it first".into(),
-            )),
+            _ => self.body_bytes(),
         }
     }
 

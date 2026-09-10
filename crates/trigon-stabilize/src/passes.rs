@@ -50,7 +50,21 @@ fn is_zip(cx: &Cx) -> bool {
     cx.format() == Format::Zip
 }
 fn has_gzip(cx: &Cx) -> bool {
-    matches!(cx.format(), Format::TarGz | Format::Gzip)
+    matches!(cx.format(), Format::TarGz | Format::Gzip) && (cx.at_depth(0) || is_structural(cx))
+}
+
+/// Whether a nested archive is framing the format defines, or a compressed file the package ships.
+///
+/// The parser cannot tell them apart: a gem's `metadata.gz` and an npm package's `banner.json.gz`
+/// are both gzip members of an outer tar. The difference is that the gem format mandates the first
+/// and the second is a deliverable, so normalizing its header rewrites content rather than a
+/// container. The profile is what knows, and this is the list.
+fn is_structural(cx: &Cx) -> bool {
+    const GEM_MEMBERS: [&[u8]; 3] = [b"data.tar.gz", b"metadata.gz", b"checksums.yaml.gz"];
+    cx.at_depth(1)
+        && cx
+            .archive_path()
+            .is_some_and(|p| GEM_MEMBERS.contains(&p.as_bytes()))
 }
 
 fn is_sorted(a: &Archive) -> bool {
@@ -124,19 +138,34 @@ entry_pass!(TarOwners, "tar-owners", RiskTier::Metadata, is_tar, |e| {
     Touched::entry()
 });
 
-entry_pass!(TarXattrs, "tar-xattrs", RiskTier::Metadata, is_tar, |e| {
-    let RawMeta::Tar(raw) = &mut e.raw else {
-        return Touched::NONE;
-    };
-    let before = raw.pax.len();
-    raw.pax
-        .retain(|k, _| !k.starts_with("SCHILY.xattr.") && !k.starts_with("LIBARCHIVE.xattr."));
-    if raw.pax.len() == before {
-        return Touched::NONE;
+entry_pass!(
+    /// Drops every surviving PAX record, not only the xattr ones.
+    ///
+    /// The keyword set is open, and what turns up in real tarballs is host state: node-tar writes
+    /// `SCHILY.ino` and `SCHILY.dev` (inode and device numbers from the packing machine),
+    /// `SCHILY.nlink`, and a `NODETAR.*` record per field of the packed `package.json`. An npm
+    /// tarball repacked on another machine differs in all of them, so keeping any of them makes
+    /// the stabilized digest a function of where the package was built.
+    ///
+    /// Records that mean something are not stored here: the reader lifts `path`, `linkpath`,
+    /// `size`, `mtime`, `atime` and `ctime` into typed fields and the writer regenerates them, so
+    /// clearing the map does not lose a long name or the `atime=0` that forces PAX.
+    TarXattrs,
+    "tar-xattrs",
+    RiskTier::Metadata,
+    is_tar,
+    |e| {
+        let RawMeta::Tar(raw) = &mut e.raw else {
+            return Touched::NONE;
+        };
+        if raw.pax.is_empty() {
+            return Touched::NONE;
+        }
+        raw.pax.clear();
+        e.mark_dirty();
+        Touched::entry()
     }
-    e.mark_dirty();
-    Touched::entry()
-});
+);
 
 entry_pass!(TarDevice, "tar-device", RiskTier::Metadata, is_tar, |e| {
     let RawMeta::Tar(raw) = &mut e.raw else {
@@ -270,6 +299,9 @@ archive_pass!(GzipMeta, "gzip-meta", RiskTier::Metadata, has_gzip, |a| {
     h.comment = None;
     h.extra = None;
     h.os = trigon_archive::gzip::OS_UNKNOWN;
+    // The trailer is the container, not a member, so the archive carries the dirty bit. It decides
+    // whether a nested archive is re-serialized or written back byte for byte.
+    a.mark_trailer_dirty();
     Touched::entry()
 });
 
@@ -454,27 +486,45 @@ archive_pass!(
 );
 
 entry_pass!(
-    /// The four bytes after the magic in a `.pyc` are a timestamp or a source hash, depending on the
-    /// PEP 552 flag. Either way they say when or from what the file was compiled.
-    PycHeader, "pyc-header", RiskTier::Content, is_zip, |e| {
-    if !e.path.ends_with(b".pyc") {
-        return Touched::NONE;
-    }
-    let Ok(body) = e.body_bytes() else {
-        return Touched::NONE;
-    };
-    if body.len() < 16 || body[4..16].iter().all(|b| *b == 0) {
-        return Touched::NONE;
-    }
-    match e.body_mut() {
-        Ok(b) => {
-            // Leave the magic alone: it identifies the bytecode version, which is content.
-            b[4..16].fill(0);
-            Touched::entry_bytes(12)
+    /// Zero the source mtime embedded in a timestamp-validated `.pyc`.
+    ///
+    /// A PEP 552 header is 16 bytes: a 4-byte magic, a 4-byte flags word, and 8 bytes whose meaning
+    /// bit 0 of the flags selects. Clear, and they are a 4-byte source mtime and a 4-byte source
+    /// size. Set, and they are an 8-byte hash of the source.
+    ///
+    /// Only the mtime is touched. The magic identifies the bytecode version. The flags word says
+    /// how to read the rest, so zeroing it changes what the file means. The source size and the
+    /// source hash are both derived from the source: neither can differ while the source matches,
+    /// so zeroing them removes a signal and normalizes nothing. The reference has no `.pyc` pass at
+    /// all, which is why this one is a listed deviation.
+    PycHeader,
+    "pyc-header",
+    RiskTier::Content,
+    is_zip,
+    |e| {
+        if !e.path.ends_with(b".pyc") {
+            return Touched::NONE;
         }
-        Err(_) => Touched::NONE,
+        let Ok(body) = e.body_bytes() else {
+            return Touched::NONE;
+        };
+        if body.len() < 16 {
+            return Touched::NONE;
+        }
+        let flags = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
+        let hash_based = flags & 1 == 1;
+        if hash_based || body[8..12].iter().all(|b| *b == 0) {
+            return Touched::NONE;
+        }
+        match e.body_mut() {
+            Ok(b) => {
+                b[8..12].fill(0);
+                Touched::entry_bytes(4)
+            }
+            Err(_) => Touched::NONE,
+        }
     }
-});
+);
 
 /// Regenerate `*.dist-info/RECORD` from the members that are actually present.
 ///
@@ -516,7 +566,14 @@ impl Stabilizer for WheelRecord {
             if i == idx {
                 continue;
             }
-            let Ok(body) = e.body_bytes() else { continue };
+            // `stabilized_bytes`, not `body_bytes`: a `.gz` a wheel ships parses as a nested
+            // archive and has no bytes of its own. Skipping the members we cannot read would drop
+            // them from the manifest, which is a silent membership change dressed up as a
+            // normalization. A member we genuinely cannot read means the manifest cannot be
+            // computed, so RECORD is left exactly as it arrived.
+            let Ok(body) = e.stabilized_bytes() else {
+                return Touched::NONE;
+            };
             rows.push(format!(
                 "{},sha256={},{}",
                 csv_quote(&e.path.to_lossy()),

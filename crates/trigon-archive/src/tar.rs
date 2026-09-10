@@ -16,7 +16,6 @@ use crate::model::{Archive, Body, Entry, EntryKind, Meta, RawMeta, SourceMap, Ta
 
 const BLOCK: usize = 512;
 const NAME_LEN: usize = 100;
-const PREFIX_LEN: usize = 155;
 /// The largest value an 11-digit octal field holds.
 const MAX_OCTAL_12: u64 = 0o77_777_777_777;
 /// The largest value a 7-digit octal field holds.
@@ -112,10 +111,10 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
                 format!("{kind:?} carries a {size}-byte body; bytes preserved"),
             ));
         }
-        // A name that fits the ustar prefix field needed no extension at all. Only a name that
-        // cannot split, and did not arrive as PAX, must have come from a GNU long-name entry.
-        let needs_extension = ustar_split(path.as_bytes()).is_none();
-        let long_name_was_gnu = needs_extension && !had_pax_path;
+        // The writer re-encodes every name over 100 bytes as PAX. One that arrived without a PAX
+        // `path` record therefore came in as either a GNU long-name entry or a ustar prefix split,
+        // and either way the framing changes on the way out.
+        let long_name_was_gnu = path.as_bytes().len() > NAME_LEN && !had_pax_path;
         if long_name_was_gnu {
             notes.push(Note::at(
                 NoteCode::LongNameReencoded,
@@ -239,11 +238,14 @@ fn write_entry<W: Write>(e: &Entry, w: &mut W) -> Result<()> {
 
     let mut pax: BTreeMap<String, String> = raw.pax.clone();
 
-    // `path`: ustar splits at a '/' into a 155-byte prefix and a 100-byte name. Anything that will
-    // not split takes a PAX record. We never emit a GNU long-name entry.
+    // `path`: a name over 100 bytes always takes a PAX record, and the ustar `prefix` field is
+    // never used. ustar could carry some of these names as a 155-byte prefix plus a 100-byte name,
+    // but only those with a '/' in the right place, which makes the encoding a property of where
+    // the slashes fall. Two paths of the same length would then be framed differently. Emitting
+    // PAX for every long name removes that per-entry choice from a signed digest, and it is what a
+    // writer pinned to the PAX format does. See docs/05 §2.1.
     let name_bytes = e.path.as_bytes();
-    let split = ustar_split(name_bytes);
-    if split.is_none() {
+    if name_bytes.len() > NAME_LEN {
         pax.insert(
             "path".into(),
             String::from_utf8_lossy(name_bytes).into_owned(),
@@ -284,8 +286,17 @@ fn write_entry<W: Write>(e: &Entry, w: &mut W) -> Result<()> {
 
     // The ustar header. When a PAX `path` record carried the real name, the header still needs
     // something; truncating the original is what every implementation does.
-    let (prefix, name) =
-        split.unwrap_or_else(|| (&[][..], &name_bytes[..name_bytes.len().min(NAME_LEN)]));
+    //
+    // A truncation can land just after a '/', and readers that infer "directory" from a trailing
+    // slash in the name field then misread a regular file as one. So a truncated name loses its
+    // trailing slashes and the NUL terminates the field. Only truncated names: a name that fits is
+    // written as it is, trailing slash and all, because there it means what it says.
+    let mut name = &name_bytes[..name_bytes.len().min(NAME_LEN)];
+    if name_bytes.len() > NAME_LEN {
+        while name.last() == Some(&b'/') {
+            name = &name[..name.len() - 1];
+        }
+    }
 
     let mut hdr = [0u8; BLOCK];
     put_bytes(&mut hdr[0..100], name);
@@ -313,7 +324,7 @@ fn write_entry<W: Write>(e: &Entry, w: &mut W) -> Result<()> {
     put_bytes(&mut hdr[297..329], &raw.gname);
     put_octal(&mut hdr[329..337], u64::from(raw.devmajor));
     put_octal(&mut hdr[337..345], u64::from(raw.devminor));
-    put_bytes(&mut hdr[345..500], prefix);
+    // 345..500 is the ustar `prefix` field, deliberately left NUL: see the `path` record above.
     finish_checksum(&mut hdr);
 
     w.write_all(&hdr)?;
@@ -398,23 +409,6 @@ fn pax_header_name(name: &[u8]) -> Vec<u8> {
 }
 
 /// Split a path into a ustar `(prefix, name)` pair, or `None` when it will not fit.
-fn ustar_split(name: &[u8]) -> Option<(&[u8], &[u8])> {
-    if name.len() <= NAME_LEN {
-        return Some((&[], name));
-    }
-    if name.len() > NAME_LEN + PREFIX_LEN + 1 {
-        return None;
-    }
-    // The split point must be a '/', the prefix must fit, and the remainder must fit.
-    let cut = name
-        .iter()
-        .enumerate()
-        .filter(|&(i, &c)| c == b'/' && i <= PREFIX_LEN && name.len() - i - 1 <= NAME_LEN)
-        .map(|(i, _)| i)
-        .next()?;
-    Some((&name[..cut], &name[cut + 1..]))
-}
-
 fn put_bytes(field: &mut [u8], value: &[u8]) {
     let n = value.len().min(field.len());
     field[..n].copy_from_slice(&value[..n]);
@@ -487,20 +481,6 @@ mod tests {
         let mut f = [0u8; 12];
         put_octal(&mut f, 0);
         assert_eq!(&f, b"00000000000\0");
-    }
-
-    #[test]
-    fn ustar_split_prefers_no_prefix() {
-        assert_eq!(
-            ustar_split(b"short/path"),
-            Some((&b""[..], &b"short/path"[..]))
-        );
-        let long = format!("{}/{}", "d".repeat(120), "f".repeat(50));
-        let (p, n) = ustar_split(long.as_bytes()).unwrap();
-        assert_eq!(p.len(), 120);
-        assert_eq!(n.len(), 50);
-        // No '/' in reach, so PAX has to carry it.
-        assert_eq!(ustar_split(&vec![b'x'; 300]), None);
     }
 
     #[test]

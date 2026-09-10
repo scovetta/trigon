@@ -161,13 +161,13 @@ fn run(set: &StabilizerSet, archive: &mut Archive, cx: &Cx, totals: &mut [Touche
         let (path, nested_format) = {
             let e = &archive.entries[i];
             match &e.body {
-                Body::Nested(inner) => (e.path.clone(), Some(inner.format)),
+                Body::Nested { inner, .. } => (e.path.clone(), Some(inner.format)),
                 _ => (e.path.clone(), None),
             }
         };
         if let Some(f) = nested_format {
             let child = cx.push(f, path);
-            if let Body::Nested(inner) = &mut archive.entries[i].body {
+            if let Body::Nested { inner, .. } = &mut archive.entries[i].body {
                 run(set, inner, &child, totals);
             }
         }

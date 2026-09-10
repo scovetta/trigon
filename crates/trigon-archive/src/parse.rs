@@ -133,7 +133,13 @@ fn descend(a: &mut Archive, limits: &Limits, notes: &mut Vec<Note>, depth: u8) {
         let Ok(body) = e.body_bytes() else { continue };
         let body = body.into_owned();
         match parse_nested(&body, limits, notes, depth) {
-            Ok(nested) => e.body = Body::Nested(Box::new(nested)),
+            Ok(nested) => {
+                let original = std::mem::replace(&mut e.body, Body::empty());
+                e.body = Body::Nested {
+                    inner: Box::new(nested),
+                    original: Box::new(original),
+                };
+            }
             Err(err) => {
                 // The body stays where it is. The digest reflects the bytes we could not read,
                 // and the note says so.
@@ -247,7 +253,16 @@ fn flatten(a: &Archive, store_only: bool) -> Result<Archive> {
     let mut out = Archive::new(a.format, a.trailer.clone());
     for e in &a.entries {
         let body = match &e.body {
-            Body::Nested(inner) => Body::Inline(serialize(inner, store_only)?),
+            // An untouched inner archive writes back the bytes it arrived as. Re-serializing it
+            // would store what was deflated and drop the header fields the inner file legitimately
+            // carries, rewriting content the package ships rather than normalizing a container.
+            Body::Nested { inner, original } => {
+                if inner.is_dirty() {
+                    Body::Inline(serialize(inner, store_only)?)
+                } else {
+                    Body::Inline(original.bytes()?.into_owned())
+                }
+            }
             Body::Inline(v) => Body::Inline(v.clone()),
             other => Body::Inline(match other {
                 Body::Original { .. } | Body::Spilled { .. } => e.body_bytes()?.into_owned(),

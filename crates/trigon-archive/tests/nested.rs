@@ -62,7 +62,7 @@ fn descends_two_layers() {
         .iter()
         .find(|e| e.path.to_lossy() == "data.tar.gz")
         .unwrap();
-    let Body::Nested(inner) = &data.body else {
+    let Body::Nested { inner, .. } = &data.body else {
         panic!("data.tar.gz should be nested")
     };
     assert_eq!(inner.format, Format::TarGz);
@@ -76,7 +76,7 @@ fn descends_two_layers() {
         .iter()
         .find(|e| e.path.to_lossy() == "metadata.gz")
         .unwrap();
-    let Body::Nested(m) = &meta.body else {
+    let Body::Nested { inner: m, .. } = &meta.body else {
         panic!("metadata.gz should be nested")
     };
     assert_eq!(m.format, Format::Gzip);
@@ -107,7 +107,7 @@ fn a_malformed_inner_archive_notes_rather_than_guessing() {
         .find(|e| e.path.to_lossy() == "data.tar.gz")
         .unwrap();
     assert!(
-        !matches!(data.body, Body::Nested(_)),
+        !matches!(data.body, Body::Nested { .. }),
         "a body we could not parse must not be presented as parsed"
     );
     // The bytes we could not read still reach the digest, unchanged.
@@ -178,5 +178,98 @@ fn container_bytes_are_exposed_for_compressed_formats() {
     assert!(
         q.container.is_none(),
         "an uncompressed container has no outer codec"
+    );
+}
+
+#[test]
+fn an_untouched_nested_archive_keeps_its_original_bytes() {
+    // Descending is for seeing inside. A nested archive that no pass changed must serialize back
+    // to exactly the bytes it arrived as, or every `.gz` asset a package ships gets decompressed
+    // and rewritten just because the parser could read it. One npm tarball in the M0 corpus grew a
+    // 4,887-byte member to 66,090 that way before this held.
+    let mut notes: Vec<Note> = Vec::new();
+    let fixture = gem_fixture(false);
+    let p = parse(fixture.clone(), Format::Tar, &Limits::default(), &mut notes).unwrap();
+
+    let data = p
+        .archive
+        .entries
+        .iter()
+        .find(|e| e.path.to_lossy() == "data.tar.gz")
+        .unwrap();
+    let Body::Nested { inner, original } = &data.body else {
+        panic!("data.tar.gz should have parsed as nested");
+    };
+    assert!(!inner.is_dirty(), "no pass has run");
+
+    // The original is the deflated member, not the tar inside it.
+    let bytes = original.bytes().unwrap();
+    assert_eq!(&bytes[..2], &[0x1f, 0x8b], "the original is still gzip");
+
+    // And serializing the outer archive reproduces the input, member bodies included.
+    let out = serialize(&p.archive, true).unwrap();
+    let round = parse(out, Format::Tar, &Limits::default(), &mut Vec::new()).unwrap();
+    let after = round
+        .archive
+        .entries
+        .iter()
+        .find(|e| e.path.to_lossy() == "data.tar.gz")
+        .unwrap();
+    let Body::Nested { original: after, .. } = &after.body else {
+        panic!("still nested");
+    };
+    assert_eq!(
+        after.bytes().unwrap(),
+        bytes,
+        "an untouched inner archive must round-trip byte for byte"
+    );
+}
+
+#[test]
+fn a_changed_nested_archive_is_re_serialized() {
+    // The other half: once something inside changes, the original is stale and must not be used.
+    let mut notes: Vec<Note> = Vec::new();
+    let mut p = parse(
+        gem_fixture(false),
+        Format::Tar,
+        &Limits::default(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let _ = &mut notes;
+
+    let data = p
+        .archive
+        .entries
+        .iter_mut()
+        .find(|e| e.path.to_lossy() == "data.tar.gz")
+        .unwrap();
+    let Body::Nested { inner, original } = &mut data.body else {
+        panic!("nested");
+    };
+    let before = original.bytes().unwrap().into_owned();
+    inner.entries[0].body_mut().unwrap().extend_from_slice(b"s");
+    assert!(inner.is_dirty());
+
+    let out = serialize(&p.archive, true).unwrap();
+    let round = parse(out, Format::Tar, &Limits::default(), &mut Vec::new()).unwrap();
+    let after = round
+        .archive
+        .entries
+        .iter()
+        .find(|e| e.path.to_lossy() == "data.tar.gz")
+        .unwrap();
+    let Body::Nested { inner, original } = &after.body else {
+        panic!("nested");
+    };
+    assert_ne!(
+        original.bytes().unwrap().into_owned(),
+        before,
+        "a changed inner archive must be re-serialized, not written back"
+    );
+    assert_eq!(
+        inner.entries[0].body_bytes().unwrap().as_ref(),
+        b"module Rails",
+        "and the change must survive the round trip"
     );
 }

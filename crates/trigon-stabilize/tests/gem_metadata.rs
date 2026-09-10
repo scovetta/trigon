@@ -52,7 +52,7 @@ fn stabilized_spec(bytes: Vec<u8>) -> String {
     let mut p = parse(bytes, Format::Tar, &Limits::default(), &mut notes).unwrap();
     apply(&profile("gem").unwrap(), &mut p.archive);
     let meta = p.archive.entries.iter().find(|e| e.path.to_lossy() == "metadata.gz").unwrap();
-    let Body::Nested(inner) = &meta.body else { panic!("metadata.gz should be nested") };
+    let Body::Nested { inner, .. } = &meta.body else { panic!("metadata.gz should be nested") };
     String::from_utf8_lossy(&inner.entries[0].body_bytes().unwrap()).into_owned()
 }
 

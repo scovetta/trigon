@@ -194,19 +194,28 @@ fn long_names_are_re_encoded_as_pax() {
         "writer must never emit a GNU long-name entry"
     );
 
-    // The prefix-splittable name needs no extension, so it must not be noted.
-    let noted: Vec<_> = notes
+    // Every ustar `prefix` field is NUL: a long name goes in a PAX record, never a prefix split.
+    for blk in out.chunks_exact(512) {
+        if blk[257..263] == *b"ustar\0" {
+            assert!(
+                blk[345..500].iter().all(|&b| b == 0),
+                "prefix field must never be used"
+            );
+        }
+    }
+
+    // Both long names are re-encoded: the 149-byte one arrived as a ustar prefix split and the
+    // 124-byte one as a GNU long name, and neither framing survives.
+    let mut noted: Vec<_> = notes
         .iter()
         .filter(|n| n.code == trigon_core::NoteCode::LongNameReencoded)
         .filter_map(|n| n.path.as_ref())
         .map(|p| p.to_lossy().into_owned())
         .collect();
-    assert_eq!(
-        noted.len(),
-        1,
-        "only the unsplittable name should be re-encoded: {noted:?}"
-    );
-    assert!(noted[0].starts_with("xxx"));
+    noted.sort();
+    assert_eq!(noted.len(), 2, "both long names should be noted: {noted:?}");
+    assert!(noted[0].starts_with("ddd"));
+    assert!(noted[1].starts_with("xxx"));
 }
 
 #[test]
@@ -242,4 +251,47 @@ fn non_utf8_paths_survive() {
     // And it survives a round trip.
     let (b2, _) = read(write(&a));
     assert_eq!(b2.entries[0].path, a.entries[0].path);
+}
+
+#[test]
+fn a_truncated_name_never_ends_in_a_slash() {
+    // A long directory path whose first 100 bytes end exactly on a separator. The real name rides
+    // in the PAX `path` record; the ustar field holds a truncation, and a truncation ending in '/'
+    // reads as a directory to anything that infers the kind from the name rather than the typeflag.
+    let dir = format!("{}/{}", "d".repeat(89), "e".repeat(9)); // 99 bytes, so byte 100 is the '/'
+    let path = format!("{dir}/leaf.txt");
+    assert_eq!(path.as_bytes()[99], b'/');
+
+    let mut b = ::tar::Builder::new(Vec::new());
+    let mut h = ::tar::Header::new_gnu();
+    h.set_size(2);
+    h.set_mode(0o644);
+    h.set_cksum();
+    b.append_data(&mut h, &path, &b"ok"[..]).unwrap();
+    let (a, _) = read(b.into_inner().unwrap());
+    let out = write(&a);
+
+    let block = out
+        .chunks_exact(512)
+        .find(|blk| blk[257..262] == *b"ustar" && blk[156] == b'0')
+        .expect("a regular-file header");
+    let field = &blk_name(block);
+    assert!(
+        !field.ends_with(b"/"),
+        "truncated name must not end in a slash: {:?}",
+        String::from_utf8_lossy(field)
+    );
+    assert_eq!(field.len(), 99, "the slash is dropped, not replaced");
+    assert_eq!(block[99], 0, "and the NUL terminates the field");
+
+    // The real name is unaffected: it rides in the PAX record.
+    assert!(out.windows(path.len()).any(|w| w == path.as_bytes()));
+}
+
+fn blk_name(block: &[u8]) -> Vec<u8> {
+    block[..100]
+        .iter()
+        .take_while(|&&c| c != 0)
+        .copied()
+        .collect()
 }

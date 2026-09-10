@@ -178,7 +178,7 @@ fn walk(a: &Archive, f: &mut impl FnMut(&Entry, &[u8])) {
     fn go(a: &Archive, prefix: &[u8], f: &mut impl FnMut(&Entry, &[u8])) {
         for e in &a.entries {
             match &e.body {
-                Body::Nested(inner) => {
+                Body::Nested { inner, .. } => {
                     let mut p = prefix.to_vec();
                     p.extend_from_slice(e.path.as_bytes());
                     p.push(b'!');
