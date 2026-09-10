@@ -6,6 +6,7 @@ members = [
     "crates/trigon-stabilize",
     "crates/trigon-compare",
     "crates/trigon",
+    "xtask",
 ]
 
 [workspace.package]
