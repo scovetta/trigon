@@ -9,6 +9,7 @@
 mod dockerfile;
 mod error;
 mod model;
+mod network;
 mod podman;
 mod runner;
 
@@ -18,5 +19,6 @@ pub use model::{
     BuildEvent, BuildOutcome, BuildPlan, EgressTier, IsolationClass, Limits, ObservabilityTier,
     OciPlan, Phase, RunOpts, RunnerCaps,
 };
+pub use network::Island;
 pub use podman::PodmanRunner;
 pub use runner::{BuildHandle, BuildRunner, route};

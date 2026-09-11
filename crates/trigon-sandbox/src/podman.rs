@@ -39,6 +39,8 @@ pub struct PodmanRunner {
     /// Where collected artifacts land on the host.
     workdir: PathBuf,
     max_concurrency: usize,
+    /// An image holding `trigon mirror`, which is what makes `MirrorOnly` enforceable.
+    mirror_image: Option<String>,
 }
 
 impl PodmanRunner {
@@ -47,7 +49,18 @@ impl PodmanRunner {
             binary: std::env::var("TRIGON_PODMAN").unwrap_or_else(|_| "podman".into()),
             workdir: workdir.into(),
             max_concurrency: 4,
+            mirror_image: None,
         }
+    }
+
+    /// Offer `MirrorOnly`, using this image to run the mirror inside the build's network island.
+    ///
+    /// Without it the tier is not advertised and a plan asking for it is refused. A runner that
+    /// accepted the plan and ran the build with ordinary networking would record a tier nothing
+    /// enforced, which is worse than refusing.
+    pub fn with_mirror_image(mut self, image: Option<String>) -> Self {
+        self.mirror_image = image;
+        self
     }
 
     pub fn with_binary(mut self, bin: impl Into<String>) -> Self {
@@ -69,9 +82,17 @@ impl BuildRunner for PodmanRunner {
             // No live-container entry yet. An exploration environment needs it; a verification
             // environment must not have it, and this runner is currently only the latter.
             exec: false,
-            // Only what can be enforced. MirrorOnly and GitAndMirror need the allowlisting proxy,
-            // and advertising them before it exists would let a plan record a tier nothing applied.
-            egress_modes: vec![EgressTier::DenyAll, EgressTier::Open],
+            // Only what can be enforced. MirrorOnly appears once there is an image to run the
+            // mirror from, because the enforcement is an internal network whose only route out is
+            // that container. GitAndMirror still needs the allowlisting proxy.
+            egress_modes: match &self.mirror_image {
+                Some(_) => vec![
+                    EgressTier::DenyAll,
+                    EgressTier::MirrorOnly,
+                    EgressTier::Open,
+                ],
+                None => vec![EgressTier::DenyAll, EgressTier::Open],
+            },
             observability: ObservabilityTier::None,
             max_concurrency: self.max_concurrency,
             // Local, unproxied, with no network transcript. Good enough to build and compare, not
@@ -133,6 +154,7 @@ impl BuildRunner for PodmanRunner {
             plan: p.clone(),
             opts: opts.clone(),
             workdir: self.workdir.clone(),
+            mirror_image: self.mirror_image.clone(),
             events,
         };
         Ok(Box::new(handle))
@@ -144,6 +166,7 @@ struct PodmanBuild {
     plan: OciPlan,
     opts: RunOpts,
     workdir: PathBuf,
+    mirror_image: Option<String>,
     events: Arc<Mutex<Vec<BuildEvent>>>,
 }
 
@@ -293,8 +316,34 @@ impl BuildHandle for PodmanBuild {
         let mut log = String::new();
         let mut timings: Vec<(Phase, Option<Duration>)> = Vec::new();
 
+        // The island has to exist before the image build, because the deps phase runs there and
+        // that is where a package manager talks to the mirror.
+        let island = match (self.plan.egress, &self.mirror_image) {
+            (EgressTier::MirrorOnly, Some(image)) => Some(
+                crate::network::Island::create(
+                    &self.binary,
+                    &self.opts.run_id,
+                    image,
+                    self.opts.mirror_port,
+                )
+                .await?,
+            ),
+            _ => None,
+        };
+        let network = island.as_ref().map(|i| i.network().to_string());
+        // Whatever the strategy called the mirror is mapped to where it actually is. The strategy
+        // names a stable host so the address, which is whatever this run's network handed out,
+        // stays out of the strategy digest.
+        let mirror_ip = match &island {
+            Some(i) => i.mirror_ip().await,
+            None => None,
+        };
+
         let ctx = tempdir(&self.opts.run_id)?;
-        dockerfile::render(&self.plan).write(&ctx)?;
+        // Rootless `podman build` cannot join a named network, so under mirror-only the deps phase
+        // has to run in the container instead of as an image layer.
+        let defer_deps = network.is_some();
+        dockerfile::render(&self.plan, defer_deps).write(&ctx)?;
 
         // Image build: setup, source and deps are layers here.
         push(&self.events, BuildEvent::PhaseStart(Phase::Deps));
@@ -321,9 +370,18 @@ impl BuildHandle for PodmanBuild {
             None
         };
         for (name, addr) in &self.plan.extra_hosts {
-            let addr = match (addr.as_str(), &gateway) {
-                ("host-gateway", Some(ip)) => ip.as_str(),
-                ("host-gateway", None) => {
+            let addr = match (addr.as_str(), &gateway, &mirror_ip) {
+                // The mirror lives on the island, and `podman build` does not join podman's DNS
+                // the way `podman run` does, so the name has to become an address here.
+                ("mirror", _, Some(ip)) => ip.as_str(),
+                ("mirror", _, None) => {
+                    return Err(SandboxError::Failed {
+                        phase: "setup".into(),
+                        detail: "the mirror container has no address on the build's network".into(),
+                    });
+                }
+                ("host-gateway", Some(ip), _) => ip.as_str(),
+                ("host-gateway", None, _) => {
                     return Err(SandboxError::Failed {
                         phase: "setup".into(),
                         detail: format!(
@@ -333,7 +391,7 @@ impl BuildHandle for PodmanBuild {
                         ),
                     });
                 }
-                (other, _) => other,
+                (other, _, _) => other,
             };
             build_args.push("--add-host".into());
             build_args.push(format!("{name}:{addr}"));
@@ -348,6 +406,9 @@ impl BuildHandle for PodmanBuild {
             },
         );
         if code != 0 {
+            if let Some(i) = island {
+                i.destroy().await;
+            }
             push(&self.events, BuildEvent::Exit(code));
             tracing::error!(
                 run_id = %self.opts.run_id,
@@ -371,7 +432,7 @@ impl BuildHandle for PodmanBuild {
         tracing::info!(run_id = %self.opts.run_id, "running the build");
         let started = Instant::now();
         let mut run_args = vec!["run".to_string(), "--rm".to_string()];
-        run_args.extend(self.isolation_args());
+        run_args.extend(self.isolation_args(network.as_deref(), mirror_ip.as_deref()));
         run_args.push("--volume".into());
         // `:Z` relabels for SELinux. Without it, a build on a Fedora-family host cannot write here
         // and the failure looks like the build's fault.
@@ -392,7 +453,13 @@ impl BuildHandle for PodmanBuild {
         // A failed build can still have produced an artifact, and its logs are worth keeping either
         // way. Collect before deciding anything.
         let artifact = collect(&out_dir);
-        let failed_in = (code != 0).then_some(Phase::Build);
+        // With deps deferred, a failure in the run could be either phase. The log says which, and
+        // guessing "build" would attribute a dependency-resolution failure to the package.
+        let failed_in = (code != 0).then_some(if defer_deps && log.contains("/trigon/deps.sh") {
+            Phase::Deps
+        } else {
+            Phase::Build
+        });
         match (&artifact, code) {
             (Some(p), 0) => tracing::info!(
                 run_id = %self.opts.run_id,
@@ -419,6 +486,9 @@ impl BuildHandle for PodmanBuild {
                 .output()
                 .await;
         }
+        if let Some(i) = island {
+            i.destroy().await;
+        }
         let _ = std::fs::remove_dir_all(&ctx);
 
         Ok(self.outcome(code, artifact, timings, failed_in, log))
@@ -427,21 +497,29 @@ impl BuildHandle for PodmanBuild {
 
 impl PodmanBuild {
     /// Isolation flags, in the order they matter.
-    fn isolation_args(&self) -> Vec<String> {
+    fn isolation_args(&self, network: Option<&str>, mirror_ip: Option<&str>) -> Vec<String> {
         let mut a: Vec<String> = Vec::new();
         for (name, addr) in &self.plan.extra_hosts {
+            let addr = match (addr.as_str(), mirror_ip) {
+                ("mirror", Some(ip)) => ip.to_string(),
+                other => other.0.to_string(),
+            };
             a.extend(["--add-host".into(), format!("{name}:{addr}")]);
         }
 
         // Egress. `none` is a real boundary: no interfaces at all, so nothing to reach.
         match self.plan.egress {
             EgressTier::DenyAll => a.extend(["--network".into(), "none".into()]),
+            // The island, and only the island. The build has no other interface, so the mirror is
+            // the only thing it can reach and there is nothing to opt out of.
+            EgressTier::MirrorOnly => match network {
+                Some(n) => a.extend(["--network".into(), n.to_string()]),
+                None => unreachable!("an island is created before the build under MirrorOnly"),
+            },
             EgressTier::Open => {}
-            // `start` rejects these before we get here; this arm exists so that adding a tier
-            // without teaching the runner to enforce it fails to compile rather than at runtime.
-            EgressTier::MirrorOnly | EgressTier::GitAndMirror => {
-                unreachable!("rejected in start()")
-            }
+            // `start` rejects this before we get here; the arm exists so that adding a tier without
+            // teaching the runner to enforce it fails to compile rather than at run time.
+            EgressTier::GitAndMirror => unreachable!("rejected in start()"),
         }
 
         a.extend([
@@ -481,6 +559,8 @@ impl PodmanBuild {
             failed_in,
             egress: self.plan.egress,
             isolation: IsolationClass::UserNs,
+            // Still not full trust even under MirrorOnly: the egress boundary holds, but there is
+            // no network transcript, so we cannot say what the build fetched from the mirror.
             attestable: false,
             log_tail,
         }

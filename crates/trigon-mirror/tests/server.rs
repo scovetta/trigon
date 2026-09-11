@@ -196,3 +196,97 @@ fn base64(s: &str) -> String {
     }
     out
 }
+
+#[tokio::test]
+async fn artifact_urls_point_back_at_the_mirror() {
+    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRIGON_LIVE=1");
+        return;
+    }
+    // Without this a build behind an enforced egress boundary resolves a version and then cannot
+    // fetch it: the packument's dist.tarball is an absolute upstream URL, and upstream is exactly
+    // what the boundary forbids. Found by running a build under mirror-only, where npm resolved
+    // left-pad 1.2.0 through the mirror and then failed with ENETUNREACH on registry.npmjs.org.
+    let m = Mirror::new().unwrap().serve(0).await.unwrap();
+    let doc: serde_json::Value = reqwest::get(format!(
+        "http://npm:2018-04-09T01:10:46@{}/left-pad",
+        m.host()
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    let tarball = doc["versions"]["1.3.0"]["dist"]["tarball"]
+        .as_str()
+        .unwrap();
+    // Addressed at the mirror, with the filter in the path rather than in credentials. npm
+    // forwards the registry's credentials to the packument request and not to the tarball request,
+    // so a URL relying on them comes back unfiltered and is refused.
+    assert!(
+        tarball.starts_with(&format!(
+            "http://{}/-artifact/npm/2018-04-09T01:10:46/",
+            m.host()
+        )),
+        "the tarball must be fetchable from the mirror: {tarball}"
+    );
+    assert!(tarball.ends_with("left-pad-1.3.0.tgz"), "{tarball}");
+
+    // And it serves the bytes rather than redirecting somewhere the build cannot reach.
+    let bytes = reqwest::get(tarball).await.unwrap().bytes().await.unwrap();
+    assert_eq!(&bytes[..2], &[0x1f, 0x8b], "a gzip member");
+    assert_eq!(bytes.len(), 3619);
+    m.shutdown().await;
+}
+
+#[tokio::test]
+async fn pypi_file_urls_point_back_at_the_mirror() {
+    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRIGON_LIVE=1");
+        return;
+    }
+    // PyPI serves files from a separate CDN host, so the upstream host rides in the rewritten path:
+    // dropping it would leave nothing to proxy to.
+    let m = Mirror::new().unwrap().serve(0).await.unwrap();
+    let doc: serde_json::Value = reqwest::Client::new()
+        .get(format!(
+            "http://pypi:2024-02-26T00:00:00@{}/simple/sniffio/",
+            m.host()
+        ))
+        .header("Accept", "application/vnd.pypi.simple.v1+json")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let url = doc["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            f["filename"]
+                .as_str()
+                .unwrap()
+                .ends_with("1.3.1-py3-none-any.whl")
+        })
+        .map(|f| f["url"].as_str().unwrap().to_string())
+        .unwrap();
+    assert!(
+        url.starts_with(&format!(
+            "http://{}/-artifact/pypi/2024-02-26T00:00:00/",
+            m.host()
+        )),
+        "{url}"
+    );
+    assert!(
+        url.contains("files.pythonhosted.org"),
+        "the real host must survive: {url}"
+    );
+
+    let bytes = reqwest::get(&url).await.unwrap().bytes().await.unwrap();
+    assert_eq!(&bytes[..2], b"PK");
+    m.shutdown().await;
+}

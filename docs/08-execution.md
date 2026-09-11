@@ -173,6 +173,29 @@ months.
 Enforcement runs as a network namespace with a veth pair whose default route points at an
 allowlisting proxy. Every request logs host, path, method, response digest, and byte count.
 
+**Rootless podman gets there by a different route,** because creating a veth into the host namespace
+needs privileges a rootless user does not have. What it does have is an **internal network**, which
+netavark firewalls off from the internet *and* from the host. The build joins one and nothing else,
+and the mirror runs as a container on both that network and an ordinary one, so it is the island's
+only route out. Measured rather than assumed:
+
+| Container is on | Reaches internet | Reaches host |
+|---|---|---|
+| default network | yes | yes, via `host-gateway` |
+| internal only | no | no |
+| internal **and** default | yes | **no** |
+
+The last row is why the mirror is a container rather than a host process: once a container touches
+an internal network, host access is blocked on all of its interfaces, so a relay forwarding to a
+mirror on the host cannot work.
+
+Two consequences worth stating plainly. Rootless `podman build` **cannot join a named network** at
+all, refusing with "cannot use networks as rootless", so at this tier the deps phase moves out of
+the image and into the container run: deps stops being a cached layer, which is the trade for an
+enforceable boundary on a laptop and goes away wherever the builder can join a network. And the
+mirror must **proxy artifact bytes rather than redirect to them**, because the build has no route to
+where a redirect points.
+
 ## 6. Do we need MITM?
 
 Mostly no, and recognizing that cuts a lot of scope.

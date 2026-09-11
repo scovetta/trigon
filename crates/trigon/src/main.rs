@@ -151,6 +151,9 @@ enum Cmd {
         /// A checked-in definitions directory, consulted before any heuristic.
         #[arg(long)]
         definitions: Option<PathBuf>,
+        /// Image holding `trigon mirror`, which is what makes `--egress mirror-only` enforceable.
+        #[arg(long, default_value = "localhost/trigon-mirror:latest")]
+        mirror_image: String,
         /// Resolve dependencies against the index as it stood when the package was published.
         ///
         /// `auto` starts a mirror for the run. Without one the rebuild resolves against today's
@@ -158,6 +161,16 @@ enum Cmd {
         /// and that is reported as an assumption rather than pinned to a mirror that is not there.
         #[arg(long)]
         timewarp: Option<String>,
+    },
+    /// Build the container image that runs the mirror inside a build's network island.
+    ///
+    /// Compiled inside a container, so nothing is needed on this machine beyond podman. The image
+    /// is what makes `--egress mirror-only` enforceable: the build's network has no route out
+    /// except this container.
+    #[cfg(feature = "build")]
+    MirrorImage {
+        #[arg(long, default_value = "localhost/trigon-mirror:latest")]
+        tag: String,
     },
     /// Serve a registry index as it stood at a named instant.
     ///
@@ -211,6 +224,12 @@ enum Cmd {
         /// Keep the image afterwards, to exec into or pull.
         #[arg(long)]
         retain: bool,
+        /// Image holding `trigon mirror`, which is what makes `--egress mirror-only` enforceable.
+        #[arg(long, default_value = "localhost/trigon-mirror:latest")]
+        mirror_image: String,
+        /// Host the strategy calls the mirror, mapped by the runner to wherever it is.
+        #[arg(long, default_value = "timewarp:8129")]
+        timewarp: String,
     },
 }
 
@@ -393,6 +412,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             egress,
             timeout,
             definitions,
+            mirror_image,
             timewarp,
         } => rebuild::run(rebuild::Args {
             purl,
@@ -402,8 +422,11 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             egress,
             timeout,
             definitions,
+            mirror_image,
             timewarp,
         }),
+        #[cfg(feature = "build")]
+        Cmd::MirrorImage { tag } => mirror::build_image(&tag),
         #[cfg(feature = "build")]
         Cmd::Mirror { port } => mirror::serve(port),
         #[cfg(feature = "build")]
@@ -423,7 +446,20 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             egress,
             timeout,
             retain,
-        } => build::run(&file, import, &image, &out, &egress, timeout, retain),
+            mirror_image,
+            timewarp,
+        } => build::run_with(
+            &file,
+            import,
+            &image,
+            &out,
+            &egress,
+            timeout,
+            retain,
+            &timewarp,
+            None,
+            Some(&mirror_image),
+        ),
     }
 }
 
@@ -540,22 +576,7 @@ mod build {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn run(
-        file: &Path,
-        import: bool,
-        image: &str,
-        out: &Path,
-        egress: &str,
-        timeout: u64,
-        retain: bool,
-    ) -> Result<()> {
-        run_with(
-            file, import, image, out, egress, timeout, retain, "timewarp", None,
-        )
-    }
-
-    /// As `run`, plus where the mirror is and what the strategy should call it.
+    /// Render a strategy and run it, saying where the mirror is and what the strategy calls it.
     #[allow(clippy::too_many_arguments)]
     pub fn run_with(
         file: &Path,
@@ -567,6 +588,7 @@ mod build {
         retain: bool,
         timewarp_host: &str,
         mirror_addr: Option<&str>,
+        mirror_image: Option<&str>,
     ) -> Result<()> {
         let (instructions, digest, _custom) =
             crate::render_strategy(file, import, timewarp_host, false)?;
@@ -575,14 +597,24 @@ mod build {
         // `host-gateway` is podman's name for the host as seen from the container. The strategy
         // names a stable host so that the port, which is whatever was free on this machine, stays
         // out of the strategy digest.
+        // Where the mirror is depends on the tier. Under `mirror-only` it runs inside the build's
+        // network island, because a container on an internal network cannot reach the host at all;
+        // otherwise it runs on the host and the container reaches it through the gateway. Either
+        // way the strategy names a stable host and the runner maps it.
         let mut extra_hosts = std::collections::BTreeMap::new();
-        if mirror_addr.is_some() {
-            let name = timewarp_host
-                .split(':')
-                .next()
-                .unwrap_or(timewarp_host)
-                .to_string();
-            extra_hosts.insert(name, "host-gateway".to_string());
+        let name = timewarp_host
+            .split(':')
+            .next()
+            .unwrap_or(timewarp_host)
+            .to_string();
+        match egress {
+            trigon_sandbox::EgressTier::MirrorOnly => {
+                extra_hosts.insert(name, "mirror".to_string());
+            }
+            _ if mirror_addr.is_some() => {
+                extra_hosts.insert(name, "host-gateway".to_string());
+            }
+            _ => {}
         }
 
         let plan = BuildPlan::Oci(OciPlan {
@@ -598,7 +630,7 @@ mod build {
         });
 
         let run_id = format!("{}-{}", &digest[..12], std::process::id());
-        let runner = PodmanRunner::new(out);
+        let runner = PodmanRunner::new(out).with_mirror_image(mirror_image.map(str::to_string));
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -613,6 +645,7 @@ mod build {
                     ..Default::default()
                 },
                 retain,
+                mirror_port: 8129,
             };
             let handle = runner.start(&plan, &opts).await?;
             let outcome = handle.wait().await?;
@@ -1108,6 +1141,7 @@ mod rebuild {
         pub egress: String,
         pub timeout: u64,
         pub definitions: Option<PathBuf>,
+        pub mirror_image: String,
         pub timewarp: Option<String>,
     }
 
@@ -1158,8 +1192,17 @@ mod rebuild {
         println!("  artifact   {}", meta.id);
 
         // 2. A strategy, from the first rung that has one.
-        // `auto` means run one here. An ephemeral port, so concurrent rebuilds do not collide.
+        // Under `mirror-only` the mirror runs inside the build's network island rather than here:
+        // a container on an internal network cannot reach the host, which is the whole point of
+        // the tier. The port is fixed because it is inside that island and collides with nothing.
+        let enforced = args.egress == "mirror-only";
         let mirror = match args.timewarp.as_deref() {
+            Some("auto") if enforced => {
+                println!(
+                    "  mirror     inside the build's network island, which is its only route out"
+                );
+                None
+            }
             Some("auto") => {
                 let handle = rt.block_on(async { trigon_mirror::Mirror::new()?.serve(0).await })?;
                 println!("  mirror     serving the index as of the publish date");
@@ -1169,10 +1212,14 @@ mod rebuild {
         };
         // The name the strategy uses, and the port the container has to reach. The name is stable
         // so the port stays out of the strategy digest.
-        let timewarp_host = mirror
-            .as_ref()
-            .map(|m| format!("timewarp:{}", m.addr.port()))
-            .or_else(|| args.timewarp.clone().filter(|t| t != "auto"));
+        let timewarp_host = if enforced && args.timewarp.is_some() {
+            Some("timewarp:8129".to_string())
+        } else {
+            mirror
+                .as_ref()
+                .map(|m| format!("timewarp:{}", m.addr.port()))
+                .or_else(|| args.timewarp.clone().filter(|t| t != "auto"))
+        };
 
         let rungs = ladder(
             &target.ecosystem,
@@ -1226,6 +1273,7 @@ mod rebuild {
             false,
             timewarp_host.as_deref().unwrap_or("timewarp"),
             mirror_addr.as_deref(),
+            Some(args.mirror_image.as_str()),
         )?;
 
         if let Some(m) = mirror {
@@ -1277,6 +1325,65 @@ mod rebuild {
 #[cfg(feature = "build")]
 mod mirror {
     use super::*;
+
+    /// Build the mirror image from this workspace.
+    ///
+    /// A multi-stage podman build: the first stage compiles against musl inside an image that has
+    /// the toolchain, the second is a scratch-thin runtime. Compiling in a container rather than on
+    /// the host is what makes this work anywhere: a host binary is linked against the host's glibc
+    /// and will not run in a base image with an older one, which is not a hypothetical.
+    pub fn build_image(tag: &str) -> Result<()> {
+        let root = workspace_root()?;
+        let dockerfile = root.join("target").join("mirror.Dockerfile");
+        std::fs::write(
+            &dockerfile,
+            "FROM docker.io/library/rust:1-alpine AS build\n\
+             RUN apk add --no-cache musl-dev\n\
+             WORKDIR /src\n\
+             COPY . .\n\
+             RUN cargo build --release -p trigon --bin trigon\n\
+             \n\
+             FROM docker.io/library/alpine:3.20\n\
+             COPY --from=build /src/target/release/trigon /usr/local/bin/trigon\n\
+             ENTRYPOINT [\"/usr/local/bin/trigon\"]\n",
+        )?;
+
+        // Without this the build context is the whole workspace including `target`, which is
+        // gigabytes and is being written to by any concurrent cargo run: the copy then fails on a
+        // file that vanished underneath it.
+        let ignore = root.join("target").join("mirror.containerignore");
+        std::fs::write(&ignore, "target/\n.git/\nfuzz/target/\ncorpora/cache/\n")?;
+
+        println!("building {tag} (this compiles trigon in a container; it takes a few minutes)");
+        let status = std::process::Command::new("podman")
+            .arg("build")
+            .args(["--tag", tag, "--file"])
+            .arg(&dockerfile)
+            .arg("--ignorefile")
+            .arg(&ignore)
+            .arg(&root)
+            .status()
+            .context("running podman build")?;
+        if !status.success() {
+            bail!("podman build failed");
+        }
+        println!("\n{tag} is ready. `--egress mirror-only` can now be enforced.");
+        Ok(())
+    }
+
+    fn workspace_root() -> Result<PathBuf> {
+        let mut d = std::env::current_dir()?;
+        loop {
+            if d.join("Cargo.toml").is_file() && d.join("crates").is_dir() {
+                return Ok(d);
+            }
+            if !d.pop() {
+                bail!(
+                    "run this from inside the trigon workspace: the image is built from its source"
+                );
+            }
+        }
+    }
 
     pub fn serve(port: u16) -> Result<()> {
         let rt = tokio::runtime::Builder::new_multi_thread()

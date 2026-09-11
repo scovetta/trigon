@@ -37,6 +37,7 @@ fn opts(run_id: &str) -> RunOpts {
             ..Default::default()
         },
         retain: false,
+        mirror_port: 8129,
     }
 }
 
@@ -180,6 +181,102 @@ async fn a_failure_in_the_deps_phase_is_attributed_to_deps() {
     assert!(
         outcome.log_tail.contains("deps blew up"),
         "{}",
+        outcome.log_tail
+    );
+}
+
+const MIRROR_IMAGE: &str = "localhost/trigon-mirror:latest";
+
+fn mirror_image_available() -> bool {
+    let ok = std::process::Command::new("podman")
+        .args(["image", "exists", MIRROR_IMAGE])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipped: build {MIRROR_IMAGE} with `trigon mirror-image`");
+    }
+    ok
+}
+
+#[tokio::test]
+async fn mirror_only_egress_blocks_everything_but_the_mirror() {
+    let r = PodmanRunner::new(workdir()).with_mirror_image(Some(MIRROR_IMAGE.into()));
+    if !usable(&r).await || !mirror_image_available() {
+        return;
+    }
+
+    // The control the whole design rests on. A build that can reach the network can fetch the
+    // artifact it is supposed to be reproducing, and will then reproduce it perfectly, past every
+    // clean re-run. Enforcement has to be a kernel boundary rather than a configured one: setting
+    // HTTP_PROXY and hoping is not a control, because the build runs the package's own scripts and
+    // those scripts are free to ignore it.
+    //
+    // Under mirror-only the build's only interface is an internal network whose sole route out is
+    // the mirror container, so there is nothing to opt out of.
+    let plan = BuildPlan::Oci(OciPlan {
+        base_image: ALPINE.into(),
+        system_deps: BTreeSet::new(),
+        source: "true".into(),
+        deps: "true".into(),
+        // Two addresses that are reachable from any ordinary network, by IP so that a blocked
+        // resolver is not mistaken for a blocked route.
+        build: "nc -w 3 -z 1.1.1.1 443 && echo REACHED-CLOUDFLARE\n\
+                nc -w 3 -z 151.101.0.223 443 && echo REACHED-NPM\n\
+                echo probes-finished"
+            .into(),
+        output_path: ".".into(),
+        egress: EgressTier::MirrorOnly,
+        privileged: false,
+        extra_hosts: Default::default(),
+    });
+
+    let h = r
+        .start(&plan, &opts("egress-enforced"))
+        .await
+        .expect("starts");
+    let outcome = h.wait().await.expect("completes");
+
+    assert!(
+        !outcome.log_tail.contains("REACHED-"),
+        "the build reached the internet under mirror-only egress:\n{}",
+        outcome.log_tail
+    );
+    assert!(
+        outcome.log_tail.contains("probes-finished") || !outcome.succeeded(),
+        "the probes should have run and failed, not been skipped:\n{}",
+        outcome.log_tail
+    );
+    assert_eq!(outcome.egress, EgressTier::MirrorOnly);
+    // The boundary holds, and it is still not enough to sign: with no network transcript we cannot
+    // say what the build fetched from the mirror itself.
+    assert!(!outcome.attestable);
+}
+
+#[tokio::test]
+async fn the_same_probes_succeed_under_open_egress() {
+    // Without this the test above proves nothing: a build that cannot reach anything because the
+    // probe is broken looks exactly like one held back by the boundary.
+    let r = PodmanRunner::new(workdir());
+    if !usable(&r).await {
+        return;
+    }
+    let plan = BuildPlan::Oci(OciPlan {
+        base_image: ALPINE.into(),
+        system_deps: BTreeSet::new(),
+        source: "true".into(),
+        deps: "true".into(),
+        build: "nc -w 5 -z 1.1.1.1 443 && echo REACHED-CLOUDFLARE".into(),
+        output_path: ".".into(),
+        egress: EgressTier::Open,
+        privileged: false,
+        extra_hosts: Default::default(),
+    });
+    let h = r.start(&plan, &opts("egress-open")).await.unwrap();
+    let outcome = h.wait().await.unwrap();
+    assert!(
+        outcome.log_tail.contains("REACHED-CLOUDFLARE"),
+        "the probe itself must work, or the enforcement test is vacuous:\n{}",
         outcome.log_tail
     );
 }

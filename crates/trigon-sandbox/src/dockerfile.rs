@@ -66,7 +66,17 @@ fn install_command(base_image: &str, deps: &[String]) -> String {
 }
 
 /// Render the build context for a plan.
-pub fn render(plan: &OciPlan) -> BuildContext {
+///
+/// `defer_deps` moves the deps phase out of the image and into the container run. It exists for one
+/// reason: rootless `podman build` cannot attach to a named network, refusing with "cannot use
+/// networks as rootless", while `podman run` can. Under `mirror-only` egress the build's only route
+/// out is a container on a named network, so the deps phase, which is exactly where a package
+/// manager talks to the mirror, has to happen at run time.
+///
+/// The cost is real and worth stating: deps stops being a cached layer, so sibling versions of a
+/// package no longer share one. That is the trade for an enforceable egress boundary on a laptop,
+/// and it goes away wherever the builder can join a network, which is every fleet runner.
+pub fn render(plan: &OciPlan, defer_deps: bool) -> BuildContext {
     let mut files = BTreeMap::new();
     let mut f = String::new();
     f.push_str(&format!("FROM {}\n\n", plan.base_image));
@@ -97,11 +107,20 @@ pub fn render(plan: &OciPlan) -> BuildContext {
     f.push_str("RUN mkdir -p /src /out\nWORKDIR /src\n\n");
 
     phase(&mut f, &mut files, "source", &plan.source);
-    phase(&mut f, &mut files, "deps", &plan.deps);
+    if !defer_deps {
+        phase(&mut f, &mut files, "deps", &plan.deps);
+    } else if !plan.deps.trim().is_empty() {
+        // Carried into the image but not run there.
+        files.insert("deps.sh".into(), format!("set -eu\n{}\n", plan.deps.trim()));
+        f.push_str("# deps: copied, run at container start (see `defer_deps`)\nCOPY deps.sh /trigon/deps.sh\n\n");
+    }
 
     // The build is written, not run. This is the whole point of the pattern: everything above is a
     // cacheable layer, and only this happens fresh under the runtime's isolation.
     let mut build = String::from("set -eux\n");
+    if defer_deps && !plan.deps.trim().is_empty() {
+        build.push_str("/bin/sh /trigon/deps.sh\n");
+    }
     build.push_str(plan.build.trim());
     build.push('\n');
     build.push_str("mkdir -p /out\n");

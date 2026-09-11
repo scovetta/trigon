@@ -64,10 +64,9 @@ impl Mirror {
         Ok(Mirror {
             client: reqwest::Client::builder()
                 .user_agent(concat!("trigon-mirror/", env!("CARGO_PKG_VERSION")))
-                // No automatic redirect following. PyPI redirects file URLs to a CDN, and a mirror
-                // that followed them would proxy the bytes through itself for no reason; the
-                // client can follow its own.
-                .redirect(reqwest::redirect::Policy::none())
+                // Redirects are followed here. A client behind an enforced egress boundary cannot
+                // follow one itself: the destination is exactly what the boundary forbids.
+                .redirect(reqwest::redirect::Policy::limited(5))
                 .build()?,
             stats: Arc::new(Stats::default()),
         })
@@ -127,6 +126,21 @@ async fn handle(State(mirror): State<Arc<Mirror>>, req: Request) -> Response {
 }
 
 async fn serve_one(mirror: &Mirror, req: Request) -> Result<Response, MirrorError> {
+    let path_now = req.uri().path().to_string();
+    let query_now = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+
+    // Artifact URLs carry the filter in the path rather than in credentials, and are handled before
+    // the auth check. npm forwards the registry's credentials to the packument request and not to
+    // the tarball request, so a rewritten URL relying on them comes back here unfiltered and is
+    // refused: the symptom is `400 Bad Request` on a tarball after the index resolved fine.
+    if let Some(rest) = path_now.strip_prefix("/-artifact/") {
+        return artifact(mirror, rest, &query_now).await;
+    }
+
     let auth = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -145,10 +159,19 @@ async fn serve_one(mirror: &Mirror, req: Request) -> Result<Response, MirrorErro
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    // How the client addressed us, which is what artifact URLs get rewritten to. Taken from the
+    // request rather than configured, because the mirror does not otherwise know its own name and
+    // guessing wrong produces a packument full of URLs that resolve to nothing.
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
     match filter.platform {
-        Platform::Npm => npm_request(mirror, &filter, &path, &query).await,
-        Platform::PyPI => pypi_request(mirror, &filter, &path, &query, &accept).await,
+        Platform::Npm => npm_request(mirror, &filter, &path, &query, &host).await,
+        Platform::PyPI => pypi_request(mirror, &filter, &path, &query, &accept, &host).await,
     }
 }
 
@@ -158,22 +181,25 @@ async fn npm_request(
     filter: &Filter,
     path: &str,
     query: &str,
+    host: &str,
 ) -> Result<Response, MirrorError> {
     let url = format!("{}{path}{query}", filter.platform.upstream());
 
-    // Tarballs are immutable, so there is nothing to filter and no reason to buffer them. A
-    // redirect keeps the bytes off this process entirely.
+    // Tarballs are immutable, so there is nothing to filter. They are still proxied rather than
+    // redirected: under an enforced egress tier the mirror is the build's only route out, and a
+    // redirect to a host the build cannot reach is the same as no answer at all.
     if path.contains("/-/") {
         mirror
             .stats
             .passthrough_requests
             .fetch_add(1, Ordering::Relaxed);
-        return Ok(redirect(&url));
+        return proxy(mirror, &url, filter).await;
     }
 
     let resp = fetch(mirror, &url, filter, &[]).await?;
     let mut doc: serde_json::Value = resp.json().await?;
     let removed = crate::npm::filter_packument(&mut doc, &filter.moment);
+    rewrite_npm_tarballs(&mut doc, &authority(filter, host));
 
     mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
     mirror
@@ -197,6 +223,7 @@ async fn pypi_request(
     path: &str,
     query: &str,
     accept: &str,
+    host: &str,
 ) -> Result<Response, MirrorError> {
     let url = format!("{}{path}{query}", filter.platform.upstream());
     let is_simple =
@@ -206,7 +233,7 @@ async fn pypi_request(
             .stats
             .passthrough_requests
             .fetch_add(1, Ordering::Relaxed);
-        return Ok(redirect(&url));
+        return proxy(mirror, &url, filter).await;
     }
 
     // Always ask upstream for JSON, whatever the client wanted. The HTML simple API carries no
@@ -220,6 +247,7 @@ async fn pypi_request(
     .await?;
     let mut doc: serde_json::Value = resp.json().await?;
     let removed = crate::pypi::filter_simple(&mut doc, &filter.moment);
+    rewrite_pypi_files(&mut doc, &authority(filter, host));
 
     mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
     mirror
@@ -266,13 +294,140 @@ async fn fetch(
     Ok(resp)
 }
 
+/// Serve an artifact addressed as `/-artifact/{platform}/{moment}/{host}/{path}`.
+///
+/// The platform and moment are carried for the log and the refusal, not to filter: an artifact's
+/// bytes are immutable, so there is nothing to filter. What matters is that the build can fetch it
+/// at all, which under an enforced egress tier means through here.
+async fn artifact(mirror: &Mirror, rest: &str, query: &str) -> Result<Response, MirrorError> {
+    let mut parts = rest.splitn(3, '/');
+    let (Some(platform), Some(moment), Some(target)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(MirrorError::NoFilter);
+    };
+    let platform = Platform::parse(platform).ok_or_else(|| MirrorError::UnknownPlatform {
+        found: platform.to_string(),
+    })?;
+    let filter = Filter {
+        platform,
+        moment: moment.to_string(),
+    };
+    mirror
+        .stats
+        .passthrough_requests
+        .fetch_add(1, Ordering::Relaxed);
+    proxy(mirror, &format!("https://{target}{query}"), &filter).await
+}
+
+/// The prefix a rewritten artifact URL is built from.
+///
+/// The credentials are carried into every rewritten URL rather than left for the client to supply.
+/// A package manager sends its index credentials to the index host and not always beyond it, and a
+/// URL that arrives here without the filter cannot be served: this mirror refuses an unfiltered
+/// request rather than answering with the index as it is today.
+fn authority(filter: &Filter, host: &str) -> String {
+    format!(
+        "{host}/-artifact/{}/{}",
+        filter.platform.as_str(),
+        filter.moment
+    )
+}
+
+/// Point every artifact URL at this mirror.
+///
+/// Without this a build behind an enforced egress boundary resolves a version successfully and then
+/// cannot fetch it: the packument's `dist.tarball` is an absolute upstream URL, and upstream is
+/// exactly what the boundary forbids. The path is preserved so the rewritten URL comes back here
+/// and is proxied to the same place.
+fn rewrite_npm_tarballs(doc: &mut serde_json::Value, host: &str) {
+    if host.is_empty() {
+        return;
+    }
+    let Some(versions) = doc.get_mut("versions").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    for version in versions.values_mut() {
+        let Some(tarball) = version
+            .get_mut("dist")
+            .and_then(|d| d.get_mut("tarball"))
+            .and_then(|t| t.as_str().map(str::to_owned))
+        else {
+            continue;
+        };
+        // The upstream host rides in the path, so the mirror knows where to fetch from without
+        // assuming an artifact lives on the index's own domain.
+        if let Some((_, rest)) = tarball.split_once("://") {
+            version["dist"]["tarball"] = serde_json::Value::String(format!("http://{host}/{rest}"));
+        }
+    }
+}
+
+/// The same for PyPI, where files live on a separate CDN host.
+///
+/// The upstream host is carried in the path, because unlike npm the files are not served from the
+/// index's own domain and dropping it would leave nothing to proxy to.
+fn rewrite_pypi_files(doc: &mut serde_json::Value, host: &str) {
+    if host.is_empty() {
+        return;
+    }
+    let Some(files) = doc.get_mut("files").and_then(|f| f.as_array_mut()) else {
+        return;
+    };
+    for file in files {
+        let Some(url) = file.get("url").and_then(|u| u.as_str().map(str::to_owned)) else {
+            continue;
+        };
+        if let Some((_, rest)) = url.split_once("://") {
+            file["url"] = serde_json::Value::String(format!("http://{host}/{rest}"));
+        }
+    }
+}
+
+/// Stream an upstream response through, headers and all.
+async fn proxy(mirror: &Mirror, url: &str, filter: &Filter) -> Result<Response, MirrorError> {
+    let resp = mirror.client.get(url).send().await?;
+    // Redirects are followed here rather than handed back: the client may have no route to where
+    // they point, which is the whole reason this proxies instead of redirecting.
+    let resp = if resp.status().is_redirection() {
+        match resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+        {
+            Some(next) => {
+                let next = next.to_string();
+                mirror.client.get(&next).send().await?
+            }
+            None => resp,
+        }
+    } else {
+        resp
+    };
+    if !resp.status().is_success() {
+        return Err(MirrorError::Upstream {
+            platform: filter.platform.as_str().into(),
+            status: resp.status().as_u16(),
+        });
+    }
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    // Streamed, not buffered: an artifact can be gigabytes and the mirror serves a whole fleet.
+    let stream = resp.bytes_stream();
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type)],
+        Body::from_stream(stream),
+    )
+        .into_response())
+}
+
 fn json_response(doc: &serde_json::Value, content_type: &'static str) -> Response {
     let body = serde_json::to_vec(doc).unwrap_or_default();
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     (StatusCode::OK, headers, Body::from(body)).into_response()
-}
-
-fn redirect(url: &str) -> Response {
-    (StatusCode::FOUND, [(header::LOCATION, url)], Body::empty()).into_response()
 }

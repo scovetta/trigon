@@ -27,7 +27,7 @@ fn plan(egress: EgressTier) -> BuildPlan {
 #[test]
 fn the_context_runs_deps_at_image_build_time_and_writes_the_build() {
     let BuildPlan::Oci(p) = plan(EgressTier::DenyAll);
-    let c = render_context(&p);
+    let c = render_context(&p, false);
     println!(
         "{}\n---\n{:#?}",
         c.dockerfile,
@@ -79,7 +79,7 @@ fn a_script_is_a_file_rather_than_a_heredoc() {
     // there is no shell quoting to get wrong, which this checks.
     let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
     p.build = "echo $HOME > marker".into();
-    let c = render_context(&p);
+    let c = render_context(&p, false);
     assert!(
         !c.dockerfile.contains("<<"),
         "no heredocs: {}",
@@ -96,7 +96,7 @@ fn every_phase_script_stops_at_the_first_error() {
     // Without -e a failing command mid-phase leaves the build running against a half-prepared tree
     // and the failure surfaces somewhere else entirely.
     let BuildPlan::Oci(p) = plan(EgressTier::DenyAll);
-    let c = render_context(&p);
+    let c = render_context(&p, false);
     for (name, body) in &c.files {
         assert!(body.starts_with("set -e"), "{name} must set -e: {body}");
     }
@@ -107,7 +107,7 @@ fn an_empty_phase_emits_no_layer() {
     let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
     p.deps = "  \n ".into();
     p.system_deps = BTreeSet::new();
-    let c = render_context(&p);
+    let c = render_context(&p, false);
     assert!(
         !c.dockerfile.contains("# deps"),
         "an empty phase is not an empty layer"
@@ -121,15 +121,15 @@ fn an_empty_phase_emits_no_layer() {
 fn the_package_manager_follows_the_base_image() {
     let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
     p.base_image = "docker.io/library/alpine@sha256:abc".into();
-    assert!(render_context(&p).files["setup.sh"].contains("apk add --no-cache"));
+    assert!(render_context(&p, false).files["setup.sh"].contains("apk add --no-cache"));
     p.base_image = "docker.io/library/fedora@sha256:abc".into();
-    assert!(render_context(&p).files["setup.sh"].contains("dnf install -y"));
+    assert!(render_context(&p, false).files["setup.sh"].contains("dnf install -y"));
 }
 
 #[test]
 fn rendering_is_deterministic() {
     let BuildPlan::Oci(p) = plan(EgressTier::DenyAll);
-    assert_eq!(render_context(&p), render_context(&p));
+    assert_eq!(render_context(&p, false), render_context(&p, false));
 }
 
 #[tokio::test]
@@ -190,4 +190,48 @@ fn a_local_podman_run_is_not_attestable_at_full_trust() {
     // sign a claim that nothing was fetched.
     assert!(!PodmanRunner::new(std::env::temp_dir()).caps().attestable);
     assert!(!PodmanRunner::new(std::env::temp_dir()).caps().exec);
+}
+
+#[tokio::test]
+async fn mirror_only_is_offered_only_when_a_mirror_image_exists() {
+    // The enforcement is an internal network whose only route out is the mirror container. Without
+    // an image to run that container from there is no route and no enforcement, so the tier is not
+    // advertised and a plan asking for it is refused rather than run with ordinary networking and
+    // labelled as though something had been enforced.
+    let bare = PodmanRunner::new(std::env::temp_dir());
+    assert!(!bare.accepts(&plan(EgressTier::MirrorOnly)));
+
+    let equipped = PodmanRunner::new(std::env::temp_dir())
+        .with_mirror_image(Some("localhost/trigon-mirror:latest".into()));
+    assert!(equipped.accepts(&plan(EgressTier::MirrorOnly)));
+    assert!(
+        equipped
+            .caps()
+            .egress_modes
+            .contains(&EgressTier::MirrorOnly),
+        "{:?}",
+        equipped.caps().egress_modes
+    );
+
+    // Still not full trust. The egress boundary holds, but with no network transcript we cannot
+    // say what the build fetched from the mirror.
+    assert!(!equipped.caps().attestable);
+}
+
+#[tokio::test]
+async fn git_and_mirror_is_still_refused() {
+    // It needs the allowlisting proxy, which does not exist. Advertising a tier we cannot enforce
+    // is the one thing this abstraction is for.
+    let r = PodmanRunner::new(std::env::temp_dir())
+        .with_mirror_image(Some("localhost/trigon-mirror:latest".into()));
+    assert!(!r.accepts(&plan(EgressTier::GitAndMirror)));
+    let e = match r
+        .start(&plan(EgressTier::GitAndMirror), &RunOpts::default())
+        .await
+    {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("a tier the runner cannot enforce must not start"),
+    };
+    assert!(e.contains("cannot enforce git-and-mirror"), "{e}");
+    assert!(e.contains("mirror-only"), "it says what it does offer: {e}");
 }

@@ -20,16 +20,23 @@ params:
       `glibc` for nodejs.org's official builds, which cover every version. `musl` for
       unofficial-builds, needed on Alpine and available only for newer versions.
 steps:
+  # The image's own Node first, when it is already the version we want. Not only to save a 17 MB
+  # download: under `mirror-only` egress there is no route to nodejs.org at all, so a strategy that
+  # unconditionally fetches a toolchain cannot run at the tier that makes a rebuild attestable. An
+  # image that already carries the right toolchain is what `docs/08` §3 means by building base
+  # images per ecosystem and toolchain family.
+  #
   # `needs: [wget]` on both, not on the tool, because a skipped step contributes nothing. Alpine's
   # busybox provides wget built in, which is why the prior art never had to declare it; a slim
   # Debian image does not, and the failure is `wget: not found` inside a phase that looks like ours.
-  - runs: >-
-      wget -O - https://unofficial-builds.nodejs.org/download/release/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64-musl.tar.gz
-      | tar xzf - --strip-components=1 -C /usr/local/
-    if: "{% if with.libc == 'musl' %}yes{% endif %}"
-    needs: [wget]
-  - runs: >-
-      wget -O - https://nodejs.org/dist/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64.tar.gz
-      | tar xzf - --strip-components=1 -C /usr/local/
-    if: "{% if with.libc != 'musl' %}yes{% endif %}"
+  - runs: |
+      if [ "$(node --version 2>/dev/null)" = "v{{ with.node_version }}" ]; then
+        echo "the image already has node v{{ with.node_version }}"
+      else
+      {%- if with.libc == 'musl' %}
+        wget -O - https://unofficial-builds.nodejs.org/download/release/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64-musl.tar.gz | tar xzf - --strip-components=1 -C /usr/local/
+      {%- else %}
+        wget -O - https://nodejs.org/dist/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64.tar.gz | tar xzf - --strip-components=1 -C /usr/local/
+      {%- endif %}
+      fi
     needs: [wget]

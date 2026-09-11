@@ -154,13 +154,26 @@ impl BuildPlan {
 }
 
 /// Per-run knobs that are not part of what is being built.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RunOpts {
     pub limits: Limits,
     /// Identifies the run in image tags and container names, so a triage session can find them.
     pub run_id: String,
     /// Keep the image and container after the run, for an agent to `exec` into or a human to pull.
     pub retain: bool,
+    /// Port the mirror listens on inside the build's network island.
+    pub mirror_port: u16,
+}
+
+impl Default for RunOpts {
+    fn default() -> Self {
+        RunOpts {
+            limits: Limits::default(),
+            run_id: String::new(),
+            retain: false,
+            mirror_port: 8129,
+        }
+    }
 }
 
 /// Which part of the build something happened in.
