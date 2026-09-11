@@ -1,6 +1,6 @@
 //! What a build is asked to do, and what comes back.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -122,6 +122,13 @@ pub struct OciPlan {
     pub output_path: String,
     pub egress: EgressTier,
     pub privileged: bool,
+    /// Extra name-to-address mappings for the build's resolver.
+    ///
+    /// How the time-filtering mirror becomes reachable: the strategy names a stable host, and the
+    /// runner maps it to wherever the mirror is actually listening. Without this the strategy
+    /// would have to carry a port number, which would put the operator's machine into the
+    /// strategy digest and make two runs of the same recipe hash differently.
+    pub extra_hosts: BTreeMap<String, String>,
 }
 
 /// A build to run, in whatever shape the runner understands.

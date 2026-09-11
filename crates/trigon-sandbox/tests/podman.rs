@@ -64,6 +64,7 @@ async fn a_build_runs_and_its_artifact_is_collected() {
         output_path: "dist/out.txt".into(),
         egress: EgressTier::DenyAll,
         privileged: false,
+        extra_hosts: Default::default(),
     });
 
     let h = r.start(&plan, &opts("collect-ok")).await.expect("starts");
@@ -112,6 +113,7 @@ async fn deny_all_egress_really_denies() {
         output_path: ".".into(),
         egress: EgressTier::DenyAll,
         privileged: false,
+        extra_hosts: Default::default(),
     });
     let h = r.start(&plan, &opts("deny-all")).await.unwrap();
     let outcome = h.wait().await.unwrap();
@@ -139,6 +141,7 @@ async fn a_failing_build_still_reports_its_phase_and_logs() {
         output_path: ".".into(),
         egress: EgressTier::DenyAll,
         privileged: false,
+        extra_hosts: Default::default(),
     });
     let h = r.start(&plan, &opts("fails")).await.unwrap();
     let outcome = h.wait().await.unwrap();
@@ -168,6 +171,7 @@ async fn a_failure_in_the_deps_phase_is_attributed_to_deps() {
         output_path: ".".into(),
         egress: EgressTier::DenyAll,
         privileged: false,
+        extra_hosts: Default::default(),
     });
     let h = r.start(&plan, &opts("deps-fail")).await.unwrap();
     let outcome = h.wait().await.unwrap();

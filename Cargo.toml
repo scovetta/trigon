@@ -9,6 +9,7 @@ members = [
     "crates/trigon-strategy",
     "crates/trigon-sandbox",
     "crates/trigon-registry",
+    "crates/trigon-mirror",
     "crates/trigon",
     "xtask",
 ]
@@ -28,6 +29,7 @@ trigon-compare = { path = "crates/trigon-compare", version = "0.0.0" }
 trigon-strategy = { path = "crates/trigon-strategy", version = "0.0.0" }
 trigon-sandbox = { path = "crates/trigon-sandbox", version = "0.0.0" }
 trigon-registry = { path = "crates/trigon-registry", version = "0.0.0" }
+trigon-mirror = { path = "crates/trigon-mirror", version = "0.0.0" }
 
 # Judgement half: sync, no tokio, no reqwest. See docs/01-architecture.md §2.2.
 serde = { version = "1", features = ["derive"] }
@@ -55,10 +57,11 @@ minijinja = { version = "2", default-features = false, features = ["builtins", "
 
 # Search half and tooling only. Nothing above the judgement line may reach these: the policy test
 # in xtask enforces it, and `cargo tree` on the shipped verifier is the claim a sceptic can check.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal"] }
 async-trait = "0.1"
 # rustls rather than the system OpenSSL: one fewer thing that differs between a laptop and a worker
 # node, and no C toolchain in the build.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "stream"] }
 futures = "0.3"
 anyhow = "1"

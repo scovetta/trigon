@@ -148,6 +148,38 @@ struct PodmanBuild {
 }
 
 impl PodmanBuild {
+    /// Resolve `host-gateway` to the address a container actually sees.
+    ///
+    /// `podman run --add-host name:host-gateway` understands the keyword; `podman build` does not,
+    /// and rejects it outright on podman 4.x. The deps phase runs at image-build time, which is
+    /// exactly where a package manager talks to the mirror, so the keyword has to become a real
+    /// address before the build starts. The address is whatever this machine's rootless networking
+    /// hands out, so it is asked for rather than assumed: 10.0.2.2 is right for slirp4netns and
+    /// wrong for pasta.
+    async fn resolve_host_gateway(&self, image: &str) -> Option<String> {
+        let out = Command::new(&self.binary)
+            .args([
+                "run",
+                "--rm",
+                "--add-host",
+                "trigon-probe:host-gateway",
+                image,
+                "getent",
+                "hosts",
+                "trigon-probe",
+            ])
+            .output()
+            .await
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let addr = text.split_whitespace().next()?.to_string();
+        tracing::debug!(addr, "resolved host-gateway");
+        Some(addr)
+    }
+
     fn tag(&self) -> String {
         format!("trigon-build:{}", self.opts.run_id)
     }
@@ -273,7 +305,7 @@ impl BuildHandle for PodmanBuild {
             "building the image: setup, source and deps run here"
         );
         let started = Instant::now();
-        let build_args = vec![
+        let mut build_args = vec![
             "build".to_string(),
             "--tag".to_string(),
             self.tag(),
@@ -281,6 +313,31 @@ impl BuildHandle for PodmanBuild {
             ctx.join("Dockerfile").display().to_string(),
             ctx.display().to_string(),
         ];
+        // The deps phase runs at image-build time, which is where a package manager actually talks
+        // to the mirror, so the mapping has to exist here too and not only at run time.
+        let gateway = if self.plan.extra_hosts.values().any(|v| v == "host-gateway") {
+            self.resolve_host_gateway(&self.plan.base_image).await
+        } else {
+            None
+        };
+        for (name, addr) in &self.plan.extra_hosts {
+            let addr = match (addr.as_str(), &gateway) {
+                ("host-gateway", Some(ip)) => ip.as_str(),
+                ("host-gateway", None) => {
+                    return Err(SandboxError::Failed {
+                        phase: "setup".into(),
+                        detail: format!(
+                            "could not work out how `{name}` should reach the host from inside a \
+                             container. `podman build` does not accept the host-gateway keyword, \
+                             so it has to be resolved first, and the probe failed."
+                        ),
+                    });
+                }
+                (other, _) => other,
+            };
+            build_args.push("--add-host".into());
+            build_args.push(format!("{name}:{addr}"));
+        }
         let code = self.run(&build_args, Phase::Deps, &mut log).await?;
         timings.push((Phase::Deps, Some(started.elapsed())));
         push(
@@ -372,6 +429,9 @@ impl PodmanBuild {
     /// Isolation flags, in the order they matter.
     fn isolation_args(&self) -> Vec<String> {
         let mut a: Vec<String> = Vec::new();
+        for (name, addr) in &self.plan.extra_hosts {
+            a.extend(["--add-host".into(), format!("{name}:{addr}")]);
+        }
 
         // Egress. `none` is a real boundary: no interfaces at all, so nothing to reach.
         match self.plan.egress {

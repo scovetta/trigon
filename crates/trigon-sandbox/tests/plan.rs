@@ -20,6 +20,7 @@ fn plan(egress: EgressTier) -> BuildPlan {
         output_path: "dist/*".into(),
         egress,
         privileged: false,
+        extra_hosts: Default::default(),
     })
 }
 

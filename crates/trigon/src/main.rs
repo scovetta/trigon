@@ -151,13 +151,22 @@ enum Cmd {
         /// A checked-in definitions directory, consulted before any heuristic.
         #[arg(long)]
         definitions: Option<PathBuf>,
-        /// Host of a time-filtering registry mirror.
+        /// Resolve dependencies against the index as it stood when the package was published.
         ///
-        /// Without one the rebuild resolves dependencies against today's registry rather than
-        /// against the publish date, which is reported as an assumption rather than pinned to a
-        /// mirror that is not there.
+        /// `auto` starts a mirror for the run. Without one the rebuild resolves against today's
+        /// registry, which makes any package with a floating range irreproducible by construction,
+        /// and that is reported as an assumption rather than pinned to a mirror that is not there.
         #[arg(long)]
         timewarp: Option<String>,
+    },
+    /// Serve a registry index as it stood at a named instant.
+    ///
+    /// Point a package manager at `http://<platform>:<RFC3339>@<host>/`. The credentials carry the
+    /// filter, which is the one configuration channel every client forwards on every request.
+    #[cfg(feature = "build")]
+    Mirror {
+        #[arg(long, default_value_t = 8129)]
+        port: u16,
     },
     /// Ask a registry what it knows about a package.
     #[cfg(feature = "build")]
@@ -396,6 +405,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             timewarp,
         }),
         #[cfg(feature = "build")]
+        Cmd::Mirror { port } => mirror::serve(port),
+        #[cfg(feature = "build")]
         Cmd::Resolve { purl, output } => registry::resolve(&purl, output),
         #[cfg(feature = "build")]
         Cmd::Fetch {
@@ -539,9 +550,40 @@ mod build {
         timeout: u64,
         retain: bool,
     ) -> Result<()> {
+        run_with(
+            file, import, image, out, egress, timeout, retain, "timewarp", None,
+        )
+    }
+
+    /// As `run`, plus where the mirror is and what the strategy should call it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_with(
+        file: &Path,
+        import: bool,
+        image: &str,
+        out: &Path,
+        egress: &str,
+        timeout: u64,
+        retain: bool,
+        timewarp_host: &str,
+        mirror_addr: Option<&str>,
+    ) -> Result<()> {
         let (instructions, digest, _custom) =
-            crate::render_strategy(file, import, "timewarp", false)?;
+            crate::render_strategy(file, import, timewarp_host, false)?;
         let egress = egress_tier(egress)?;
+
+        // `host-gateway` is podman's name for the host as seen from the container. The strategy
+        // names a stable host so that the port, which is whatever was free on this machine, stays
+        // out of the strategy digest.
+        let mut extra_hosts = std::collections::BTreeMap::new();
+        if mirror_addr.is_some() {
+            let name = timewarp_host
+                .split(':')
+                .next()
+                .unwrap_or(timewarp_host)
+                .to_string();
+            extra_hosts.insert(name, "host-gateway".to_string());
+        }
 
         let plan = BuildPlan::Oci(OciPlan {
             base_image: image.to_string(),
@@ -552,6 +594,7 @@ mod build {
             output_path: instructions.output_path.clone(),
             egress,
             privileged: instructions.requires.privileged,
+            extra_hosts,
         });
 
         let run_id = format!("{}-{}", &digest[..12], std::process::id());
@@ -1115,11 +1158,27 @@ mod rebuild {
         println!("  artifact   {}", meta.id);
 
         // 2. A strategy, from the first rung that has one.
+        // `auto` means run one here. An ephemeral port, so concurrent rebuilds do not collide.
+        let mirror = match args.timewarp.as_deref() {
+            Some("auto") => {
+                let handle = rt.block_on(async { trigon_mirror::Mirror::new()?.serve(0).await })?;
+                println!("  mirror     serving the index as of the publish date");
+                Some(handle)
+            }
+            _ => None,
+        };
+        // The name the strategy uses, and the port the container has to reach. The name is stable
+        // so the port stays out of the strategy digest.
+        let timewarp_host = mirror
+            .as_ref()
+            .map(|m| format!("timewarp:{}", m.addr.port()))
+            .or_else(|| args.timewarp.clone().filter(|t| t != "auto"));
+
         let rungs = ladder(
             &target.ecosystem,
             client,
             args.definitions,
-            args.timewarp.clone(),
+            timewarp_host.clone(),
         );
         let Some(candidate) = rt.block_on(trigon_registry::infer(&rungs, &resolved))? else {
             bail!(
@@ -1156,7 +1215,8 @@ mod rebuild {
             trigon_strategy::to_yaml(&candidate.strategy)?,
         )?;
         let out = args.work.join("rebuild");
-        crate::build::run(
+        let mirror_addr = mirror.as_ref().map(|m| m.host());
+        crate::build::run_with(
             &strategy_file,
             false,
             &args.image,
@@ -1164,7 +1224,22 @@ mod rebuild {
             &args.egress,
             args.timeout,
             false,
+            timewarp_host.as_deref().unwrap_or("timewarp"),
+            mirror_addr.as_deref(),
         )?;
+
+        if let Some(m) = mirror {
+            use std::sync::atomic::Ordering;
+            let s = m.stats();
+            // Printed because a claim of a pinned dependency graph should be able to show the pin
+            // did something. Zero filtered requests means the build never asked the mirror.
+            println!(
+                "\n  mirror     {} index request(s), {} version(s) withheld",
+                s.index_requests.load(Ordering::Relaxed),
+                s.versions_withheld.load(Ordering::Relaxed),
+            );
+            rt.block_on(m.shutdown());
+        }
 
         // 5. Compare, with the same code path `verify` uses.
         let rebuilt = newest_file(&out)
@@ -1196,5 +1271,32 @@ mod rebuild {
         }
         found.sort();
         found.pop()
+    }
+}
+
+#[cfg(feature = "build")]
+mod mirror {
+    use super::*;
+
+    pub fn serve(port: u16) -> Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async move {
+            let handle = trigon_mirror::Mirror::new()?.serve(port).await?;
+            println!("mirror listening on {}", handle.host());
+            println!(
+                "  npm    npm config set registry http://npm:<RFC3339>@{}",
+                handle.host()
+            );
+            println!(
+                "  pypi   PIP_INDEX_URL=http://pypi:<RFC3339>@{}/simple",
+                handle.host()
+            );
+            println!("\nCtrl-C to stop.");
+            tokio::signal::ctrl_c().await.ok();
+            handle.shutdown().await;
+            Ok(())
+        })
     }
 }

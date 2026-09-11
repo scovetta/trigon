@@ -1,0 +1,63 @@
+use thiserror::Error;
+use trigon_core::{Classify, Fault};
+
+#[derive(Debug, Error)]
+pub enum MirrorError {
+    #[error(
+        "no time filter on this request. The mirror is addressed as \
+         http://<platform>:<RFC3339>@<host>/, and a request without one would be served the index \
+         as it is today, which is the opposite of what this exists for."
+    )]
+    NoFilter,
+
+    #[error("unknown platform `{found}`; this mirror serves npm and pypi")]
+    UnknownPlatform { found: String },
+
+    #[error("`{found}` is not an RFC 3339 instant this mirror can compare")]
+    BadMoment { found: String },
+
+    #[error("upstream {platform} answered {status}")]
+    Upstream { platform: String, status: u16 },
+
+    #[error("upstream {platform} returned {content_type}, which cannot be filtered by date")]
+    Unfilterable {
+        platform: String,
+        content_type: String,
+    },
+
+    #[error("could not listen on port {port}: {detail}")]
+    Bind { port: u16, detail: String },
+
+    #[error(transparent)]
+    Transport(#[from] reqwest::Error),
+}
+
+impl MirrorError {
+    /// The status a client should see.
+    pub fn status(&self) -> u16 {
+        match self {
+            MirrorError::NoFilter
+            | MirrorError::UnknownPlatform { .. }
+            | MirrorError::BadMoment { .. } => 400,
+            MirrorError::Upstream { status, .. } => *status,
+            MirrorError::Unfilterable { .. } => 502,
+            MirrorError::Bind { .. } => 500,
+            MirrorError::Transport(_) => 502,
+        }
+    }
+}
+
+impl Classify for MirrorError {
+    fn fault(&self) -> Fault {
+        match self {
+            // A build configured the mirror wrongly, or asked for something it does not serve.
+            MirrorError::NoFilter
+            | MirrorError::UnknownPlatform { .. }
+            | MirrorError::BadMoment { .. } => Fault::Policy,
+            MirrorError::Upstream { .. }
+            | MirrorError::Unfilterable { .. }
+            | MirrorError::Transport(_) => Fault::Upstream,
+            MirrorError::Bind { .. } => Fault::Infra,
+        }
+    }
+}

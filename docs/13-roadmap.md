@@ -66,6 +66,12 @@ This milestone retires the project's risk, so over-invest in it.
 **Adds:** `trigon-strategy`, `trigon-sandbox` (Podman only), the time-filtered registry, and
 `trigon run --strategy build.yaml`.
 
+The time-filtered registry is in and serves npm and PyPI. Real `pip` and real `npm` resolve through
+it, and a rebuild of `left-pad@1.3.0` with `--timewarp auto` withheld 1,048 versions across 70 index
+requests and still matched. What remains before a run at that tier can be *signed* is enforcement:
+the runner still offers `open` egress rather than `mirror-only`, because nothing yet stops a build
+reaching past the mirror.
+
 **Exit criteria:**
 
 M1 needs **two** corpora, and conflating them was a mistake in an earlier draft.
