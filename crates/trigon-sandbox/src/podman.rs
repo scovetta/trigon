@@ -325,6 +325,7 @@ impl BuildHandle for PodmanBuild {
                     &self.opts.run_id,
                     image,
                     self.opts.mirror_port,
+                    self.opts.guard.as_deref(),
                 )
                 .await?,
             ),
@@ -485,11 +486,15 @@ impl BuildHandle for PodmanBuild {
             ),
         }
 
+        let mut guard_trips = Vec::new();
         if let Some(i) = island {
+            guard_trips = i.guard_trips().await;
             i.destroy().await;
         }
 
-        Ok(self.outcome(code, artifact, timings, failed_in, log))
+        let mut outcome = self.outcome(code, artifact, timings, failed_in, log);
+        outcome.guard_trips = guard_trips;
+        Ok(outcome)
     }
 }
 
@@ -561,6 +566,7 @@ impl PodmanBuild {
             // no network transcript, so we cannot say what the build fetched from the mirror.
             attestable: false,
             log_tail,
+            guard_trips: Vec::new(),
         }
     }
 }

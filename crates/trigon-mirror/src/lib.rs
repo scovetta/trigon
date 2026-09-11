@@ -13,12 +13,14 @@
 //! is a build that cannot reach the artifact it is supposed to be reproducing.
 
 mod error;
+mod guard;
 mod moment;
 mod npm;
 mod pypi;
 mod server;
 
 pub use error::MirrorError;
+pub use guard::{Guard, GuardManifest, GuardMatch, TRIP_MARKER, Trip};
 pub use moment::{Filter, Platform, normalize, published_by, url_for};
 pub use npm::filter_packument;
 pub use pypi::{filter_simple, render_html};

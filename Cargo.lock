@@ -1916,12 +1916,19 @@ name = "trigon-mirror"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "bytes",
+ "flate2",
+ "futures",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
+ "tar",
  "thiserror",
  "tokio",
  "tracing",
+ "trigon-archive",
+ "trigon-compare",
  "trigon-core",
 ]
 
@@ -1953,6 +1960,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trigon-core",
+ "trigon-mirror",
  "trigon-strategy",
 ]
 

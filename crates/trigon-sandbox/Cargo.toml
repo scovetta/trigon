@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 trigon-core.workspace = true
 trigon-strategy.workspace = true
+trigon-mirror.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

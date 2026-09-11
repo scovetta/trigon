@@ -180,6 +180,10 @@ enum Cmd {
     Mirror {
         #[arg(long, default_value_t = 8129)]
         port: u16,
+        /// A guard manifest: the artifact this run must not be allowed to download, and the
+        /// members of it worth watching for inside anything else.
+        #[arg(long)]
+        guard: Option<PathBuf>,
     },
     /// Rebuild many packages and report the rate.
     ///
@@ -472,7 +476,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
         #[cfg(feature = "build")]
         Cmd::MirrorImage { tag } => mirror::build_image(&tag),
         #[cfg(feature = "build")]
-        Cmd::Mirror { port } => mirror::serve(port),
+        Cmd::Mirror { port, guard } => mirror::serve(port, guard.as_deref()),
         #[cfg(feature = "build")]
         Cmd::Resolve { purl, output } => registry::resolve(&purl, output),
         #[cfg(feature = "build")]
@@ -504,6 +508,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             None,
             Some(&mirror_image),
             true,
+            None,
         ),
     }
 }
@@ -635,6 +640,7 @@ mod build {
         mirror_addr: Option<&str>,
         mirror_image: Option<&str>,
         verbose: bool,
+        guard: Option<&Path>,
     ) -> Result<()> {
         let (instructions, digest, _custom) =
             crate::render_strategy(file, import, timewarp_host, false)?;
@@ -692,6 +698,7 @@ mod build {
                 },
                 retain,
                 mirror_port: 8129,
+                guard: guard.map(Path::to_path_buf),
             };
             let handle = runner.start(&plan, &opts).await?;
             let outcome = handle.wait().await?;
@@ -723,6 +730,11 @@ mod build {
                     ),
                     (None, false) => {}
                 }
+            }
+            if let Some(t) = outcome.guard_trips.first() {
+                // Before the exit status is even considered: a tripped guard means the run cannot
+                // be used, whether the build succeeded or failed.
+                bail!("void: {t}");
             }
             if !outcome.succeeded() {
                 if verbose {
@@ -1203,6 +1215,14 @@ mod rebuild {
             fault: trigon_core::Fault,
             detail: String,
         },
+        /// Neither a pass nor a failure.
+        ///
+        /// The artifact under test reached the build over the network, so whatever the build
+        /// produced is not evidence about the source. It may be perfectly honest and we cannot
+        /// tell, which is exactly what this says. See `docs/12-security.md` §2.4.
+        Void {
+            reason: String,
+        },
         /// Read back from a previous run of the same sweep.
         Recorded(String),
     }
@@ -1214,6 +1234,7 @@ mod rebuild {
                 Outcome::NoStrategy => "no-strategy".into(),
                 Outcome::BuildFailed { phase } => format!("build-failed:{phase}"),
                 Outcome::Failed { fault, .. } => format!("error:{fault:?}").to_lowercase(),
+                Outcome::Void { .. } => "void".into(),
                 Outcome::Recorded(label) => label.clone(),
             }
         }
@@ -1286,6 +1307,9 @@ mod rebuild {
         match outcome {
             // `Recorded` only comes from a sweep's results file, never from a single run.
             Outcome::Compared(_) | Outcome::NoStrategy | Outcome::Recorded(_) => Ok(()),
+            // Not an error, and not a pass. The exit code says something went wrong because
+            // something did: the run cannot be used.
+            Outcome::Void { reason } => bail!("void: {reason}"),
             Outcome::BuildFailed { phase } => bail!("the build failed in {phase}"),
             Outcome::Failed { detail, .. } => bail!("{detail}"),
         }
@@ -1319,7 +1343,41 @@ mod rebuild {
             println!("  artifact   {}", meta.id);
         }
 
-        // 2. A strategy, from the first rung that has one.
+        // 2. The published bytes, before anything else.
+        //
+        // The guard manifest is built from them, and the mirror has to be armed with it before a
+        // build can ask the mirror for anything.
+        let upstream_path = args.work.join(meta.id.as_str());
+        let mut file = std::fs::File::create(&upstream_path)?;
+        let upstream_digest = match rt.block_on(registry.fetch(&meta, &mut file)) {
+            Ok(d) => d,
+            Err(e) => return Ok(classify(&e)),
+        };
+        drop(file);
+        if verbose {
+            println!("  published  sha256 {}", &upstream_digest.to_hex()[..16]);
+        }
+
+        // The guard manifest, from the bytes we just fetched. This is the control that defeats the
+        // attack the whole design is shaped around: a strategy that downloads the published
+        // artifact reproduces it byte for byte, passes every clean re-run, and is worth nothing.
+        let guard = match std::fs::read(&upstream_path) {
+            Ok(bytes) => trigon_mirror::GuardManifest::for_artifact(
+                &bytes,
+                crate::resolve_format(&upstream_path, None)?,
+                Some(meta.url.clone()),
+            ),
+            Err(_) => trigon_mirror::GuardManifest::default(),
+        };
+        if verbose {
+            println!(
+                "  guarding   the artifact and {} of its members ({} too small or too common)",
+                guard.members.len(),
+                guard.filtered_out
+            );
+        }
+
+        // 3. A strategy, from the first rung that has one.
         // Under `mirror-only` the mirror runs inside the build's network island rather than here:
         // a container on an internal network cannot reach the host, which is the whole point of
         // the tier. The port is fixed because it is inside that island and collides with nothing.
@@ -1332,7 +1390,10 @@ mod rebuild {
                 None
             }
             Some("auto") => {
-                let handle = rt.block_on(async { trigon_mirror::Mirror::new()?.serve(0).await })?;
+                let g = guard.clone();
+                let handle = rt.block_on(async {
+                    trigon_mirror::Mirror::new()?.with_guard(g).serve(0).await
+                })?;
                 if verbose {
                     println!("  mirror     serving the index as of the publish date");
                 }
@@ -1374,18 +1435,6 @@ mod rebuild {
             }
         }
 
-        // 3. The published bytes.
-        let upstream_path = args.work.join(meta.id.as_str());
-        let mut file = std::fs::File::create(&upstream_path)?;
-        let upstream_digest = match rt.block_on(registry.fetch(&meta, &mut file)) {
-            Ok(d) => d,
-            Err(e) => return Ok(classify(&e)),
-        };
-        drop(file);
-        if verbose {
-            println!("  published  sha256 {}", &upstream_digest.to_hex()[..16]);
-        }
-
         // 4. Build it.
         let strategy_file = args.work.join("strategy.yaml");
         std::fs::write(
@@ -1393,6 +1442,12 @@ mod rebuild {
             trigon_strategy::to_yaml(&candidate.strategy)?,
         )?;
         let out = args.work.join("rebuild");
+        // Written next to the run, and mounted read-only into the island's mirror when there is
+        // one. The mirror runs in a container with no route to this process, so a file is how the
+        // manifest gets there.
+        let guard_file = args.work.join("guard.json");
+        std::fs::write(&guard_file, serde_json::to_vec_pretty(&guard)?)?;
+
         let mirror_addr = mirror.as_ref().map(|m| m.host());
         let built = crate::build::run_with(
             &strategy_file,
@@ -1406,6 +1461,7 @@ mod rebuild {
             mirror_addr.as_deref(),
             Some(args.mirror_image.as_str()),
             verbose,
+            enforced.then_some(guard_file.as_path()),
         );
 
         if let Some(m) = mirror {
@@ -1420,9 +1476,23 @@ mod rebuild {
                     s.versions_withheld.load(Ordering::Relaxed),
                 );
             }
+            let trips = m.trips();
             rt.block_on(m.shutdown());
+            if let Some(t) = trips.first() {
+                // Checked before the build's exit status is even considered. A tripped guard means
+                // the run cannot be used, whether the build succeeded or failed.
+                return Ok(Outcome::Void {
+                    reason: format!("{:?} arrived from {}", t.matched, t.url),
+                });
+            }
         }
         if let Err(e) = built {
+            let text = e.to_string();
+            if let Some(reason) = text.strip_prefix("void: ") {
+                return Ok(Outcome::Void {
+                    reason: reason.to_string(),
+                });
+            }
             return Ok(build_outcome(&e));
         }
 
@@ -1561,12 +1631,28 @@ mod mirror {
         }
     }
 
-    pub fn serve(port: u16) -> Result<()> {
+    pub fn serve(port: u16, guard: Option<&Path>) -> Result<()> {
+        let manifest = match guard {
+            Some(p) => {
+                let text = std::fs::read_to_string(p)
+                    .with_context(|| format!("reading {}", p.display()))?;
+                serde_json::from_str::<trigon_mirror::GuardManifest>(&text)
+                    .with_context(|| format!("parsing {}", p.display()))?
+            }
+            None => trigon_mirror::GuardManifest::default(),
+        };
+        let armed = !manifest.is_empty();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
         rt.block_on(async move {
-            let handle = trigon_mirror::Mirror::new()?.serve(port).await?;
+            let handle = trigon_mirror::Mirror::new()?
+                .with_guard(manifest)
+                .serve(port)
+                .await?;
+            if armed {
+                println!("  guard armed");
+            }
             println!("mirror listening on {}", handle.host());
             println!(
                 "  npm    npm config set registry http://npm:<RFC3339>@{}",

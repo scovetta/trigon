@@ -32,12 +32,14 @@ pub struct Stats {
 pub struct Mirror {
     client: reqwest::Client,
     stats: Arc<Stats>,
+    guard: Arc<crate::guard::Guard>,
 }
 
 /// A running mirror.
 pub struct MirrorHandle {
     pub addr: SocketAddr,
     stats: Arc<Stats>,
+    guard: Arc<crate::guard::Guard>,
     shutdown: tokio::sync::oneshot::Sender<()>,
     joined: tokio::task::JoinHandle<()>,
 }
@@ -50,6 +52,11 @@ impl MirrorHandle {
 
     pub fn stats(&self) -> &Stats {
         &self.stats
+    }
+
+    /// What the guard caught, if anything. A non-empty list makes the run `Void`.
+    pub fn trips(&self) -> Vec<crate::Trip> {
+        self.guard.trips()
     }
 
     /// Stop serving and wait for in-flight requests.
@@ -69,7 +76,14 @@ impl Mirror {
                 .redirect(reqwest::redirect::Policy::limited(5))
                 .build()?,
             stats: Arc::new(Stats::default()),
+            guard: Arc::new(crate::guard::Guard::default()),
         })
+    }
+
+    /// Refuse this run's own artifact, and watch for it arriving by any other route.
+    pub fn with_guard(mut self, manifest: crate::GuardManifest) -> Self {
+        self.guard = Arc::new(crate::guard::Guard::new(manifest));
+        self
     }
 
     /// Bind and serve until the handle is dropped or shut down.
@@ -78,6 +92,7 @@ impl Mirror {
     /// container on another network namespace.
     pub async fn serve(self, port: u16) -> Result<MirrorHandle, MirrorError> {
         let stats = self.stats.clone();
+        let guard = self.guard.clone();
         let app = axum::Router::new()
             .fallback(handle)
             .with_state(Arc::new(self));
@@ -101,6 +116,7 @@ impl Mirror {
         Ok(MirrorHandle {
             addr,
             stats,
+            guard,
             shutdown: tx,
             joined,
         })
@@ -385,6 +401,15 @@ fn rewrite_pypi_files(doc: &mut serde_json::Value, host: &str) {
 
 /// Stream an upstream response through, headers and all.
 async fn proxy(mirror: &Mirror, url: &str, filter: &Filter) -> Result<Response, MirrorError> {
+    // The cheapest control there is: at mirror-only egress this is the only reachable host, so a
+    // build that asks for its own published artifact gets nothing. Refused before the request is
+    // made, so the bytes never leave the registry.
+    if mirror.guard.refuses(url) {
+        mirror.guard.record_refusal(url);
+        return Err(MirrorError::Refused {
+            url: url.to_string(),
+        });
+    }
     let resp = mirror.client.get(url).send().await?;
     // Redirects are followed here rather than handed back: the client may have no route to where
     // they point, which is the whole reason this proxies instead of redirecting.
@@ -416,13 +441,74 @@ async fn proxy(mirror: &Mirror, url: &str, filter: &Filter) -> Result<Response, 
         .unwrap_or("application/octet-stream")
         .to_string();
     // Streamed, not buffered: an artifact can be gigabytes and the mirror serves a whole fleet.
-    let stream = resp.bytes_stream();
+    // The guard hashes as the bytes go past rather than holding them.
+    let stream = guarded_stream(resp.bytes_stream(), mirror.guard.clone(), url.to_string());
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, content_type)],
         Body::from_stream(stream),
     )
         .into_response())
+}
+
+/// Pass a body through, hashing it, and check it once it has finished.
+///
+/// The body is also collected when it is small enough to decompose, because the case worth
+/// catching is not the artifact arriving under its own name but one of its members arriving inside
+/// something unrelated. Above that size only the whole-body hash applies, which is stated in
+/// `guard.rs` rather than left as a silent limit.
+fn guarded_stream<S>(
+    inner: S,
+    guard: Arc<crate::guard::Guard>,
+    url: String,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>>
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    use sha2::Digest as _;
+    struct State<S> {
+        inner: S,
+        hasher: sha2::Sha256,
+        body: Option<Vec<u8>>,
+        guard: Arc<crate::guard::Guard>,
+        url: String,
+    }
+    let armed = guard.is_armed();
+    let state = State {
+        inner,
+        hasher: sha2::Sha256::new(),
+        body: armed.then(Vec::new),
+        guard,
+        url,
+    };
+    futures::stream::unfold(Some(state), move |s| async move {
+        let mut s = s?;
+        match futures::StreamExt::next(&mut s.inner).await {
+            Some(Ok(chunk)) => {
+                if armed {
+                    s.hasher.update(&chunk);
+                    // Stop collecting once it is too big to decompose; the hash continues.
+                    if let Some(b) = &mut s.body {
+                        if b.len() + chunk.len() <= crate::guard::MAX_DECOMPOSE_BYTES {
+                            b.extend_from_slice(&chunk);
+                        } else {
+                            s.body = None;
+                        }
+                    }
+                }
+                Some((Ok(chunk), Some(s)))
+            }
+            // An error mid-stream means we never saw the whole body, so there is nothing to check.
+            Some(Err(e)) => Some((Err(e), None)),
+            None => {
+                if armed {
+                    let digest = trigon_core::Digest::from_bytes(s.hasher.finalize().into());
+                    s.guard.observe(&s.url, digest, s.body.as_deref());
+                }
+                None
+            }
+        }
+    })
 }
 
 fn json_response(doc: &serde_json::Value, content_type: &'static str) -> Response {

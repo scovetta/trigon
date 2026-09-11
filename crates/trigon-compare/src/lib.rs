@@ -12,7 +12,7 @@
 
 mod diff;
 
-pub use diff::{DiffReport, FileDiff, FileStatus};
+pub use diff::{ContentKind, DiffReport, FileDiff, FileStatus};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256, Sha512 as Sha512Hasher};

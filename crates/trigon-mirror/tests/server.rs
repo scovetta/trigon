@@ -290,3 +290,126 @@ async fn pypi_file_urls_point_back_at_the_mirror() {
     assert_eq!(&bytes[..2], b"PK");
     m.shutdown().await;
 }
+
+#[tokio::test]
+async fn the_mirror_refuses_the_runs_own_artifact() {
+    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRIGON_LIVE=1");
+        return;
+    }
+    // The cheapest control there is. At mirror-only egress this is the only reachable host, so a
+    // build that asks for its own published artifact gets nothing.
+    let manifest = trigon_mirror::GuardManifest {
+        refuse_url: Some("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".into()),
+        ..Default::default()
+    };
+    let m = Mirror::new()
+        .unwrap()
+        .with_guard(manifest)
+        .serve(0)
+        .await
+        .unwrap();
+
+    let url = format!(
+        "http://{}/-artifact/npm/2018-04-09T01:10:46/registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+        m.host()
+    );
+    let resp = reqwest::get(&url).await.unwrap();
+    assert_eq!(resp.status(), 403);
+    assert!(resp.text().await.unwrap().contains("proves nothing"));
+    assert_eq!(
+        m.trips().len(),
+        1,
+        "and the refusal is recorded, so the run is void"
+    );
+
+    // A different version is served normally: the guard is about this run's artifact, not the
+    // package.
+    let other = format!(
+        "http://{}/-artifact/npm/2018-04-09T01:10:46/registry.npmjs.org/left-pad/-/left-pad-1.2.0.tgz",
+        m.host()
+    );
+    assert_eq!(reqwest::get(&other).await.unwrap().status(), 200);
+    m.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_artifact_arriving_from_anywhere_trips_the_guard() {
+    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRIGON_LIVE=1");
+        return;
+    }
+    // The case the URL refusal does not cover: the same bytes under a different name. This is what
+    // a strategy fetching from cdn.evil.example looks like, and it is why the body is hashed rather
+    // than the request matched.
+    let bytes = reqwest::get("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz")
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let manifest = trigon_mirror::GuardManifest::for_artifact(
+        &bytes,
+        trigon_core::Format::TarGz,
+        // No URL refusal, so only the hash can catch it.
+        None,
+    );
+    let m = Mirror::new()
+        .unwrap()
+        .with_guard(manifest)
+        .serve(0)
+        .await
+        .unwrap();
+
+    let url = format!(
+        "http://{}/-artifact/npm/2018-04-09T01:10:46/registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+        m.host()
+    );
+    let resp = reqwest::get(&url).await.unwrap();
+    // Served, and noticed. The build still gets its bytes; what changes is the verdict.
+    assert_eq!(resp.status(), 200);
+    let got = resp.bytes().await.unwrap();
+    assert_eq!(got.len(), bytes.len());
+
+    let trips = m.trips();
+    assert_eq!(trips.len(), 1, "the artifact under test reached the build");
+    assert_eq!(trips[0].matched, trigon_mirror::GuardMatch::WholeArtifact);
+    m.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_ordinary_dependency_does_not_trip_the_guard() {
+    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRIGON_LIVE=1");
+        return;
+    }
+    // Without this the control is worthless: a guard that fires on every build is one people turn
+    // off. left-pad is guarded; ms is an unrelated package the build legitimately fetches.
+    let bytes = reqwest::get("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz")
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let m = Mirror::new()
+        .unwrap()
+        .with_guard(trigon_mirror::GuardManifest::for_artifact(
+            &bytes,
+            trigon_core::Format::TarGz,
+            Some("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".into()),
+        ))
+        .serve(0)
+        .await
+        .unwrap();
+
+    let url = format!(
+        "http://{}/-artifact/npm/2024-01-01T00:00:00/registry.npmjs.org/ms/-/ms-2.1.3.tgz",
+        m.host()
+    );
+    assert_eq!(reqwest::get(&url).await.unwrap().status(), 200);
+    assert!(
+        m.trips().is_empty(),
+        "an unrelated dependency must pass through"
+    );
+    m.shutdown().await;
+}

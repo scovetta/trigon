@@ -25,6 +25,12 @@ pub enum MirrorError {
         content_type: String,
     },
 
+    #[error(
+        "refusing {url}: it is the artifact this run is trying to reproduce. A build that can \
+         download its own published output reproduces it perfectly and proves nothing."
+    )]
+    Refused { url: String },
+
     #[error("could not listen on port {port}: {detail}")]
     Bind { port: u16, detail: String },
 
@@ -42,6 +48,7 @@ impl MirrorError {
             MirrorError::Upstream { status, .. } => *status,
             MirrorError::Unfilterable { .. } => 502,
             MirrorError::Bind { .. } => 500,
+            MirrorError::Refused { .. } => 403,
             MirrorError::Transport(_) => 502,
         }
     }
@@ -58,6 +65,8 @@ impl Classify for MirrorError {
             | MirrorError::Unfilterable { .. }
             | MirrorError::Transport(_) => Fault::Upstream,
             MirrorError::Bind { .. } => Fault::Infra,
+            // A policy this run is enforcing, not a broken package and not broken infrastructure.
+            MirrorError::Refused { .. } => Fault::Policy,
         }
     }
 }

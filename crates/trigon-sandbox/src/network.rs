@@ -53,6 +53,7 @@ impl Island {
         run_id: &str,
         mirror_image: &str,
         mirror_port: u16,
+        guard: Option<&std::path::Path>,
     ) -> Result<Self, SandboxError> {
         let name = format!("trigon-{run_id}");
         let mut island = Island {
@@ -75,24 +76,38 @@ impl Island {
         // reach the registries it proxies. A container with only the internal network has no
         // uplink at all, which is the point of the internal network.
         let container = format!("{name}-mirror");
-        run_ok(
-            binary,
-            &[
-                "run",
-                "--detach",
-                "--name",
-                &container,
-                "--network",
-                &name,
-                "--network",
-                "podman",
-                "--rm",
-                mirror_image,
-                "mirror",
-                "--port",
-                &mirror_port.to_string(),
-            ],
-        )
+        let port = mirror_port.to_string();
+        let mut args: Vec<String> = [
+            "run",
+            "--detach",
+            "--name",
+            &container,
+            "--network",
+            &name,
+            "--network",
+            "podman",
+            "--rm",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        // Read-only, and `:Z` for SELinux hosts. The mirror needs the manifest and has no business
+        // writing to it.
+        if let Some(g) = guard {
+            args.push("--volume".into());
+            args.push(format!("{}:/guard.json:ro,Z", g.display()));
+        }
+        args.extend([
+            mirror_image.to_string(),
+            "mirror".into(),
+            "--port".into(),
+            port,
+        ]);
+        if guard.is_some() {
+            args.extend(["--guard".to_string(), "/guard.json".into()]);
+        }
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_ok(binary, &argv)
         .await
         .map_err(|e| SandboxError::Failed {
             phase: "setup".into(),
@@ -165,6 +180,26 @@ impl Island {
     /// The name to attach a build container to.
     pub fn network(&self) -> &str {
         &self.name
+    }
+
+    /// Whatever the guard caught, read from the mirror container's log.
+    ///
+    /// The log rather than an endpoint, because the mirror sits inside the island and the host has
+    /// no route to it: that is the point of the island. The marker is a fixed prefix so this does
+    /// not depend on parsing prose.
+    pub async fn guard_trips(&self) -> Vec<String> {
+        let Some(container) = &self.mirror else {
+            return Vec::new();
+        };
+        run_ok(&self.binary, &["logs", container])
+            .await
+            .map(|logs| {
+                logs.lines()
+                    .filter(|l| l.contains(trigon_mirror::TRIP_MARKER))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The mirror's address on the island.

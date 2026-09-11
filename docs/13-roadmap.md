@@ -100,6 +100,13 @@ M1 needs **two** corpora, and conflating them was a mistake in an earlier draft.
 - [ ] The `smoke` benchmark corpus (~50 targets) is green and runs in under ten minutes.
 - [ ] Per-phase timings and costs recorded, with `None` meaning "no data".
 
+**The artifact-hash check is in**, ahead of its milestone, because the egress work made it cheap:
+everything a build fetches now crosses one process. Both controls from
+[`12-security.md`](12-security.md) §2 are live and tested against the real registry. The run outcome
+`Void` exists and is reported. What is not yet implemented is two of the four member filters, the
+stock-content list and the also-in-source check, which means the guard is currently narrower than
+designed rather than wider: it can miss a smuggled member, and it will not fire on an innocent one.
+
 ### M2. Attestations (2 weeks)
 
 **Adds:** `trigon-attest`, `trigon-store`.

@@ -163,6 +163,11 @@ pub struct RunOpts {
     pub retain: bool,
     /// Port the mirror listens on inside the build's network island.
     pub mirror_port: u16,
+    /// A guard manifest to mount into that mirror.
+    ///
+    /// Without it the island still enforces egress, but nothing notices if the build downloads the
+    /// artifact it is meant to be reproducing from somewhere the mirror proxies.
+    pub guard: Option<std::path::PathBuf>,
 }
 
 impl Default for RunOpts {
@@ -172,6 +177,7 @@ impl Default for RunOpts {
             run_id: String::new(),
             retain: false,
             mirror_port: 8129,
+            guard: None,
         }
     }
 }
@@ -226,6 +232,9 @@ pub struct BuildOutcome {
     pub attestable: bool,
     /// Bounded tail of the combined log, for an agent and for triage.
     pub log_tail: String,
+    /// What the artifact guard caught. Non-empty means the run is `Void`: the artifact under test
+    /// reached the build over the network, so whatever it produced says nothing about the source.
+    pub guard_trips: Vec<String>,
 }
 
 impl BuildOutcome {

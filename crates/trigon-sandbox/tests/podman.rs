@@ -38,6 +38,7 @@ fn opts(run_id: &str) -> RunOpts {
         },
         retain: false,
         mirror_port: 8129,
+        guard: None,
     }
 }
 
