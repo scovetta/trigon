@@ -136,8 +136,27 @@ toward voiding an honest run rather than missing a forged one.
 **Adds:** `trigon-ai`, holding Resolver, Builder and Explainer, with budgets, generalizing caches,
 transcripts, replay, and the three-tier eval harness.
 
+**Sequencing note, from implementation.** The crate begins with the parts that are *deterministic*,
+before any provider or prompt exists, because they are what decides whether the subsystem costs
+thousands of dollars or hundreds of thousands for the same work — and because each of them is a unit
+test rather than an evaluation run:
+
+- `trigon_core::FailureSignature` names a failure so that every run sharing the cause shares the
+  name. It is simultaneously the repair cache key, the admission-control input and the cluster id;
+  key the cache on the target instead and every sibling misses.
+- `trigon_core::compress` cuts a build log to what a model needs to read — the largest single cost
+  lever in §4.2, worth about 7× on its own.
+- `trigon_ai::RepairLoop` decides whether to spend anything at all: stop on a repeated signature
+  rather than an iteration count, escalate on progress rather than frustration, and refuse a
+  signature nobody has ever repaired.
+
+Only then the provider abstraction and the Builder, because a Builder without these is the
+$168,000 configuration.
+
 **Exit criteria:**
 
+- [x] The deterministic half: failure signatures, log compression, and the repair-loop policy, each
+      testable with no provider configured.
 - [ ] Measurable lift on the `regression` corpus versus M1's heuristics-only baseline.
 - [ ] **Model-invocation rate trends down** across the milestone as the flywheel produces rules.
 - [ ] At least one repair promoted into a merged corpus-wide rule, with its impact preview.

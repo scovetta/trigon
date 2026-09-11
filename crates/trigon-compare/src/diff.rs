@@ -65,6 +65,15 @@ pub struct FileDiff {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiffReport {
+    /// Every difference, named by what it *is* rather than by where it turned up.
+    ///
+    /// The part of a divergence a maintainer can act on. "Four members differ" is an accusation;
+    /// `entry:zip.method@lib/x.py` is a thing to go and look at, and it goes into the signed
+    /// divergence statement for exactly that reason. Empty when the two sides agree — and empty
+    /// while the digests disagree is itself a finding, because it means the difference is below
+    /// this vocabulary's resolution.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub codes: std::collections::BTreeSet<String>,
     pub identical: u32,
     pub differs: u32,
     pub only_upstream: u32,
@@ -79,6 +88,7 @@ pub struct DiffReport {
 /// Members are keyed by `(path, occurrence)`, so upstream's second `lib/index.js` compares against
 /// the rebuild's second one. Keying on path alone would make a duplicate path unmatchable.
 pub fn report(upstream: &Archive, rebuild: &Archive) -> DiffReport {
+    let codes = crate::signature::signature(upstream, rebuild);
     let u = index(upstream);
     let r = index(rebuild);
 
@@ -138,6 +148,7 @@ pub fn report(upstream: &Archive, rebuild: &Archive) -> DiffReport {
     }
 
     DiffReport {
+        codes,
         identical: counts.0,
         differs: counts.1,
         only_upstream: counts.2,

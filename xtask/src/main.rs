@@ -14,7 +14,6 @@ mod corpus;
 mod differential;
 mod golden;
 mod scan;
-mod signature;
 
 #[derive(Parser, Debug)]
 #[command(name = "xtask")]
@@ -190,6 +189,14 @@ const FORBID_TRANSITIVE: &[(&str, &[&str])] = &[
     (
         "trigon-attest",
         &["trigon-ai", "trigon-registry", "tokio", "reqwest", "hyper"],
+    ),
+    // The invariant read from the other side. Everything above keeps the judgement half free of a
+    // model; this keeps the model's half out of the judgement code. A `trigon-ai` that could call
+    // `compare` or `apply` could compare, and no amount of care in the engine would make that
+    // untrue — whereas a crate that cannot name the function cannot call it.
+    (
+        "trigon-ai",
+        &["trigon-compare", "trigon-stabilize", "trigon-archive"],
     ),
 ];
 

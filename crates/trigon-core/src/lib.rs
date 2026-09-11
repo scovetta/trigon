@@ -24,7 +24,7 @@ pub use evidence::{
     ToolchainResolution, resolve_toolchain,
 };
 pub use failure::{FailureSignature, classify};
-pub use fault::{Classify, Fault};
+pub use fault::{Classify, Fault, Phase};
 pub use format::Format;
 pub use logs::{Compressed, compress};
 pub use note::{Note, NoteCode};

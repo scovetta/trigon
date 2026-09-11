@@ -182,19 +182,12 @@ impl Default for RunOpts {
     }
 }
 
-/// Which part of the build something happened in.
+/// Which part of the build something happened in, and the unit the timings are reported in.
 ///
-/// Also the unit the timings are reported in. Each phase is an image layer, so the durations fall
-/// out of layer metadata without instrumenting anything.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Phase {
-    Setup,
-    Source,
-    Deps,
-    Build,
-    Collect,
-}
+/// Defined in `trigon-core`: the repair loop and the verdict both need it and neither may depend on
+/// a container runtime. Each phase is an image layer here, so the durations fall out of layer
+/// metadata without instrumenting anything.
+pub use trigon_core::Phase;
 
 /// Something the build did, as it happens.
 ///

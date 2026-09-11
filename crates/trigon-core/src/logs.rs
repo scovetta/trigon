@@ -208,30 +208,36 @@ fn is_noise(line: &str) -> bool {
 /// Collapse runs of identical lines.
 ///
 /// Kept to *identical* rather than similar on purpose. "Similar" needs a distance threshold, and a
-/// threshold is a knob whose value nobody can justify and which quietly merges two different
-/// errors that happen to share a prefix.
+/// threshold is a knob whose value nobody can justify and which quietly merges two different errors
+/// that happen to share a prefix.
+///
+/// The marker counts what was **omitted**, not how long the run was. Those differ by the copies
+/// still on screen, and a marker that reported the run length beside three visible copies of the
+/// line would overstate what is missing — in a log whose whole job is to be honest about what it
+/// dropped.
 fn dedup(lines: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    let mut run = 0usize;
     let mut i = 0;
     while i < lines.len() {
         let line = &lines[i];
-        if i > 0 && *line == lines[i - 1] && !line.trim().is_empty() {
-            run += 1;
-        } else {
-            if run > RUN_LIMIT {
-                out.push(format!("… the previous line repeated {run} times …"));
+        let mut end = i + 1;
+        if !line.trim().is_empty() {
+            while end < lines.len() && lines[end] == *line {
+                end += 1;
             }
-            run = 0;
+        }
+        let run = end - i;
+        let shown = run.min(RUN_LIMIT + 1);
+        for _ in 0..shown {
             out.push(line.clone());
         }
-        if run > 0 && run <= RUN_LIMIT {
-            out.push(line.clone());
+        if run > shown {
+            out.push(format!(
+                "… the previous line repeated {} more times …",
+                run - shown
+            ));
         }
-        i += 1;
-    }
-    if run > RUN_LIMIT {
-        out.push(format!("… the previous line repeated {run} times …"));
+        i = end;
     }
     out
 }
@@ -338,9 +344,10 @@ mod tests {
     fn a_line_repeated_a_thousand_times_costs_one_line() {
         let log = "warning: unused variable\n".repeat(1000) + "error: it broke\n";
         let c = compress(&log, 8192);
-        assert!(c.text.contains("repeated"), "{}", c.text);
         assert!(c.text.lines().count() < 10, "{}", c.text);
         assert!(c.text.contains("error: it broke"));
+        // The count is what was omitted, not how long the run was: 1000 copies, 3 still shown.
+        assert!(c.text.contains("repeated 997 more times"), "{}", c.text);
     }
 
     #[test]

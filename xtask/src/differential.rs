@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::corpus::{Manifest, cache_dir, digest_of};
-use crate::signature::{matches, signature};
+use trigon_compare::{matches, signature};
 
 #[derive(Debug, Deserialize)]
 struct Deviations {

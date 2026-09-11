@@ -11,8 +11,10 @@
 #![warn(missing_debug_implementations)]
 
 mod diff;
+mod signature;
 
 pub use diff::{ContentKind, DiffReport, FileDiff, FileStatus};
+pub use signature::{matches, signature};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256, Sha512 as Sha512Hasher};

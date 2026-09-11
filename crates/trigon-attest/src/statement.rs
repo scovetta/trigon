@@ -172,6 +172,14 @@ fn equivalence_predicate(c: &Comparison) -> serde_json::Value {
             // differences are never benign and are counted separately for that reason.
             "executableDiffers": d.executable_differs,
         });
+        // The deterministic difference signature. What makes a published divergence something a
+        // maintainer can reproduce rather than argue with: not "your package does not rebuild" but
+        // "these four members differ in `zip.method`, under this stabilizer set". Deterministic and
+        // model-free, which is why it is inside the signed document while the Explainer's prose
+        // stays outside it.
+        if !d.codes.is_empty() {
+            p["differences"] = serde_json::json!(d.codes);
+        }
     }
     p
 }

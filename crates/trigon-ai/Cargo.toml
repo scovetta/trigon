@@ -1,0 +1,16 @@
+[package]
+name = "trigon-ai"
+version = "0.0.0"
+description = "The search half: strategy inference, build repair, and the budgets that bound them."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

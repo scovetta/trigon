@@ -848,18 +848,29 @@ mod build {
                 // be used, whether the build succeeded or failed.
                 bail!("void: {t}");
             }
+            // The log, always, whether the build worked or not. A successful build's log is what
+            // tells you *how* it succeeded, and until `trigon-store` exists this file is the whole
+            // run record. Next to the strategy and the artifact, which is where somebody looks.
+            let log_path = out.join("build.log");
+            if let Err(e) = std::fs::write(&log_path, &outcome.log_tail) {
+                tracing::warn!("could not write {}: {e}", log_path.display());
+            }
+
             if !outcome.succeeded() {
-                if verbose {
-                    eprintln!("\n{}", outcome.log_tail);
-                }
                 // Named here, where the log is in hand. Re-deriving it later from an error string
                 // would mean classifying our own prose instead of the build's output.
                 let signature = trigon_core::classify(&outcome.log_tail);
                 if verbose {
+                    // The compressed form, not the raw tail. A hundred kilobytes of dependency
+                    // chatter in a terminal buries the four lines that say what happened, and the
+                    // full text is on disk either way.
+                    let short = trigon_core::compress(&outcome.log_tail, 4096);
+                    eprintln!("\n{}", short.text);
                     println!("\n  failure   {signature}");
                     if !signature.repairable {
                         println!("            no strategy change fixes this one");
                     }
+                    println!("  log       {}", log_path.display());
                 }
                 return Err(BuildFailure {
                     phase: outcome
@@ -2147,6 +2158,93 @@ mod sweep {
             total,
             total / rows.len() as f64
         );
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn write(dir: &Path, rows: &str) -> PathBuf {
+            let p = dir.join("results.tsv");
+            std::fs::write(&p, rows).unwrap();
+            p
+        }
+
+        fn tmpdir(tag: &str) -> PathBuf {
+            let d = std::env::temp_dir().join(format!("trigon-sweep-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        #[test]
+        fn a_resumed_row_keeps_its_failure_cluster() {
+            // A long sweep always finishes by resuming. Losing the cluster on the way back in would
+            // empty the summary that is the reason to run it, and it would do so silently — which
+            // is exactly how the caveated-match rate went missing once already.
+            let d = tmpdir("cluster");
+            let p = write(
+                &d,
+                "pkg:npm/a@1\tbuild-failed:deps\t12.0\tcc/missing-header:python.h\n",
+            );
+            let got = completed(&p);
+            let (label, secs, cluster) = got.get("pkg:npm/a@1").unwrap();
+            assert_eq!(label, "build-failed:deps");
+            assert_eq!(*secs, 12.0);
+            assert_eq!(cluster.as_deref(), Some("cc/missing-header:python.h"));
+
+            let o = Outcome::Recorded(label.clone(), cluster.clone());
+            assert_eq!(o.cluster().as_deref(), Some("cc/missing-header:python.h"));
+        }
+
+        #[test]
+        fn a_results_file_written_before_clusters_existed_still_resumes() {
+            // Three columns, not four. Read as "no cluster recorded" rather than as a broken row:
+            // refusing to resume an older file would throw away hours of completed builds.
+            let d = tmpdir("legacy");
+            let p = write(&d, "pkg:npm/a@1\tnormalized\t12.0\n");
+            let got = completed(&p);
+            let (label, _, cluster) = got.get("pkg:npm/a@1").unwrap();
+            assert_eq!(label, "normalized");
+            assert!(cluster.is_none());
+        }
+
+        #[test]
+        fn a_resumed_match_still_counts_toward_the_rate() {
+            // The outcome label round-trips through the file as a string, and `as_match` parses it
+            // back. A spelling that does not parse drops the row out of the numerator without
+            // dropping it out of the denominator, which understates the rate and looks like data.
+            for label in [
+                "exact",
+                "normalized",
+                "normalized_with_caveats",
+                "divergent",
+            ] {
+                let o = Outcome::Recorded(label.to_string(), None);
+                assert!(
+                    o.as_match().is_some(),
+                    "`{label}` did not parse back into an outcome"
+                );
+                assert_eq!(o.label(), label);
+            }
+        }
+
+        #[test]
+        fn an_infrastructure_failure_is_not_counted_as_a_package_that_does_not_build() {
+            let ours = Outcome::Failed {
+                fault: trigon_core::Fault::Infra,
+                detail: "the mirror container did not start".into(),
+            };
+            assert!(
+                !ours.is_evidence(),
+                "our own fault is not evidence about the package"
+            );
+            let theirs = Outcome::BuildFailed {
+                phase: "build".into(),
+                signature: None,
+            };
+            assert!(!theirs.is_evidence());
+            assert!(Outcome::Compared(trigon_core::Match::Divergent).is_evidence());
+        }
     }
 }
 

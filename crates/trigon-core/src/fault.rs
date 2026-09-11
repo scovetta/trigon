@@ -49,3 +49,48 @@ impl Fault {
         matches!(self, Fault::Build)
     }
 }
+
+/// Which part of a build something happened in.
+///
+/// Lives here rather than in the sandbox because three crates that must not depend on a container
+/// runtime need to reason about it: the verdict names the phase a run failed in, the repair loop
+/// asks whether an attempt got *further* than the last one, and the cost model attributes time.
+/// Ordered, and the order is the build's own: `Setup < Source < Deps < Build < Collect`, so
+/// "reached a later phase" is a comparison rather than a table.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Setup,
+    Source,
+    Deps,
+    Build,
+    Collect,
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Phase::Setup => "setup",
+            Phase::Source => "source",
+            Phase::Deps => "deps",
+            Phase::Build => "build",
+            Phase::Collect => "collect",
+        })
+    }
+}
+
+impl std::str::FromStr for Phase {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        Ok(match s {
+            "setup" => Phase::Setup,
+            "source" => Phase::Source,
+            "deps" => Phase::Deps,
+            "build" => Phase::Build,
+            "collect" => Phase::Collect,
+            _ => return Err(()),
+        })
+    }
+}

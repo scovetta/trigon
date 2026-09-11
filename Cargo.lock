@@ -2013,6 +2013,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trigon-ai"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "trigon-core",
+]
+
+[[package]]
 name = "trigon-archive"
 version = "0.0.0"
 dependencies = [
@@ -2491,6 +2502,7 @@ dependencies = [
  "sha2",
  "toml",
  "trigon-archive",
+ "trigon-compare",
  "trigon-core",
 ]
 

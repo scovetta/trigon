@@ -1,10 +1,19 @@
 //! A framing-level description of how two stabilized archives differ.
 //!
-//! The differential test needs to answer "what, exactly, is different" rather than "the digests
-//! disagree", for one reason: a deviation list keyed by artifact name is a hiding place. Adding a
-//! filename to an exemption list takes no thought and silences a real bug as readily as a known
-//! one. A deviation keyed by *what the difference is* cannot: a wheel that differs for a new reason
-//! stays unexplained even though every other wheel in the corpus is exempt.
+//! Two callers need exactly this vocabulary, which is why it lives here rather than beside either
+//! of them:
+//!
+//! - **The differential test** answers "what, exactly, is different" rather than "the digests
+//!   disagree", for one reason: a deviation list keyed by artifact name is a hiding place. Adding a
+//!   filename to an exemption list takes no thought and silences a real bug as readily as a known
+//!   one. A deviation keyed by *what the difference is* cannot: a wheel that differs for a new
+//!   reason stays unexplained even though every other wheel in the corpus is exempt.
+//! - **The divergence attestation** must carry a *deterministic* difference signature
+//!   (`docs/09-attestations.md`), because a divergence is a public claim about someone else's
+//!   package and "these two files differ" is an accusation a maintainer cannot act on. `zip.method`
+//!   on four members is something they can.
+//!
+//! One implementation, because two would drift and the published one is signed.
 //!
 //! So each mismatch is reduced to a set of codes naming the fields that differ, and a deviation
 //! declares the codes it explains. An artifact is explained when every code it produced is claimed
@@ -26,6 +35,12 @@ use std::collections::BTreeSet;
 use trigon_archive::{Archive, Body, Entry, RawMeta, Trailer};
 
 /// Compare two stabilized archives and return every difference, named.
+///
+/// `reference` is the side being compared *against* and `ours` is what we produced: the upstream
+/// artifact and our rebuild in a comparison, the reference implementation's output and our
+/// stabilizer's in the differential test. The code names follow that, so
+/// `member-only-in-reference` in a divergence means the published artifact has a file our rebuild
+/// does not.
 ///
 /// An empty set from two archives with different digests means the difference is below this
 /// function's resolution, which is itself a finding: `signature` is the vocabulary the deviation

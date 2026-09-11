@@ -171,11 +171,43 @@ fn a_divergence_is_a_first_class_signed_claim() {
     assert_eq!(st.predicate_type, trigon_attest::DIVERGENCE);
     assert_eq!(st.predicate["members"]["differs"], 1);
 
+    // The deterministic difference signature, which is what separates a finding from an
+    // accusation. A maintainer can go and look at the member this names; "your package does not
+    // rebuild" gives them nothing to do.
+    let codes = st.predicate["differences"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a divergence must name its differences: {}", st.predicate));
+    assert!(
+        codes
+            .iter()
+            .any(|c| c.as_str().is_some_and(|s| s.starts_with("body@"))),
+        "{codes:?}"
+    );
+    assert!(
+        codes
+            .iter()
+            .any(|c| c.as_str().is_some_and(|s| s.contains("pkg/b.txt"))),
+        "the differing member should be named: {codes:?}"
+    );
+
     // And it re-derives like any other. A divergence a maintainer cannot reproduce is an accusation,
     // not a finding.
     let out = rederive(&st, u, r).unwrap();
     assert!(out.holds(), "{out:?}");
     assert_eq!(out.actual, Match::Divergent);
+}
+
+#[test]
+fn a_match_names_no_differences() {
+    // The field is absent rather than present-and-empty. A consumer checking `differences` as a
+    // truthy value should not have to also check its length.
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let st = Statement::equivalence("pkg-1.0.0.tar", &comparison(&u, &r));
+    assert!(
+        st.predicate.get("differences").is_none(),
+        "{}",
+        st.predicate
+    );
 }
 
 #[test]

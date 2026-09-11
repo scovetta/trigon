@@ -16,3 +16,4 @@ toml.workspace = true
 sha2.workspace = true
 trigon-core.workspace = true
 trigon-archive.workspace = true
+trigon-compare.workspace = true
