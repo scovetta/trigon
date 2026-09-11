@@ -413,3 +413,50 @@ async fn an_ordinary_dependency_does_not_trip_the_guard() {
     );
     m.shutdown().await;
 }
+
+#[test]
+fn the_source_filter_narrows_a_real_package() {
+    // Needs a published artifact and a checkout of the repository it came from, which the test
+    // does not fetch for itself. Point `TRIGON_GUARD_FIXTURE` at a directory holding `pkg.tgz` and
+    // `src/`:
+    //
+    //     trigon fetch pkg:npm/semver@7.6.3 --out $F/pkg.tgz
+    //     git clone --depth 1 -b v7.6.3 https://github.com/npm/node-semver $F/src
+    let Ok(fixture) = std::env::var("TRIGON_GUARD_FIXTURE") else {
+        eprintln!("skipped: set TRIGON_GUARD_FIXTURE to a directory with pkg.tgz and src/");
+        return;
+    };
+    let dir = std::path::Path::new(&fixture);
+    if !dir.join("pkg.tgz").is_file() || !dir.join("src").is_dir() {
+        eprintln!("skipped: {fixture} has no pkg.tgz and src/");
+        return;
+    }
+    let bytes = std::fs::read(dir.join("pkg.tgz")).unwrap();
+
+    let wide = trigon_mirror::GuardManifest::for_artifact(&bytes, trigon_core::Format::TarGz, None);
+    let narrow = trigon_mirror::GuardManifest::for_artifact_with_source(
+        &bytes,
+        trigon_core::Format::TarGz,
+        None,
+        &dir.join("src"),
+    );
+
+    // Every published file of a pure-JavaScript package is in its repository, so the source filter
+    // should remove most of the member set. What it leaves is whatever the publish step generated.
+    assert!(
+        !wide.members.is_empty(),
+        "the package has members worth guarding"
+    );
+    assert!(
+        narrow.members.len() < wide.members.len(),
+        "the source filter removed nothing: {} vs {}",
+        narrow.members.len(),
+        wide.members.len()
+    );
+    assert!(narrow.filtered_out > wide.filtered_out);
+    println!(
+        "guarded members: {} without the source tree, {} with it",
+        wide.members.len(),
+        narrow.members.len()
+    );
+}

@@ -161,6 +161,14 @@ enum Cmd {
         /// and that is reported as an assumption rather than pinned to a mirror that is not there.
         #[arg(long)]
         timewarp: Option<String>,
+        /// A checkout of the package's source.
+        ///
+        /// Narrows the artifact guard: a member the repository also contains is not evidence of
+        /// anything, because the build is entitled to fetch it and something else vendoring the
+        /// same file is ordinary. Without one the guard is wider than designed, which errs toward
+        /// voiding an honest run rather than missing a forged one.
+        #[arg(long)]
+        source: Option<PathBuf>,
     },
     /// Build the container image that runs the mirror inside a build's network island.
     ///
@@ -258,6 +266,14 @@ enum Cmd {
         /// Host the strategy calls the mirror, mapped by the runner to wherever it is.
         #[arg(long, default_value = "timewarp:8129")]
         timewarp: String,
+        /// A checkout of the package's source.
+        ///
+        /// Narrows the artifact guard: a member the repository also contains is not evidence of
+        /// anything, because the build is entitled to fetch it and something else vendoring the
+        /// same file is ordinary. Without one the guard is wider than designed, which errs toward
+        /// voiding an honest run rather than missing a forged one.
+        #[arg(long)]
+        source: Option<PathBuf>,
     },
 }
 
@@ -442,6 +458,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             definitions,
             mirror_image,
             timewarp,
+            source,
         } => rebuild::run(rebuild::Args {
             purl,
             artifact,
@@ -452,6 +469,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             definitions,
             mirror_image,
             timewarp,
+            source,
         }),
         #[cfg(feature = "build")]
         Cmd::Sweep {
@@ -496,6 +514,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             retain,
             mirror_image,
             timewarp,
+            source,
         } => build::run_with(
             &file,
             import,
@@ -509,6 +528,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             Some(&mirror_image),
             true,
             None,
+            source.as_deref(),
         ),
     }
 }
@@ -641,6 +661,7 @@ mod build {
         mirror_image: Option<&str>,
         verbose: bool,
         guard: Option<&Path>,
+        _source: Option<&Path>,
     ) -> Result<()> {
         let (instructions, digest, _custom) =
             crate::render_strategy(file, import, timewarp_host, false)?;
@@ -1270,6 +1291,8 @@ mod rebuild {
         pub definitions: Option<PathBuf>,
         pub mirror_image: String,
         pub timewarp: Option<String>,
+        /// A checkout of the package's source, when one is available locally.
+        pub source: Option<PathBuf>,
     }
 
     /// The ladder, in the order `docs/04-strategies.md` §6 sets out.
@@ -1362,11 +1385,16 @@ mod rebuild {
         // attack the whole design is shaped around: a strategy that downloads the published
         // artifact reproduces it byte for byte, passes every clean re-run, and is worth nothing.
         let guard = match std::fs::read(&upstream_path) {
-            Ok(bytes) => trigon_mirror::GuardManifest::for_artifact(
-                &bytes,
-                crate::resolve_format(&upstream_path, None)?,
-                Some(meta.url.clone()),
-            ),
+            Ok(bytes) => {
+                let format = crate::resolve_format(&upstream_path, None)?;
+                let url = Some(meta.url.clone());
+                match args.source.as_deref() {
+                    Some(dir) => trigon_mirror::GuardManifest::for_artifact_with_source(
+                        &bytes, format, url, dir,
+                    ),
+                    None => trigon_mirror::GuardManifest::for_artifact(&bytes, format, url),
+                }
+            }
             Err(_) => trigon_mirror::GuardManifest::default(),
         };
         if verbose {
@@ -1462,6 +1490,7 @@ mod rebuild {
             Some(args.mirror_image.as_str()),
             verbose,
             enforced.then_some(guard_file.as_path()),
+            args.source.as_deref(),
         );
 
         if let Some(m) = mirror {
@@ -1757,6 +1786,10 @@ mod sweep {
                     definitions: args.definitions.clone(),
                     mirror_image: args.mirror_image.clone(),
                     timewarp: args.timewarp.clone(),
+                    // A sweep has no checkout per target: the source cache that would supply one
+                    // is fleet work. The guard is wider than designed without it, which errs
+                    // toward voiding an honest run rather than missing a forged one.
+                    source: None,
                 },
                 false,
             )

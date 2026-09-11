@@ -103,9 +103,10 @@ M1 needs **two** corpora, and conflating them was a mistake in an earlier draft.
 **The artifact-hash check is in**, ahead of its milestone, because the egress work made it cheap:
 everything a build fetches now crosses one process. Both controls from
 [`12-security.md`](12-security.md) §2 are live and tested against the real registry. The run outcome
-`Void` exists and is reported. What is not yet implemented is two of the four member filters, the
-stock-content list and the also-in-source check, which means the guard is currently narrower than
-designed rather than wider: it can miss a smuggled member, and it will not fire on an innocent one.
+`Void` exists and is reported, and all four member filters are in. The one that is not automatic is
+also-in-source: it needs a checkout, which `--source` supplies and which a sweep has no per-target
+equivalent of until the source cache exists. Without it the guard is wider than designed, which errs
+toward voiding an honest run rather than missing a forged one.
 
 ### M2. Attestations (2 weeks)
 

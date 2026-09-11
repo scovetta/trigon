@@ -63,6 +63,30 @@ impl GuardManifest {
     /// Filtering narrows what triggers a `Void` and changes nothing about the comparison: a dropped
     /// member is still compared member-for-member when the verdict is decided.
     pub fn for_artifact(bytes: &[u8], format: Format, url: Option<String>) -> Self {
+        Self::build(bytes, format, url, &BTreeSet::new())
+    }
+
+    /// As [`Self::for_artifact`], also dropping anything byte-identical to a file in the source.
+    ///
+    /// A file the artifact ships and the repository also contains is not evidence of anything: the
+    /// build is entitled to fetch it, and something else in the ecosystem vendoring the same file
+    /// is ordinary rather than suspicious. Guarding it produces a `Void` on an honest run, and a
+    /// control that fires on honest runs is one people turn off.
+    pub fn for_artifact_with_source(
+        bytes: &[u8],
+        format: Format,
+        url: Option<String>,
+        source_tree: &std::path::Path,
+    ) -> Self {
+        Self::build(bytes, format, url, &digest_tree(source_tree))
+    }
+
+    fn build(
+        bytes: &[u8],
+        format: Format,
+        url: Option<String>,
+        in_source: &BTreeSet<Digest>,
+    ) -> Self {
         let artifact = Digest::from_bytes(Sha256::digest(bytes).into());
         let mut members = BTreeSet::new();
         let mut filtered_out = 0;
@@ -78,11 +102,12 @@ impl GuardManifest {
                 let Ok(body) = e.stabilized_bytes() else {
                     continue;
                 };
-                if !guardable(&e.path, body.len() as u64) {
+                let digest = Digest::from_bytes(Sha256::digest(&body).into());
+                if !guardable(&e.path, &body) || in_source.contains(&digest) {
                     filtered_out += 1;
                     continue;
                 }
-                members.insert(Digest::from_bytes(Sha256::digest(&body).into()));
+                members.insert(digest);
             }
         }
 
@@ -103,14 +128,101 @@ impl GuardManifest {
 ///
 /// Executables are guarded whatever their size: they are what an attacker wants to smuggle, and a
 /// size threshold that let a small `.so` through would exempt the only case that matters.
-fn guardable(path: &EntryPath, bytes: u64) -> bool {
-    if bytes == 0 {
+fn guardable(path: &EntryPath, body: &[u8]) -> bool {
+    if body.is_empty() {
         return false;
     }
-    match ContentKind::classify(path) {
-        ContentKind::Executable => true,
-        _ => bytes >= MIN_GUARDED_BYTES,
+    // Executables first, and unconditionally. They are what an attacker wants to smuggle, so
+    // neither a size threshold nor a content rule gets to exempt one.
+    if ContentKind::classify(path) == ContentKind::Executable {
+        return true;
     }
+    body.len() as u64 >= MIN_GUARDED_BYTES && !is_stock(path, body)
+}
+
+/// Whether a member is boilerplate that unrelated packages carry byte-identical copies of.
+///
+/// The size threshold does not cover this. An Apache-2.0 LICENSE is eleven kilobytes and a GPL is
+/// thirty-five, so both sail past it, and they are byte-identical across thousands of packages: a
+/// guard that included one would void any build that downloaded any other Apache-2.0 package. Which
+/// is most builds.
+///
+/// Matched on the name *and* the content. Name alone would drop a file someone chose to call
+/// `LICENSE` that holds something else; content alone would drop source that quotes a licence
+/// header, which plenty of source does.
+fn is_stock(path: &EntryPath, body: &[u8]) -> bool {
+    let name = String::from_utf8_lossy(path.file_name()).to_ascii_uppercase();
+    let stem = name.split('.').next().unwrap_or(&name).to_string();
+
+    // Generated markers, whatever they contain: they exist to be present, not to hold anything.
+    if matches!(
+        name.as_str(),
+        ".GITKEEP" | ".NPMIGNORE" | "PY.TYPED" | ".KEEP"
+    ) {
+        return true;
+    }
+    // Nothing but whitespace is the same file everywhere.
+    if body.iter().all(|b| b.is_ascii_whitespace()) {
+        return true;
+    }
+
+    let licence_name = matches!(
+        stem.as_str(),
+        "LICENSE" | "LICENCE" | "COPYING" | "COPYRIGHT" | "NOTICE" | "UNLICENSE" | "UNLICENCE"
+    );
+    if !licence_name {
+        return false;
+    }
+    // A prefix is enough: licence texts differ in a copyright line near the top and are identical
+    // for thousands of lines after it, and reading the whole of a large file to decide this is
+    // waste on a path that runs per member.
+    let head = &body[..body.len().min(8192)];
+    let text = String::from_utf8_lossy(head);
+    const MARKERS: &[&str] = &[
+        "Apache License",
+        "Permission is hereby granted, free of charge",
+        "Redistribution and use in source and binary forms",
+        "GNU GENERAL PUBLIC LICENSE",
+        "GNU LESSER GENERAL PUBLIC LICENSE",
+        "GNU AFFERO GENERAL PUBLIC LICENSE",
+        "Mozilla Public License",
+        "THE SOFTWARE IS PROVIDED",
+        "This is free and unencumbered software released into the public domain",
+        "PERMISSION IS HEREBY GRANTED",
+    ];
+    MARKERS.iter().any(|m| text.contains(m))
+}
+
+/// Every file in a source tree, by content digest.
+///
+/// Walked rather than asked of git, because what matters is what is on disk at the commit the
+/// build checks out, and a `.gitignore`d file the build generates is not in the repository's index
+/// but is in the tree the artifact was packed from.
+fn digest_tree(root: &std::path::Path) -> BTreeSet<Digest> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            // `.git` holds packed objects, not source: hashing it finds nothing and costs plenty.
+            if p.file_name().is_some_and(|n| n == ".git") {
+                continue;
+            }
+            match e.file_type() {
+                Ok(t) if t.is_dir() => stack.push(p),
+                Ok(t) if t.is_file() => {
+                    if let Ok(bytes) = std::fs::read(&p) {
+                        out.insert(Digest::from_bytes(Sha256::digest(&bytes).into()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// Why a run is `Void`.
@@ -349,6 +461,123 @@ mod tests {
             Some(&innocent),
         );
         assert!(g.trips().is_empty());
+    }
+
+    const APACHE: &str = "\n                                 Apache License\n                           Version 2.0, January 2004\n                        http://www.apache.org/licenses/\n\n   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n";
+
+    #[test]
+    fn stock_licence_text_is_not_guarded() {
+        // The size threshold does not cover this. An Apache-2.0 LICENSE is eleven kilobytes and a
+        // GPL is thirty-five, so both sail past it, and they are byte-identical across thousands of
+        // packages. Guarding one voids any build that downloads any other Apache-2.0 package.
+        let licence = format!("{APACHE}{}", "x".repeat(9000));
+        let artifact = tgz(&[
+            ("pkg/LICENSE", licence.as_bytes()),
+            ("pkg/index.js", &vec![b'x'; 8192]),
+        ]);
+        let m = GuardManifest::for_artifact(&artifact, Format::TarGz, None);
+        assert_eq!(m.members.len(), 1, "only the real member is guarded");
+        assert_eq!(m.filtered_out, 1);
+
+        // And a build downloading an unrelated package with the same licence is not voided.
+        let g = Guard::new(m);
+        let other = tgz(&[("other/LICENSE", licence.as_bytes())]);
+        g.observe(
+            "https://registry.npmjs.org/other/-/other-1.0.0.tgz",
+            Digest::from_bytes(Sha256::digest(&other).into()),
+            Some(&other),
+        );
+        assert!(g.trips().is_empty());
+    }
+
+    #[test]
+    fn a_file_merely_called_licence_is_still_guarded() {
+        // Name alone would drop whatever someone chose to put in a file called LICENSE, which is
+        // exactly where an attacker would put something once the rule was known.
+        let payload = vec![b'Z'; 9000];
+        let artifact = tgz(&[("pkg/LICENSE", &payload)]);
+        let m = GuardManifest::for_artifact(&artifact, Format::TarGz, None);
+        assert_eq!(
+            m.members.len(),
+            1,
+            "no licence marker in it, so it is not stock"
+        );
+    }
+
+    #[test]
+    fn source_that_quotes_a_licence_header_is_still_guarded() {
+        // Content alone would drop source that carries a licence header, and plenty of source does.
+        let mut src = APACHE.as_bytes().to_vec();
+        src.extend(vec![b'c'; 9000]);
+        let artifact = tgz(&[("pkg/vendored.js", &src)]);
+        let m = GuardManifest::for_artifact(&artifact, Format::TarGz, None);
+        assert_eq!(m.members.len(), 1, "the name is not a licence name");
+    }
+
+    #[test]
+    fn an_executable_is_never_dropped_by_the_stock_rule() {
+        // Ordering matters: a guard that exempted `LICENSE.so` because of its name would exempt
+        // the one case worth catching.
+        let mut body = APACHE.as_bytes().to_vec();
+        body.extend(vec![0u8; 9000]);
+        let artifact = tgz(&[("pkg/LICENSE.so", &body)]);
+        let m = GuardManifest::for_artifact(&artifact, Format::TarGz, None);
+        assert_eq!(
+            m.members.len(),
+            1,
+            "an executable is guarded whatever it is called"
+        );
+    }
+
+    #[test]
+    fn a_member_that_is_also_in_the_source_tree_is_not_guarded() {
+        // A file the artifact ships and the repository also contains is not evidence of anything:
+        // the build is entitled to fetch it, and something else vendoring the same file is
+        // ordinary rather than suspicious.
+        let vendored = vec![b'V'; 9000];
+        let own = vec![b'O'; 9000];
+        let artifact = tgz(&[("pkg/vendored.js", &vendored), ("pkg/own.js", &own)]);
+
+        let dir = std::env::temp_dir().join(format!("trigon-guard-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib/vendored.js"), &vendored).unwrap();
+        // Present in the repository under a different path, which is the normal case: the filter
+        // is on content, not on where the file sits.
+        let m = GuardManifest::for_artifact_with_source(&artifact, Format::TarGz, None, &dir);
+        assert_eq!(
+            m.members.len(),
+            1,
+            "the vendored file is dropped, the package's own is kept"
+        );
+        assert_eq!(m.filtered_out, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_source_tree_guards_everything() {
+        // Failing open here would be the wrong direction: a filter that cannot read the source
+        // should narrow nothing rather than silently drop the whole member set.
+        let artifact = tgz(&[("pkg/index.js", &vec![b'x'; 8192])]);
+        let m = GuardManifest::for_artifact_with_source(
+            &artifact,
+            Format::TarGz,
+            None,
+            std::path::Path::new("/nonexistent-source-tree"),
+        );
+        assert_eq!(m.members.len(), 1);
+    }
+
+    #[test]
+    fn generated_markers_are_not_guarded() {
+        let artifact = tgz(&[
+            ("pkg/.gitkeep", &vec![b' '; 9000]),
+            ("pkg/py.typed", &vec![b'\n'; 9000]),
+        ]);
+        let m = GuardManifest::for_artifact(&artifact, Format::TarGz, None);
+        assert!(m.members.is_empty());
+        assert_eq!(m.filtered_out, 2);
     }
 
     #[test]
