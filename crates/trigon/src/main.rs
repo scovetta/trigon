@@ -181,6 +181,30 @@ enum Cmd {
         #[arg(long, default_value_t = 8129)]
         port: u16,
     },
+    /// Rebuild many packages and report the rate.
+    ///
+    /// One data point is an anecdote. This is what turns a working pipeline into a number, and the
+    /// number is only meaningful because outcomes are separated: a package that does not reproduce
+    /// and a build our own infrastructure could not run are different findings.
+    #[cfg(feature = "build")]
+    Sweep {
+        /// A file of package URLs, one per line. `#` comments and blank lines are skipped.
+        targets: PathBuf,
+        #[arg(long)]
+        image: String,
+        #[arg(long, default_value = "./trigon-sweep")]
+        work: PathBuf,
+        #[arg(long, default_value = "open")]
+        egress: String,
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+        #[arg(long)]
+        definitions: Option<PathBuf>,
+        #[arg(long, default_value = "localhost/trigon-mirror:latest")]
+        mirror_image: String,
+        #[arg(long)]
+        timewarp: Option<String>,
+    },
     /// Ask a registry what it knows about a package.
     #[cfg(feature = "build")]
     Resolve {
@@ -426,6 +450,26 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             timewarp,
         }),
         #[cfg(feature = "build")]
+        Cmd::Sweep {
+            targets,
+            image,
+            work,
+            egress,
+            timeout,
+            definitions,
+            mirror_image,
+            timewarp,
+        } => sweep::run(sweep::Args {
+            targets,
+            image,
+            work,
+            egress,
+            timeout,
+            definitions,
+            mirror_image,
+            timewarp,
+        }),
+        #[cfg(feature = "build")]
         Cmd::MirrorImage { tag } => mirror::build_image(&tag),
         #[cfg(feature = "build")]
         Cmd::Mirror { port } => mirror::serve(port),
@@ -459,6 +503,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             &timewarp,
             None,
             Some(&mirror_image),
+            true,
         ),
     }
 }
@@ -589,6 +634,7 @@ mod build {
         timewarp_host: &str,
         mirror_addr: Option<&str>,
         mirror_image: Option<&str>,
+        verbose: bool,
     ) -> Result<()> {
         let (instructions, digest, _custom) =
             crate::render_strategy(file, import, timewarp_host, false)?;
@@ -650,33 +696,38 @@ mod build {
             let handle = runner.start(&plan, &opts).await?;
             let outcome = handle.wait().await?;
 
-            println!("strategy {}", &digest[..16]);
-            println!("  egress    {}", outcome.egress);
-            println!("  isolation {:?}", outcome.isolation);
-            for (phase, d) in &outcome.timings {
-                match d {
-                    // `None` means no data, never zero. A timing we failed to read is not a fast
-                    // phase, and reporting it as one poisons every average downstream.
-                    Some(d) => println!("  {phase:?}{:>10.1}s", d.as_secs_f64()),
-                    None => println!("  {phase:?}      no data"),
+            if verbose {
+                println!("strategy {}", &digest[..16]);
+                println!("  egress    {}", outcome.egress);
+                println!("  isolation {:?}", outcome.isolation);
+                for (phase, d) in &outcome.timings {
+                    match d {
+                        // `None` means no data, never zero. A timing we failed to read is not a
+                        // fast phase, and reporting it as one poisons every average downstream.
+                        Some(d) => println!("  {phase:?}{:>10.1}s", d.as_secs_f64()),
+                        None => println!("  {phase:?}      no data"),
+                    }
+                }
+                if !outcome.attestable {
+                    println!(
+                        "\n  not attestable: this runner enforces no mirror and records no \
+                         network transcript, so it cannot claim the build fetched nothing it \
+                         should not have"
+                    );
+                }
+                match (&outcome.artifact, outcome.succeeded()) {
+                    (Some(p), _) => println!("\n  artifact  {}", p.display()),
+                    (None, true) => println!(
+                        "\n  the build succeeded but produced no single artifact. Check \
+                         output_path: a glob matching several files does not identify one."
+                    ),
+                    (None, false) => {}
                 }
             }
-            if !outcome.attestable {
-                println!(
-                    "\n  not attestable: this runner enforces no mirror and records no network \
-                     transcript, so it cannot claim the build fetched nothing it should not have"
-                );
-            }
-            match (&outcome.artifact, outcome.succeeded()) {
-                (Some(p), _) => println!("\n  artifact  {}", p.display()),
-                (None, true) => println!(
-                    "\n  the build succeeded but produced no single artifact. Check output_path: \
-                     a glob matching several files does not identify one."
-                ),
-                (None, false) => {}
-            }
             if !outcome.succeeded() {
-                eprintln!("\n{}", outcome.log_tail);
+                if verbose {
+                    eprintln!("\n{}", outcome.log_tail);
+                }
                 bail!(
                     "build failed in {:?} with exit {}",
                     outcome.failed_in,
@@ -1133,6 +1184,46 @@ mod rebuild {
         for_ecosystem,
     };
 
+    /// How far a rebuild got, and what it concluded.
+    ///
+    /// A sweep needs this rather than prose plus an error: "47 failed" is not a finding, and the
+    /// difference between no strategy, a build that would not run, and a real divergence is the
+    /// whole reason for a reproduction rate to mean anything.
+    #[derive(Clone, Debug)]
+    pub enum Outcome {
+        Compared(trigon_core::Match),
+        /// No rung had anything to say. A scope statement, not a failure.
+        NoStrategy,
+        /// The build ran and did not finish.
+        BuildFailed {
+            phase: String,
+        },
+        /// Ours, the registry's, or a policy. Never the package's.
+        Failed {
+            fault: trigon_core::Fault,
+            detail: String,
+        },
+    }
+
+    impl Outcome {
+        pub fn label(&self) -> String {
+            match self {
+                Outcome::Compared(m) => m.to_string(),
+                Outcome::NoStrategy => "no-strategy".into(),
+                Outcome::BuildFailed { phase } => format!("build-failed:{phase}"),
+                Outcome::Failed { fault, .. } => format!("error:{fault:?}").to_lowercase(),
+            }
+        }
+
+        /// Whether this says anything about the package reproducing.
+        ///
+        /// An infrastructure fault is not an unreproducible package, and counting it as one is how
+        /// a reproduction rate becomes a number about our own reliability.
+        pub fn is_evidence(&self) -> bool {
+            matches!(self, Outcome::Compared(_))
+        }
+    }
+
     pub struct Args {
         pub purl: String,
         pub artifact: Option<String>,
@@ -1176,6 +1267,19 @@ mod rebuild {
     }
 
     pub fn run(args: Args) -> Result<()> {
+        let outcome = run_one(args, true)?;
+        match outcome {
+            Outcome::Compared(_) | Outcome::NoStrategy => Ok(()),
+            Outcome::BuildFailed { phase } => bail!("the build failed in {phase}"),
+            Outcome::Failed { detail, .. } => bail!("{detail}"),
+        }
+    }
+
+    /// One rebuild, reported rather than raised.
+    ///
+    /// Returns `Err` only for something that would stop a sweep entirely, such as an unusable
+    /// registry. Everything about one target, including its failures, comes back as an `Outcome`.
+    pub fn run_one(args: Args, verbose: bool) -> Result<Outcome> {
         let target = TargetRef::from_str(&args.purl)?;
         let client = Client::new(ClientConfig::default())?;
         let registry = for_ecosystem(target.ecosystem, client.clone())?;
@@ -1186,10 +1290,18 @@ mod rebuild {
         std::fs::create_dir_all(&args.work)?;
 
         // 1. What the registry knows.
-        let resolved = rt.block_on(registry.resolve(&target))?;
-        let meta = resolved.pick(args.artifact.as_deref())?.clone();
-        println!("{}", resolved.reference);
-        println!("  artifact   {}", meta.id);
+        let resolved = match rt.block_on(registry.resolve(&target)) {
+            Ok(r) => r,
+            Err(e) => return Ok(classify(&e)),
+        };
+        let meta = match resolved.pick(args.artifact.as_deref()) {
+            Ok(m) => m.clone(),
+            Err(e) => return Ok(classify(&e)),
+        };
+        if verbose {
+            println!("{}", resolved.reference);
+            println!("  artifact   {}", meta.id);
+        }
 
         // 2. A strategy, from the first rung that has one.
         // Under `mirror-only` the mirror runs inside the build's network island rather than here:
@@ -1205,7 +1317,9 @@ mod rebuild {
             }
             Some("auto") => {
                 let handle = rt.block_on(async { trigon_mirror::Mirror::new()?.serve(0).await })?;
-                println!("  mirror     serving the index as of the publish date");
+                if verbose {
+                    println!("  mirror     serving the index as of the publish date");
+                }
                 Some(handle)
             }
             _ => None,
@@ -1228,32 +1342,33 @@ mod rebuild {
             timewarp_host.clone(),
         );
         let Some(candidate) = rt.block_on(trigon_registry::infer(&rungs, &resolved))? else {
-            bail!(
-                "no rung produced a strategy for {}. The rungs available here are a checked-in \
-                 definition and the {} heuristic; a target that needs more than those needs the \
-                 source-discovery ladder or a human.",
-                resolved.reference,
-                target.ecosystem
-            );
+            return Ok(Outcome::NoStrategy);
         };
         let loc = candidate.strategy.location().cloned().unwrap_or_default();
-        println!("  source     {} @ {}", loc.repo, loc.git_ref);
-        println!(
-            "  strategy   {:?}, commit found by {:?}, confidence {:?}",
-            candidate.derivation, candidate.discovery, candidate.confidence
-        );
-        for a in &candidate.assumptions {
-            // Printed, not buried. A divergence has to be readable against the guesses that
-            // produced it rather than taken as a fact about the package.
-            println!("  assuming   {a}");
+        if verbose {
+            println!("  source     {} @ {}", loc.repo, loc.git_ref);
+            println!(
+                "  strategy   {:?}, commit found by {:?}, confidence {:?}",
+                candidate.derivation, candidate.discovery, candidate.confidence
+            );
+            for a in &candidate.assumptions {
+                // Printed, not buried. A divergence has to be readable against the guesses that
+                // produced it rather than taken as a fact about the package.
+                println!("  assuming   {a}");
+            }
         }
 
         // 3. The published bytes.
         let upstream_path = args.work.join(meta.id.as_str());
         let mut file = std::fs::File::create(&upstream_path)?;
-        let upstream_digest = rt.block_on(registry.fetch(&meta, &mut file))?;
+        let upstream_digest = match rt.block_on(registry.fetch(&meta, &mut file)) {
+            Ok(d) => d,
+            Err(e) => return Ok(classify(&e)),
+        };
         drop(file);
-        println!("  published  sha256 {}", &upstream_digest.to_hex()[..16]);
+        if verbose {
+            println!("  published  sha256 {}", &upstream_digest.to_hex()[..16]);
+        }
 
         // 4. Build it.
         let strategy_file = args.work.join("strategy.yaml");
@@ -1263,7 +1378,7 @@ mod rebuild {
         )?;
         let out = args.work.join("rebuild");
         let mirror_addr = mirror.as_ref().map(|m| m.host());
-        crate::build::run_with(
+        let built = crate::build::run_with(
             &strategy_file,
             false,
             &args.image,
@@ -1274,33 +1389,78 @@ mod rebuild {
             timewarp_host.as_deref().unwrap_or("timewarp"),
             mirror_addr.as_deref(),
             Some(args.mirror_image.as_str()),
-        )?;
+            verbose,
+        );
 
         if let Some(m) = mirror {
             use std::sync::atomic::Ordering;
             let s = m.stats();
             // Printed because a claim of a pinned dependency graph should be able to show the pin
             // did something. Zero filtered requests means the build never asked the mirror.
-            println!(
-                "\n  mirror     {} index request(s), {} version(s) withheld",
-                s.index_requests.load(Ordering::Relaxed),
-                s.versions_withheld.load(Ordering::Relaxed),
-            );
+            if verbose {
+                println!(
+                    "\n  mirror     {} index request(s), {} version(s) withheld",
+                    s.index_requests.load(Ordering::Relaxed),
+                    s.versions_withheld.load(Ordering::Relaxed),
+                );
+            }
             rt.block_on(m.shutdown());
+        }
+        if let Err(e) = built {
+            return Ok(build_outcome(&e));
         }
 
         // 5. Compare, with the same code path `verify` uses.
-        let rebuilt = newest_file(&out)
-            .ok_or_else(|| anyhow::anyhow!("the build produced no artifact to compare"))?;
-        println!();
-        crate::verify(
+        let Some(rebuilt) = newest_file(&out) else {
+            return Ok(Outcome::BuildFailed {
+                phase: "collect".into(),
+            });
+        };
+        let set = crate::resolve_profile(
             &upstream_path,
-            &rebuilt,
             None,
-            None,
-            OutputFormat::Text,
-            false,
-        )
+            crate::resolve_format(&upstream_path, None)?,
+        )?;
+        let a = std::fs::read(&upstream_path)?;
+        let b = std::fs::read(&rebuilt)?;
+        let comparison = match compare_bytes(
+            a,
+            b,
+            crate::resolve_format(&upstream_path, None)?,
+            &set,
+            &Limits::default(),
+        ) {
+            Ok(c) => c,
+            Err(e) => return Ok(classify(&e)),
+        };
+        if verbose {
+            println!();
+            print_text(&comparison, false);
+        }
+        Ok(Outcome::Compared(comparison.outcome))
+    }
+
+    /// An error that stopped one target, as an outcome.
+    fn classify<E: trigon_core::Classify + std::fmt::Display>(e: &E) -> Outcome {
+        Outcome::Failed {
+            fault: e.fault(),
+            detail: e.to_string(),
+        }
+    }
+
+    /// A build failure, keeping the phase it died in.
+    ///
+    /// The phase is the difference between "our infrastructure" and "this package does not build",
+    /// and collapsing them makes a sweep's numbers uninterpretable.
+    fn build_outcome(e: &anyhow::Error) -> Outcome {
+        let text = e.to_string();
+        let phase = ["deps", "build", "collect", "source", "setup"]
+            .into_iter()
+            .find(|p| text.to_lowercase().contains(p))
+            .unwrap_or("build");
+        Outcome::BuildFailed {
+            phase: phase.to_string(),
+        }
     }
 
     /// The artifact the build left behind.
@@ -1405,5 +1565,132 @@ mod mirror {
             handle.shutdown().await;
             Ok(())
         })
+    }
+}
+
+#[cfg(feature = "build")]
+mod sweep {
+    use std::time::Instant;
+
+    use super::*;
+    use crate::rebuild::Outcome;
+
+    pub struct Args {
+        pub targets: PathBuf,
+        pub image: String,
+        pub work: PathBuf,
+        pub egress: String,
+        pub timeout: u64,
+        pub definitions: Option<PathBuf>,
+        pub mirror_image: String,
+        pub timewarp: Option<String>,
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        let text = std::fs::read_to_string(&args.targets)
+            .with_context(|| format!("reading {}", args.targets.display()))?;
+        let purls: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        if purls.is_empty() {
+            bail!("{} has no targets", args.targets.display());
+        }
+        println!("sweeping {} targets\n", purls.len());
+
+        let mut rows: Vec<(String, Outcome, f64)> = Vec::new();
+        for (i, purl) in purls.iter().enumerate() {
+            let started = Instant::now();
+            // A per-target directory, or one run's artifacts are collected as another's.
+            let work = args.work.join(format!("{i:03}"));
+            let _ = std::fs::remove_dir_all(&work);
+
+            let outcome = crate::rebuild::run_one(
+                crate::rebuild::Args {
+                    purl: purl.to_string(),
+                    artifact: None,
+                    image: args.image.clone(),
+                    work,
+                    egress: args.egress.clone(),
+                    timeout: args.timeout,
+                    definitions: args.definitions.clone(),
+                    mirror_image: args.mirror_image.clone(),
+                    timewarp: args.timewarp.clone(),
+                },
+                false,
+            )
+            // A target that cannot even be parsed is that target's problem, not the sweep's.
+            .unwrap_or_else(|e| Outcome::Failed {
+                fault: trigon_core::Fault::Policy,
+                detail: e.to_string(),
+            });
+
+            let secs = started.elapsed().as_secs_f64();
+            println!(
+                "  {:<28} {:<20} {:>6.0}s   [{}/{}]",
+                short(purl),
+                outcome.label(),
+                secs,
+                i + 1,
+                purls.len()
+            );
+            rows.push((purl.to_string(), outcome, secs));
+        }
+
+        summarize(&rows);
+        Ok(())
+    }
+
+    fn short(purl: &str) -> String {
+        purl.strip_prefix("pkg:").unwrap_or(purl).to_string()
+    }
+
+    fn summarize(rows: &[(String, Outcome, f64)]) {
+        use std::collections::BTreeMap;
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for (_, o, _) in rows {
+            *counts.entry(o.label()).or_default() += 1;
+        }
+
+        println!("\n  {} targets", rows.len());
+        for (label, n) in &counts {
+            println!("    {label:<22} {n}");
+        }
+
+        // The denominator is the load-bearing part. A package that did not reproduce and a build
+        // our own infrastructure could not run are different findings, and averaging them produces
+        // a number about our reliability wearing the costume of a reproduction rate.
+        let evidence: Vec<&Outcome> = rows
+            .iter()
+            .map(|(_, o, _)| o)
+            .filter(|o| o.is_evidence())
+            .collect();
+        let reproduced = evidence
+            .iter()
+            .filter(|o| matches!(o, Outcome::Compared(m) if *m != trigon_core::Match::Divergent))
+            .count();
+
+        println!();
+        if evidence.is_empty() {
+            println!("  no target reached a comparison, so there is no rate to report");
+        } else {
+            println!(
+                "  {reproduced} of {} compared targets reproduced ({:.0}%)",
+                evidence.len(),
+                100.0 * reproduced as f64 / evidence.len() as f64
+            );
+            println!(
+                "  {} of {} targets reached a comparison at all",
+                evidence.len(),
+                rows.len()
+            );
+        }
+        let total: f64 = rows.iter().map(|(_, _, s)| s).sum();
+        println!(
+            "  {:.0}s total, {:.0}s mean",
+            total,
+            total / rows.len() as f64
+        );
     }
 }
