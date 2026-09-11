@@ -62,6 +62,12 @@ impl Island {
             mirror_host: None,
         };
 
+        // Sweep up after runs that did not get to tear down. A process killed by a wall-clock
+        // timeout, a Ctrl-C or an OOM leaves its network and its mirror container behind, and at
+        // fleet scale that is an unbounded leak on every worker: after one night of this machine's
+        // testing there were two orphaned networks and a container up for eleven hours.
+        prune_orphans(binary).await;
+
         run_ok(binary, &["network", "create", "--internal", &name]).await?;
         tracing::debug!(network = %name, "created an internal network");
 
@@ -216,4 +222,35 @@ async fn run_ok(binary: &str, args: &[&str]) -> Result<String, SandboxError> {
 
 fn container_start_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(30)
+}
+
+/// Remove islands whose mirror is gone.
+///
+/// Keyed on whether the mirror container is still running rather than on age, so a concurrent run
+/// is never disturbed: a live island always has one. A network that outlives its mirror can never
+/// be used again, because the mirror was its only route out.
+async fn prune_orphans(binary: &str) {
+    let Ok(list) = run_ok(binary, &["network", "ls", "--format", "{{.Name}}"]).await else {
+        return;
+    };
+    for name in list.lines().filter(|n| n.starts_with("trigon-")) {
+        let container = format!("{name}-mirror");
+        let running = run_ok(
+            binary,
+            &["inspect", "--format", "{{.State.Status}}", &container],
+        )
+        .await
+        .map(|s| s == "running")
+        .unwrap_or(false);
+        if running {
+            continue;
+        }
+        let _ = run_ok(binary, &["rm", "--force", &container]).await;
+        if run_ok(binary, &["network", "rm", "--force", name])
+            .await
+            .is_ok()
+        {
+            tracing::debug!(network = name, "removed an orphaned egress island");
+        }
+    }
 }
