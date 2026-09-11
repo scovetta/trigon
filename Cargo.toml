@@ -7,6 +7,7 @@ members = [
     "crates/trigon-stabilize",
     "crates/trigon-compare",
     "crates/trigon-strategy",
+    "crates/trigon-attest",
     "crates/trigon-sandbox",
     "crates/trigon-registry",
     "crates/trigon-mirror",
@@ -27,6 +28,7 @@ trigon-archive = { path = "crates/trigon-archive", version = "0.0.0" }
 trigon-stabilize = { path = "crates/trigon-stabilize", version = "0.0.0" }
 trigon-compare = { path = "crates/trigon-compare", version = "0.0.0" }
 trigon-strategy = { path = "crates/trigon-strategy", version = "0.0.0" }
+trigon-attest = { path = "crates/trigon-attest", version = "0.0.0" }
 trigon-sandbox = { path = "crates/trigon-sandbox", version = "0.0.0" }
 trigon-registry = { path = "crates/trigon-registry", version = "0.0.0" }
 trigon-mirror = { path = "crates/trigon-mirror", version = "0.0.0" }
@@ -43,6 +45,10 @@ tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 smallvec = { version = "1", features = ["union"] }
+# Signing. Pure Rust, no runtime: the verifier build links this and nothing that can open a socket.
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+base64 = "0.22"
 
 # Instrumentation. `tracing` itself is pure: no runtime, no network, no allocation when nothing is
 # subscribed, so the judgement-half crates may use it. The subscriber lives in the binary.

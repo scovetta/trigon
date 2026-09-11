@@ -114,12 +114,18 @@ toward voiding an honest run rather than missing a forged one.
 
 **Exit criteria:**
 
-- [ ] All four predicates emitted, plus a conformant SLSA Provenance v1 statement.
-- [ ] Signing works unsigned, with a local key, and with sigstore keyless including Rekor v2.
+- [x] `equivalence/v1` and `divergence/v1` emitted, DSSE-wrapped over RFC 8785 canonical bytes.
+      The remaining two predicates and SLSA Provenance v1 wait on `trigon-store`, which holds the
+      build record they describe.
+- [x] Signing works unsigned and with a local ed25519 key. Sigstore keyless and Rekor v2 remain.
 - [ ] The attestor runs as a separate process and **re-derives the claim before signing**.
-- [ ] **`trigon verify-attestation --rerun-comparison` succeeds against a bundle produced on a
-      different machine**, from a checkout that shares no state with the producer.
-- [ ] `trigon verify` refuses to compare across differing stabilizer-set digests.
+- [x] **`trigon verify-attestation --rerun-comparison`** re-derives the claim from the bundle and
+      two files, with no network and no trust in the producer. Still to prove: a bundle produced on
+      a different machine, from a checkout that shares no state with the producer.
+- [x] `trigon verify` refuses to compare across differing stabilizer-set digests
+      (`AttestError::SetMismatch`), and re-derivation checks the **raw** digests as well as the
+      stabilized ones — two artifacts that stabilize alike are the normal case, so the stabilized
+      check alone would accept a substituted artifact as proof of the claim.
 - [ ] **Stabilizer sets publish as content-addressed WASM components**, and
       `--rerun-comparison` loads the set named in the attestation rather than the one in the binary
       ([`09`](09-attestations.md) §7.1). A CI test asserts the WASM and native builds produce

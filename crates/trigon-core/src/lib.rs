@@ -10,6 +10,7 @@ mod digest;
 mod evidence;
 mod fault;
 mod format;
+pub mod jcs;
 mod note;
 mod outcome;
 mod path;

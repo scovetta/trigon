@@ -71,100 +71,55 @@ pub fn canonical(s: &Strategy) -> Result<String, StrategyError> {
 }
 
 fn canonical_value(v: &serde_yaml_ng::Value) -> Result<String, StrategyError> {
-    let mut out = String::new();
-    write_jcs(v, &mut out)?;
-    Ok(out)
+    // Canonicalization lives in `trigon-core` because the attestation layer needs the same one.
+    // Two implementations of RFC 8785 is two ways to disagree about a signature.
+    trigon_core::jcs::canonicalize(&to_json(v)?).map_err(|e| StrategyError::Invalid(e.to_string()))
 }
 
-/// RFC 8785 for the subset a strategy document can contain.
-fn write_jcs(v: &serde_yaml_ng::Value, out: &mut String) -> Result<(), StrategyError> {
+/// YAML to JSON, refusing what JCS cannot canonicalize.
+fn to_json(v: &serde_yaml_ng::Value) -> Result<serde_json::Value, StrategyError> {
     use serde_yaml_ng::Value;
-    match v {
-        Value::Null => out.push_str("null"),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+    Ok(match v {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Number(n) => {
             if n.is_f64() {
                 // JCS number formatting for floats is the hard part of the spec, and nothing in a
-                // strategy needs one. Refusing is better than serializing one a second
-                // implementation would format differently and then disagreeing about a signature.
+                // strategy needs one. Refusing beats emitting a form a second implementation would
+                // render differently and then disagreeing about a signature.
                 return Err(StrategyError::Invalid(format!(
                     "a strategy may not contain the floating-point value {n}: its canonical form \
                      is implementation-dependent, and this digest is signed"
                 )));
             }
-            out.push_str(&n.to_string());
-        }
-        Value::String(s) => write_json_string(s, out),
-        Value::Sequence(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_jcs(item, out)?;
+            match n.as_i64() {
+                Some(i) => serde_json::Value::from(i),
+                None => serde_json::Value::from(n.as_u64().unwrap_or(0)),
             }
-            out.push(']');
+        }
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Sequence(items) => {
+            serde_json::Value::Array(items.iter().map(to_json).collect::<Result<Vec<_>, _>>()?)
         }
         Value::Mapping(m) => {
-            // JCS orders members by the UTF-16 code units of their keys. Every key we emit is
-            // ASCII, where that coincides with byte order, and a non-ASCII key is refused rather
-            // than ordered by a rule this implementation does not fully implement.
-            let mut pairs: Vec<(String, &Value)> = Vec::with_capacity(m.len());
+            let mut out = serde_json::Map::new();
             for (k, val) in m {
                 let Value::String(k) = k else {
                     return Err(StrategyError::Invalid(
                         "a strategy mapping key must be a string".into(),
                     ));
                 };
-                if !k.is_ascii() {
-                    return Err(StrategyError::Invalid(format!(
-                        "non-ASCII mapping key `{k}`: JCS orders keys by UTF-16 code unit, which \
-                         this canonicalizer only implements for ASCII"
-                    )));
-                }
-                pairs.push((k.clone(), val));
+                out.insert(k.clone(), to_json(val)?);
             }
-            pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            out.push('{');
-            for (i, (k, val)) in pairs.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_json_string(k, out);
-                out.push(':');
-                write_jcs(val, out)?;
-            }
-            out.push('}');
+            serde_json::Value::Object(out)
         }
         Value::Tagged(t) => {
-            return write_jcs(&t.value, out).map_err(|_| {
-                StrategyError::Invalid(format!(
-                    "a strategy may not contain the YAML tag `{}`",
-                    t.tag
-                ))
-            });
+            return Err(StrategyError::Invalid(format!(
+                "a strategy may not contain the YAML tag `{}`",
+                t.tag
+            )));
         }
-    }
-    Ok(())
-}
-
-/// RFC 8785 string escaping: the two-character forms where they exist, `\u00xx` otherwise.
-fn write_json_string(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {

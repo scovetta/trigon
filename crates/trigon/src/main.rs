@@ -93,6 +93,47 @@ enum Cmd {
         /// List every differing member rather than the first few.
         #[arg(long)]
         explain: bool,
+        /// Write a DSSE-wrapped in-toto statement of the result here.
+        ///
+        /// Emitted for a divergence as readily as for a match: a negative result somebody else can
+        /// check is the more useful of the two, and one that only we can reproduce is an accusation.
+        #[arg(long)]
+        attest: Option<PathBuf>,
+        /// Sign the statement with an ed25519 key held in this file (32 raw bytes).
+        ///
+        /// Without one the bundle is unsigned. That is a complete, re-derivable claim that names
+        /// nobody, which is the honest default for a laptop.
+        #[arg(long, requires = "attest")]
+        key: Option<PathBuf>,
+        /// The name to record as the statement's subject. Defaults to the upstream file name.
+        #[arg(long, requires = "attest")]
+        subject: Option<String>,
+    },
+    /// Check an attestation against the artifacts it is about.
+    ///
+    /// The point of the whole design: this needs the bundle and two files, no network, and no trust
+    /// in us. Under `--rerun-comparison` it recomputes the claim from the bytes rather than reading
+    /// what the statement asserts.
+    VerifyAttestation {
+        /// A DSSE bundle, as written by `trigon verify --attest`.
+        bundle: PathBuf,
+        /// Recompute the equivalence claim from the artifacts instead of believing it.
+        #[arg(long)]
+        rerun_comparison: bool,
+        /// The published artifact. Required by `--rerun-comparison`.
+        #[arg(long, requires = "rerun_comparison")]
+        upstream: Option<PathBuf>,
+        /// The rebuilt artifact. Required by `--rerun-comparison`.
+        #[arg(long, requires = "rerun_comparison")]
+        rebuild: Option<PathBuf>,
+        /// Check the signature against this ed25519 public key, given as hex.
+        ///
+        /// Omitted, the signature is reported but not checked — and a bundle nobody pinned a key
+        /// for is worth exactly its re-derivation.
+        #[arg(long)]
+        public_key: Option<String>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output: OutputFormat,
     },
     /// Stabilize one artifact and write the result.
     ///
@@ -169,6 +210,12 @@ enum Cmd {
         /// voiding an honest run rather than missing a forged one.
         #[arg(long)]
         source: Option<PathBuf>,
+        /// Write a DSSE-wrapped statement of the result here.
+        #[arg(long)]
+        attest: Option<PathBuf>,
+        /// Sign it with an ed25519 key held in this file (32 raw bytes, or hex).
+        #[arg(long, requires = "attest")]
+        key: Option<PathBuf>,
     },
     /// Build the container image that runs the mirror inside a build's network island.
     ///
@@ -430,6 +477,9 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             profile: prof,
             output,
             explain,
+            attest,
+            key,
+            subject,
         } => verify(
             &upstream,
             &rebuild,
@@ -437,6 +487,26 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             prof.as_deref(),
             output,
             explain,
+            Attest {
+                to: attest.as_deref(),
+                key: key.as_deref(),
+                subject: subject.as_deref(),
+            },
+        ),
+        Cmd::VerifyAttestation {
+            bundle,
+            rerun_comparison,
+            upstream,
+            rebuild,
+            public_key,
+            output,
+        } => verify_attestation(
+            &bundle,
+            rerun_comparison,
+            upstream.as_deref(),
+            rebuild.as_deref(),
+            public_key.as_deref(),
+            output,
         ),
         Cmd::Stabilize {
             infile,
@@ -476,6 +546,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             mirror_image,
             timewarp,
             source,
+            attest,
+            key,
         } => rebuild::run(rebuild::Args {
             purl,
             artifact,
@@ -487,6 +559,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             mirror_image,
             timewarp,
             source,
+            attest,
+            key,
         }),
         #[cfg(feature = "build")]
         Cmd::Sweep {
@@ -796,6 +870,7 @@ fn verify(
     prof: Option<&str>,
     output: OutputFormat,
     explain: bool,
+    attest: Attest<'_>,
 ) -> Result<()> {
     let fmt = resolve_format(upstream, format)?;
     let set = resolve_profile(upstream, prof, fmt)?;
@@ -804,6 +879,13 @@ fn verify(
     let b = std::fs::read(rebuild).with_context(|| format!("reading {}", rebuild.display()))?;
 
     let c = compare_bytes(a, b, fmt, &set, &Limits::default())?;
+    if let Some(path) = attest.to {
+        let name = attest
+            .subject
+            .map(str::to_string)
+            .unwrap_or_else(|| file_name(upstream));
+        write_bundle(path, attest.key, &name, &c)?;
+    }
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&c)?),
         OutputFormat::Text => print_text(&c, explain),
@@ -1310,6 +1392,10 @@ mod rebuild {
         pub timewarp: Option<String>,
         /// A checkout of the package's source, when one is available locally.
         pub source: Option<PathBuf>,
+        /// Write a DSSE-wrapped statement of the comparison here.
+        pub attest: Option<PathBuf>,
+        /// Sign it with an ed25519 key held in this file.
+        pub key: Option<PathBuf>,
     }
 
     /// The ladder, in the order `docs/04-strategies.md` §6 sets out.
@@ -1569,6 +1655,18 @@ mod rebuild {
             println!();
             print_text(&comparison, false);
         }
+        // Reached only by a run that got this far, which is the point: every path that voids a run —
+        // a tripped artifact guard above all — returns before here, so no statement can be written
+        // about a run that is evidence of nothing. That is a property of the control flow rather
+        // than a check somebody has to remember to write.
+        if let Some(path) = &args.attest {
+            crate::write_bundle(
+                path,
+                args.key.as_deref(),
+                &crate::file_name(&upstream_path),
+                &comparison,
+            )?;
+        }
         Ok(Outcome::Compared(comparison.outcome))
     }
 
@@ -1807,6 +1905,10 @@ mod sweep {
                     // is fleet work. The guard is wider than designed without it, which errs
                     // toward voiding an honest run rather than missing a forged one.
                     source: None,
+                    // A sweep writes no statements. Its product is a rate, and 20 bundles nobody
+                    // asked for is 20 files to explain.
+                    attest: None,
+                    key: None,
                 },
                 false,
             )
@@ -1908,4 +2010,180 @@ mod sweep {
             total / rows.len() as f64
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Attestations
+//
+// The bundle is a DSSE envelope and nothing else: no wrapper object, no metadata sidecar. A
+// verifier's whole job is to decode one payload and check one signature, and every field we add
+// beside the envelope is a field that is not covered by that signature.
+
+/// Where a statement goes and who signs it. Grouped because they are one decision — whether this
+/// run leaves behind something a third party can check — and travel together everywhere.
+#[derive(Clone, Copy, Default)]
+struct Attest<'a> {
+    to: Option<&'a Path>,
+    key: Option<&'a Path>,
+    subject: Option<&'a str>,
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
+fn load_key(path: &Path) -> Result<trigon_attest::LocalKey> {
+    let raw = std::fs::read(path).with_context(|| format!("reading key {}", path.display()))?;
+    // Accept hex as well as raw bytes: a key pasted out of a terminal is hex more often than not.
+    let bytes = match std::str::from_utf8(&raw).map(str::trim) {
+        Ok(s) if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) => (0..64)
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+            .collect::<Result<Vec<_>, _>>()
+            .context("key file looked like hex but did not parse")?,
+        _ => raw,
+    };
+    Ok(trigon_attest::LocalKey::from_bytes(&bytes)?)
+}
+
+fn write_bundle(
+    path: &Path,
+    key: Option<&Path>,
+    subject: &str,
+    c: &trigon_compare::Comparison,
+) -> Result<()> {
+    use trigon_attest::Signer as _;
+
+    let st = trigon_attest::Statement::equivalence(subject, c);
+    let env = match key {
+        Some(k) => {
+            let key = load_key(k)?;
+            let env = trigon_attest::sign_statement(&st, &key)?;
+            eprintln!("signed with key {}", key.key_id());
+            eprintln!("public key: {}", key.public_hex());
+            env
+        }
+        None => trigon_attest::sign_statement(&st, &trigon_attest::Unsigned)?,
+    };
+    let mut json = serde_json::to_string_pretty(&env)?;
+    json.push('\n');
+    std::fs::write(path, json).with_context(|| format!("writing {}", path.display()))?;
+
+    eprintln!("attestation: {}", path.display());
+    if key.is_none() {
+        // Said once, plainly, at the moment it is produced. "Unsigned" and "signed by someone you
+        // do not trust" are different answers and only one of them is this bundle.
+        eprintln!(
+            "  unsigned — the claim is complete and checkable, but nothing here says who made it"
+        );
+    }
+    Ok(())
+}
+
+fn verify_attestation(
+    bundle: &Path,
+    rerun: bool,
+    upstream: Option<&Path>,
+    rebuild: Option<&Path>,
+    public_key: Option<&str>,
+    output: OutputFormat,
+) -> Result<()> {
+    let raw = std::fs::read(bundle).with_context(|| format!("reading {}", bundle.display()))?;
+    let env: trigon_attest::Envelope =
+        serde_json::from_slice(&raw).context("this file is not a DSSE envelope")?;
+    let payload = env.decoded_payload()?;
+    let st: trigon_attest::Statement = serde_json::from_slice(&payload)
+        .context("the envelope's payload is not an in-toto statement")?;
+
+    let signature = match (env.is_signed(), public_key) {
+        (false, _) => "unsigned".to_string(),
+        (true, None) => format!(
+            "present ({}), not checked — pass --public-key to check it",
+            env.signatures
+                .iter()
+                .map(|s| s.keyid.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        (true, Some(pk)) => {
+            let pae = env.pae()?;
+            // Any one signature verifying is enough; a bundle may carry several.
+            let ok = env
+                .signatures
+                .iter()
+                .filter(|s| !s.sig.is_empty())
+                .any(|s| trigon_attest::verify_signature(&pae, s, pk).is_ok());
+            if !ok {
+                bail!("no signature on this bundle verifies against that key");
+            }
+            "verified".to_string()
+        }
+    };
+
+    let rederived = if rerun {
+        let (u, r) = match (upstream, rebuild) {
+            (Some(u), Some(r)) => (u, r),
+            _ => bail!("--rerun-comparison needs both --upstream and --rebuild"),
+        };
+        let ub = std::fs::read(u).with_context(|| format!("reading {}", u.display()))?;
+        let rb = std::fs::read(r).with_context(|| format!("reading {}", r.display()))?;
+        Some(trigon_attest::rederive(&st, ub, rb)?)
+    } else {
+        None
+    };
+
+    match output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "subject": st.subject,
+                "predicateType": st.predicate_type,
+                "outcome": st.predicate["outcome"],
+                "signature": signature,
+                "rederived": rederived.as_ref().map(|d| serde_json::json!({
+                    "claimed": d.claimed,
+                    "actual": d.actual.to_string(),
+                    "stabilizerSet": d.stabilizer_set,
+                    "holds": d.holds(),
+                })),
+            }))?
+        ),
+        OutputFormat::Text => {
+            for s in &st.subject {
+                println!(
+                    "subject   {} ({})",
+                    s.name,
+                    s.digest.get("sha256").map(String::as_str).unwrap_or("?")
+                );
+            }
+            println!("predicate {}", st.predicate_type);
+            println!(
+                "claims    {}",
+                st.predicate["outcome"].as_str().unwrap_or("?")
+            );
+            println!("signature {signature}");
+            match &rederived {
+                Some(d) if d.holds() => println!(
+                    "rederived {} under {} — the claim holds",
+                    d.actual, d.stabilizer_set
+                ),
+                Some(d) => println!(
+                    "rederived {} under {}, but the statement claims {} — the claim does NOT hold",
+                    d.actual, d.stabilizer_set, d.claimed
+                ),
+                // Worth saying outright. Reading a statement is not checking it, and the difference
+                // is the entire reason this subcommand exists.
+                None => {
+                    println!("rederived not attempted — pass --rerun-comparison to check the claim")
+                }
+            }
+        }
+    }
+
+    if rederived.as_ref().is_some_and(|d| !d.holds()) {
+        std::process::exit(1);
+    }
+    Ok(())
 }

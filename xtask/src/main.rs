@@ -184,6 +184,13 @@ const FORBID_TRANSITIVE: &[(&str, &[&str])] = &[
         "trigon-strategy",
         &["trigon-ai", "trigon-registry", "tokio", "reqwest", "hyper"],
     ),
+    // The one a user checks for themselves. `trigon verify-attestation` links this and nothing
+    // else, so "here is a binary with no network client and no model code that re-derives our
+    // verdict" is a claim about a dependency tree rather than about a diagram.
+    (
+        "trigon-attest",
+        &["trigon-ai", "trigon-registry", "tokio", "reqwest", "hyper"],
+    ),
 ];
 
 /// Judgement-half crates declare no cargo features of their own, which leaves feature unification
@@ -194,6 +201,7 @@ const REQUIRE_NO_FEATURES: &[&str] = &[
     "trigon-stabilize",
     "trigon-compare",
     "trigon-strategy",
+    "trigon-attest",
 ];
 
 /// Crates where a `HashMap` in the source is a policy violation rather than a style preference.

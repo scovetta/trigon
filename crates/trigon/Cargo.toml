@@ -19,6 +19,7 @@ trigon-archive.workspace = true
 trigon-stabilize.workspace = true
 trigon-compare.workspace = true
 trigon-strategy.workspace = true
+trigon-attest.workspace = true
 trigon-sandbox = { workspace = true, optional = true }
 trigon-registry = { workspace = true, optional = true }
 trigon-mirror = { workspace = true, optional = true }

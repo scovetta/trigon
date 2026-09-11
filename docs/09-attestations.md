@@ -255,12 +255,19 @@ emit no `equivalence/v1` and no `divergence/v1` statement, and the verdict is `V
 ## 3. Signing
 
 ```rust
-#[async_trait]
 pub trait Signer: Send + Sync {
-    fn key_id(&self) -> &str;
-    async fn sign(&self, pae: &[u8]) -> Result<Signature, SignError>;
+    fn key_id(&self) -> String;
+    fn sign(&self, pae: &[u8]) -> Result<Signature, AttestError>;
 }
 ```
+
+**Synchronous, revised during implementation.** The trait was specified `#[async_trait]`, and the
+verifier build is why it is not. `trigon verify-attestation` links `trigon-attest` and must contain
+no async runtime — that is the claim §7 makes checkable, and `xtask policy` enforces it — so an
+async method here would drag `tokio` across the judgement line for the benefit of signers that do
+not exist yet. A synchronous trait is callable from an async context by whoever holds the runtime;
+the reverse needs an executor everywhere. A network signer (sigstore, KMS) blocks in its own
+implementation, or lives behind an async façade in a crate below the line.
 
 | Implementation | Use |
 |---|---|

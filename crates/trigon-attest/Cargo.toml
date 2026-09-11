@@ -1,0 +1,26 @@
+[package]
+name = "trigon-attest"
+version = "0.0.0"
+description = "in-toto statements, DSSE envelopes, and the signing seam."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+trigon-archive.workspace = true
+trigon-compare.workspace = true
+trigon-stabilize.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+tar = "0.4"
