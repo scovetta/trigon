@@ -30,7 +30,21 @@ pub struct Stats {
 }
 
 pub struct Mirror {
+    /// For index documents, which we parse. Transparent decompression is wanted here.
     client: reqwest::Client,
+    /// For artifact bodies, which we must not touch.
+    ///
+    /// A separate client with `no_gzip`, because reqwest's `gzip` feature decompresses any response
+    /// carrying `Content-Encoding: gzip` and hands back the plaintext. Registries serve `.tgz`
+    /// files that way, so the proxy was gunzipping a tarball once and forwarding the result under
+    /// the original content type: npm reported `zlib: invalid stored block lengths` and the build
+    /// failed in a way that read as the package's fault.
+    ///
+    /// Worse, and the reason this is a correctness bug rather than a compatibility one: the
+    /// artifact guard hashes the bytes as they go past. Decompressed bytes are not the artifact,
+    /// so the digest never matches the one we are guarding against — the single most important
+    /// control in the design was checking a transformed body. See `docs/12-security.md` §2.
+    passthrough: reqwest::Client,
     stats: Arc<Stats>,
     guard: Arc<crate::guard::Guard>,
 }
@@ -74,6 +88,11 @@ impl Mirror {
                 // Redirects are followed here. A client behind an enforced egress boundary cannot
                 // follow one itself: the destination is exactly what the boundary forbids.
                 .redirect(reqwest::redirect::Policy::limited(5))
+                .build()?,
+            passthrough: reqwest::Client::builder()
+                .user_agent(concat!("trigon-mirror/", env!("CARGO_PKG_VERSION")))
+                .redirect(reqwest::redirect::Policy::limited(5))
+                .no_gzip()
                 .build()?,
             stats: Arc::new(Stats::default()),
             guard: Arc::new(crate::guard::Guard::default()),
@@ -410,7 +429,7 @@ async fn proxy(mirror: &Mirror, url: &str, filter: &Filter) -> Result<Response, 
             url: url.to_string(),
         });
     }
-    let resp = mirror.client.get(url).send().await?;
+    let resp = mirror.passthrough.get(url).send().await?;
     // Redirects are followed here rather than handed back: the client may have no route to where
     // they point, which is the whole reason this proxies instead of redirecting.
     let resp = if resp.status().is_redirection() {
@@ -421,7 +440,7 @@ async fn proxy(mirror: &Mirror, url: &str, filter: &Filter) -> Result<Response, 
         {
             Some(next) => {
                 let next = next.to_string();
-                mirror.client.get(&next).send().await?
+                mirror.passthrough.get(&next).send().await?
             }
             None => resp,
         }
@@ -440,15 +459,30 @@ async fn proxy(mirror: &Mirror, url: &str, filter: &Filter) -> Result<Response, 
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
+    // Forwarded because the body is now passed through undecoded. Without it a client receiving a
+    // `Content-Encoding: gzip` body has no way to know, and the corruption simply moves from our
+    // side to theirs.
+    let content_encoding = resp
+        .headers()
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
     // Streamed, not buffered: an artifact can be gigabytes and the mirror serves a whole fleet.
     // The guard hashes as the bytes go past rather than holding them.
     let stream = guarded_stream(resp.bytes_stream(), mirror.guard.clone(), url.to_string());
-    Ok((
+    let mut out = (
         StatusCode::OK,
         [(header::CONTENT_TYPE, content_type)],
         Body::from_stream(stream),
     )
-        .into_response())
+        .into_response();
+    if let Some(enc) = content_encoding
+        && let Ok(v) = header::HeaderValue::from_str(&enc)
+    {
+        out.headers_mut().insert(header::CONTENT_ENCODING, v);
+    }
+    Ok(out)
 }
 
 /// Pass a body through, hashing it, and check it once it has finished.

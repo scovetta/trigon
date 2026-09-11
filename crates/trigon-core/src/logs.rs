@@ -90,7 +90,19 @@ const NOISE_PREFIXES: &[&str] = &[
     "Reading package lists",
     "Building dependency tree",
     "Reading state information",
+    // npm's `--loglevel` install table: one line per package, hundreds of them on a real tree.
+    "add\t",
 ];
+
+/// Whether a line is a transfer progress meter rather than output.
+///
+/// `wget`'s dot progress has no fixed prefix — it is an indented run of dots and a percentage — and
+/// it dominated a real log in the npm corpus: 55 MB of Node came down as roughly a thousand lines
+/// of dots, which is most of the file and none of the meaning. Ten consecutive dots is not
+/// something a diagnostic says.
+fn is_progress(line: &str) -> bool {
+    line.contains("..........")
+}
 
 /// Cut a log down to roughly `budget` bytes.
 ///
@@ -202,7 +214,7 @@ fn is_error(line: &str) -> bool {
 
 fn is_noise(line: &str) -> bool {
     let t = line.trim_start();
-    NOISE_PREFIXES.iter().any(|p| t.starts_with(p))
+    is_progress(t) || NOISE_PREFIXES.iter().any(|p| t.starts_with(p))
 }
 
 /// Collapse runs of identical lines.
@@ -362,6 +374,28 @@ mod tests {
         assert!(!c.text.contains('\u{7}'));
         assert!(!c.text.contains('\r'));
         assert!(c.text.contains("error: it broke"), "{}", c.text);
+    }
+
+    #[test]
+    fn a_download_progress_meter_does_not_survive() {
+        // 55 MB of Node came down as about a thousand lines of dots in a real sweep log, burying
+        // the one line that said why the build then failed.
+        let mut log = String::new();
+        for i in 0..1000 {
+            log.push_str(&format!(
+                " {}K .......... .......... .......... .......... .......... 99%  112M 0s\n",
+                i * 50
+            ));
+        }
+        log.push_str("node: error while loading shared libraries: libatomic.so.1\n");
+        let c = compress(&log, 4096);
+        assert!(c.text.contains("libatomic.so.1"), "{}", c.text);
+        assert!(
+            !c.text.contains(".........."),
+            "progress survived:\n{}",
+            c.text
+        );
+        assert!(c.ratio() > 20.0, "ratio was only {:.1}×", c.ratio());
     }
 
     #[test]

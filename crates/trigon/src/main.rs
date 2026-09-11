@@ -851,8 +851,15 @@ mod build {
             // The log, always, whether the build worked or not. A successful build's log is what
             // tells you *how* it succeeded, and until `trigon-store` exists this file is the whole
             // run record. Next to the strategy and the artifact, which is where somebody looks.
+            //
+            // `create_dir_all` first: a build that failed during the *image* build never reached
+            // the point where the output directory is made, and those are exactly the runs whose
+            // log nobody can otherwise see — which is how one target in the corpus came back
+            // `unknown` with nothing to read.
             let log_path = out.join("build.log");
-            if let Err(e) = std::fs::write(&log_path, &outcome.log_tail) {
+            if let Err(e) = std::fs::create_dir_all(out)
+                .and_then(|()| std::fs::write(&log_path, &outcome.log_tail))
+            {
                 tracing::warn!("could not write {}: {e}", log_path.display());
             }
 

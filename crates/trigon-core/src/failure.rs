@@ -140,6 +140,28 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // Found in the npm corpus: a slim Debian image has no `libatomic1`, and the Node build that
+        // needs it dies before printing anything of its own. The missing library *is* the repair
+        // and it is shared by every package that hits it, which is what makes it worth capturing.
+        code: "env/missing-shared-library",
+        needles: &["error while loading shared libraries"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        capture: Capture::Between("libraries: ", ":"),
+    },
+    Rule {
+        // An old interpreter on a new kernel. Node 5 and Node 9 both abort on contemporary glibc,
+        // which matters because the toolchain that published a package is part of what we are
+        // reproducing: the fix is a base image of the right vintage, not a newer toolchain.
+        code: "env/toolchain-crashed",
+        needles: &["Aborted (core dumped)"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        capture: Capture::None,
+    },
+    Rule {
         code: "env/missing-venv",
         needles: &["ensurepip is not available"],
         fault: Fault::Bug,
@@ -362,6 +384,17 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // npm records the publisher's `gitHead`, and a force-push or a rebase can leave it pointing
+        // at nothing. Not repairable by a strategy change: the recorded commit is simply gone, and
+        // the answer is source rediscovery or nothing.
+        code: "git/commit-not-in-repo",
+        needles: &["reference is not a tree"],
+        fault: Fault::Upstream,
+        retryable: false,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
         code: "git/repository-gone",
         needles: &["Repository not found"],
         fault: Fault::Upstream,
@@ -370,6 +403,25 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     // ---- ours ---------------------------------------------------------------------------------------
+    Rule {
+        // Our mirror handed the build a body it could not read. Named as ours, loudly, because the
+        // symptom — a corrupt tarball — reads exactly like a broken package and would otherwise be
+        // counted against one. Found when the mirror was transparently gunzipping artifacts.
+        code: "trigon/mirror-corrupted-artifact",
+        needles: &["Z_DATA_ERROR"],
+        fault: Fault::Bug,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "trigon/mirror-corrupted-artifact",
+        needles: &["zlib: invalid stored block lengths"],
+        fault: Fault::Bug,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
     Rule {
         code: "trigon/no-output",
         needles: &["no file matched the output path"],
@@ -578,6 +630,46 @@ mod tests {
         ] {
             assert_eq!(classify(log).code, code, "log: {log}");
         }
+    }
+
+    #[test]
+    fn the_failures_the_npm_corpus_actually_produced_are_named() {
+        // Added from a real sweep, where all three arrived as `unknown` — which is what an unnamed
+        // cluster is for: a pile of red rows nobody can act on until the rule exists.
+        for (log, key) in [
+            (
+                "node: error while loading shared libraries: libatomic.so.1: cannot open shared object file: No such file or directory",
+                "env/missing-shared-library:libatomic.so.1",
+            ),
+            (
+                "add\tmocha\t3.5.3\tnode_modules/mocha\nAborted (core dumped)\nError: building at STEP \"RUN /bin/sh /trigon/deps.sh\": while running runtime: exit status 134",
+                "env/toolchain-crashed",
+            ),
+        ] {
+            assert_eq!(classify(log).key(), key, "log: {log}");
+        }
+    }
+
+    #[test]
+    fn a_fault_of_ours_that_looks_like_a_broken_package_is_named_as_ours() {
+        // A corrupt tarball reads exactly like a package problem. When the corruption is our
+        // mirror's, counting it against the package makes the reproduction rate a measure of our
+        // own bugs — which is the failure this whole taxonomy exists to prevent.
+        let s = classify("npm ERR! code Z_DATA_ERROR\nnpm ERR! zlib: invalid stored block lengths");
+        assert_eq!(s.code, "trigon/mirror-corrupted-artifact");
+        assert_eq!(s.fault, Fault::Bug);
+        assert!(!s.repairable, "no strategy change fixes our mirror");
+        assert!(s.retryable);
+    }
+
+    #[test]
+    fn a_commit_that_is_gone_is_upstream_and_beyond_repair() {
+        let s =
+            classify("fatal: reference is not a tree: 89347534a881a1fbf0d866bcb0cdc24e7a1ff642");
+        assert_eq!(s.code, "git/commit-not-in-repo");
+        assert_eq!(s.fault, Fault::Upstream);
+        // The recorded commit is gone. A different strategy cannot conjure it back.
+        assert!(!s.repairable);
     }
 
     #[test]
