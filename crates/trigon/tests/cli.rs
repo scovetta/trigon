@@ -538,3 +538,56 @@ fn a_failure_says_whose_fault_it_was() {
     );
     assert!(err.contains("the published artifact's"), "{err}");
 }
+
+#[cfg(feature = "build")]
+#[test]
+fn resolve_refuses_a_purl_with_no_version() {
+    // Offline: the parse fails before anything is asked of a registry.
+    let out = Command::new(bin())
+        .args(["resolve", "pkg:npm/left-pad"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("nothing to compare"), "{err}");
+}
+
+#[cfg(feature = "build")]
+#[test]
+fn resolve_names_the_supported_ecosystems() {
+    let out = Command::new(bin())
+        .args(["resolve", "pkg:nuget/Newtonsoft.Json@13.0.3"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("does not speak nuget"), "{err}");
+    assert!(err.contains("npm, pypi"), "{err}");
+    assert!(
+        err.contains("fault=Policy"),
+        "declining is policy, not breakage: {err}"
+    );
+}
+
+#[cfg(feature = "build")]
+#[test]
+fn resolve_reports_a_live_package() {
+    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRIGON_LIVE=1");
+        return;
+    }
+    let out = Command::new(bin())
+        .args(["resolve", "pkg:npm/left-pad@1.3.0"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("github.com/stevemao/left-pad"), "{text}");
+    // The rung is printed alongside the commit. A registry-recorded commit and a fuzzy tag match
+    // are both "a commit" and must not be read alike.
+    assert!(text.contains("found by   RegistryCommit"), "{text}");
+}

@@ -1,0 +1,189 @@
+//! Intersecting evidence, and the two outcomes that mean "ask a model".
+
+use trigon_core::{Claim, Confidence, Evidence, ToolchainResolution, resolve_toolchain};
+
+fn range(lo: Option<&str>, hi: Option<&str>, source: &str) -> Evidence {
+    Evidence::new(
+        Claim::ToolchainRange {
+            tool: "cargo".into(),
+            lo: lo.map(str::to_owned),
+            hi: hi.map(str::to_owned),
+        },
+        Confidence::Strong,
+        source,
+    )
+}
+
+fn exact(v: &str, source: &str) -> Evidence {
+    Evidence::new(
+        Claim::ToolchainExact {
+            tool: "cargo".into(),
+            version: v.into(),
+        },
+        Confidence::Certain,
+        source,
+    )
+}
+
+#[test]
+fn independent_ranges_intersect_to_the_tightest() {
+    // This is the prior art's clamping sequence, written as what it actually is. Each constraint
+    // came from somewhere different and none of them knows about the others.
+    let r = resolve_toolchain(
+        "cargo",
+        &[
+            range(Some("1.55"), None, "cargo-manifest:header-comment"),
+            range(Some("1.60"), None, "cargo-manifest:pretty-arrays"),
+            range(None, Some("1.71"), "cargo-manifest:debug-denormalized"),
+        ],
+    );
+    assert_eq!(
+        r,
+        ToolchainResolution::Window {
+            lo: Some("1.60".into()),
+            hi: Some("1.71".into())
+        }
+    );
+    assert!(!r.needs_help());
+}
+
+#[test]
+fn no_evidence_is_a_signal_rather_than_a_default() {
+    // The alternative is picking "whatever was current" and reporting a divergence when it was
+    // wrong. Unconstrained says so, and that is what escalates.
+    let r = resolve_toolchain("cargo", &[]);
+    assert_eq!(r, ToolchainResolution::Unconstrained);
+    assert!(r.needs_help());
+}
+
+#[test]
+fn evidence_about_another_tool_is_ignored() {
+    let r = resolve_toolchain("cargo", &[exact("3.11", "python")]);
+    let other = resolve_toolchain(
+        "cargo",
+        &[Evidence::new(
+            Claim::ToolchainExact {
+                tool: "rustc".into(),
+                version: "1.70".into(),
+            },
+            Confidence::Certain,
+            "rust-toolchain.toml",
+        )],
+    );
+    assert_eq!(other, ToolchainResolution::Unconstrained);
+    let _ = r;
+}
+
+#[test]
+fn contradictory_ranges_name_both_sides() {
+    // Empty intersection. One of these constraints is wrong, and guessing which produces a build
+    // that fails for a reason nobody can trace back here.
+    let r = resolve_toolchain(
+        "cargo",
+        &[
+            range(Some("1.75"), None, "declared-msrv"),
+            range(None, Some("1.71"), "cargo-manifest:debug-denormalized"),
+        ],
+    );
+    let ToolchainResolution::Contradiction { conflicting } = &r else {
+        panic!("expected a contradiction, got {r:?}")
+    };
+    assert_eq!(conflicting.len(), 2);
+    assert!(conflicting.iter().any(|e| e.source == "declared-msrv"));
+    assert!(r.needs_help());
+}
+
+#[test]
+fn an_exact_version_outside_a_range_is_a_contradiction() {
+    let r = resolve_toolchain(
+        "cargo",
+        &[
+            exact("1.50", "rust-toolchain.toml"),
+            range(Some("1.60"), None, "cargo-manifest:pretty-arrays"),
+        ],
+    );
+    assert!(
+        matches!(r, ToolchainResolution::Contradiction { .. }),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn an_exact_version_inside_every_range_pins_it() {
+    let r = resolve_toolchain(
+        "cargo",
+        &[
+            exact("1.65", "rust-toolchain.toml"),
+            range(Some("1.60"), None, "cargo-manifest:pretty-arrays"),
+            range(None, Some("1.71"), "cargo-manifest:debug-denormalized"),
+        ],
+    );
+    assert_eq!(
+        r,
+        ToolchainResolution::Pinned {
+            version: "1.65".into()
+        }
+    );
+}
+
+#[test]
+fn two_different_exact_versions_contradict() {
+    let r = resolve_toolchain("cargo", &[exact("1.65", "a"), exact("1.66", "b")]);
+    assert!(
+        matches!(r, ToolchainResolution::Contradiction { .. }),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn versions_compare_numerically_not_lexically() {
+    // "1.10" sorts before "1.9" as text. A toolchain window silently off by a release is worse
+    // than one we declined to compute.
+    let r = resolve_toolchain(
+        "cargo",
+        &[
+            range(Some("1.9"), None, "a"),
+            range(Some("1.10"), None, "b"),
+        ],
+    );
+    assert_eq!(
+        r,
+        ToolchainResolution::Window {
+            lo: Some("1.10".into()),
+            hi: None
+        }
+    );
+}
+
+#[test]
+fn a_version_we_cannot_parse_is_skipped_rather_than_ordered_wrongly() {
+    let r = resolve_toolchain(
+        "cargo",
+        &[
+            range(Some("nightly-2024-01-01"), None, "unparseable"),
+            range(Some("1.60"), None, "cargo-manifest:pretty-arrays"),
+        ],
+    );
+    assert_eq!(
+        r,
+        ToolchainResolution::Window {
+            lo: Some("1.60".into()),
+            hi: None
+        }
+    );
+}
+
+#[test]
+fn prerelease_and_build_metadata_do_not_break_the_comparison() {
+    let r = resolve_toolchain(
+        "cargo",
+        &[range(Some("1.60.0-beta.1"), Some("1.71.0+nightly"), "a")],
+    );
+    assert_eq!(
+        r,
+        ToolchainResolution::Window {
+            lo: Some("1.60.0".into()),
+            hi: Some("1.71.0".into())
+        }
+    );
+}

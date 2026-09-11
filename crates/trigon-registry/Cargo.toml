@@ -1,0 +1,24 @@
+[package]
+name = "trigon-registry"
+version = "0.0.0"
+description = "Reading the internet about a package: resolution, artifacts, source discovery."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

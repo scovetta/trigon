@@ -125,6 +125,26 @@ enum Cmd {
     /// Work with strategy documents.
     #[command(subcommand)]
     Strategy(StrategyCmd),
+    /// Ask a registry what it knows about a package.
+    #[cfg(feature = "build")]
+    Resolve {
+        /// A package URL, such as `pkg:npm/left-pad@1.3.0`.
+        purl: String,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output: OutputFormat,
+    },
+    /// Download a published artifact, verifying it against what the registry declared.
+    #[cfg(feature = "build")]
+    Fetch {
+        /// A package URL.
+        purl: String,
+        /// Which file, when the version publishes more than one.
+        #[arg(long)]
+        artifact: Option<String>,
+        /// Where to write it. Defaults to the artifact's own filename in the current directory.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Build a package from a strategy, in a container.
     #[cfg(feature = "build")]
     Build {
@@ -226,11 +246,17 @@ fn report_fault(e: &anyhow::Error) {
                 .map(|e| e.fault())
         });
     #[cfg(feature = "build")]
-    let fault = fault.or_else(|| {
-        e.downcast_ref::<trigon_sandbox::SandboxError>()
-            .map(|e| e.fault())
-    });
+    let fault = fault
+        .or_else(|| {
+            e.downcast_ref::<trigon_sandbox::SandboxError>()
+                .map(|e| e.fault())
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_registry::RegistryError>()
+                .map(|e| e.fault())
+        });
     let Some(fault) = fault else { return };
+    let retryable = retryable_of(e).unwrap_or_else(|| fault.is_retryable());
     let whose = match fault {
         Fault::Infra => "ours: infrastructure, and retryable",
         Fault::Upstream => "the published artifact's",
@@ -238,7 +264,38 @@ fn report_fault(e: &anyhow::Error) {
         Fault::Policy => "a policy this run is enforcing",
         Fault::Bug => "a bug in trigon; please report it",
     };
-    tracing::error!(fault = ?fault, retryable = fault.is_retryable(), "{whose}");
+    tracing::error!(fault = ?fault, retryable, "{whose}");
+}
+
+/// Retryability as the error itself reports it.
+///
+/// The fault class is a default and cannot always answer: a registry that was briefly down and an
+/// artifact that will never parse are both `Upstream`. Asking the error means a fleet does not
+/// spend a worker slot per sweep re-reaching the same conclusion.
+fn retryable_of(e: &anyhow::Error) -> Option<bool> {
+    use trigon_core::Classify;
+    let r = e
+        .downcast_ref::<trigon_compare::CompareError>()
+        .map(Classify::is_retryable)
+        .or_else(|| {
+            e.downcast_ref::<trigon_archive::ArchiveError>()
+                .map(Classify::is_retryable)
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_strategy::StrategyError>()
+                .map(Classify::is_retryable)
+        });
+    #[cfg(feature = "build")]
+    let r = r
+        .or_else(|| {
+            e.downcast_ref::<trigon_sandbox::SandboxError>()
+                .map(Classify::is_retryable)
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_registry::RegistryError>()
+                .map(Classify::is_retryable)
+        });
+    r
 }
 
 fn dispatch(cmd: Cmd) -> Result<()> {
@@ -285,6 +342,14 @@ fn dispatch(cmd: Cmd) -> Result<()> {
         }) => strategy_render(&file, import, &timewarp, has_repo, output),
         Cmd::Strategy(StrategyCmd::Tools) => strategy_tools(),
         #[cfg(feature = "build")]
+        Cmd::Resolve { purl, output } => registry::resolve(&purl, output),
+        #[cfg(feature = "build")]
+        Cmd::Fetch {
+            purl,
+            artifact,
+            out,
+        } => registry::fetch(&purl, artifact.as_deref(), out.as_deref()),
+        #[cfg(feature = "build")]
         Cmd::Build {
             file,
             import,
@@ -294,6 +359,100 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             timeout,
             retain,
         } => build::run(&file, import, &image, &out, &egress, timeout, retain),
+    }
+}
+
+#[cfg(feature = "build")]
+mod registry {
+    use std::str::FromStr;
+
+    use super::*;
+    use trigon_core::TargetRef;
+    use trigon_registry::{Client, ClientConfig, for_ecosystem};
+
+    fn runtime() -> Result<tokio::runtime::Runtime> {
+        Ok(tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?)
+    }
+
+    pub fn resolve(purl: &str, output: OutputFormat) -> Result<()> {
+        let target = TargetRef::from_str(purl)?;
+        let registry = for_ecosystem(target.ecosystem, Client::new(ClientConfig::default())?)?;
+
+        let resolved = runtime()?.block_on(registry.resolve(&target))?;
+
+        match output {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&resolved)?);
+            }
+            OutputFormat::Text => {
+                println!("{}", resolved.reference);
+                if let Some(t) = &resolved.intrinsics.publish_time {
+                    println!("  published  {t}");
+                }
+                match &resolved.source {
+                    // The rung is printed, not just the answer. A registry-recorded commit and a
+                    // fuzzy tag match are both "a commit", and they should not be read alike.
+                    Some(s) if !s.commit.is_empty() => {
+                        println!("  source     {} @ {}", s.repo_url, s.commit);
+                        println!("  found by   {:?}", s.how);
+                    }
+                    Some(s) => {
+                        println!("  source     {} (no commit)", s.repo_url);
+                        println!(
+                            "  found by   {:?}: something still has to find the commit",
+                            s.how
+                        );
+                    }
+                    None => println!("  source     not declared"),
+                }
+                println!("\n  artifacts");
+                let w = resolved
+                    .artifacts
+                    .iter()
+                    .map(|a| a.id.as_str().len())
+                    .max()
+                    .unwrap_or(0);
+                for a in &resolved.artifacts {
+                    let digest = match &a.declared_sha256 {
+                        Some(d) => format!("sha256:{}", &d.to_hex()[..16]),
+                        // Said plainly. npm publishes sha1 and sometimes sha512, so for most of it
+                        // there is nothing to check the bytes against.
+                        None => "no sha256 declared".into(),
+                    };
+                    println!("    {:<w$}  {digest}", a.id.as_str());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn fetch(purl: &str, artifact: Option<&str>, out: Option<&Path>) -> Result<()> {
+        let target = TargetRef::from_str(purl)?;
+        let registry = for_ecosystem(target.ecosystem, Client::new(ClientConfig::default())?)?;
+        let rt = runtime()?;
+
+        let resolved = rt.block_on(registry.resolve(&target))?;
+        let meta = resolved.pick(artifact)?;
+        let path = out
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(meta.id.as_str()));
+
+        let mut file =
+            std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+        let digest = rt.block_on(registry.fetch(meta, &mut file))?;
+
+        println!("{}", path.display());
+        println!("  sha256  {digest}");
+        println!(
+            "  {}",
+            match &meta.declared_sha256 {
+                Some(_) => "matches the digest the registry declared",
+                None => "the registry declared no sha256, so nothing was checked against it",
+            }
+        );
+        Ok(())
     }
 }
 

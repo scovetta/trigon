@@ -153,6 +153,7 @@ const FORBID_TRANSITIVE: &[(&str, &[&str])] = &[
         "trigon-stabilize",
         &[
             "trigon-ai",
+            "trigon-registry",
             "tokio",
             "reqwest",
             "hyper",
@@ -162,19 +163,23 @@ const FORBID_TRANSITIVE: &[(&str, &[&str])] = &[
     ),
     (
         "trigon-compare",
-        &["trigon-ai", "tokio", "reqwest", "hyper"],
+        &["trigon-ai", "trigon-registry", "tokio", "reqwest", "hyper"],
     ),
     (
         "trigon-archive",
         &[
             "trigon-ai",
+            "trigon-registry",
             "tokio",
             "reqwest",
             "hyper",
             "async-compression",
         ],
     ),
-    ("trigon-core", &["trigon-ai", "tokio", "reqwest", "hyper"]),
+    (
+        "trigon-core",
+        &["trigon-ai", "trigon-registry", "tokio", "reqwest", "hyper"],
+    ),
     (
         "trigon-strategy",
         &["trigon-ai", "trigon-registry", "tokio", "reqwest", "hyper"],

@@ -7,6 +7,7 @@
 #![warn(missing_debug_implementations)]
 
 mod digest;
+mod evidence;
 mod fault;
 mod format;
 mod note;
@@ -15,6 +16,10 @@ mod path;
 mod target;
 
 pub use digest::{Digest, MultiDigest, ParseDigestError, Sha512};
+pub use evidence::{
+    Claim, Confidence, Evidence, Intrinsics, RegistryMoment, SourceDiscovery, SourceProvenance,
+    ToolchainResolution, resolve_toolchain,
+};
 pub use fault::{Classify, Fault};
 pub use format::Format;
 pub use note::{Note, NoteCode};
