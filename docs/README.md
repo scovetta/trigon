@@ -50,6 +50,9 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
 - **Implementing?** `13` for what to build first, then `05` for the hard part, then `15` for the corpus it needs, then `02` and `04`.
 - **Operating it?** `10`, `08`, `11`.
 - **Consuming its output?** `09`, then run `trigon verify-attestation --rerun-comparison`.
+  `scripts/cross-machine-verify.sh` runs the whole thing end to end — it builds the verifier from a
+  fresh clone, hands it a bundle and two files with the network taken away, and requires three
+  different lies to be caught for three different reasons.
 - **Sceptical?** `14`, where two of the four examples come out with caveats.
 
 ## Status

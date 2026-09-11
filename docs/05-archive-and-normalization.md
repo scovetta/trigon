@@ -591,6 +591,14 @@ The report groups uncovered codes by class with counts and example paths, which 
 mismatch readable: `entry:zip.creator_version 33 members` and `body 8 members` in the same wheel are
 two different findings, and the second one is the bug.
 
+**The same vocabulary is the divergence attestation's**, which is why `signature` lives in
+`trigon-compare` rather than beside the differential test that first needed it. A published
+divergence is a public claim about someone else's package, and "these two files differ" is an
+accusation a maintainer cannot act on; `entry:zip.method` on four named members is something they
+can go and reproduce. `DiffReport::codes` carries them, on a divergence only — naming every field
+that differs means walking both archives a second time, and on a match there is nothing to name.
+Two implementations of this would drift, and the published one is signed.
+
 The first run on a five-artifact corpus found three real bugs. Scaling to 58 artifacts selected by
 structure ([`15-corpora.md`](15-corpora.md) §2) found four more. All seven were fixed:
 
