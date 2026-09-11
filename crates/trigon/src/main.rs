@@ -1425,6 +1425,11 @@ mod rebuild {
         pub fn cluster(&self) -> Option<String> {
             match self {
                 Outcome::BuildFailed { signature, .. } => signature.as_ref().map(|s| s.key()),
+                // Errors cluster too, and for the same reason. Twenty-six targets once came back
+                // `error:upstream` with no diagnosis attached anywhere, and the cause was a single
+                // bug of ours: one cluster, invisible because this arm returned `None`. A bucket
+                // with no grouping is a bucket nobody reads.
+                Outcome::Failed { detail, .. } => Some(format!("error:{}", generalize(detail))),
                 // A resumed row carries its cluster forward. Without this, resuming a sweep — which
                 // is how a long one always finishes — silently empties the cluster summary, and the
                 // summary is the reason to run it.
@@ -1755,6 +1760,32 @@ mod rebuild {
         Ok(Outcome::Compared(comparison.outcome))
     }
 
+    /// Reduce one of our own error messages to the part that is the same across targets.
+    ///
+    /// Paths, digests, versions and package names are what make two reports of one bug look like
+    /// two bugs. Dropping them is crude — it cannot know which number mattered — but the alternative
+    /// in practice is no grouping at all, and a cluster of twenty-six is what makes somebody look.
+    fn generalize(detail: &str) -> String {
+        let first = detail.lines().next().unwrap_or(detail);
+        let mut out = String::with_capacity(first.len());
+        let mut last_was_elision = false;
+        for word in first.split_whitespace() {
+            let noisy =
+                word.len() > 24 || word.contains('/') || word.chars().any(|c| c.is_ascii_digit());
+            if noisy {
+                if !last_was_elision {
+                    out.push_str(" _");
+                    last_was_elision = true;
+                }
+            } else {
+                out.push(' ');
+                out.push_str(word);
+                last_was_elision = false;
+            }
+        }
+        out.trim().chars().take(80).collect()
+    }
+
     /// An error that stopped one target, as an outcome.
     fn classify<E: trigon_core::Classify + std::fmt::Display>(e: &E) -> Outcome {
         Outcome::Failed {
@@ -1800,7 +1831,10 @@ mod rebuild {
                 let p = e.path();
                 if p.is_dir() {
                     stack.push(p);
-                } else {
+                // Belt and braces beside writing the log elsewhere. Anything that is obviously ours
+                // rather than the build's has no business being mistaken for the artifact, and the
+                // failure when it is — a log parsed as a zip — names the wrong culprit.
+                } else if p.file_name() != Some(std::ffi::OsStr::new("build.log")) {
                     found.push(p);
                 }
             }
@@ -2243,6 +2277,43 @@ mod sweep {
                 );
                 assert_eq!(o.label(), label);
             }
+        }
+
+        #[test]
+        fn our_own_errors_cluster_so_one_bug_does_not_read_as_many() {
+            // The case this comes from: a bug of ours made every successful build compare a log
+            // file against the published artifact. Twenty-six targets, one cause, and the summary
+            // showed twenty-six undiagnosed rows because errors had no cluster at all.
+            let a = Outcome::Failed {
+                fault: trigon_core::Fault::Upstream,
+                detail: "malformed zip: no end-of-central-directory record".into(),
+            };
+            let b = Outcome::Failed {
+                fault: trigon_core::Fault::Upstream,
+                detail: "malformed zip: no end-of-central-directory record".into(),
+            };
+            assert_eq!(a.cluster(), b.cluster());
+            assert!(a.cluster().is_some());
+
+            // And what varies per target does not split the cluster.
+            let x = Outcome::Failed {
+                fault: trigon_core::Fault::Infra,
+                detail: "reading /work/041/left-pad-1.3.0.tgz: No such file".into(),
+            };
+            let y = Outcome::Failed {
+                fault: trigon_core::Fault::Infra,
+                detail: "reading /work/002/is-odd-3.0.1.tgz: No such file".into(),
+            };
+            assert_eq!(
+                x.cluster(),
+                y.cluster(),
+                "{:?} vs {:?}",
+                x.cluster(),
+                y.cluster()
+            );
+
+            // But genuinely different errors stay apart.
+            assert_ne!(a.cluster(), x.cluster());
         }
 
         #[test]
