@@ -16,15 +16,23 @@
 //! is a better answer than any amount of tag matching.
 
 mod client;
+mod definitions;
 mod error;
+mod heuristic;
+mod infer;
 mod model;
 mod npm;
 mod pypi;
 mod registry;
+mod tags;
 
 pub use client::{Client, ClientConfig};
+pub use definitions::DefinitionsInferrer;
 pub use error::RegistryError;
+pub use heuristic::{NpmInferrer, PyPiInferrer};
+pub use infer::{Candidate, Derivation, StrategyInferrer, infer};
 pub use model::{ArtifactMeta, BlobSink, ResolvedTarget};
 pub use npm::NpmRegistry;
 pub use pypi::PyPiRegistry;
 pub use registry::{Registry, for_ecosystem};
+pub use tags::resolve_version_tag;

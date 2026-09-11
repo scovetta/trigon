@@ -1,4 +1,14 @@
-# Run a command under a pinned npm, in the package directory.
+# Run a command under a specific npm, in the package directory.
+#
+# The bundled npm first. Every Node distribution ships one, and when it is already the version we
+# want, `npx --package=npm@X` re-downloads and re-unpacks the same npm for nothing. That is not
+# only waste: npm 5.5.1 on Node 9.2.1, which is exactly what published left-pad 1.3.0, aborts in
+# node-tar while unpacking itself, so the faithful reproduction of a 2018 publish fails on a step
+# the publisher never ran. The bundled copy is already unpacked and works.
+#
+# The command is carried in a variable so it is quoted once. It must not contain a single quote;
+# nothing that generates one here does, and a tool that needs it should say so rather than have
+# this silently mangle it.
 id: npm/npx
 needs: [npm]
 params:
@@ -11,4 +21,10 @@ params:
   locator:
     required: false
 steps:
-  - runs: "{{ with.locator }}npx --package=npm@{{ with.npm_version }} -c '{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'"
+  - runs: |
+      TRIGON_NPM_CMD='{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'
+      if [ "$({{ with.locator }}npm --version 2>/dev/null)" = "{{ with.npm_version }}" ]; then
+        sh -c "$TRIGON_NPM_CMD"
+      else
+        {{ with.locator }}npx --package=npm@{{ with.npm_version }} -c "$TRIGON_NPM_CMD"
+      fi

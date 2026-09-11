@@ -7,10 +7,14 @@ params:
     required: true
   registry_time:
     required: false
+  libc:
+    required: false
+    doc: Passed through to npm/install-node. See there for why it is not a detail.
 steps:
   - uses: npm/install-node
     with:
       node_version: "{{ with.node_version }}"
+      libc: "{{ with.libc }}"
   - uses: npm/install
     with:
       npm_version: "{{ with.npm_version }}"

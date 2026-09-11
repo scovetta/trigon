@@ -254,3 +254,30 @@ fn the_builtin_tools_load_and_resolve() {
     r.validate()
         .expect("every uses: resolves and there are no cycles");
 }
+
+#[test]
+fn the_node_libc_variant_is_a_parameter_not_a_hardcoded_url() {
+    // Found by rebuilding left-pad 1.3.0: npm recorded `_nodeVersion: 9.2.1`, which is exactly
+    // right, and the musl build of it does not exist. Hardcoding musl makes every package whose
+    // publisher used an older Node unbuildable for a reason that looks like our bug.
+    let tools = ToolRegistry::builtin().unwrap();
+    let strategy = |libc: &str| {
+        from_yaml(&format!(
+            "kind: flow\nlocation: {{ repo: r, ref: c }}\ndeps:\n  - uses: npm/install-node\n    with: {{ node_version: \"9.2.1\"{libc} }}\n"
+        ))
+        .unwrap()
+    };
+
+    let glibc = render(&strategy(""), &cx(), &tools).unwrap();
+    assert!(
+        glibc
+            .deps
+            .contains("nodejs.org/dist/v9.2.1/node-v9.2.1-linux-x64.tar.gz"),
+        "{}",
+        glibc.deps
+    );
+
+    let musl = render(&strategy(", libc: musl"), &cx(), &tools).unwrap();
+    assert!(musl.deps.contains("unofficial-builds"), "{}", musl.deps);
+    assert!(musl.deps.contains("linux-x64-musl"), "{}", musl.deps);
+}

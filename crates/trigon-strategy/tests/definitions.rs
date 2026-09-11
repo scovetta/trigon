@@ -171,11 +171,17 @@ fn the_npm_override_renders_the_script_its_definition_describes() {
     println!("--- deps ---\n{}\n--- build ---\n{}", i.deps, i.build);
 
     // node_version: 8.16.0, npm_version: 6.4.1, registry_time: 2018-09-13T19:55:58Z
+    //
+    // The official glibc distribution by default. The prior art hardcodes the musl build because
+    // its base image is Alpine, and that URL does not exist for every version: Node 9.2.1, which
+    // published left-pad 1.3.0, 404s on unofficial-builds and is present on nodejs.org.
     assert!(
-        i.deps.contains("node-v8.16.0-linux-x64-musl.tar.gz"),
+        i.deps
+            .contains("nodejs.org/dist/v8.16.0/node-v8.16.0-linux-x64.tar.gz"),
         "{}",
         i.deps
     );
+    assert!(!i.deps.contains("musl"), "musl is opt-in: {}", i.deps);
     assert!(i.deps.contains("npx --package=npm@6.4.1"), "{}", i.deps);
     assert!(
         i.deps

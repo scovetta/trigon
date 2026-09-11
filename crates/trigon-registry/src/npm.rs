@@ -121,6 +121,26 @@ impl Registry for NpmRegistry {
             ));
         }
 
+        // The toolchain the publisher actually used, recorded by the registry at publish time.
+        // Certain, because this is not an inference: it is what the publishing client reported.
+        // It is also the difference between npm inference being a transcription and a guess, since
+        // a 2026 npm packs a tarball a 2018 npm would not have.
+        for (field, tool, source) in [
+            ("_nodeVersion", "node", "npm:_nodeVersion"),
+            ("_npmVersion", "npm", "npm:_npmVersion"),
+        ] {
+            if let Some(v) = doc.get(field).and_then(Value::as_str) {
+                evidence.push(Evidence::new(
+                    Claim::ToolchainExact {
+                        tool: tool.into(),
+                        version: v.to_string(),
+                    },
+                    Confidence::Certain,
+                    source,
+                ));
+            }
+        }
+
         Ok(ResolvedTarget {
             reference: target.clone(),
             artifacts: vec![artifact],

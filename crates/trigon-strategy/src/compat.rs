@@ -201,14 +201,16 @@ fn npm_custom(body: &Value) -> Result<Strategy, StrategyError> {
         }
     }
 
-    let output_dir = loc.subdir.clone().unwrap_or_else(|| ".".into());
+    // The tarball rather than the directory: `npm pack` writes one, and naming the directory
+    // copies the whole working tree instead.
+    let output_path = tgz_glob(&loc);
     Ok(Strategy::Flow(FlowStrategy {
         location: loc,
         src: vec![uses("git-checkout", BTreeMap::new())],
         deps: vec![uses("npm/deps/custom", deps)],
         build: vec![uses("npm/build/custom", build)],
-        output_dir: Some(output_dir),
-        output_path: None,
+        output_dir: None,
+        output_path: Some(output_path),
     }))
 }
 
@@ -226,14 +228,14 @@ fn npm_pack(body: &Value) -> Result<Strategy, StrategyError> {
     if let Some(v) = string(body.get("version_override")) {
         build.insert("version_override".into(), v);
     }
-    let output_dir = loc.subdir.clone().unwrap_or_else(|| ".".into());
+    let output_path = tgz_glob(&loc);
     Ok(Strategy::Flow(FlowStrategy {
         location: loc,
         src: vec![uses("git-checkout", BTreeMap::new())],
         deps: vec![uses("npm/deps/custom", deps)],
         build: vec![uses("npm/build/pack", build)],
-        output_dir: Some(output_dir),
-        output_path: None,
+        output_dir: None,
+        output_path: Some(output_path),
     }))
 }
 
@@ -245,6 +247,13 @@ fn required(body: &Value, key: &str) -> Result<String, StrategyError> {
              not ask for, which is a different build reported under this definition's name."
         ))
     })
+}
+
+fn tgz_glob(loc: &Location) -> String {
+    match &loc.subdir {
+        Some(d) => format!("{}/*.tgz", d.trim_end_matches('/')),
+        None => "*.tgz".into(),
+    }
 }
 
 fn uses(tool: &str, with: BTreeMap<String, String>) -> Step {

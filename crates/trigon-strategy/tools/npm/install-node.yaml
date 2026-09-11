@@ -1,13 +1,35 @@
 # Fetch a specific Node build into /usr/local.
 #
-# The musl build, because the base image varies and the musl one runs on both glibc and musl hosts.
-# Pinned by version: the toolchain that produced a package is part of what we are reproducing, and
-# "whatever Node the image has" is not a description of a build.
+# Pinned by version, because the toolchain that produced a package is part of what we are
+# reproducing and "whatever Node the image has" is not a description of a build.
+#
+# The libc matters and is not a detail. The prior art hardcodes the musl build because its base
+# image is Alpine, and that URL only exists for the versions unofficial-builds covers: Node 9.2.1,
+# which is what published left-pad 1.3.0, 404s there while nodejs.org has it. So the variant is a
+# parameter, defaulting to the official glibc distribution, which carries every version back to the
+# beginning. An Alpine image passes `libc: musl` and accepts the narrower version range that comes
+# with it.
 id: npm/install-node
 params:
   node_version:
     required: true
+  libc:
+    required: false
+    default: glibc
+    doc: >-
+      `glibc` for nodejs.org's official builds, which cover every version. `musl` for
+      unofficial-builds, needed on Alpine and available only for newer versions.
 steps:
+  # `needs: [wget]` on both, not on the tool, because a skipped step contributes nothing. Alpine's
+  # busybox provides wget built in, which is why the prior art never had to declare it; a slim
+  # Debian image does not, and the failure is `wget: not found` inside a phase that looks like ours.
   - runs: >-
       wget -O - https://unofficial-builds.nodejs.org/download/release/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64-musl.tar.gz
       | tar xzf - --strip-components=1 -C /usr/local/
+    if: "{% if with.libc == 'musl' %}yes{% endif %}"
+    needs: [wget]
+  - runs: >-
+      wget -O - https://nodejs.org/dist/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64.tar.gz
+      | tar xzf - --strip-components=1 -C /usr/local/
+    if: "{% if with.libc != 'musl' %}yes{% endif %}"
+    needs: [wget]

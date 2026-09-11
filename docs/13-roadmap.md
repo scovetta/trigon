@@ -82,8 +82,15 @@ M1 needs **two** corpora, and conflating them was a mistake in an earlier draft.
 - [ ] **The common-path corpus: 400 targets sampled by prevalence**, 200 npm and 200 PyPI, stratified
       by build system rather than by popularity alone ([`15-corpora.md`](15-corpora.md) §3). This is
       what a reproduction rate can be quoted from, and it is the number M1 reports.
-- [ ] `trigon verify pkg:npm/left-pad@1.3.0` works on a laptop with Podman and no cloud account.
-- [ ] npm and PyPI end-to-end with heuristic and CI-derived strategies only, **with no AI involved**.
+- [x] `trigon rebuild pkg:npm/left-pad@1.3.0` works on a laptop with Podman and no cloud account.
+      Resolve, infer, fetch, build, compare, in one command. Reported `normalized`, with all ten
+      members identical, against what npm published in 2018.
+- [~] npm and PyPI end-to-end with heuristic and CI-derived strategies only, **with no AI involved**.
+      **npm, yes.** The registry records the commit it published from and the Node and npm versions
+      the publisher used, so npm inference is a transcription rather than a guess. **PyPI is
+      weaker**: no commit is recorded, so the rung resolves a tag and assumes the build requirements,
+      and it declines when no tag matches. No CI-derived rung yet, which is what would supply the
+      toolchain PyPI does not record.
 - [ ] The `smoke` benchmark corpus (~50 targets) is green and runs in under ten minutes.
 - [ ] Per-phase timings and costs recorded, with `None` meaning "no data".
 

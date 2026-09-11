@@ -125,6 +125,40 @@ enum Cmd {
     /// Work with strategy documents.
     #[command(subcommand)]
     Strategy(StrategyCmd),
+    /// Rebuild a published package from source and compare the result.
+    ///
+    /// Resolve, infer a strategy, fetch what the registry published, build it in a container, and
+    /// report how far the two agree. Every step is printed, because a verdict whose derivation is
+    /// invisible is a verdict nobody can argue with.
+    #[cfg(feature = "build")]
+    Rebuild {
+        /// A package URL, such as `pkg:npm/left-pad@1.3.0`.
+        purl: String,
+        /// Which file, when the version publishes more than one.
+        #[arg(long)]
+        artifact: Option<String>,
+        /// Base image, pinned by digest.
+        #[arg(long)]
+        image: String,
+        /// Working directory for the fetched and rebuilt artifacts.
+        #[arg(long, default_value = "./trigon-work")]
+        work: PathBuf,
+        /// What the build may reach.
+        #[arg(long, default_value = "open")]
+        egress: String,
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// A checked-in definitions directory, consulted before any heuristic.
+        #[arg(long)]
+        definitions: Option<PathBuf>,
+        /// Host of a time-filtering registry mirror.
+        ///
+        /// Without one the rebuild resolves dependencies against today's registry rather than
+        /// against the publish date, which is reported as an assumption rather than pinned to a
+        /// mirror that is not there.
+        #[arg(long)]
+        timewarp: Option<String>,
+    },
     /// Ask a registry what it knows about a package.
     #[cfg(feature = "build")]
     Resolve {
@@ -341,6 +375,26 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             output,
         }) => strategy_render(&file, import, &timewarp, has_repo, output),
         Cmd::Strategy(StrategyCmd::Tools) => strategy_tools(),
+        #[cfg(feature = "build")]
+        Cmd::Rebuild {
+            purl,
+            artifact,
+            image,
+            work,
+            egress,
+            timeout,
+            definitions,
+            timewarp,
+        } => rebuild::run(rebuild::Args {
+            purl,
+            artifact,
+            image,
+            work,
+            egress,
+            timeout,
+            definitions,
+            timewarp,
+        }),
         #[cfg(feature = "build")]
         Cmd::Resolve { purl, output } => registry::resolve(&purl, output),
         #[cfg(feature = "build")]
@@ -990,4 +1044,157 @@ fn strategy_tools() -> Result<()> {
     }
     println!("\n  {} tools, * marks a required parameter", ids.len());
     Ok(())
+}
+
+#[cfg(feature = "build")]
+mod rebuild {
+    use std::str::FromStr;
+
+    use super::*;
+    use trigon_core::TargetRef;
+    use trigon_registry::{
+        Client, ClientConfig, DefinitionsInferrer, NpmInferrer, PyPiInferrer, StrategyInferrer,
+        for_ecosystem,
+    };
+
+    pub struct Args {
+        pub purl: String,
+        pub artifact: Option<String>,
+        pub image: String,
+        pub work: PathBuf,
+        pub egress: String,
+        pub timeout: u64,
+        pub definitions: Option<PathBuf>,
+        pub timewarp: Option<String>,
+    }
+
+    /// The ladder, in the order `docs/04-strategies.md` §6 sets out.
+    ///
+    /// A definition first, because one exists exactly where inference already failed. Then the
+    /// ecosystem heuristic. No rung here costs money or calls a model, and the engine contains no
+    /// branch asking which kind of rung produced a candidate: the ordering is the policy.
+    fn ladder(
+        target: &trigon_core::Ecosystem,
+        client: Client,
+        definitions: Option<PathBuf>,
+        mirror: Option<String>,
+    ) -> Vec<Box<dyn StrategyInferrer>> {
+        let mut rungs: Vec<Box<dyn StrategyInferrer>> = Vec::new();
+        if let Some(d) = definitions
+            .map(DefinitionsInferrer::new)
+            .or_else(DefinitionsInferrer::from_env)
+        {
+            rungs.push(Box::new(d));
+        }
+        match target {
+            trigon_core::Ecosystem::Npm => {
+                rungs.push(Box::new(NpmInferrer::new(client).with_mirror(mirror)))
+            }
+            trigon_core::Ecosystem::PyPI => {
+                rungs.push(Box::new(PyPiInferrer::new(client).with_mirror(mirror)))
+            }
+            _ => {}
+        }
+        rungs
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        let target = TargetRef::from_str(&args.purl)?;
+        let client = Client::new(ClientConfig::default())?;
+        let registry = for_ecosystem(target.ecosystem, client.clone())?;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        std::fs::create_dir_all(&args.work)?;
+
+        // 1. What the registry knows.
+        let resolved = rt.block_on(registry.resolve(&target))?;
+        let meta = resolved.pick(args.artifact.as_deref())?.clone();
+        println!("{}", resolved.reference);
+        println!("  artifact   {}", meta.id);
+
+        // 2. A strategy, from the first rung that has one.
+        let rungs = ladder(
+            &target.ecosystem,
+            client,
+            args.definitions,
+            args.timewarp.clone(),
+        );
+        let Some(candidate) = rt.block_on(trigon_registry::infer(&rungs, &resolved))? else {
+            bail!(
+                "no rung produced a strategy for {}. The rungs available here are a checked-in \
+                 definition and the {} heuristic; a target that needs more than those needs the \
+                 source-discovery ladder or a human.",
+                resolved.reference,
+                target.ecosystem
+            );
+        };
+        let loc = candidate.strategy.location().cloned().unwrap_or_default();
+        println!("  source     {} @ {}", loc.repo, loc.git_ref);
+        println!(
+            "  strategy   {:?}, commit found by {:?}, confidence {:?}",
+            candidate.derivation, candidate.discovery, candidate.confidence
+        );
+        for a in &candidate.assumptions {
+            // Printed, not buried. A divergence has to be readable against the guesses that
+            // produced it rather than taken as a fact about the package.
+            println!("  assuming   {a}");
+        }
+
+        // 3. The published bytes.
+        let upstream_path = args.work.join(meta.id.as_str());
+        let mut file = std::fs::File::create(&upstream_path)?;
+        let upstream_digest = rt.block_on(registry.fetch(&meta, &mut file))?;
+        drop(file);
+        println!("  published  sha256 {}", &upstream_digest.to_hex()[..16]);
+
+        // 4. Build it.
+        let strategy_file = args.work.join("strategy.yaml");
+        std::fs::write(
+            &strategy_file,
+            trigon_strategy::to_yaml(&candidate.strategy)?,
+        )?;
+        let out = args.work.join("rebuild");
+        crate::build::run(
+            &strategy_file,
+            false,
+            &args.image,
+            &out,
+            &args.egress,
+            args.timeout,
+            false,
+        )?;
+
+        // 5. Compare, with the same code path `verify` uses.
+        let rebuilt = newest_file(&out)
+            .ok_or_else(|| anyhow::anyhow!("the build produced no artifact to compare"))?;
+        println!();
+        crate::verify(
+            &upstream_path,
+            &rebuilt,
+            None,
+            None,
+            OutputFormat::Text,
+            false,
+        )
+    }
+
+    /// The artifact the build left behind.
+    fn newest_file(dir: &Path) -> Option<PathBuf> {
+        let mut found: Vec<PathBuf> = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).ok()?.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    found.push(p);
+                }
+            }
+        }
+        found.sort();
+        found.pop()
+    }
 }
