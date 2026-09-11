@@ -187,3 +187,24 @@ fn prerelease_and_build_metadata_do_not_break_the_comparison() {
         }
     );
 }
+
+#[test]
+fn a_match_outcome_reads_back_as_itself() {
+    use std::str::FromStr;
+    use trigon_core::Match;
+    // Anything that writes a verdict to a file and reads it back depends on this. Restating the
+    // strings at a call site is how they drift, and the drift is silent: a sweep's resume path
+    // spelled one of them with hyphens and dropped every caveated match from its own rate.
+    for m in [
+        Match::Exact,
+        Match::Normalized,
+        Match::NormalizedWithCaveats,
+        Match::Divergent,
+    ] {
+        assert_eq!(Match::from_str(&m.to_string()), Ok(m), "{m}");
+    }
+    assert!(
+        Match::from_str("normalized-with-caveats").is_err(),
+        "hyphens are not the spelling"
+    );
+}

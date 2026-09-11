@@ -1203,6 +1203,8 @@ mod rebuild {
             fault: trigon_core::Fault,
             detail: String,
         },
+        /// Read back from a previous run of the same sweep.
+        Recorded(String),
     }
 
     impl Outcome {
@@ -1212,6 +1214,7 @@ mod rebuild {
                 Outcome::NoStrategy => "no-strategy".into(),
                 Outcome::BuildFailed { phase } => format!("build-failed:{phase}"),
                 Outcome::Failed { fault, .. } => format!("error:{fault:?}").to_lowercase(),
+                Outcome::Recorded(label) => label.clone(),
             }
         }
 
@@ -1220,7 +1223,19 @@ mod rebuild {
         /// An infrastructure fault is not an unreproducible package, and counting it as one is how
         /// a reproduction rate becomes a number about our own reliability.
         pub fn is_evidence(&self) -> bool {
-            matches!(self, Outcome::Compared(_))
+            self.as_match().is_some()
+        }
+
+        /// The comparison this outcome carries, however it was produced.
+        ///
+        /// Parsed rather than string-matched, so a resumed row and a fresh one cannot disagree
+        /// about what a verdict is called.
+        pub fn as_match(&self) -> Option<trigon_core::Match> {
+            match self {
+                Outcome::Compared(m) => Some(*m),
+                Outcome::Recorded(label) => label.parse().ok(),
+                _ => None,
+            }
         }
     }
 
@@ -1269,7 +1284,8 @@ mod rebuild {
     pub fn run(args: Args) -> Result<()> {
         let outcome = run_one(args, true)?;
         match outcome {
-            Outcome::Compared(_) | Outcome::NoStrategy => Ok(()),
+            // `Recorded` only comes from a sweep's results file, never from a single run.
+            Outcome::Compared(_) | Outcome::NoStrategy | Outcome::Recorded(_) => Ok(()),
             Outcome::BuildFailed { phase } => bail!("the build failed in {phase}"),
             Outcome::Failed { detail, .. } => bail!("{detail}"),
         }
@@ -1570,6 +1586,7 @@ mod mirror {
 
 #[cfg(feature = "build")]
 mod sweep {
+    use std::collections::BTreeMap;
     use std::time::Instant;
 
     use super::*;
@@ -1597,10 +1614,47 @@ mod sweep {
         if purls.is_empty() {
             bail!("{} has no targets", args.targets.display());
         }
-        println!("sweeping {} targets\n", purls.len());
+        std::fs::create_dir_all(&args.work)?;
+
+        // Each row is written as it completes, not held until the end. A sweep is hours long and
+        // the first one lost two of twenty results when the process died near the finish: a run
+        // that summarizes only at the end throws away everything it already knew. The file is also
+        // what makes a sweep resumable, and what a second process can read while it runs.
+        let results = args.work.join("results.tsv");
+        let already = completed(&results);
+        if !already.is_empty() {
+            println!(
+                "resuming: {} of {} already done",
+                already.len(),
+                purls.len()
+            );
+        }
+        let mut sink = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&results)
+            .with_context(|| format!("opening {}", results.display()))?;
+
+        println!(
+            "sweeping {} targets -> {}\n",
+            purls.len(),
+            results.display()
+        );
 
         let mut rows: Vec<(String, Outcome, f64)> = Vec::new();
         for (i, purl) in purls.iter().enumerate() {
+            if let Some((label, secs)) = already.get(*purl) {
+                println!(
+                    "  {:<28} {:<20} {:>6.0}s   [{}/{}] (done)",
+                    short(purl),
+                    label,
+                    secs,
+                    i + 1,
+                    purls.len()
+                );
+                rows.push((purl.to_string(), Outcome::Recorded(label.clone()), *secs));
+                continue;
+            }
             let started = Instant::now();
             // A per-target directory, or one run's artifacts are collected as another's.
             let work = args.work.join(format!("{i:03}"));
@@ -1635,6 +1689,11 @@ mod sweep {
                 i + 1,
                 purls.len()
             );
+            // Flushed per row. Buffered output is lost with the process, which is the failure this
+            // exists to prevent.
+            use std::io::Write as _;
+            writeln!(sink, "{purl}\t{}\t{secs:.1}", outcome.label())?;
+            sink.flush()?;
             rows.push((purl.to_string(), outcome, secs));
         }
 
@@ -1642,12 +1701,29 @@ mod sweep {
         Ok(())
     }
 
+    /// Targets already recorded in a previous run of this sweep.
+    fn completed(path: &Path) -> BTreeMap<String, (String, f64)> {
+        let mut out = BTreeMap::new();
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return out;
+        };
+        for line in text.lines() {
+            let mut f = line.split('\t');
+            if let (Some(purl), Some(label), Some(secs)) = (f.next(), f.next(), f.next()) {
+                out.insert(
+                    purl.to_string(),
+                    (label.to_string(), secs.parse().unwrap_or(0.0)),
+                );
+            }
+        }
+        out
+    }
+
     fn short(purl: &str) -> String {
         purl.strip_prefix("pkg:").unwrap_or(purl).to_string()
     }
 
     fn summarize(rows: &[(String, Outcome, f64)]) {
-        use std::collections::BTreeMap;
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
         for (_, o, _) in rows {
             *counts.entry(o.label()).or_default() += 1;
@@ -1668,7 +1744,10 @@ mod sweep {
             .collect();
         let reproduced = evidence
             .iter()
-            .filter(|o| matches!(o, Outcome::Compared(m) if *m != trigon_core::Match::Divergent))
+            .filter(|o| {
+                o.as_match()
+                    .is_some_and(|m| m != trigon_core::Match::Divergent)
+            })
             .count();
 
         println!();

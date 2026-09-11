@@ -340,6 +340,11 @@ impl BuildHandle for PodmanBuild {
         };
 
         let ctx = tempdir(&self.opts.run_id)?;
+        let _leftovers = Leftovers {
+            binary: self.binary.clone(),
+            ctx: ctx.clone(),
+            image: (!self.opts.retain).then(|| self.tag()),
+        };
         // Rootless `podman build` cannot join a named network, so under mirror-only the deps phase
         // has to run in the container instead of as an image layer.
         let defer_deps = network.is_some();
@@ -480,16 +485,9 @@ impl BuildHandle for PodmanBuild {
             ),
         }
 
-        if !self.opts.retain {
-            let _ = Command::new(&self.binary)
-                .args(["rmi", "--force", &self.tag()])
-                .output()
-                .await;
-        }
         if let Some(i) = island {
             i.destroy().await;
         }
-        let _ = std::fs::remove_dir_all(&ctx);
 
         Ok(self.outcome(code, artifact, timings, failed_in, log))
     }
@@ -583,6 +581,34 @@ fn collect(dir: &std::path::Path) -> Option<PathBuf> {
     match files.len() {
         1 => files.pop(),
         _ => None,
+    }
+}
+
+/// Whatever a run leaves behind, removed however the run ends.
+///
+/// A guard rather than a line at the end of the happy path, which is what this was: a build that
+/// failed kept its context directory and its image forever. On this machine that had accumulated
+/// nineteen contexts and a 602 MB image, and a failing build is the common case for exactly the
+/// packages a sweep spends most of its time on.
+struct Leftovers {
+    binary: String,
+    ctx: PathBuf,
+    /// `None` when the caller asked to keep the image, to exec into or pull.
+    image: Option<String>,
+}
+
+impl Drop for Leftovers {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.ctx);
+        if let Some(tag) = &self.image {
+            // Synchronous on purpose: `Drop` cannot await, and leaving this to an async path is
+            // how it came to run only on success.
+            let _ = std::process::Command::new(&self.binary)
+                .args(["rmi", "--force", tag])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 }
 

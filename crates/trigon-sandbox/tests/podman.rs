@@ -280,3 +280,85 @@ async fn the_same_probes_succeed_under_open_egress() {
         outcome.log_tail
     );
 }
+
+#[tokio::test]
+async fn a_failed_build_leaves_nothing_behind() {
+    let r = PodmanRunner::new(workdir());
+    if !usable(&r).await {
+        return;
+    }
+    // Cleanup used to sit at the end of the happy path, so only successful builds tidied up. A
+    // failing build is the common case for exactly the packages a sweep spends its time on, and
+    // this machine had accumulated nineteen context directories and a 602 MB image before anyone
+    // looked.
+    let plan = BuildPlan::Oci(OciPlan {
+        base_image: ALPINE.into(),
+        system_deps: BTreeSet::new(),
+        source: "true".into(),
+        deps: "echo 'deps will fail' && exit 1".into(),
+        build: "true".into(),
+        output_path: ".".into(),
+        egress: EgressTier::DenyAll,
+        privileged: false,
+        extra_hosts: Default::default(),
+    });
+
+    let run_id = "leftovers";
+    let h = r.start(&plan, &opts(run_id)).await.unwrap();
+    let outcome = h.wait().await.unwrap();
+    assert!(!outcome.succeeded());
+
+    let ctx = std::env::temp_dir().join(format!("trigon-ctx-{run_id}"));
+    assert!(
+        !ctx.exists(),
+        "the build context outlived the failed build: {}",
+        ctx.display()
+    );
+    // This run's own tag, not a count of every trigon-build image. A count is shared state, and
+    // sibling tests create and delete those images: the first version of this assertion passed
+    // alone and failed under `cargo test`, which is a flaky test rather than a finding.
+    assert!(
+        !image_exists(&format!("trigon-build:{run_id}")),
+        "a failed build left its image behind"
+    );
+}
+
+#[tokio::test]
+async fn a_retained_build_keeps_its_image() {
+    let r = PodmanRunner::new(workdir());
+    if !usable(&r).await {
+        return;
+    }
+    // The other half: `retain` exists so an agent can exec into the container and a human can pull
+    // the image, and a guard that removed it regardless would make the flag a lie.
+    let plan = BuildPlan::Oci(OciPlan {
+        base_image: ALPINE.into(),
+        system_deps: BTreeSet::new(),
+        source: "true".into(),
+        deps: "true".into(),
+        build: "mkdir -p dist && echo hi > dist/out.txt".into(),
+        output_path: "dist/out.txt".into(),
+        egress: EgressTier::DenyAll,
+        privileged: false,
+        extra_hosts: Default::default(),
+    });
+    let run_id = "retained";
+    let mut o = opts(run_id);
+    o.retain = true;
+    let h = r.start(&plan, &o).await.unwrap();
+    assert!(h.wait().await.unwrap().succeeded());
+
+    let tag = format!("trigon-build:{run_id}");
+    assert!(image_exists(&tag), "retain must keep the image");
+    let _ = std::process::Command::new("podman")
+        .args(["rmi", "--force", &tag])
+        .status();
+}
+
+fn image_exists(tag: &str) -> bool {
+    std::process::Command::new("podman")
+        .args(["image", "exists", tag])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}

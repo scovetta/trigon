@@ -42,6 +42,26 @@ impl fmt::Display for Match {
     }
 }
 
+impl std::str::FromStr for Match {
+    type Err = String;
+
+    /// The inverse of [`Display`](fmt::Display), so a verdict written to a file reads back as the
+    /// same verdict.
+    ///
+    /// Worth the twenty lines because restating these strings at a call site is how they drift: a
+    /// sweep's resume path spelled `normalized_with_caveats` with hyphens and silently dropped
+    /// every caveated match from the rate it reported.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "exact" => Match::Exact,
+            "normalized" => Match::Normalized,
+            "normalized_with_caveats" => Match::NormalizedWithCaveats,
+            "divergent" => Match::Divergent,
+            other => return Err(format!("`{other}` is not a match outcome")),
+        })
+    }
+}
+
 /// What a stabilizer is allowed to disturb.
 ///
 /// `Structural` covers reordering and reframing, **and** dropping integrity metadata computed over
