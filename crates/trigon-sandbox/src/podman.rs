@@ -340,6 +340,8 @@ impl BuildHandle for PodmanBuild {
             None => None,
         };
 
+        prune_stale_leftovers(&self.binary);
+
         let ctx = tempdir(&self.opts.run_id)?;
         let _leftovers = Leftovers {
             binary: self.binary.clone(),
@@ -636,6 +638,75 @@ impl Drop for Leftovers {
             // how it came to run only on success.
             let _ = std::process::Command::new(&self.binary)
                 .args(["rmi", "--force", tag])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// Remove contexts and images whose run is gone.
+///
+/// `Leftovers` covers every path a process can return by; it cannot cover a process that does not
+/// return. A wall-clock timeout, a Ctrl-C or a fatal signal skips `Drop` entirely, and those are
+/// not rare: three contexts and three 600 MB images were sitting here from runs killed by a SIGPIPE
+/// bug earlier in this session.
+///
+/// Keyed on the process id embedded in the run id, so a concurrent run is never disturbed. Age is
+/// required as well, because process ids are reused and deleting a live run's context because some
+/// unrelated process inherited its number would be worse than the leak.
+fn prune_stale_leftovers(binary: &str) {
+    const MIN_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
+    let dead = |run_id: &str| -> bool {
+        let Some(pid) = run_id
+            .rsplit('-')
+            .next()
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        !std::path::Path::new(&format!("/proc/{pid}")).exists()
+    };
+    let old_enough = |t: std::time::SystemTime| t.elapsed().map(|e| e >= MIN_AGE).unwrap_or(false);
+
+    for e in std::fs::read_dir(std::env::temp_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let p = e.path();
+        let Some(run_id) = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("trigon-ctx-"))
+        else {
+            continue;
+        };
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(old_enough)
+            .unwrap_or(false);
+        if stale && dead(run_id) {
+            let _ = std::fs::remove_dir_all(&p);
+        }
+    }
+
+    let Ok(out) = std::process::Command::new(binary)
+        .args(["images", "--format", "{{.Repository}}:{{.Tag}}"])
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return;
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some(tag) = line.strip_prefix("localhost/trigon-build:") else {
+            continue;
+        };
+        if dead(tag) {
+            let _ = std::process::Command::new(binary)
+                .args(["rmi", "--force", line])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();

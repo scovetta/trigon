@@ -5,6 +5,7 @@
 //! runner refuses anything else, which is exactly the property under test.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use trigon_sandbox::{
     BuildPlan, BuildRunner, EgressTier, Limits, OciPlan, Phase, PodmanRunner, RunOpts,
@@ -362,4 +363,66 @@ fn image_exists(tag: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn a_build_prunes_leftovers_from_runs_that_were_killed() {
+    let r = PodmanRunner::new(workdir());
+    if !usable(&r).await {
+        return;
+    }
+    // `Leftovers` covers every path a process returns by; it cannot cover one that does not return.
+    // A wall-clock timeout or a fatal signal skips Drop, and three contexts and three 600 MB images
+    // were found sitting here from runs a SIGPIPE bug had killed.
+    //
+    // Pid 1 is alive, so its context must survive: a prune that disturbed a concurrent run would be
+    // worse than the leak.
+    let dead = std::env::temp_dir().join("trigon-ctx-deadbeef1234-4294967290");
+    let live = std::env::temp_dir().join("trigon-ctx-deadbeef1234-1");
+    for d in [&dead, &live] {
+        std::fs::create_dir_all(d).unwrap();
+        // Backdated past the age floor, which exists because process ids get reused.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let _ = filetime_set(d, old);
+    }
+
+    let plan = BuildPlan::Oci(OciPlan {
+        base_image: ALPINE.into(),
+        system_deps: BTreeSet::new(),
+        source: "true".into(),
+        deps: "true".into(),
+        build: "mkdir -p dist && echo hi > dist/out.txt".into(),
+        output_path: "dist/out.txt".into(),
+        egress: EgressTier::DenyAll,
+        privileged: false,
+        extra_hosts: Default::default(),
+    });
+    let h = r.start(&plan, &opts("prunes")).await.unwrap();
+    let _ = h.wait().await.unwrap();
+
+    assert!(
+        !dead.exists(),
+        "a context whose process is gone should have been removed"
+    );
+    assert!(
+        live.exists(),
+        "a context whose process is alive must be left alone"
+    );
+    let _ = std::fs::remove_dir_all(&live);
+}
+
+/// Backdate a directory so the age floor does not protect it.
+fn filetime_set(path: &Path, when: std::time::SystemTime) -> std::io::Result<()> {
+    let secs = when
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .as_secs();
+    let status = std::process::Command::new("touch")
+        .args(["-d", &format!("@{secs}")])
+        .arg(path)
+        .status()?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| std::io::Error::other("touch failed"))
 }
