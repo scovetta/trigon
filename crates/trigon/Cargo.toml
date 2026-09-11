@@ -43,3 +43,4 @@ build = ["dep:trigon-sandbox", "dep:trigon-registry", "dep:trigon-mirror", "dep:
 tar = "0.4"
 zip_crate = { package = "zip", version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
+base64.workspace = true

@@ -287,21 +287,21 @@ fn push(events: &Arc<Mutex<Vec<BuildEvent>>>, e: BuildEvent) {
     }
 }
 
-/// Append a line to the bounded tail, dropping from the front once it is full.
+/// Append a line to the bounded log, compressing rather than truncating once it is full.
+///
+/// This used to drop from the front, which is the mistake `trigon_core::compress` exists to avoid:
+/// **the first error is usually the real one**, and everything after it is consequence. A build
+/// that emits a megabyte of dependency-resolution chatter after the line that broke it would push
+/// that line out of a front-dropping buffer, leaving a tail full of downstream noise and no cause —
+/// for a human reading it, and for the classifier and the repair loop that read it next.
+///
+/// Compression runs only on overflow, so the per-line cost stays amortized constant.
 fn append(log: &mut String, line: &str) {
     log.push_str(line);
     log.push('\n');
     if log.len() > LOG_TAIL_BYTES * 2 {
-        let cut = log.len() - LOG_TAIL_BYTES;
-        // Cut on a character boundary, and prefer a line boundary just after it.
-        let mut at = cut;
-        while at < log.len() && !log.is_char_boundary(at) {
-            at += 1;
-        }
-        if let Some(nl) = log[at..].find('\n') {
-            at += nl + 1;
-        }
-        *log = log[at..].to_string();
+        *log = trigon_core::compress(log, LOG_TAIL_BYTES).text;
+        log.push('\n');
     }
 }
 

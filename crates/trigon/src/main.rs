@@ -852,16 +852,53 @@ mod build {
                 if verbose {
                     eprintln!("\n{}", outcome.log_tail);
                 }
-                bail!(
-                    "build failed in {:?} with exit {}",
-                    outcome.failed_in,
-                    outcome.exit_code
-                );
+                // Named here, where the log is in hand. Re-deriving it later from an error string
+                // would mean classifying our own prose instead of the build's output.
+                let signature = trigon_core::classify(&outcome.log_tail);
+                if verbose {
+                    println!("\n  failure   {signature}");
+                    if !signature.repairable {
+                        println!("            no strategy change fixes this one");
+                    }
+                }
+                return Err(BuildFailure {
+                    phase: outcome
+                        .failed_in
+                        .map(|p| format!("{p:?}").to_lowercase())
+                        .unwrap_or_else(|| "build".into()),
+                    exit_code: outcome.exit_code,
+                    signature,
+                }
+                .into());
             }
             Ok(())
         })
     }
 }
+
+/// A build that ran and did not finish, with the failure already named.
+///
+/// A typed error rather than a formatted string, because the signature keys a cache and gates
+/// spend: reconstructing it by pattern-matching our own error prose would put a second, worse
+/// classifier in the path of every decision the first one exists to make.
+#[derive(Debug)]
+pub struct BuildFailure {
+    pub phase: String,
+    pub exit_code: i32,
+    pub signature: trigon_core::FailureSignature,
+}
+
+impl std::fmt::Display for BuildFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the build failed in {} with exit {} ({})",
+            self.phase, self.exit_code, self.signature
+        )
+    }
+}
+
+impl std::error::Error for BuildFailure {}
 
 fn verify(
     upstream: &Path,
@@ -1329,6 +1366,9 @@ mod rebuild {
         /// The build ran and did not finish.
         BuildFailed {
             phase: String,
+            /// What stopped it, named so that every run sharing the cause shares the name.
+            /// `None` only where the failure happened outside a build we have a log for.
+            signature: Option<trigon_core::FailureSignature>,
         },
         /// Ours, the registry's, or a policy. Never the package's.
         Failed {
@@ -1344,7 +1384,7 @@ mod rebuild {
             reason: String,
         },
         /// Read back from a previous run of the same sweep.
-        Recorded(String),
+        Recorded(String, Option<String>),
     }
 
     impl Outcome {
@@ -1352,10 +1392,26 @@ mod rebuild {
             match self {
                 Outcome::Compared(m) => m.to_string(),
                 Outcome::NoStrategy => "no-strategy".into(),
-                Outcome::BuildFailed { phase } => format!("build-failed:{phase}"),
+                Outcome::BuildFailed { phase, .. } => format!("build-failed:{phase}"),
                 Outcome::Failed { fault, .. } => format!("error:{fault:?}").to_lowercase(),
                 Outcome::Void { .. } => "void".into(),
-                Outcome::Recorded(label) => label.clone(),
+                Outcome::Recorded(label, _) => label.clone(),
+            }
+        }
+
+        /// The failure cluster this row belongs to, where it has one.
+        ///
+        /// What turns a column of red rows into a handful of tickets. Kept off `label` on purpose:
+        /// the label is the sweep's outcome taxonomy and stays small enough to read as a table,
+        /// while clusters are open-ended and belong beside it.
+        pub fn cluster(&self) -> Option<String> {
+            match self {
+                Outcome::BuildFailed { signature, .. } => signature.as_ref().map(|s| s.key()),
+                // A resumed row carries its cluster forward. Without this, resuming a sweep — which
+                // is how a long one always finishes — silently empties the cluster summary, and the
+                // summary is the reason to run it.
+                Outcome::Recorded(_, cluster) => cluster.clone(),
+                _ => None,
             }
         }
 
@@ -1374,7 +1430,7 @@ mod rebuild {
         pub fn as_match(&self) -> Option<trigon_core::Match> {
             match self {
                 Outcome::Compared(m) => Some(*m),
-                Outcome::Recorded(label) => label.parse().ok(),
+                Outcome::Recorded(label, _) => label.parse().ok(),
                 _ => None,
             }
         }
@@ -1432,11 +1488,14 @@ mod rebuild {
         let outcome = run_one(args, true)?;
         match outcome {
             // `Recorded` only comes from a sweep's results file, never from a single run.
-            Outcome::Compared(_) | Outcome::NoStrategy | Outcome::Recorded(_) => Ok(()),
+            Outcome::Compared(_) | Outcome::NoStrategy | Outcome::Recorded(..) => Ok(()),
             // Not an error, and not a pass. The exit code says something went wrong because
             // something did: the run cannot be used.
             Outcome::Void { reason } => bail!("void: {reason}"),
-            Outcome::BuildFailed { phase } => bail!("the build failed in {phase}"),
+            Outcome::BuildFailed { phase, signature } => match signature {
+                Some(s) => bail!("the build failed in {phase}: {s}"),
+                None => bail!("the build failed in {phase}"),
+            },
             Outcome::Failed { detail, .. } => bail!("{detail}"),
         }
     }
@@ -1632,6 +1691,14 @@ mod rebuild {
         let Some(rebuilt) = newest_file(&out) else {
             return Ok(Outcome::BuildFailed {
                 phase: "collect".into(),
+                signature: Some(trigon_core::FailureSignature {
+                    code: "trigon/no-output",
+                    subject: None,
+                    fault: trigon_core::Fault::Bug,
+                    retryable: false,
+                    repairable: true,
+                    evidence: "the build succeeded and left no artifact at the output path".into(),
+                }),
             });
         };
         let set = crate::resolve_profile(
@@ -1682,14 +1749,27 @@ mod rebuild {
     ///
     /// The phase is the difference between "our infrastructure" and "this package does not build",
     /// and collapsing them makes a sweep's numbers uninterpretable.
+    /// A build that ran and failed, or a failure of ours that never got that far.
+    ///
+    /// Only a [`crate::BuildFailure`] — which exists only where a build actually produced a log —
+    /// becomes `BuildFailed`. Everything else is `Failed`, and the distinction is load-bearing:
+    /// `BuildFailed` says the package did not build, `Failed` says we could not test it. This used
+    /// to search our own error text for a phase name, so "the mirror container did not start
+    /// listening" became `build-failed:setup` and a broken mirror on our side read, in the sweep
+    /// summary, as five packages that do not build.
     fn build_outcome(e: &anyhow::Error) -> Outcome {
-        let text = e.to_string();
-        let phase = ["deps", "build", "collect", "source", "setup"]
-            .into_iter()
-            .find(|p| text.to_lowercase().contains(p))
-            .unwrap_or("build");
-        Outcome::BuildFailed {
-            phase: phase.to_string(),
+        if let Some(f) = e.downcast_ref::<crate::BuildFailure>() {
+            return Outcome::BuildFailed {
+                phase: f.phase.clone(),
+                signature: Some(f.signature.clone()),
+            };
+        }
+        if let Some(s) = e.downcast_ref::<trigon_sandbox::SandboxError>() {
+            return classify(s);
+        }
+        Outcome::Failed {
+            fault: trigon_core::Fault::Infra,
+            detail: e.to_string(),
         }
     }
 
@@ -1873,7 +1953,7 @@ mod sweep {
 
         let mut rows: Vec<(String, Outcome, f64)> = Vec::new();
         for (i, purl) in purls.iter().enumerate() {
-            if let Some((label, secs)) = already.get(*purl) {
+            if let Some((label, secs, cluster)) = already.get(*purl) {
                 println!(
                     "  {:<28} {:<20} {:>6.0}s   [{}/{}] (done)",
                     short(purl),
@@ -1882,7 +1962,11 @@ mod sweep {
                     i + 1,
                     purls.len()
                 );
-                rows.push((purl.to_string(), Outcome::Recorded(label.clone()), *secs));
+                rows.push((
+                    purl.to_string(),
+                    Outcome::Recorded(label.clone(), cluster.clone()),
+                    *secs,
+                ));
                 continue;
             }
             let started = Instant::now();
@@ -1930,7 +2014,12 @@ mod sweep {
             // Flushed per row. Buffered output is lost with the process, which is the failure this
             // exists to prevent.
             use std::io::Write as _;
-            writeln!(sink, "{purl}\t{}\t{secs:.1}", outcome.label())?;
+            writeln!(
+                sink,
+                "{purl}\t{}\t{secs:.1}\t{}",
+                outcome.label(),
+                outcome.cluster().unwrap_or_default()
+            )?;
             sink.flush()?;
             rows.push((purl.to_string(), outcome, secs));
         }
@@ -1940,7 +2029,7 @@ mod sweep {
     }
 
     /// Targets already recorded in a previous run of this sweep.
-    fn completed(path: &Path) -> BTreeMap<String, (String, f64)> {
+    fn completed(path: &Path) -> BTreeMap<String, (String, f64, Option<String>)> {
         let mut out = BTreeMap::new();
         let Ok(text) = std::fs::read_to_string(path) else {
             return out;
@@ -1948,13 +2037,26 @@ mod sweep {
         for line in text.lines() {
             let mut f = line.split('\t');
             if let (Some(purl), Some(label), Some(secs)) = (f.next(), f.next(), f.next()) {
+                // The cluster column arrived after the first results files did, so its absence is
+                // read as "not recorded" rather than as a malformed row.
+                let cluster = f.next().filter(|c| !c.is_empty()).map(str::to_string);
                 out.insert(
                     purl.to_string(),
-                    (label.to_string(), secs.parse().unwrap_or(0.0)),
+                    (label.to_string(), secs.parse().unwrap_or(0.0), cluster),
                 );
             }
         }
         out
+    }
+
+    /// One line of what the build said, for a human scanning clusters.
+    fn short_evidence(s: &str) -> String {
+        let s = s.trim();
+        if s.chars().count() > 96 {
+            format!("{}…", s.chars().take(95).collect::<String>())
+        } else {
+            s.to_string()
+        }
     }
 
     fn short(purl: &str) -> String {
@@ -1970,6 +2072,42 @@ mod sweep {
         println!("\n  {} targets", rows.len());
         for (label, n) in &counts {
             println!("    {label:<22} {n}");
+        }
+
+        // The clusters, which is what a failed sweep is actually for. Twenty red rows are twenty
+        // tickets until they are grouped; grouped, they are usually three. The count is what says
+        // which one to fix first, and a cluster nothing can fix is marked so nobody tries.
+        let mut clusters: BTreeMap<String, (usize, bool, String)> = BTreeMap::new();
+        for (_, o, _) in rows {
+            let Some(key) = o.cluster() else { continue };
+            let (repairable, evidence) = match o {
+                Outcome::BuildFailed {
+                    signature: Some(s), ..
+                } => (s.repairable, s.evidence.clone()),
+                // A resumed row kept its cluster but not the log line behind it, which is on disk
+                // in that target's work directory rather than in the results file.
+                _ => (true, String::new()),
+            };
+            let e = clusters.entry(key).or_insert((0, repairable, evidence));
+            e.0 += 1;
+        }
+        if !clusters.is_empty() {
+            let mut ranked: Vec<_> = clusters.into_iter().collect();
+            ranked.sort_by_key(|(k, (n, ..))| (std::cmp::Reverse(*n), k.clone()));
+            println!("\n  failure clusters");
+            for (key, (n, repairable, evidence)) in &ranked {
+                println!(
+                    "    {n:>3}  {key:<34}{}",
+                    if *repairable {
+                        ""
+                    } else {
+                        "  (nothing to repair)"
+                    }
+                );
+                if !evidence.is_empty() {
+                    println!("         {}", short_evidence(evidence));
+                }
+            }
         }
 
         // The denominator is the load-bearing part. A package that did not reproduce and a build

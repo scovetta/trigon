@@ -8,9 +8,11 @@
 
 mod digest;
 mod evidence;
+mod failure;
 mod fault;
 mod format;
 pub mod jcs;
+mod logs;
 mod note;
 mod outcome;
 mod path;
@@ -21,8 +23,10 @@ pub use evidence::{
     Claim, Confidence, Evidence, Intrinsics, RegistryMoment, SourceDiscovery, SourceProvenance,
     ToolchainResolution, resolve_toolchain,
 };
+pub use failure::{FailureSignature, classify};
 pub use fault::{Classify, Fault};
 pub use format::Format;
+pub use logs::{Compressed, compress};
 pub use note::{Note, NoteCode};
 pub use outcome::{Match, ProfileId, Provenance, RiskTier, StabilizerId};
 pub use path::EntryPath;

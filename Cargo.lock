@@ -1991,6 +1991,7 @@ name = "trigon"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "flate2",
  "serde_json",

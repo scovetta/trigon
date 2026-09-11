@@ -617,3 +617,122 @@ fn a_closed_network_peer_does_not_kill_the_process() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+// ---------------------------------------------------------------------------
+// Attestations, from the command line a person actually types.
+
+#[test]
+fn attest_writes_a_bundle_that_verify_attestation_re_derives() {
+    let a = write_tgz("att-a.tgz", b"hello", 1_700_000_000);
+    let b = write_tgz("att-b.tgz", b"hello", 1_800_000_000);
+    let bundle = tmp().join("att.json");
+
+    let out = Command::new(bin())
+        .args(["verify"])
+        .arg(&a)
+        .arg(&b)
+        .arg("--attest")
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    // Unsigned by default, and it says so rather than letting a bundle pass as verified.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unsigned"), "{err}");
+
+    let out = Command::new(bin())
+        .args(["verify-attestation"])
+        .arg(&bundle)
+        .arg("--rerun-comparison")
+        .arg("--upstream")
+        .arg(&a)
+        .arg("--rebuild")
+        .arg(&b)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("the claim holds"), "{text}");
+}
+
+#[test]
+fn reading_an_attestation_is_not_checking_it_and_the_output_says_so() {
+    // The distinction the whole subcommand exists for. Without `--rerun-comparison` we have
+    // repeated what the statement says, which is worth nothing against a producer who lied.
+    let a = write_tgz("read-a.tgz", b"hello", 1);
+    let bundle = tmp().join("read.json");
+    Command::new(bin())
+        .args(["verify"])
+        .arg(&a)
+        .arg(&a)
+        .arg("--attest")
+        .arg(&bundle)
+        .output()
+        .unwrap();
+
+    let out = Command::new(bin())
+        .args(["verify-attestation"])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("not attempted"), "{text}");
+    assert!(text.contains("--rerun-comparison"), "{text}");
+}
+
+#[test]
+fn an_overstated_claim_exits_nonzero() {
+    let a = write_tgz("lie-a.tgz", b"hello", 1_700_000_000);
+    let b = write_tgz("lie-b.tgz", b"hello", 1_800_000_000);
+    let bundle = tmp().join("lie.json");
+    Command::new(bin())
+        .args(["verify"])
+        .arg(&a)
+        .arg(&b)
+        .arg("--attest")
+        .arg(&bundle)
+        .output()
+        .unwrap();
+
+    // Edit the claim upward, the way a dishonest rebuilder would.
+    let mut env: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&bundle).unwrap()).unwrap();
+    let payload = env["payload"].as_str().unwrap();
+    let mut st: serde_json::Value = serde_json::from_slice(&base64_decode(payload)).unwrap();
+    st["predicate"]["outcome"] = serde_json::Value::String("exact".into());
+    env["payload"] = serde_json::Value::String(base64_encode(
+        serde_json::to_string(&st).unwrap().as_bytes(),
+    ));
+    std::fs::write(&bundle, serde_json::to_vec(&env).unwrap()).unwrap();
+
+    let out = Command::new(bin())
+        .args(["verify-attestation"])
+        .arg(&bundle)
+        .arg("--rerun-comparison")
+        .arg("--upstream")
+        .arg(&a)
+        .arg("--rebuild")
+        .arg(&b)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "an overstated claim must not exit zero: {text}"
+    );
+    assert!(text.contains("does NOT hold"), "{text}");
+}
+
+fn base64_decode(s: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(s).unwrap()
+}
+
+fn base64_encode(b: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(b)
+}

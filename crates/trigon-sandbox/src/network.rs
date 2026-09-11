@@ -86,7 +86,10 @@ impl Island {
             &name,
             "--network",
             "podman",
-            "--rm",
+            // Deliberately no `--rm`. A mirror that crashes on startup takes its logs with it, and
+            // then a crash and a slow start are the same observation: the readiness probe polls a
+            // container that no longer exists and reports a timeout, which sent an afternoon
+            // looking at the wrong thing. `destroy` and `prune_orphans` already remove these.
         ]
         .iter()
         .map(|s| s.to_string())
@@ -142,28 +145,39 @@ impl Island {
         };
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            if let Ok(logs) = run_ok(&self.binary, &["logs", container]).await
-                && logs.contains("listening")
+            if combined(&self.binary, &["logs", container])
+                .await
+                .contains("listening")
             {
                 return Ok(());
             }
             // A container that has already exited will never start listening, so say what it said
-            // rather than waiting out the timeout.
-            if let Ok(state) = run_ok(
+            // rather than waiting out the timeout. An inspect that *fails* means the container is
+            // gone entirely, which is equally terminal: polling on is how a crash at startup came
+            // to be reported as a 30-second timeout.
+            match run_ok(
                 &self.binary,
                 &["inspect", "--format", "{{.State.Status}}", container],
             )
             .await
-                && state != "running"
-                && state != "created"
             {
-                let logs = run_ok(&self.binary, &["logs", container])
-                    .await
-                    .unwrap_or_default();
-                return Err(SandboxError::Failed {
-                    phase: "setup".into(),
-                    detail: format!("the mirror container is {state}: {logs}"),
-                });
+                Ok(state) if state != "running" && state != "created" => {
+                    let logs = combined(&self.binary, &["logs", container]).await;
+                    return Err(SandboxError::Failed {
+                        phase: "setup".into(),
+                        detail: format!("the mirror container is {state}: {}", tail(&logs)),
+                    });
+                }
+                Err(_) => {
+                    return Err(SandboxError::Failed {
+                        phase: "setup".into(),
+                        detail: format!(
+                            "the mirror container {container} disappeared before it started                              listening. If `{}` is older than this build it will not understand                              the flags we pass it; rebuild it with `trigon mirror-image`.",
+                            self.mirror_image_hint()
+                        ),
+                    });
+                }
+                _ => {}
             }
             if std::time::Instant::now() >= deadline {
                 return Err(SandboxError::Failed {
@@ -175,6 +189,11 @@ impl Island {
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
+    }
+
+    /// For the message above, which is the only place it is needed.
+    fn mirror_image_hint(&self) -> &str {
+        "localhost/trigon-mirror:latest"
     }
 
     /// The name to attach a build container to.
@@ -234,10 +253,37 @@ impl Island {
     pub async fn destroy(self) {
         if let Some(c) = &self.mirror {
             let _ = run_ok(&self.binary, &["stop", "--time", "2", c]).await;
+            // Explicit, now that the container does not remove itself.
+            let _ = run_ok(&self.binary, &["rm", "--force", c]).await;
         }
         let _ = run_ok(&self.binary, &["network", "rm", "--force", &self.name]).await;
         tracing::debug!(network = %self.name, "tore down the egress island");
     }
+}
+
+/// A container's output, both streams.
+///
+/// `podman logs` splits them, and a program that dies on a bad argument says so on stderr — which
+/// is exactly the case this is here to report. Reading stdout alone produced an empty diagnosis for
+/// the one failure that most needed one.
+async fn combined(binary: &str, args: &[&str]) -> String {
+    let Ok(out) = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+    else {
+        return String::new();
+    };
+    let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+    s.push_str(&String::from_utf8_lossy(&out.stderr));
+    s
+}
+
+/// The last few lines of a container's output, for an error message a person reads.
+fn tail(logs: &str) -> String {
+    let lines: Vec<&str> = logs.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(4)..].join(" / ")
 }
 
 async fn run_ok(binary: &str, args: &[&str]) -> Result<String, SandboxError> {
