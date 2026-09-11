@@ -474,10 +474,12 @@ where
         url: String,
     }
     let armed = guard.is_armed();
+    // Hashing always; keeping the bytes only when something will look at them.
+    let keep_body = guard.wants_body();
     let state = State {
         inner,
         hasher: sha2::Sha256::new(),
-        body: armed.then(Vec::new),
+        body: keep_body.then(Vec::new),
         guard,
         url,
     };

@@ -269,6 +269,15 @@ impl Guard {
         !self.manifest.is_empty() || self.manifest.refuse_url.is_some()
     }
 
+    /// Whether the body has to be kept, not just hashed.
+    ///
+    /// Only member checking needs the bytes; the whole-artifact hash is computed as they stream
+    /// past. With no guarded members, which is the common case for a small package where the size
+    /// filter drops everything, buffering every dependency the build downloads is pure cost.
+    pub fn wants_body(&self) -> bool {
+        !self.manifest.members.is_empty()
+    }
+
     /// Whether this URL is the run's own published artifact.
     pub fn refuses(&self, url: &str) -> bool {
         self.manifest

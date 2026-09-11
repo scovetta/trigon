@@ -70,7 +70,6 @@ serde_json = "1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "ansi", "std"] }
 proptest = "1"
 toml = "0.8"
-libc = "0.2"
 regex = "1"
 
 [profile.release]

@@ -308,21 +308,38 @@ enum OutputFormat {
     Json,
 }
 
-/// Die quietly when the reader goes away, rather than panicking.
+/// Exit quietly when the reader goes away, rather than panicking.
 ///
-/// Rust masks SIGPIPE at startup, so a write to a closed pipe returns EPIPE, `println!` panics on
-/// it, and `trigon verify x y | head -3` exits 101 with a backtrace instead of 0. That matters more
-/// here than in most tools, because the exit code carries the verdict: 0 for a match and 1 for a
-/// divergence. A panic in the middle of a pipeline is indistinguishable from a real failure.
-fn die_quietly_on_sigpipe() {
-    // SAFETY: restoring a signal to its default disposition, before any thread is spawned.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
+/// `trigon verify x y | head -3` would otherwise exit 101 with a backtrace: Rust masks SIGPIPE at
+/// startup, so the write returns EPIPE and `println!` panics on it. That matters more here than in
+/// most tools because the exit code carries the verdict, and a panic mid-pipeline is
+/// indistinguishable from a real failure.
+///
+/// A panic hook rather than restoring SIGPIPE to its default, which is what this was and which was
+/// worse than the problem. The signal disposition is process-wide and applies to **every** write,
+/// including sockets: the mirror proxies to a build container, the container finishes and closes
+/// its connection, the mirror writes one more chunk, and the whole run dies with status 141 having
+/// printed nothing. It killed a twenty-target sweep twice at the same target before anyone looked
+/// at the exit code.
+fn exit_quietly_on_broken_pipe() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if msg.contains("Broken pipe") || msg.contains("os error 32") {
+            // 128 + SIGPIPE, which is what a shell reports for `yes | head`.
+            std::process::exit(141);
+        }
+        default(info);
+    }));
 }
 
 fn main() -> Result<()> {
-    die_quietly_on_sigpipe();
+    exit_quietly_on_broken_pipe();
     let cli = Cli::parse();
     init_logging(cli.verbose, cli.log_json);
     let result = dispatch(cli.cmd);

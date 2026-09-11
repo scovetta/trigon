@@ -94,12 +94,19 @@ filters:
 | Filter | Rule | Why |
 |---|---|---|
 | Minimum size | Drop members under 4 KiB | Small files collide across unrelated packages as a matter of course |
-| Stock content | Drop members matching a maintained list of common licence texts and generated stubs | Same reason, for files above the size threshold |
+| Stock content | Drop members whose **name and content** both say licence or generated stub | Same reason, for files above the size threshold. Name alone would drop whatever someone put in a file called `LICENSE`, which is where an attacker would put it once the rule was known; content alone would drop source carrying a licence header, which plenty of source does |
 | Also-in-source | Drop members byte-identical to a file in the resolved source tree | A vendored file the build legitimately re-fetches is not evidence of anything |
 | Executable weighting | Never drop a member classified `Executable`, whatever its size | These are what an attacker wants to smuggle |
 
 A member the filters drop is still compared during `Compare`. Filtering narrows what triggers a
 `Void`, and it changes nothing about the verdict.
+
+How much the last one narrows is worth knowing. On `semver@7.6.3` against its own repository the
+guarded member set goes from six to zero, because every file a pure-JavaScript package publishes is
+in its repository: what is left guarding it is the whole-artifact hash. The filter needs a checkout,
+so it applies where one is at hand and not in a sweep, which has no per-target source until the
+source cache exists. Without it the guard is **wider** than designed, which errs toward voiding an
+honest run rather than missing a forged one.
 
 ### 2.3 Write-only blob access from the sandbox
 

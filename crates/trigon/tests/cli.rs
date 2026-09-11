@@ -591,3 +591,29 @@ fn resolve_reports_a_live_package() {
     // are both "a commit" and must not be read alike.
     assert!(text.contains("found by   RegistryCommit"), "{text}");
 }
+
+#[cfg(feature = "build")]
+#[test]
+fn a_closed_network_peer_does_not_kill_the_process() {
+    // The first fix for the piping case restored SIGPIPE to its default, which is process-wide and
+    // applies to every write, sockets included. The mirror proxies to a build container; the
+    // container finishes and closes its connection; the mirror writes one more chunk and the whole
+    // run dies with status 141 having printed nothing. It killed a twenty-target sweep twice at the
+    // same target before anyone read the exit code.
+    //
+    // Reproduced without containers: serve, start a request, drop it mid-body.
+    let out = Command::new(bin()).args(["mirror", "--port", "0"]).spawn();
+    let Ok(mut child) = out else {
+        eprintln!("skipped: could not start the mirror");
+        return;
+    };
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    // Still running: nothing has written to a closed peer yet, and more importantly the process
+    // must not have died from arming the signal.
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the mirror exited immediately"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}

@@ -1850,7 +1850,6 @@ dependencies = [
  "anyhow",
  "clap",
  "flate2",
- "libc",
  "serde_json",
  "sha2",
  "tar",
