@@ -87,8 +87,12 @@ pub struct DiffReport {
 ///
 /// Members are keyed by `(path, occurrence)`, so upstream's second `lib/index.js` compares against
 /// the rebuild's second one. Keying on path alone would make a duplicate path unmatchable.
+///
+/// `codes` is left empty here and filled by [`crate::compare`] on a divergence only: naming every
+/// field that differs means walking both archives a second time, and on a match there is nothing
+/// to name. Every comparison in a sweep is a match if the system is working, so this is the hot
+/// path.
 pub fn report(upstream: &Archive, rebuild: &Archive) -> DiffReport {
-    let codes = crate::signature::signature(upstream, rebuild);
     let u = index(upstream);
     let r = index(rebuild);
 
@@ -148,7 +152,7 @@ pub fn report(upstream: &Archive, rebuild: &Archive) -> DiffReport {
     }
 
     DiffReport {
-        codes,
+        codes: Default::default(),
         identical: counts.0,
         differs: counts.1,
         only_upstream: counts.2,

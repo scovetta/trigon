@@ -1818,14 +1818,24 @@ mod mirror {
         let dockerfile = root.join("target").join("mirror.Dockerfile");
         std::fs::write(
             &dockerfile,
+            // The cache mounts turn a rebuild from a forty-minute full recompile into an
+            // incremental one. `COPY . .` invalidates on any source change, so without them every
+            // rebuild compiles all ~180 dependency crates against musl again to pick up a one-line
+            // change in ours — which is most of why this image goes stale and stays stale.
+            //
+            // A cache mount is not part of the resulting layer, so the binary has to be copied out
+            // of the target directory before the mount goes away.
             "FROM docker.io/library/rust:1-alpine AS build\n\
              RUN apk add --no-cache musl-dev\n\
              WORKDIR /src\n\
              COPY . .\n\
-             RUN cargo build --release -p trigon --bin trigon\n\
+             RUN --mount=type=cache,target=/usr/local/cargo/registry \\\n\
+             \x20   --mount=type=cache,target=/src/target \\\n\
+             \x20   cargo build --release -p trigon --bin trigon \\\n\
+             \x20   && cp target/release/trigon /trigon\n\
              \n\
              FROM docker.io/library/alpine:3.20\n\
-             COPY --from=build /src/target/release/trigon /usr/local/bin/trigon\n\
+             COPY --from=build /trigon /usr/local/bin/trigon\n\
              ENTRYPOINT [\"/usr/local/bin/trigon\"]\n",
         )?;
 

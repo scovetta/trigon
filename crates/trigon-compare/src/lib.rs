@@ -182,10 +182,19 @@ pub fn compare(
 
     // A diff report is produced on every run, including a success: it is what makes a verdict
     // auditable, and it is what the UI renders.
-    let diff = match (upstream_archive, rebuild_archive) {
+    let mut diff = match (upstream_archive, rebuild_archive) {
         (Some(u), Some(r)) => Some(diff::report(u, r)),
         _ => None,
     };
+
+    // The deterministic difference signature, on a divergence only. It is what makes a published
+    // divergence reproducible rather than merely accusatory, and it is the one place worth walking
+    // both archives a second time for.
+    if outcome == Match::Divergent
+        && let (Some(d), Some(u), Some(r)) = (diff.as_mut(), upstream_archive, rebuild_archive)
+    {
+        d.codes = signature::signature(u, r);
+    }
 
     // One event carrying the verdict and the digests it rests on. This is the line a fleet
     // aggregates, so it names the outcome as a string rather than an ordinal: a downstream filter
