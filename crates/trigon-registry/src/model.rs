@@ -51,14 +51,47 @@ impl ResolvedTarget {
         }
     }
 
-    /// The artifact the caller named, or the only one, or an error listing what exists.
+    /// The artifact to verify when the caller named none.
+    ///
+    /// A verdict still names one file, because it has to: a release publishes an sdist and up to a
+    /// dozen platform wheels, built on a dozen machines, and they do not reproduce alike. What this
+    /// adds is a deterministic choice where one is obvious, so a sweep does not have to name every
+    /// filename by hand and then be wrong about the ones it guessed.
+    ///
+    /// A pure wheel first, because it is the artifact almost everything installs and the only one
+    /// whose contents do not depend on the machine that built it. Then a lone sdist. Anything else
+    /// is genuinely ambiguous and stays an error.
+    pub fn preferred(&self) -> Option<&ArtifactMeta> {
+        if let [one] = self.artifacts.as_slice() {
+            return Some(one);
+        }
+        let pure: Vec<&ArtifactMeta> = self
+            .artifacts
+            .iter()
+            .filter(|a| a.id.as_str().ends_with("-none-any.whl"))
+            .collect();
+        if let [one] = pure.as_slice() {
+            return Some(one);
+        }
+        let sdists: Vec<&ArtifactMeta> = self
+            .artifacts
+            .iter()
+            .filter(|a| a.id.kind() == trigon_core::ArtifactKind::Sdist)
+            .collect();
+        match sdists.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    /// The artifact the caller named, or the obvious one, or an error listing what exists.
     ///
     /// The listing is the point. "no such artifact" against a release with twelve wheels sends
     /// someone to a browser; the same error with the twelve filenames in it does not.
     pub fn pick(&self, wanted: Option<&str>) -> Result<&ArtifactMeta, crate::RegistryError> {
         let found = match wanted {
             Some(id) => self.artifact(id),
-            None => self.sole_artifact(),
+            None => self.preferred(),
         };
         found.ok_or_else(|| crate::RegistryError::NoSuchArtifact {
             name: self.reference.registry_name(),

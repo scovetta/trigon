@@ -1,7 +1,14 @@
-# Build a wheel with no network access and no isolated environment.
+# Build a wheel.
 #
-# `-n` because the dependencies were installed in the deps phase, from the mirror. Letting the
-# frontend build its own isolated environment would reach the live index and undo the pinning.
+# Isolation is a parameter because the right answer depends on who is asking. A definition that
+# pinned its build requirements exactly wants `-n`: the deps phase already installed them, and
+# letting the frontend build its own environment would resolve them again and undo the pinning.
+# A heuristic that pinned nothing wants the opposite, because with `-n` the frontend does not
+# install a declared build requirement, it checks for it and stops: `six` fails with "Unmet
+# dependencies: wheel, found: not installed".
+#
+# Isolation is not a hole in the pinning when a mirror is in play. The frontend resolves build
+# requirements through the same time-filtered index as everything else.
 id: pypi/build/wheel
 params:
   locator:
@@ -9,5 +16,12 @@ params:
   dir:
     required: false
     doc: Project directory, when it is not the working tree root.
+  no_isolation:
+    required: false
+    default: "true"
+    doc: >-
+      Pass `-n`. True by default because a definition pins its build requirements and installs them
+      in the deps phase; a caller that pinned nothing passes false and lets the frontend resolve
+      them from the project's own declaration.
 steps:
-  - runs: "{{ with.locator }}python3 -m build --wheel -n{% if with.dir and with.dir != '.' %} {{ with.dir }}{% endif %}"
+  - runs: "{{ with.locator }}python3 -m build --wheel{% if with.no_isolation == 'true' %} -n{% endif %}{% if with.dir and with.dir != '.' %} {{ with.dir }}{% endif %}"

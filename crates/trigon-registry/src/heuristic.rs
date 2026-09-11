@@ -222,7 +222,8 @@ impl StrategyInferrer for PyPiInferrer {
         // for one that expected a specific setuptools. That is the common case, and where it is
         // wrong the divergence is in METADATA or RECORD and legible.
         assumptions.push(
-            "build requirements come from the project's own pyproject.toml, not from the registry"
+            "build requirements come from the project's own declaration, resolved by the build \
+             frontend rather than pinned here"
                 .into(),
         );
 
@@ -236,7 +237,13 @@ impl StrategyInferrer for PyPiInferrer {
             deps: vec![uses("pypi/deps/basic", deps)],
             build: vec![uses(
                 "pypi/build/wheel",
-                BTreeMap::from([("locator".to_string(), "/deps/bin/".to_string())]),
+                BTreeMap::from([
+                    ("locator".to_string(), "/deps/bin/".to_string()),
+                    // This rung pins no build requirements, so the frontend has to resolve them
+                    // from the project's own declaration. With `-n` it does not install a declared
+                    // requirement, it checks for it and stops.
+                    ("no_isolation".to_string(), "false".to_string()),
+                ]),
             )],
             output_dir: Some(match &source.subdir {
                 Some(d) => format!("{}/dist", d.trim_end_matches('/')),

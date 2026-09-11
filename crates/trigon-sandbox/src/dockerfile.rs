@@ -55,13 +55,46 @@ impl BuildContext {
 /// the build then fails later for a reason that looks like the package's fault.
 fn install_command(base_image: &str, deps: &[String]) -> String {
     let img = base_image.to_ascii_lowercase();
-    let joined = deps.join(" ");
-    if img.contains("alpine") {
-        format!("apk add --no-cache {joined}")
+    let (family, install) = if img.contains("alpine") {
+        (Family::Alpine, "apk add --no-cache")
     } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
-        format!("dnf install -y {joined}")
+        (Family::Fedora, "dnf install -y")
     } else {
-        format!("apt-get update && apt-get install -y --no-install-recommends {joined}")
+        (
+            Family::Debian,
+            "apt-get update && apt-get install -y --no-install-recommends",
+        )
+    };
+    let mut names: Vec<String> = Vec::new();
+    for d in deps {
+        for n in expand(d, family) {
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+    }
+    format!("{install} {}", names.join(" "))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Debian,
+    Alpine,
+    Fedora,
+}
+
+/// A strategy's logical system dependency, as this base image's packages.
+///
+/// A strategy names what it needs, not what a particular distribution calls it, because a strategy
+/// that named Debian packages would be a strategy that only builds on Debian. The mapping is small
+/// and only covers the cases where a logical name is not one package: `python3 -m venv` on Debian
+/// needs `python3-venv` for ensurepip, which is not part of `python3` there and does not exist as a
+/// separate package anywhere else. Without it the venv fails with Debian's own advice to run
+/// `apt install python3.11-venv`, inside a container, which is not advice anyone can take.
+fn expand(dep: &str, family: Family) -> Vec<String> {
+    match (dep, family) {
+        ("python3", Family::Debian) => vec!["python3".into(), "python3-venv".into()],
+        _ => vec![dep.to_string()],
     }
 }
 

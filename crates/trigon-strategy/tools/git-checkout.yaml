@@ -4,7 +4,11 @@
 # fails leaves the previous revision in place. That is a rebuild of the wrong commit reported as a
 # rebuild of the right one.
 id: git-checkout
-needs: [git]
+# `ca-certificates` as well as git. A slim base image carries no CA bundle, so cloning over HTTPS
+# fails with "server certificate verification failed. CAfile: none", which reads like a network
+# problem rather than a missing package. It went unnoticed for a while because installing npm pulls
+# a CA bundle in as a dependency, so every npm target happened to work.
+needs: [git, ca-certificates]
 params:
   crlf:
     required: false

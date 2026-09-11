@@ -415,14 +415,19 @@ impl BuildHandle for PodmanBuild {
             if let Some(i) = island {
                 i.destroy().await;
             }
+            // Which script died, not just "the image build failed". Setup, source and deps are all
+            // image-build-time layers, and calling every one of them a dependency failure is the
+            // difference between "this package does not build" and "our base image has no CA
+            // bundle".
+            let phase = failing_phase(&log).unwrap_or(Phase::Deps);
             push(&self.events, BuildEvent::Exit(code));
             tracing::error!(
                 run_id = %self.opts.run_id,
-                phase = "deps",
+                phase = ?phase,
                 exit = code,
                 "image build failed"
             );
-            return Ok(self.outcome(code, None, timings, Some(Phase::Deps), log));
+            return Ok(self.outcome(code, None, timings, Some(phase), log));
         }
         tracing::info!(
             run_id = %self.opts.run_id,
@@ -569,6 +574,26 @@ impl PodmanBuild {
             guard_trips: Vec::new(),
         }
     }
+}
+
+/// Which phase script the image build died in.
+///
+/// Read from the last `RUN /bin/sh /trigon/<phase>.sh` the builder announced, because that is the
+/// one it was executing when it stopped.
+pub fn failing_phase(log: &str) -> Option<Phase> {
+    let mut last = None;
+    for line in log.lines() {
+        let Some(rest) = line.split("/trigon/").nth(1) else {
+            continue;
+        };
+        last = match rest.split(".sh").next() {
+            Some("setup") => Some(Phase::Setup),
+            Some("source") => Some(Phase::Source),
+            Some("deps") => Some(Phase::Deps),
+            _ => last,
+        };
+    }
+    last
 }
 
 /// The single file the build left in `/out`, if there is exactly one.

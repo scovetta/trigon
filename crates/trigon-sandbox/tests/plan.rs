@@ -235,3 +235,43 @@ async fn git_and_mirror_is_still_refused() {
     assert!(e.contains("cannot enforce git-and-mirror"), "{e}");
     assert!(e.contains("mirror-only"), "it says what it does offer: {e}");
 }
+
+#[test]
+fn an_image_build_failure_names_the_phase_that_died() {
+    // Setup, source and deps are all image-build-time layers, and calling every one of them a
+    // dependency failure is the difference between "this package does not build" and "our base
+    // image has no CA bundle", which is a real thing that happened.
+    use trigon_sandbox::failing_phase_for_test as failing_phase;
+    let log = "STEP 4/11: COPY source.sh /trigon/source.sh\n\
+               STEP 5/11: RUN /bin/sh /trigon/source.sh\n\
+               fatal: unable to access 'https://github.com/a/b/': \
+               server certificate verification failed\n";
+    assert_eq!(failing_phase(log), Some(trigon_sandbox::Phase::Source));
+
+    let deps = "RUN /bin/sh /trigon/source.sh\nok\nRUN /bin/sh /trigon/deps.sh\nboom\n";
+    assert_eq!(failing_phase(deps), Some(trigon_sandbox::Phase::Deps));
+
+    assert_eq!(failing_phase("nothing to see"), None);
+}
+
+#[test]
+fn a_logical_system_dep_renders_for_the_base_image() {
+    // A strategy names what it needs, not what a distribution calls it: one that named Debian
+    // packages would only build on Debian. `python3 -m venv` needs ensurepip, which Debian ships
+    // separately as python3-venv and which no other family has as its own package.
+    let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
+    p.system_deps = BTreeSet::from(["python3".to_string(), "git".to_string()]);
+
+    p.base_image = "docker.io/library/debian@sha256:abc".into();
+    let setup = render_context(&p, false).files["setup.sh"].clone();
+    assert!(setup.contains("python3-venv"), "{setup}");
+    assert!(setup.contains("git"), "{setup}");
+
+    p.base_image = "docker.io/library/alpine@sha256:abc".into();
+    let setup = render_context(&p, false).files["setup.sh"].clone();
+    assert!(setup.contains("apk add"), "{setup}");
+    assert!(
+        !setup.contains("python3-venv"),
+        "there is no such package outside Debian: {setup}"
+    );
+}

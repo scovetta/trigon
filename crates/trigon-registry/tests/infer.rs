@@ -169,3 +169,56 @@ async fn a_target_with_no_source_yields_nothing_rather_than_an_error() {
             .is_empty()
     );
 }
+
+fn with_artifacts(names: &[&str]) -> ResolvedTarget {
+    let mut t = npm_target(true);
+    t.reference = TargetRef::new(Ecosystem::PyPI, "demo", "1.0");
+    t.artifacts = names
+        .iter()
+        .map(|n| ArtifactMeta {
+            id: ArtifactId::new(*n),
+            url: format!("https://files/{n}"),
+            declared_sha256: None,
+            size: None,
+        })
+        .collect();
+    t
+}
+
+#[test]
+fn a_release_with_several_artifacts_still_has_an_obvious_one() {
+    // Every PyPI release publishes an sdist and at least one wheel, so requiring exactly one
+    // artifact meant every PyPI target failed before it built anything.
+    let t = with_artifacts(&["six-1.17.0-py2.py3-none-any.whl", "six-1.17.0.tar.gz"]);
+    assert_eq!(
+        t.pick(None).unwrap().id.as_str(),
+        "six-1.17.0-py2.py3-none-any.whl",
+        "the pure wheel is what almost everything installs"
+    );
+}
+
+#[test]
+fn a_sole_sdist_is_chosen_when_there_is_no_pure_wheel() {
+    let t = with_artifacts(&["thing-1.0.tar.gz"]);
+    assert_eq!(t.pick(None).unwrap().id.as_str(), "thing-1.0.tar.gz");
+}
+
+#[test]
+fn several_platform_wheels_stay_ambiguous() {
+    // These are built on different machines and do not reproduce alike, so picking one would
+    // attach a verdict to whichever the registry happened to list first.
+    let t = with_artifacts(&[
+        "x-1.0-cp39-abi3-manylinux_2_28_x86_64.whl",
+        "x-1.0-cp39-abi3-macosx_11_0_arm64.whl",
+        "x-1.0.tar.gz",
+    ]);
+    // The lone sdist is still unambiguous, and is the artifact that carries the source.
+    assert_eq!(t.pick(None).unwrap().id.as_str(), "x-1.0.tar.gz");
+
+    let no_sdist = with_artifacts(&[
+        "x-1.0-cp39-abi3-manylinux_2_28_x86_64.whl",
+        "x-1.0-cp39-abi3-macosx_11_0_arm64.whl",
+    ]);
+    let e = no_sdist.pick(None).unwrap_err().to_string();
+    assert!(e.contains("manylinux"), "the error lists what exists: {e}");
+}
