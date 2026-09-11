@@ -452,3 +452,89 @@ fn write_zip(path: &Path, members: &[(&str, &[u8])]) {
     }
     w.finish().unwrap();
 }
+
+#[test]
+fn logs_go_to_stderr_so_stdout_stays_machine_readable() {
+    // `--output json | jq` must not have log lines in it.
+    let a = write_tgz("log-a.tgz", b"hello", 1_700_000_000);
+    let b = write_tgz("log-b.tgz", b"hello", 1_800_000_000);
+    let out = Command::new(bin())
+        .arg("verify")
+        .arg(&a)
+        .arg(&b)
+        .args(["--output", "json", "-v"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str::<serde_json::Value>(&stdout)
+        .unwrap_or_else(|e| panic!("stdout must be parseable JSON: {e}\n{stdout}"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("compared"),
+        "and the log must still have happened"
+    );
+}
+
+#[test]
+fn the_default_is_quiet() {
+    // A tool that chatters by default gets its output redirected to /dev/null, and then the
+    // warnings that matter go there too.
+    let a = write_tgz("quiet-a.tgz", b"hello", 1_700_000_000);
+    let out = Command::new(bin())
+        .arg("verify")
+        .arg(&a)
+        .arg(&a)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "stderr should be empty on a clean run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn log_json_emits_one_object_per_line() {
+    let a = write_tgz("j-a.tgz", b"hello", 1_700_000_000);
+    let out = Command::new(bin())
+        .arg("verify")
+        .arg(&a)
+        .arg(&a)
+        .args(["-v", "--log-json"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut seen = 0;
+    for line in stderr.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("every log line must be one JSON object: {e}\n{line}"));
+        // Fields are flattened, not nested under "fields", so a log pipeline can index on them
+        // without knowing our subscriber's shape.
+        if v["message"] == "compared" {
+            assert!(v["outcome"].is_string(), "{line}");
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 1, "the comparison should be reported exactly once");
+}
+
+#[test]
+fn a_failure_says_whose_fault_it_was() {
+    // Fault exists so a sweep's numbers mean something: a hundred failures is a different
+    // situation depending on whether they are our infrastructure, the packages' builds, or a
+    // policy. It was implemented and never called, which made it documentation.
+    let bad = tmp().join("not-an-archive.tgz");
+    std::fs::write(&bad, b"this is not a gzip stream at all").unwrap();
+    let out = Command::new(bin())
+        .arg("verify")
+        .arg(&bad)
+        .arg(&bad)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("fault=Upstream"),
+        "a malformed artifact is not our fault: {err}"
+    );
+    assert!(err.contains("the published artifact's"), "{err}");
+}

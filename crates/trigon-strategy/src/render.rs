@@ -30,6 +30,7 @@ use crate::tool::ToolRegistry;
 const MAX_TOOL_DEPTH: usize = 16;
 
 /// Render a strategy to instructions.
+#[tracing::instrument(level = "debug", skip_all, fields(repo = s.location().map(|l| l.repo.as_str())))]
 pub fn render(
     s: &Strategy,
     cx: &Context,

@@ -30,6 +30,27 @@ pub enum CompareError {
     SetMismatch(ProfileId, ProfileId),
 }
 
+impl trigon_core::Classify for CompareError {
+    fn fault(&self) -> trigon_core::Fault {
+        match self {
+            // Delegate rather than restate. A malformed artifact is the artifact's fault whether
+            // the parser was reached through a comparison or directly, and duplicating the mapping
+            // here is how the two answers drift apart.
+            CompareError::Archive(e) => e.fault(),
+            // Comparing across stabilizer sets is a caller error: the two digests answer different
+            // questions, so the comparison was never going to mean anything.
+            CompareError::SetMismatch(..) => trigon_core::Fault::Bug,
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        match self {
+            CompareError::Archive(e) => e.is_retryable(),
+            CompareError::SetMismatch(..) => false,
+        }
+    }
+}
+
 /// What one artifact looks like at each of the three forms we digest.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Summary {
@@ -164,6 +185,17 @@ pub fn compare(
         _ => None,
     };
 
+    // One event carrying the verdict and the digests it rests on. This is the line a fleet
+    // aggregates, so it names the outcome as a string rather than an ordinal: a downstream filter
+    // written against an integer breaks the moment an outcome is inserted.
+    tracing::info!(
+        outcome = %outcome,
+        upstream_stabilized = %upstream.stabilized.sha256,
+        rebuild_stabilized = %rebuild.stabilized.sha256,
+        applied = upstream.applied.len(),
+        differs = diff.as_ref().map(|d| d.differs).unwrap_or(0),
+        "compared"
+    );
     Ok(Comparison {
         outcome,
         upstream,

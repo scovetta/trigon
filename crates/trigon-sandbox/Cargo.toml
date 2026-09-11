@@ -13,6 +13,7 @@ trigon-core.workspace = true
 trigon-strategy.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

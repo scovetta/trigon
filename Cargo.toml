@@ -40,6 +40,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 smallvec = { version = "1", features = ["union"] }
 
+# Instrumentation. `tracing` itself is pure: no runtime, no network, no allocation when nothing is
+# subscribed, so the judgement-half crates may use it. The subscriber lives in the binary.
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+
 # Strategy documents. `serde_yaml` is archived; `serde_yaml_ng` is the maintained fork.
 # `serde_path_to_error` is what turns "data did not match any variant" into a path a repair loop can
 # act on, which docs/04 §2.2 argues is the highest-return dependency in the design.
@@ -55,6 +59,7 @@ futures = "0.3"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "ansi", "std"] }
 proptest = "1"
 toml = "0.8"
 libc = "0.2"

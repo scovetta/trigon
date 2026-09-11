@@ -23,6 +23,55 @@ use trigon_stabilize::{default_for, profile};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+
+    /// Say more. Once for what the tool is doing, twice for the build's own output.
+    ///
+    /// A container build is minutes of silence otherwise, which is indistinguishable from a hang.
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
+    /// Structured logs, one JSON object per line, for anything that aggregates them.
+    #[arg(long, global = true)]
+    log_json: bool,
+}
+
+/// Install the subscriber.
+///
+/// `RUST_LOG` wins when it is set, because someone debugging one crate should not have to discover
+/// our flags. Logs go to stderr so that stdout stays the machine-readable result: `--output json`
+/// piped to `jq` must not have log lines in it.
+fn init_logging(verbose: u8, json: bool) {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let default = match verbose {
+        0 => "warn",
+        1 => "info,trigon::build=info",
+        2 => "debug",
+        _ => "trace",
+    };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    // ANSI follows the terminal, always. Escape sequences written into a pipe corrupt whatever
+    // reads them, and a log line that greps differently depending on whether a human was watching
+    // is worse than one with no colour at all.
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let builder = fmt()
+        .with_writer(std::io::stderr)
+        .with_target(verbose >= 2)
+        .with_ansi(ansi)
+        .with_env_filter(filter);
+    if json {
+        builder.json().flatten_event(true).init();
+    } else {
+        // Timestamps only when they can mean something. For a one-shot command they are noise;
+        // for a multi-minute build they are how you tell a slow phase from a stuck one.
+        if verbose >= 1 {
+            builder.init();
+        } else {
+            // Timestamps only when they can mean something. For a one-shot command they are noise;
+            // for a multi-minute build they are how you tell a slow phase from a stuck one.
+            builder.without_time().init();
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -148,7 +197,52 @@ fn die_quietly_on_sigpipe() {
 
 fn main() -> Result<()> {
     die_quietly_on_sigpipe();
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    init_logging(cli.verbose, cli.log_json);
+    let result = dispatch(cli.cmd);
+    if let Err(e) = &result {
+        report_fault(e);
+    }
+    result
+}
+
+/// Say whose fault a failure was, when the error knows.
+///
+/// `Fault` exists so that a sweep's numbers mean something: a hundred failures is a different
+/// situation depending on whether they are our infrastructure, the packages' own builds, or a
+/// policy we are enforcing. The classification was implemented and never used, which made it
+/// documentation rather than a control.
+fn report_fault(e: &anyhow::Error) {
+    use trigon_core::{Classify, Fault};
+    let fault = e
+        .downcast_ref::<trigon_compare::CompareError>()
+        .map(|e| e.fault())
+        .or_else(|| {
+            e.downcast_ref::<trigon_archive::ArchiveError>()
+                .map(|e| e.fault())
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_strategy::StrategyError>()
+                .map(|e| e.fault())
+        });
+    #[cfg(feature = "build")]
+    let fault = fault.or_else(|| {
+        e.downcast_ref::<trigon_sandbox::SandboxError>()
+            .map(|e| e.fault())
+    });
+    let Some(fault) = fault else { return };
+    let whose = match fault {
+        Fault::Infra => "ours: infrastructure, and retryable",
+        Fault::Upstream => "the published artifact's",
+        Fault::Build => "the package's own build",
+        Fault::Policy => "a policy this run is enforcing",
+        Fault::Bug => "a bug in trigon; please report it",
+    };
+    tracing::error!(fault = ?fault, retryable = fault.is_retryable(), "{whose}");
+}
+
+fn dispatch(cmd: Cmd) -> Result<()> {
+    match cmd {
         Cmd::Verify {
             upstream,
             rebuild,

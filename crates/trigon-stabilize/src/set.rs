@@ -135,6 +135,7 @@ pub struct Applied {
 ///
 /// Returns only the stabilizers that actually changed something: `applied` drives the provenance cap
 /// and the attestation, so a pass that was configured but did no work has no business in either.
+#[tracing::instrument(level = "debug", skip(set, archive), fields(profile = %set.id))]
 pub fn apply(set: &StabilizerSet, archive: &mut Archive) -> Vec<Applied> {
     let cx = Cx::root(archive.format);
     let mut totals: Vec<Touched> = vec![Touched::NONE; set.members.len()];
@@ -150,6 +151,15 @@ pub fn apply(set: &StabilizerSet, archive: &mut Archive) -> Vec<Applied> {
             provenance: m.provenance(),
             entries_touched: t.entries,
             bytes_changed: t.bytes,
+        })
+        .inspect(|a: &Applied| {
+            tracing::debug!(
+                stabilizer = %a.id,
+                risk = ?a.risk,
+                entries = a.entries_touched,
+                bytes = a.bytes_changed,
+                "applied"
+            );
         })
         .collect()
 }

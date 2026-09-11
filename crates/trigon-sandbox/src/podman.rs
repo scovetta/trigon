@@ -80,6 +80,7 @@ impl BuildRunner for PodmanRunner {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(runner = "podman"))]
     async fn health(&self) -> Result<(), SandboxError> {
         let out = Command::new(&self.binary)
             .arg("--version")
@@ -158,6 +159,12 @@ impl PodmanBuild {
         phase: Phase,
         log: &mut String,
     ) -> Result<i32, SandboxError> {
+        tracing::debug!(
+            target: "trigon::build",
+            phase = ?phase,
+            command = %format!("{} {}", self.binary, args.join(" ")),
+            "running"
+        );
         let mut child = Command::new(&self.binary)
             .args(args)
             .stdout(Stdio::piped())
@@ -173,14 +180,30 @@ impl PodmanBuild {
         loop {
             tokio::select! {
                 line = out.next_line() => match line? {
-                    Some(l) => { push(&self.events, BuildEvent::Stdout(l.clone())); append(log, &l); }
+                    Some(l) => {
+                        // At `debug`, because a build prints thousands of these and an operator
+                        // watching a fleet wants the phase boundaries, not the compiler output.
+                        // At `-vv` it is the live progress that a silent 90-second build lacks.
+                        tracing::debug!(target: "trigon::build", phase = ?phase, "{l}");
+                        push(&self.events, BuildEvent::Stdout(l.clone()));
+                        append(log, &l);
+                    }
                     None => break,
                 },
                 line = err.next_line() => match line? {
-                    Some(l) => { push(&self.events, BuildEvent::Stderr(l.clone())); append(log, &l); }
+                    Some(l) => {
+                        tracing::debug!(target: "trigon::build", phase = ?phase, stream = "stderr", "{l}");
+                        push(&self.events, BuildEvent::Stderr(l.clone()));
+                        append(log, &l);
+                    }
                     None => break,
                 },
                 _ = tokio::time::sleep_until(deadline) => {
+                    tracing::warn!(
+                        phase = ?phase,
+                        timeout_s = self.opts.limits.wall_clock.as_secs(),
+                        "wall-clock limit reached, killing the build"
+                    );
                     // Kill rather than wait. A hung build otherwise holds a worker slot until a
                     // human notices, and at fleet scale nobody notices.
                     let _ = child.start_kill();
@@ -199,7 +222,6 @@ impl PodmanBuild {
         }
 
         let status = child.wait().await?;
-        let _ = phase;
         Ok(status.code().unwrap_or(-1))
     }
 }
@@ -244,6 +266,12 @@ impl BuildHandle for PodmanBuild {
 
         // Image build: setup, source and deps are layers here.
         push(&self.events, BuildEvent::PhaseStart(Phase::Deps));
+        tracing::info!(
+            run_id = %self.opts.run_id,
+            image = %self.plan.base_image,
+            egress = %self.plan.egress,
+            "building the image: setup, source and deps run here"
+        );
         let started = Instant::now();
         let build_args = vec![
             "build".to_string(),
@@ -264,14 +292,26 @@ impl BuildHandle for PodmanBuild {
         );
         if code != 0 {
             push(&self.events, BuildEvent::Exit(code));
+            tracing::error!(
+                run_id = %self.opts.run_id,
+                phase = "deps",
+                exit = code,
+                "image build failed"
+            );
             return Ok(self.outcome(code, None, timings, Some(Phase::Deps), log));
         }
+        tracing::info!(
+            run_id = %self.opts.run_id,
+            elapsed_s = started.elapsed().as_secs_f64(),
+            "image built"
+        );
 
         // The build itself.
         let out_dir = self.workdir.join(&self.opts.run_id);
         std::fs::create_dir_all(&out_dir)?;
 
         push(&self.events, BuildEvent::PhaseStart(Phase::Build));
+        tracing::info!(run_id = %self.opts.run_id, "running the build");
         let started = Instant::now();
         let mut run_args = vec!["run".to_string(), "--rm".to_string()];
         run_args.extend(self.isolation_args());
@@ -296,6 +336,25 @@ impl BuildHandle for PodmanBuild {
         // way. Collect before deciding anything.
         let artifact = collect(&out_dir);
         let failed_in = (code != 0).then_some(Phase::Build);
+        match (&artifact, code) {
+            (Some(p), 0) => tracing::info!(
+                run_id = %self.opts.run_id,
+                elapsed_s = started.elapsed().as_secs_f64(),
+                artifact = %p.display(),
+                "build succeeded"
+            ),
+            (None, 0) => tracing::warn!(
+                run_id = %self.opts.run_id,
+                output_path = %self.plan.output_path,
+                "build succeeded but collected no single artifact; check output_path"
+            ),
+            (_, exit) => tracing::error!(
+                run_id = %self.opts.run_id,
+                exit,
+                phase = "build",
+                "build failed"
+            ),
+        }
 
         if !self.opts.retain {
             let _ = Command::new(&self.binary)

@@ -28,6 +28,15 @@ impl Classify for ArchiveError {
             ArchiveError::Io(_) => Fault::Infra,
         }
     }
+
+    fn is_retryable(&self) -> bool {
+        match self {
+            // These are facts about the bytes. Fetching them again produces the same bytes.
+            ArchiveError::Malformed { .. } | ArchiveError::LimitExceeded { .. } => false,
+            ArchiveError::Unsupported(_) => false,
+            ArchiveError::Io(_) => true,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ArchiveError>;

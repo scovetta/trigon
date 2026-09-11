@@ -157,3 +157,21 @@ fn faults_are_classified_so_benchmarks_stay_honest() {
     let unsupported = ArchiveError::Unsupported("zip method 99".into());
     assert_eq!(unsupported.fault(), Fault::Policy);
 }
+
+#[test]
+fn a_malformed_artifact_is_upstream_but_not_worth_retrying() {
+    use trigon_core::Classify as _;
+    // `Upstream` covers a registry that was briefly down and an artifact that will never parse.
+    // The class alone says retry; the error knows better. At fleet scale the difference is a
+    // worker slot spent on every sweep to reach the same conclusion.
+    let malformed = trigon_archive::ArchiveError::Malformed {
+        format: "gzip",
+        detail: "not a gzip member".into(),
+    };
+    assert_eq!(malformed.fault(), trigon_core::Fault::Upstream);
+    assert!(malformed.fault().is_retryable(), "the class says yes");
+    assert!(!malformed.is_retryable(), "and the error overrides it");
+
+    let io = trigon_archive::ArchiveError::Io(std::io::Error::other("disk"));
+    assert!(io.is_retryable(), "infrastructure genuinely is");
+}

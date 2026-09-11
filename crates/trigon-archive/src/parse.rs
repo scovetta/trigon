@@ -27,7 +27,46 @@ pub struct Parsed {
     pub container: Option<Vec<u8>>,
 }
 
+/// Parse an artifact.
+///
+/// The `notes` this leaves behind are the point of the signature: a nested archive that would not
+/// parse, a limit reached, a duplicate member path. They reach the verdict rather than being
+/// logged and forgotten, and they are traced as well so an operator sweeping a corpus sees them
+/// without reading every report.
+#[tracing::instrument(
+    level = "debug",
+    skip(bytes, limits, notes),
+    fields(format = ?format, bytes = bytes.len())
+)]
 pub fn parse(
+    bytes: Vec<u8>,
+    format: Format,
+    limits: &Limits,
+    notes: &mut Vec<Note>,
+) -> Result<Parsed> {
+    let before = notes.len();
+    let out = parse_inner(bytes, format, limits, notes);
+    for n in &notes[before..] {
+        // `warn` for the ones that mean we could not see something, `debug` for the ones that are
+        // merely unusual. A run that hit a recursion limit answered a narrower question than it was
+        // asked, and that should not need a `-v` to discover.
+        if n.code.is_noteworthy() {
+            tracing::warn!(
+                code = ?n.code,
+                path = n.path.as_ref().map(|p| p.to_lossy().into_owned()),
+                "{}", n.detail
+            );
+        } else {
+            tracing::debug!(code = ?n.code, "{}", n.detail);
+        }
+    }
+    if let Ok(p) = &out {
+        tracing::debug!(entries = p.archive.entries.len(), "parsed");
+    }
+    out
+}
+
+fn parse_inner(
     bytes: Vec<u8>,
     format: Format,
     limits: &Limits,
