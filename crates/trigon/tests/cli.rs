@@ -409,3 +409,46 @@ fn walk_for_tar(dir: &Path) -> Option<PathBuf> {
     }
     None
 }
+
+#[test]
+fn a_wheel_gets_the_wheel_profile_not_the_zip_one() {
+    // A wheel and an arbitrary zip are both Format::Zip, and the container format alone picked the
+    // zip set, so wheel-record never ran: a rebuilt wheel's RECORD was compared against the
+    // published one line for line rather than regenerated from the members actually present, and
+    // one differing member reported as two. Found by rebuilding sniffio from source.
+    let whl = tmp().join("demo-1.0-py3-none-any.whl");
+    write_zip(&whl, &[("demo/__init__.py", b"x = 1\n")]);
+    let out = Command::new(bin())
+        .arg("verify")
+        .arg(&whl)
+        .arg(&whl)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("stabilizer set wheel"), "{text}");
+
+    // .tgz stays generic on purpose: an npm tarball is a .tgz and so is a great deal else, and
+    // nothing in the name says which.
+    let a = write_tgz("kind-a.tgz", b"hello", 1);
+    let out = Command::new(bin())
+        .arg("verify")
+        .arg(&a)
+        .arg(&a)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("tar+gzip"), "{text}");
+    assert!(!text.contains("stabilizer set npm"), "{text}");
+}
+
+fn write_zip(path: &Path, members: &[(&str, &[u8])]) {
+    use std::io::Write as _;
+    let mut w = zip_crate::ZipWriter::new(std::fs::File::create(path).unwrap());
+    let opts: zip_crate::write::FileOptions<'_, ()> = zip_crate::write::FileOptions::default()
+        .compression_method(zip_crate::CompressionMethod::Stored);
+    for (n, b) in members {
+        w.start_file(*n, opts).unwrap();
+        w.write_all(b).unwrap();
+    }
+    w.finish().unwrap();
+}

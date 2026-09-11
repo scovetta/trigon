@@ -314,10 +314,7 @@ fn verify(
     explain: bool,
 ) -> Result<()> {
     let fmt = resolve_format(upstream, format)?;
-    let set = match prof {
-        Some(p) => profile(p).with_context(|| format!("unknown profile `{p}`"))?,
-        None => default_for(fmt),
-    };
+    let set = resolve_profile(upstream, prof, fmt)?;
 
     let a = std::fs::read(upstream).with_context(|| format!("reading {}", upstream.display()))?;
     let b = std::fs::read(rebuild).with_context(|| format!("reading {}", rebuild.display()))?;
@@ -401,6 +398,52 @@ fn resolve_format(path: &Path, explicit: Option<&str>) -> Result<Format> {
                  ecosystem knows that from the name alone."
         )
     })
+}
+
+/// Which stabilizer set to use.
+///
+/// The container format is not enough. A wheel and an arbitrary zip are both `Format::Zip`, and
+/// the wheel needs `wheel-record` and `pyc-header` on top of the zip set: without them a rebuilt
+/// wheel's RECORD is compared against the published one line for line rather than regenerated from
+/// the members that are actually there, so one differing member reports as two. The artifact kind
+/// is what selects the profile, and for these extensions the filename carries it unambiguously.
+///
+/// `.tgz` deliberately stays generic. An npm tarball is a `.tgz` and so is a great deal else, and
+/// nothing in the name says which. The registry knows, and will say so once it exists; guessing
+/// here would apply npm-specific passes to whatever happened to share the extension.
+fn resolve_profile(
+    artifact: &Path,
+    requested: Option<&str>,
+    fmt: Format,
+) -> Result<trigon_stabilize::StabilizerSet> {
+    if let Some(p) = requested {
+        return profile(p).with_context(|| {
+            format!(
+                "unknown profile `{p}`; known: {}",
+                trigon_stabilize::all_profiles().join(", ")
+            )
+        });
+    }
+    let name = artifact
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let by_kind = if name.ends_with(".whl") {
+        Some("wheel")
+    } else if name.ends_with(".crate") {
+        Some("crate")
+    } else if name.ends_with(".gem") {
+        Some("gem")
+    } else if name.ends_with(".nupkg") {
+        Some("nupkg")
+    } else {
+        None
+    };
+    match by_kind.and_then(profile) {
+        Some(set) => Ok(set),
+        None => Ok(default_for(fmt)),
+    }
 }
 
 fn print_text(c: &Comparison, explain: bool) {

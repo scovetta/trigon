@@ -2,8 +2,13 @@
 #
 # `uv` when a Python version is named, because it can fetch that interpreter; the stdlib module
 # otherwise, which can only use the interpreter already present.
+#
+# The system dependency sits on the branch that uses it, not on the tool. Declaring both
+# unconditionally, as the prior art does, asks every image to carry `uv` even when the build never
+# calls it, and on Alpine there is no such package: the setup phase fails with "uv (no such
+# package)" for a tool the build was never going to run. `expand` evaluates a step's condition
+# before collecting its needs, so a skipped step asks for nothing.
 id: pypi/setup-venv
-needs: [python3, uv]
 params:
   path:
     required: true
@@ -15,9 +20,9 @@ params:
     required: false
     doc: The interpreter to fetch. Omit to use whichever one the image has.
 steps:
-  - runs: |
-      {%- if with.python_version %}
-      {{ with.locator }}uvx uv venv {{ with.path }} --seed --python {{ with.python_version }}
-      {%- else %}
-      {{ with.locator }}python3 -m venv {{ with.path }}
-      {%- endif %}
+  - runs: "{{ with.locator }}uvx uv venv {{ with.path }} --seed --python {{ with.python_version }}"
+    if: "{{ with.python_version }}"
+    needs: [uv]
+  - runs: "{{ with.locator }}python3 -m venv {{ with.path }}"
+    if: "{% if not with.python_version %}yes{% endif %}"
+    needs: [python3]

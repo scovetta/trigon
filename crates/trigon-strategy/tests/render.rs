@@ -106,7 +106,43 @@ fn a_real_override_renders_to_a_runnable_script() {
     // System dependencies are hoisted out of the steps that declared them.
     assert!(i.requires.system_deps.contains("git"));
     assert!(i.requires.system_deps.contains("python3"));
+    // And only from the steps that actually run. No python_version here, so the venv comes from
+    // the stdlib module and `uv` is never called.
+    assert!(
+        !i.requires.system_deps.contains("uv"),
+        "a skipped step must not contribute its system deps: {:?}",
+        i.requires.system_deps
+    );
+}
+
+#[test]
+fn a_system_dep_follows_the_branch_that_uses_it() {
+    // Declaring both interpreters' dependencies unconditionally asks every image to carry `uv`
+    // even when the build never calls it. On Alpine there is no such package, so the setup phase
+    // fails with "uv (no such package)" for a tool that was never going to run. Found by building
+    // sniffio from source.
+    let tools = ToolRegistry::builtin().unwrap();
+    let with_version = from_yaml(
+        "kind: flow\nlocation: { repo: r, ref: c }\ndeps:\n  - uses: pypi/setup-venv\n    with: { path: /deps, python_version: \"3.11\" }\n",
+    )
+    .unwrap();
+    let i = render(&with_version, &cx(), &tools).unwrap();
+    assert!(
+        i.deps.contains("uv venv /deps --seed --python 3.11"),
+        "{}",
+        i.deps
+    );
     assert!(i.requires.system_deps.contains("uv"));
+    assert!(!i.requires.system_deps.contains("python3"));
+
+    let without = from_yaml(
+        "kind: flow\nlocation: { repo: r, ref: c }\ndeps:\n  - uses: pypi/setup-venv\n    with: { path: /deps }\n",
+    )
+    .unwrap();
+    let i = render(&without, &cx(), &tools).unwrap();
+    assert!(i.deps.contains("python3 -m venv /deps"), "{}", i.deps);
+    assert!(i.requires.system_deps.contains("python3"));
+    assert!(!i.requires.system_deps.contains("uv"));
 }
 
 #[test]

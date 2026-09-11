@@ -994,6 +994,7 @@ dependencies = [
  "trigon-sandbox",
  "trigon-stabilize",
  "trigon-strategy",
+ "zip",
 ]
 
 [[package]]

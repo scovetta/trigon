@@ -15,6 +15,10 @@ params:
     required: false
   remove_deps:
     required: false
+  locator:
+    required: false
+    default: /usr/local/bin/
+    doc: Where to find npx. Defaults to where npm/install-node puts it.
 steps:
   - uses: npm/version-override
     with:
@@ -25,4 +29,4 @@ steps:
       command: "{% if with.keep_root == 'true' %}npm config set unsafe-perm true && {% endif %}{% if with.command %}npm run {{ with.command }} && {% endif %}{% if with.remove_deps == 'true' %}rm -rf node_modules && {% endif %}npm pack"
       npm_version: "{{ with.npm_version }}"
       dir: "{{ location.subdir }}"
-      locator: /usr/local/bin/
+      locator: "{{ with.locator }}"

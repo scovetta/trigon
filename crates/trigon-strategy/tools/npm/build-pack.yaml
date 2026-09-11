@@ -5,6 +5,14 @@ params:
     required: true
   version_override:
     required: false
+  locator:
+    required: false
+    default: /usr/local/bin/
+    doc: >-
+      Where to find npx. Defaults to where npm/install-node puts it. The prior art hardcodes
+      /usr/bin here because its base image ships npm there; on an image where the toolchain was
+      installed rather than preinstalled, that resolves the system npm against the installed node
+      and fails with a module the older runtime does not have.
 steps:
   - uses: npm/version-override
     with:
@@ -15,4 +23,4 @@ steps:
       command: npm pack
       npm_version: "{{ with.npm_version }}"
       dir: "{{ location.subdir }}"
-      locator: /usr/bin/
+      locator: "{{ with.locator }}"

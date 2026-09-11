@@ -37,4 +37,5 @@ build = ["dep:trigon-sandbox", "dep:tokio"]
 
 [dev-dependencies]
 tar = "0.4"
+zip_crate = { package = "zip", version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
