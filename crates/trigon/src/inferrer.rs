@@ -87,17 +87,7 @@ impl trigon_registry::StrategyInferrer for ModelInferrer {
                 detail: format!("the checkout task did not finish: {e}"),
             })??;
 
-        let files = checkout.files(FILE_LIMIT)?;
-        let manifests = checkout.read(MANIFESTS, MANIFEST_BYTES);
-        let evidence: Vec<String> = target
-            .intrinsics
-            .evidence
-            .iter()
-            .map(|e| format!("{}: {:?} ({:?})", e.source, e.claim, e.confidence))
-            .collect();
-
-        let purl = target.reference.to_string();
-        let ecosystem = target.reference.ecosystem;
+        let inputs = Inputs::read(&checkout, target)?;
         let provider = self.provider.clone();
         let model = self.model.clone();
 
@@ -105,17 +95,7 @@ impl trigon_registry::StrategyInferrer for ModelInferrer {
         // either block in their own client or are a recorded transcript. Blocking a worker thread
         // of the runtime that is also driving a sweep would stall every other target.
         let proposed = tokio::task::spawn_blocking(move || {
-            let task = Task {
-                purl: &purl,
-                ecosystem,
-                repo_files: &files,
-                manifests: &manifests,
-                evidence: &evidence,
-                previous: None,
-                failure: None,
-                log: None,
-            };
-            trigon_ai::propose(provider.as_ref(), &model, &task)
+            trigon_ai::propose(provider.as_ref(), &model, &inputs.task(None, None, None))
         })
         .await
         .map_err(|e| RegistryError::Source {
@@ -181,6 +161,58 @@ fn first_line(s: &str) -> String {
     }
 }
 
+/// Everything about a target the Builder is shown, read once.
+///
+/// Owned rather than borrowed because the call happens on another thread, and shared between the
+/// first proposal and every repair after it: the repository does not change between attempts, and
+/// re-reading it would be both wasteful and a way for the two to disagree.
+pub struct Inputs {
+    purl: String,
+    ecosystem: Ecosystem,
+    files: Vec<String>,
+    manifests: Vec<(String, String)>,
+    evidence: Vec<String>,
+}
+
+impl Inputs {
+    fn read(
+        checkout: &trigon_registry::Checkout,
+        target: &ResolvedTarget,
+    ) -> Result<Self, RegistryError> {
+        Ok(Inputs {
+            purl: target.reference.to_string(),
+            ecosystem: target.reference.ecosystem,
+            files: checkout.files(FILE_LIMIT)?,
+            manifests: checkout.read(MANIFESTS, MANIFEST_BYTES),
+            evidence: target
+                .intrinsics
+                .evidence
+                .iter()
+                .map(|e| format!("{}: {:?} ({:?})", e.source, e.claim, e.confidence))
+                .collect(),
+        })
+    }
+
+    /// The task, with the repair fields filled in on an iteration after the first.
+    fn task<'a>(
+        &'a self,
+        previous: Option<&'a str>,
+        failure: Option<&'a trigon_core::FailureSignature>,
+        log: Option<&'a str>,
+    ) -> Task<'a> {
+        Task {
+            purl: &self.purl,
+            ecosystem: self.ecosystem,
+            repo_files: &self.files,
+            manifests: &self.manifests,
+            evidence: &self.evidence,
+            previous,
+            failure,
+            log,
+        }
+    }
+}
+
 /// A provider the operator asked for, and the model id to address it with.
 ///
 /// Held separately from the rung because a ladder is rebuilt per target and a provider is not:
@@ -203,6 +235,9 @@ pub struct Configured {
 pub struct Counting {
     inner: Box<dyn Provider>,
     calls: std::sync::atomic::AtomicU32,
+    /// Tokens, so the repair loop's budgets are enforceable rather than decorative. Summed across
+    /// every call this run made, which is what a per-target budget is about.
+    spent: std::sync::Mutex<trigon_ai::Usage>,
 }
 
 impl Counting {
@@ -210,11 +245,16 @@ impl Counting {
         Counting {
             inner,
             calls: std::sync::atomic::AtomicU32::new(0),
+            spent: std::sync::Mutex::new(trigon_ai::Usage::default()),
         }
     }
 
     fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn spent(&self) -> trigon_ai::Usage {
+        self.spent.lock().map(|u| *u).unwrap_or_default()
     }
 }
 
@@ -231,7 +271,13 @@ impl Provider for Counting {
         // Before the call, not after it: a call that failed still cost something and still happened,
         // and a counter that only counts successes understates exactly the runs worth looking at.
         self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.complete(req)
+        let resp = self.inner.complete(req)?;
+        if let Ok(mut u) = self.spent.lock() {
+            u.input += resp.usage.input;
+            u.cached_input += resp.usage.cached_input;
+            u.output += resp.usage.output;
+        }
+        Ok(resp)
     }
 }
 
@@ -372,6 +418,55 @@ impl Configured {
     /// How many times a model was asked, so far.
     pub fn calls(&self) -> u32 {
         self.provider.calls()
+    }
+
+    /// What those calls have cost, so far.
+    ///
+    /// A provider that reports nothing leaves this at zero, which is honest rather than estimated —
+    /// and means a token budget cannot stop a run against a provider that does not count. The
+    /// iteration cap and the repeated-signature rule still can.
+    pub fn spent(&self) -> trigon_ai::Usage {
+        self.provider.spent()
+    }
+
+    /// Read a target's repository once, for a run that is going to ask more than one question.
+    ///
+    /// Synchronous, unlike the rung: the repair loop runs after the build, where there is no async
+    /// context to borrow and nothing to overlap with.
+    pub fn inputs(&self, target: &ResolvedTarget) -> Result<Inputs> {
+        let source = target
+            .source
+            .as_ref()
+            .filter(|s| !s.commit.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("no source commit, so there is no repository to read"))?;
+        let checkout = SourceCache::new(&self.cache_root)
+            .checkout(&source.repo_url, &source.commit)
+            .context("fetching the source for a repair")?;
+        Ok(Inputs::read(&checkout, target)?)
+    }
+
+    /// Ask for a repair: the recipe that was tried, how it failed, and the log.
+    ///
+    /// The log is **already compressed** by the caller. Sending raw build output is the single
+    /// most expensive mistake available here — `docs/07-ai.md` §4.5 measures it at roughly 7× —
+    /// and a function that quietly compressed it would hide the cost from the caller who chose the
+    /// budget.
+    pub fn repair(
+        &self,
+        inputs: &Inputs,
+        previous: &str,
+        failure: &trigon_core::FailureSignature,
+        log: &str,
+    ) -> Result<trigon_strategy::Strategy> {
+        let task = inputs.task(Some(previous), Some(failure), Some(log));
+        let proposed = trigon_ai::propose(self.provider.as_ref(), &self.model, &task)
+            .context("asking for a repair")?;
+        trigon_strategy::from_yaml(&proposed.strategy).with_context(|| {
+            format!(
+                "the repair did not parse as a strategy. The model said: {}",
+                first_line(&proposed.diagnosis)
+            )
+        })
     }
 
     pub fn rung(&self) -> ModelInferrer {

@@ -1870,16 +1870,8 @@ mod rebuild {
             }
         }
 
-        // 4. Build it.
+        // 4. Build it, and repair it where a model is configured to try.
         let strategy_file = args.work.join("strategy.yaml");
-        let strategy_yaml = trigon_strategy::to_yaml(&candidate.strategy)?;
-        std::fs::write(&strategy_file, &strategy_yaml)?;
-        // Over the canonical value, not the YAML bytes, so editing a comment does not change what
-        // the attestation names or bust a cache entry across a hundred thousand targets.
-        let strategy_digest = trigon_strategy::ToolRegistry::builtin()
-            .and_then(|tools| trigon_strategy::strategy_digest(&candidate.strategy, &tools))
-            .ok();
-        let derivation = format!("{:?}", candidate.derivation).to_lowercase();
         let out = args.work.join("rebuild");
         // Written next to the run, and mounted read-only into the island's mirror when there is
         // one. The mirror runs in a container with no route to this process, so a file is how the
@@ -1890,21 +1882,149 @@ mod rebuild {
         // Evidence the registry pin bound something, filled in once the mirror is torn down.
         let mut pin: Option<trigon_mirror::Observed> = None;
         let mirror_addr = mirror.as_ref().map(|m| m.host());
-        let built = crate::build::run_with(
-            &strategy_file,
-            false,
-            &args.image,
-            &out,
-            &args.egress,
-            args.timeout,
-            false,
-            timewarp_host.as_deref().unwrap_or("timewarp"),
-            mirror_addr.as_deref(),
-            Some(args.mirror_image.as_str()),
-            verbose,
-            enforced.then_some(guard_file.as_path()),
-            args.source.as_deref(),
+
+        // One mirror for the whole run rather than one per attempt: what it observed is a fact
+        // about this run's dependency resolution, and restarting it between repairs would reset
+        // the counters that say whether the pin bound anything.
+        let mut strategy = candidate.strategy.clone();
+        let mut repairs = trigon_ai::RepairLoop::new(
+            trigon_ai::Budget::default(),
+            // A person is waiting on a single `rebuild`, so admission control is off: they asked,
+            // and the cost is one target's. A sweep passes prevalence and every gate applies.
+            trigon_ai::Trigger::Interactive,
         );
+        let repair_started = std::time::Instant::now();
+        // Read on the first repair and not before. A run whose build works never touches the
+        // repository, and a `--model` that is only there as a fallback should cost nothing.
+        let mut repo_inputs: Option<crate::inferrer::Inputs> = None;
+        let (built, strategy_digest) = loop {
+            // A fresh directory per attempt. Without it an earlier attempt's partial output sits
+            // beside a later one's artifact, and "the newest file" stops being a description of
+            // what this recipe produced.
+            if !repairs.attempts().is_empty() {
+                let _ = std::fs::remove_dir_all(&out);
+            }
+            let strategy_yaml = trigon_strategy::to_yaml(&strategy)?;
+            std::fs::write(&strategy_file, &strategy_yaml)?;
+            // Over the canonical value, not the YAML bytes, so editing a comment does not change
+            // what the attestation names or bust a cache entry across a hundred thousand targets.
+            let strategy_digest = trigon_strategy::ToolRegistry::builtin()
+                .and_then(|tools| trigon_strategy::strategy_digest(&strategy, &tools))
+                .ok();
+            let built = crate::build::run_with(
+                &strategy_file,
+                false,
+                &args.image,
+                &out,
+                &args.egress,
+                args.timeout,
+                false,
+                timewarp_host.as_deref().unwrap_or("timewarp"),
+                mirror_addr.as_deref(),
+                Some(args.mirror_image.as_str()),
+                verbose,
+                enforced.then_some(guard_file.as_path()),
+                args.source.as_deref(),
+            );
+
+            // A tripped guard ends the loop whatever else happened, and before another attempt can
+            // spend anything: the artifact under test reached the build, so nothing this run
+            // produces is evidence about the source. The block below turns it into a `Void`.
+            if mirror.as_ref().is_some_and(|m| !m.trips().is_empty()) {
+                break (built, strategy_digest);
+            }
+
+            let Err(e) = &built else {
+                break (built, strategy_digest);
+            };
+            // Only a failure the build itself reported carries a signature. Our own errors and a
+            // void run are not something a different recipe fixes.
+            let Some(failure) = e
+                .downcast_ref::<crate::BuildFailure>()
+                .map(|f| f.signature.clone())
+            else {
+                break (built, strategy_digest);
+            };
+            let Some(cfg) = &model else {
+                break (built, strategy_digest);
+            };
+
+            match repairs.next(&failure, &trigon_ai::NoPrior, repair_started.elapsed().as_secs()) {
+                trigon_ai::Decision::Stop(reason) => {
+                    // Said out loud. Which stop rule fired is the difference between "the budget
+                    // is too small", "we have no rule for this" and "working as intended", and a
+                    // run that just stops tells the operator none of them.
+                    if verbose {
+                        println!("  repair     stopped: {}", stop_reason(&reason));
+                    }
+                    tracing::info!(?reason, "the repair loop stopped");
+                    break (built, strategy_digest);
+                }
+                trigon_ai::Decision::Attempt { escalate } => {
+                    if repo_inputs.is_none() {
+                        match cfg.inputs(&resolved) {
+                            Ok(i) => repo_inputs = Some(i),
+                            // No repository to read is not a failure of the run: the build failed
+                            // for its own reasons and that is what gets reported.
+                            Err(e) => {
+                                tracing::warn!("no repair: {e:#}");
+                                break (built, strategy_digest);
+                            }
+                        }
+                    }
+                    let read = repo_inputs.as_ref().expect("just filled");
+                    // Compressed here rather than inside the provider, so the caller who chose the
+                    // budget can see what it is spending. Raw build output is the most expensive
+                    // mistake available: `docs/07-ai.md` §4.5 measures the difference at ~7x.
+                    let log = std::fs::read_to_string(out.join("build.log")).unwrap_or_default();
+                    // 8k, which is what `docs/07-ai.md` §4.5 costs its figures at. A larger
+                    // budget buys dependency noise; a smaller one clips the error.
+                    let compressed = trigon_core::compress(&log, 8 * 1024);
+                    if verbose {
+                        println!(
+                            "  repair     attempt {} on {}{}",
+                            repairs.attempts().len() + 1,
+                            failure.key(),
+                            if escalate { ", escalated" } else { "" },
+                        );
+                    }
+                    let before = cfg.spent();
+                    let proposed = cfg.repair(read, &strategy_yaml, &failure, &compressed.text);
+                    // Recorded whether or not the answer was usable. An attempt that produced
+                    // nothing still cost tokens and still counts against the budget; not recording
+                    // it is how a loop spends its cap on calls it threw away.
+                    let after = cfg.spent();
+                    repairs.record(trigon_ai::Attempt {
+                        signature: failure.key(),
+                        reached: e
+                            .downcast_ref::<crate::BuildFailure>()
+                            .and_then(|f| f.phase.parse().ok())
+                            .unwrap_or(trigon_core::Phase::Build),
+                        tokens_in: after.input.saturating_sub(before.input),
+                        tokens_out: after.output.saturating_sub(before.output),
+                        cached_in: after.cached_input.saturating_sub(before.cached_input),
+                    });
+                    match proposed {
+                        Ok(next) => {
+                            strategy = next;
+                            continue;
+                        }
+                        Err(e) => {
+                            // A model that will not answer, or an answer that will not parse. The
+                            // run ends on the build failure it already had rather than on ours.
+                            tracing::warn!("the repair produced nothing: {e:#}");
+                            break (built, strategy_digest);
+                        }
+                    }
+                }
+            }
+        };
+        let derivation = if repairs.attempts().is_empty() {
+            format!("{:?}", candidate.derivation).to_lowercase()
+        } else {
+            // Whatever produced the first candidate, what ran is what a model last proposed.
+            "model_assisted".to_string()
+        };
 
         if let Some(m) = mirror {
             // A claim of a pinned dependency graph has to be able to show the pin did something,
@@ -2239,6 +2359,28 @@ mod rebuild {
     /// to search our own error text for a phase name, so "the mirror container did not start
     /// listening" became `build-failed:setup` and a broken mirror on our side read, in the sweep
     /// summary, as five packages that do not build.
+    /// Why the repair loop stopped, in a sentence.
+    ///
+    /// Each of these is a different thing to do about it — a knob, a gap in our rule table, or the
+    /// budget working as intended — and a run that just stops tells the operator none of them.
+    fn stop_reason(r: &trigon_ai::StopReason) -> String {
+        use trigon_ai::StopReason as S;
+        match r {
+            S::NotRepairable => "the failure is not one a different recipe fixes".into(),
+            S::KnownUnfixable => "this failure has been attempted before and never repaired".into(),
+            S::NoProgress { signature } => format!(
+                "two attempts failed the same way ({signature}), so the model is restating rather \
+                 than searching"
+            ),
+            S::BelowPrevalenceThreshold { score, threshold } => format!(
+                "prevalence {score:.3} is below the sweep's threshold of {threshold:.3}"
+            ),
+            S::IterationCap { cap } => format!("the iteration cap of {cap} was reached"),
+            S::BudgetExhausted { what } => format!("the {what} budget was exhausted"),
+            S::Repaired => "the build succeeded".into(),
+        }
+    }
+
     fn build_outcome(e: &anyhow::Error) -> Outcome {
         if let Some(f) = e.downcast_ref::<crate::BuildFailure>() {
             return Outcome::BuildFailed {

@@ -53,6 +53,11 @@ fn ollama_answers_and_reports_what_it_spent() {
     assert!(resp.usage.input > 0, "no input tokens reported: {resp:?}");
     assert!(resp.usage.output > 0, "no output tokens reported: {resp:?}");
     assert_eq!(resp.model, model, "the provider reports what answered");
+
+    // And the pinned form is what a run addresses it by: the digest is stripped on the way out and
+    // put back on the way in. Asking for it literally returns `invalid model name`.
+    let pinned_resp = p.complete(&request(&pinned, "Say hello.")).unwrap();
+    assert_eq!(pinned_resp.model, pinned, "the pin was lost: {pinned_resp:?}");
 }
 
 #[test]

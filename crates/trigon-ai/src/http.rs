@@ -162,7 +162,10 @@ impl OpenAiCompatible {
         }
 
         let mut body = json!({
-            "model": req.model,
+            // The digest rides in the model id we *record*; it is not a name the endpoint knows.
+            // Sending it gets `invalid model name` back, which reads as a broken provider rather
+            // than as us having appended something.
+            "model": addressable(&req.model),
             "messages": messages,
             self.flavor.output_cap_field(): req.max_output_tokens,
         });
@@ -217,8 +220,13 @@ impl Provider for OpenAiCompatible {
                     .unwrap_or(0),
                 output: usage["completion_tokens"].as_u64().unwrap_or(0),
             },
-            // What answered, not what was asked for.
-            model: doc["model"].as_str().unwrap_or(&req.model).to_string(),
+            // What answered, not what was asked for — and with the pin put back, because the
+            // endpoint echoes the tag it knows and the tag alone is not a pin.
+            model: match doc["model"].as_str() {
+                Some(m) if m == addressable(&req.model) => req.model.clone(),
+                Some(m) => m.to_string(),
+                None => req.model.clone(),
+            },
             stop_reason: choice["finish_reason"]
                 .as_str()
                 .unwrap_or("unknown")
@@ -354,6 +362,11 @@ impl Provider for Anthropic {
     }
 }
 
+/// A model id the endpoint will accept: ours without the digest we pinned it to.
+fn addressable(model: &str) -> &str {
+    model.split_once('@').map(|(tag, _)| tag).unwrap_or(model)
+}
+
 /// Which header carries the key.
 #[derive(Clone, Copy)]
 enum Auth {
@@ -440,6 +453,19 @@ mod tests {
         OpenAiCompatible::new("http://x/v1", None, flavor)
             .unwrap()
             .body(&probe("operator instructions"))
+    }
+
+    #[test]
+    fn a_pinned_tag_is_recorded_but_not_sent() {
+        // Found by running it: `qwen2.5:0.5b@a8b0c5157701` is what a transcript has to name, and
+        // `invalid model name` is what the endpoint says if you ask for it.
+        let mut req = probe("sys");
+        req.model = "qwen2.5:0.5b@a8b0c5157701".into();
+        let body = OpenAiCompatible::new("http://x/v1", None, Flavor::Ollama)
+            .unwrap()
+            .body(&req);
+        assert_eq!(body["model"], "qwen2.5:0.5b");
+        assert_eq!(addressable("claude-opus-5"), "claude-opus-5");
     }
 
     #[test]

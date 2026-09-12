@@ -140,6 +140,18 @@ const RULES: &[Rule] = &[
         capture: Capture::WordBefore(": command not found"),
     },
     Rule {
+        // The same failure in dash's words rather than bash's. A `/bin/sh` that is dash — which is
+        // every Debian image — says `npx: not found`, with no `command`. Found by a run whose
+        // whole cluster came back `unknown` for a missing `npx`, which is exactly the failure this
+        // rule exists to name.
+        code: "env/missing-tool",
+        needles: &[": not found"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        capture: Capture::WordBefore(": not found"),
+    },
+    Rule {
         code: "env/node-too-old",
         needles: &["Cannot find module 'node:"],
         fault: Fault::Bug,
@@ -571,6 +583,17 @@ mod tests {
             classify("building 'lxml' extension\nfatal error: Python.h: No such file or directory");
         assert_eq!(a.key(), b.key());
         assert_eq!(a.key(), "cc/missing-header:python.h");
+    }
+
+    #[test]
+    fn a_shell_that_is_not_bash_names_a_missing_tool_the_same_way() {
+        // `/bin/sh` on a Debian image is dash, which says `npx: not found` where bash says
+        // `npx: command not found`. Before this, a missing tool under dash clustered as `unknown`.
+        let s = classify("+ npx --yes pack\n/build: 2: npx: not found");
+        assert_eq!(s.code, "env/missing-tool");
+        assert_eq!(s.subject.as_deref(), Some("npx"));
+        assert_eq!(s.fault, Fault::Bug, "our image lacks it, the package is fine");
+        assert!(s.repairable);
     }
 
     #[test]

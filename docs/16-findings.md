@@ -283,6 +283,36 @@ spawns this same binary. Three reasons: the crate requires Rust 1.94 and the wor
 it embeds a CLI executable in the dependency tree; and this codebase already reaches `podman` and
 `git` the same way.
 
+### 3.9 The repair loop, and two things running it found
+
+Wiring `RepairLoop` into `rebuild` turns the build into a loop: a failure the build itself reported
+carries a signature, and where `--model` names a provider the Builder is asked for a new recipe with
+the previous one, that signature, and the **compressed** log — compressed at the call site rather
+than inside the provider, so the caller who chose the budget can see what it is spending.
+
+Driven against a deliberately broken recipe, the loop did what `docs/07-ai.md` §4.5 says it should:
+two attempts, then *"two attempts failed the same way, so the model is restating rather than
+searching"* — stopping four iterations before the cap. Which stop rule fired is printed, because a
+budget that is too small, a gap in our rule table, and admission control working as intended are
+three different things to do about it.
+
+Two bugs, both found only by running it:
+
+- **The digest pin was being sent as the model name.** Pinning an Ollama tag to its digest is right
+  for the transcript and wrong on the wire: `qwen2.5:0.5b@a8b0c5157701` comes back
+  `invalid model name`, which reads as a broken provider rather than as us having appended
+  something. The digest is stripped on the way out and put back on the way in.
+- **`npx: not found` did not classify.** The rule table knew bash's `command not found`; `/bin/sh`
+  on a Debian image is dash, which says `npx: not found`. Every missing tool under dash was
+  clustering as `unknown` — the bucket that hides our own bugs.
+
+Still missing, and the next thing: the loop triggers on a *build failure*, and the most interesting
+repair class is a **divergence** — the build succeeded and the artifact differs. `escalade 3.2.0`,
+the corpus's one `needs-build-inference` target, is exactly that: `npm pack` alone never produces
+the `dist/` it publishes. Feeding a `Comparison` back to the Builder is a different prompt and a
+different admission-control question, and it is what the flywheel's first promoted rule will come
+from.
+
 ---
 
 ## 4. A stabilizer the reference does not have
