@@ -15,8 +15,10 @@ mod builder;
 mod eval;
 mod provider;
 mod repair;
+mod transcript;
 
 pub use builder::{Candidate, Task, candidate_schema, parse_candidate, prompt, propose};
 pub use eval::{Capability, Labelled, Observation, Rate, Scorecard, score};
 pub use provider::{LlmError, ModelCaps, Part, Prompt, Provider, Replay, Request, Response, Usage};
+pub use transcript::{Recorder, Replaying, Transcript, Turn, is_snapshot};
 pub use repair::{Attempt, Budget, Decision, NoPrior, Prior, RepairLoop, StopReason, Trigger};

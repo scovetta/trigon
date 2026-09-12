@@ -31,6 +31,14 @@ pub enum MirrorError {
     )]
     Refused { url: String },
 
+    #[error(
+        "refusing to fetch a toolchain from `{host}`. The toolchain route is an allowlist, and \
+         widening it is an edit to `trigon-mirror`, not a runtime decision: at mirror-only egress \
+         this proxy is the build's only route out, so any host reachable through it is a host the \
+         build can be told to fetch from."
+    )]
+    HostNotAllowed { host: String },
+
     #[error("could not listen on port {port}: {detail}")]
     Bind { port: u16, detail: String },
 
@@ -45,6 +53,7 @@ impl MirrorError {
             MirrorError::NoFilter
             | MirrorError::UnknownPlatform { .. }
             | MirrorError::BadMoment { .. } => 400,
+            MirrorError::HostNotAllowed { .. } => 403,
             MirrorError::Upstream { status, .. } => *status,
             MirrorError::Unfilterable { .. } => 502,
             MirrorError::Bind { .. } => 500,
@@ -60,7 +69,8 @@ impl Classify for MirrorError {
             // A build configured the mirror wrongly, or asked for something it does not serve.
             MirrorError::NoFilter
             | MirrorError::UnknownPlatform { .. }
-            | MirrorError::BadMoment { .. } => Fault::Policy,
+            | MirrorError::BadMoment { .. }
+            | MirrorError::HostNotAllowed { .. } => Fault::Policy,
             MirrorError::Upstream { .. }
             | MirrorError::Unfilterable { .. }
             | MirrorError::Transport(_) => Fault::Upstream,

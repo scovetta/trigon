@@ -20,11 +20,11 @@ params:
       `glibc` for nodejs.org's official builds, which cover every version. `musl` for
       unofficial-builds, needed on Alpine and available only for newer versions.
 steps:
-  # The image's own Node first, when it is already the version we want. Not only to save a 17 MB
-  # download: under `mirror-only` egress there is no route to nodejs.org at all, so a strategy that
-  # unconditionally fetches a toolchain cannot run at the tier that makes a rebuild attestable. An
-  # image that already carries the right toolchain is what `docs/08` §3 means by building base
-  # images per ecosystem and toolchain family.
+  # The image's own Node first, when it is already the version we want. Mostly to save a 17 MB
+  # download; under `mirror-only` egress it also skips a proxy hop, because the download there goes
+  # through the mirror's toolchain route — the deps phase runs inside the network island and the
+  # mirror is the only host reachable from it. An image that already carries the right toolchain is
+  # what `docs/08` §3 means by building base images per ecosystem and toolchain family.
   #
   # `needs: [wget]` on both, not on the tool, because a skipped step contributes nothing. Alpine's
   # busybox provides wget built in, which is why the prior art never had to declare it; a slim
@@ -34,11 +34,17 @@ steps:
         echo "the image already has node v{{ with.node_version }}"
       else
       {%- if with.libc == 'musl' %}
-        wget -O - https://unofficial-builds.nodejs.org/download/release/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64-musl.tar.gz | tar xzf - --strip-components=1 -C /usr/local/
+        wget -O - {{ toolchain_url('unofficial-builds.nodejs.org', 'download/release/v' ~ with.node_version ~ '/node-v' ~ with.node_version ~ '-linux-x64-musl.tar.gz') }} | tar xzf - --no-same-owner --strip-components=1 -C /usr/local/
       {%- else %}
-        wget -O - https://nodejs.org/dist/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64.tar.gz | tar xzf - --strip-components=1 -C /usr/local/
+        wget -O - {{ toolchain_url('nodejs.org', 'dist/v' ~ with.node_version ~ '/node-v' ~ with.node_version ~ '-linux-x64.tar.gz') }} | tar xzf - --no-same-owner --strip-components=1 -C /usr/local/
       {%- endif %}
       fi
+    # `--no-same-owner` because the official tarballs record uid/gid 500, and a deferred deps phase
+    # runs inside the container rather than as an image layer: the user namespace there maps a
+    # narrow range, so tar fails on every entry and exits non-zero. At `open` egress the same step
+    # ran at image-build time and never hit it, which is what made this look like a mirror bug. File
+    # ownership inside a toolchain is not part of what we reproduce.
+    #
     # `libatomic` because Node 24 and later link against it, and a slim Debian image does not carry
     # it. The failure is `node: error while loading shared libraries: libatomic.so.1` before Node
     # prints anything of its own, so it reads as a broken download rather than a missing package.

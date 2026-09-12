@@ -288,3 +288,38 @@ fn the_node_libc_variant_is_a_parameter_not_a_hardcoded_url() {
     assert!(musl.deps.contains("unofficial-builds"), "{}", musl.deps);
     assert!(musl.deps.contains("linux-x64-musl"), "{}", musl.deps);
 }
+
+#[test]
+fn a_toolchain_download_goes_through_the_mirror_when_there_is_one() {
+    // The deps phase runs inside the network island at `mirror-only` egress, where the mirror is
+    // the only reachable host. A template that writes the upstream URL builds an image fine and
+    // then dies at `Network is unreachable` in the phase after it, which reads as our sandbox being
+    // broken rather than as the strategy naming a host it cannot reach.
+    let tools = ToolRegistry::builtin().unwrap();
+    let strategy = from_yaml(
+        "kind: flow\nlocation: { repo: r, ref: c }\ndeps:\n  - uses: npm/install-node\n    with: { node_version: \"9.2.1\" }\n",
+    )
+    .unwrap();
+
+    let mirrored = render(&strategy, &cx(), &tools).unwrap();
+    assert!(
+        mirrored
+            .deps
+            .contains("http://timewarp/-toolchain/nodejs.org/dist/v9.2.1/"),
+        "{}",
+        mirrored.deps
+    );
+
+    // And straight upstream when there is no mirror, because a pinned toolchain URL names its own
+    // version: there is nothing for a time filter to do, so needing one would be a false dependency.
+    let mut plain = cx();
+    plain.env.timewarp_base = None;
+    let plain = render(&strategy, &plain, &tools).unwrap();
+    assert!(
+        plain
+            .deps
+            .contains("https://nodejs.org/dist/v9.2.1/node-v9.2.1-linux-x64.tar.gz"),
+        "{}",
+        plain.deps
+    );
+}

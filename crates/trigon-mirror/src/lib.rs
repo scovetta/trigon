@@ -24,4 +24,4 @@ pub use guard::{Guard, GuardManifest, GuardMatch, TRIP_MARKER, Trip};
 pub use moment::{Filter, Platform, normalize, published_by, url_for};
 pub use npm::filter_packument;
 pub use pypi::{filter_simple, render_html};
-pub use server::{Mirror, MirrorHandle, Observed};
+pub use server::{Mirror, MirrorHandle, Observed, TOOLCHAIN_HOSTS, toolchain_host_allowed};

@@ -210,6 +210,19 @@ const RULES: &[Rule] = &[
         repairable: false,
         capture: Capture::None,
     },
+    Rule {
+        // Extracting an archive that records an owner the sandbox's user namespace does not map.
+        // Ours, not the package's: the same tarball extracts fine as an image layer, where the
+        // mapping is wide, and fails in a deferred phase inside the container, where it is narrow.
+        // The repair is `--no-same-owner`, which is why this is repairable rather than merely a
+        // fault to report.
+        code: "env/cannot-chown",
+        needles: &["Cannot change ownership"],
+        fault: Fault::Infra,
+        retryable: false,
+        repairable: true,
+        capture: Capture::None,
+    },
     // ---- the network, and what a denied egress tier looks like from inside ---------------------
     Rule {
         code: "net/unreachable",
@@ -236,6 +249,20 @@ const RULES: &[Rule] = &[
         retryable: false,
         repairable: true,
         capture: Capture::None,
+    },
+    // A fetch that reached a server and was turned away. Under an enforced tier the server is
+    // almost always our own mirror, and the status says which refusal: 400 for a request that
+    // arrived without the time filter, 403 for a host outside the toolchain allowlist or for the
+    // run's own artifact. Classified separately from `net/unreachable` because the fix is
+    // different — the route exists and the request was wrong — and because an unclassified failure
+    // clusters as `unknown`, where twenty-six identical ones once hid a single bug of ours.
+    Rule {
+        code: "net/http-error",
+        needles: &["ERROR 4"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: true,
+        capture: Capture::WordAfter("ERROR"),
     },
     Rule {
         code: "net/registry-5xx",
@@ -604,6 +631,21 @@ mod tests {
         assert_eq!(s.code, "env/out-of-memory");
         assert!(!s.repairable);
         assert!(s.retryable, "a bigger worker could get further");
+    }
+
+    #[test]
+    fn a_mirror_turning_a_request_away_is_not_an_unknown_failure() {
+        // The real line, from a toolchain fetch against a mirror image built before the route
+        // existed. It classified as `unknown`, which is where a whole cluster of our own bugs goes
+        // to be invisible.
+        let s = classify(
+            "--2026-09-12 13:44:18--  http://timewarp:8129/-toolchain/nodejs.org/dist/v9.2.1/node-v9.2.1-linux-x64.tar.gz\n             Connecting to timewarp (timewarp)|10.89.0.2|:8129... connected.\n             HTTP request sent, awaiting response... 400 Bad Request\n             2026-09-12 13:44:18 ERROR 400: Bad Request.",
+        );
+        assert_eq!(s.code, "net/http-error");
+        assert_eq!(s.subject.as_deref(), Some("400"), "the status is what clusters");
+        assert_eq!(s.fault, Fault::Policy, "the route was wrong, not the package");
+        assert!(s.repairable);
+        assert!(!s.retryable, "the same request gets the same answer");
     }
 
     #[test]

@@ -80,6 +80,11 @@ pub struct PinEvidence {
     pub index_requests: u64,
     pub versions_withheld: u64,
     pub artifact_requests: u64,
+    /// Toolchain downloads proxied through the mirror's allowlist. Recorded because a toolchain is
+    /// the one thing a build fetches that then *runs*, and a reader of this record should not have
+    /// to infer it from the artifact count.
+    #[serde(default)]
+    pub toolchain_requests: u64,
     /// Requests refused, most often for arriving without the filter. Distinct from silence.
     pub rejected: u64,
 }
@@ -149,6 +154,18 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureSignature>,
 
+    /// The model exchange this run's strategy came out of, when one did: JSON of a
+    /// `trigon_ai::Transcript`, stored as an ordinary blob.
+    ///
+    /// Stored beside `derivation` rather than inside the signed statement, which is the rule from
+    /// [`09`](../docs/09-attestations.md) §4: AI is a provenance fact next to the claim, never part
+    /// of it. Worth keeping even where nobody intends to replay — a run that says
+    /// `derivation: model_assisted` with no transcript is an assertion, and one with a transcript
+    /// is a record. What a replay of it proves is narrow and stated where the type is defined: the
+    /// provenance of the derivation, not the reproducibility of the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<Digest>,
+
     /// Set once a statement has been signed for this run. Read by the prune path, which must not
     /// discard the bytes a signature is about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -183,6 +200,7 @@ impl RunRecord {
             build_log: None,
             timings: Vec::new(),
             failure: None,
+            transcript: None,
             attestations: Vec::new(),
         }
     }

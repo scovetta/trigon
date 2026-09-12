@@ -106,6 +106,62 @@ async fn an_unfiltered_request_gets_a_400_rather_than_the_live_index() {
 }
 
 #[tokio::test]
+async fn a_toolchain_host_outside_the_allowlist_is_refused() {
+    // The toolchain route exists because the deps phase runs inside the network island and needs a
+    // pinned Node. What it must not become is a general proxy: at `mirror-only` egress this server
+    // is the only host the build can reach, so an open toolchain route hands the build back the
+    // internet under a different path.
+    let m = Mirror::new().unwrap().serve(0).await.unwrap();
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/-toolchain/evil.example/x.tar.gz", m.host()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("evil.example"), "{body}");
+
+    // Exact match, not a suffix: the obvious `ends_with` rule accepts this one.
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "http://{}/-toolchain/evil-nodejs.org/x.tar.gz",
+            m.host()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    assert!(trigon_mirror::toolchain_host_allowed("nodejs.org"));
+    assert!(!trigon_mirror::toolchain_host_allowed("nodejs.org.evil.example"));
+    m.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_toolchain_download_comes_back_through_the_mirror() {
+    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRIGON_LIVE=1");
+        return;
+    }
+    let m = Mirror::new().unwrap().serve(0).await.unwrap();
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "http://{}/-toolchain/nodejs.org/dist/v9.2.1/SHASUMS256.txt",
+            m.host()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(resp.text().await.unwrap().contains("node-v9.2.1-linux-x64.tar.gz"));
+    assert_eq!(m.observed().toolchain_requests, 1);
+    // And it counts as contact, so a run cannot report "the mirror was never asked for anything"
+    // while the toolchain came through it.
+    assert!(m.observed().contacted());
+    m.shutdown().await;
+}
+
+#[tokio::test]
 async fn npm_sees_the_index_as_it_was() {
     if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
         eprintln!("skipped: set TRIGON_LIVE=1");

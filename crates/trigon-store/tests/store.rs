@@ -162,6 +162,51 @@ async fn pruning_refuses_a_run_nothing_has_signed() {
 }
 
 #[tokio::test]
+async fn a_model_assisted_run_keeps_the_exchange_it_came_out_of() {
+    // `derivation: model_assisted` with no transcript is an assertion; with one it is a record.
+    // Pruning is about the rebuilt artifact, which can be re-derived, and must not reach the
+    // derivation, which cannot.
+    let s = Store::in_memory();
+    let up = s.blobs().put(&b"upstream"[..]).await.unwrap();
+    let rb = s.blobs().put(&b"rebuilt"[..]).await.unwrap();
+    let transcript = serde_json::json!({
+        "target": "pkg:npm/a@1",
+        "turns": [{
+            "model": "claude-haiku-4-5-20251001",
+            "temperature": 0.0,
+            "prompt_sha256": "0".repeat(64),
+            "system_sha256": "1".repeat(64),
+            "answer": "kind: flow\n",
+            "usage": { "input": 10, "cached_input": 8, "output": 2 },
+            "stop_reason": "end_turn",
+        }],
+    });
+    let t = s
+        .blobs()
+        .put(serde_json::to_vec(&transcript).unwrap())
+        .await
+        .unwrap();
+
+    let mut r = RunRecord::new("0009", "pkg:npm/a@1", artifact("a.tgz", &up, 8), env(), "t");
+    r.rebuild = Some(artifact("a.tgz", &rb, 7));
+    r.outcome = Some("normalized".into());
+    r.derivation = Some("model_assisted".into());
+    r.transcript = Some(t);
+    r.attestations = vec!["attestations/npm/a/1/a.tgz/equivalence.intoto.json".into()];
+    s.put_run(&r).await.unwrap();
+
+    assert!(s.prune_rebuild("0009").await.unwrap());
+    assert!(!s.blobs().has(&rb).await.unwrap(), "the rebuild goes");
+    assert!(
+        s.blobs().has(&t).await.unwrap(),
+        "and the transcript stays: it is the only account of how the strategy came to exist"
+    );
+    let back = s.get_run("0009").await.unwrap();
+    assert_eq!(back.transcript, Some(t));
+    assert_eq!(back.derivation.as_deref(), Some("model_assisted"));
+}
+
+#[tokio::test]
 async fn a_divergence_keeps_its_bytes() {
     // A divergence is a public claim about someone else's package. A maintainer who cannot obtain
     // the artifact we compared against has no way to answer it.
@@ -282,6 +327,7 @@ async fn a_pinned_moment_is_recorded_with_the_evidence_that_it_bound_something()
         index_requests: 153,
         versions_withheld: 903,
         artifact_requests: 40,
+        toolchain_requests: 1,
         rejected: 0,
     };
     assert!(bound.bound());

@@ -26,7 +26,28 @@ pub struct Stats {
     pub index_requests: AtomicU64,
     pub versions_withheld: AtomicU64,
     pub passthrough_requests: AtomicU64,
+    pub toolchain_requests: AtomicU64,
     pub rejected_requests: AtomicU64,
+}
+
+/// Hosts the toolchain route will fetch from.
+///
+/// Short and hand-maintained on purpose. At `mirror-only` egress this proxy is the build's only
+/// route out, so every entry here is a place a build can be told to download an executable from —
+/// which is why it is a compiled-in list rather than a flag. The entries are toolchain
+/// distributions whose URLs name an exact version, so what comes back is a function of the URL and
+/// not of the day.
+///
+/// Adding one is cheap and deliberate. What it must never become is a wildcard: the moment the
+/// build picks the host, `mirror-only` means nothing.
+pub const TOOLCHAIN_HOSTS: &[&str] = &["nodejs.org", "unofficial-builds.nodejs.org"];
+
+/// Whether the toolchain route will proxy to this host.
+///
+/// Exact match, not a suffix match: `nodejs.org.evil.example` ends with nothing in the list, but a
+/// suffix rule written the obvious way would have accepted `evil-nodejs.org`.
+pub fn toolchain_host_allowed(host: &str) -> bool {
+    TOOLCHAIN_HOSTS.contains(&host)
 }
 
 /// Evidence that a registry pin bound something.
@@ -46,6 +67,11 @@ pub struct Observed {
     /// Versions removed because they did not exist yet at the pinned moment.
     pub versions_withheld: u64,
     pub artifact_requests: u64,
+    /// Toolchain downloads proxied through the allowlist. Separate from artifacts because they are
+    /// a different claim: an artifact request is the build fetching a dependency, a toolchain
+    /// request is the build fetching the thing that will run.
+    #[serde(default)]
+    pub toolchain_requests: u64,
     /// Requests the mirror turned away, most often for arriving with no filter at all — a client
     /// that dropped the credentials carrying the moment. Distinct from silence: somebody asked and
     /// was refused, which is a different thing to investigate.
@@ -68,7 +94,7 @@ impl Observed {
     /// investigations: the first is a configuration that did not reach the client, the second is a
     /// build that resolved nothing or resolved it somewhere else.
     pub fn contacted(&self) -> bool {
-        self.index_requests + self.artifact_requests + self.rejected > 0
+        self.index_requests + self.artifact_requests + self.toolchain_requests + self.rejected > 0
     }
 }
 
@@ -117,6 +143,7 @@ impl MirrorHandle {
             index_requests: self.stats.index_requests.load(Ordering::Relaxed),
             versions_withheld: self.stats.versions_withheld.load(Ordering::Relaxed),
             artifact_requests: self.stats.passthrough_requests.load(Ordering::Relaxed),
+            toolchain_requests: self.stats.toolchain_requests.load(Ordering::Relaxed),
             rejected: self.stats.rejected_requests.load(Ordering::Relaxed),
         }
     }
@@ -227,6 +254,15 @@ async fn serve_one(mirror: &Mirror, req: Request) -> Result<Response, MirrorErro
     // refused: the symptom is `400 Bad Request` on a tarball after the index resolved fine.
     if let Some(rest) = path_now.strip_prefix("/-artifact/") {
         return artifact(mirror, rest, &query_now).await;
+    }
+
+    // Toolchains, likewise before the auth check and for a stronger reason: there is nothing to
+    // filter by date. A pinned toolchain URL names its own version, so the bytes are a function of
+    // the URL. Without this route a build at `mirror-only` egress cannot install the toolchain that
+    // produced the package at all — the deps phase runs inside the island, and the only host in
+    // there is this one. See `docs/16-findings.md`.
+    if let Some(rest) = path_now.strip_prefix("/-toolchain/") {
+        return toolchain(mirror, rest, &query_now).await;
     }
 
     let auth = req
@@ -405,6 +441,30 @@ async fn artifact(mirror: &Mirror, rest: &str, query: &str) -> Result<Response, 
         .passthrough_requests
         .fetch_add(1, Ordering::Relaxed);
     proxy(mirror, &format!("https://{target}{query}"), &filter).await
+}
+
+/// Proxy a toolchain download, from an allowlisted host only.
+///
+/// `/-toolchain/<host>/<path>`. No filter and no credentials: the URL names an exact version, so
+/// there is no moment to pin it to and nothing a date filter could remove. The guard still applies,
+/// because "the artifact arrived dressed as a toolchain" is exactly the route it exists to close.
+async fn toolchain(mirror: &Mirror, rest: &str, query: &str) -> Result<Response, MirrorError> {
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if !toolchain_host_allowed(host) {
+        return Err(MirrorError::HostNotAllowed {
+            host: host.to_string(),
+        });
+    }
+    mirror
+        .stats
+        .toolchain_requests
+        .fetch_add(1, Ordering::Relaxed);
+    // The filter is carried for the log line the proxy writes, and filters nothing here.
+    let filter = Filter {
+        platform: Platform::Npm,
+        moment: String::new(),
+    };
+    proxy(mirror, &format!("https://{host}/{path}{query}"), &filter).await
 }
 
 /// The prefix a rewritten artifact URL is built from.

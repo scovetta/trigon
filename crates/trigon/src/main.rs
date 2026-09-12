@@ -874,6 +874,11 @@ mod build {
         });
 
         let run_id = format!("{}-{}", &digest[..12], std::process::id());
+        if let Some(tag) = mirror_image
+            && egress != EgressTier::Open
+        {
+            mirror::warn_if_stale(tag);
+        }
         let runner = PodmanRunner::new(out).with_mirror_image(mirror_image.map(str::to_string));
 
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -908,10 +913,18 @@ mod build {
                     }
                 }
                 if !outcome.attestable {
+                    // Two different reasons, and naming the wrong one sends the reader to the
+                    // wrong fix. A run at `mirror-only` really did hold the boundary — the island
+                    // has one route out — and telling its operator that no mirror was enforced
+                    // invites them to go looking for a configuration bug that is not there.
+                    let why = if outcome.egress == trigon_sandbox::EgressTier::Open {
+                        "this run enforced no mirror and recorded no network transcript"
+                    } else {
+                        "the egress boundary held, but this runner records no network transcript"
+                    };
                     println!(
-                        "\n  not attestable: this runner enforces no mirror and records no \
-                         network transcript, so it cannot claim the build fetched nothing it \
-                         should not have"
+                        "\n  not attestable: {why}, so it cannot claim the build fetched nothing \
+                         it should not have"
                     );
                 }
                 match (&outcome.artifact, outcome.succeeded()) {
@@ -1481,8 +1494,8 @@ mod rebuild {
         Void {
             reason: String,
         },
-        /// Read back from a previous run of the same sweep.
-        Recorded(String, Option<String>),
+        /// Read back from a previous run of the same sweep: label, cluster, model calls.
+        Recorded(String, Option<String>, u32),
     }
 
     impl Outcome {
@@ -1493,7 +1506,20 @@ mod rebuild {
                 Outcome::BuildFailed { phase, .. } => format!("build-failed:{phase}"),
                 Outcome::Failed { fault, .. } => format!("error:{fault:?}").to_lowercase(),
                 Outcome::Void { .. } => "void".into(),
-                Outcome::Recorded(label, _) => label.clone(),
+                Outcome::Recorded(label, ..) => label.clone(),
+            }
+        }
+
+        /// How many times a model was called for this target.
+        ///
+        /// Zero from every live arm, and that is a measurement rather than a placeholder: no
+        /// inference rung installed today calls one. It is written to the results file all the same,
+        /// because the column is what lets `trigon score` tell "no model fired" apart from "nobody
+        /// counted" — and the second reads exactly like the first once a model is wired in.
+        pub fn model_calls(&self) -> u32 {
+            match self {
+                Outcome::Recorded(_, _, calls) => *calls,
+                _ => 0,
             }
         }
 
@@ -1513,7 +1539,7 @@ mod rebuild {
                 // A resumed row carries its cluster forward. Without this, resuming a sweep — which
                 // is how a long one always finishes — silently empties the cluster summary, and the
                 // summary is the reason to run it.
-                Outcome::Recorded(_, cluster) => cluster.clone(),
+                Outcome::Recorded(_, cluster, _) => cluster.clone(),
                 _ => None,
             }
         }
@@ -1533,7 +1559,7 @@ mod rebuild {
         pub fn as_match(&self) -> Option<trigon_core::Match> {
             match self {
                 Outcome::Compared(m) => Some(*m),
-                Outcome::Recorded(label, _) => label.parse().ok(),
+                Outcome::Recorded(label, ..) => label.parse().ok(),
                 _ => None,
             }
         }
@@ -1815,6 +1841,15 @@ mod rebuild {
                     "\n  mirror     {} index request(s), {} version(s) withheld across them",
                     observed.index_requests, observed.versions_withheld,
                 );
+                if observed.toolchain_requests > 0 {
+                    // Named separately because it is a different claim: the build fetched the
+                    // thing that would run, not a dependency, and it did so from a host on the
+                    // mirror's allowlist rather than one the strategy chose.
+                    println!(
+                        "             {} toolchain download(s) through the allowlist",
+                        observed.toolchain_requests
+                    );
+                }
             }
             // Zero is ambiguous — a package with no dependencies asks for nothing — so this warns
             // rather than fails unless the caller says otherwise. Silence was the whole problem;
@@ -2021,6 +2056,7 @@ mod rebuild {
                         index_requests: o.index_requests,
                         versions_withheld: o.versions_withheld,
                         artifact_requests: o.artifact_requests,
+                        toolchain_requests: o.toolchain_requests,
                         rejected: o.rejected,
                     }),
                 },
@@ -2181,6 +2217,7 @@ mod mirror {
         println!("building {tag} (this compiles trigon in a container; it takes a few minutes)");
         let status = std::process::Command::new("podman")
             .arg("build")
+            .args(["--label", &format!("{SOURCE_LABEL}={}", source_digest(&root)?)])
             .args(["--tag", tag, "--file"])
             .arg(&dockerfile)
             .arg("--ignorefile")
@@ -2193,6 +2230,89 @@ mod mirror {
         }
         println!("\n{tag} is ready. `--egress mirror-only` can now be enforced.");
         Ok(())
+    }
+
+    /// The label carrying the source the image was compiled from.
+    const SOURCE_LABEL: &str = "dev.trigon.mirror-source";
+
+    /// A digest of the source that decides how the mirror behaves.
+    ///
+    /// Scoped to `trigon-mirror` alone, not the workspace and not its dependencies. A digest over
+    /// everything would be correct and useless: it changes when a stabilizer or a failure rule
+    /// changes, and a warning that fires on every commit is one people learn to ignore. The routes,
+    /// the time filter and the guard all live in this one crate, so this is where staleness that
+    /// changes what a build sees comes from.
+    fn source_digest(root: &Path) -> Result<String> {
+        use sha2::Digest as _;
+        let mut files = Vec::new();
+        for crate_name in ["trigon-mirror"] {
+            let dir = root.join("crates").join(crate_name);
+            files.push(dir.join("Cargo.toml"));
+            let mut stack = vec![dir.join("src")];
+            while let Some(d) = stack.pop() {
+                for entry in std::fs::read_dir(&d)
+                    .with_context(|| format!("reading {}", d.display()))?
+                    .flatten()
+                {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else {
+                        files.push(p);
+                    }
+                }
+            }
+        }
+        // Sorted, because a directory listing is in whatever order the filesystem feels like and a
+        // digest that depends on that is a digest that changes for no reason.
+        files.sort();
+        let mut h = sha2::Sha256::new();
+        for f in &files {
+            h.update(f.strip_prefix(root).unwrap_or(f).to_string_lossy().as_bytes());
+            h.update([0]);
+            h.update(std::fs::read(f).with_context(|| format!("reading {}", f.display()))?);
+            h.update([0]);
+        }
+        Ok(format!("{:x}", h.finalize())[..16].to_string())
+    }
+
+    /// Say so when the mirror image predates the source it is being used with.
+    ///
+    /// The failure this exists for is silent and expensive: an image built before a mirror change
+    /// serves the old routes, so a build fails on something the current source handles. What the
+    /// operator sees is a 400 from inside the island and a strategy that looks wrong. Found by
+    /// hitting it — the toolchain route returned `400 Bad Request` from an image built twenty
+    /// minutes earlier.
+    ///
+    /// A warning and never an error. The image may be deliberately older, the workspace may not be
+    /// present at all, and refusing to run would turn a diagnostic into an obstacle.
+    pub fn warn_if_stale(tag: &str) {
+        let Ok(root) = workspace_root() else { return };
+        let Ok(want) = source_digest(&root) else {
+            return;
+        };
+        let out = std::process::Command::new("podman")
+            .args(["image", "inspect", tag, "--format"])
+            .arg(format!("{{{{index .Labels \"{SOURCE_LABEL}\"}}}}"))
+            .output();
+        let Ok(out) = out else { return };
+        if !out.status.success() {
+            return;
+        }
+        let have = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if have == want {
+            return;
+        }
+        let detail = if have.is_empty() || have == "<no value>" {
+            "it carries no source label, so it was built before this check existed".to_string()
+        } else {
+            format!("it was built from {have}, and this binary is {want}")
+        };
+        tracing::warn!(
+            "{tag} may be stale: {detail}. Rebuild it with `trigon mirror-image`. A stale mirror \
+             serves the routes it was built with, and the build inside the island fails on \
+             something this source handles."
+        );
     }
 
     fn workspace_root() -> Result<PathBuf> {
@@ -2315,7 +2435,7 @@ mod sweep {
 
         let mut rows: Vec<(String, Outcome, f64)> = Vec::new();
         for (i, purl) in purls.iter().enumerate() {
-            if let Some((label, secs, cluster)) = already.get(*purl) {
+            if let Some((label, secs, cluster, calls)) = already.get(*purl) {
                 println!(
                     "  {:<28} {:<20} {:>6.0}s   [{}/{}] (done)",
                     short(purl),
@@ -2326,7 +2446,7 @@ mod sweep {
                 );
                 rows.push((
                     purl.to_string(),
-                    Outcome::Recorded(label.clone(), cluster.clone()),
+                    Outcome::Recorded(label.clone(), cluster.clone(), *calls),
                     *secs,
                 ));
                 continue;
@@ -2379,9 +2499,10 @@ mod sweep {
             use std::io::Write as _;
             writeln!(
                 sink,
-                "{purl}\t{}\t{secs:.1}\t{}",
+                "{purl}\t{}\t{secs:.1}\t{}\t{}",
                 outcome.label(),
-                outcome.cluster().unwrap_or_default()
+                outcome.cluster().unwrap_or_default(),
+                outcome.model_calls(),
             )?;
             sink.flush()?;
             rows.push((purl.to_string(), outcome, secs));
@@ -2392,7 +2513,7 @@ mod sweep {
     }
 
     /// Targets already recorded in a previous run of this sweep.
-    fn completed(path: &Path) -> BTreeMap<String, (String, f64, Option<String>)> {
+    fn completed(path: &Path) -> BTreeMap<String, (String, f64, Option<String>, u32)> {
         let mut out = BTreeMap::new();
         let Ok(text) = std::fs::read_to_string(path) else {
             return out;
@@ -2403,9 +2524,13 @@ mod sweep {
                 // The cluster column arrived after the first results files did, so its absence is
                 // read as "not recorded" rather than as a malformed row.
                 let cluster = f.next().filter(|c| !c.is_empty()).map(str::to_string);
+                // The model-call column arrived after the cluster column did, and is read the same
+                // way: absent means the sweep that wrote this row did not count, which resumes as
+                // zero rather than refusing the row.
+                let calls = f.next().and_then(|c| c.parse().ok()).unwrap_or(0);
                 out.insert(
                     purl.to_string(),
-                    (label.to_string(), secs.parse().unwrap_or(0.0), cluster),
+                    (label.to_string(), secs.parse().unwrap_or(0.0), cluster, calls),
                 );
             }
         }
@@ -2539,13 +2664,25 @@ mod sweep {
                 "pkg:npm/a@1\tbuild-failed:deps\t12.0\tcc/missing-header:python.h\n",
             );
             let got = completed(&p);
-            let (label, secs, cluster) = got.get("pkg:npm/a@1").unwrap();
+            let (label, secs, cluster, _) = got.get("pkg:npm/a@1").unwrap();
             assert_eq!(label, "build-failed:deps");
             assert_eq!(*secs, 12.0);
             assert_eq!(cluster.as_deref(), Some("cc/missing-header:python.h"));
 
-            let o = Outcome::Recorded(label.clone(), cluster.clone());
+            let o = Outcome::Recorded(label.clone(), cluster.clone(), 0);
             assert_eq!(o.cluster().as_deref(), Some("cc/missing-header:python.h"));
+        }
+
+        #[test]
+        fn a_resumed_row_carries_its_model_call_count_forward() {
+            // Same reason the cluster is carried: resuming a sweep is how a long one finishes, and
+            // a count that resets on resume reports fewer model calls the longer the sweep took.
+            let d = tmpdir("calls");
+            let p = write(&d, "pkg:npm/a@1\tnormalized\t12.0\t\t3\n");
+            let got = completed(&p);
+            let (_, _, _, calls) = got.get("pkg:npm/a@1").unwrap();
+            assert_eq!(*calls, 3);
+            assert_eq!(Outcome::Recorded("normalized".into(), None, *calls).model_calls(), 3);
         }
 
         #[test]
@@ -2555,7 +2692,7 @@ mod sweep {
             let d = tmpdir("legacy");
             let p = write(&d, "pkg:npm/a@1\tnormalized\t12.0\n");
             let got = completed(&p);
-            let (label, _, cluster) = got.get("pkg:npm/a@1").unwrap();
+            let (label, _, cluster, _) = got.get("pkg:npm/a@1").unwrap();
             assert_eq!(label, "normalized");
             assert!(cluster.is_none());
         }
@@ -2571,7 +2708,7 @@ mod sweep {
                 "normalized_with_caveats",
                 "divergent",
             ] {
-                let o = Outcome::Recorded(label.to_string(), None);
+                let o = Outcome::Recorded(label.to_string(), None, 0);
                 assert!(
                     o.as_match().is_some(),
                     "`{label}` did not parse back into an outcome"
@@ -2721,33 +2858,46 @@ fn score_run(results: &Path, labels: &Path) -> Result<()> {
 
     let text = std::fs::read_to_string(results)
         .with_context(|| format!("reading {}", results.display()))?;
+    // Whether the sweep recorded model calls at all. Rows written before the column existed carry
+    // no count, and reading their absence as zero would report "0 model calls" for a sweep that
+    // never looked — which is the same sentence a clean run prints. Absent is not zero.
+    let mut recorded = false;
     let observed: Vec<trigon_ai::Observation> = text
         .lines()
         .filter_map(|line| {
             let mut f = line.split('\t');
             let purl = f.next()?.to_string();
             let label = f.next()?;
-            // A model-call count is not in the results file yet, so it reads as zero. That is the
-            // honest value today — nothing calls a model — and it becomes wrong the moment one
-            // does, which is why the sweep has to carry it before this number means anything.
+            let calls = f
+                .nth(2)
+                .filter(|c| !c.is_empty())
+                .and_then(|c| c.parse::<u32>().ok());
+            recorded |= calls.is_some();
             Some(trigon_ai::Observation {
                 purl,
                 outcome: label
                     .parse::<trigon_core::Match>()
                     .ok()
                     .map(|m| m.to_string()),
-                model_calls: 0,
+                model_calls: calls.unwrap_or(0),
                 is_evidence: label.parse::<trigon_core::Match>().is_ok(),
             })
         })
         .collect();
 
     let card = trigon_ai::score(&corpus.labels, &observed);
-    println!(
-        "{} targets, {} model call(s)\n",
-        corpus.labels.len(),
-        card.model_calls
-    );
+    if recorded {
+        println!(
+            "{} targets, {} model call(s)\n",
+            corpus.labels.len(),
+            card.model_calls
+        );
+    } else {
+        println!(
+            "{} targets, model calls not recorded by this sweep\n",
+            corpus.labels.len()
+        );
+    }
     for (capability, rate) in &card.by_capability {
         match rate.fraction() {
             Some(f) => println!(

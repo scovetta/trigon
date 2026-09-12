@@ -152,6 +152,65 @@ maintaining one whose shape is a guess. M2's store is the content-addressed layo
 [`09`](09-attestations.md) §7 already specifies — blobs, run records, attestations — over
 `object_store`, so cloud backends are a cargo feature rather than code. The tables arrive with M4.
 
+### 3.5 The capability taxonomy was missing the label the Builder is most for
+
+[`07`](07-ai.md) §6.2 lists `trivial-deterministic`, `needs-source-discovery`, the four
+`needs-repair-*` labels, and `known-unreproducible`. Labelling the two smoke corpora turned up a
+target none of them fits: `escalade 3.2.0` publishes `dist/index.js` and `dist/index.mjs`, which
+`npm pack` alone never produces. Nothing is being *repaired* — the first attempt is not wrong, it is
+absent. A recipe has to be inferred from the repository or its CI.
+
+Filing it under the nearest `needs-repair-*` label would have hidden the most common thing the
+Builder actually does, and the whole point of labelling by capability is that a model firing on the
+wrong class is visible. The taxonomy gains `needs-build-inference`, between source discovery and
+repair.
+
+### 3.6 `mirror-only` egress has to carry the toolchain too
+
+[`08`](08-execution.md) describes the tiers as a statement about *dependency* traffic, and the tools
+were written to match: `npm/install-node` fetched `https://nodejs.org/dist/...` directly, with a
+comment noting that this fails at `mirror-only`. It does, and it fails late. Rootless `podman build`
+cannot join a named network, so at that tier the deps phase is deferred into the container — inside
+the island, where the mirror is the only reachable host. The image builds, the source checks out,
+and then the first phase that needs the network dies at `Network is unreachable` in a way that reads
+as a broken sandbox rather than as a strategy naming a host it cannot reach.
+
+The tier is not wrong; the seam was missing. The mirror now serves `/-toolchain/<host>/<path>`
+against a compiled-in allowlist (`nodejs.org`, `unofficial-builds.nodejs.org`), and templates write
+the URL through a `toolchain_url()` function that yields the upstream URL when no mirror is
+configured. No time filter: a toolchain URL names its exact version, so the bytes are a function of
+the URL and there is nothing for a date to remove. The guard still runs on the body, because "the
+artifact arrived dressed as a toolchain" is exactly the route it exists to close.
+
+The allowlist is the load-bearing part and is deliberately compiled in. At `mirror-only` the mirror
+is the build's only route out, so any host reachable through it is a host a strategy can be told to
+download an executable from; a wildcard here would quietly restore `open` egress under a different
+path. Matching is exact rather than by suffix — the obvious `ends_with` rule accepts
+`evil-nodejs.org`.
+
+Two more came out of running it to the end, both from the same root cause — a phase that used to run
+as an image layer now runs inside the container:
+
+- **`tar` cannot preserve ownership there.** The official Node tarballs record uid/gid 500. As an
+  image layer the user namespace maps a wide range and tar is happy; inside the container the range
+  is narrow, so tar fails on every entry and exits non-zero. The phase after a 40-second download
+  dies with 700 lines of `Cannot change ownership`, and the fix is `--no-same-owner` — file
+  ownership inside a toolchain is not part of what we reproduce.
+- **The mirror image goes stale silently.** It is compiled from this workspace, so an image built
+  before a mirror change serves the old routes. What the operator sees is a `400` from inside the
+  island and a strategy that looks wrong; what it is, is an old binary. `rebuild` now compares a
+  digest of `trigon-mirror`'s source against a label on the image and warns before the build starts.
+  Scoped to that one crate deliberately: a digest over the workspace would fire on every commit, and
+  a warning that always fires is not a warning.
+
+Beside them, a message that was actively misleading: a run at `mirror-only` reported *"this runner
+enforces no mirror"* because the local runner is never attestable at full trust. Two different
+reasons — no boundary, versus a boundary with no network transcript — and only the second is true
+there.
+
+With all of it in place, `left-pad 1.3.0` reproduces `normalized` at `mirror-only` on a stock Debian
+image.
+
 ---
 
 ## 4. A stabilizer the reference does not have

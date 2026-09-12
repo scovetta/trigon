@@ -284,6 +284,26 @@ fn environment(cx: &Context) -> Environment<'static> {
         },
     );
 
+    // A toolchain download, routed through the mirror when there is one.
+    //
+    // Unlike `timewarp_url` this has a correct answer when no mirror is configured — the upstream
+    // URL — because a toolchain URL names an exact version and there is no moment to pin it to.
+    // What it fixes is the tier where there *is* a mirror: the deps phase runs inside the network
+    // island, the mirror is the only host in there, and a template that writes `https://nodejs.org`
+    // produces a build that dies at `Network is unreachable` after the image is built. The mirror
+    // refuses any host outside its own allowlist, so this is a rewrite and not a hole.
+    let base = cx.env.timewarp_base.clone();
+    env.add_function(
+        "toolchain_url",
+        move |host: String, path: String| -> String {
+            let path = path.trim_start_matches('/');
+            match &base {
+                Some(base) => format!("http://{base}/-toolchain/{host}/{path}"),
+                None => format!("https://{host}/{path}"),
+            }
+        },
+    );
+
     // The mirror's `host:port`, with no scheme and no credentials.
     //
     // pip **silently ignores** a plain-HTTP index that is not also a trusted host: it prints a

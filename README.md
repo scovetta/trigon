@@ -197,8 +197,19 @@ network whose only route out is the time-filtered mirror, and needs that mirror'
 
 ```
 $ trigon mirror-image          # compiles trigon in a container; several minutes
-$ trigon rebuild … --egress mirror-only --timewarp auto
+$ trigon rebuild pkg:npm/left-pad@1.3.0 --image <as above> --work ./work \
+      --egress mirror-only --timewarp auto
+…
+✔ normalized
 ```
+
+The image is built from this workspace's source, so it goes stale when the mirror changes. `rebuild`
+compares the two and says so before the build starts rather than after it fails inside the island.
+
+At that tier the deps phase runs *inside* the island, so everything it fetches comes through the
+mirror — including the toolchain. Node is downloaded over the mirror's `/-toolchain/` route, which
+proxies a short compiled-in allowlist of distribution hosts and refuses everything else. A base
+image that already carries the right toolchain skips the hop entirely.
 
 The artifact guard runs either way. If the package's own published bytes — or any of its member
 files — arrive over the network, the run is `Void`: not a pass and not a failure, because a build
