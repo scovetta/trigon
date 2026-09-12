@@ -72,6 +72,7 @@ pub fn profile(id: &str) -> Option<StabilizerSet> {
             vec![
                 Arc::new(WheelDirectUrl) as Arc<dyn Stabilizer>,
                 Arc::new(PycHeader) as Arc<dyn Stabilizer>,
+                Arc::new(WheelMetadataEol) as Arc<dyn Stabilizer>,
                 // Finalize: RECORD is a manifest of membership, and the passes above change it.
                 Arc::new(WheelRecord) as Arc<dyn Stabilizer>,
             ],

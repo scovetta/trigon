@@ -11,6 +11,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+mod builder;
+mod provider;
 mod repair;
 
+pub use builder::{Candidate, Task, candidate_schema, parse_candidate, prompt, propose};
+pub use provider::{LlmError, ModelCaps, Part, Prompt, Provider, Replay, Request, Response, Usage};
 pub use repair::{Attempt, Budget, Decision, NoPrior, Prior, RepairLoop, StopReason, Trigger};

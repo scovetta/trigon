@@ -152,3 +152,47 @@ This is the cargo-vcs-surgical argument again. A pass that reports Metadata risk
 fields it says it changes. Reformatting the surrounding document inflates bytes_changed into
 meaninglessness and would mask a genuine difference in a neighbouring field.
 """
+
+[[deviation]]
+id = "wheel-metadata-eol"
+signature = [
+  "body@*.dist-info/METADATA",
+  "entry:size@*.dist-info/METADATA",
+  "entry:zip.crc32@*.dist-info/METADATA",
+  "body@*.dist-info/WHEEL",
+  "entry:size@*.dist-info/WHEEL",
+  "entry:zip.crc32@*.dist-info/WHEEL",
+  "body@*.dist-info/entry_points.txt",
+  "entry:size@*.dist-info/entry_points.txt",
+  "entry:zip.crc32@*.dist-info/entry_points.txt",
+  "body@*.dist-info/top_level.txt",
+  "entry:size@*.dist-info/top_level.txt",
+  "entry:zip.crc32@*.dist-info/top_level.txt",
+  "body@*.dist-info/RECORD",
+  "entry:size@*.dist-info/RECORD",
+  "entry:zip.crc32@*.dist-info/RECORD",
+]
+applies_to = ["wheel"]
+test = "crates/trigon-stabilize/tests/passes.rs::two_wheels_differing_only_in_metadata_line_endings_agree_after_stabilizing"
+summary = "We normalize CRLF to LF in the metadata a wheel builder generates; the reference does not."
+detail = """
+A publisher on Windows gets CRLF in METADATA because the tool that wrote it opened the file in text
+mode, and the same tool on Linux writes LF. The content is identical — these are RFC 822-style
+headers, where a line terminator carries no meaning — but the bytes are not, and RECORD differs too
+because it digests METADATA. We cannot reproduce Windows text-mode I/O from a Linux builder, so
+normalizing is the only route to a match, and without it every package published from Windows is
+permanently divergent for a reason that says nothing about its source.
+
+The corpus makes the case and also bounds it. Two of 58 M0 artifacts are affected, one of which is
+named `feagi_bv_windows`; one of 17 in the M1 PyPI corpus. Adding the pass flipped `sniffio 1.3.1`
+from divergent to reproducing and changed no other verdict in either corpus.
+
+Scoped to the four files a wheel builder *generates*, never to package source. A `.py` file with
+CRLF is the package's own content and its line endings are the author's choice; a stabilizer that
+rewrote those would be editing the thing under test. `dist-info/` is not a licence to rewrite
+everything inside it either — a wheel may ship hand-written files there — so the list is explicit
+rather than a glob. Three tests pin exactly that boundary.
+
+RECORD appears in the signature because it is a manifest of digests over the other four; normalizing
+them necessarily moves it. It is regenerated at Finalize over the normalized bytes.
+"""

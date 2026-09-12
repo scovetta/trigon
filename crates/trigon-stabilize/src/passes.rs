@@ -526,6 +526,75 @@ entry_pass!(
     }
 );
 
+entry_pass!(
+    /// Normalize CRLF to LF in a wheel's **generated** metadata files.
+    ///
+    /// A publisher on Windows gets `\r\n` in `METADATA` because the tool that wrote it opened the
+    /// file in text mode; the same tool on Linux writes `\n`. The content is identical — these are
+    /// RFC 822-style headers, and a line terminator carries no meaning in them — but the bytes are
+    /// not, and `RECORD` then differs too because it digests `METADATA`. `sniffio 1.3.1` is the
+    /// case that prompted this: with the build backend pinned and the index time-filtered, its
+    /// rebuild matched in every member except these, and no amount of pinning reaches it. We cannot
+    /// reproduce Windows text-mode I/O, so normalizing is the only route to a match.
+    ///
+    /// **Scoped to the four files a wheel builder generates**, never to package source. A `.py`
+    /// file with CRLF is the package's content and its line endings are the author's choice; a
+    /// stabilizer that rewrote those would be editing the thing under test. That is the whole
+    /// distinction this pass rests on, and it is why the list is explicit rather than a glob over
+    /// `dist-info/`: a wheel may ship arbitrary files there, including licences the author wrote.
+    ///
+    /// `Content` risk, because it rewrites bytes inside a file. Wheels are already capped below
+    /// `Normalized` by `wheel-record`, so this costs no outcome that was otherwise reachable, and
+    /// it runs at `Default` so `RECORD` is regenerated over the normalized bytes at `Finalize`.
+    ///
+    /// Measured impact when added: one wheel in the seventeen-package M1 PyPI corpus carries CRLF
+    /// metadata at all. It is a rare case that recurs rather than a common one.
+    WheelMetadataEol,
+    "wheel-metadata-eol",
+    RiskTier::Content,
+    is_zip,
+    |e| {
+        const GENERATED: [&[u8]; 4] = [
+            b".dist-info/METADATA",
+            b".dist-info/WHEEL",
+            b".dist-info/entry_points.txt",
+            b".dist-info/top_level.txt",
+        ];
+        if !GENERATED.iter().any(|suffix| e.path.ends_with(suffix)) {
+            return Touched::NONE;
+        }
+        let Ok(body) = e.body_bytes() else {
+            return Touched::NONE;
+        };
+        // Count first so an untouched file stays on its original `Body` and reports nothing: a pass
+        // that promotes every wheel's METADATA to `Inline` would defeat the copy-on-write the
+        // archive model exists for.
+        let carriage_returns = body.windows(2).filter(|w| w == b"\r\n").count();
+        if carriage_returns == 0 {
+            return Touched::NONE;
+        }
+        match e.body_mut() {
+            Ok(b) => {
+                // Only `\r` immediately before `\n`. A lone carriage return is not a line ending
+                // in any convention still in use, and dropping one would be editing content.
+                let mut out = Vec::with_capacity(b.len());
+                let mut i = 0;
+                while i < b.len() {
+                    if b[i] == b'\r' && b.get(i + 1) == Some(&b'\n') {
+                        i += 1;
+                        continue;
+                    }
+                    out.push(b[i]);
+                    i += 1;
+                }
+                *b = out;
+                Touched::entry_bytes(carriage_returns as u64)
+            }
+            Err(_) => Touched::NONE,
+        }
+    }
+);
+
 /// Regenerate `*.dist-info/RECORD` from the members that are actually present.
 ///
 /// This is why `Stage::Finalize` exists. `RECORD` is a manifest *of* membership, and earlier passes

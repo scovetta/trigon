@@ -94,6 +94,9 @@ enum Family {
 fn expand(dep: &str, family: Family) -> Vec<String> {
     match (dep, family) {
         ("python3", Family::Debian) => vec!["python3".into(), "python3-venv".into()],
+        // Debian names this after the soname, Alpine after the library. A strategy should not have
+        // to know which distribution it will land on.
+        ("libatomic", Family::Debian) => vec!["libatomic1".into()],
         _ => vec![dep.to_string()],
     }
 }

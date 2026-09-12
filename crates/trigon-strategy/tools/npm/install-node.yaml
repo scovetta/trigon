@@ -39,4 +39,9 @@ steps:
         wget -O - https://nodejs.org/dist/v{{ with.node_version }}/node-v{{ with.node_version }}-linux-x64.tar.gz | tar xzf - --strip-components=1 -C /usr/local/
       {%- endif %}
       fi
-    needs: [wget]
+    # `libatomic` because Node 24 and later link against it, and a slim Debian image does not carry
+    # it. The failure is `node: error while loading shared libraries: libatomic.so.1` before Node
+    # prints anything of its own, so it reads as a broken download rather than a missing package.
+    # Declared for every version: it is tens of kilobytes, and a conditional on the Node version
+    # would be a second place to get the boundary wrong.
+    needs: [wget, libatomic]

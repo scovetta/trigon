@@ -258,3 +258,111 @@ fn two_wheels_differing_in_pyc_timestamps_stabilize_identically() {
     // And stabilizing twice changes nothing, RECORD regeneration included.
     assert_eq!(stabilize(a.clone(), Format::Zip, "wheel").0, a);
 }
+
+// ---------------------------------------------------------------------------
+// wheel-metadata-eol
+
+fn wheel_with(members: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut w = zip_crate::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts: zip_crate::write::FileOptions<'_, ()> = zip_crate::write::FileOptions::default()
+        .compression_method(zip_crate::CompressionMethod::Stored);
+    for (name, body) in members {
+        w.start_file(*name, opts).unwrap();
+        w.write_all(body).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+fn member(bytes: Vec<u8>, path: &str) -> Vec<u8> {
+    let mut notes = Vec::new();
+    let parsed = trigon_archive::parse(bytes, Format::Zip, &Limits::default(), &mut notes).unwrap();
+    let e = parsed
+        .archive
+        .entries
+        .iter()
+        .find(|e| e.path.to_string() == path)
+        .unwrap_or_else(|| panic!("no member {path}"));
+    e.body_bytes().unwrap().into_owned()
+}
+
+#[test]
+fn generated_wheel_metadata_loses_its_carriage_returns() {
+    // A publisher on Windows writes CRLF into METADATA because the tool opened it in text mode.
+    // The content is identical and the bytes are not, and no amount of pinning reaches it: we
+    // cannot reproduce Windows text-mode I/O.
+    let bytes = wheel_with(&[(
+        "demo-1.0.dist-info/METADATA",
+        b"Metadata-Version: 2.1\r\nName: demo\r\n",
+    )]);
+    let (out, _) = stabilize(bytes, Format::Zip, "wheel");
+    assert_eq!(
+        member(out, "demo-1.0.dist-info/METADATA"),
+        b"Metadata-Version: 2.1\nName: demo\n"
+    );
+}
+
+#[test]
+fn package_source_keeps_its_line_endings() {
+    // The distinction the pass rests on. A `.py` file's line endings are the author's choice and
+    // part of what is under test; rewriting them would be editing the artifact rather than
+    // normalizing a build-environment artefact.
+    let bytes = wheel_with(&[
+        ("demo/__init__.py", b"x = 1\r\ny = 2\r\n"),
+        ("demo-1.0.dist-info/METADATA", b"Name: demo\r\n"),
+    ]);
+    let (out, _) = stabilize(bytes, Format::Zip, "wheel");
+    assert_eq!(
+        member(out.clone(), "demo/__init__.py"),
+        b"x = 1\r\ny = 2\r\n",
+        "source content must survive untouched"
+    );
+    assert_eq!(member(out, "demo-1.0.dist-info/METADATA"), b"Name: demo\n");
+}
+
+#[test]
+fn a_licence_in_dist_info_is_not_generated_metadata() {
+    // `dist-info/` is not a licence to rewrite everything inside it: a wheel may ship arbitrary
+    // files there, including ones the author wrote by hand.
+    let bytes = wheel_with(&[(
+        "demo-1.0.dist-info/LICENSE",
+        b"Copyright\r\nAll rights reserved\r\n",
+    )]);
+    let (out, _) = stabilize(bytes, Format::Zip, "wheel");
+    assert_eq!(
+        member(out, "demo-1.0.dist-info/LICENSE"),
+        b"Copyright\r\nAll rights reserved\r\n"
+    );
+}
+
+#[test]
+fn a_lone_carriage_return_is_content_not_a_line_ending() {
+    let bytes = wheel_with(&[(
+        "demo-1.0.dist-info/METADATA",
+        b"Summary: a\rb\r\nName: d\r\n",
+    )]);
+    let (out, _) = stabilize(bytes, Format::Zip, "wheel");
+    assert_eq!(
+        member(out, "demo-1.0.dist-info/METADATA"),
+        b"Summary: a\rb\nName: d\n",
+        "only a CR immediately before LF is a line ending"
+    );
+}
+
+#[test]
+fn two_wheels_differing_only_in_metadata_line_endings_agree_after_stabilizing() {
+    // The property that makes it worth the risk tier: this is what flips `sniffio` from divergent.
+    let crlf = wheel_with(&[
+        ("demo/__init__.py", b"x = 1\n"),
+        ("demo-1.0.dist-info/METADATA", b"Metadata-Version: 2.1\r\n"),
+    ]);
+    let lf = wheel_with(&[
+        ("demo/__init__.py", b"x = 1\n"),
+        ("demo-1.0.dist-info/METADATA", b"Metadata-Version: 2.1\n"),
+    ]);
+    assert_ne!(crlf, lf);
+    assert_eq!(
+        stabilize(crlf, Format::Zip, "wheel").0,
+        stabilize(lf, Format::Zip, "wheel").0
+    );
+}
