@@ -45,6 +45,15 @@ pub enum StoreError {
     #[error("no run `{0}` in this store")]
     NoSuchRun(String),
 
+    #[error("no stabilizer set `{0}` in this store")]
+    NoSuchSet(String),
+
+    #[error(
+        "the manifest for stabilizer set {digest} does not recompute to the digest it claims. It \
+         describes some other set, or it has been edited."
+    )]
+    InconsistentSet { digest: String },
+
     #[error(
         "run `{0}` has no signed attestation, and pruning its artifacts would destroy the evidence \
          a signature is supposed to be about. Attest first, or delete the run."
@@ -68,7 +77,11 @@ impl Classify for StoreError {
             // should not have, or the store lost data. Either way somebody should look now.
             StoreError::Corrupt { .. } => Fault::Bug,
             StoreError::NotAttested(_) => Fault::Policy,
-            StoreError::NoSuchRun(_) | StoreError::Json(_) => Fault::Bug,
+            // A manifest that does not describe its own digest is the same class of problem as a
+            // blob that does not hash to its own address: something wrote a document that cannot be
+            // true.
+            StoreError::InconsistentSet { .. } => Fault::Bug,
+            StoreError::NoSuchRun(_) | StoreError::NoSuchSet(_) | StoreError::Json(_) => Fault::Bug,
             StoreError::Object(_) | StoreError::Io(_) => Fault::Infra,
         }
     }
@@ -199,6 +212,60 @@ impl Store {
             .put(&ObjPath::from(path.clone()), PutPayload::from(body))
             .await?;
         Ok(path)
+    }
+
+    /// Publish a stabilizer set's manifest, addressed by the set digest.
+    ///
+    /// `trigon verify` refuses to compare across differing set digests and re-derives instead,
+    /// which is right and leaves a verifier holding an older attestation with a digest that matches
+    /// nothing they have and no way to learn what it was. Publishing the manifest beside the
+    /// attestation is the smallest fix: it does not let them *run* the old set — that wants the
+    /// component of `docs/09-attestations.md` §7.1 — but it says exactly what the claim was made
+    /// under, and it recomputes its own digest so it cannot describe a different set than it names.
+    ///
+    /// The path is the digest, so publishing the same set twice is a no-op and two writers cannot
+    /// disagree about what a digest means.
+    pub async fn put_stabilizer_set(
+        &self,
+        manifest: &trigon_stabilize::SetManifest,
+    ) -> Result<String, StoreError> {
+        if !manifest.self_consistent() {
+            return Err(StoreError::InconsistentSet {
+                digest: manifest.digest.clone(),
+            });
+        }
+        let path = format!("stabilizers/sha256/{}.json", manifest.digest);
+        let body = serde_json::to_vec_pretty(manifest)?;
+        self.inner
+            .put(&ObjPath::from(path.clone()), PutPayload::from(body))
+            .await?;
+        Ok(path)
+    }
+
+    /// Read a published set manifest back, **checking it against the digest asked for**.
+    ///
+    /// Two checks, not one: the document must recompute its own digest, and that digest must be the
+    /// one requested. Either alone is insufficient — a self-consistent manifest for some other set
+    /// is a correct document and the wrong answer.
+    pub async fn get_stabilizer_set(
+        &self,
+        digest: &str,
+    ) -> Result<trigon_stabilize::SetManifest, StoreError> {
+        let path = format!("stabilizers/sha256/{digest}.json");
+        let bytes = match self.inner.get(&ObjPath::from(path)).await {
+            Ok(r) => r.bytes().await?,
+            Err(object_store::Error::NotFound { .. }) => {
+                return Err(StoreError::NoSuchSet(digest.to_string()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let m: trigon_stabilize::SetManifest = serde_json::from_slice(&bytes)?;
+        if !m.self_consistent() || m.digest != digest {
+            return Err(StoreError::InconsistentSet {
+                digest: digest.to_string(),
+            });
+        }
+        Ok(m)
     }
 
     pub async fn get_attestation(&self, path: &str) -> Result<trigon_attest::Envelope, StoreError> {

@@ -335,3 +335,52 @@ async fn no_mirror_is_a_third_state_rather_than_an_unproven_pin() {
     assert!(r.environment.pin.is_none());
     assert!(r.environment.registry_moment.is_none());
 }
+
+#[tokio::test]
+async fn a_published_set_manifest_is_checked_against_the_digest_asked_for() {
+    // Two checks, not one. A self-consistent manifest for some *other* set is a perfectly correct
+    // document and the wrong answer, so recomputing it is not enough on its own.
+    let s = Store::in_memory();
+    let wheel = trigon_stabilize::profile("wheel").unwrap().manifest();
+    let tar = trigon_stabilize::profile("tar-gzip").unwrap().manifest();
+    assert_ne!(wheel.digest, tar.digest);
+
+    let path = s.put_stabilizer_set(&wheel).await.unwrap();
+    assert_eq!(path, format!("stabilizers/sha256/{}.json", wheel.digest));
+    assert_eq!(s.get_stabilizer_set(&wheel.digest).await.unwrap(), wheel);
+
+    // Asking for a set that was never published says so rather than failing obscurely — this is
+    // the case a verifier with an old attestation actually hits.
+    let e = s.get_stabilizer_set(&tar.digest).await.unwrap_err();
+    assert!(matches!(e, StoreError::NoSuchSet(_)), "{e}");
+}
+
+#[tokio::test]
+async fn a_manifest_that_does_not_describe_its_own_digest_is_refused() {
+    // Both on the way in and on the way out. A document asserting a digest it cannot reproduce is
+    // the same class of problem as a blob that does not hash to its own address.
+    use object_store::{ObjectStoreExt as _, PutPayload, path::Path};
+    let inner = std::sync::Arc::new(object_store::memory::InMemory::new());
+    let s = Store::new(inner.clone());
+    let mut m = trigon_stabilize::profile("wheel").unwrap().manifest();
+
+    m.members[0].risk = "Structural".into();
+    let e = s.put_stabilizer_set(&m).await.unwrap_err();
+    assert!(matches!(e, StoreError::InconsistentSet { .. }), "{e}");
+
+    // And the same edit made directly in the store is caught on read, because a writer we do not
+    // control is exactly who this protects against.
+    let good = trigon_stabilize::profile("wheel").unwrap().manifest();
+    s.put_stabilizer_set(&good).await.unwrap();
+    let mut tampered = good.clone();
+    tampered.members[0].risk = "Structural".into();
+    inner
+        .put(
+            &Path::from(format!("stabilizers/sha256/{}.json", good.digest)),
+            PutPayload::from(serde_json::to_vec(&tampered).unwrap()),
+        )
+        .await
+        .unwrap();
+    let e = s.get_stabilizer_set(&good.digest).await.unwrap_err();
+    assert!(matches!(e, StoreError::InconsistentSet { .. }), "{e}");
+}

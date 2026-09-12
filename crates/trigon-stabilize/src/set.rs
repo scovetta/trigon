@@ -113,6 +113,79 @@ impl StabilizerSet {
     }
 }
 
+/// One member of a set, as the manifest records it.
+///
+/// Exactly the four fields the digest is computed over, in the same spelling. That is the point: a
+/// reader can recompute the digest from the manifest and confirm it names the set it claims to. A
+/// manifest carrying prettier or richer fields than the digest covers would be a document nobody
+/// could check.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SetMember {
+    pub id: String,
+    pub stage: String,
+    pub risk: String,
+    /// `builtin`, `human:<reviewer>` or `model:<id>:<run>`. A string rather than a structure because
+    /// it is a digest input, and a structure invites a second serialization to disagree with it.
+    pub provenance: String,
+}
+
+/// What a stabilizer set is, in a form that outlives the binary that produced it.
+///
+/// `trigon verify` refuses to compare across differing set digests and re-derives instead, which is
+/// correct and leaves a verifier holding an old attestation with nothing to go on: they get a
+/// digest that does not match theirs and no way to learn what it was. This is the smallest thing
+/// that fixes it. It does not let them *run* the old set — that wants the WASM component of
+/// `docs/09-attestations.md` §7.1 — but it tells them precisely what the claim was made under, and
+/// it is self-verifying, so it cannot quietly describe a different set than the one it names.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SetManifest {
+    pub id: String,
+    /// The set digest, as hex. Recomputable from `members` alone.
+    pub digest: String,
+    pub members: Vec<SetMember>,
+}
+
+impl SetManifest {
+    /// Recompute the digest from the members and check it against the one recorded.
+    ///
+    /// The reason to publish a manifest rather than a list: a reader can tell a faithful record of
+    /// a set from a document that merely claims a digest.
+    pub fn self_consistent(&self) -> bool {
+        let mut rows: Vec<String> = self
+            .members
+            .iter()
+            .map(|m| format!("{}|{}|{}|{}", m.id, m.stage, m.risk, m.provenance))
+            .collect();
+        rows.sort();
+        let mut h = Sha256::new();
+        for r in rows {
+            h.update(r.as_bytes());
+            h.update(b"\n");
+        }
+        Digest::from_bytes(h.finalize().into()).to_hex() == self.digest
+    }
+}
+
+impl StabilizerSet {
+    /// The set as a publishable document.
+    pub fn manifest(&self) -> SetManifest {
+        SetManifest {
+            id: self.id.as_str().to_string(),
+            digest: self.digest().to_hex(),
+            members: self
+                .members
+                .iter()
+                .map(|m| SetMember {
+                    id: m.id().to_string(),
+                    stage: format!("{:?}", m.stage()),
+                    risk: format!("{:?}", m.risk()),
+                    provenance: provenance_tag(&m.provenance()),
+                })
+                .collect(),
+        }
+    }
+}
+
 fn provenance_tag(p: &Provenance) -> String {
     match p {
         Provenance::Builtin => "builtin".into(),

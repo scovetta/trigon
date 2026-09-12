@@ -308,6 +308,14 @@ fn check_policy_with(
         }
     }
 
+    // Compiles before it resolves. A tree is a claim about what *would* be linked; this is the
+    // claim actually on the front of the project, and it was false for several commits while the
+    // resolve below stayed green.
+    match verifier_builds() {
+        Ok(()) => lines.push("  trigon (verifier)  compiles".to_string()),
+        Err(e) => violations.push(e.to_string()),
+    }
+
     match verifier_tree() {
         Ok(found) if !found.is_empty() => violations.push(format!(
             "the verifier build (`-p trigon --no-default-features`) links {}. That build is the \
@@ -381,6 +389,31 @@ fn hashmap_uses(crate_name: &str) -> Result<Vec<String>> {
     }
     out.sort();
     Ok(out)
+}
+
+/// Whether the verifier build compiles at all.
+///
+/// `cargo tree` answers a question about the dependency *graph*, which is not the same question as
+/// whether the binary builds — and the difference is not academic. The verifier was broken for
+/// several commits by a match arm added outside its `#[cfg]`, while this check stayed green the
+/// whole time, because a resolve does not compile anything. The claim on the front of this project
+/// is that a sceptic can build a small binary and re-derive our verdict; asserting its dependency
+/// tree while it does not build asserts nothing.
+///
+/// `cargo check` rather than `build`: it catches the same class at a fraction of the time.
+fn verifier_builds() -> Result<()> {
+    let out = std::process::Command::new(env!("CARGO"))
+        .current_dir(workspace_root())
+        .args(["check", "-q", "-p", "trigon", "--no-default-features"])
+        .output()
+        .context("running cargo check on the verifier build")?;
+    if !out.status.success() {
+        bail!(
+            "the verifier build (`-p trigon --no-default-features`) does not compile:\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Forbidden crates present in the verifier build.

@@ -126,6 +126,14 @@ enum Cmd {
         /// The rebuilt artifact. Required by `--rerun-comparison`.
         #[arg(long, requires = "rerun_comparison")]
         rebuild: Option<PathBuf>,
+        /// A published stabilizer-set manifest, or a store holding one.
+        ///
+        /// Read when the attestation names a set this binary does not have. It does not make the
+        /// claim re-derivable — that wants the component of `docs/09` §7.1 — but it turns "these
+        /// digests disagree" into a description of what the claim was made under, which is the
+        /// difference between a dead end and a thing somebody can act on.
+        #[arg(long)]
+        stabilizers: Option<PathBuf>,
         /// Check the signature against this ed25519 public key, given as hex.
         ///
         /// Omitted, the signature is reported but not checked — and a bundle nobody pinned a key
@@ -533,6 +541,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             rerun_comparison,
             upstream,
             rebuild,
+            stabilizers,
             public_key,
             output,
         } => verify_attestation(
@@ -540,6 +549,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             rerun_comparison,
             upstream.as_deref(),
             rebuild.as_deref(),
+            stabilizers.as_deref(),
             public_key.as_deref(),
             output,
         ),
@@ -633,7 +643,9 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             key,
             prune,
         }),
+        #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
+        #[cfg(feature = "build")]
         Cmd::MirrorImage { tag } => mirror::build_image(&tag),
         #[cfg(feature = "build")]
         Cmd::Mirror { port, guard } => mirror::serve(port, guard.as_deref()),
@@ -2673,11 +2685,66 @@ fn write_bundle(
     Ok(())
 }
 
+/// Say what stabilizer set a statement was made under, from a published manifest.
+///
+/// Printed on a set mismatch, which is otherwise a dead end: the verifier is told two digests
+/// disagree and has no way to learn what the first one was. Not gated behind `build` — the
+/// minimal verifier is exactly who hits this, and it needs no runtime to read a JSON file.
+fn describe_set(st: &trigon_attest::Statement, from: Option<&Path>) {
+    let want = st.predicate["stabilizerSet"]["digest"]["sha256"]
+        .as_str()
+        .unwrap_or_default();
+    let Some(path) = from else {
+        eprintln!(
+            "\nThe set this claim was made under is `{}@{}`. Pass --stabilizers with its published \
+             manifest (stabilizers/sha256/{want}.json) to see what it contained.",
+            st.predicate["stabilizerSet"]["id"].as_str().unwrap_or("?"),
+            &want[..12.min(want.len())],
+        );
+        return;
+    };
+    let text = match std::fs::read(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("\ncould not read {}: {e}", path.display());
+            return;
+        }
+    };
+    let m: trigon_stabilize::SetManifest = match serde_json::from_slice(&text) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("\n{} is not a stabilizer set manifest: {e}", path.display());
+            return;
+        }
+    };
+    // Both checks, for the same reason the store does them: a self-consistent manifest for some
+    // other set is a correct document and the wrong answer.
+    if !m.self_consistent() {
+        eprintln!("\nthat manifest does not recompute the digest it claims; ignoring it");
+        return;
+    }
+    if m.digest != want {
+        eprintln!(
+            "\nthat manifest describes set {} and the claim was made under {want}",
+            m.digest
+        );
+        return;
+    }
+    eprintln!("\nthe claim was made under `{}`, which contained:", m.id);
+    for member in &m.members {
+        eprintln!(
+            "  {:<26} {:<11} {}",
+            member.id, member.risk, member.provenance
+        );
+    }
+}
+
 fn verify_attestation(
     bundle: &Path,
     rerun: bool,
     upstream: Option<&Path>,
     rebuild: Option<&Path>,
+    stabilizers: Option<&Path>,
     public_key: Option<&str>,
     output: OutputFormat,
 ) -> Result<()> {
@@ -2720,7 +2787,18 @@ fn verify_attestation(
         };
         let ub = std::fs::read(u).with_context(|| format!("reading {}", u.display()))?;
         let rb = std::fs::read(r).with_context(|| format!("reading {}", r.display()))?;
-        Some(trigon_attest::rederive(&st, ub, rb)?)
+        match trigon_attest::rederive(&st, ub, rb) {
+            Ok(d) => Some(d),
+            // The one error worth turning into a description rather than a refusal. A verifier who
+            // cannot reach the statement's set is not looking at a broken attestation; they are
+            // looking at one made under a set their binary does not carry, and saying which
+            // stabilizers those were is most of what they need.
+            Err(e @ trigon_attest::AttestError::SetMismatch { .. }) => {
+                describe_set(&st, stabilizers);
+                return Err(e.into());
+            }
+            Err(e) => return Err(e.into()),
+        }
     } else {
         None
     };
@@ -2842,6 +2920,7 @@ mod attestor {
             };
 
             let mut written = Vec::new();
+            let mut published_set: Option<String> = None;
 
             // 1. The equivalence (or divergence) claim, re-derived from the bytes.
             if let Some(comparison_digest) = record.comparison {
@@ -2877,6 +2956,18 @@ mod attestor {
                         record.outcome.as_deref().unwrap_or("nothing"),
                         comparison.outcome
                     );
+                }
+
+                // Publish the set this claim was made under, addressed by its own digest. A
+                // verifier whose binary carries a different set gets `SetMismatch` and, without
+                // this, nothing else — a digest that matches nothing they have. It does not let
+                // them run the old set, but it says exactly what the claim was made under.
+                let set_id = comparison.upstream.set.0.as_str();
+                if let Some(set) = trigon_stabilize::profile(set_id) {
+                    match store.put_stabilizer_set(&set.manifest()).await {
+                        Ok(p) => published_set = Some(p),
+                        Err(e) => tracing::warn!("could not publish the stabilizer set: {e}"),
+                    }
                 }
 
                 let statement = Statement::equivalence(&record.upstream.name, &comparison);
@@ -2930,6 +3021,9 @@ mod attestor {
 
             println!();
             for p in &written {
+                println!("  {p}");
+            }
+            if let Some(p) = &published_set {
                 println!("  {p}");
             }
             if !signer.key_id().is_empty() {

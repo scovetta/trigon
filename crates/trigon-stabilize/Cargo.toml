@@ -21,3 +21,6 @@ proptest.workspace = true
 tar = "0.4"
 flate2 = "1"
 zip_crate = { package = "zip", version = "2", default-features = false, features = ["deflate"] }
+# The set manifest is published as JSON and read by somebody else's build, so the round trip is
+# part of what the tests check.
+serde_json.workspace = true

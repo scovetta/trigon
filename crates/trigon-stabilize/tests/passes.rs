@@ -366,3 +366,70 @@ fn two_wheels_differing_only_in_metadata_line_endings_agree_after_stabilizing() 
         stabilize(lf, Format::Zip, "wheel").0
     );
 }
+
+// ---------------------------------------------------------------------------
+// The set manifest
+
+#[test]
+fn a_manifest_recomputes_the_digest_it_claims() {
+    // The property that makes publishing one worth anything. A verifier holding an attestation made
+    // under a set they do not have gets a digest that does not match theirs and, without this, no
+    // way to learn what it was — and no way to tell a faithful record from a document that merely
+    // asserts a digest.
+    for profile in trigon_stabilize::all_profiles() {
+        let set = profile_of(profile);
+        let m = set.manifest();
+        assert!(
+            m.self_consistent(),
+            "`{profile}` manifest does not recompute its own digest"
+        );
+        assert_eq!(m.digest, set.digest().to_hex());
+        assert_eq!(m.members.len(), set.members.len());
+    }
+}
+
+#[test]
+fn a_manifest_survives_a_round_trip_through_json() {
+    // It is published as a file and read by somebody else's build. A manifest that only verifies
+    // in the process that produced it verifies nothing.
+    let set = profile_of("wheel");
+    let m = set.manifest();
+    let back: trigon_stabilize::SetManifest =
+        serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+    assert_eq!(back, m);
+    assert!(back.self_consistent());
+}
+
+#[test]
+fn editing_a_manifest_breaks_its_own_check() {
+    // Downgrading a risk tier in the document without changing the set is exactly the edit that
+    // would make a capped outcome look clean. It does not survive the recomputation.
+    let mut m = profile_of("wheel").manifest();
+    let touched = m
+        .members
+        .iter_mut()
+        .find(|x| x.risk != "Structural")
+        .expect("the wheel set has a member above Structural risk");
+    touched.risk = "Structural".into();
+    assert!(
+        !m.self_consistent(),
+        "a rewritten risk tier must not verify"
+    );
+}
+
+#[test]
+fn the_manifest_names_what_the_digest_covers_and_no_more() {
+    // Four fields, the same four the digest is computed over. A manifest carrying richer fields
+    // than the digest covers would be a document nobody could check against the set.
+    let m = profile_of("wheel").manifest();
+    let v = serde_json::to_value(&m.members[0]).unwrap();
+    // Compared as a set: `serde_json` orders keys itself, and the claim here is about which fields
+    // exist rather than how they are laid out.
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(keys, ["id", "provenance", "risk", "stage"]);
+}
+
+fn profile_of(name: &str) -> StabilizerSet {
+    profile(name).unwrap_or_else(|| panic!("no profile `{name}`"))
+}

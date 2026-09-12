@@ -2315,6 +2315,7 @@ dependencies = [
  "flate2",
  "proptest",
  "serde",
+ "serde_json",
  "sha2",
  "smallvec",
  "tar",
@@ -2340,6 +2341,7 @@ dependencies = [
  "tracing",
  "trigon-attest",
  "trigon-core",
+ "trigon-stabilize",
 ]
 
 [[package]]

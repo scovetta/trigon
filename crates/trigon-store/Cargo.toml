@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 trigon-core.workspace = true
 trigon-attest.workspace = true
+trigon-stabilize.workspace = true
 object_store.workspace = true
 bytes.workspace = true
 futures.workspace = true
@@ -26,3 +27,4 @@ tempfile.workspace = true
 # The test that a reader checks a blob against its digest has to write past the digest, which means
 # reaching the object store directly.
 object_store.workspace = true
+serde_json.workspace = true
