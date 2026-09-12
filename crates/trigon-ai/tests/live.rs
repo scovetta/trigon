@@ -1,0 +1,104 @@
+//! Calls that actually leave the process.
+//!
+//! Off unless `TRIGON_LIVE=1`, because a suite that needs a running model server or an API key is a
+//! suite that fails for reasons unrelated to the change under test. What these cover is the part a
+//! unit test cannot: that the wire format we build is one the endpoint accepts.
+//!
+//! Ollama is the one that runs without a key, so it carries the end-to-end assertions. The keyed
+//! providers run the same shape where a key is present.
+
+use trigon_ai::{Flavor, OpenAiCompatible, Prompt, Provider, Recorder, Replaying, Request};
+
+fn live() -> bool {
+    std::env::var("TRIGON_LIVE").as_deref() == Ok("1")
+}
+
+fn request(model: &str, body: &str) -> Request {
+    Request {
+        prompt: Prompt::new("Answer with one word and nothing else.")
+            .stable("You are being tested for connectivity.")
+            .volatile(body.to_string()),
+        model: model.to_string(),
+        max_output_tokens: 32,
+        temperature: 0.0,
+        schema: None,
+    }
+}
+
+fn ollama() -> (String, OpenAiCompatible) {
+    let model = std::env::var("TRIGON_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5:0.5b".into());
+    let p = OpenAiCompatible::new("http://localhost:11434/v1", None, Flavor::Ollama).unwrap();
+    (model, p)
+}
+
+#[test]
+fn ollama_answers_and_reports_what_it_spent() {
+    if !live() {
+        eprintln!("skipped: set TRIGON_LIVE=1 and run a local ollama");
+        return;
+    }
+    let (model, p) = ollama();
+
+    // The tag is pinned to the digest it resolves to. Without this a recording names a label that
+    // the next `ollama pull` moves, and replaying it would be evidence of nothing.
+    let pinned = p.pinned_model(&model);
+    assert!(
+        pinned.starts_with(&model) && pinned.contains('@'),
+        "the tag was not pinned to a digest: {pinned}"
+    );
+    assert!(trigon_ai::is_snapshot(&pinned), "{pinned} is not replayable");
+
+    let resp = p.complete(&request(&model, "Say hello.")).unwrap();
+    assert!(!resp.text.trim().is_empty());
+    assert!(resp.usage.input > 0, "no input tokens reported: {resp:?}");
+    assert!(resp.usage.output > 0, "no output tokens reported: {resp:?}");
+    assert_eq!(resp.model, model, "the provider reports what answered");
+}
+
+#[test]
+fn a_live_exchange_replays_without_the_server() {
+    // The point of recording: the same question, answered from the recording, with nothing
+    // listening at the far end. Run against a real provider so what is replayed is a real answer.
+    if !live() {
+        eprintln!("skipped: set TRIGON_LIVE=1 and run a local ollama");
+        return;
+    }
+    let (model, p) = ollama();
+    let r = Recorder::new(p);
+
+    let answered = r.complete(&request(&model, "Say hello.")).unwrap();
+    let transcript = r.transcript("connectivity");
+    assert_eq!(transcript.turns.len(), 1);
+
+    let replayed = Replaying::new(transcript.clone())
+        .complete(&request(&model, "Say hello."))
+        .unwrap();
+    assert_eq!(replayed.text, answered.text);
+
+    // And a different question is refused rather than answered from the old recording. A fresh
+    // replay rather than a second call on the one above: that one has already consumed its turn,
+    // and running out of turns is a different refusal than answering the wrong question.
+    let e = Replaying::new(transcript)
+        .complete(&request(&model, "Say something else."))
+        .unwrap_err();
+    assert!(e.to_string().contains("different question"), "{e}");
+}
+
+#[test]
+fn anthropic_answers_where_a_key_is_present() {
+    let Ok(key) = std::env::var("ANTHROPIC_API_KEY") else {
+        eprintln!("skipped: set TRIGON_LIVE=1 and ANTHROPIC_API_KEY");
+        return;
+    };
+    if !live() {
+        return;
+    }
+    let model =
+        std::env::var("TRIGON_ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".into());
+    let p = trigon_ai::Anthropic::new(key, None).unwrap();
+    let resp = p.complete(&request(&model, "Say hello.")).unwrap();
+    assert!(!resp.text.trim().is_empty());
+    // Reported alongside the uncached input rather than inside it, which is why the provider sums
+    // the three fields: reading `input_tokens` alone understates a cached call by its whole prefix.
+    assert!(resp.usage.input > 0, "{resp:?}");
+}

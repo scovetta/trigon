@@ -77,22 +77,28 @@ impl Transcript {
     }
 }
 
-/// Whether a model id pins a specific snapshot.
+/// Whether a model id pins specific weights.
 ///
-/// The rule is deliberately crude and deliberately strict: a name with no digits in its last
-/// segment is an alias. `claude-opus-5` moves; `claude-haiku-4-5-20251001` does not. Being wrong in
-/// the strict direction costs a caller an explicit opt-out; being wrong the other way costs a
-/// transcript that claims to be replayable and is not.
+/// Crude on purpose, and it accepts three shapes: a dated snapshot
+/// (`claude-haiku-4-5-20251001`), a version that *is* the complete id — Anthropic's current models
+/// are named `claude-opus-5` with no date to append, and appending one is an error — and a content
+/// digest, which is how a local tag gets pinned to bytes (`qwen2.5:0.5b@a8b0c5157701`).
+///
+/// What it refuses is a label that resolves to whatever is behind it today: `gpt-latest`,
+/// `sonnet-preview`, a bare Ollama tag. Being wrong in the strict direction costs a caller a
+/// re-record; being wrong the other way costs a transcript that claims to be replayable and is not.
 pub fn is_snapshot(model: &str) -> bool {
     // `replay` is the recorded-answer provider, which by construction *is* pinned: its answers are
     // the recording.
     if model == "replay" {
         return true;
     }
-    model
-        .rsplit(['-', ':', '@'])
-        .next()
-        .is_some_and(|last| last.len() >= 4 && last.chars().all(|c| c.is_ascii_digit()))
+    let Some(last) = model.rsplit(['-', ':', '@']).next() else {
+        return false;
+    };
+    let digits = !last.is_empty() && last.chars().all(|c| c.is_ascii_digit());
+    let digest = last.len() >= 12 && last.chars().all(|c| c.is_ascii_hexdigit());
+    digits || digest
 }
 
 /// A provider that records everything through it.
@@ -306,12 +312,17 @@ mod tests {
         // the transcript says up front whether it can be replayed as evidence.
         assert!(is_snapshot("claude-haiku-4-5-20251001"));
         assert!(is_snapshot("some-model:20240101"));
-        assert!(!is_snapshot("claude-opus-5"));
+        // A version that is the whole id, with no date to append — Anthropic's current naming.
+        assert!(is_snapshot("claude-opus-5"));
+        // A local tag moves; the same tag with the digest it resolved to does not.
+        assert!(!is_snapshot("qwen2.5:0.5b"));
+        assert!(is_snapshot("qwen2.5:0.5b@a8b0c5157701"));
         assert!(!is_snapshot("gpt-latest"));
+        assert!(!is_snapshot("sonnet-preview"));
 
         let mut t = Transcript::new("pkg:npm/a@1");
         t.turns.push(Turn {
-            model: "claude-opus-5".into(),
+            model: "gpt-latest".into(),
             temperature: 0.0,
             prompt_sha256: sha(b"x"),
             system_sha256: sha(b"s"),

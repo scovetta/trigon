@@ -238,13 +238,69 @@ impl Provider for Counting {
 impl Configured {
     /// Read `--model`.
     ///
-    /// One spec form today: `replay:<transcript.json>`, which answers from a recording and opens no
-    /// socket. That is not a placeholder for a live provider — it is the form the eval tiers run
-    /// on, where the exit criterion is *reproduces a recorded run with zero model calls*
-    /// (`docs/07-ai.md` §8). A live provider is another arm here and changes nothing else.
+    /// `<provider>:<model>`, or `replay:<transcript.json>` to answer from a recording and open no
+    /// socket. Replay is not a placeholder for the live providers — it is the form the eval tiers
+    /// run on, where the exit criterion is *reproduces a recorded run with zero model calls*
+    /// (`docs/07-ai.md` §8).
+    ///
+    /// Keys come from the environment and never from the command line, so a key does not end up in
+    /// a shell history, a process list, or a `--help` example somebody copies.
     pub fn parse(spec: &str) -> Result<Self> {
         let (kind, rest) = spec.split_once(':').unwrap_or((spec, ""));
         match kind {
+            // Local, and the reason this is the one that needs no key: the model is on this
+            // machine. The tag is pinned to the digest it resolves to, so a recording names bytes
+            // rather than a label that the next `ollama pull` moves.
+            "ollama" => {
+                let base = std::env::var("OLLAMA_HOST")
+                    .unwrap_or_else(|_| "http://localhost:11434".into());
+                let base = format!("{}/v1", base.trim_end_matches('/').trim_end_matches("/v1"));
+                let p = trigon_ai::OpenAiCompatible::new(base, None, trigon_ai::Flavor::Ollama)?;
+                let model = p.pinned_model(&named(rest, "ollama")?);
+                Ok(Self::live(Box::new(p), model))
+            }
+            "openai" => Ok(Self::live(
+                Box::new(trigon_ai::OpenAiCompatible::new(
+                    std::env::var("OPENAI_BASE_URL")
+                        .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+                    Some(key("OPENAI_API_KEY")?),
+                    trigon_ai::Flavor::OpenAi,
+                )?),
+                named(rest, "openai")?,
+            )),
+            "openrouter" => Ok(Self::live(
+                Box::new(trigon_ai::OpenAiCompatible::new(
+                    "https://openrouter.ai/api/v1",
+                    Some(key("OPENROUTER_API_KEY")?),
+                    trigon_ai::Flavor::OpenRouter,
+                )?),
+                named(rest, "openrouter")?,
+            )),
+            "anthropic" => Ok(Self::live(
+                Box::new(trigon_ai::Anthropic::new(
+                    key("ANTHROPIC_API_KEY")?,
+                    std::env::var("ANTHROPIC_BASE_URL").ok(),
+                )?),
+                named(rest, "anthropic")?,
+            )),
+            // Anything else speaking the same protocol: vLLM, llama.cpp, a gateway. The URL is in
+            // the spec because there is nothing else to guess it from.
+            "compatible" => {
+                let (base, model) = rest.split_once('#').ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "`--model compatible:<base-url>#<model>` needs both, such as \
+                         `compatible:http://localhost:8000/v1#my-model`"
+                    )
+                })?;
+                Ok(Self::live(
+                    Box::new(trigon_ai::OpenAiCompatible::new(
+                        base,
+                        std::env::var("TRIGON_LLM_API_KEY").ok(),
+                        trigon_ai::Flavor::Other,
+                    )?),
+                    named(model, "compatible")?,
+                ))
+            }
             "replay" => {
                 if rest.is_empty() {
                     anyhow::bail!("`--model replay:<transcript.json>` needs a recording to replay");
@@ -267,18 +323,24 @@ impl Configured {
                     .first()
                     .map(|t| t.model.clone())
                     .unwrap_or_else(|| "replay".into());
-                Ok(Configured {
-                    provider: Arc::new(Counting::new(Box::new(trigon_ai::Replaying::new(
-                        transcript,
-                    )))),
+                Ok(Self::live(
+                    Box::new(trigon_ai::Replaying::new(transcript)),
                     model,
-                    cache_root: trigon_registry::SourceCache::default_root(),
-                })
+                ))
             }
             other => anyhow::bail!(
-                "`{other}` is not a provider this build knows. Today: \
-                 `--model replay:<transcript.json>`."
+                "`{other}` is not a provider this build knows. One of: \
+                 `ollama:<model>`, `anthropic:<model>`, `openai:<model>`, `openrouter:<model>`, \
+                 `compatible:<base-url>#<model>`, or `replay:<transcript.json>`."
             ),
+        }
+    }
+
+    fn live(provider: Box<dyn Provider>, model: String) -> Self {
+        Configured {
+            provider: Arc::new(Counting::new(provider)),
+            model,
+            cache_root: trigon_registry::SourceCache::default_root(),
         }
     }
 
@@ -307,6 +369,27 @@ impl Configured {
             SourceCache::new(&self.cache_root),
         )
     }
+}
+
+/// The model a spec named, or a message saying one is needed.
+fn named(rest: &str, provider: &str) -> Result<String> {
+    if rest.is_empty() {
+        anyhow::bail!("`--model {provider}:<model>` needs a model, such as `{provider}:<name>`");
+    }
+    Ok(rest.to_string())
+}
+
+/// A key from the environment, never from the command line.
+fn key(var: &str) -> Result<String> {
+    std::env::var(var)
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "${var} is not set. Keys are read from the environment rather than passed on the \
+                 command line, so they stay out of shell history and process listings."
+            )
+        })
 }
 
 /// Which ecosystems this rung will speak about.
@@ -496,7 +579,9 @@ mod tests {
         let d = tmpdir("alias");
         let mut t = Transcript::new("pkg:npm/a@1");
         t.turns.push(trigon_ai::Turn {
-            model: "claude-opus-5".into(),
+            // A label that resolves to whatever is behind it today. `claude-opus-5` is not one:
+            // that version *is* the complete model id, with no date to append.
+            model: "gpt-latest".into(),
             temperature: 0.0,
             prompt_sha256: "0".repeat(64),
             system_sha256: "1".repeat(64),
