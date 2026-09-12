@@ -211,6 +211,30 @@ mirror — including the toolchain. Node is downloaded over the mirror's `/-tool
 proxies a short compiled-in allowlist of distribution hosts and refuses everything else. A base
 image that already carries the right toolchain skips the hop entirely.
 
+### Asking a model
+
+Off unless you name a provider. The ladder tries a checked-in definition, then the ecosystem
+heuristic, and only then — if `--model` says so — asks a model for a strategy:
+
+```
+$ trigon rebuild pkg:npm/some-package@1.0.0 --model ollama:qwen2.5:0.5b …
+$ trigon rebuild …  --model anthropic:claude-opus-5      # $ANTHROPIC_API_KEY
+$ trigon rebuild …  --model openai:gpt-5                 # $OPENAI_API_KEY
+$ trigon rebuild …  --model openrouter:<model>           # $OPENROUTER_API_KEY
+$ trigon rebuild …  --model copilot:auto                 # the Copilot CLI, signed in
+$ trigon rebuild …  --model compatible:http://host/v1#m  # vLLM, llama.cpp, a gateway
+$ trigon rebuild …  --model replay:run.transcript.json   # a recording; opens no socket
+```
+
+Keys are read from the environment, never the command line. A model rung needs the repository, so
+it fetches the pinned commit to a local cache first; it declines where there is no source, no
+commit, or an answer that will not parse, and the ladder moves on. The candidate it produces is
+recorded as `model_assisted` and can never reach `normalized` — only `normalized_with_caveats` —
+which is the provenance cap, not a policy setting.
+
+`copilot` is an agent with a shell on your machine, and it is configured here so the model sees no
+tools at all. Read the module documentation in `trigon-ai/src/copilot.rs` before using it.
+
 The artifact guard runs either way. If the package's own published bytes — or any of its member
 files — arrive over the network, the run is `Void`: not a pass and not a failure, because a build
 that downloads its own output reproduces it perfectly and proves nothing.

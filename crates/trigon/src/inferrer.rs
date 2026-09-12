@@ -276,6 +276,17 @@ impl Configured {
                 )?),
                 named(rest, "openrouter")?,
             )),
+            // An agent with a shell on this machine, configured so the model sees no tools at all.
+            // The reasoning is in `trigon_ai::Copilot`'s module docs and it is worth reading before
+            // using this: the prompt carries text a package wrote, and every other provider here is
+            // a function from a prompt to a string rather than something that can act.
+            "copilot" => Ok(Self::live(
+                Box::new(trigon_ai::Copilot::new(
+                    std::env::temp_dir().join("trigon-copilot"),
+                )?),
+                // `auto` lets Copilot pick, and the transcript records what answered.
+                if rest.is_empty() { "auto".into() } else { rest.to_string() },
+            )),
             "anthropic" => Ok(Self::live(
                 Box::new(trigon_ai::Anthropic::new(
                     key("ANTHROPIC_API_KEY")?,
@@ -331,7 +342,8 @@ impl Configured {
             other => anyhow::bail!(
                 "`{other}` is not a provider this build knows. One of: \
                  `ollama:<model>`, `anthropic:<model>`, `openai:<model>`, `openrouter:<model>`, \
-                 `compatible:<base-url>#<model>`, or `replay:<transcript.json>`."
+                 `copilot:<model|auto>`, `compatible:<base-url>#<model>`, or \
+                 `replay:<transcript.json>`."
             ),
         }
     }

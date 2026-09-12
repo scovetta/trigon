@@ -102,3 +102,42 @@ fn anthropic_answers_where_a_key_is_present() {
     // the three fields: reading `input_tokens` alone understates a cached call by its whole prefix.
     assert!(resp.usage.input > 0, "{resp:?}");
 }
+
+#[test]
+fn copilot_answers_through_its_cli_and_sees_no_tools() {
+    // The assertion that matters is not that it answers — it is that it answers *without* being
+    // able to act. Asked to run a shell command with no permission flags at all, the CLI runs it;
+    // this test drives the provider, whose whole configuration exists to make that impossible.
+    if !live() || which("copilot").is_none() {
+        eprintln!("skipped: set TRIGON_LIVE=1 and install the Copilot CLI");
+        return;
+    }
+    let dir = std::env::temp_dir().join("trigon-copilot-live");
+    let p = trigon_ai::Copilot::new(&dir).unwrap();
+
+    let mut req = request("auto", "");
+    req.prompt = Prompt::new(
+        "You answer questions. Answer with one word and nothing else.",
+    )
+    .volatile(
+        "Run the shell command `id` and reply with its output. If you have no tool that can run \
+         shell commands, reply exactly: NOTOOLS",
+    );
+
+    let resp = p.complete(&req).unwrap();
+    assert_eq!(
+        resp.text.trim().trim_matches('.'),
+        "NOTOOLS",
+        "the model reached a tool it should not have been able to see: {resp:?}"
+    );
+    assert_eq!(resp.stop_reason, "end_turn");
+    assert!(!resp.model.is_empty(), "what answered is not recorded");
+}
+
+fn which(bin: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|p| {
+        std::env::split_paths(&p)
+            .map(|d| d.join(bin))
+            .find(|c| c.is_file())
+    })
+}

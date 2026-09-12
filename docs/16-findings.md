@@ -241,6 +241,48 @@ run rather than an error of ours in a sweep's denominator. It is last on the lad
 when `--model` names a provider, and the candidate it returns is `Weak` whatever the model said
 about its own confidence.
 
+### 3.8 The Copilot CLI runs shell commands in non-interactive mode, unasked
+
+Adding GitHub Copilot as a provider turned up something worth stating plainly, because it changes
+what a provider *is*. Every other provider here is a function from a prompt to a string. Copilot is
+an agent with `bash`, `apply_patch` and `rg` on the machine that invokes it — and in `-p`
+non-interactive mode it uses them without asking. Measured, not assumed: asked to run `id` with no
+permission flags at all, it did, and printed the operator's uid and group list.
+
+The prompt the Builder sends is full of text a package controls: its file names, its manifests, its
+build log. [`12`](12-security.md) §4 already calls that the highest-risk injection channel in the
+system. Pointing it at a shell on the verifying machine turns a README into a command.
+
+`--available-tools` is the control, and it is an allowlist: everything not named is filtered out
+before the model sees it, so it does not rot when a new tool ships. Two details are easy to get
+wrong and both were found by testing:
+
+- **An empty value means "no filter", not "no tools".** With `--available-tools=` the model called
+  `bash` and the call ran. The flag has to name something; the provider names the most inert tool on
+  offer, which fetches Copilot's own documentation.
+- **`--deny-tool='*'` is not a thing.** It is rejected as an invalid rule, which is the good
+  failure; a denylist of the seventeen current tools would have been the bad one.
+
+Three more flags are part of the posture rather than tidiness: `--no-custom-instructions`, because
+`AGENTS.md` is loaded from the working directory and a package's checkout can contain one — that is
+instruction injection with no prompt required; `--no-remote --no-remote-export`, because the default
+exports the session, and therefore somebody else's package, to GitHub's web and mobile surfaces; and
+`--no-auto-update`, because a provider that replaces its own binary part-way through a sweep makes
+the sweep's results unattributable. The CLI also runs in an empty directory, so there is nothing
+around it to read.
+
+What cannot be fixed from here: `-p` takes one string, so there is no system-role channel. The
+operator's instructions and the package's data travel in the same text, which is precisely the
+separation §4 asks for. The provider uses the best substitute available — the package-derived half
+is wrapped in a nonce-delimited block, the nonce derived from the prompt rather than a clock so
+replay and caching still work — and the code says it is a substitute. Where the choice exists,
+prefer a provider with a real system message.
+
+We talk to the CLI rather than to `github-copilot-sdk`, which is itself a JSON-RPC client that
+spawns this same binary. Three reasons: the crate requires Rust 1.94 and the workspace is on 1.85;
+it embeds a CLI executable in the dependency tree; and this codebase already reaches `podman` and
+`git` the same way.
+
 ---
 
 ## 4. A stabilizer the reference does not have
