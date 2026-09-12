@@ -25,6 +25,7 @@ mod npm;
 mod pypi;
 mod registry;
 mod tags;
+pub mod wheel;
 
 pub use client::{Client, ClientConfig};
 pub use definitions::DefinitionsInferrer;

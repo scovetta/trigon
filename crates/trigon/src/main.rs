@@ -1591,7 +1591,7 @@ mod rebuild {
         std::fs::create_dir_all(&args.work)?;
 
         // 1. What the registry knows.
-        let resolved = match rt.block_on(registry.resolve(&target)) {
+        let mut resolved = match rt.block_on(registry.resolve(&target)) {
             Ok(r) => r,
             Err(e) => return Ok(classify(&e)),
         };
@@ -1617,6 +1617,17 @@ mod rebuild {
         drop(file);
         if verbose {
             println!("  published  sha256 {}", &upstream_digest.to_hex()[..16]);
+        }
+
+        // What the published artifact says about the toolchain that made it, added to the
+        // intrinsics before inference so a rung can pin it. A read from the artifact under test,
+        // which is the one source that cannot be out of date about its own build.
+        if let Ok(bytes) = std::fs::read(&upstream_path) {
+            let found = trigon_registry::wheel::generator_evidence(&bytes);
+            if verbose && let Some(e) = found.first() {
+                println!("  generator  {:?}", e.claim);
+            }
+            resolved.intrinsics.evidence.extend(found);
         }
 
         // The guard manifest, from the bytes we just fetched. This is the control that defeats the
@@ -1685,7 +1696,14 @@ mod rebuild {
             work: args.work.clone(),
             image: args.image.clone(),
             egress: args.egress.clone(),
-            timewarp: args.timewarp.clone(),
+            // The instant the index was actually pinned to, not the flag that asked for one.
+            // `auto` is a description of our command line; a signed statement has to describe the
+            // environment, and a consumer reading `auto` learns nothing they could check.
+            timewarp: resolved
+                .intrinsics
+                .publish_time
+                .clone()
+                .filter(|_| args.timewarp.is_some()),
             strategy_digest: None,
             derivation: None,
         };

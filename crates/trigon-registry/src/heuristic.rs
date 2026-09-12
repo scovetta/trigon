@@ -217,15 +217,25 @@ impl StrategyInferrer for PyPiInferrer {
                 "no publish time recorded, so dependencies resolve against today's index".into(),
             ),
         }
-        // Nothing in PyPI's metadata says what the build needed. The frontend reads pyproject.toml
-        // and installs the declared backend itself, which is right for a modern project and wrong
-        // for one that expected a specific setuptools. That is the common case, and where it is
-        // wrong the divergence is in METADATA or RECORD and legible.
-        assumptions.push(
-            "build requirements come from the project's own declaration, resolved by the build \
-             frontend rather than pinned here"
-                .into(),
-        );
+        // The published wheel says which backend built it, in its own `Generator:` field. Nothing
+        // in PyPI's *metadata* does, which is what this rung used to assume — and the difference
+        // was nine of ten divergences in the M1 corpus, every one of them confined to `WHEEL`,
+        // `METADATA` and the `RECORD` that follows from them, with every source file identical.
+        //
+        // Unpinned, the frontend resolves the project's declaration against the index and installs
+        // whatever is current; the publisher used whatever was current then. Two lines differ and
+        // the wheel diverges.
+        let backend = build_backend_pin(target);
+        match &backend {
+            Some(pin) => {
+                deps.insert("build_backend".into(), pin.clone());
+            }
+            None => assumptions.push(
+                "the published artifact names no build backend, so build requirements come from \
+                 the project's own declaration resolved by the frontend"
+                    .into(),
+            ),
+        }
 
         let strategy = Strategy::Flow(FlowStrategy {
             location: Location {
@@ -239,9 +249,19 @@ impl StrategyInferrer for PyPiInferrer {
                 "pypi/build/wheel",
                 BTreeMap::from([
                     ("locator".to_string(), "/deps/bin/".to_string()),
-                    // This rung pins no build requirements, so the frontend has to resolve them
-                    // from the project's own declaration. With `-n` it does not install a declared
-                    // requirement, it checks for it and stops.
+                    (
+                        "constraints".to_string(),
+                        backend
+                            .as_ref()
+                            .map(|_| "/deps/constraints.txt".to_string())
+                            .unwrap_or_default(),
+                    ),
+                    // Isolation stays on. `-n` makes the frontend *check* for each declared build
+                    // requirement rather than install it, so anything the project needs beyond the
+                    // backend goes missing — `attrs` wants `hatch-vcs` and `hatch-fancy-pypi-readme`
+                    // and stops with "Unmet dependencies". The backend version is pinned by a
+                    // constraint instead, which binds the environment the frontend builds without
+                    // taking over what goes into it.
                     ("no_isolation".to_string(), "false".to_string()),
                 ]),
             )],
@@ -262,6 +282,25 @@ impl StrategyInferrer for PyPiInferrer {
             assumptions,
         }])
     }
+}
+
+/// `name==version` for the backend the published wheel says built it.
+///
+/// A deterministic read from the artifact under test, not a guess: `crate::wheel::generator_evidence`
+/// puts it in the intrinsics at fetch time and this turns it into something pip can install.
+fn build_backend_pin(target: &ResolvedTarget) -> Option<String> {
+    target
+        .intrinsics
+        .evidence
+        .iter()
+        .find_map(|e| match &e.claim {
+            trigon_core::Claim::ToolchainExact { tool, version }
+                if e.source == "wheel:Generator" =>
+            {
+                Some(format!("{tool}=={version}"))
+            }
+            _ => None,
+        })
 }
 
 fn evidence_value(target: &ResolvedTarget, source: &str) -> Option<String> {

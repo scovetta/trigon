@@ -9,7 +9,13 @@ params:
     required: false
     doc: RFC 3339 moment to filter the index to. Omitted means the live index, which is rarely right.
 steps:
+  # `PIP_TRUSTED_HOST` is not optional and its absence is silent. The mirror speaks plain HTTP, and
+  # pip treats a plain-HTTP index it does not trust by warning once and then resolving as though no
+  # index were configured at all — so the build gets today's packages while every log line says it
+  # was pinned. The only symptom is the mirror reporting zero requests, which reads like a build
+  # that happened not to need anything.
   - runs: |
       {%- if with.registry_time %}
       export PIP_INDEX_URL={{ timewarp_url("pypi", with.registry_time) }}/simple
+      export PIP_TRUSTED_HOST={{ timewarp_host() }}
       {%- endif %}

@@ -283,5 +283,25 @@ fn environment(cx: &Context) -> Environment<'static> {
             Ok(format!("{}://{ecosystem}:{moment}@{}", "http", base))
         },
     );
+
+    // The mirror's `host:port`, with no scheme and no credentials.
+    //
+    // pip **silently ignores** a plain-HTTP index that is not also a trusted host: it prints a
+    // warning and resolves as though no index were configured. Every PyPI rebuild that pinned a
+    // registry moment was therefore resolving against the live index, and the only sign was the
+    // mirror reporting zero requests. A client that needs this needs the bare authority, which the
+    // URL form cannot supply without string surgery in a template.
+    let base = cx.env.timewarp_base.clone();
+    env.add_function(
+        "timewarp_host",
+        move || -> Result<String, minijinja::Error> {
+            base.clone().ok_or_else(|| {
+                minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    "timewarp_host was called but no mirror is configured for this run.",
+                )
+            })
+        },
+    );
     env
 }

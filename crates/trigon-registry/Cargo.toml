@@ -11,6 +11,8 @@ authors.workspace = true
 [dependencies]
 trigon-core.workspace = true
 trigon-strategy.workspace = true
+# For reading what a published wheel says about the toolchain that made it.
+trigon-archive.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -23,3 +25,4 @@ reqwest.workspace = true
 [dev-dependencies]
 sha2.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+zip = { workspace = true }

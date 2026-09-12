@@ -2286,8 +2286,10 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "trigon-archive",
  "trigon-core",
  "trigon-strategy",
+ "zip",
 ]
 
 [[package]]

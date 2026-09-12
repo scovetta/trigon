@@ -16,6 +16,12 @@ params:
   dir:
     required: false
     doc: Project directory, when it is not the working tree root.
+  constraints:
+    required: false
+    doc: >-
+      A pip constraint file to apply to the frontend's isolated build environment. `PIP_CONSTRAINT`
+      is inherited by the pip that `build` runs to populate that environment, which is the only way
+      to pin a backend version without also taking over which requirements get installed.
   no_isolation:
     required: false
     default: "true"
@@ -24,4 +30,8 @@ params:
       in the deps phase; a caller that pinned nothing passes false and lets the frontend resolve
       them from the project's own declaration.
 steps:
-  - runs: "{{ with.locator }}python3 -m build --wheel{% if with.no_isolation == 'true' %} -n{% endif %}{% if with.dir and with.dir != '.' %} {{ with.dir }}{% endif %}"
+  - runs: |
+      {%- if with.constraints %}
+      export PIP_CONSTRAINT={{ with.constraints }}
+      {%- endif %}
+      {{ with.locator }}python3 -m build --wheel{% if with.no_isolation == 'true' %} -n{% endif %}{% if with.dir and with.dir != '.' %} {{ with.dir }}{% endif %}
