@@ -2172,10 +2172,16 @@ mod mirror {
                 "  npm    npm config set registry http://npm:<RFC3339>@{}",
                 handle.host()
             );
+            // Both lines, because `index-url` on its own does not work and does not say so: pip
+            // warns once about an untrusted plain-HTTP index and then resolves as though none were
+            // configured. Printing only the first half is an instruction to reproduce the bug.
+            println!("  pypi   /etc/pip.conf:");
+            println!("           [global]");
             println!(
-                "  pypi   PIP_INDEX_URL=http://pypi:<RFC3339>@{}/simple",
+                "           index-url = http://pypi:<RFC3339>@{}/simple",
                 handle.host()
             );
+            println!("           trusted-host = {}", handle.host());
             println!("\nCtrl-C to stop.");
             tokio::signal::ctrl_c().await.ok();
             handle.shutdown().await;

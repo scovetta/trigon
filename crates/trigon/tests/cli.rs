@@ -247,10 +247,16 @@ custom_stabilizers:
     let text = String::from_utf8_lossy(&out.stdout);
 
     assert!(text.contains("git checkout --force 'cafebabe'"), "{text}");
+    // A config file rather than an exported variable, and the assertion names both halves because
+    // each was once missing and neither failure is visible at run time: without `trusted-host` pip
+    // ignores a plain-HTTP index after one warning, and an `export` does not survive into the build
+    // phase where the frontend populates its isolated environment.
     assert!(
-        text.contains("PIP_INDEX_URL=http://pypi:2023-05-01T04:11:28Z@timewarp/simple"),
+        text.contains("index-url = http://pypi:2023-05-01T04:11:28Z@timewarp/simple"),
         "{text}"
     );
+    assert!(text.contains("trusted-host = timewarp"), "{text}");
+    assert!(text.contains("/etc/pip.conf"), "{text}");
     assert!(
         text.contains("/deps/bin/pip install 'wheel==0.40.0'"),
         "{text}"

@@ -80,8 +80,15 @@ fn a_real_override_renders_to_a_runnable_script() {
     assert!(i.deps.contains("/deps/bin/pip install build"), "{}", i.deps);
     assert!(
         i.deps
-            .contains("PIP_INDEX_URL=http://pypi:2023-05-01T04:11:28Z@timewarp/simple"),
+            .contains("index-url = http://pypi:2023-05-01T04:11:28Z@timewarp/simple"),
         "the mirror has to carry the moment: {}",
+        i.deps
+    );
+    // Without this pip warns once about an untrusted plain-HTTP index and then resolves as though
+    // none were configured — so the moment above would be carried and ignored.
+    assert!(
+        i.deps.contains("trusted-host = timewarp"),
+        "the index has to be trusted or the pin is silently dropped: {}",
         i.deps
     );
     assert!(
