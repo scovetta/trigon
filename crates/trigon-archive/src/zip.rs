@@ -47,35 +47,41 @@ impl<'a> Cursor<'a> {
     fn new(b: &'a [u8], p: usize) -> Self {
         Self { b, p }
     }
+
+    /// The bytes at the cursor, or a short read.
+    ///
+    /// **`checked_add`, not `+`.** Every offset here comes from a header field the input controls,
+    /// and `self.p + n` wraps on a field set to `u64::MAX`: the wrapped range is then *inside* the
+    /// slice, `get` succeeds, and the parse continues on bytes it was never pointed at — or, under
+    /// this workspace's release profile, which enables overflow checks, panics. A 42-byte file was
+    /// enough: a zip64 locator claiming its end-of-central-directory sits at `0xFFFFFFFFFFFFFFFF`.
+    /// A panic parsing an artifact is a denial of service on a sweep worker and, worse, an outcome
+    /// that reads as our infrastructure failing rather than as a hostile input.
+    fn at(&self, n: usize) -> Result<&'a [u8]> {
+        let end = self.p.checked_add(n).ok_or_else(|| bad("short read"))?;
+        self.b.get(self.p..end).ok_or_else(|| bad("short read"))
+    }
+
     fn u16(&mut self) -> Result<u16> {
-        let v = self
-            .b
-            .get(self.p..self.p + 2)
-            .ok_or_else(|| bad("short read (u16)"))?;
+        let v = self.at(2)?;
+        let out = u16::from_le_bytes([v[0], v[1]]);
         self.p += 2;
-        Ok(u16::from_le_bytes([v[0], v[1]]))
+        Ok(out)
     }
     fn u32(&mut self) -> Result<u32> {
-        let v = self
-            .b
-            .get(self.p..self.p + 4)
-            .ok_or_else(|| bad("short read (u32)"))?;
+        let v = self.at(4)?;
+        let out = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
         self.p += 4;
-        Ok(u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+        Ok(out)
     }
     fn u64(&mut self) -> Result<u64> {
-        let v = self
-            .b
-            .get(self.p..self.p + 8)
-            .ok_or_else(|| bad("short read (u64)"))?;
+        let v = self.at(8)?;
+        let out = u64::from_le_bytes(v.try_into().unwrap());
         self.p += 8;
-        Ok(u64::from_le_bytes(v.try_into().unwrap()))
+        Ok(out)
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let v = self
-            .b
-            .get(self.p..self.p + n)
-            .ok_or_else(|| bad("short read (bytes)"))?;
+        let v = self.at(n)?;
         self.p += n;
         Ok(v)
     }
@@ -143,7 +149,12 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
             });
         }
 
-        let data = read_member(b, local_offset, method, comp_size, uncomp_size)?;
+        // The budget is what is left of the artifact's ceiling, not the size the directory
+        // declared: `uncomp_size` is a number the input wrote, and checking it against the limit
+        // above while inflating without one meant the limit constrained the claim rather than the
+        // bytes. A 200 KB member declaring 64 bytes expanded to 200 MB in this process.
+        let remaining = limits.total_expanded_bytes.saturating_sub(expanded);
+        let data = read_member(b, local_offset, method, comp_size, uncomp_size, remaining)?;
         let path = EntryPath::new(name);
         // Zip has no type flags. A trailing slash is the universal convention for a directory.
         let kind = if path.as_bytes().ends_with(b"/") {
@@ -286,6 +297,7 @@ fn read_member(
     method: u16,
     comp: u64,
     uncomp: u64,
+    budget: u64,
 ) -> Result<Vec<u8>> {
     let mut c = Cursor::new(
         b,
@@ -312,10 +324,31 @@ fn read_member(
         METHOD_STORE => Ok(raw.to_vec()),
         METHOD_DEFLATE => {
             use std::io::Read as _;
-            let mut out = Vec::with_capacity(usize::try_from(uncomp).unwrap_or(0));
+            // Not `with_capacity(uncomp)`: that is an allocation sized from a header field, which
+            // a 4 GB declaration turns into a 4 GB allocation for a member that inflates to
+            // nothing.
+            let mut out = Vec::new();
+            let ceiling = budget.saturating_add(1);
             flate2::read::DeflateDecoder::new(raw)
+                .take(ceiling)
                 .read_to_end(&mut out)
                 .map_err(|e| bad(format!("inflate: {e}")))?;
+            if out.len() as u64 > budget {
+                return Err(ArchiveError::LimitExceeded {
+                    limit: "total_expanded_bytes",
+                    actual: out.len() as u64,
+                    allowed: budget,
+                });
+            }
+            // What the directory declared, against what came out. They disagree only if the file
+            // is lying or corrupt, and every size the walker added to its running total came from
+            // the declaration — so a mismatch means the budget was computed against fiction.
+            if out.len() as u64 != uncomp {
+                return Err(bad(format!(
+                    "member declares {uncomp} uncompressed bytes and inflates to {}",
+                    out.len()
+                )));
+            }
             Ok(out)
         }
         other => Err(ArchiveError::Unsupported(format!(

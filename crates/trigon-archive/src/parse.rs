@@ -90,7 +90,7 @@ fn parse_inner(
             })
         }
         Format::TarGz => {
-            let (header, inner) = gzip::read(&bytes)?;
+            let (header, inner) = gzip::read(&bytes, limits.total_expanded_bytes)?;
             let mut a = tar::read(Arc::new(SourceMap::owned(inner.clone())), limits, notes)?;
             a.format = Format::TarGz;
             a.trailer = Trailer::Gzip(header);
@@ -101,7 +101,7 @@ fn parse_inner(
             })
         }
         Format::Gzip => {
-            let (header, inner) = gzip::read(&bytes)?;
+            let (header, inner) = gzip::read(&bytes, limits.total_expanded_bytes)?;
             let a = single_member(header.clone(), inner.clone());
             Ok(Parsed {
                 archive: a,
@@ -193,7 +193,7 @@ fn descend(a: &mut Archive, limits: &Limits, notes: &mut Vec<Note>, depth: u8) {
 }
 
 fn parse_nested(body: &[u8], limits: &Limits, notes: &mut Vec<Note>, depth: u8) -> Result<Archive> {
-    let (header, inner) = gzip::read(body)?;
+    let (header, inner) = gzip::read(body, limits.total_expanded_bytes)?;
     if sniff_tar(&inner) {
         let mut a = tar::read(Arc::new(SourceMap::owned(inner)), limits, notes)?;
         a.format = Format::TarGz;

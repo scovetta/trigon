@@ -203,3 +203,157 @@ fn nesting_a_gzip_inside_itself_terminates() {
             .any(|n| n.code == trigon_core::NoteCode::RecursionLimitReached)
     );
 }
+
+/// A zip64 locator pointing its end-of-central-directory at `u64::MAX`.
+///
+/// Forty-two bytes, and it used to panic: the cursor did `self.p + n` on an offset the file
+/// controls, which wraps. Under this workspace's release profile, which enables overflow checks,
+/// that is an abort; without them it is a read of whatever the wrapped range lands on.
+fn zip64_locator_at_max() -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&0x0706_4b50u32.to_le_bytes()); // zip64 EOCD locator signature
+    b.extend_from_slice(&0u32.to_le_bytes()); // disk holding the zip64 EOCD
+    b.extend_from_slice(&u64::MAX.to_le_bytes()); // its offset: the whole point
+    b.extend_from_slice(&1u32.to_le_bytes()); // total disks
+    b.extend_from_slice(&0x0605_4b50u32.to_le_bytes()); // EOCD signature
+    b.extend_from_slice(&0u16.to_le_bytes()); // this disk
+    b.extend_from_slice(&0u16.to_le_bytes()); // disk with the central directory
+    b.extend_from_slice(&0xFFFFu16.to_le_bytes()); // entries here: the zip64 marker
+    b.extend_from_slice(&0xFFFFu16.to_le_bytes()); // entries total
+    b.extend_from_slice(&0u32.to_le_bytes()); // central directory size
+    b.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // its offset: the zip64 marker
+    b.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    b
+}
+
+#[test]
+fn an_offset_that_wraps_is_a_short_read_and_not_a_panic() {
+    // A panic parsing an artifact is a denial of service on a sweep worker, and worse: an outcome
+    // that reads as our infrastructure failing rather than as a hostile input.
+    let bytes = zip64_locator_at_max();
+    assert_eq!(bytes.len(), 42);
+    let err = parse(bytes, Format::Zip, &Limits::default(), &mut Vec::new())
+        .expect_err("a locator pointing past the end cannot resolve");
+    assert!(
+        err.to_string().contains("short read"),
+        "named as what it is: {err}"
+    );
+}
+
+/// A gzip member of `n` zero bytes, which compresses to almost nothing.
+fn gzip_bomb(n: usize) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    e.write_all(&vec![0u8; n]).unwrap();
+    e.finish().unwrap()
+}
+
+#[test]
+fn a_gzip_bomb_is_refused_at_the_limit_rather_than_inflated() {
+    // `total_expanded_bytes` used to be checked against the sizes a zip's central directory
+    // *declares*, and gzip took no limits at all — so this inflated in full whatever the caller
+    // asked for. `.tar.gz` is every npm package, so this is the hot path, not an exotic one.
+    let bomb = gzip_bomb(64 * 1024 * 1024);
+    assert!(bomb.len() < 100_000, "the point is that it is small: {}", bomb.len());
+
+    let limits = Limits {
+        total_expanded_bytes: 1024 * 1024,
+        ..Limits::default()
+    };
+    let err = parse(bomb.clone(), Format::Gzip, &limits, &mut Vec::new())
+        .expect_err("64 MiB through a 1 MiB ceiling");
+    assert!(
+        err.to_string().contains("total_expanded_bytes"),
+        "the limit that stopped it is named: {err}"
+    );
+
+    // And the same bytes parse when the ceiling allows them: the limit is a limit, not a refusal
+    // to inflate.
+    assert!(parse(bomb, Format::Gzip, &Limits::default(), &mut Vec::new()).is_ok());
+}
+
+/// A one-member deflate zip, with the central directory declaring `declared` uncompressed bytes.
+///
+/// Hand-assembled, because this crate deliberately owns its zip writer and that writer only ever
+/// emits stored members — the deflate path is what a *published* artifact uses, and what this is
+/// testing.
+fn deflate_zip(body: &[u8], declared: u32) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    e.write_all(body).unwrap();
+    let deflated = e.finish().unwrap();
+    let crc = crc32fast::hash(body);
+    let name = b"big";
+
+    let mut lfh = Vec::new();
+    lfh.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+    lfh.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    lfh.extend_from_slice(&0u16.to_le_bytes()); // flags
+    lfh.extend_from_slice(&8u16.to_le_bytes()); // deflate
+    lfh.extend_from_slice(&0u16.to_le_bytes()); // time
+    lfh.extend_from_slice(&0u16.to_le_bytes()); // date
+    lfh.extend_from_slice(&crc.to_le_bytes());
+    lfh.extend_from_slice(&(deflated.len() as u32).to_le_bytes());
+    lfh.extend_from_slice(&declared.to_le_bytes());
+    lfh.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    lfh.extend_from_slice(&0u16.to_le_bytes()); // extra length
+    lfh.extend_from_slice(name);
+
+    let mut out = lfh;
+    out.extend_from_slice(&deflated);
+    let cd_offset = out.len() as u32;
+
+    let mut cdh = Vec::new();
+    cdh.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+    cdh.extend_from_slice(&20u16.to_le_bytes()); // version made by
+    cdh.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    cdh.extend_from_slice(&0u16.to_le_bytes()); // flags
+    cdh.extend_from_slice(&8u16.to_le_bytes()); // deflate
+    cdh.extend_from_slice(&0u16.to_le_bytes()); // time
+    cdh.extend_from_slice(&0u16.to_le_bytes()); // date
+    cdh.extend_from_slice(&crc.to_le_bytes());
+    cdh.extend_from_slice(&(deflated.len() as u32).to_le_bytes());
+    cdh.extend_from_slice(&declared.to_le_bytes());
+    cdh.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    cdh.extend_from_slice(&0u16.to_le_bytes()); // extra
+    cdh.extend_from_slice(&0u16.to_le_bytes()); // comment
+    cdh.extend_from_slice(&0u16.to_le_bytes()); // disk
+    cdh.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+    cdh.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+    cdh.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+    cdh.extend_from_slice(name);
+    let cd_size = cdh.len() as u32;
+    out.extend_from_slice(&cdh);
+
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // this disk
+    out.extend_from_slice(&0u16.to_le_bytes()); // cd disk
+    out.extend_from_slice(&1u16.to_le_bytes()); // entries here
+    out.extend_from_slice(&1u16.to_le_bytes()); // entries total
+    out.extend_from_slice(&cd_size.to_le_bytes());
+    out.extend_from_slice(&cd_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    out
+}
+
+#[test]
+fn a_zip_member_that_lies_about_its_size_is_refused() {
+    // The declared size is what the walker adds to its running total, so a member declaring 64
+    // bytes and inflating to 32 MiB made every limit downstream a limit on fiction: the artifact
+    // passed the `total_expanded_bytes` check and then expanded past it inside this process.
+    let bytes = deflate_zip(&vec![0u8; 32 * 1024 * 1024], 64);
+    assert!(bytes.len() < 100_000, "small on the wire: {}", bytes.len());
+
+    let err = parse(bytes, Format::Zip, &Limits::default(), &mut Vec::new())
+        .expect_err("a member that inflates past what it declared");
+    let text = err.to_string();
+    assert!(
+        text.contains("declares 64") || text.contains("total_expanded_bytes"),
+        "refused for the right reason: {text}"
+    );
+
+    // An honest member of the same shape still parses, so the check is about the lie and not about
+    // deflate.
+    let honest = deflate_zip(b"hello", 5);
+    assert!(parse(honest, Format::Zip, &Limits::default(), &mut Vec::new()).is_ok());
+}

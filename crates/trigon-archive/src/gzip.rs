@@ -20,7 +20,14 @@ const FCOMMENT: u8 = 1 << 4;
 pub const OS_UNKNOWN: u8 = 255;
 
 /// Parse the header and inflate the payload.
-pub fn read(bytes: &[u8]) -> Result<(GzipHeader, Vec<u8>)> {
+/// Parse a gzip member, inflating at most `budget` bytes.
+///
+/// The budget is not advisory. `total_expanded_bytes` used to be checked against the sizes a zip's
+/// central directory *declares*, and gzip took no limits at all — so a 200 KB member of compressed
+/// zeros inflated to 200 MB inside this process whatever the caller's limits said, and `.tar.gz`,
+/// which is every npm package, went through this path. The ceiling has to be enforced against what
+/// comes out, because what goes in is a number the attacker wrote.
+pub fn read(bytes: &[u8], budget: u64) -> Result<(GzipHeader, Vec<u8>)> {
     let bad = |d: &str| ArchiveError::Malformed {
         format: "gzip",
         detail: d.to_string(),
@@ -85,9 +92,20 @@ pub fn read(bytes: &[u8]) -> Result<(GzipHeader, Vec<u8>)> {
         .get(p..bytes.len() - 8)
         .ok_or_else(|| bad("truncated payload"))?;
     let mut out = Vec::new();
-    flate2::read::DeflateDecoder::new(payload)
+    // One byte past the budget, so an exhausted reader is distinguishable from one that stopped
+    // exactly at the limit.
+    let ceiling = budget.saturating_add(1);
+    let mut decoder = flate2::read::DeflateDecoder::new(payload).take(ceiling);
+    decoder
         .read_to_end(&mut out)
         .map_err(|e| bad(&format!("inflate: {e}")))?;
+    if out.len() as u64 > budget {
+        return Err(ArchiveError::LimitExceeded {
+            limit: "total_expanded_bytes",
+            actual: out.len() as u64,
+            allowed: budget,
+        });
+    }
 
     let tail = &bytes[bytes.len() - 8..];
     let want_crc = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]);
@@ -216,7 +234,7 @@ mod tests {
         let mut out = Vec::new();
         write(&h, &payload, flate2::Compression::none(), &mut out).unwrap();
 
-        let (h2, p2) = read(&out).unwrap();
+        let (h2, p2) = read(&out, u64::MAX).unwrap();
         assert_eq!(h2, h);
         assert_eq!(p2, payload);
     }
@@ -245,7 +263,7 @@ mod tests {
         let h = GzipHeader::default();
         let mut out = Vec::new();
         write(&h, b"x", flate2::Compression::none(), &mut out).unwrap();
-        assert_eq!(read(&out).unwrap().0.mtime, None);
+        assert_eq!(read(&out, u64::MAX).unwrap().0.mtime, None);
     }
 
     #[test]
@@ -255,7 +273,7 @@ mod tests {
         write(&h, b"hello world", flate2::Compression::none(), &mut out).unwrap();
         let n = out.len();
         out[n - 6] ^= 0xff; // corrupt the stored crc
-        assert!(read(&out).is_err());
+        assert!(read(&out, u64::MAX).is_err());
     }
 
     #[test]
@@ -264,7 +282,7 @@ mod tests {
         let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         e.write_all(b"interoperability").unwrap();
         let bytes = e.finish().unwrap();
-        let (_, payload) = read(&bytes).unwrap();
+        let (_, payload) = read(&bytes, u64::MAX).unwrap();
         assert_eq!(payload, b"interoperability");
     }
 }
