@@ -120,8 +120,13 @@ toward voiding an honest run rather than missing a forged one.
 - [x] Signing works unsigned and with a local ed25519 key. Sigstore keyless and Rekor v2 remain.
 - [ ] The attestor runs as a separate process and **re-derives the claim before signing**.
 - [x] **`trigon verify-attestation --rerun-comparison`** re-derives the claim from the bundle and
-      two files, with no network and no trust in the producer. Still to prove: a bundle produced on
-      a different machine, from a checkout that shares no state with the producer.
+      two files, with no network and no trust in the producer — including from a checkout that
+      shares no state with the producer. `scripts/cross-machine-verify.sh` runs it: a fresh clone, a
+      separate target directory, a `--no-default-features` build whose tree contains no runtime and
+      no network client, four files handed over, and the network taken away with `unshare -rn`. It
+      also requires an overstated outcome, an edited payload and a substituted artifact each to be
+      caught, and each for its own reason — a verifier that printed "the claim holds"
+      unconditionally would pass the positive case alone.
 - [x] `trigon verify` refuses to compare across differing stabilizer-set digests
       (`AttestError::SetMismatch`), and re-derivation checks the **raw** digests as well as the
       stabilized ones — two artifacts that stabilize alike are the normal case, so the stabilized
