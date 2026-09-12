@@ -370,6 +370,21 @@ impl BuildHandle for PodmanBuild {
             ctx.join("Dockerfile").display().to_string(),
             ctx.display().to_string(),
         ];
+        // The image build had no network flag at all, so every phase rendered as a layer — setup,
+        // source, and deps unless deferred — ran with ordinary rootless networking whatever tier
+        // was asked for. At `deny-all` that meant a tier whose entire content is "reaches nothing"
+        // reached everything, and the run was still recorded as enforced. `docs/12-security.md`
+        // §1.1 needs no more than that: a `src:` step fetching the published artifact, a `build:`
+        // step copying it to the output, and a signed `Exact`.
+        //
+        // Only `DenyAll` can be closed here. `MirrorOnly` cannot: rootless `podman build` refuses
+        // to join a named network, and the source phase has to clone from a forge the island has
+        // no route to. That gap is real, is not closed by this, and is written down in
+        // `docs/16-findings.md` §3.12 and `docs/17-backlog.md` B7.
+        if self.plan.egress == EgressTier::DenyAll {
+            build_args.push("--network".into());
+            build_args.push("none".into());
+        }
         // The deps phase runs at image-build time, which is where a package manager actually talks
         // to the mirror, so the mapping has to exist here too and not only at run time.
         let gateway = if self.plan.extra_hosts.values().any(|v| v == "host-gateway") {
@@ -495,8 +510,11 @@ impl BuildHandle for PodmanBuild {
 
         let mut guard_trips = Vec::new();
         if let Some(i) = island {
-            guard_trips = i.guard_trips().await;
+            // The island is destroyed either way, and the read happens first: a failure to read the
+            // guard must not leave a network behind, and must not be swallowed.
+            let read = i.guard_trips().await;
             i.destroy().await;
+            guard_trips = read?;
         }
 
         let mut outcome = self.outcome(code, artifact, timings, failed_in, log);
@@ -603,12 +621,17 @@ pub fn failing_phase(log: &str) -> Option<Phase> {
 /// Exactly one on purpose. A glob that matched three files means the strategy's `output_path` does
 /// not identify an artifact, and picking one of them would attach a verdict to whichever the
 /// filesystem happened to list first.
+/// The single file at the output path, if there is exactly one.
+///
+/// Regular files only, and the type is read without following the link: the build chose what is in
+/// this directory, and a symlink there points at a path on *our* filesystem. See `newest_file` in
+/// the binary, which had the same hole.
 fn collect(dir: &std::path::Path) -> Option<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.path())
-        .filter(|p| p.is_file())
         .collect();
     files.sort();
     match files.len() {

@@ -80,6 +80,32 @@ The tests no longer race because they serialize on a lock; that is not a fix for
 not depend on timing — a store lock, per-run storage, or not removing images from the build path at
 all.
 
+## B7. The image build is outside the egress boundary at `mirror-only`
+
+Found by the security sweep, and the most serious thing it found. `podman build` was invoked with no
+network flag at all, so every phase rendered as an image layer — setup and source always, deps
+unless deferred — ran with ordinary networking whatever tier was asked for. At `deny-all` a tier
+whose entire content is "reaches nothing" reached everything.
+
+`deny-all` is closed: the image build now runs with `--network none`. A build that needs a system
+package at that tier now fails, which is correct — the answer is a base image that carries it.
+
+`mirror-only` is **not** closed, and cannot be by the same move. Rootless `podman build` refuses to
+join a named network, which is why the deps phase is already deferred into the container; the source
+phase cannot be deferred the same way because it clones from a forge the island has no route to. So
+at the tier we recommend, a `src:` step can still reach the internet — and a model-authored strategy
+is exactly where such a step comes from.
+
+The design already names the shape of the answer: `EgressTier::GitAndMirror`. Either the mirror
+proxies git (its passthrough route is most of the mechanism already), or the source is fetched on
+the host and mounted, which `--source` half does today.
+
+Until then the CLI says what is true rather than "the egress boundary held", and the store records
+the runner's own `attestable`, which is `false`.
+
+**Done when:** no phase of a `mirror-only` run reaches anything but the mirror, demonstrated by a
+test that fails if one does.
+
 ## B5. A bug sweep
 
 Not a review of the last change: a sweep of the whole thing, looking for the classes this project

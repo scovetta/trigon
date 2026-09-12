@@ -400,6 +400,52 @@ One thing the corpus lost: it no longer contains a target that defeats a determi
 `needs-build-inference` rate will now read as a Builder win it is not, and the corpus wants a target
 that genuinely requires one.
 
+### 3.12 What an adversarial sweep of the code found
+
+Ten lenses over the whole workspace, every finding refuted by two independent skeptics before it
+counted. Twenty-one survived; thirteen were high. Three of them were controls this design rests on
+not working, and all three had the same shape: **a control that fails open, and reports success
+while doing it.**
+
+**The artifact guard never fired at `mirror-only`.** `Island::guard_trips` read the mirror
+container's *stdout*; the mirror writes its trip through `tracing`, which writes to *stderr*. The
+single most important control in the system — the one that makes a build downloading its own
+published artifact `Void` rather than a perfect reproduction — returned an empty list on the only
+tier that enforces it, and an unreadable log returned the same empty list as a quiet one. Three
+lenses found it independently, which is itself the finding: it was reachable from the subprocess
+surface, from the guard, and from "absent read as zero".
+
+**A symlink in the output directory made any host file the rebuilt artifact.** The collector used
+`Path::is_file`, which follows links. The published artifact sits two levels above the output
+directory under a name the package knows, so `ln -s ../../evil-1.2.3.tgz /out/zzz.tgz` hands back
+the published bytes, compares them against themselves, and signs `Exact`. No network needed — this
+is `docs/12-security.md` §1.1 reached with one symlink. Both collectors now take the type without
+following the link.
+
+**The image build was outside the egress boundary at every tier.** `podman build` was invoked with
+no network flag, so setup, source, and deps-unless-deferred ran with ordinary networking whatever
+tier was asked for — and the run was recorded as enforced. `deny-all` is now closed with
+`--network none`; `mirror-only` cannot be closed the same way, and is written up as B7.
+
+Two more worth naming because they are the project's own recurring shapes:
+
+- **The output directory was not cleared before the first attempt**, so a `--work` directory reused
+  across targets could hand the *previous* run's artifact to the comparison. `newest_file` takes the
+  last path in sort order, which has nothing to do with which run produced it.
+- **`attestable` was derived from the `--egress` flag rather than from the runner**, so a local
+  podman run — which records no network transcript and is never attestable at full trust — was
+  stamped `attestable: true` in the store, and the CLI told the operator "the egress boundary held"
+  for a run three of whose phases were outside it.
+
+The parser findings are their own cluster and are not yet fixed: a 42-byte zip panics the archive
+parser through an unchecked `u64` addition, and neither `gzip::read` nor `zip::read_member` bounds
+the inflate — `total_expanded_bytes` is checked against a size the input declares rather than
+against what it produces, so a 200 KB member expands to 200 MB inside our own process. Those are
+`docs/17-backlog.md` B5's remaining work.
+
+Thirty findings were refuted by the verification pass, which is the part worth keeping: the same
+structure that surfaced the guard bug also threw away half of what was claimed.
+
 ---
 
 ## 4. A stabilizer the reference does not have

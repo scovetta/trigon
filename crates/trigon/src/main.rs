@@ -957,14 +957,28 @@ mod build {
                     }
                 }
                 if !outcome.attestable {
-                    // Two different reasons, and naming the wrong one sends the reader to the
-                    // wrong fix. A run at `mirror-only` really did hold the boundary — the island
-                    // has one route out — and telling its operator that no mirror was enforced
-                    // invites them to go looking for a configuration bug that is not there.
-                    let why = if outcome.egress == trigon_sandbox::EgressTier::Open {
-                        "this run enforced no mirror and recorded no network transcript"
-                    } else {
-                        "the egress boundary held, but this runner records no network transcript"
+                    // Three different reasons, and naming the wrong one sends the reader to the
+                    // wrong fix.
+                    //
+                    // The middle one used to say "the egress boundary held", and that was not
+                    // true: rootless `podman build` cannot join the island, so at `mirror-only`
+                    // the setup and source phases run as image layers with ordinary networking.
+                    // Only `deny-all` closes the image build, and it does so by having no network
+                    // there at all. Saying the boundary held when one phase ran outside it is the
+                    // kind of claim this whole system exists to refuse.
+                    let why = match outcome.egress {
+                        trigon_sandbox::EgressTier::Open => {
+                            "this run enforced no mirror and recorded no network transcript"
+                        }
+                        trigon_sandbox::EgressTier::DenyAll => {
+                            "the build reached nothing, but this runner records no network \
+                             transcript to show it"
+                        }
+                        _ => {
+                            "the build phase was inside the boundary, the image build was not \
+                             (setup and source run as layers, which rootless podman cannot put on \
+                             the island), and this runner records no network transcript"
+                        }
                     };
                     println!(
                         "\n  not attestable: {why}, so it cannot claim the build fetched nothing \
@@ -1863,6 +1877,10 @@ mod rebuild {
             strategy_digest: None,
             derivation: None,
             pin: None,
+            // Overwritten below from what the runner reported. `false` until then, because
+            // claiming a run is attestable when we do not yet know is the one direction this must
+            // not err in.
+            attestable: false,
         };
 
         if let (Some(m), true) = (&model, verbose) {
@@ -1932,12 +1950,12 @@ mod rebuild {
         let mut judged: Option<(PathBuf, trigon_compare::Comparison)> = None;
         let mut compare_error: Option<Outcome> = None;
         let (built, strategy_digest) = loop {
-            // A fresh directory per attempt. Without it an earlier attempt's partial output sits
-            // beside a later one's artifact, and "the newest file" stops being a description of
-            // what this recipe produced.
-            if !repairs.attempts().is_empty() {
-                let _ = std::fs::remove_dir_all(&out);
-            }
+            // A fresh directory every attempt, including the first. Without clearing it before
+            // the first, a `--work` directory reused across targets hands the *previous run's*
+            // artifact to the comparison: `newest_file` takes the last path in sort order, which
+            // has nothing to do with which run produced it. A second target built into the same
+            // work directory would be judged against the first one's tarball.
+            let _ = std::fs::remove_dir_all(&out);
             let strategy_yaml = trigon_strategy::to_yaml(&strategy)?;
             std::fs::write(&strategy_file, &strategy_yaml)?;
             // Over the canonical value, not the YAML bytes, so editing a comment does not change
@@ -2261,6 +2279,14 @@ mod rebuild {
                 strategy_digest: strategy_digest.clone(),
                 derivation: Some(derivation.clone()),
                 pin,
+                // Asked of the runner that ran it, rather than derived from the flag that asked
+                // for a tier. The local runner reports `false` at every tier — it records no
+                // network transcript — and deriving this from `--egress` stamped `attestable:
+                // true` on runs whose image-build phases were outside the boundary entirely.
+                attestable: trigon_sandbox::BuildRunner::caps(&trigon_sandbox::PodmanRunner::new(
+                    &args.work,
+                ))
+                .attestable,
                 ..inputs.clone()
             };
             if let Err(e) = record_run(dir, &inputs, &upstream_path, &rebuilt, &comparison, verbose)
@@ -2322,6 +2348,8 @@ mod rebuild {
         strategy_digest: Option<String>,
         derivation: Option<String>,
         pin: Option<trigon_mirror::Observed>,
+        /// What the runner reported about its own enforcement, never what the flag asked for.
+        attestable: bool,
     }
 
     fn record_run(
@@ -2375,9 +2403,13 @@ mod rebuild {
                     base_image: args.image.clone(),
                     egress: args.egress.clone(),
                     isolation: String::new(),
-                    // An honest default until the runner reports it: claiming a run is attestable
-                    // when we do not know is the one direction this must not err in.
-                    attestable: args.egress != "open",
+                    // What the runner reported, not what the flag asked for. Deriving this from
+                    // `--egress` stamped `attestable: true` on a local podman run — which is never
+                    // attestable at full trust, because it records no network transcript, and
+                    // whose image-build phases are outside the boundary at every tier but
+                    // `deny-all`. A claim about enforcement has to come from the thing that
+                    // enforced it.
+                    attestable: args.attestable,
                     registry_moment: args.timewarp.clone(),
                     pin: args.pin.map(|o| trigon_store::PinEvidence {
                         index_requests: o.index_requests,
@@ -2613,14 +2645,29 @@ mod rebuild {
     }
 
     /// The artifact the build left behind.
+    ///
+    /// **Regular files only, and the type is taken without following the link.** The build writes
+    /// into a directory this process then reads, so a symlink there is the build choosing a path on
+    /// *our* filesystem — and the published artifact is sitting two levels up, under a name the
+    /// package knows. `ln -s ../../evil-1.2.3.tgz /out/zzz.tgz` would otherwise make the published
+    /// bytes the "rebuild", compare them against themselves, and sign `Exact`. That is
+    /// `docs/12-security.md` §1.1 with no network needed at all.
     fn newest_file(dir: &Path) -> Option<PathBuf> {
         let mut found: Vec<PathBuf> = Vec::new();
         let mut stack = vec![dir.to_path_buf()];
         while let Some(d) = stack.pop() {
             for e in std::fs::read_dir(&d).ok()?.flatten() {
                 let p = e.path();
-                if p.is_dir() {
+                // `file_type` on the entry is `lstat`: a symlink reports as a symlink rather than
+                // as whatever it points at. `Path::is_dir`/`is_file` follow it, which is the bug.
+                let Ok(kind) = e.file_type() else { continue };
+                if kind.is_dir() {
                     stack.push(p);
+                } else if !kind.is_file() {
+                    tracing::warn!(
+                        path = %p.display(),
+                        "ignoring a collected entry that is not a regular file"
+                    );
                 // Belt and braces beside writing the log elsewhere. Anything that is obviously ours
                 // rather than the build's has no business being mistaken for the artifact, and the
                 // failure when it is — a log parsed as a zip — names the wrong culprit.
@@ -2631,6 +2678,56 @@ mod rebuild {
         }
         found.sort();
         found.pop()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn tmpdir(tag: &str) -> PathBuf {
+            let d = std::env::temp_dir().join(format!("trigon-collect-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        #[test]
+        fn a_symlink_the_build_wrote_is_never_taken_for_the_artifact() {
+            // The build writes into a directory this process reads, so a symlink there is the
+            // build choosing a path on *our* filesystem — and the published artifact sits two
+            // levels up under a name the package knows. Following it would compare the published
+            // bytes against themselves and sign `Exact`: `docs/12-security.md` §1.1, with no
+            // network needed.
+            let d = tmpdir("symlink");
+            let published = d.join("evil-1.2.3.tgz");
+            std::fs::write(&published, b"the published bytes").unwrap();
+            let out = d.join("rebuild");
+            std::fs::create_dir_all(&out).unwrap();
+
+            // Sorts last, so it would win on any collector that took it.
+            std::os::unix::fs::symlink(&published, out.join("zzz.tgz")).unwrap();
+            assert_eq!(newest_file(&out), None, "a symlink is not an artifact");
+
+            // A real file beside it is still found, and the symlink still is not.
+            let real = out.join("aaa.tgz");
+            std::fs::write(&real, b"built here").unwrap();
+            assert_eq!(newest_file(&out), Some(real));
+        }
+
+        #[test]
+        fn a_symlinked_directory_is_not_walked_into() {
+            // The same escape one level up: a link to a directory elsewhere would put every file
+            // under it in the running for "the artifact".
+            let d = tmpdir("symlink-dir");
+            let elsewhere = d.join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::fs::write(elsewhere.join("zzz.tgz"), b"not ours to collect").unwrap();
+            let out = d.join("rebuild");
+            std::fs::create_dir_all(&out).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, out.join("sub")).unwrap();
+
+            assert_eq!(newest_file(&out), None);
+        }
     }
 }
 

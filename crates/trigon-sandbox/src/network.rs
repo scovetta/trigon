@@ -206,19 +206,23 @@ impl Island {
     /// The log rather than an endpoint, because the mirror sits inside the island and the host has
     /// no route to it: that is the point of the island. The marker is a fixed prefix so this does
     /// not depend on parsing prose.
-    pub async fn guard_trips(&self) -> Vec<String> {
+    ///
+    /// **Both streams, and an error when they cannot be read.** This used to take stdout only, and
+    /// the mirror writes its trip through `tracing`, which writes to *stderr* — so the single most
+    /// important control in the system reported nothing on the only tier that enforces it. A
+    /// failure to read is an error rather than an empty list for the same reason: "we could not
+    /// look" and "nothing tripped" are different answers, and only one of them means the run is
+    /// evidence of anything.
+    pub async fn guard_trips(&self) -> Result<Vec<String>, SandboxError> {
         let Some(container) = &self.mirror else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        run_ok(&self.binary, &["logs", container])
-            .await
-            .map(|logs| {
-                logs.lines()
-                    .filter(|l| l.contains(trigon_mirror::TRIP_MARKER))
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default()
+        let logs = run_both(&self.binary, &["logs", container]).await?;
+        Ok(logs
+            .lines()
+            .filter(|l| l.contains(trigon_mirror::TRIP_MARKER))
+            .map(str::to_owned)
+            .collect())
     }
 
     /// The mirror's address on the island.
@@ -266,6 +270,30 @@ impl Island {
 /// `podman logs` splits them, and a program that dies on a bad argument says so on stderr — which
 /// is exactly the case this is here to report. Reading stdout alone produced an empty diagnosis for
 /// the one failure that most needed one.
+/// Both streams, or the reason neither could be read.
+///
+/// Distinct from [`combined`], which answers the empty string on failure. Anything deciding whether
+/// a run is evidence needs to tell a quiet log from an unreadable one.
+async fn run_both(binary: &str, args: &[&str]) -> Result<String, SandboxError> {
+    let out = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Err(SandboxError::Failed {
+            phase: "collect".into(),
+            detail: format!(
+                "reading the mirror's log: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        });
+    }
+    let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+    s.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok(s)
+}
+
 async fn combined(binary: &str, args: &[&str]) -> String {
     let Ok(out) = Command::new(binary)
         .args(args)
