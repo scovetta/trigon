@@ -78,6 +78,12 @@ The most consequential serde decision in the design, so here is the reasoning in
 Internal tagging buffers through serde's private `Content` type, which breaks `flatten` with
 non-self-describing formats and loses YAML span information. So deserialization runs **two passes**:
 
+> **Revised in implementation.** Internal tagging and `serde_path_to_error` are incompatible: the
+> tagged deserializer buffers through serde's `Content` and the path is lost. The parser reads
+> `schema` and `kind` manually and then deserializes the payload directly, which keeps the path the
+> repair loop depends on. See [`16-findings.md`](16-findings.md) §3.2.
+
+
 ```rust
 let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(src)?;
 let schema = doc.get("schema").and_then(Value::as_u64).unwrap_or(1);
@@ -322,3 +328,12 @@ Promoting one means:
 
 Each promotion runs against the whole corpus before merge. That is the flywheel described in
 [`07-ai.md`](07-ai.md) §5, and it stops the system paying for the same insight ten thousand times.
+
+
+---
+
+> **Revised in implementation.** A tool's `needs` are collected whether or not any of its steps
+> survive their conditions, so a conditional tool contributes its system packages to every build that
+> references it. Put a need on the step that uses it. Two npm tools got this wrong and the symptom
+> was a pinned Node aborting under modules belonging to a Node nobody asked for —
+> [`16-findings.md`](16-findings.md) §3.3.

@@ -174,6 +174,15 @@ $168,000 configuration.
 
 - [x] The deterministic half: failure signatures, log compression, and the repair-loop policy, each
       testable with no provider configured.
+- [x] The provider seam and the Builder, with a replay provider that makes no call. The prompt is a
+      list of parts with a cache breakpoint rather than a string, because cache-read rate is an SLO
+      whose failure is invisible: the calls succeed and the bill is several times larger.
+- [ ] A live provider. Anthropic and one OpenAI-compatible endpoint.
+- [ ] The deterministic rungs that lower the model-invocation rate before any model is configured.
+      Two are already done and measured — pinning the build backend a wheel names, and removing a
+      system package that was breaking every npm build — and together they moved PyPI from 33% to
+      80% and npm from 13 of 20 to 15 of 20 reaching a comparison, with no model involved
+      ([`16-findings.md`](16-findings.md) §2).
 - [ ] Measurable lift on the `regression` corpus versus M1's heuristics-only baseline.
 - [ ] **Model-invocation rate trends down** across the milestone as the flywheel produces rules.
 - [ ] At least one repair promoted into a merged corpus-wide rule, with its impact preview.

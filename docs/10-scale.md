@@ -142,6 +142,11 @@ and only where payloads sit inline.
 
 ## 4. Metadata schema
 
+> **Not built yet, deliberately.** None of these tables is needed to sign a statement, and a schema
+> built before there is a fleet to put in it is a schema whose shape is a guess. `trigon-store` ships
+> the content-addressed layout [`09`](09-attestations.md) §7 specifies — blobs, run records,
+> attestations — and the tables below arrive with M4. See [`16-findings.md`](16-findings.md) §3.4.
+
 ```
 targets     (id, ecosystem, namespace, name, version, artifact, upstream_digest, publish_time,
              prevalence_score)          -- one row per artifact ever seen

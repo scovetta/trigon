@@ -261,7 +261,7 @@ pub trait Signer: Send + Sync {
 }
 ```
 
-**Synchronous, revised during implementation.** The trait was specified `#[async_trait]`, and the
+**Synchronous, revised during implementation** ([`16-findings.md`](16-findings.md) §3.1). The trait was specified `#[async_trait]`, and the
 verifier build is why it is not. `trigon verify-attestation` links `trigon-attest` and must contain
 no async runtime — that is the claim §7 makes checkable, and `xtask policy` enforces it — so an
 async method here would drag `tokio` across the judgement line for the benefit of signers that do

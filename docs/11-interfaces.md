@@ -18,7 +18,26 @@ So: **web for personas 2 and 3, and a very good CLI for personas 1 and 4.**
 
 ## 2. CLI
 
-One binary, subcommands.
+One binary, subcommands. **What follows is the intended surface; the built subset is smaller and its
+spellings differ in places.** `trigon --help` is authoritative, and today it carries:
+
+```
+trigon verify <upstream> <rebuild> [--attest F] [--key K] [--store D]
+trigon verify-attestation <bundle> --rerun-comparison --upstream A --rebuild B [--public-key HEX]
+trigon rebuild <purl> --image <pinned> [--egress TIER] [--timewarp auto] [--store D]
+trigon sweep <targets> --image <pinned> [--store D]
+trigon attest [--store D] [<run>] [--key K] [--prune]
+trigon runs [--store D]
+trigon stabilize | stabilizers | strategy render|tools | mirror | mirror-image | resolve | fetch | build
+```
+
+Three differences from the intended surface are decisions rather than gaps.
+`trigon attest` reads a **store**, not a run id on a control plane, because the attestor is a
+separate process that reads blobs by hash ([`09`](09-attestations.md) §6). `verify` takes two
+artifact paths rather than a PURL, because the judgement half has no registry client by
+construction. And there is no `serve`, `work` or `ingest` yet: those are M4.
+
+The intended surface:
 
 ```
 # The front door. Starts from something the user already has.

@@ -42,6 +42,7 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
 | [`13-roadmap.md`](13-roadmap.md) | M0 to M5 with exit criteria |
 | [`14-worked-examples.md`](14-worked-examples.md) | Four targets traced end to end, including the ones that come out messy |
 | [`15-corpora.md`](15-corpora.md) | The five test corpora, the manifest format, and how to fetch them without getting blocked |
+| [`16-findings.md`](16-findings.md) | **What building it changed.** Corrections to these documents, the measured rates, and what is still open |
 | [`adr/`](adr/) | Short records for the load-bearing decisions |
 
 ## Suggested reading order
@@ -53,11 +54,21 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
   `scripts/cross-machine-verify.sh` runs the whole thing end to end — it builds the verifier from a
   fresh clone, hands it a bundle and two files with the network taken away, and requires three
   different lies to be caught for three different reasons.
-- **Sceptical?** `14`, where two of the four examples come out with caveats.
+- **Sceptical?** `14`, where two of the four examples come out with caveats, and `16`, which is the
+  list of things these documents got wrong.
 
 ## Status
 
-Design phase. No implementation yet. We checked every claim in these documents about the prior art
-against the source of [google/oss-rebuild](https://github.com/google/oss-rebuild) and
-[microsoft/OSSGadget](https://github.com/microsoft/OSSGadget), and cite every claim about ecosystem
-reproducibility rates in [`03-ecosystems.md`](03-ecosystems.md).
+**These documents were written before any code, and describe the system as intended rather than as
+built.** Where the two disagree, [`16-findings.md`](16-findings.md) records which is right and why;
+individual documents carry a note where a decision has been revised. Keeping the record separate is
+deliberate — amending each document in place would erase which beliefs were wrong and how they were
+found out, and that history is most of what a later reader needs.
+
+M0 and M1 are complete, M2 is complete but for one criterion, and M3 has begun. The top-level
+[`README`](../README.md) carries the current rates.
+
+Every claim in these documents about the prior art was checked against the source of
+[google/oss-rebuild](https://github.com/google/oss-rebuild) and
+[microsoft/OSSGadget](https://github.com/microsoft/OSSGadget), and every claim about ecosystem
+reproducibility rates is cited in [`03-ecosystems.md`](03-ecosystems.md).
