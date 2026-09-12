@@ -247,6 +247,7 @@ crates/trigon-sandbox     the build runner, egress islands, isolation
 crates/trigon-mirror      the time-filtered index and the artifact guard
 crates/trigon-store       content-addressed blobs and run records
 crates/trigon-ai          the provider seam, the Builder, budgets and admission control
+crates/trigon-stabilize-wasm  a stabilizer set archived as a WebAssembly module, and its host
 crates/trigon             the binary
 xtask                     dependency policy, corpora, golden digests, the differential
 docs/                     the design, and what implementing it changed
@@ -257,10 +258,14 @@ scripts/                  the cross-machine verification check
 ## Build and check
 
 ```
-cargo test --workspace                      # 390 tests
+cargo test --workspace                      # 400 tests
 cargo run -p xtask -- policy                # the dependency policy
 cargo run -p xtask -- differential          # against the reference implementation
 scripts/cross-machine-verify.sh             # the claim a third party can check
+
+# The archived stabilizer set, which needs a second target and is not in the default run:
+cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
+cargo test  -p trigon-stabilize-wasm --features host
 ```
 
 Rust 1.85 or later, edition 2024. Rebuilds additionally need `podman`; nothing else has

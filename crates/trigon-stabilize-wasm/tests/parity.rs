@@ -154,3 +154,57 @@ fn an_unparseable_artifact_is_a_refusal_rather_than_a_plausible_answer() {
         .unwrap_err();
     assert!(e.to_string().contains("refused"), "{e}");
 }
+
+#[test]
+fn a_module_that_wants_an_import_is_refused_at_load() {
+    // The security-relevant path, and the reason this guest is worth running at all. A stabilizer
+    // that could reach a clock, a socket or a file could make a comparison depend on something
+    // outside the two artifacts — and the whole design rests on it being unable to. Refused at
+    // instantiation rather than at first call, so the failure names the module rather than
+    // appearing later as a strange result.
+    //
+    // Hand-assembled rather than compiled: the point is a module our own toolchain would never
+    // produce, and the bytes are the specification.
+    #[rustfmt::skip]
+    let with_import: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic, version 1
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00,             // type section: one () -> ()
+        0x02, 0x07, 0x01,                               // import section, one entry
+        0x01, b'e',                                     //   module "e"
+        0x01, b'f',                                     //   name "f"
+        0x00, 0x00,                                     //   a function of type 0
+    ];
+    let dir = std::env::temp_dir().join(format!("trigon-wasm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("imports.wasm");
+    std::fs::write(&path, with_import).unwrap();
+
+    let text = match trigon_stabilize_wasm::ArchivedSet::load(&path) {
+        Ok(_) => panic!("a module declaring an import must not load"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        text.contains("e::f"),
+        "the refusal should name what it wanted: {text}"
+    );
+    assert!(
+        text.contains("pure by construction"),
+        "and say why it is refused: {text}"
+    );
+}
+
+#[test]
+fn a_file_that_is_not_wasm_at_all_fails_with_its_path() {
+    // A verifier points `--stabilizers` at the wrong file eventually. The error should say which
+    // file, because "failed to parse" with no path is the same message for every mistake.
+    let dir = std::env::temp_dir().join(format!("trigon-wasm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("not-a-module.wasm");
+    std::fs::write(&path, b"{\"id\":\"wheel\"}").unwrap();
+
+    let text = match trigon_stabilize_wasm::ArchivedSet::load(&path) {
+        Ok(_) => panic!("a JSON file must not load as a module"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(text.contains("not-a-module.wasm"), "{text}");
+}
