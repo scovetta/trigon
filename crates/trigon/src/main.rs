@@ -252,6 +252,20 @@ enum Cmd {
         #[arg(long)]
         prune: bool,
     },
+    /// Score a sweep against a labelled corpus.
+    ///
+    /// A pass rate on its own cannot show the regression that matters: a change that raises the
+    /// aggregate while making the model fire on targets that were supposed to need nothing. This
+    /// splits the rate by the capability each target was labelled with, and fails on a model
+    /// invocation where the label forbids one, whatever the rate did.
+    #[cfg(feature = "build")]
+    Score {
+        /// A sweep's `results.tsv`.
+        results: PathBuf,
+        /// The labels for that corpus, as JSON.
+        #[arg(long)]
+        labels: PathBuf,
+    },
     /// List the runs a store holds.
     #[cfg(feature = "build")]
     Runs {
@@ -644,6 +658,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             key,
             prune,
         }),
+        #[cfg(feature = "build")]
+        Cmd::Score { results, labels } => score_run(&results, &labels),
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
         #[cfg(feature = "build")]
@@ -2687,6 +2703,86 @@ fn write_bundle(
         eprintln!(
             "  unsigned — the claim is complete and checkable, but nothing here says who made it"
         );
+    }
+    Ok(())
+}
+
+/// Score a sweep's results against its labelled corpus.
+#[cfg(feature = "build")]
+fn score_run(results: &Path, labels: &Path) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Corpus {
+        labels: Vec<trigon_ai::Labelled>,
+    }
+    let corpus: Corpus = serde_json::from_slice(
+        &std::fs::read(labels).with_context(|| format!("reading {}", labels.display()))?,
+    )
+    .with_context(|| format!("parsing {}", labels.display()))?;
+
+    let text = std::fs::read_to_string(results)
+        .with_context(|| format!("reading {}", results.display()))?;
+    let observed: Vec<trigon_ai::Observation> = text
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split('\t');
+            let purl = f.next()?.to_string();
+            let label = f.next()?;
+            // A model-call count is not in the results file yet, so it reads as zero. That is the
+            // honest value today — nothing calls a model — and it becomes wrong the moment one
+            // does, which is why the sweep has to carry it before this number means anything.
+            Some(trigon_ai::Observation {
+                purl,
+                outcome: label
+                    .parse::<trigon_core::Match>()
+                    .ok()
+                    .map(|m| m.to_string()),
+                model_calls: 0,
+                is_evidence: label.parse::<trigon_core::Match>().is_ok(),
+            })
+        })
+        .collect();
+
+    let card = trigon_ai::score(&corpus.labels, &observed);
+    println!(
+        "{} targets, {} model call(s)\n",
+        corpus.labels.len(),
+        card.model_calls
+    );
+    for (capability, rate) in &card.by_capability {
+        match rate.fraction() {
+            Some(f) => println!(
+                "  {capability:<24} {:>2}/{:<2} reproduced ({:.0}%)   of {} labelled",
+                rate.reproduced,
+                rate.evidence,
+                f * 100.0,
+                rate.total
+            ),
+            // Not 0%. "Nothing reproduces" and "nothing was tested" are different findings.
+            None => println!(
+                "  {capability:<24}  no evidence            of {} labelled",
+                rate.total
+            ),
+        }
+    }
+    if !card.forbidden_model_calls.is_empty() {
+        println!("\n  REGRESSION: a model fired on targets labelled trivial-deterministic:");
+        for p in &card.forbidden_model_calls {
+            println!("    {p}");
+        }
+    }
+    for (heading, list) in [
+        ("labelled but not reported on", &card.missing),
+        ("reported but not labelled", &card.unlabelled),
+    ] {
+        if !list.is_empty() {
+            println!("\n  {heading}:");
+            for p in list {
+                println!("    {p}");
+            }
+        }
+    }
+    if !card.acceptable() {
+        std::process::exit(1);
     }
     Ok(())
 }
