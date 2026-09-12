@@ -125,6 +125,25 @@ npm --registry "http://npm:2024-09-13T10:31:26Z@mirror.internal:8081"
 The timestamp travels in the URL userinfo, which means **plain HTTP to a host we control**. That is
 why the common path needs no MITM at all (§6).
 
+**Plain HTTP is not enough for pip, and its refusal is silent.** `PIP_INDEX_URL` alone gets a single
+warning — *"the repository located at timewarp is not a trusted or secure host and is being
+ignored"* — after which pip resolves as though no index were configured. Every build then installs
+from the live index while every log line says it was pinned, and the only symptom is the mirror
+reporting **zero requests**, which looks exactly like a build that happened not to need anything.
+`PIP_TRUSTED_HOST` must be exported alongside it, carrying the bare `host:port` with no scheme and
+no credentials:
+
+```
+PIP_INDEX_URL=http://pypi:2024-09-13T10:31:26Z@mirror.internal:8081/simple
+PIP_TRUSTED_HOST=mirror.internal:8081
+```
+
+This cost real measurements. The PyPI numbers in the M1 smoke corpus were gathered without the time
+pin they claimed to have, and the discrepancy only surfaced when a *pinned build backend* became the
+first thing to ask the mirror for a package after the index was configured. Anything that verifies
+the pin is working — a non-zero request count, a withheld-version count — is worth more than the
+configuration that sets it up.
+
 ### 4.2 Index-commit pinning (crates.io, and any git-indexed registry)
 
 Resolve a `crates.io-index` commit that satisfies the target's `Cargo.lock`, and serve the registry
