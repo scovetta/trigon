@@ -10,6 +10,7 @@ fn env() -> Environment {
         isolation: "UserNs".into(),
         attestable: true,
         registry_moment: Some("2018-04-09T01:10:45Z".into()),
+        pin: None,
     }
 }
 
@@ -265,4 +266,72 @@ async fn a_local_store_is_readable_by_a_process_that_did_not_write_it() {
         &reader.blobs().get(&written).await.unwrap()[..],
         b"published bytes"
     );
+}
+
+#[tokio::test]
+async fn a_pinned_moment_is_recorded_with_the_evidence_that_it_bound_something() {
+    // A `registry_moment` describes how a build was configured, not how it resolved, and the two
+    // came apart silently: pip ignores an untrusted plain-HTTP index after one warning and resolves
+    // against the live one, so every PyPI run recorded a pin it did not have. The evidence sits
+    // beside the claim so a reader can tell which they are looking at.
+    use trigon_store::PinEvidence;
+    let s = Store::in_memory();
+    let d = Digest::from_bytes([4; 32]);
+
+    let bound = PinEvidence {
+        index_requests: 153,
+        versions_withheld: 903,
+        artifact_requests: 40,
+        rejected: 0,
+    };
+    assert!(bound.bound());
+    let unproven = PinEvidence {
+        index_requests: 0,
+        ..bound
+    };
+    assert!(!unproven.bound(), "nothing went through the time filter");
+
+    let mut r = RunRecord::new(
+        "0008",
+        "pkg:pypi/a@1",
+        artifact("a.whl", &d, 1),
+        Environment {
+            registry_moment: Some("2024-02-25T23:20:01Z".into()),
+            pin: Some(unproven),
+            ..env()
+        },
+        "t",
+    );
+    r.outcome = Some("normalized".into());
+    s.put_run(&r).await.unwrap();
+
+    let back = s.get_run("0008").await.unwrap();
+    let pin = back.environment.pin.unwrap();
+    assert!(!pin.bound());
+    // The moment is still there. An unproven pin is not an absent one, and erasing it would hide
+    // what the build was trying to do.
+    assert_eq!(
+        back.environment.registry_moment.as_deref(),
+        Some("2024-02-25T23:20:01Z")
+    );
+}
+
+#[tokio::test]
+async fn no_mirror_is_a_third_state_rather_than_an_unproven_pin() {
+    // Nothing was configured, so there is nothing to prove — distinct from a pin that was claimed
+    // and cannot be confirmed, which is the case worth investigating.
+    let d = Digest::from_bytes([5; 32]);
+    let r = RunRecord::new(
+        "0009",
+        "pkg:npm/a@1",
+        artifact("a.tgz", &d, 1),
+        Environment {
+            registry_moment: None,
+            pin: None,
+            ..env()
+        },
+        "t",
+    );
+    assert!(r.environment.pin.is_none());
+    assert!(r.environment.registry_moment.is_none());
 }

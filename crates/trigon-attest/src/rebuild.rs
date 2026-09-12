@@ -31,6 +31,13 @@ pub struct RunFacts<'a> {
     /// unenforced one will read every run as enforced.
     pub attestable: bool,
     pub registry_moment: Option<&'a str>,
+    /// Evidence the pin above bound anything: `(index_requests, versions_withheld)`.
+    ///
+    /// `registry_moment` alone describes how a build was *configured*, not how it *resolved*, and
+    /// the two came apart silently for weeks. A statement that carries the moment and no evidence
+    /// invites a reader to assume the stronger thing, which is the mistake this whole field exists
+    /// to prevent.
+    pub pin_observed: Option<(u64, u64)>,
     pub strategy_digest: Option<&'a str>,
     /// `definition`, `heuristic`, `ci_derived`, `model_assisted`.
     pub derivation: Option<&'a str>,
@@ -76,6 +83,9 @@ impl Statement {
                 "internalParameters": {
                     "strategyDigest": f.strategy_digest,
                     "registryMoment": f.registry_moment,
+                    // Beside the moment, never instead of it. `false` here does not make the run
+                    // wrong; it makes the pin unproven, and those are different claims.
+                    "registryPinBound": f.pin_observed.map(|(i, _)| i > 0),
                 },
             },
             "runDetails": {
@@ -145,6 +155,14 @@ impl Statement {
                 "trips": f.guard_trips,
             },
             "violations": f.guard_trips,
+            // The numbers, not just the verdict, so a reader can tell "the build asked for nothing"
+            // from "the build asked somewhere else" without re-running anything.
+            "registryPin": f.pin_observed.map(|(index_requests, withheld)| json!({
+                "moment": f.registry_moment,
+                "bound": index_requests > 0,
+                "indexRequests": index_requests,
+                "versionsWithheld": withheld,
+            })),
         });
 
         Statement {
@@ -171,6 +189,7 @@ mod tests {
             isolation: "UserNs",
             attestable: true,
             registry_moment: Some("2018-04-09T01:10:45Z"),
+            pin_observed: Some((153, 903)),
             strategy_digest: Some("be7ffd47303e29ca"),
             derivation: Some("heuristic"),
             instructions: None,
@@ -215,6 +234,45 @@ mod tests {
             "open"
         );
         assert_eq!(s.predicate["attestable"], false);
+    }
+
+    #[test]
+    fn a_pinned_moment_carries_the_evidence_that_it_bound_something() {
+        // The whole point. A statement naming a moment with nothing beside it invites the reader to
+        // assume it applied, and for weeks it did not: pip ignores an untrusted plain-HTTP index
+        // after one warning and resolves against the live one.
+        let d = Digest::from_bytes([9; 32]);
+        let s = Statement::rebuild("a.tgz", &d, &facts());
+        assert_eq!(
+            s.predicate["buildDefinition"]["internalParameters"]["registryPinBound"],
+            true
+        );
+
+        let unproven = RunFacts {
+            pin_observed: Some((0, 0)),
+            ..facts()
+        };
+        let s = Statement::build_observation("a.tgz", &d, &unproven);
+        assert_eq!(s.predicate["registryPin"]["bound"], false);
+        assert_eq!(s.predicate["registryPin"]["indexRequests"], 0);
+        // The moment is still recorded. An unproven pin is not an absent one.
+        assert_eq!(s.predicate["registryPin"]["moment"], "2018-04-09T01:10:45Z");
+    }
+
+    #[test]
+    fn a_run_with_no_mirror_claims_no_pin_either_way() {
+        // A third state, and not a failure: nothing was configured, so there is nothing to prove.
+        let d = Digest::from_bytes([8; 32]);
+        let s = Statement::build_observation(
+            "a.tgz",
+            &d,
+            &RunFacts {
+                registry_moment: None,
+                pin_observed: None,
+                ..facts()
+            },
+        );
+        assert!(s.predicate["registryPin"].is_null());
     }
 
     #[test]

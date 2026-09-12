@@ -1706,6 +1706,7 @@ mod rebuild {
                 .filter(|_| args.timewarp.is_some()),
             strategy_digest: None,
             derivation: None,
+            pin: None,
         };
 
         let rungs = ladder(
@@ -1748,6 +1749,8 @@ mod rebuild {
         let guard_file = args.work.join("guard.json");
         std::fs::write(&guard_file, serde_json::to_vec_pretty(&guard)?)?;
 
+        // Evidence the registry pin bound something, filled in once the mirror is torn down.
+        let mut pin: Option<trigon_mirror::Observed> = None;
         let mirror_addr = mirror.as_ref().map(|m| m.host());
         let built = crate::build::run_with(
             &strategy_file,
@@ -1766,15 +1769,34 @@ mod rebuild {
         );
 
         if let Some(m) = mirror {
-            use std::sync::atomic::Ordering;
-            let s = m.stats();
-            // Printed because a claim of a pinned dependency graph should be able to show the pin
-            // did something. Zero filtered requests means the build never asked the mirror.
+            // A claim of a pinned dependency graph has to be able to show the pin did something,
+            // and until this check existed it could not. `PIP_INDEX_URL` without `PIP_TRUSTED_HOST`
+            // makes pip warn once and then resolve against the live index, so every PyPI run
+            // recorded a moment it did not have — for weeks, with this counter sitting at zero the
+            // whole time and reading exactly like a build that needed nothing.
+            let observed = m.observed();
+            pin = Some(observed);
             if verbose {
                 println!(
                     "\n  mirror     {} index request(s), {} version(s) withheld",
-                    s.index_requests.load(Ordering::Relaxed),
-                    s.versions_withheld.load(Ordering::Relaxed),
+                    observed.index_requests, observed.versions_withheld,
+                );
+            }
+            // Zero is ambiguous — a package with no dependencies asks for nothing — so this warns
+            // rather than fails unless the caller says otherwise. Silence was the whole problem;
+            // guessing which silence is which would be a different one.
+            if !observed.pin_bound() {
+                let how = if observed.contacted() {
+                    "it was contacted but served no index document"
+                } else {
+                    "it was never contacted"
+                };
+                tracing::warn!(
+                    rejected = observed.rejected,
+                    "this run claims to resolve against the index as it stood at the publish \
+                     moment, and the mirror cannot confirm it: {how}. Either the build needed no \
+                     dependencies, or the pin did not reach the client and it resolved against \
+                     today's index."
                 );
             }
             let trips = m.trips();
@@ -1851,6 +1873,7 @@ mod rebuild {
             let inputs = RecordInputs {
                 strategy_digest: strategy_digest.clone(),
                 derivation: Some(derivation.clone()),
+                pin,
                 ..inputs.clone()
             };
             if let Err(e) = record_run(dir, &inputs, &upstream_path, &rebuilt, &comparison, verbose)
@@ -1902,6 +1925,7 @@ mod rebuild {
         timewarp: Option<String>,
         strategy_digest: Option<String>,
         derivation: Option<String>,
+        pin: Option<trigon_mirror::Observed>,
     }
 
     fn record_run(
@@ -1959,6 +1983,12 @@ mod rebuild {
                     // when we do not know is the one direction this must not err in.
                     attestable: args.egress != "open",
                     registry_moment: args.timewarp.clone(),
+                    pin: args.pin.map(|o| trigon_store::PinEvidence {
+                        index_requests: o.index_requests,
+                        versions_withheld: o.versions_withheld,
+                        artifact_requests: o.artifact_requests,
+                        rejected: o.rejected,
+                    }),
                 },
                 now_rfc3339(),
             );
@@ -2951,6 +2981,10 @@ mod attestor {
             isolation: &r.environment.isolation,
             attestable: r.environment.attestable,
             registry_moment: r.environment.registry_moment.as_deref(),
+            pin_observed: r
+                .environment
+                .pin
+                .map(|p| (p.index_requests, p.versions_withheld)),
             strategy_digest: r.strategy_digest.as_deref(),
             derivation: r.derivation.as_deref(),
             instructions: None,

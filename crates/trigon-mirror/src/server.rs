@@ -29,6 +29,49 @@ pub struct Stats {
     pub rejected_requests: AtomicU64,
 }
 
+/// Evidence that a registry pin bound something.
+///
+/// A run that says it resolved against the index as of some instant is making a claim, and until
+/// this existed nothing checked it. The failure it exists to catch is silent by construction: pip
+/// ignores an untrusted plain-HTTP index after one warning and resolves against the live one, so
+/// the build gets today's packages while every log line says it was pinned. The only trace was this
+/// counter sitting at zero, which reads exactly like a build that happened not to need anything.
+///
+/// Zero is genuinely ambiguous — a package with no dependencies asks for nothing — so this reports
+/// rather than judges, and the caller decides. See `docs/16-findings.md` §1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Observed {
+    /// Index documents served through the time filter. Non-zero is proof the pin bound something.
+    pub index_requests: u64,
+    /// Versions removed because they did not exist yet at the pinned moment.
+    pub versions_withheld: u64,
+    pub artifact_requests: u64,
+    /// Requests the mirror turned away, most often for arriving with no filter at all — a client
+    /// that dropped the credentials carrying the moment. Distinct from silence: somebody asked and
+    /// was refused, which is a different thing to investigate.
+    pub rejected: u64,
+}
+
+impl Observed {
+    /// Whether anything was served through the time filter.
+    ///
+    /// Not the same question as "is the pin correct": a build that asked once and got what it
+    /// wanted proves the configuration reached the client, which is the part that was silently
+    /// failing.
+    pub fn pin_bound(&self) -> bool {
+        self.index_requests > 0
+    }
+
+    /// Whether the mirror was contacted at all, by any route.
+    ///
+    /// Separates "the pin did not apply" from "the build never came here", which want different
+    /// investigations: the first is a configuration that did not reach the client, the second is a
+    /// build that resolved nothing or resolved it somewhere else.
+    pub fn contacted(&self) -> bool {
+        self.index_requests + self.artifact_requests + self.rejected > 0
+    }
+}
+
 pub struct Mirror {
     /// For index documents, which we parse. Transparent decompression is wanted here.
     client: reqwest::Client,
@@ -66,6 +109,16 @@ impl MirrorHandle {
 
     pub fn stats(&self) -> &Stats {
         &self.stats
+    }
+
+    /// What the mirror actually did, as plain numbers a caller can act on.
+    pub fn observed(&self) -> Observed {
+        Observed {
+            index_requests: self.stats.index_requests.load(Ordering::Relaxed),
+            versions_withheld: self.stats.versions_withheld.load(Ordering::Relaxed),
+            artifact_requests: self.stats.passthrough_requests.load(Ordering::Relaxed),
+            rejected: self.stats.rejected_requests.load(Ordering::Relaxed),
+        }
     }
 
     /// What the guard caught, if anything. A non-empty list makes the run `Void`.

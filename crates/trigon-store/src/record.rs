@@ -60,6 +60,35 @@ pub struct Environment {
     /// The instant the dependency index was pinned to, where one was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_moment: Option<String>,
+    /// Evidence that the pin above bound anything.
+    ///
+    /// A `registry_moment` on its own is a claim about how the build was configured, not about how
+    /// it resolved. The two came apart silently for weeks: pip ignores an untrusted plain-HTTP
+    /// index after a single warning and resolves against the live one, so every run recorded a pin
+    /// it did not have. Recording the evidence beside the claim is what makes the difference
+    /// visible to anyone reading the statement rather than only to whoever ran it.
+    ///
+    /// `None` where no mirror was configured, which is a third state and not a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<PinEvidence>,
+}
+
+/// What the mirror saw, recorded beside the moment the build claimed to be pinned to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinEvidence {
+    /// Non-zero is proof the configuration reached the client.
+    pub index_requests: u64,
+    pub versions_withheld: u64,
+    pub artifact_requests: u64,
+    /// Requests refused, most often for arriving without the filter. Distinct from silence.
+    pub rejected: u64,
+}
+
+impl PinEvidence {
+    /// Whether anything was served through the time filter.
+    pub fn bound(&self) -> bool {
+        self.index_requests > 0
+    }
 }
 
 /// Everything one run produced, with the large parts left in the blob store.
