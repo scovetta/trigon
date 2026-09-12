@@ -1,0 +1,29 @@
+[package]
+name = "trigon-stabilize-wasm"
+version = "0.0.0"
+description = "A stabilizer set, archived as a WebAssembly module a verifier can run."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+trigon-core.workspace = true
+trigon-archive.workspace = true
+trigon-stabilize.workspace = true
+# The host lives beside the guest so the ABI has one definition rather than two that drift. Off by
+# default, and never enabled for the wasm32 build.
+wasmtime = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+
+[features]
+host = ["dep:wasmtime", "dep:anyhow"]
+
+[dev-dependencies]
+tar = "0.4"
+flate2 = "1"
+zip_crate = { package = "zip", version = "2", default-features = false, features = ["deflate"] }

@@ -79,7 +79,7 @@ $ trigon rebuild pkg:npm/left-pad@1.3.0 \
   source     https://github.com/stevemao/left-pad @ ff8e7ba8b41228…
   strategy   Heuristic, commit found by RegistryCommit, confidence Certain
 
-  mirror     70 index request(s), 1047 version(s) withheld
+  mirror     69 index request(s), 1044 version(s) withheld across them
 
 ✔ normalized
 
@@ -95,9 +95,13 @@ $ trigon rebuild pkg:npm/left-pad@1.3.0 \
 ```
 
 `normalized` rather than `exact`: the two tarballs differ in mtimes, file modes and member order,
-all of which the stabilizers remove, and in nothing else. The `mirror` line is the evidence that the
-dependency index really was pinned to the publish date — 1,047 versions that did not exist in 2018
-were withheld from the resolver.
+all of which the stabilizers remove, and in nothing else.
+
+The `mirror` line is the evidence that the dependency index really was pinned to the publish date.
+The count is across all 69 packuments the build fetched, not left-pad's own — left-pad has published
+nothing since 2018, so none of its fifteen versions were withheld. The thousand-odd come from its
+devDependency tree, where `mocha` alone accounts for 111 versions that did not exist in April 2018
+and `glob` for 73.
 
 ### A PyPI package
 
@@ -106,7 +110,7 @@ $ trigon rebuild pkg:pypi/chardet@7.6.0 \
       --image docker.io/library/python@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b \
       --work ./work-py --egress open --timewarp auto
 
-  mirror     10 index request(s), 12 version(s) withheld
+  mirror     10 index request(s), 12 version(s) withheld across them
 
 ✔ exact
 

@@ -428,6 +428,10 @@ fn verifier_tree() -> Result<Vec<String>> {
         "trigon-sandbox",
         "trigon-ai",
         "trigon-registry",
+        // The `wasm` feature exists and is off by default. It nearly doubles this tree, so a
+        // verifier that acquired it by accident — a default-features slip, a feature unified in
+        // from elsewhere — would have quietly given up the property the build exists to demonstrate.
+        "wasmtime",
     ];
     let out = std::process::Command::new(env!("CARGO"))
         .current_dir(workspace_root())

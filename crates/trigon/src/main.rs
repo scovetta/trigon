@@ -1789,8 +1789,13 @@ mod rebuild {
             let observed = m.observed();
             pin = Some(observed);
             if verbose {
+                // The denominator is stated inline because the count is a total across every
+                // packument the build fetched, not the target's own. left-pad publishes fifteen
+                // versions and withholds none of them; the thousand-odd are its devDependency
+                // tree, where `mocha` alone accounts for a hundred. "1044 versions withheld" on
+                // its own reads as a claim about left-pad and is not one.
                 println!(
-                    "\n  mirror     {} index request(s), {} version(s) withheld",
+                    "\n  mirror     {} index request(s), {} version(s) withheld across them",
                     observed.index_requests, observed.versions_withheld,
                 );
             }

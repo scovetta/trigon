@@ -24,6 +24,7 @@ trigon-sandbox = { workspace = true, optional = true }
 trigon-registry = { workspace = true, optional = true }
 trigon-mirror = { workspace = true, optional = true }
 trigon-store = { workspace = true, optional = true }
+trigon-stabilize-wasm = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 anyhow.workspace = true
 clap.workspace = true
@@ -39,6 +40,11 @@ default = ["build"]
 # that reproduces a verdict from two artifacts and links no runtime and no network client, which is
 # the claim a sceptic can check with `cargo tree` rather than take on trust.
 build = ["dep:trigon-sandbox", "dep:trigon-registry", "dep:trigon-mirror", "dep:trigon-store", "dep:tokio"]
+# Run an archived stabilizer set rather than only describing it, so a claim made under a set this
+# binary does not carry can still be re-derived. Off by default: it roughly doubles the verifier's
+# dependency tree, and the small tree is the thing a sceptic checks instead of trusting us. A
+# verifier who only ever checks claims made under their own set never needs it.
+wasm = ["dep:trigon-stabilize-wasm", "trigon-stabilize-wasm/host"]
 
 [dev-dependencies]
 tar = "0.4"

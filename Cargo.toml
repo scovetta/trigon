@@ -13,6 +13,7 @@ members = [
     "crates/trigon-mirror",
     "crates/trigon-ai",
     "crates/trigon-store",
+    "crates/trigon-stabilize-wasm",
     "crates/trigon",
     "xtask",
 ]
@@ -36,6 +37,7 @@ trigon-registry = { path = "crates/trigon-registry", version = "0.0.0" }
 trigon-mirror = { path = "crates/trigon-mirror", version = "0.0.0" }
 trigon-ai = { path = "crates/trigon-ai", version = "0.0.0" }
 trigon-store = { path = "crates/trigon-store", version = "0.0.0" }
+trigon-stabilize-wasm = { path = "crates/trigon-stabilize-wasm", version = "0.0.0" }
 
 # Judgement half: sync, no tokio, no reqwest. See docs/01-architecture.md §2.2.
 serde = { version = "1", features = ["derive"] }
@@ -78,6 +80,11 @@ futures = "0.3"
 # backends behind features: `docs/17` says to use it directly rather than wrap it in a trait of our
 # own, and the local backend is all a single binary needs.
 object_store = "0.14"
+# Only for the `wasm` feature of the verifier, which is off by default. Roughly doubles the
+# verifier's dependency tree (99 crates against the 100 it has), which is exactly why it is a
+# feature: the small binary is the claim, and only a verifier checking *across* stabilizer-set
+# digests needs to pay for a WASM host.
+wasmtime = { version = "40", default-features = false, features = ["runtime", "cranelift"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
