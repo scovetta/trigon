@@ -195,5 +195,19 @@ fn the_npm_override_renders_the_script_its_definition_describes() {
         "{}",
         i.build
     );
-    assert!(i.requires.system_deps.contains("npm"), "{:?}", i.requires);
+    // And *not* Debian's `npm`. This definition installs its own pinned Node and points every npm
+    // invocation at it, so asking apt for a second one adds a Node 18 plus a system-wide
+    // `NODE_PATH` that the pinned Node 10 then loads modules from — it aborts with SIGABRT after
+    // the install has already succeeded, which reads as a toolchain too old for the kernel and is
+    // not. This assertion used to require the opposite, which is how the bug survived a corpus run.
+    assert!(
+        !i.requires.system_deps.contains("npm"),
+        "a strategy that installs its own Node must not also pull Debian's: {:?}",
+        i.requires
+    );
+    assert!(
+        i.requires.system_deps.contains("wget"),
+        "it still needs what actually fetches that Node: {:?}",
+        i.requires
+    );
 }

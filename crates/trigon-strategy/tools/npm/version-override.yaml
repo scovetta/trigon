@@ -3,8 +3,14 @@
 # Some packages are published from a tree whose package.json still carries the previous version,
 # with the release version supplied at publish time. `--ignore-scripts` because this is metadata
 # surgery, not a build step, and a version hook here would run outside the phase that declared it.
+#
+# The need sits on the step, not on the tool. A tool-level `needs` is collected whether or not any
+# of its steps survive their conditions — so this tool, whose single step only runs when a version
+# override was asked for, was pulling Debian's `npm` into every npm build. That package brings its
+# own Node 18 and a system-wide `NODE_PATH`, and a pinned Node 10 then loads modules written for 18
+# and aborts after the install has already succeeded. It reads as a toolchain too old for the
+# kernel; it is not.
 id: npm/version-override
-needs: [npm]
 params:
   version:
     required: false
@@ -12,6 +18,8 @@ params:
     required: false
 steps:
   - runs: >-
-      {%- if with.version %}
       PATH=/usr/bin:/bin:/usr/local/bin npm version --ignore-scripts{% if with.dir and with.dir != '.' %} --prefix {{ with.dir }}{% endif %} --no-git-tag-version {{ with.version }}
-      {%- endif %}
+    if: "{{ with.version }}"
+    # Genuinely needed here: the command above prefers the system npm on purpose, because metadata
+    # surgery should not run under the package's own pinned toolchain.
+    needs: [npm]

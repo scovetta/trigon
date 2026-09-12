@@ -103,12 +103,22 @@ pub fn generator_evidence(bytes: &[u8]) -> Vec<Evidence> {
 
 /// The name the wheel records is not always the name that installs.
 ///
-/// `bdist_wheel` is the setuptools command that wrote the file, not a distribution anyone can pin;
-/// its version is the `wheel` package's. Pinning `bdist_wheel==0.37.1` fails to resolve, which
-/// would turn a divergence we understand into a build failure we do not.
+/// Two cases, both found by pins that failed to bite:
+///
+/// - `bdist_wheel` is the setuptools *command* that wrote the file, not a distribution anyone can
+///   pin; the version it reports is the `wheel` package's. Pinning `bdist_wheel==0.37.1` fails to
+///   resolve, turning a divergence we understand into a build failure we do not.
+/// - `flit` is the command-line tool; `flit_core` is the PEP 517 backend that writes the
+///   `Generator` line and decides the metadata. Constraining `flit` leaves `flit_core` free, which
+///   is why `packaging` came back built by `flit 4.0.1` under a `flit==3.12.0` pin and diverged on
+///   `Metadata-Version` alone.
+///
+/// Both are the same mistake: the name in the file is the thing that *ran*, and a constraint binds
+/// the thing that *installs*.
 fn normalize_backend(tool: &str) -> String {
     match tool {
         "bdist_wheel" => "wheel".to_string(),
+        "flit" => "flit_core".to_string(),
         other => other.to_string(),
     }
 }
@@ -143,12 +153,21 @@ mod tests {
     }
 
     #[test]
-    fn bdist_wheel_is_recorded_as_the_package_that_can_actually_be_pinned() {
-        // `bdist_wheel` is a setuptools command, not a distribution. Pinning it by name fails to
-        // resolve, turning a divergence we understand into a build failure we do not.
-        let doc = "Generator: bdist_wheel (0.37.1)\n";
-        let (tool, _) = parse_generator(doc).unwrap();
-        assert_eq!(normalize_backend(&tool), "wheel");
+    fn the_name_that_ran_is_mapped_to_the_name_that_installs() {
+        // Both found by a pin that failed to bite. `bdist_wheel` is a setuptools command whose
+        // version is the `wheel` package's, and pinning it by name does not resolve at all.
+        // `flit` is the CLI while `flit_core` is the backend that writes this very line, so a
+        // `flit==3.12.0` constraint leaves the backend free — `packaging` was rebuilt by
+        // `flit 4.0.1` under exactly that pin and diverged on `Metadata-Version` alone.
+        for (line, want) in [
+            ("Generator: bdist_wheel (0.37.1)", "wheel"),
+            ("Generator: flit 3.12.0", "flit_core"),
+            ("Generator: hatchling 1.29.0", "hatchling"),
+            ("Generator: setuptools (75.6.0)", "setuptools"),
+        ] {
+            let (tool, _) = parse_generator(line).unwrap();
+            assert_eq!(normalize_backend(&tool), want, "{line}");
+        }
     }
 
     #[test]

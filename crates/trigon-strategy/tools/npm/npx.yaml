@@ -9,8 +9,25 @@
 # The command is carried in a variable so it is quoted once. It must not contain a single quote;
 # nothing that generates one here does, and a tool that needs it should say so rather than have
 # this silently mangle it.
+#
+# **Do not add `needs: [npm]` back at tool level.** Debian's `npm` package pulls in its own Node —
+# 18 on bookworm — plus a tree under `/usr/share/nodejs` that a system-wide `NODE_PATH` puts ahead
+# of everything. A pinned Node 10 then loads modules written for 18 and aborts with SIGABRT after
+# the install has already succeeded, which reads as a toolchain too old for the kernel and is not:
+# the same build passes with the identical Node and npm when that one apt package is absent.
+# `env/toolchain-crashed` on the M1 corpus was this, not vintage.
+#
+# When a `locator` is given the caller has already installed the Node it wants, so the need belongs
+# on the fallback branch alone — and a skipped step contributes no needs.
+#
+# `unsafe-perm` is about our sandbox, not about the package. npm 5 and 6 running as root try to drop
+# privileges with `setuid` before running lifecycle scripts, and a rootless container with
+# `no-new-privileges` denies that: npm reports `EPERM` from `uid-number`, then crashes inside its own
+# error handler and reports nothing useful. The deps phase escapes it because image-build time has
+# the capability and `podman run` does not, so the same strategy worked in one phase and not the
+# next. Running as root in a disposable container is the intent, and the tar stabilizer zeroes
+# ownership either way.
 id: npm/npx
-needs: [npm]
 params:
   command:
     required: true
@@ -21,10 +38,25 @@ params:
   locator:
     required: false
 steps:
+  # Two branches for one script, because `needs` is a literal list and the whole point is that one
+  # of them must not ask apt for a Node. A skipped step contributes no needs, so the condition is
+  # what keeps Debian's nodejs out of an image that already has the one we pinned.
   - runs: |
+      export npm_config_unsafe_perm=true
       TRIGON_NPM_CMD='{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'
       if [ "$({{ with.locator }}npm --version 2>/dev/null)" = "{{ with.npm_version }}" ]; then
         sh -c "$TRIGON_NPM_CMD"
       else
         {{ with.locator }}npx --package=npm@{{ with.npm_version }} -c "$TRIGON_NPM_CMD"
       fi
+    if: "{{ with.locator }}"
+  - runs: |
+      export npm_config_unsafe_perm=true
+      TRIGON_NPM_CMD='{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'
+      if [ "$(npm --version 2>/dev/null)" = "{{ with.npm_version }}" ]; then
+        sh -c "$TRIGON_NPM_CMD"
+      else
+        npx --package=npm@{{ with.npm_version }} -c "$TRIGON_NPM_CMD"
+      fi
+    if: "{% if not with.locator %}yes{% endif %}"
+    needs: [npm]
