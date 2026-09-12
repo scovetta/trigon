@@ -44,6 +44,7 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
 | [`15-corpora.md`](15-corpora.md) | The five test corpora, the manifest format, and how to fetch them without getting blocked |
 | [`16-findings.md`](16-findings.md) | **What building it changed.** Corrections to these documents, the measured rates, and what is still open |
 | [`17-backlog.md`](17-backlog.md) | Agreed work not yet done, each with what "done" means |
+| [`18-management-ui.md`](18-management-ui.md) | The plan for `trigon watch`: monitoring a sweep from outside the process running it |
 | [`adr/`](adr/) | Short records for the load-bearing decisions |
 
 ## Suggested reading order
