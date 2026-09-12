@@ -61,44 +61,144 @@ Those two tarballs were built eight years apart, by different users, with differ
 different member order, at different gzip levels. They stabilize to the same digest. Change one byte
 of `index.js` and the verdict is `divergent`, the member is named, and the exit code is 1.
 
-Rebuilding a real package, from the registry:
+## Verify a package end to end
+
+Two real targets, start to finish. Both need `podman` and take a few minutes each, most of it
+pulling the base image the first time.
+
+### An npm package
 
 ```
-$ trigon rebuild pkg:npm/left-pad@1.3.0 --image debian@sha256:8820… --timewarp auto --store ./store
+$ trigon rebuild pkg:npm/left-pad@1.3.0 \
+      --image docker.io/library/debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 \
+      --work ./work --egress open --timewarp auto
+
   artifact   left-pad-1.3.0.tgz
   published  sha256 870c0fe1096223a5
   guarding   the artifact and 10 of its members
-  mirror     inside the build's network island, which is its only route out
   source     https://github.com/stevemao/left-pad @ ff8e7ba8b41228…
   strategy   Heuristic, commit found by RegistryCommit, confidence Certain
-  ✔ normalized
+
+  mirror     70 index request(s), 1047 version(s) withheld
+
+✔ normalized
+
+  format         tar+gzip
+  stabilizer set tar-gzip (4598411b636d…)
+
+               upstream           rebuild
+  raw          870c0fe10962…      0ebf94afb7c6…      ≠
+  container    2bc27360d33b…      b7142014cce1…      ≠
+  stabilized   f0a01941419d…      f0a01941419d…      =
+
+  members  10 identical, 0 differ, 0 upstream-only, 0 rebuild-only
 ```
 
-Then signing it, from a **separate process that runs no build**:
+`normalized` rather than `exact`: the two tarballs differ in mtimes, file modes and member order,
+all of which the stabilizers remove, and in nothing else. The `mirror` line is the evidence that the
+dependency index really was pinned to the publish date — 1,047 versions that did not exist in 2018
+were withheld from the resolver.
+
+### A PyPI package
 
 ```
-$ trigon attest --store ./store --key k.bin
-rederived normalized under tar-gzip@4598411b636d — signing
-  attestations/npm/left-pad/1.3.0/left-pad-1.3.0.tgz/equivalence.intoto.json
-  attestations/npm/left-pad/1.3.0/left-pad-1.3.0.tgz/rebuild.intoto.json
-  attestations/npm/left-pad/1.3.0/left-pad-1.3.0.tgz/buildobservation.intoto.json
+$ trigon rebuild pkg:pypi/chardet@7.6.0 \
+      --image docker.io/library/python@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b \
+      --work ./work-py --egress open --timewarp auto
+
+  mirror     10 index request(s), 12 version(s) withheld
+
+✔ exact
+
+  format         zip
+  stabilizer set wheel (58632c3c627d…)
+
+               upstream           rebuild
+  raw          4076d795897c…      4076d795897c…      =
+  stabilized   aafb77c84b42…      aafb77c84b42…      =
+
+  members  41 identical, 0 differ, 0 upstream-only, 0 rebuild-only
 ```
 
-And checking it, as somebody who does not trust us:
+`exact` is the strongest outcome there is: the rebuilt wheel is byte-for-byte the published one,
+before any stabilizer ran.
+
+### Signing it, and checking the signature
+
+`--store` records the run so a **separate process** can sign it. That separation is the point: the
+process that ran the build could record any outcome it liked, so the attestor re-derives the claim
+from the artifact bytes before it signs anything.
 
 ```
-$ trigon verify-attestation bundle.json --rerun-comparison \
-      --upstream upstream.tgz --rebuild rebuild.tgz --public-key <hex>
+$ head -c 32 /dev/urandom > key.bin          # a development key; see docs/09 for the real options
+$ trigon rebuild pkg:pypi/chardet@7.6.0 --image <as above> --work ./work-py \
+      --egress open --timewarp auto --store ./store
+$ trigon runs --store ./store
+1789215251-4076d795  pkg:pypi/chardet@7.6.0    exact    unattested
+
+$ trigon attest --store ./store --key key.bin
+target    pkg:pypi/chardet@7.6.0
+rederived exact under wheel@58632c3c627d — signing
+
+  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/equivalence.intoto.json
+  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/rebuild.intoto.json
+  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/buildobservation.intoto.json
+
+signed with key 8238c7031caabae5
+```
+
+`rederived exact … — signing` is the load-bearing line. The attestor did not take the run record's
+word for the outcome: it fetched both artifacts from the store **by hash**, checked each against the
+hash it asked for, recomputed the comparison, and would have refused to sign had the answer differed.
+
+Anyone holding the two artifacts can now check that claim without trusting us, and without a
+network:
+
+```
+$ trigon verify-attestation \
+      ./store/attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/equivalence.intoto.json \
+      --rerun-comparison \
+      --upstream ./work-py/chardet-7.6.0-py3-none-any.whl \
+      --rebuild ./work-py/rebuild/*/chardet-7.6.0-py3-none-any.whl \
+      --public-key <hex printed when the key signed>
+
+subject   chardet-7.6.0-py3-none-any.whl (4076d795897ce45239825956a1334e134322ecc4bfe84dbb12acd5390de0fbc1)
+predicate https://trigon.dev/equivalence/v1
+claims    exact
 signature verified
-rederived normalized under tar-gzip@4598411b636d — the claim holds
+rederived exact under wheel@58632c3c627d — the claim holds
 ```
 
-`scripts/cross-machine-verify.sh` runs that last step the hard way: a fresh clone, a separate target
-directory, a `--no-default-features` build whose dependency tree contains no async runtime and no
-network client, four files handed over, and the network removed with `unshare -rn`. It also requires
-an overstated outcome, an edited payload and a substituted artifact each to be caught, for three
-different reasons — a verifier that printed "the claim holds" unconditionally would pass the
-positive case on its own.
+Drop `--public-key` and it still re-derives; it just says the signature was present and unchecked,
+because "unsigned" and "signed by someone you do not trust" are different answers. Edit the payload
+and the signature fails. Edit the claimed outcome and **the bytes refute it even with no key at
+all** — which is the property that makes an attestation from a rebuilder worth anything.
+
+### Comparing two files you already have
+
+No registry, no container, no network:
+
+```
+$ trigon verify upstream.tgz rebuild.tgz
+```
+
+This is the whole judgement half, and it is the part with no prerequisites at all.
+
+### A note on `--egress open`
+
+`open` lets the build reach the internet, which is the quick way to try this. It is also the weaker
+claim, and the attestation says so: `attestable: false`, because a run with no enforced mirror
+cannot show the build fetched nothing it should not have. `--egress mirror-only` puts the build on a
+network whose only route out is the time-filtered mirror, and needs that mirror's image built first:
+
+```
+$ trigon mirror-image          # compiles trigon in a container; several minutes
+$ trigon rebuild … --egress mirror-only --timewarp auto
+```
+
+The artifact guard runs either way. If the package's own published bytes — or any of its member
+files — arrive over the network, the run is `Void`: not a pass and not a failure, because a build
+that downloads its own output reproduces it perfectly and proves nothing.
 
 ## The two halves
 
