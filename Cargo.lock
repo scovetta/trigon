@@ -2664,6 +2664,7 @@ dependencies = [
  "flate2",
  "tar",
  "trigon-archive",
+ "trigon-attest",
  "trigon-core",
  "trigon-stabilize",
  "wasmtime",

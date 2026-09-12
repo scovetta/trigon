@@ -57,6 +57,38 @@ pub fn rederive(
     upstream: Vec<u8>,
     rebuild: Vec<u8>,
 ) -> Result<Rederived, AttestError> {
+    rederive_with(statement, upstream, rebuild, None)
+}
+
+/// How to stabilize, when it is not the set compiled into this binary.
+///
+/// A trait so `trigon-attest` stays free of a WebAssembly runtime: the judgement half must not link
+/// one, and the verifier build's dependency tree is the claim a sceptic checks. The implementation
+/// lives in `trigon-stabilize-wasm` behind its `host` feature, below the line.
+pub trait ArchivedStabilizer {
+    /// The set digest this implementation provides for `profile`.
+    fn digest(&mut self, profile: &str) -> Result<Digest, String>;
+    fn stabilize(&mut self, profile: &str, format: Format, bytes: &[u8])
+    -> Result<Vec<u8>, String>;
+}
+
+/// Re-derive a claim, optionally through a stabilizer set this binary does not carry.
+///
+/// The whole reason an archived set is worth publishing. Without one, a verifier holding a
+/// statement made under an older set gets `SetMismatch` and stops: correct, and useless to them.
+/// With one, the claim is checkable against the set it was actually made under — which is what
+/// "every stabilizer version archived forever" was always for.
+///
+/// The archived path checks digests rather than producing a diff report. A diff describes *how* two
+/// artifacts differ and is a triage aid; the claim under test is only that their stabilized forms
+/// are equal, and that is a digest comparison. Running somebody else's module to produce prose
+/// nobody reads would be paying for the wrong thing.
+pub fn rederive_with(
+    statement: &Statement,
+    upstream: Vec<u8>,
+    rebuild: Vec<u8>,
+    archived: Option<&mut dyn ArchivedStabilizer>,
+) -> Result<Rederived, AttestError> {
     let p = &statement.predicate;
     let claimed = p["outcome"]
         .as_str()
@@ -70,16 +102,42 @@ pub fn rederive(
         .as_str()
         .ok_or_else(|| AttestError::Malformed("the stabilizer set has no digest".into()))?;
 
-    let set = trigon_stabilize::profile(set_id).ok_or_else(|| AttestError::SetMismatch {
-        claimed: format!("{set_id} (unknown to this build)"),
-        current: trigon_stabilize::all_profiles().join(", "),
-    })?;
-    let current = set.digest().to_hex();
-    if current != set_digest {
-        return Err(AttestError::SetMismatch {
-            claimed: format!("{set_id}@{}", &set_digest[..12.min(set_digest.len())]),
-            current: format!("{set_id}@{}", &current[..12.min(current.len())]),
-        });
+    // An archived set is consulted first and has to *be* the set the statement names — checked
+    // here, because a module implementing some other set produces a plausible digest rather than an
+    // error, and that is the one failure this whole mechanism exists to prevent.
+    let archived = match archived {
+        Some(a) => {
+            let got = a
+                .digest(set_id)
+                .map_err(|e| AttestError::Malformed(format!("the archived set failed: {e}")))?
+                .to_hex();
+            if got != set_digest {
+                return Err(AttestError::SetMismatch {
+                    claimed: format!("{set_id}@{}", &set_digest[..12.min(set_digest.len())]),
+                    current: format!(
+                        "{set_id}@{} (the module supplied)",
+                        &got[..12.min(got.len())]
+                    ),
+                });
+            }
+            Some(a)
+        }
+        None => None,
+    };
+
+    let native = trigon_stabilize::profile(set_id);
+    if archived.is_none() {
+        let set = native.as_ref().ok_or_else(|| AttestError::SetMismatch {
+            claimed: format!("{set_id} (unknown to this build)"),
+            current: trigon_stabilize::all_profiles().join(", "),
+        })?;
+        let current = set.digest().to_hex();
+        if current != set_digest {
+            return Err(AttestError::SetMismatch {
+                claimed: format!("{set_id}@{}", &set_digest[..12.min(set_digest.len())]),
+                current: format!("{set_id}@{}", &current[..12.min(current.len())]),
+            });
+        }
     }
 
     // The format is taken from the statement rather than sniffed. A verifier holding an attestation
@@ -124,20 +182,52 @@ pub fn rederive(
         }
     }
 
-    let c = compare_bytes(upstream, rebuild, format, &set, &Limits::default())
-        .map_err(|e| AttestError::Malformed(e.to_string()))?;
+    let (outcome, up_stab, rb_stab) = match archived {
+        Some(a) => {
+            let u = a
+                .stabilize(set_id, format, &upstream)
+                .map_err(|e| AttestError::Malformed(format!("the archived set failed: {e}")))?;
+            let r = a
+                .stabilize(set_id, format, &rebuild)
+                .map_err(|e| AttestError::Malformed(format!("the archived set failed: {e}")))?;
+            let (ud, rd) = (hex(&Sha256::digest(&u)), hex(&Sha256::digest(&r)));
+            // `Exact` when the raw bytes were identical, which the caller already established
+            // above; otherwise equality of the stabilized forms is `NormalizedWithCaveats`. Not
+            // `Normalized`: the provenance cap needs each applied stabilizer's risk and provenance,
+            // and a module that only returns bytes cannot supply them. Claiming the stronger
+            // outcome on less evidence is the one direction this must not err in.
+            let outcome = if upstream == rebuild {
+                Match::Exact
+            } else if ud == rd {
+                Match::NormalizedWithCaveats
+            } else {
+                Match::Divergent
+            };
+            (outcome, ud, rd)
+        }
+        None => {
+            let set = native.expect("checked above when no archived set was supplied");
+            let c = compare_bytes(upstream, rebuild, format, &set, &Limits::default())
+                .map_err(|e| AttestError::Malformed(e.to_string()))?;
+            (
+                c.outcome,
+                c.upstream.stabilized.sha256.to_hex(),
+                c.rebuild.stabilized.sha256.to_hex(),
+            )
+        }
+    };
 
     // Both sides, because a statement that got one right and one wrong is still refuted.
     for (side, claimed_digest, actual) in [
         (
             "upstream",
             p["stabilized"]["upstream"]["sha256"].as_str(),
-            &c.upstream.stabilized.sha256,
+            &up_stab,
         ),
         (
             "rebuild",
             p["stabilized"]["rebuild"]["sha256"].as_str(),
-            &c.rebuild.stabilized.sha256,
+            &rb_stab,
         ),
     ] {
         let Some(claimed_digest) = claimed_digest else {
@@ -145,20 +235,20 @@ pub fn rederive(
                 "predicate has no stabilized digest for the {side} artifact"
             )));
         };
-        if claimed_digest != actual.to_hex() {
+        if claimed_digest != *actual {
             return Err(AttestError::ClaimRefuted {
                 side,
                 claimed: claimed_digest.to_string(),
-                actual: actual.to_hex(),
+                actual: actual.clone(),
             });
         }
     }
 
     Ok(Rederived {
         claimed,
-        actual: c.outcome,
+        actual: outcome,
         digests_match: true,
-        stabilizer_set: format!("{set_id}@{}", &current[..12]),
+        stabilizer_set: format!("{set_id}@{}", &set_digest[..12.min(set_digest.len())]),
     })
 }
 

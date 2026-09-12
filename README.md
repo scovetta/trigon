@@ -12,7 +12,7 @@ and that gap is where build-time supply-chain attacks live.
 
 ## Status
 
-M0 and M1 are complete, M2 is complete but for one criterion, and M3 has begun. The design lives in
+M0, M1 and M2 are complete, and M3 has begun. The design lives in
 [`docs/`](docs/) and was written before any code; [`docs/16-findings.md`](docs/16-findings.md)
 records where building it proved the design wrong.
 
@@ -20,7 +20,7 @@ records where building it proved the design wrong.
 |---|---|---|
 | **M0** the judgement half | done | differential against the reference implementation: 34 match, 24 deviate by a declared entry, **0 unexplained** |
 | **M1** first rebuilds | done | npm and PyPI rebuild end to end, under an enforced egress tier, against a time-filtered index |
-| **M2** attestations | 5 of 6 | signed statements, re-derivable cross-machine; stabilizer sets as WASM components remain |
+| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime` |
 | **M3** the search half | begun | the deterministic parts first — failure signatures, log compression, the repair-loop policy, the Builder |
 
 Measured on the M1 smoke corpora, at `--egress open`:

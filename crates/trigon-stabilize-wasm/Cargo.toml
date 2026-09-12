@@ -18,10 +18,11 @@ trigon-stabilize.workspace = true
 # The host lives beside the guest so the ABI has one definition rather than two that drift. Off by
 # default, and never enabled for the wasm32 build.
 wasmtime = { workspace = true, optional = true }
+trigon-attest = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 
 [features]
-host = ["dep:wasmtime", "dep:anyhow"]
+host = ["dep:wasmtime", "dep:anyhow", "dep:trigon-attest"]
 
 [dev-dependencies]
 tar = "0.4"

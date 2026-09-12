@@ -177,7 +177,45 @@ as written.
 
 ---
 
+## 4b. A core module where the design says component
+
+`docs/09-attestations.md` §7.1 specifies stabilizer sets shipping as **WASM components**, instantiated
+under `wasmtime`. What ships is a **core module** for `wasm32-unknown-unknown`, with a four-function
+ABI over a byte buffer.
+
+The component model means `wasm32-wasip2`, WIT definitions and `cargo-component`. A core module gets
+the whole benefit of the criterion — an archived set that *executes*, so a claim made under a set the
+verifier's binary does not carry is checkable rather than merely describable — with a host that needs
+no WASI implementation at all, and a toolchain that is one `rustup target add`. What it gives up is a
+typed interface for guests written in other languages, which begins to matter when somebody writes
+one.
+
+Two things about it are worth knowing before relying on it.
+
+**Host and guest share a crate.** The ABI — a packed `(ptr << 32) | len` return, an append-only
+format numbering — has one definition rather than two that drift. Two crates agreeing on a calling
+convention by comment is two things to keep in step.
+
+**An archived set can reach `NormalizedWithCaveats` and never `Normalized`.** The provenance cap
+needs each applied stabilizer's risk tier and provenance, and a module that returns bytes cannot
+supply them. The ABI could be extended to report an `applied` list, and then the cap would rest on
+what the module says about itself — which is exactly the wrong place for it. So the archived path
+claims the weaker outcome on the weaker evidence, and a `Normalized` claim re-derived through its
+archived set reports `NormalizedWithCaveats` and reads as refuted. That is a real limitation rather
+than a rounding error: it is honest, and it is not yet good enough for a verifier checking an old
+`Normalized` claim. Revisit if the interface ever becomes typed.
+
+`wasmtime` is behind a feature and on the verifier's forbidden list: 100 crates by default, 142 with
+`--features wasm`. The small tree is the claim a sceptic checks instead of trusting us, and a
+verifier who only checks claims made under their own set should not pay for a runtime they never
+use.
+
+---
+
 ## 5. Open
+
+**An archived `Normalized` claim re-derives as `NormalizedWithCaveats`.** See §4b: the provenance cap
+cannot be confirmed from bytes alone.
 
 **`trigon/mirror-corrupted-artifact`.** Intermittent; npm retries and then fails with
 `Z_DATA_ERROR`. Ruled out so far: transparent gzip decompression (fixed, and a serial fetch through
@@ -185,8 +223,6 @@ the mirror is byte-identical to the registry's); concurrency (twelve parallel fe
 identical); packument integrity mismatch (the declared sha512 matches the served bytes exactly). It
 is correctly classified as ours with nothing to repair, so it does not contaminate any reproduction
 rate, but it is unexplained.
-
-**Verification that a pin took effect.** §1's most valuable unbuilt item.
 
 **Two clean re-runs before publishing a divergence.** [`10.3`](00-overview.md) requires it and
 nothing implements it yet.

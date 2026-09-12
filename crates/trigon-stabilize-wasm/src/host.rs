@@ -157,3 +157,23 @@ where
         .get_typed_func::<P, R>(&mut *store, name)
         .with_context(|| format!("the module exports no `{name}` with the expected signature"))
 }
+
+/// The archived set, as `trigon-attest` asks for it.
+///
+/// Implemented here rather than there so the judgement half never links a WebAssembly runtime: a
+/// trait it defines and something below the line implements is how a verifier gets this capability
+/// without every verifier paying for it.
+impl trigon_attest::ArchivedStabilizer for ArchivedSet {
+    fn digest(&mut self, profile: &str) -> Result<Digest, String> {
+        ArchivedSet::digest(self, profile).map_err(|e| e.to_string())
+    }
+
+    fn stabilize(
+        &mut self,
+        profile: &str,
+        format: Format,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        ArchivedSet::stabilize(self, profile, format, bytes).map_err(|e| e.to_string())
+    }
+}

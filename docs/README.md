@@ -65,7 +65,7 @@ individual documents carry a note where a decision has been revised. Keeping the
 deliberate — amending each document in place would erase which beliefs were wrong and how they were
 found out, and that history is most of what a later reader needs.
 
-M0 and M1 are complete, M2 is complete but for one criterion, and M3 has begun. The top-level
+M0, M1 and M2 are complete, and M3 has begun. The top-level
 [`README`](../README.md) carries the current rates.
 
 Every claim in these documents about the prior art was checked against the source of

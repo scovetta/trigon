@@ -126,12 +126,13 @@ enum Cmd {
         /// The rebuilt artifact. Required by `--rerun-comparison`.
         #[arg(long, requires = "rerun_comparison")]
         rebuild: Option<PathBuf>,
-        /// A published stabilizer-set manifest, or a store holding one.
+        /// The stabilizer set the attestation was made under: a published `.json` manifest, or a
+        /// `.wasm` module.
         ///
-        /// Read when the attestation names a set this binary does not have. It does not make the
-        /// claim re-derivable — that wants the component of `docs/09` §7.1 — but it turns "these
-        /// digests disagree" into a description of what the claim was made under, which is the
-        /// difference between a dead end and a thing somebody can act on.
+        /// A manifest says what the set *was*, which turns "these digests disagree" from a dead end
+        /// into something a person can act on. A module lets the claim be **checked** under the set
+        /// it was actually made under, which is what archiving stabilizer sets was always for. The
+        /// module path needs this binary built with `--features wasm`.
         #[arg(long)]
         stabilizers: Option<PathBuf>,
         /// Check the signature against this ed25519 public key, given as hex.
@@ -2792,7 +2793,33 @@ fn verify_attestation(
         };
         let ub = std::fs::read(u).with_context(|| format!("reading {}", u.display()))?;
         let rb = std::fs::read(r).with_context(|| format!("reading {}", r.display()))?;
-        match trigon_attest::rederive(&st, ub, rb) {
+        // A `.wasm` module is run; anything else is read as a manifest and described. Chosen by
+        // extension rather than by sniffing, because the two failure modes differ: a module we
+        // cannot run should say so, and a manifest we cannot parse should say that instead.
+        #[cfg(feature = "wasm")]
+        let mut archived = match stabilizers {
+            Some(p) if p.extension().is_some_and(|e| e == "wasm") => Some(
+                trigon_stabilize_wasm::ArchivedSet::load(p)
+                    .with_context(|| format!("loading {}", p.display()))?,
+            ),
+            _ => None,
+        };
+        #[cfg(feature = "wasm")]
+        let outcome = match archived.as_mut() {
+            Some(a) => trigon_attest::rederive_with(&st, ub, rb, Some(a)),
+            None => trigon_attest::rederive(&st, ub, rb),
+        };
+        #[cfg(not(feature = "wasm"))]
+        let outcome = {
+            if stabilizers.is_some_and(|p| p.extension().is_some_and(|e| e == "wasm")) {
+                bail!(
+                    "this build cannot run a stabilizer module. Rebuild with `--features wasm`, or \
+                     pass the set's `.json` manifest to see what it contained."
+                );
+            }
+            trigon_attest::rederive(&st, ub, rb)
+        };
+        match outcome {
             Ok(d) => Some(d),
             // The one error worth turning into a description rather than a refusal. A verifier who
             // cannot reach the statement's set is not looking at a broken attestation; they are

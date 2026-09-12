@@ -108,7 +108,7 @@ also-in-source: it needs a checkout, which `--source` supplies and which a sweep
 equivalent of until the source cache exists. Without it the guard is wider than designed, which errs
 toward voiding an honest run rather than missing a forged one.
 
-### M2. Attestations (2 weeks)
+### M2. Attestations (2 weeks) — complete
 
 **Adds:** `trigon-attest`, `trigon-store`.
 
@@ -143,10 +143,15 @@ maintaining one whose shape is a guess. It arrives with M4.
       (`AttestError::SetMismatch`), and re-derivation checks the **raw** digests as well as the
       stabilized ones — two artifacts that stabilize alike are the normal case, so the stabilized
       check alone would accept a substituted artifact as proof of the claim.
-- [ ] **Stabilizer sets publish as content-addressed WASM components**, and
-      `--rerun-comparison` loads the set named in the attestation rather than the one in the binary
-      ([`09`](09-attestations.md) §7.1). A CI test asserts the WASM and native builds produce
-      identical digests over the M0 corpus.
+- [x] **Stabilizer sets publish as content-addressed artifacts**, and `--rerun-comparison` loads the
+      set named in the attestation rather than the one in the binary ([`09`](09-attestations.md)
+      §7.1). Two forms: a self-verifying JSON manifest that says what a set *was*, and a WebAssembly
+      module that *runs* it. A parity test asserts the module and the native build produce identical
+      bytes and identical set digests for every profile.
+
+      Shipped as a **core module** rather than a component, and an archived set can reach
+      `NormalizedWithCaveats` but not `Normalized`, because the provenance cap cannot be confirmed
+      from bytes alone. Both are recorded in [`16-findings.md`](16-findings.md) §4b.
 
 ### M3. The AI subsystem (4 weeks)
 
