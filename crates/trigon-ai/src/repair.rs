@@ -299,7 +299,7 @@ mod tests {
 
     fn sig(code: &'static str, repairable: bool) -> FailureSignature {
         FailureSignature {
-            code,
+            code: std::borrow::Cow::Borrowed(code),
             subject: None,
             fault: Fault::Build,
             retryable: false,

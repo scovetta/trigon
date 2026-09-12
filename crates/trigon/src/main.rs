@@ -216,6 +216,38 @@ enum Cmd {
         /// Sign it with an ed25519 key held in this file (32 raw bytes, or hex).
         #[arg(long, requires = "attest")]
         key: Option<PathBuf>,
+        /// Record the run — its artifacts, log, comparison and environment — in a store, so that a
+        /// separate `trigon attest` can re-derive the claim and sign it without ever running a
+        /// build. This is what makes the signing process separable from the one that executes
+        /// attacker-supplied scripts.
+        #[arg(long)]
+        store: Option<PathBuf>,
+    },
+    /// Sign what a stored run says, after re-deriving it from the bytes.
+    ///
+    /// A separate process from the one that ran the build, and that is the point: it reads blobs by
+    /// hash, checks each against the hash it asked for, recomputes the claim, and only then signs.
+    /// The process that ran the build could record any outcome it liked; an attestor that signed
+    /// what it was told would launder that into a signature.
+    #[cfg(feature = "build")]
+    Attest {
+        /// The store the run was written to.
+        #[arg(long, default_value = "./trigon-store")]
+        store: PathBuf,
+        /// Which run. Defaults to the most recent.
+        run: Option<String>,
+        /// Sign with an ed25519 key held in this file. Without one the statements are unsigned.
+        #[arg(long)]
+        key: Option<PathBuf>,
+        /// Drop the rebuilt artifact's bytes afterwards, keeping its digests.
+        #[arg(long)]
+        prune: bool,
+    },
+    /// List the runs a store holds.
+    #[cfg(feature = "build")]
+    Runs {
+        #[arg(long, default_value = "./trigon-store")]
+        store: PathBuf,
     },
     /// Build the container image that runs the mirror inside a build's network island.
     ///
@@ -263,6 +295,9 @@ enum Cmd {
         mirror_image: String,
         #[arg(long)]
         timewarp: Option<String>,
+        /// Record every run in a store, so the sweep leaves something an attestor can sign.
+        #[arg(long)]
+        store: Option<PathBuf>,
     },
     /// Ask a registry what it knows about a package.
     #[cfg(feature = "build")]
@@ -548,6 +583,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             source,
             attest,
             key,
+            store,
         } => rebuild::run(rebuild::Args {
             purl,
             artifact,
@@ -561,6 +597,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             source,
             attest,
             key,
+            store,
         }),
         #[cfg(feature = "build")]
         Cmd::Sweep {
@@ -572,17 +609,31 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             definitions,
             mirror_image,
             timewarp,
+            store,
         } => sweep::run(sweep::Args {
             targets,
             image,
             work,
             egress,
             timeout,
+            store,
             definitions,
             mirror_image,
             timewarp,
         }),
         #[cfg(feature = "build")]
+        Cmd::Attest {
+            store,
+            run,
+            key,
+            prune,
+        } => attestor::run(attestor::Args {
+            store,
+            run,
+            key,
+            prune,
+        }),
+        Cmd::Runs { store } => attestor::list(&store),
         Cmd::MirrorImage { tag } => mirror::build_image(&tag),
         #[cfg(feature = "build")]
         Cmd::Mirror { port, guard } => mirror::serve(port, guard.as_deref()),
@@ -1475,6 +1526,8 @@ mod rebuild {
         pub attest: Option<PathBuf>,
         /// Sign it with an ed25519 key held in this file.
         pub key: Option<PathBuf>,
+        /// Record the run in a store for a separate attestor to sign.
+        pub store: Option<PathBuf>,
     }
 
     /// The ladder, in the order `docs/04-strategies.md` §6 sets out.
@@ -1625,6 +1678,18 @@ mod rebuild {
                 .or_else(|| args.timewarp.clone().filter(|t| t != "auto"))
         };
 
+        // Taken before the ladder consumes `args`, so the record can be written at the end without
+        // keeping the whole argument struct alive.
+        let inputs = RecordInputs {
+            purl: args.purl.clone(),
+            work: args.work.clone(),
+            image: args.image.clone(),
+            egress: args.egress.clone(),
+            timewarp: args.timewarp.clone(),
+            strategy_digest: None,
+            derivation: None,
+        };
+
         let rungs = ladder(
             &target.ecosystem,
             client,
@@ -1650,10 +1715,14 @@ mod rebuild {
 
         // 4. Build it.
         let strategy_file = args.work.join("strategy.yaml");
-        std::fs::write(
-            &strategy_file,
-            trigon_strategy::to_yaml(&candidate.strategy)?,
-        )?;
+        let strategy_yaml = trigon_strategy::to_yaml(&candidate.strategy)?;
+        std::fs::write(&strategy_file, &strategy_yaml)?;
+        // Over the canonical value, not the YAML bytes, so editing a comment does not change what
+        // the attestation names or bust a cache entry across a hundred thousand targets.
+        let strategy_digest = trigon_strategy::ToolRegistry::builtin()
+            .and_then(|tools| trigon_strategy::strategy_digest(&candidate.strategy, &tools))
+            .ok();
+        let derivation = format!("{:?}", candidate.derivation).to_lowercase();
         let out = args.work.join("rebuild");
         // Written next to the run, and mounted read-only into the island's mirror when there is
         // one. The mirror runs in a container with no route to this process, so a file is how the
@@ -1715,7 +1784,7 @@ mod rebuild {
             return Ok(Outcome::BuildFailed {
                 phase: "collect".into(),
                 signature: Some(trigon_core::FailureSignature {
-                    code: "trigon/no-output",
+                    code: std::borrow::Cow::Borrowed("trigon/no-output"),
                     subject: None,
                     fault: trigon_core::Fault::Bug,
                     retryable: false,
@@ -1757,6 +1826,20 @@ mod rebuild {
                 &comparison,
             )?;
         }
+        if let Some(dir) = &args.store {
+            // A failure here does not fail the run. The comparison already happened and its verdict
+            // is what the caller asked for; losing the record is a thing to report, not a reason to
+            // throw the verdict away.
+            let inputs = RecordInputs {
+                strategy_digest: strategy_digest.clone(),
+                derivation: Some(derivation.clone()),
+                ..inputs.clone()
+            };
+            if let Err(e) = record_run(dir, &inputs, &upstream_path, &rebuilt, &comparison, verbose)
+            {
+                tracing::warn!("could not record this run: {e:#}");
+            }
+        }
         Ok(Outcome::Compared(comparison.outcome))
     }
 
@@ -1784,6 +1867,133 @@ mod rebuild {
             }
         }
         out.trim().chars().take(80).collect()
+    }
+
+    /// Write everything a separate attestor needs to sign this run without re-running it.
+    ///
+    /// Artifacts, the build log and the comparison go in as blobs addressed by their own hashes; the
+    /// record holds digests and small scalars. That split is what lets the attestor check every byte
+    /// it reads against the hash it asked for rather than trusting whoever wrote it.
+    /// The fields a record needs, captured before `args` is consumed by the inference ladder.
+    #[derive(Clone)]
+    struct RecordInputs {
+        purl: String,
+        work: PathBuf,
+        image: String,
+        egress: String,
+        timewarp: Option<String>,
+        strategy_digest: Option<String>,
+        derivation: Option<String>,
+    }
+
+    fn record_run(
+        dir: &Path,
+        args: &RecordInputs,
+        upstream_path: &Path,
+        rebuilt: &Path,
+        c: &trigon_compare::Comparison,
+        verbose: bool,
+    ) -> Result<()> {
+        use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async move {
+            let store = Store::local(dir)?;
+            let up_bytes = std::fs::read(upstream_path)?;
+            let rb_bytes = std::fs::read(rebuilt)?;
+            let up = store.blobs().put(up_bytes.clone()).await?;
+            let rb = store.blobs().put(rb_bytes.clone()).await?;
+            let comparison = store.blobs().put(serde_json::to_vec(c)?).await?;
+            let build_log = match std::fs::read(args.work.join("rebuild").join("build.log"))
+                .or_else(|_| std::fs::read(args.work.join("build.log")))
+            {
+                Ok(b) => Some(store.blobs().put(b).await?),
+                Err(_) => None,
+            };
+
+            // Time-ordered, so listing a store gives the most recent run first without reading
+            // every record to sort them.
+            let id = format!(
+                "{}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                &c.upstream.raw.sha256.to_hex()[..8]
+            );
+
+            let mut record = RunRecord::new(
+                id.clone(),
+                &args.purl,
+                ArtifactRef {
+                    name: crate::file_name(upstream_path),
+                    sha256: up,
+                    bytes: up_bytes.len() as u64,
+                    stored: true,
+                },
+                Environment {
+                    base_image: args.image.clone(),
+                    egress: args.egress.clone(),
+                    isolation: String::new(),
+                    // An honest default until the runner reports it: claiming a run is attestable
+                    // when we do not know is the one direction this must not err in.
+                    attestable: args.egress != "open",
+                    registry_moment: args.timewarp.clone(),
+                },
+                now_rfc3339(),
+            );
+            record.state = RunState::Done;
+            record.strategy_digest = args.strategy_digest.clone();
+            record.derivation = args.derivation.clone();
+            record.outcome = Some(c.outcome.to_string());
+            record.rebuild = Some(ArtifactRef {
+                name: crate::file_name(rebuilt),
+                sha256: rb,
+                bytes: rb_bytes.len() as u64,
+                stored: true,
+            });
+            record.comparison = Some(comparison);
+            record.build_log = build_log;
+            record.finished = Some(now_rfc3339());
+            store.put_run(&record).await?;
+            if verbose {
+                println!("\n  recorded   run {id} in {}", dir.display());
+            }
+            anyhow::Ok(())
+        })
+    }
+
+    /// The current instant, as RFC 3339 UTC.
+    ///
+    /// Hand-rolled rather than pulling in a date library for one format. UTC only, and seconds
+    /// precision, which is all a run record needs.
+    fn now_rfc3339() -> String {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let days = secs.div_euclid(86_400);
+        let tod = secs.rem_euclid(86_400);
+        // Civil-from-days, Howard Hinnant's algorithm: exact, branch-free and about ten lines,
+        // against a dependency whose only other use here would be formatting.
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        format!(
+            "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+            tod / 3600,
+            (tod % 3600) / 60,
+            tod % 60
+        )
     }
 
     /// An error that stopped one target, as an outcome.
@@ -1973,6 +2183,8 @@ mod sweep {
         pub definitions: Option<PathBuf>,
         pub mirror_image: String,
         pub timewarp: Option<String>,
+        /// Record every run in a store, so a sweep leaves something an attestor can sign.
+        pub store: Option<PathBuf>,
     }
 
     pub fn run(args: Args) -> Result<()> {
@@ -2055,6 +2267,7 @@ mod sweep {
                     // asked for is 20 files to explain.
                     attest: None,
                     key: None,
+                    store: args.store.clone(),
                 },
                 false,
             )
@@ -2510,4 +2723,251 @@ fn verify_attestation(
         std::process::exit(1);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The attestor.
+//
+// A separate process on purpose, and the separation is the security control rather than a tidiness
+// preference (`docs/09-attestations.md` §6). The sandbox executes attacker-supplied build scripts
+// and writes blobs; this reads those blobs **by hash**, checks each against the hash it asked for,
+// re-derives the equivalence claim from the bytes, and only then signs. It runs no build, opens no
+// socket, and holds the only thing worth stealing — the key.
+//
+// Which is why it re-derives rather than believing the run record. The record was written by the
+// process that ran the build. If that process were compromised it could record any outcome it
+// liked, and an attestor that signed what it was told would launder that into a signature.
+
+#[cfg(feature = "build")]
+mod attestor {
+    use anyhow::{Context, Result, bail};
+    use std::path::Path;
+    use trigon_attest::{RunFacts, Statement};
+    use trigon_store::{RunRecord, Store};
+
+    pub struct Args {
+        pub store: std::path::PathBuf,
+        pub run: Option<String>,
+        pub key: Option<std::path::PathBuf>,
+        pub prune: bool,
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async move {
+            let store = Store::local(&args.store)?;
+            let id = match args.run {
+                Some(id) => id,
+                None => store
+                    .list_runs()
+                    .await?
+                    .into_iter()
+                    .next()
+                    .context("this store holds no runs")?,
+            };
+            let mut record = store.get_run(&id).await?;
+            println!("run       {id}");
+            println!("target    {}", record.target);
+
+            // Before anything else. A run whose artifact reached the build over the network is
+            // evidence of nothing, and the one thing we must never do is sign a statement saying
+            // otherwise — that is the forged-attestation attack, arriving exactly as designed.
+            if !record.guard_trips.is_empty() {
+                println!("\nvoid: {}", record.guard_trips.join("; "));
+                bail!(
+                    "refusing to attest a void run: the artifact under test reached the build over \
+                     the network, so a match proves only that the build downloaded it"
+                );
+            }
+
+            let signer: Box<dyn trigon_attest::Signer> = match &args.key {
+                Some(p) => Box::new(crate::load_key(p)?),
+                None => Box::new(trigon_attest::Unsigned),
+            };
+
+            let mut written = Vec::new();
+
+            // 1. The equivalence (or divergence) claim, re-derived from the bytes.
+            if let Some(comparison_digest) = record.comparison {
+                let bytes = store.blobs().get(&comparison_digest).await?;
+                let comparison: trigon_compare::Comparison = serde_json::from_slice(&bytes)?;
+
+                let rebuilt = record
+                    .rebuild
+                    .as_ref()
+                    .context("a run with a comparison must name a rebuilt artifact")?;
+                if !record.upstream.stored || !rebuilt.stored {
+                    bail!(
+                        "the artifacts for this run are no longer in the store, so the claim \
+                         cannot be re-derived. It was pruned after being attested; the existing \
+                         statement is still checkable by anyone holding the two files."
+                    );
+                }
+
+                // Fetched by hash and checked against it. The attestor trusts the digest, never the
+                // process that wrote the bytes.
+                let upstream = store.blobs().get(&record.upstream.sha256).await?;
+                let rebuild = store.blobs().get(&rebuilt.sha256).await?;
+
+                // The record and the evidence it points at must agree. Re-derivation already
+                // catches a forged *comparison*, because it recomputes from the artifact bytes —
+                // but the record is a separate document, and a worker that wrote an honest
+                // comparison beside a record claiming something better would otherwise have that
+                // claim survive into `trigon runs` and anything reading it.
+                if record.outcome.as_deref() != Some(comparison.outcome.to_string().as_str()) {
+                    bail!(
+                        "the run record says `{}` and the comparison it points at says `{}`. \
+                         Refusing to attest a run that disagrees with its own evidence.",
+                        record.outcome.as_deref().unwrap_or("nothing"),
+                        comparison.outcome
+                    );
+                }
+
+                let statement = Statement::equivalence(&record.upstream.name, &comparison);
+                let checked = trigon_attest::rederive(&statement, upstream.into(), rebuild.into())
+                    .context("re-deriving the claim before signing it")?;
+                if !checked.holds() {
+                    bail!(
+                        "refusing to sign: the run recorded `{}` and the bytes give `{}`",
+                        checked.claimed,
+                        checked.actual
+                    );
+                }
+                println!(
+                    "rederived {} under {} — signing",
+                    checked.actual, checked.stabilizer_set
+                );
+
+                let env = trigon_attest::sign_statement(&statement, signer.as_ref())?;
+                let target = record.target.parse::<trigon_core::TargetRef>()?;
+                let target = trigon_core::Target::new(
+                    target,
+                    trigon_core::ArtifactId::new(record.upstream.name.clone()),
+                );
+                written.push(
+                    store
+                        .put_attestation(
+                            &target,
+                            &record.upstream.name,
+                            &statement.predicate_type,
+                            &env,
+                        )
+                        .await?,
+                );
+            }
+
+            // 2. How the rebuild came to exist, and what the build was observed to do.
+            let facts = facts(&record);
+            if let Some(rebuilt) = &record.rebuild {
+                let st = Statement::rebuild(&rebuilt.name, &rebuilt.sha256, &facts);
+                written.push(put(&store, &record, &st, signer.as_ref()).await?);
+            }
+            let obs = Statement::build_observation(
+                &record.upstream.name,
+                &record.upstream.sha256,
+                &facts,
+            );
+            written.push(put(&store, &record, &obs, signer.as_ref()).await?);
+
+            record.attestations = written.clone();
+            store.put_run(&record).await?;
+
+            println!();
+            for p in &written {
+                println!("  {p}");
+            }
+            if !signer.key_id().is_empty() {
+                println!("\nsigned with key {}", signer.key_id());
+            } else {
+                println!(
+                    "\nunsigned — the claims are complete and checkable, but nothing here says who \
+                     made them"
+                );
+            }
+
+            if args.prune {
+                match store.prune_rebuild(&id).await {
+                    Ok(true) => println!("pruned the rebuilt artifact; its digests remain"),
+                    Ok(false) => {
+                        println!("kept the rebuilt artifact: a divergence needs its bytes")
+                    }
+                    Err(e) => println!("did not prune: {e}"),
+                }
+            }
+            Ok(())
+        })
+    }
+
+    async fn put(
+        store: &Store,
+        record: &RunRecord,
+        st: &Statement,
+        signer: &dyn trigon_attest::Signer,
+    ) -> Result<String> {
+        let env = trigon_attest::sign_statement(st, signer)?;
+        let reference = record.target.parse::<trigon_core::TargetRef>()?;
+        let target = trigon_core::Target::new(
+            reference,
+            trigon_core::ArtifactId::new(record.upstream.name.clone()),
+        );
+        Ok(store
+            .put_attestation(&target, &record.upstream.name, &st.predicate_type, &env)
+            .await?)
+    }
+
+    fn facts(r: &RunRecord) -> RunFacts<'_> {
+        RunFacts {
+            run_id: &r.id,
+            started: &r.started,
+            finished: r.finished.as_deref(),
+            base_image: &r.environment.base_image,
+            egress: &r.environment.egress,
+            isolation: &r.environment.isolation,
+            attestable: r.environment.attestable,
+            registry_moment: r.environment.registry_moment.as_deref(),
+            strategy_digest: r.strategy_digest.as_deref(),
+            derivation: r.derivation.as_deref(),
+            instructions: None,
+            build_log: None,
+            trigon_version: env!("CARGO_PKG_VERSION"),
+            stabilizer_set: None,
+            guard_trips: &r.guard_trips,
+            guard_manifest: None,
+            guarded_members: None,
+        }
+    }
+
+    /// List what a store holds.
+    pub fn list(store: &Path) -> Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async move {
+            let store = Store::local(store)?;
+            let ids = store.list_runs().await?;
+            if ids.is_empty() {
+                println!("no runs");
+                return Ok(());
+            }
+            for id in ids {
+                let r = store.get_run(&id).await?;
+                println!(
+                    "{id}  {:<34} {:<24} {}",
+                    r.target,
+                    r.outcome.as_deref().unwrap_or(match r.guard_trips.len() {
+                        0 => "-",
+                        _ => "void",
+                    }),
+                    if r.attestations.is_empty() {
+                        "unattested"
+                    } else {
+                        "attested"
+                    }
+                );
+            }
+            Ok(())
+        })
+    }
 }

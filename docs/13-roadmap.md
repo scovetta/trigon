@@ -112,13 +112,25 @@ toward voiding an honest run rather than missing a forged one.
 
 **Adds:** `trigon-attest`, `trigon-store`.
 
+`trigon-store` is scoped here to what makes the attestor separable: content-addressed blobs and run
+records, in the layout [`09`](09-attestations.md) §7 already specifies. The Postgres tables of
+[`10`](10-scale.md) §4 — `runs`, `verdicts`, `rollups` — exist to make a *fleet* legible, and none of
+them is needed to sign a statement; building that schema before there is a fleet to put in it means
+maintaining one whose shape is a guess. It arrives with M4.
+
 **Exit criteria:**
 
-- [x] `equivalence/v1` and `divergence/v1` emitted, DSSE-wrapped over RFC 8785 canonical bytes.
-      The remaining two predicates and SLSA Provenance v1 wait on `trigon-store`, which holds the
-      build record they describe.
+- [x] `equivalence/v1`, `divergence/v1`, `rebuild/v1` and `buildobservation/v1` emitted,
+      DSSE-wrapped over RFC 8785 canonical bytes. A conformant SLSA Provenance v1 statement remains:
+      `rebuild/v1` already carries the SLSA shape but not the predicate type, and claiming
+      conformance is worth doing only against the conformance suite.
 - [x] Signing works unsigned and with a local ed25519 key. Sigstore keyless and Rekor v2 remain.
-- [ ] The attestor runs as a separate process and **re-derives the claim before signing**.
+- [x] The attestor runs as a separate process and **re-derives the claim before signing**.
+      `trigon attest` reads a store written by `trigon rebuild --store`, fetches every blob **by
+      hash and checks it against that hash**, recomputes the claim from the artifact bytes, and
+      refuses in four cases: a void run, a record that disagrees with the comparison it points at,
+      a re-derivation that does not hold, and a blob whose content no longer matches its address.
+      It runs no build and opens no socket.
 - [x] **`trigon verify-attestation --rerun-comparison`** re-derives the claim from the bundle and
       two files, with no network and no trust in the producer — including from a checkout that
       shares no state with the producer. `scripts/cross-machine-verify.sh` runs it: a fresh clone, a

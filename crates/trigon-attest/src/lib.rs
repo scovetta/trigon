@@ -9,12 +9,14 @@
 
 mod dsse;
 mod error;
+mod rebuild;
 mod signer;
 mod statement;
 mod verify;
 
 pub use dsse::{Envelope, PAYLOAD_TYPE, Signature, pae};
 pub use error::AttestError;
+pub use rebuild::{BUILD_OBSERVATION, REBUILD, RunFacts};
 pub use signer::{LocalKey, Signer, Unsigned, verify as verify_signature};
 pub use statement::{DIVERGENCE, EQUIVALENCE, STATEMENT_TYPE, Statement, Subject};
 pub use verify::{Rederived, rederive, sign_statement, subject_sha256};

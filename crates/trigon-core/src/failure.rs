@@ -22,6 +22,7 @@
 //! Deterministic, and it stays that way. A model reads the compressed log this module produces; it
 //! does not get to decide what the failure was, because the answer keys a cache and gates spend.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,14 @@ use crate::Fault;
 pub struct FailureSignature {
     /// Stable, `ecosystem/what-happened`. Appears in cache keys, cluster ids and tickets, so it is
     /// treated as a wire value: renaming one splits its cluster in two and orphans its repairs.
-    pub code: &'static str,
+    ///
+    /// `Cow` rather than `&'static str`, which is what the rule table holds and what this wanted to
+    /// be. Serde can only deserialize a `&'static str` from input that is itself `'static`, so the
+    /// derive on any struct *containing* one fails to compile — and a signature that cannot be read
+    /// back from a file is no use in a run record, which is where it has to end up. `Cow::Borrowed`
+    /// keeps construction from the table allocation-free; only a value read back from JSON owns
+    /// its bytes.
+    pub code: Cow<'static, str>,
     /// The part of the message that generalizes, normalized. `Some("Python.h")` for a missing
     /// header — the repair is the same for every package that needs it. Never a package name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,7 +75,7 @@ impl FailureSignature {
     /// hundred singleton clusters that look like five hundred unrelated problems.
     pub fn unknown(evidence: impl Into<String>) -> Self {
         FailureSignature {
-            code: "unknown",
+            code: Cow::Borrowed("unknown"),
             subject: None,
             fault: Fault::Build,
             retryable: false,
@@ -452,7 +460,7 @@ fn classify_line(line: &str) -> Option<FailureSignature> {
         .iter()
         .find(|r| r.needles.iter().all(|n| line.contains(n)))?;
     Some(FailureSignature {
-        code: rule.code,
+        code: Cow::Borrowed(rule.code),
         subject: capture(line, rule.capture).map(|s| normalize_subject(&s)),
         fault: rule.fault,
         retryable: rule.retryable,
@@ -690,6 +698,19 @@ mod tests {
         assert!(
             !classify("npm ERR! notarget No matching version found for left-pad@9.9.9").retryable
         );
+    }
+
+    #[test]
+    fn a_signature_survives_a_round_trip_through_a_file() {
+        // It has to: a run record carries one, and a record nobody can read back is not a record.
+        // `code` was `&'static str` until this test existed, which compiles on its own and makes
+        // the derive fail on every struct that contains one — serde can only produce a `'static`
+        // borrow from `'static` input.
+        let before = classify("fatal error: Python.h: No such file or directory");
+        let json = serde_json::to_string(&before).unwrap();
+        let after: FailureSignature = serde_json::from_str(&json).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(after.key(), "cc/missing-header:python.h");
     }
 
     #[test]

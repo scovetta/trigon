@@ -23,6 +23,7 @@ trigon-attest.workspace = true
 trigon-sandbox = { workspace = true, optional = true }
 trigon-registry = { workspace = true, optional = true }
 trigon-mirror = { workspace = true, optional = true }
+trigon-store = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 anyhow.workspace = true
 clap.workspace = true
@@ -37,7 +38,7 @@ default = ["build"]
 # Everything that needs an async runtime. `--no-default-features` produces the verifier: a binary
 # that reproduces a verdict from two artifacts and links no runtime and no network client, which is
 # the claim a sceptic can check with `cargo tree` rather than take on trust.
-build = ["dep:trigon-sandbox", "dep:trigon-registry", "dep:trigon-mirror", "dep:tokio"]
+build = ["dep:trigon-sandbox", "dep:trigon-registry", "dep:trigon-mirror", "dep:trigon-store", "dep:tokio"]
 
 [dev-dependencies]
 tar = "0.4"
