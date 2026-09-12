@@ -28,6 +28,17 @@ pub enum RegistryError {
         available: Vec<String>,
     },
 
+    #[error("could not read the source at {repo}: {detail}")]
+    Source { repo: String, detail: String },
+
+    /// A repository reference this will not act on, as opposed to one that failed.
+    ///
+    /// Separate because the two want different handling and the difference is not visible in the
+    /// message: a fetch that broke may work on the next attempt, and a URL we declined to hand to
+    /// `git` will be declined every time.
+    #[error("refusing to read the source at `{repo}`: {detail}")]
+    SourceRefused { repo: String, detail: String },
+
     #[error(
         "{name} declares sha256 {expected} for {artifact}, and the bytes we fetched hash to \
          {actual}. Refusing: a run against bytes the registry does not vouch for proves nothing \
@@ -102,6 +113,11 @@ impl Classify for RegistryError {
             | RegistryError::RateLimited { .. }
             | RegistryError::Transport(_) => Fault::Upstream,
             RegistryError::Unsupported { .. } => Fault::Policy,
+            // A repository that will not fetch is upstream's, the same as a registry that will
+            // not answer.
+            RegistryError::Source { .. } => Fault::Upstream,
+            // A reference we declined is ours, and a policy rather than a bug.
+            RegistryError::SourceRefused { .. } => Fault::Policy,
             RegistryError::Io(_) => Fault::Infra,
         }
     }
@@ -119,6 +135,9 @@ impl Classify for RegistryError {
             | RegistryError::DigestMismatch { .. }
             | RegistryError::Malformed { .. }
             | RegistryError::Unsupported { .. } => false,
+            // A fetch can fail for a moment and succeed after it. A reference we declined cannot.
+            RegistryError::Source { .. } => true,
+            RegistryError::SourceRefused { .. } => false,
             RegistryError::Io(_) => true,
         }
     }

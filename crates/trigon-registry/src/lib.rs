@@ -24,6 +24,7 @@ mod model;
 mod npm;
 mod pypi;
 mod registry;
+mod source;
 mod tags;
 pub mod wheel;
 
@@ -36,4 +37,5 @@ pub use model::{ArtifactMeta, BlobSink, ResolvedTarget};
 pub use npm::NpmRegistry;
 pub use pypi::PyPiRegistry;
 pub use registry::{Registry, for_ecosystem};
+pub use source::{Checkout, SourceCache};
 pub use tags::resolve_version_tag;

@@ -225,6 +225,16 @@ enum Cmd {
         /// Sign it with an ed25519 key held in this file (32 raw bytes, or hex).
         #[arg(long, requires = "attest")]
         key: Option<PathBuf>,
+        /// Ask a model for a strategy when nothing deterministic produced one.
+        ///
+        /// `replay:<transcript.json>` answers from a recording and opens no socket. Off by
+        /// default: a run that silently calls a model is a run whose cost and derivation are a
+        /// surprise.
+        #[arg(long)]
+        model: Option<String>,
+        /// Where to keep the source checkouts a model rung reads.
+        #[arg(long)]
+        source_cache: Option<PathBuf>,
         /// Record the run — its artifacts, log, comparison and environment — in a store, so that a
         /// separate `trigon attest` can re-derive the claim and sign it without ever running a
         /// build. This is what makes the signing process separable from the one that executes
@@ -321,6 +331,11 @@ enum Cmd {
         /// Record every run in a store, so the sweep leaves something an attestor can sign.
         #[arg(long)]
         store: Option<PathBuf>,
+        /// Ask a model where nothing deterministic answers, for every target or none.
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        source_cache: Option<PathBuf>,
     },
     /// Ask a registry what it knows about a package.
     #[cfg(feature = "build")]
@@ -442,6 +457,9 @@ fn exit_quietly_on_broken_pipe() {
         default(info);
     }));
 }
+
+#[cfg(feature = "build")]
+mod inferrer;
 
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
@@ -609,6 +627,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             attest,
             key,
             store,
+            model,
+            source_cache,
         } => rebuild::run(rebuild::Args {
             purl,
             artifact,
@@ -623,6 +643,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             attest,
             key,
             store,
+            model,
+            source_cache,
         }),
         #[cfg(feature = "build")]
         Cmd::Sweep {
@@ -635,6 +657,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             mirror_image,
             timewarp,
             store,
+            model,
+            source_cache,
         } => sweep::run(sweep::Args {
             targets,
             image,
@@ -645,6 +669,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             definitions,
             mirror_image,
             timewarp,
+            model,
+            source_cache,
         }),
         #[cfg(feature = "build")]
         Cmd::Attest {
@@ -1583,18 +1609,28 @@ mod rebuild {
         pub key: Option<PathBuf>,
         /// Record the run in a store for a separate attestor to sign.
         pub store: Option<PathBuf>,
+        /// Ask a model for a strategy when nothing above it on the ladder produced one.
+        ///
+        /// Off unless the operator names a provider. A run that would silently call a model is a
+        /// run whose cost and derivation are a surprise, and `docs/07-ai.md` §6 measures the
+        /// invocation rate precisely because it is supposed to be something you choose.
+        pub model: Option<String>,
+        /// Where the model rung keeps its source checkouts.
+        pub source_cache: Option<PathBuf>,
     }
 
     /// The ladder, in the order `docs/04-strategies.md` §6 sets out.
     ///
     /// A definition first, because one exists exactly where inference already failed. Then the
-    /// ecosystem heuristic. No rung here costs money or calls a model, and the engine contains no
-    /// branch asking which kind of rung produced a candidate: the ordering is the policy.
+    /// ecosystem heuristic. Then, only if the operator asked for one, the model. The engine
+    /// contains no branch asking which kind of rung produced a candidate: the ordering is the
+    /// policy, and the model is last because everything above it is free and deterministic.
     fn ladder(
         target: &trigon_core::Ecosystem,
         client: Client,
         definitions: Option<PathBuf>,
         mirror: Option<String>,
+        model: Option<&crate::inferrer::Configured>,
     ) -> Vec<Box<dyn StrategyInferrer>> {
         let mut rungs: Vec<Box<dyn StrategyInferrer>> = Vec::new();
         if let Some(d) = definitions
@@ -1612,11 +1648,16 @@ mod rebuild {
             }
             _ => {}
         }
+        if let Some(m) = model
+            && crate::inferrer::supported(*target)
+        {
+            rungs.push(Box::new(m.rung()));
+        }
         rungs
     }
 
     pub fn run(args: Args) -> Result<()> {
-        let outcome = run_one(args, true)?;
+        let outcome = run_one(args, true)?.outcome;
         match outcome {
             // `Recorded` only comes from a sweep's results file, never from a single run.
             Outcome::Compared(_) | Outcome::NoStrategy | Outcome::Recorded(..) => Ok(()),
@@ -1635,8 +1676,40 @@ mod rebuild {
     ///
     /// Returns `Err` only for something that would stop a sweep entirely, such as an unusable
     /// registry. Everything about one target, including its failures, comes back as an `Outcome`.
-    pub fn run_one(args: Args, verbose: bool) -> Result<Outcome> {
+    /// One run's outcome, and what it cost in model calls.
+    ///
+    /// A pair rather than a field on `Outcome`, because the count is a property of the *run* and
+    /// not of the verdict: a target that reproduced after two calls and one that reproduced after
+    /// none are the same verdict and very different data points, and the eval harness needs the
+    /// second number to say whether the invocation rate is trending down.
+    pub struct Ran {
+        pub outcome: Outcome,
+        pub model_calls: u32,
+    }
+
+    impl From<Outcome> for Ran {
+        fn from(outcome: Outcome) -> Self {
+            Ran {
+                outcome,
+                model_calls: 0,
+            }
+        }
+    }
+
+    pub fn run_one(args: Args, verbose: bool) -> Result<Ran> {
         let target = TargetRef::from_str(&args.purl)?;
+        // Before anything touches the network. A typo in `--model` should cost nothing and be
+        // reported as a typo, not as a run that resolved a package and then died.
+        //
+        // Parsed once rather than per rung: a transcript is read once, and a live provider would
+        // otherwise open a connection pool per target.
+        let model = match &args.model {
+            Some(spec) => Some(
+                crate::inferrer::Configured::parse(spec)?
+                    .with_cache_root(args.source_cache.clone()),
+            ),
+            None => None,
+        };
         let client = Client::new(ClientConfig::default())?;
         let registry = for_ecosystem(target.ecosystem, client.clone())?;
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1648,11 +1721,11 @@ mod rebuild {
         // 1. What the registry knows.
         let mut resolved = match rt.block_on(registry.resolve(&target)) {
             Ok(r) => r,
-            Err(e) => return Ok(classify(&e)),
+            Err(e) => return Ok(classify(&e).into()),
         };
         let meta = match resolved.pick(args.artifact.as_deref()) {
             Ok(m) => m.clone(),
-            Err(e) => return Ok(classify(&e)),
+            Err(e) => return Ok(classify(&e).into()),
         };
         if verbose {
             println!("{}", resolved.reference);
@@ -1667,7 +1740,7 @@ mod rebuild {
         let mut file = std::fs::File::create(&upstream_path)?;
         let upstream_digest = match rt.block_on(registry.fetch(&meta, &mut file)) {
             Ok(d) => d,
-            Err(e) => return Ok(classify(&e)),
+            Err(e) => return Ok(classify(&e).into()),
         };
         drop(file);
         if verbose {
@@ -1764,14 +1837,24 @@ mod rebuild {
             pin: None,
         };
 
+        if let (Some(m), true) = (&model, verbose) {
+            println!(
+                "  model      {}, asked only where nothing deterministic answers",
+                m.describe()
+            );
+        }
         let rungs = ladder(
             &target.ecosystem,
             client,
             args.definitions,
             timewarp_host.clone(),
+            model.as_ref(),
         );
         let Some(candidate) = rt.block_on(trigon_registry::infer(&rungs, &resolved))? else {
-            return Ok(Outcome::NoStrategy);
+            return Ok(Ran {
+                outcome: Outcome::NoStrategy,
+                model_calls: calls(&model),
+            });
         };
         let loc = candidate.strategy.location().cloned().unwrap_or_default();
         if verbose {
@@ -1873,33 +1956,46 @@ mod rebuild {
             if let Some(t) = trips.first() {
                 // Checked before the build's exit status is even considered. A tripped guard means
                 // the run cannot be used, whether the build succeeded or failed.
-                return Ok(Outcome::Void {
-                    reason: format!("{:?} arrived from {}", t.matched, t.url),
+                return Ok(Ran {
+                    outcome: Outcome::Void {
+                        reason: format!("{:?} arrived from {}", t.matched, t.url),
+                    },
+                    model_calls: calls(&model),
                 });
             }
         }
         if let Err(e) = built {
             let text = e.to_string();
             if let Some(reason) = text.strip_prefix("void: ") {
-                return Ok(Outcome::Void {
-                    reason: reason.to_string(),
+                return Ok(Ran {
+                    outcome: Outcome::Void {
+                        reason: reason.to_string(),
+                    },
+                    model_calls: calls(&model),
                 });
             }
-            return Ok(build_outcome(&e));
+            return Ok(Ran {
+                outcome: build_outcome(&e),
+                model_calls: calls(&model),
+            });
         }
 
         // 5. Compare, with the same code path `verify` uses.
         let Some(rebuilt) = newest_file(&out) else {
-            return Ok(Outcome::BuildFailed {
-                phase: "collect".into(),
-                signature: Some(trigon_core::FailureSignature {
-                    code: std::borrow::Cow::Borrowed("trigon/no-output"),
-                    subject: None,
-                    fault: trigon_core::Fault::Bug,
-                    retryable: false,
-                    repairable: true,
-                    evidence: "the build succeeded and left no artifact at the output path".into(),
-                }),
+            return Ok(Ran {
+                model_calls: calls(&model),
+                outcome: Outcome::BuildFailed {
+                    phase: "collect".into(),
+                    signature: Some(trigon_core::FailureSignature {
+                        code: std::borrow::Cow::Borrowed("trigon/no-output"),
+                        subject: None,
+                        fault: trigon_core::Fault::Bug,
+                        retryable: false,
+                        repairable: true,
+                        evidence: "the build succeeded and left no artifact at the output path"
+                            .into(),
+                    }),
+                },
             });
         };
         let set = crate::resolve_profile(
@@ -1917,7 +2013,7 @@ mod rebuild {
             &Limits::default(),
         ) {
             Ok(c) => c,
-            Err(e) => return Ok(classify(&e)),
+            Err(e) => return Ok(classify(&e).into()),
         };
         if verbose {
             println!();
@@ -1950,7 +2046,16 @@ mod rebuild {
                 tracing::warn!("could not record this run: {e:#}");
             }
         }
-        Ok(Outcome::Compared(comparison.outcome))
+        Ok(Ran {
+            outcome: Outcome::Compared(comparison.outcome),
+            model_calls: calls(&model),
+        })
+    }
+
+    /// What a run has spent so far, with no provider configured reading as zero rather than as
+    /// missing: nothing was asked because nothing could be.
+    fn calls(model: &Option<crate::inferrer::Configured>) -> u32 {
+        model.as_ref().map_or(0, |m| m.calls())
     }
 
     /// Reduce one of our own error messages to the part that is the same across targets.
@@ -2393,6 +2498,10 @@ mod sweep {
         pub timewarp: Option<String>,
         /// Record every run in a store, so a sweep leaves something an attestor can sign.
         pub store: Option<PathBuf>,
+        /// Passed to every target. A sweep that asks a model does so for all of them or none: a
+        /// rate measured over a mixture of the two is not a rate of anything.
+        pub model: Option<String>,
+        pub source_cache: Option<PathBuf>,
     }
 
     pub fn run(args: Args) -> Result<()> {
@@ -2456,7 +2565,7 @@ mod sweep {
             let work = args.work.join(format!("{i:03}"));
             let _ = std::fs::remove_dir_all(&work);
 
-            let outcome = crate::rebuild::run_one(
+            let ran = crate::rebuild::run_one(
                 crate::rebuild::Args {
                     purl: purl.to_string(),
                     artifact: None,
@@ -2476,14 +2585,20 @@ mod sweep {
                     attest: None,
                     key: None,
                     store: args.store.clone(),
+                    model: args.model.clone(),
+                    source_cache: args.source_cache.clone(),
                 },
                 false,
             )
             // A target that cannot even be parsed is that target's problem, not the sweep's.
-            .unwrap_or_else(|e| Outcome::Failed {
-                fault: trigon_core::Fault::Policy,
-                detail: e.to_string(),
+            .unwrap_or_else(|e| {
+                Outcome::Failed {
+                    fault: trigon_core::Fault::Policy,
+                    detail: e.to_string(),
+                }
+                .into()
             });
+            let (outcome, model_calls) = (ran.outcome, ran.model_calls);
 
             let secs = started.elapsed().as_secs_f64();
             println!(
@@ -2502,7 +2617,9 @@ mod sweep {
                 "{purl}\t{}\t{secs:.1}\t{}\t{}",
                 outcome.label(),
                 outcome.cluster().unwrap_or_default(),
-                outcome.model_calls(),
+                // What this run actually spent, not what the outcome remembers: a fresh row knows
+                // its own count and only a resumed one has to read it back out of the file.
+                model_calls.max(outcome.model_calls()),
             )?;
             sink.flush()?;
             rows.push((purl.to_string(), outcome, secs));

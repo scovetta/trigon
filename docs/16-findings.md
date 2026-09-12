@@ -211,6 +211,36 @@ there.
 With all of it in place, `left-pad 1.3.0` reproduces `normalized` at `mirror-only` on a stock Debian
 image.
 
+### 3.7 The Builder needs the repository, and the repository was only ever inside the container
+
+[`07`](07-ai.md) §4 has the Builder answering from a file list and the manifests. Nothing in the run
+path could supply either: the heuristic rungs answer from registry metadata alone, and the only
+checkout that exists is the one the build container makes and takes away with it. A model rung
+without the repository can do nothing but guess, which is strictly worse than the heuristic it sits
+behind — so the rung needed a pinned checkout on the host before it needed a provider.
+
+That moves a `git fetch` from inside the island to the host, over a URL that came from package
+metadata. The controls are in `trigon-registry/src/source.rs` and each exists for a specific reason:
+
+- **`https` only, and no leading `-`.** git reads a leading dash as an option wherever it appears,
+  so `--upload-pack=…` in a repository field is a command on the operator's machine. The scheme
+  restriction rules out `ssh` (a credential agent), `file` (the local filesystem) and `ext` (an
+  arbitrary command).
+- **A full commit id, never a ref.** A rung that reads "the repository at `main`" reads whatever
+  `main` says today, and a file that arrived after the release would be read as evidence about it.
+- **`GIT_ALLOW_PROTOCOL`,** which holds where the URL check cannot see: a redirect, a submodule, an
+  `insteadOf` that survived. It is load-bearing rather than decorative — it refused the test fixture
+  until the trusted case said otherwise.
+- **A local path only where the *operator* named it,** never where a package did. `file://` is not
+  dangerous; `file://` chosen by the thing under test is. That distinction is a constructor
+  (`trusting_local_paths`) rather than a guess inside the check.
+
+The rung itself declines more often than it answers: no repository, no commit, an answer that does
+not parse — the ladder moves on and the target ends as `no-strategy`, which is a statement about the
+run rather than an error of ours in a sweep's denominator. It is last on the ladder, it runs only
+when `--model` names a provider, and the candidate it returns is `Weak` whatever the model said
+about its own confidence.
+
 ---
 
 ## 4. A stabilizer the reference does not have

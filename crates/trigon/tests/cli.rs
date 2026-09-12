@@ -742,3 +742,39 @@ fn base64_encode(b: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(b)
 }
+
+#[test]
+fn an_unknown_model_provider_fails_before_anything_touches_the_network() {
+    // A typo in `--model` should cost nothing and read as a typo. Before this was checked first,
+    // the run resolved the package, started a mirror, and then died on the spec — which reads as
+    // the registry's fault, and takes seconds to say so.
+    let out = Command::new(bin())
+        .args(["rebuild", "pkg:npm/left-pad@1.3.0"])
+        .args(["--image", "unused", "--work"])
+        .arg(tmp().join("model-typo"))
+        .args(["--model", "gpt-4o"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not a provider this build knows"), "{err}");
+    // And says what it does know, rather than leaving the reader to guess the spelling.
+    assert!(err.contains("replay:"), "{err}");
+}
+
+#[test]
+fn a_rebuild_asks_no_model_unless_one_is_named() {
+    // The default matters more than it looks: `docs/07-ai.md` §6 measures the model-invocation rate
+    // precisely because a run that quietly called one is a run whose cost and derivation are a
+    // surprise. `--help` is where an operator finds out it is opt-in.
+    let out = Command::new(bin())
+        .args(["rebuild", "--help"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--model"), "{text}");
+    assert!(
+        text.contains("nothing deterministic produced one"),
+        "the help does not say when the model is asked: {text}"
+    );
+}
