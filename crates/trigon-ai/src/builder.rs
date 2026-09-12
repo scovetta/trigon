@@ -40,10 +40,18 @@ pub struct Task<'a> {
     pub evidence: &'a [String],
     /// The strategy that was tried, as YAML, on a repair iteration.
     pub previous: Option<&'a str>,
-    /// How it failed. Present exactly when `previous` is.
+    /// How it failed. Present exactly when `previous` is **and the build failed**.
     pub failure: Option<&'a FailureSignature>,
     /// The failing build's log, **already compressed**.
     pub log: Option<&'a str>,
+    /// How the artifact differed, when the build *succeeded* and the result did not match.
+    ///
+    /// A separate field rather than a failure with a synthetic code, because it is a different
+    /// question and wants a different answer. A build failure says "this recipe does not run"; a
+    /// divergence says "this recipe runs and builds something else", which is the harder and more
+    /// interesting half — `escalade 3.2.0` publishes a `dist/` that `npm pack` alone never
+    /// produces, and nothing about that looks like an error.
+    pub divergence: Option<&'a str>,
 }
 
 /// What the Builder answers.
@@ -122,6 +130,18 @@ pub fn prompt(task: &Task) -> Prompt {
     }
     p = p.volatile(context);
 
+    if let (Some(previous), Some(divergence)) = (task.previous, task.divergence) {
+        // Deliberately explicit that the build worked. A model shown a recipe and told to fix it
+        // tends to look for the error, and here there is none: the recipe ran, and produced
+        // something that is not what was published.
+        p = p.volatile(format!(
+            "\nThe previous attempt **built successfully**, and the artifact it produced is not \
+             the published one. Nothing failed; the recipe builds something else.\n\n\
+             --- strategy tried ---\n{previous}\n\n--- how it differs ---\n{divergence}\n\n\
+             Propose a recipe that produces the published artifact. Do not add steps that fetch \
+             the published artifact or any part of it.\n"
+        ));
+    }
     if let (Some(previous), Some(failure)) = (task.previous, task.failure) {
         let mut repair = format!(
             "\nThe previous attempt failed with `{}`.\n\n--- strategy tried ---\n{previous}\n",
@@ -258,7 +278,30 @@ mod tests {
             previous: None,
             failure: None,
             log: None,
+            divergence: None,
         }
+    }
+
+    #[test]
+    fn a_divergence_is_asked_about_as_a_divergence_and_not_as_a_failure() {
+        // A model shown a recipe and told to fix it looks for the error. On a divergence there is
+        // none: the recipe ran, and built something that is not what was published. Saying so is
+        // the difference between "add a missing dependency" and "this package has a build step".
+        let t = Task {
+            previous: Some("kind: flow\n"),
+            divergence: Some("member-only-in-reference@dist/index.js"),
+            ..task()
+        };
+        let p = prompt(&t);
+        let text = p.flatten();
+        assert!(text.contains("built successfully"), "{text}");
+        assert!(text.contains("builds something else"), "{text}");
+        assert!(text.contains("dist/index.js"), "{text}");
+        // And the artifact guard's rule is stated where the model can act on it, not only enforced
+        // after the fact: a recipe that downloads the published artifact reproduces it perfectly.
+        assert!(text.contains("Do not add steps that fetch"), "{text}");
+        // Still cacheable: the divergence is volatile and goes after the prefix.
+        assert!(p.is_cacheable());
     }
 
     #[test]

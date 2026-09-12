@@ -1897,6 +1897,11 @@ mod rebuild {
         // Read on the first repair and not before. A run whose build works never touches the
         // repository, and a `--model` that is only there as a fallback should cost nothing.
         let mut repo_inputs: Option<crate::inferrer::Inputs> = None;
+        // What the comparison said, when there was one to make. Carried out of the loop rather
+        // than returned from inside it, because the mirror is torn down after the loop and an
+        // early return would leave it running.
+        let mut judged: Option<(PathBuf, trigon_compare::Comparison)> = None;
+        let mut compare_error: Option<Outcome> = None;
         let (built, strategy_digest) = loop {
             // A fresh directory per attempt. Without it an earlier attempt's partial output sits
             // beside a later one's artifact, and "the newest file" stops being a description of
@@ -1935,7 +1940,86 @@ mod rebuild {
             }
 
             let Err(e) = &built else {
-                break (built, strategy_digest);
+                // A build that ran is not yet an answer. The comparison happens here, inside the
+                // loop, because a divergence is the repair case that matters most: the recipe
+                // works and builds something that is not what was published.
+                let Some(rebuilt) = newest_file(&out) else {
+                    break (built, strategy_digest);
+                };
+                let comparison = match judge(&upstream_path, &rebuilt) {
+                    Ok(c) => c,
+                    Err(outcome) => {
+                        compare_error = Some(outcome);
+                        break (built, strategy_digest);
+                    }
+                };
+                if comparison.outcome != trigon_core::Match::Divergent {
+                    judged = Some((rebuilt, comparison));
+                    break (built, strategy_digest);
+                }
+
+                let Some(cfg) = &model else {
+                    judged = Some((rebuilt, comparison));
+                    break (built, strategy_digest);
+                };
+                // The same admission control as a build failure, over a signature built from the
+                // difference codes. Two divergences that differ the same way are the model
+                // restating, exactly as two builds that fail the same way are.
+                let failure = divergence_signature(&comparison);
+                match repairs.next(&failure, &trigon_ai::NoPrior, repair_started.elapsed().as_secs())
+                {
+                    trigon_ai::Decision::Stop(reason) => {
+                        if verbose {
+                            println!("  repair     stopped: {}", stop_reason(&reason));
+                        }
+                        tracing::info!(?reason, "the repair loop stopped after a divergence");
+                        judged = Some((rebuilt, comparison));
+                        break (built, strategy_digest);
+                    }
+                    trigon_ai::Decision::Attempt { .. } => {
+                        if repo_inputs.is_none() {
+                            match cfg.inputs(&resolved) {
+                                Ok(i) => repo_inputs = Some(i),
+                                Err(e) => {
+                                    tracing::warn!("no repair: {e:#}");
+                                    judged = Some((rebuilt, comparison));
+                                    break (built, strategy_digest);
+                                }
+                            }
+                        }
+                        let read = repo_inputs.as_ref().expect("just filled");
+                        let brief = divergence_brief(&comparison);
+                        if verbose {
+                            println!(
+                                "  repair     attempt {} on {}",
+                                repairs.attempts().len() + 1,
+                                failure.key()
+                            );
+                        }
+                        let before = cfg.spent();
+                        let proposed = cfg.repair_divergence(read, &strategy_yaml, &brief);
+                        let after = cfg.spent();
+                        repairs.record(trigon_ai::Attempt {
+                            signature: failure.key(),
+                            // The build reached the end; what differs is what it produced.
+                            reached: trigon_core::Phase::Collect,
+                            tokens_in: after.input.saturating_sub(before.input),
+                            tokens_out: after.output.saturating_sub(before.output),
+                            cached_in: after.cached_input.saturating_sub(before.cached_input),
+                        });
+                        match proposed {
+                            Ok(next) => {
+                                strategy = next;
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!("the proposal produced nothing: {e:#}");
+                                judged = Some((rebuilt, comparison));
+                                break (built, strategy_digest);
+                            }
+                        }
+                    }
+                }
             };
             // Only a failure the build itself reported carries a signature. Our own errors and a
             // void run are not something a different recipe fixes.
@@ -2100,8 +2184,14 @@ mod rebuild {
             });
         }
 
-        // 5. Compare, with the same code path `verify` uses.
-        let Some(rebuilt) = newest_file(&out) else {
+        // 5. The comparison the loop already made, with the same code path `verify` uses.
+        if let Some(outcome) = compare_error {
+            return Ok(Ran {
+                outcome,
+                model_calls: calls(&model),
+            });
+        }
+        let Some((rebuilt, comparison)) = judged else {
             return Ok(Ran {
                 model_calls: calls(&model),
                 outcome: Outcome::BuildFailed {
@@ -2117,23 +2207,6 @@ mod rebuild {
                     }),
                 },
             });
-        };
-        let set = crate::resolve_profile(
-            &upstream_path,
-            None,
-            crate::resolve_format(&upstream_path, None)?,
-        )?;
-        let a = std::fs::read(&upstream_path)?;
-        let b = std::fs::read(&rebuilt)?;
-        let comparison = match compare_bytes(
-            a,
-            b,
-            crate::resolve_format(&upstream_path, None)?,
-            &set,
-            &Limits::default(),
-        ) {
-            Ok(c) => c,
-            Err(e) => return Ok(classify(&e).into()),
         };
         if verbose {
             println!();
@@ -2359,6 +2432,119 @@ mod rebuild {
     /// to search our own error text for a phase name, so "the mirror container did not start
     /// listening" became `build-failed:setup` and a broken mirror on our side read, in the sweep
     /// summary, as five packages that do not build.
+    /// Compare the two artifacts, the way `verify` does.
+    fn judge(upstream: &Path, rebuilt: &Path) -> Result<trigon_compare::Comparison, Outcome> {
+        let read = || -> Result<trigon_compare::Comparison> {
+            let format = crate::resolve_format(upstream, None)?;
+            let set = crate::resolve_profile(upstream, None, format)?;
+            let a = std::fs::read(upstream)?;
+            let b = std::fs::read(rebuilt)?;
+            // Classified as itself rather than as an anyhow string: a comparison that could not
+            // run is our fault or the archive's, and which one it is has to survive to the caller.
+            compare_bytes(a, b, format, &set, &Limits::default())
+                .map_err(|e| anyhow::Error::new(ComparisonFailed(classify(&e))))
+        };
+        read().map_err(|e| match e.downcast::<ComparisonFailed>() {
+            Ok(ComparisonFailed(o)) => o,
+            Err(e) => Outcome::Failed {
+                fault: trigon_core::Fault::Infra,
+                detail: e.to_string(),
+            },
+        })
+    }
+
+    /// A comparison that could not run, carrying the classification it already had.
+    #[derive(Debug)]
+    struct ComparisonFailed(Outcome);
+
+    impl std::fmt::Display for ComparisonFailed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "the comparison could not run")
+        }
+    }
+
+    impl std::error::Error for ComparisonFailed {}
+
+    /// A divergence, in the shape the repair loop's admission control reads.
+    ///
+    /// The subject is the difference *codes*, not the file names: `docs/07-ai.md` §4.2 keys repair
+    /// caching on a normalized signature, and a key carrying `dist/index.js` is a key that matches
+    /// one package. `entry:content` is a class of problem that recurs across thousands.
+    ///
+    /// Repairable, because a divergence is the case a different recipe can fix — which is the whole
+    /// reason this exists. Not retryable: the same recipe produces the same bytes.
+    fn divergence_signature(c: &trigon_compare::Comparison) -> trigon_core::FailureSignature {
+        let codes = c.diff.as_ref().map(|d| &d.codes);
+        // The codes carry `@path` suffixes; the class is what comes before, and a handful of
+        // classes is what makes this a cluster rather than a list of packages.
+        let mut classes: std::collections::BTreeSet<&str> = Default::default();
+        for code in codes.into_iter().flatten() {
+            classes.insert(code.split('@').next().unwrap_or(code));
+        }
+        let subject = (!classes.is_empty()).then(|| classes.into_iter().collect::<Vec<_>>().join(","));
+        trigon_core::FailureSignature {
+            code: std::borrow::Cow::Borrowed("divergence"),
+            subject,
+            // The package built and the result differs. Not our infrastructure, and not a broken
+            // package either until somebody has looked.
+            fault: trigon_core::Fault::Build,
+            retryable: false,
+            repairable: true,
+            evidence: c
+                .diff
+                .as_ref()
+                .map(|d| {
+                    format!(
+                        "{} identical, {} differ, {} only upstream, {} only in the rebuild",
+                        d.identical, d.differs, d.only_upstream, d.only_rebuild
+                    )
+                })
+                .unwrap_or_else(|| "the stabilized digests differ".into()),
+        }
+    }
+
+    /// What differs, for a model to read.
+    ///
+    /// Named files here, unlike the signature: the signature is a cluster key and this is the
+    /// evidence. A model that is told "four members differ" can do nothing; one told
+    /// `dist/index.js` is only in the published artifact can infer a build step.
+    fn divergence_brief(c: &trigon_compare::Comparison) -> String {
+        let mut out = String::new();
+        let Some(d) = &c.diff else {
+            return "the stabilized digests differ, with no member-level detail available".into();
+        };
+        out.push_str(&format!(
+            "{} members identical, {} differ, {} only in the published artifact, {} only in the \
+             rebuild.\n",
+            d.identical, d.differs, d.only_upstream, d.only_rebuild
+        ));
+        if !d.codes.is_empty() {
+            out.push_str("\nDifference codes:\n");
+            // Capped: a wholesale mismatch produces one code per member, and a thousand of them
+            // buys nothing the first twenty do not say.
+            for code in d.codes.iter().take(40) {
+                out.push_str(&format!("  {code}\n"));
+            }
+            if d.codes.len() > 40 {
+                out.push_str(&format!("  … and {} more\n", d.codes.len() - 40));
+            }
+        }
+        let mut named = 0;
+        for f in &d.files {
+            if f.status == trigon_compare::FileStatus::Identical || named >= 40 {
+                continue;
+            }
+            named += 1;
+            out.push_str(&format!(
+                "  {:?} {} ({:?})\n",
+                f.status,
+                String::from_utf8_lossy(f.path.as_bytes()),
+                f.kind
+            ));
+        }
+        out
+    }
+
     /// Why the repair loop stopped, in a sentence.
     ///
     /// Each of these is a different thing to do about it — a knob, a gap in our rule table, or the

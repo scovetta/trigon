@@ -228,9 +228,17 @@ $ trigon rebuild …  --model replay:run.transcript.json   # a recording; opens 
 
 Keys are read from the environment, never the command line. A model rung needs the repository, so
 it fetches the pinned commit to a local cache first; it declines where there is no source, no
-commit, or an answer that will not parse, and the ladder moves on. The candidate it produces is
-recorded as `model_assisted` and can never reach `normalized` — only `normalized_with_caveats` —
-which is the provenance cap, not a policy setting.
+commit, or an answer that will not parse, and the ladder moves on.
+
+When a build fails — or succeeds and produces something that is not the published artifact — the
+recipe, the failure and the compressed log go back to the model for another attempt, bounded: six
+iterations, a token budget, a wall clock, and a stop as soon as two attempts fail the same way.
+
+A model-derived recipe is recorded as `derivation: model_assisted` **beside** the claim, never
+inside it, so a consumer can filter on "no model touched this". It does not change the match
+outcome: the provenance cap is about *stabilizers*, and a model-authored one can only ever reach
+`normalized_with_caveats`. What keeps a model-written recipe honest is the artifact guard — a build
+that downloads its own published output is `Void` however it was derived.
 
 `copilot` is an agent with a shell on your machine, and it is configured here so the model sees no
 tools at all. Read the module documentation in `trigon-ai/src/copilot.rs` before using it.

@@ -57,11 +57,17 @@ fn collect(reference: &Archive, ours: &Archive, prefix: &str, out: &mut BTreeSet
     }
     trailer(&reference.trailer, &ours.trailer, prefix, out);
 
-    // Members are keyed by (path, ordinal), the same total order the writer sorts by, so a
-    // duplicate path in one archive lines up with the same occurrence in the other.
-    let key = |e: &Entry| (e.path.as_bytes().to_vec(), e.ordinal);
-    let rk: Vec<_> = reference.entries.iter().map(key).collect();
-    let ok: Vec<_> = ours.entries.iter().map(key).collect();
+    // Members are keyed by (path, *occurrence of that path*), so a duplicate path in one archive
+    // lines up with the same occurrence in the other.
+    //
+    // Not `Entry::ordinal`, which is the entry's position in the archive. Keying on that made every
+    // member of an archive whose length differs look unmatched: `escalade 3.2.0` publishes seven
+    // files `npm pack` does not produce, and this named `package.json` as present only in the
+    // rebuild *and* only in the published artifact, while the member diff correctly called it
+    // identical. These codes go into a signed divergence statement about somebody else's package,
+    // which makes a false one the most expensive kind of wrong there is (`docs/09` §10.3).
+    let rk = keys(&reference.entries);
+    let ok = keys(&ours.entries);
     let rset: BTreeSet<_> = rk.iter().cloned().collect();
     let oset: BTreeSet<_> = ok.iter().cloned().collect();
 
@@ -81,16 +87,30 @@ fn collect(reference: &Archive, ours: &Archive, prefix: &str, out: &mut BTreeSet
         out.insert(format!("entry-order{}", at(prefix)));
     }
 
-    for r in &reference.entries {
-        let Some(o) = ours
-            .entries
-            .iter()
-            .find(|o| o.path == r.path && o.ordinal == r.ordinal)
-        else {
+    // Paired by the same key, so the second `lib/index.js` in one is compared with the second in
+    // the other rather than with whatever sits at the same position.
+    let paired: std::collections::BTreeMap<_, _> = ok.iter().cloned().zip(&ours.entries).collect();
+    for (k, r) in rk.iter().zip(&reference.entries) {
+        let Some(o) = paired.get(k) else {
             continue;
         };
         entry(r, o, prefix, out);
     }
+}
+
+/// `(path, occurrence)` for each entry, in archive order.
+fn keys(entries: &[Entry]) -> Vec<(Vec<u8>, u32)> {
+    let mut seen: std::collections::BTreeMap<Vec<u8>, u32> = Default::default();
+    entries
+        .iter()
+        .map(|e| {
+            let path = e.path.as_bytes().to_vec();
+            let n = seen.entry(path.clone()).or_insert(0);
+            let key = (path, *n);
+            *n += 1;
+            key
+        })
+        .collect()
 }
 
 fn entry(r: &Entry, o: &Entry, prefix: &str, out: &mut BTreeSet<String>) {
@@ -271,7 +291,61 @@ pub fn matches(pattern: &str, code: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::matches;
+    use super::{matches, signature};
+    use trigon_archive::{Archive, Limits};
+    use trigon_core::Format;
+
+    /// A tar holding these paths, in this order, each with the same body.
+    fn tar(paths: &[&str]) -> Archive {
+        let mut b = ::tar::Builder::new(Vec::new());
+        for p in paths {
+            let mut h = ::tar::Header::new_ustar();
+            h.set_size(1);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, p, &b"x"[..]).unwrap();
+        }
+        let bytes = b.into_inner().unwrap();
+        trigon_archive::parse(bytes, Format::Tar, &Limits::default(), &mut Vec::new())
+            .unwrap()
+            .archive
+    }
+
+    #[test]
+    fn a_member_present_in_both_is_not_named_as_missing_from_either() {
+        // Found on `escalade 3.2.0`, whose published tarball carries seven files `npm pack` does
+        // not produce. Keyed on `Entry::ordinal` — the position in the archive — every member after
+        // the first difference looked unmatched, so `package.json` was reported as present only in
+        // the rebuild *and* only in the published artifact while the member diff called it
+        // identical. These codes go into a signed statement about somebody else's package.
+        let published = tar(&["pkg/dist/index.js", "pkg/package.json", "pkg/readme.md"]);
+        let ours = tar(&["pkg/package.json", "pkg/readme.md"]);
+
+        let codes = signature(&published, &ours);
+        assert!(codes.contains("member-only-in-reference@pkg/dist/index.js"), "{codes:?}");
+        assert!(
+            !codes.iter().any(|c| c.starts_with("member-only-in-ours@")),
+            "the rebuild has no file the published artifact lacks: {codes:?}"
+        );
+        assert!(
+            !codes.contains("member-only-in-reference@pkg/package.json"),
+            "a file present in both was named as missing: {codes:?}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_path_lines_up_with_the_same_occurrence() {
+        // What the key exists for. Two archives holding `a` twice must compare first-with-first,
+        // whatever else sits between them.
+        let reference = tar(&["a", "b", "a"]);
+        let ours = tar(&["a", "a"]);
+        let codes = signature(&reference, &ours);
+        assert!(codes.contains("member-only-in-reference@b"), "{codes:?}");
+        assert!(
+            !codes.iter().any(|c| c.starts_with("member-only-in-ours@")),
+            "{codes:?}"
+        );
+    }
 
     #[test]
     fn patterns_are_anchored_at_both_ends() {

@@ -194,7 +194,7 @@ impl Inputs {
     }
 
     /// The task, with the repair fields filled in on an iteration after the first.
-    fn task<'a>(
+    pub(crate) fn task<'a>(
         &'a self,
         previous: Option<&'a str>,
         failure: Option<&'a trigon_core::FailureSignature>,
@@ -209,6 +209,7 @@ impl Inputs {
             previous,
             failure,
             log,
+            divergence: None,
         }
     }
 }
@@ -443,6 +444,29 @@ impl Configured {
             .checkout(&source.repo_url, &source.commit)
             .context("fetching the source for a repair")?;
         Ok(Inputs::read(&checkout, target)?)
+    }
+
+    /// Ask for a repair after a divergence: the recipe that ran, and how what it built differs.
+    ///
+    /// Separate from [`Self::repair`] because it is a different question. A build failure says the
+    /// recipe does not run; a divergence says it runs and builds something else, which is the
+    /// harder half and the one the corpus's `needs-build-inference` label is about.
+    pub fn repair_divergence(
+        &self,
+        inputs: &Inputs,
+        previous: &str,
+        divergence: &str,
+    ) -> Result<trigon_strategy::Strategy> {
+        let mut task = inputs.task(Some(previous), None, None);
+        task.divergence = Some(divergence);
+        let proposed = trigon_ai::propose(self.provider.as_ref(), &self.model, &task)
+            .context("asking about a divergence")?;
+        trigon_strategy::from_yaml(&proposed.strategy).with_context(|| {
+            format!(
+                "the proposal did not parse as a strategy. The model said: {}",
+                first_line(&proposed.diagnosis)
+            )
+        })
     }
 
     /// Ask for a repair: the recipe that was tried, how it failed, and the log.

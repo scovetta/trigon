@@ -306,12 +306,39 @@ Two bugs, both found only by running it:
   on a Debian image is dash, which says `npx: not found`. Every missing tool under dash was
   clustering as `unknown` — the bucket that hides our own bugs.
 
-Still missing, and the next thing: the loop triggers on a *build failure*, and the most interesting
-repair class is a **divergence** — the build succeeded and the artifact differs. `escalade 3.2.0`,
-the corpus's one `needs-build-inference` target, is exactly that: `npm pack` alone never produces
-the `dist/` it publishes. Feeding a `Comparison` back to the Builder is a different prompt and a
-different admission-control question, and it is what the flywheel's first promoted rule will come
-from.
+### 3.10 Divergence repair, and a false accusation it found
+
+The loop now also triggers on a **divergence** — the build succeeded and produced something that is
+not what was published. It is the more interesting half and it is a genuinely different question, so
+it is a separate field on the task and a separate prompt rather than a build failure with a
+synthetic code. A model shown a recipe and told to fix it looks for the error; here there is none,
+and saying so explicitly is the difference between "add a missing dependency" and "this package has
+a build step". The prompt also states the artifact-guard rule where the model can act on it rather
+than only enforcing it afterwards: *do not add steps that fetch the published artifact*.
+
+Admission control is the same, over a signature built from the difference **codes** rather than the
+file names — `docs/07-ai.md` §4.2 keys repair caching on a normalized signature, and a key carrying
+`dist/index.js` matches one package while `member-only-in-reference` is a class that recurs across
+thousands. The brief the model reads does name the files, because that is the evidence.
+
+Run against `escalade 3.2.0`, the corpus's one `needs-build-inference` target, it fired on
+`divergence:member-only-in-ours,member-only-in-reference` — and that key exposed a bug in
+`signature()` worth more than the feature:
+
+> **Members were keyed by `Entry::ordinal`, which is the entry's position in the archive, not the
+> occurrence of that path.** The comment said occurrence; the code said position. So whenever the
+> two archives differ in length — which is every divergence with an added or removed member — every
+> member after the first difference looked unmatched. `escalade`'s `package.json` was reported as
+> present *only in the rebuild* **and** *only in the published artifact*, while the member diff
+> correctly called it identical.
+
+These codes go into the signed divergence predicate, which is a public claim about somebody else's
+package; a false one is the error class [`09`](09-attestations.md) §10.3 gates tightest. Keyed by
+occurrence, as `diff::report` already did, the same comparison names exactly the seven files that
+really are only in the published artifact.
+
+Still missing: the flywheel's other half. A repair that works is not yet promoted into a rule and
+re-tested corpus-wide, which is what stops the same insight being paid for ten thousand times.
 
 ---
 
