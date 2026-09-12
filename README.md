@@ -247,6 +247,29 @@ The artifact guard runs either way. If the package's own published bytes — or 
 files — arrive over the network, the run is `Void`: not a pass and not a failure, because a build
 that downloads its own output reproduces it perfectly and proves nothing.
 
+## Watching a sweep
+
+`trigon sweep` prints its summary once, at the end, into the terminal that launched it. `trigon
+watch` reads the same work directory from somewhere else, while the sweep is still running:
+
+```
+$ trigon sweep corpora/m1-npm-smoke.txt --image <digest> --work ./sweeps/npm …
+$ trigon watch ./sweeps/npm --targets corpora/m1-npm-smoke.txt     # in another terminal
+watching on http://127.0.0.1:8099  (read-only; ctrl-c to stop)
+```
+
+The board, the two rates with their denominators printed, and the failure clusters ranked by size —
+then a cluster page that says whether forty red rows are one problem or three, and a run page with
+the log and what the ladder decided.
+
+It never talks to the sweep. It reads the files the sweep already writes, so it survives the sweep's
+death: every completed result stays on the page, the silence is labelled with its age, and the
+target that was in flight is reported as unknown rather than converted into a failure. Read-only —
+there is no write path, and a cluster hands you the `trigon rebuild` line to paste.
+
+Loopback by default, because a work directory holds artifacts fetched from registries and build logs
+that may carry credentials. [`docs/18`](docs/18-management-ui.md) has the plan it is being built to.
+
 ## The two halves
 
 The system is one idea: **rebuild verification is a search problem wrapped in an equivalence

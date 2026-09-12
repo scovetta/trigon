@@ -350,6 +350,30 @@ enum Cmd {
         #[arg(long)]
         source_cache: Option<PathBuf>,
     },
+    /// Watch a sweep's work directory, from a browser, while it runs.
+    ///
+    /// Read-only, and it never talks to the sweep: it reads the files the sweep already writes, so
+    /// it survives the sweep's death. That is the point — every completed result stays on the page,
+    /// the silence is labelled with its age, and the target that was in flight is reported as
+    /// unknown rather than converted into a failure.
+    ///
+    /// Not `serve`, which `docs/11-interfaces.md` reserves for an API, a UI and workers together.
+    #[cfg(feature = "build")]
+    Watch {
+        /// A sweep's `--work` directory.
+        work: PathBuf,
+        /// The targets file that sweep was given.
+        ///
+        /// Without it the page has no denominator — it can say how many targets were attempted and
+        /// not how many there are — and it says so rather than guessing. It is also what names the
+        /// per-target directories, so without it a resumed sweep's rows may link to the wrong one.
+        #[arg(long)]
+        targets: Option<PathBuf>,
+        /// Loopback by default. A work directory holds artifacts fetched from registries and build
+        /// logs that may carry credentials from a build environment.
+        #[arg(long, default_value = "127.0.0.1:8099")]
+        bind: String,
+    },
     /// Ask a registry what it knows about a package.
     #[cfg(feature = "build")]
     Resolve {
@@ -473,6 +497,8 @@ fn exit_quietly_on_broken_pipe() {
 
 #[cfg(feature = "build")]
 mod inferrer;
+#[cfg(feature = "build")]
+mod watch;
 
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
@@ -704,6 +730,12 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             baseline,
             fail_on_regression,
         } => score_run(&results, &labels, baseline.as_deref(), fail_on_regression),
+        #[cfg(feature = "build")]
+        Cmd::Watch {
+            work,
+            targets,
+            bind,
+        } => watch::serve(work, targets, bind),
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
         #[cfg(feature = "build")]

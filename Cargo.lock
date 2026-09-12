@@ -2490,6 +2490,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "base64",
  "clap",
  "flate2",
