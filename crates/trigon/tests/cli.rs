@@ -778,3 +778,63 @@ fn a_rebuild_asks_no_model_unless_one_is_named() {
         "the help does not say when the model is asked: {text}"
     );
 }
+
+#[test]
+fn a_sweep_comparison_names_what_a_change_broke_as_well_as_what_it_fixed() {
+    // The question a promoted rule has to answer. An aggregate rate is exactly what hides a change
+    // that fixes one package and breaks another — both sweeps here score 2/3.
+    let d = tmp().join("flips");
+    std::fs::create_dir_all(&d).unwrap();
+    let write = |name: &str, body: &str| {
+        let p = d.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    };
+    let before = write(
+        "before.tsv",
+        "pkg:npm/a@1\tdivergent\t1.0\t\t0\npkg:npm/b@1\texact\t1.0\t\t0\npkg:npm/c@1\tnormalized\t1.0\t\t0\n",
+    );
+    let after = write(
+        "after.tsv",
+        "pkg:npm/a@1\tnormalized\t1.0\t\t0\npkg:npm/b@1\tdivergent\t1.0\t\t0\npkg:npm/c@1\tnormalized\t1.0\t\t0\n",
+    );
+    let labels = write(
+        "labels.json",
+        r#"{"labels":[
+            {"purl":"pkg:npm/a@1","capability":"needs-build-inference","reason":"x"},
+            {"purl":"pkg:npm/b@1","capability":"trivial-deterministic","reason":"x"},
+            {"purl":"pkg:npm/c@1","capability":"trivial-deterministic","reason":"x"}]}"#,
+    );
+
+    let out = Command::new(bin())
+        .args(["score"])
+        .arg(&after)
+        .arg("--labels")
+        .arg(&labels)
+        .arg("--baseline")
+        .arg(&before)
+        .arg("--fail-on-regression")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("1 now reproduces"), "{text}");
+    assert!(text.contains("pkg:npm/a@1"), "{text}");
+    assert!(text.contains("NO LONGER REPRODUCES"), "{text}");
+    assert!(text.contains("pkg:npm/b@1"), "{text}");
+    assert!(text.contains("NOT a net gain"), "{text}");
+    // The gate is what makes this usable as a promotion check rather than a report.
+    assert!(!out.status.success(), "a regression must fail the gate");
+
+    // And without the gate it is a report: same finding, exit zero, because a person reading a
+    // comparison should not be told their shell command failed.
+    let out = Command::new(bin())
+        .args(["score"])
+        .arg(&after)
+        .arg("--labels")
+        .arg(&labels)
+        .arg("--baseline")
+        .arg(&before)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+}

@@ -97,12 +97,98 @@ pub struct Observation {
 }
 
 impl Observation {
-    fn reproduced(&self) -> bool {
+    /// Whether this run says the package reproduces.
+    pub fn reproduced(&self) -> bool {
         matches!(
             self.outcome.as_deref(),
             Some("exact" | "normalized" | "normalized_with_caveats")
         )
     }
+}
+
+/// What changed between two runs of the same corpus.
+///
+/// The question a proposed rule has to answer. Not "did the rate go up" — an aggregate hides a rule
+/// that fixes one package and breaks two, and `docs/07-ai.md` §6 is explicit that the aggregate is
+/// exactly what conceals the regression worth catching. This names the targets.
+///
+/// The categories are separate because they mean different things and want different responses. In
+/// particular a target that stopped producing *evidence* is not a target the rule broke: an
+/// infrastructure fault is ours, and filing it as a regression would make every flaky sweep look
+/// like a bad rule. It is reported, loudly, and on its own.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Flips {
+    /// Did not reproduce, now does. What a rule is for.
+    pub fixed: Vec<String>,
+    /// Reproduced, now does not, with evidence either way. **The regression that matters.**
+    pub broken: Vec<String>,
+    /// Reproduced, and now produced no evidence at all. Our infrastructure, not the rule — unless
+    /// the rule is what broke the build, which is why it is shown rather than dropped.
+    pub lost_evidence: Vec<String>,
+    /// Produced no evidence before and does now, whatever it says.
+    pub gained_evidence: Vec<String>,
+    /// Reproduces both times, by a different route: `exact` became `normalized`, or the other way.
+    /// A quiet downgrade is still a downgrade — a stabilizer that had to fire is a fact about the
+    /// rebuild that was not true before.
+    pub changed: Vec<Change>,
+    /// In this run and not the baseline, and the reverse. A corpus that quietly shrank is how a
+    /// rate improves without anything improving.
+    pub added: Vec<String>,
+    pub dropped: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Change {
+    pub purl: String,
+    pub from: String,
+    pub to: String,
+}
+
+impl Flips {
+    /// Whether this comparison is safe to promote on.
+    ///
+    /// A regression is disqualifying; losing evidence is not, because it is a statement about our
+    /// infrastructure rather than about the rule. Both are printed either way.
+    pub fn is_net_gain(&self) -> bool {
+        self.broken.is_empty() && !self.fixed.is_empty()
+    }
+}
+
+/// Compare two runs of the same corpus.
+pub fn flips(baseline: &[Observation], current: &[Observation]) -> Flips {
+    let by_purl: BTreeMap<&str, &Observation> =
+        baseline.iter().map(|o| (o.purl.as_str(), o)).collect();
+    let now: BTreeMap<&str, &Observation> = current.iter().map(|o| (o.purl.as_str(), o)).collect();
+
+    let mut out = Flips::default();
+    for (purl, c) in &now {
+        let Some(b) = by_purl.get(purl) else {
+            out.added.push((*purl).to_string());
+            continue;
+        };
+        match (b.is_evidence, c.is_evidence) {
+            (false, false) => {}
+            (false, true) => out.gained_evidence.push((*purl).to_string()),
+            (true, false) if b.reproduced() => out.lost_evidence.push((*purl).to_string()),
+            (true, false) => {}
+            (true, true) => match (b.reproduced(), c.reproduced()) {
+                (false, true) => out.fixed.push((*purl).to_string()),
+                (true, false) => out.broken.push((*purl).to_string()),
+                _ if b.outcome != c.outcome => out.changed.push(Change {
+                    purl: (*purl).to_string(),
+                    from: b.outcome.clone().unwrap_or_default(),
+                    to: c.outcome.clone().unwrap_or_default(),
+                }),
+                _ => {}
+            },
+        }
+    }
+    for purl in by_purl.keys() {
+        if !now.contains_key(purl) {
+            out.dropped.push((*purl).to_string());
+        }
+    }
+    out
 }
 
 /// A run scored against the corpus it was run on.
@@ -206,6 +292,62 @@ mod tests {
             model_calls: calls,
             is_evidence: outcome.is_some(),
         }
+    }
+
+    #[test]
+    fn a_rule_that_fixes_one_target_and_breaks_another_is_not_a_net_gain() {
+        // The whole question a promotion has to answer. A rate went from 2/4 to 2/4 and the
+        // aggregate says nothing happened; what happened is that a rule traded one package for
+        // another, and the flywheel's first job is to refuse that trade.
+        let before = vec![
+            observed("pkg:npm/a@1", Some("divergent"), 0),
+            observed("pkg:npm/b@1", Some("exact"), 0),
+            observed("pkg:npm/c@1", Some("normalized"), 0),
+            observed("pkg:npm/d@1", Some("exact"), 0),
+        ];
+        let after = vec![
+            observed("pkg:npm/a@1", Some("normalized"), 0),
+            observed("pkg:npm/b@1", Some("divergent"), 0),
+            observed("pkg:npm/c@1", Some("exact"), 0),
+            observed("pkg:npm/d@1", Some("exact"), 0),
+        ];
+
+        let f = flips(&before, &after);
+        assert_eq!(f.fixed, ["pkg:npm/a@1"]);
+        assert_eq!(f.broken, ["pkg:npm/b@1"]);
+        // Reproduces either way, by a different route. Not a regression, and not nothing: a
+        // stabilizer that no longer has to fire is a fact about the rebuild.
+        assert_eq!(f.changed.len(), 1);
+        assert_eq!(f.changed[0].purl, "pkg:npm/c@1");
+        assert_eq!((f.changed[0].from.as_str(), f.changed[0].to.as_str()), ("normalized", "exact"));
+        assert!(!f.is_net_gain(), "one fixed and one broken is a trade, not a gain");
+    }
+
+    #[test]
+    fn a_target_that_stopped_producing_evidence_is_not_filed_as_a_regression() {
+        // An infrastructure fault is ours, not the rule's. Counting it as a regression would make
+        // every flaky sweep look like a bad rule, and the failure would be attributed to whatever
+        // change happened to be under test.
+        let before = vec![observed("pkg:npm/a@1", Some("exact"), 0)];
+        let mut lost = observed("pkg:npm/a@1", None, 0);
+        lost.is_evidence = false;
+        let f = flips(&before, &[lost]);
+
+        assert!(f.broken.is_empty(), "an infra fault is not a package that stopped reproducing");
+        assert_eq!(f.lost_evidence, ["pkg:npm/a@1"]);
+        // And it is not a gain either: nothing was fixed and something is unexplained.
+        assert!(!f.is_net_gain());
+    }
+
+    #[test]
+    fn a_corpus_that_changed_shape_says_so_rather_than_moving_the_rate() {
+        // A rate improves nicely if the targets that fail are quietly dropped. Named, both ways.
+        let before = vec![observed("pkg:npm/gone@1", Some("divergent"), 0)];
+        let after = vec![observed("pkg:npm/new@1", Some("exact"), 0)];
+        let f = flips(&before, &after);
+        assert_eq!(f.dropped, ["pkg:npm/gone@1"]);
+        assert_eq!(f.added, ["pkg:npm/new@1"]);
+        assert!(f.fixed.is_empty(), "a target that was not in the baseline was not fixed by this");
     }
 
     #[test]

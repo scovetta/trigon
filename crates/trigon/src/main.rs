@@ -275,6 +275,19 @@ enum Cmd {
         /// The labels for that corpus, as JSON.
         #[arg(long)]
         labels: PathBuf,
+        /// An earlier sweep of the same corpus, to report what changed.
+        ///
+        /// This is what makes a proposed rule answerable: not "does the rate look better" but
+        /// "which targets flipped, in which direction". A rule that fixes one package and breaks
+        /// two is a net loss, and an aggregate rate hides that by construction.
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        /// Exit non-zero if any target that reproduced in the baseline no longer does.
+        ///
+        /// For CI and for the promotion gate. Off by default so a human reading a comparison is
+        /// not told their shell command failed.
+        #[arg(long, requires = "baseline")]
+        fail_on_regression: bool,
     },
     /// List the runs a store holds.
     #[cfg(feature = "build")]
@@ -685,7 +698,12 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             prune,
         }),
         #[cfg(feature = "build")]
-        Cmd::Score { results, labels } => score_run(&results, &labels),
+        Cmd::Score {
+            results,
+            labels,
+            baseline,
+            fail_on_regression,
+        } => score_run(&results, &labels, baseline.as_deref(), fail_on_regression),
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
         #[cfg(feature = "build")]
@@ -3289,25 +3307,17 @@ fn write_bundle(
     Ok(())
 }
 
-/// Score a sweep's results against its labelled corpus.
+/// Read a sweep's `results.tsv`.
+///
+/// Returns the observations and whether the file recorded model calls at all. Rows written before
+/// the column existed carry no count, and reading their absence as zero would report "0 model
+/// calls" for a sweep that never looked — the same sentence a clean run prints. Absent is not zero.
 #[cfg(feature = "build")]
-fn score_run(results: &Path, labels: &Path) -> Result<()> {
-    #[derive(serde::Deserialize)]
-    struct Corpus {
-        labels: Vec<trigon_ai::Labelled>,
-    }
-    let corpus: Corpus = serde_json::from_slice(
-        &std::fs::read(labels).with_context(|| format!("reading {}", labels.display()))?,
-    )
-    .with_context(|| format!("parsing {}", labels.display()))?;
-
-    let text = std::fs::read_to_string(results)
-        .with_context(|| format!("reading {}", results.display()))?;
-    // Whether the sweep recorded model calls at all. Rows written before the column existed carry
-    // no count, and reading their absence as zero would report "0 model calls" for a sweep that
-    // never looked — which is the same sentence a clean run prints. Absent is not zero.
+fn read_results(path: &Path) -> Result<(Vec<trigon_ai::Observation>, bool)> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut recorded = false;
-    let observed: Vec<trigon_ai::Observation> = text
+    let observed = text
         .lines()
         .filter_map(|line| {
             let mut f = line.split('\t');
@@ -3329,6 +3339,27 @@ fn score_run(results: &Path, labels: &Path) -> Result<()> {
             })
         })
         .collect();
+    Ok((observed, recorded))
+}
+
+/// Score a sweep's results against its labelled corpus, and against an earlier sweep of it.
+#[cfg(feature = "build")]
+fn score_run(
+    results: &Path,
+    labels: &Path,
+    baseline: Option<&Path>,
+    fail_on_regression: bool,
+) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Corpus {
+        labels: Vec<trigon_ai::Labelled>,
+    }
+    let corpus: Corpus = serde_json::from_slice(
+        &std::fs::read(labels).with_context(|| format!("reading {}", labels.display()))?,
+    )
+    .with_context(|| format!("parsing {}", labels.display()))?;
+
+    let (observed, recorded) = read_results(results)?;
 
     let card = trigon_ai::score(&corpus.labels, &observed);
     if recorded {
@@ -3376,7 +3407,64 @@ fn score_run(results: &Path, labels: &Path) -> Result<()> {
             }
         }
     }
-    if !card.acceptable() {
+    let mut regressed = false;
+    if let Some(path) = baseline {
+        let (before, _) = read_results(path)?;
+        let f = trigon_ai::flips(&before, &observed);
+        regressed = !f.broken.is_empty();
+        println!("\nagainst {}:", path.display());
+
+        // Named, never counted. "Two regressions" is a number to argue with; a list of package
+        // URLs is a list of things to go and look at.
+        let sections: [(&str, &[String]); 5] = [
+            ("now reproduces", &f.fixed),
+            ("NO LONGER REPRODUCES", &f.broken),
+            ("stopped producing evidence (ours, not the rule's)", &f.lost_evidence),
+            ("now produces evidence", &f.gained_evidence),
+            ("in this run and not the baseline", &f.added),
+        ];
+        let mut said = false;
+        for (heading, list) in sections {
+            if list.is_empty() {
+                continue;
+            }
+            said = true;
+            println!("  {} {heading}:", list.len());
+            for p in list {
+                println!("    {p}");
+            }
+        }
+        if !f.changed.is_empty() {
+            said = true;
+            println!("  {} reproduce differently:", f.changed.len());
+            for c in &f.changed {
+                println!("    {} {} -> {}", c.purl, c.from, c.to);
+            }
+        }
+        if !f.dropped.is_empty() {
+            said = true;
+            // A corpus that quietly shrank is how a rate improves without anything improving.
+            println!("  {} in the baseline and not this run:", f.dropped.len());
+            for p in &f.dropped {
+                println!("    {p}");
+            }
+        }
+        if !said {
+            println!("  nothing changed");
+        }
+        println!(
+            "\n  {}",
+            if f.is_net_gain() {
+                "a net gain: something was fixed and nothing regressed"
+            } else if regressed {
+                "NOT a net gain: something that reproduced no longer does"
+            } else {
+                "not a gain: nothing was fixed"
+            }
+        );
+    }
+
+    if !card.acceptable() || (fail_on_regression && regressed) {
         std::process::exit(1);
     }
     Ok(())
