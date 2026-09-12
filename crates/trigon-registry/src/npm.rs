@@ -141,6 +141,19 @@ impl Registry for NpmRegistry {
             }
         }
 
+        // A build step nothing in the recipe will run.
+        //
+        // `docs/07-ai.md` calls this `needs-build-inference`, and until now it was a label on a
+        // corpus rather than something the system could see: the registry's version document
+        // carries `scripts`, and this resolver was discarding it.
+        if let Some((name, command)) = unrun_build_script(&doc) {
+            evidence.push(Evidence::new(
+                Claim::UnrunScript { name, command },
+                Confidence::Certain,
+                "npm:scripts",
+            ));
+        }
+
         Ok(ResolvedTarget {
             reference: target.clone(),
             artifacts: vec![artifact],
@@ -316,4 +329,129 @@ pub(crate) async fn fetch_verified(
         "fetched"
     );
     Ok(actual)
+}
+
+/// A build this package declares and its packaging tool will not run.
+///
+/// Returns the script name and its command, or `None` — and `None` is the common and correct
+/// answer. Every condition below exists to make the claim mean exactly one thing: *`npm pack` will
+/// produce a tarball missing whatever this script would have written*.
+///
+/// 1. A `build` script, and only that name. `compile` and `bundle` are the same semantic class and
+///    are not conventional enough to assume; a docs build and a deploy answer to those names too.
+///    Narrow first, and widen on a measurement rather than on an argument.
+/// 2. **No** `prepare`, `prepack`, `prepublish` or `prepublishOnly` declared at all. Not "none that
+///    this npm runs" — none at all. A package that declares one builds at pack time under some npm,
+///    and a separate `build` script alongside it is probably a different job. Requiring all four
+///    absent also means the claim holds under *every* npm version, so there is no lifecycle
+///    boundary to get wrong for a package published in 2017.
+/// 3. No `install`, `preinstall` or `postinstall`. That is node-gyp, which compiles, and whatever
+///    it downloads while doing so.
+/// 4. The command's first token is a key of `dependencies` or `devDependencies`. `npm install` has
+///    therefore already put it in `node_modules/.bin`, so nothing that acts on this claim needs a
+///    socket the dependency phase did not already open.
+///
+/// What it deliberately does not say is whether running the script is a good idea. That is the
+/// question a rung answers with the repository in hand; this is the fact it answers it from.
+fn unrun_build_script(doc: &Value) -> Option<(String, String)> {
+    let scripts = doc.get("scripts")?.as_object()?;
+    const PACK_HOOKS: &[&str] = &["prepare", "prepack", "prepublish", "prepublishOnly"];
+    const INSTALL_HOOKS: &[&str] = &["install", "preinstall", "postinstall"];
+    if PACK_HOOKS
+        .iter()
+        .chain(INSTALL_HOOKS)
+        .any(|h| scripts.contains_key(*h))
+    {
+        return None;
+    }
+    let command = scripts.get("build")?.as_str()?.trim();
+    let program = command.split_whitespace().next()?;
+    let declared = |field: &str| {
+        doc.get(field)
+            .and_then(Value::as_object)
+            .is_some_and(|d| d.contains_key(program))
+    };
+    if !declared("devDependencies") && !declared("dependencies") {
+        return None;
+    }
+    Some(("build".to_string(), command.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(v: serde_json::Value) -> Option<(String, String)> {
+        unrun_build_script(&v)
+    }
+
+    #[test]
+    fn a_build_nothing_will_run_is_recorded_as_evidence() {
+        // escalade 3.2.0's real manifest. `npm pack` runs neither `build` nor `pretest`, so the
+        // published `dist/` is output no rebuild of the plain recipe can contain — the whole
+        // content of the `needs-build-inference` label, and invisible to every rung until the
+        // resolver stopped discarding `scripts`.
+        let got = doc(serde_json::json!({
+            "scripts": {
+                "build": "bundt",
+                "pretest": "npm run build",
+                "test": "uvu -r esm test -i fixtures",
+            },
+            "devDependencies": { "bundt": "1.1.1", "uvu": "0.5.6" },
+        }));
+        assert_eq!(got, Some(("build".into(), "bundt".into())));
+    }
+
+    #[test]
+    fn a_package_that_builds_at_pack_time_is_not_claimed() {
+        // The distinction the claim rests on. This package builds and `npm pack` builds it, so a
+        // rebuild is missing nothing.
+        for hook in ["prepare", "prepack", "prepublish", "prepublishOnly"] {
+            let got = doc(serde_json::json!({
+                "scripts": { "build": "tsc", hook: "npm run build" },
+                "devDependencies": { "tsc": "2.0.0" },
+            }));
+            assert_eq!(got, None, "a declared `{hook}` means something already builds");
+        }
+    }
+
+    #[test]
+    fn a_native_package_is_left_alone() {
+        // node-gyp compiles, and downloads a toolchain while doing it. Whatever this package needs,
+        // it is not a rung guessing that `npm run build` is the missing step.
+        let got = doc(serde_json::json!({
+            "scripts": { "build": "node-gyp rebuild", "install": "node-gyp rebuild" },
+            "devDependencies": { "node-gyp": "10.0.0" },
+        }));
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn a_build_tool_the_package_did_not_declare_is_not_claimed() {
+        // `chokidar` is the real case: its build script is `tsc`, a bare token, but the package it
+        // comes from is `typescript`, so `npm install` does not put it in `node_modules/.bin`.
+        // Anything acting on this claim would have to fetch it, which is a socket the dependency
+        // phase did not open. A real miss, and the right way to miss.
+        let got = doc(serde_json::json!({
+            "scripts": { "build": "tsc" },
+            "devDependencies": { "typescript": "5.0.0" },
+        }));
+        assert_eq!(got, None);
+
+        // Declared as a direct dependency rather than a dev one is just as good: it is installed.
+        let got = doc(serde_json::json!({
+            "scripts": { "build": "rollup -c" },
+            "dependencies": { "rollup": "4.0.0" },
+        }));
+        assert_eq!(got, Some(("build".into(), "rollup -c".into())));
+    }
+
+    #[test]
+    fn a_package_with_no_build_says_nothing() {
+        assert_eq!(doc(serde_json::json!({ "scripts": { "test": "mocha" } })), None);
+        assert_eq!(doc(serde_json::json!({})), None);
+        // Present but empty, or not a string: absent, not a claim about an empty command.
+        assert_eq!(doc(serde_json::json!({ "scripts": { "build": "" } })), None);
+        assert_eq!(doc(serde_json::json!({ "scripts": { "build": 7 } })), None);
+    }
 }

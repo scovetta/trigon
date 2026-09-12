@@ -21,6 +21,40 @@ use crate::infer::{Candidate, Derivation, StrategyInferrer, confidence_of};
 use crate::model::ResolvedTarget;
 use crate::tags;
 
+/// The build this package declares that its packaging tool will not run, from the evidence the
+/// resolver recorded.
+fn unrun_build(target: &ResolvedTarget) -> Option<(String, String)> {
+    target.intrinsics.evidence.iter().find_map(|e| match &e.claim {
+        trigon_core::Claim::UnrunScript { name, command } => {
+            Some((name.clone(), command.clone()))
+        }
+        _ => None,
+    })
+}
+
+/// Whether a command is one program with literal arguments.
+///
+/// `bundt` and `rollup -c` qualify; `premove dist && pnpm build-bundle` does not. The point is not
+/// that a shell pipeline is unsafe to run — the build already runs whatever the package says, in a
+/// container with an enforced egress boundary — but that a pipeline reaches for tools and paths
+/// this rung has checked nothing about. A rung that cannot tell what it is about to run should not
+/// be the one deciding to run it; that is the Builder's job, and the divergence that says so is
+/// how it gets there.
+fn bare_program(command: &str) -> bool {
+    !command.is_empty()
+        && command
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " @._/,:+-".contains(c))
+}
+
+fn plural(n: usize, what: &str) -> String {
+    if n == 1 {
+        format!("1 {what}")
+    } else {
+        format!("{n} {what}s")
+    }
+}
+
 fn uses(tool: &str, with: BTreeMap<String, String>) -> Step {
     Step {
         body: StepBody::Uses {
@@ -36,6 +70,7 @@ fn uses(tool: &str, with: BTreeMap<String, String>) -> Step {
 pub struct NpmInferrer {
     client: Client,
     mirror: Option<String>,
+    sources: Option<std::sync::Arc<crate::SourceCache>>,
 }
 
 impl NpmInferrer {
@@ -43,7 +78,20 @@ impl NpmInferrer {
         NpmInferrer {
             client,
             mirror: None,
+            sources: None,
         }
+    }
+
+    /// Let the rung read the repository, for the one question registry metadata cannot answer.
+    ///
+    /// Without it the rung is exactly what it was: metadata in, strategy out, no disk. With it, a
+    /// package that declares a build nothing runs gets one depth-1 checkout so the rung can ask
+    /// whether the repository already contains what the manifest promises. That question decides
+    /// between a recipe that builds and one that does not, and getting it wrong in either direction
+    /// costs a target — so it is asked of the repository rather than assumed.
+    pub fn with_sources(mut self, sources: Option<std::sync::Arc<crate::SourceCache>>) -> Self {
+        self.sources = sources;
+        self
     }
 
     /// Pin the registry moment against a time-filtering mirror.
@@ -107,11 +155,66 @@ impl StrategyInferrer for NpmInferrer {
             ),
         }
 
-        // `npm pack` runs prepare and prepack itself, so the plain build covers a package with
-        // publish scripts as well. Where it does not, the divergence says so and a definitions
-        // entry is the answer; guessing at a script to run first would build something the
-        // publisher did not.
-        let build = BTreeMap::from([("npm_version".to_string(), deps["npm_version"].clone())]);
+        // `npm pack` runs prepare and prepack itself, so the plain recipe covers a package with
+        // publish scripts. What it does not cover is a package whose build hangs off a name npm
+        // never runs — `build`, most often — and which publishes the output.
+        //
+        // Two conditions, and both have to hold. The registry document has to say a build exists
+        // that nothing will run (`Claim::UnrunScript`, which is where the narrow test lives), and
+        // the repository has to be missing something its own manifest promises. The second is what
+        // keeps the rule off a package that declares a build *and commits its output*: running that
+        // build regenerates files the repository already holds correctly, under whatever today's
+        // floating ranges resolve to, which is a divergence manufactured by the fix.
+        let mut build = BTreeMap::from([("npm_version".to_string(), deps["npm_version"].clone())]);
+        let mut build_tool = "npm/build/pack";
+        if let Some((script, command)) = unrun_build(target)
+            && bare_program(&command)
+            && let Some(sources) = self.sources.clone()
+        {
+            let (repo, commit) = (source.repo_url.clone(), source.commit.clone());
+            // On a blocking thread: the checkout shells out to git, and a rung runs inside the
+            // runtime that drives a sweep.
+            let read = tokio::task::spawn_blocking(move || {
+                let c = sources.checkout(&repo, &commit)?;
+                let manifest = c.read(&["package.json"], 1 << 20);
+                let files = c.files(20_000)?;
+                Ok::<_, RegistryError>((manifest, files))
+            })
+            .await;
+
+            match read {
+                Ok(Ok((manifest, files))) => {
+                    let parsed = manifest
+                        .first()
+                        .and_then(|(_, text)| serde_json::from_str::<serde_json::Value>(text).ok());
+                    let missing = parsed
+                        .map(|m| crate::shortfall(&m, &files))
+                        .unwrap_or_default();
+                    if !missing.is_empty() {
+                        build_tool = "npm/build/custom";
+                        build.insert("command".into(), script.clone());
+                        assumptions.push(format!(
+                            "the manifest promises {} the repository does not contain ({}), and \
+                             `npm pack` runs no script that would build {}, so `npm run {script}` \
+                             is run first",
+                            plural(missing.len(), "file"),
+                            missing.iter().take(4).cloned().collect::<Vec<_>>().join(", "),
+                            if missing.len() == 1 { "it" } else { "them" },
+                        ));
+                        assumptions.push(format!(
+                            "`{command}` is the publisher's own build command, and this assumes it \
+                             is what they ran: nothing records that it is"
+                        ));
+                    }
+                }
+                // A repository we cannot read leaves the plain recipe in place. A rung that failed
+                // here would turn a package with a force-pushed commit from a build failure into no
+                // strategy at all, which moves a verdict for a reason that has nothing to do with
+                // the package.
+                Ok(Err(e)) => tracing::debug!("no build inference: {e}"),
+                Err(e) => tracing::debug!("the checkout task did not finish: {e}"),
+            }
+        }
 
         let strategy = Strategy::Flow(FlowStrategy {
             location: Location {
@@ -121,7 +224,7 @@ impl StrategyInferrer for NpmInferrer {
             },
             src: vec![uses("git-checkout", BTreeMap::new())],
             deps: vec![uses("npm/deps/custom", deps)],
-            build: vec![uses("npm/build/pack", build)],
+            build: vec![uses(build_tool, build)],
             // The tarball, not the directory. `npm pack` writes `<name>-<version>.tgz` into the
             // package directory, and naming the directory copies the whole working tree: a
             // "successful" build that collects a source checkout and nothing to compare.

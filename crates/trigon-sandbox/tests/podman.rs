@@ -13,6 +13,23 @@ use trigon_sandbox::{
 
 const ALPINE: &str = "docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e";
 
+/// Serialize every case that touches the container store.
+///
+/// These tests share one machine-global resource: podman's local image store. Running two builds
+/// against it at once is not a thing the suite is testing, and it is a thing podman is unhappy
+/// about — a build reusing cached layers while a sibling's image is removed fails with
+/// `getting top layer info: layer not known`, and the case that reports it is whichever one
+/// happened to be building.
+///
+/// The product's own guards against this live in `prune_stale_leftovers` and `Leftovers::drop`:
+/// an age floor, a dead-process check, and no `--force`. They narrow the window and do not close
+/// it, because one process cannot see another's builds. That is recorded in `docs/17-backlog.md`;
+/// here, the answer is to stop racing.
+async fn store() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+}
+
 async fn usable(r: &PodmanRunner) -> bool {
     if r.health().await.is_err() {
         eprintln!("skipped: podman is not available");
@@ -51,6 +68,7 @@ fn workdir() -> std::path::PathBuf {
 
 #[tokio::test]
 async fn a_build_runs_and_its_artifact_is_collected() {
+    let _store = store().await;
     let r = PodmanRunner::new(workdir());
     if !usable(&r).await {
         return;
@@ -101,6 +119,7 @@ async fn a_build_runs_and_its_artifact_is_collected() {
 
 #[tokio::test]
 async fn deny_all_egress_really_denies() {
+    let _store = store().await;
     let r = PodmanRunner::new(workdir());
     if !usable(&r).await {
         return;
@@ -130,6 +149,7 @@ async fn deny_all_egress_really_denies() {
 
 #[tokio::test]
 async fn a_failing_build_still_reports_its_phase_and_logs() {
+    let _store = store().await;
     let r = PodmanRunner::new(workdir());
     if !usable(&r).await {
         return;
@@ -160,6 +180,7 @@ async fn a_failing_build_still_reports_its_phase_and_logs() {
 
 #[tokio::test]
 async fn a_failure_in_the_deps_phase_is_attributed_to_deps() {
+    let _store = store().await;
     let r = PodmanRunner::new(workdir());
     if !usable(&r).await {
         return;
@@ -203,6 +224,7 @@ fn mirror_image_available() -> bool {
 
 #[tokio::test]
 async fn mirror_only_egress_blocks_everything_but_the_mirror() {
+    let _store = store().await;
     let r = PodmanRunner::new(workdir()).with_mirror_image(Some(MIRROR_IMAGE.into()));
     if !usable(&r).await || !mirror_image_available() {
         return;
@@ -257,6 +279,7 @@ async fn mirror_only_egress_blocks_everything_but_the_mirror() {
 
 #[tokio::test]
 async fn the_same_probes_succeed_under_open_egress() {
+    let _store = store().await;
     // Without this the test above proves nothing: a build that cannot reach anything because the
     // probe is broken looks exactly like one held back by the boundary.
     let r = PodmanRunner::new(workdir());
@@ -285,6 +308,7 @@ async fn the_same_probes_succeed_under_open_egress() {
 
 #[tokio::test]
 async fn a_failed_build_leaves_nothing_behind() {
+    let _store = store().await;
     let r = PodmanRunner::new(workdir());
     if !usable(&r).await {
         return;
@@ -327,6 +351,7 @@ async fn a_failed_build_leaves_nothing_behind() {
 
 #[tokio::test]
 async fn a_retained_build_keeps_its_image() {
+    let _store = store().await;
     let r = PodmanRunner::new(workdir());
     if !usable(&r).await {
         return;
@@ -367,6 +392,7 @@ fn image_exists(tag: &str) -> bool {
 
 #[tokio::test]
 async fn a_build_prunes_leftovers_from_runs_that_were_killed() {
+    let _store = store().await;
     let r = PodmanRunner::new(workdir());
     if !usable(&r).await {
         return;

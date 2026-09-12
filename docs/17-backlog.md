@@ -59,6 +59,27 @@ exercise what they claim to.
 **Done when:** a coverage number exists per crate, the judgement half is at a stated bar, and every
 gap that is deliberate is named as deliberate.
 
+## B6. Two Trigon runs on one machine can disturb each other's container store
+
+Found by an intermittent sandbox test that passed in isolation. Podman's local image store is
+machine-global, and this system reaches into it in two places: `Leftovers::drop` removes a run's own
+image when it finishes, and `prune_stale_leftovers` removes what dead runs left behind. A concurrent
+build reuses those images' layers as its build cache, so removing one fails the other with
+`getting top layer info: layer not known` — reported as our sandbox being broken rather than as one
+run deleting another's cache.
+
+Narrowed, not closed: the stale sweep now runs once per process, only on images idle for ten
+minutes whose process is gone, and neither path passes `--force`, so podman declines while anything
+still depends on an image. What remains is the cross-process window — one Trigon cannot see
+another's builds — which matters for a sweep run beside an interactive rebuild, and will matter more
+with fleet concurrency.
+
+The tests no longer race because they serialize on a lock; that is not a fix for the product.
+
+**Done when:** two concurrent runs on one machine cannot fail each other, by a mechanism that does
+not depend on timing — a store lock, per-run storage, or not removing images from the build path at
+all.
+
 ## B5. A bug sweep
 
 Not a review of the last change: a sweep of the whole thing, looking for the classes this project

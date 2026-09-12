@@ -91,6 +91,21 @@ pub enum Claim {
     RequiresNetwork {
         required: bool,
     },
+    /// The package declares a build step that its packaging tool does not run.
+    ///
+    /// The signal behind `needs-build-inference`: a recipe of "pack the repository" cannot produce
+    /// files that only exist after something builds them, and the packaging tool is not going to
+    /// build them by itself. npm runs `prepare` and `prepack` during `npm pack` and never runs
+    /// `build`, so a package whose build hangs off `build` — or off `pretest`, as `escalade` does —
+    /// publishes output no rebuild will contain.
+    ///
+    /// A transcription rather than an inference: the script is in the registry's own version
+    /// document, and which hooks the packaging tool runs was measured per version rather than read
+    /// off documentation that turned out to be wrong.
+    UnrunScript {
+        name: String,
+        command: String,
+    },
 }
 
 /// What a registry and an artifact's own bytes say about how it was built.

@@ -337,8 +337,68 @@ package; a false one is the error class [`09`](09-attestations.md) §10.3 gates 
 occurrence, as `diff::report` already did, the same comparison names exactly the seven files that
 really are only in the published artifact.
 
-Still missing: the flywheel's other half. A repair that works is not yet promoted into a rule and
-re-tested corpus-wide, which is what stops the same insight being paid for ten thousand times.
+### 3.11 The first promoted rule, and what investigating it corrected
+
+The flywheel's other half: a repair turned into a rule that holds corpus-wide. The target was
+`escalade 3.2.0`, and investigating it properly corrected three things I had believed.
+
+**The registry knows about the build, and the resolver was throwing it away.** An npm version
+document carries `scripts`; `NpmRegistry::resolve` read four fields and discarded the rest. So the
+one deterministic signal that separates "this package publishes what it builds" from "this package
+publishes what it commits" was never available to any rung. It is now a `Claim::UnrunScript`, and
+the predicate behind it is narrow on purpose: a `build` script, no `prepare`/`prepack`/`prepublish`/
+`prepublishOnly` declared **at all** — so the claim holds under every npm version and there is no
+lifecycle boundary to get wrong — no install hooks, and a command whose first token the package
+itself declares as a dependency, so nothing acting on the claim opens a socket the dependency phase
+did not.
+
+**`npm pack`'s lifecycle is version-dependent, and the npm 6 documentation is wrong.** Measured
+across eleven majors: npm ≤3 runs only `prepublish`; npm 4 runs `prepublish` and `prepare`; npm 5–6
+run those plus `prepack` and `postpack`; npm ≥7 run `prepack`, `prepare` and `postpack` and never
+`prepublish`. The npm 6 docs list only `prepack` and `postpack` for pack, and npm 6.14.18
+demonstrably also runs the other two. A table taken from the documentation would misread every
+package published by npm 5 or 6 — which the corpus contains.
+
+**A rule that runs the declared build is not safe on its own.** `axios` commits its `dist/`,
+byte-identical to what it publishes, and its build begins `gulp clear` — which empties that
+directory and regenerates it under whatever its floating ranges resolve to today. Running the build
+there manufactures the divergence it was meant to fix. So the rule has a second condition, read from
+the repository rather than from the artifact: the manifest has to promise a file the repository does
+not contain. A package that commits its output has an empty shortfall and is left exactly as it was.
+
+Read from the repository and never from the published artifact, deliberately. A shortfall computed
+as "published members minus repository tree" gives the same seven paths for escalade and is fitting
+the recipe to the answer key — the reasoning `corpora/m1-npm-smoke.labels.json` already rules out
+for labels.
+
+Measured on the npm smoke corpus: the claim fires on **exactly one of twenty** targets. The other
+nineteen declare no build script, never reach the second condition, never clone, and render an
+unchanged strategy. escalade goes from seven missing members to one.
+
+**And the seventh needed a definition, which is what definitions are for.** `bundt 1.1.1` hardcodes
+the `.d.ts` extension, so `sync/index.d.mts` is not a file any version of it can emit. The
+publisher's recipe is `build.ts` at the repository root — a script no `package.json` entry invokes,
+which runs `npm run build` and copies four declaration files out of `src/`. We do not run it: it is
+TypeScript and the pinned Node 20.10.0 cannot execute a `.ts` file. `definitions/` writes those four
+copies out verbatim and in its order, rather than the one that happens to close the divergence.
+`escalade 3.2.0` then reproduces **exact** — identical raw digests, eleven of eleven members.
+
+That split is the design's governance model working rather than a compromise: a rule that holds
+across a class, and a definition for the long tail, each with its reasoning written where somebody
+will read it.
+
+**What it deliberately leaves unfixed**, from the same investigation: build scripts that are shell
+pipelines (roughly 15% of popular npm — `vite`, `dayjs`, `tailwindcss`), packages whose build tool
+is not one of their own dependencies (`chokidar` builds with `tsc`, which comes from `typescript`),
+`prepublishOnly` builds that `npm publish` runs and `npm pack` never does, and packages pinned to
+npm ≤4 that declare a hook that vintage does not run. Those stay the Builder's job. Class (c) — a
+build not reachable from a pack-run hook — is around 46% of `corpora/candidates.jsonl` and 16–33% of
+a dependency-weighted install closure, so what is left unfixed is most of the class; what is fixed
+is the part that can be fixed without guessing.
+
+One thing the corpus lost: it no longer contains a target that defeats a deterministic read. The
+`needs-build-inference` rate will now read as a Builder win it is not, and the corpus wants a target
+that genuinely requires one.
 
 ---
 

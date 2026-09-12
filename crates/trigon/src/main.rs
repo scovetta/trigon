@@ -1649,6 +1649,7 @@ mod rebuild {
         definitions: Option<PathBuf>,
         mirror: Option<String>,
         model: Option<&crate::inferrer::Configured>,
+        sources: Option<PathBuf>,
     ) -> Vec<Box<dyn StrategyInferrer>> {
         let mut rungs: Vec<Box<dyn StrategyInferrer>> = Vec::new();
         if let Some(d) = definitions
@@ -1659,7 +1660,16 @@ mod rebuild {
         }
         match target {
             trigon_core::Ecosystem::Npm => {
-                rungs.push(Box::new(NpmInferrer::new(client).with_mirror(mirror)))
+                // The cache is shared with the model rung: a target whose repository both want is
+                // fetched once.
+                let sources = std::sync::Arc::new(trigon_registry::SourceCache::new(
+                    sources.unwrap_or_else(trigon_registry::SourceCache::default_root),
+                ));
+                rungs.push(Box::new(
+                    NpmInferrer::new(client)
+                        .with_mirror(mirror)
+                        .with_sources(Some(sources)),
+                ))
             }
             trigon_core::Ecosystem::PyPI => {
                 rungs.push(Box::new(PyPiInferrer::new(client).with_mirror(mirror)))
@@ -1867,6 +1877,7 @@ mod rebuild {
             args.definitions,
             timewarp_host.clone(),
             model.as_ref(),
+            args.source_cache.clone(),
         );
         let Some(candidate) = rt.block_on(trigon_registry::infer(&rungs, &resolved))? else {
             return Ok(Ran {

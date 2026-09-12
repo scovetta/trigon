@@ -1,0 +1,39 @@
+# escalade publishes four declaration files that no npm script produces.
+#
+# The heuristic already gets ten of eleven members here: the registry document declares
+# `"build": "bundt"` with no hook `npm pack` runs, the repository contains no `dist/` or `sync/`,
+# so the rung runs `npm run build` first. That closes six of the seven files `npm pack` alone
+# misses. It cannot close the seventh, and no version of `bundt` can either: bundt 1.1.1 hardcodes
+# the `.d.ts` extension, so `sync/index.d.mts` is not something it is able to emit.
+#
+# The publisher's own recipe is `build.ts` at the repository root — a script no `package.json`
+# entry invokes, which runs `npm run build` and then copies four declaration files out of `src/`.
+# We do not run it: it is TypeScript, and the Node this package was published with (20.10.0) cannot
+# execute a `.ts` file. So the four copies are written out here, verbatim from that script and in
+# its order, rather than the one copy that happens to close this divergence — fitting a recipe to
+# the difference it has to explain is how a definition stops being a record of what the publisher
+# did. Two of the four are no-ops against bundt's output and one restores a file the repository
+# already tracks; all four are in build.ts, so all four are here.
+#
+# Every byte comes from the repository. Nothing here fetches anything.
+#
+# Source: https://github.com/lukeed/escalade/blob/fa5be167391581849cff04dbc75dc2978744b642/build.ts
+schema: 1
+kind: flow
+location:
+  repo: https://github.com/lukeed/escalade
+  ref: fa5be167391581849cff04dbc75dc2978744b642
+src:
+  - uses: git-checkout
+deps:
+  - uses: npm/deps/custom
+    with:
+      node_version: 20.10.0
+      npm_version: 10.2.3
+      registry_time: 2024-08-30T01:48:05.318Z
+build:
+  - uses: npm/npx
+    with:
+      npm_version: 10.2.3
+      command: npm run build && cp src/async.d.mts index.d.mts && cp src/async.d.ts index.d.ts && cp src/sync.d.mts sync/index.d.mts && cp src/sync.d.ts sync/index.d.ts && npm pack
+output_path: "*.tgz"

@@ -1,46 +1,106 @@
 {
-  "//": "Capability labels for corpora/m1-npm-smoke.txt. See docs/07-ai.md §6.2 and crates/trigon-ai/src/eval.rs.",
+  "//": "Capability labels for corpora/m1-npm-smoke.txt. See docs/07-ai.md \u00a76.2 and crates/trigon-ai/src/eval.rs.",
   "//why": "A label says what a target is EXPECTED to need, assigned from what is known about the package rather than from what a run happened to do. Deriving labels from outcomes would make every scorecard tautological: a regression would relabel itself instead of showing up.",
   "labels": [
-    { "purl": "pkg:npm/left-pad@1.3.0", "capability": "trivial-deterministic",
-      "reason": "npm records gitHead and the publisher's node/npm versions, and the package has no build step. Nothing has to be searched for." },
-    { "purl": "pkg:npm/is-number@7.0.0", "capability": "trivial-deterministic",
-      "reason": "As left-pad: a recorded commit, a recorded toolchain, no build step." },
-    { "purl": "pkg:npm/ms@2.1.3", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; npm pack alone reproduces it." },
-    { "purl": "pkg:npm/escape-string-regexp@5.0.0", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; no build step." },
-    { "purl": "pkg:npm/is-odd@3.0.1", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; no build step." },
-    { "purl": "pkg:npm/pad-left@2.1.0", "capability": "known-unreproducible",
-      "reason": "The gitHead npm recorded (89347534) is not reachable in the repository: force-pushed or rebased away. No strategy can conjure a deleted commit, and source rediscovery would be building a different thing from what was published." },
-    { "purl": "pkg:npm/repeat-string@1.6.1", "capability": "known-unreproducible",
-      "reason": "The package appears in its own devDependency tree, so installing dependencies fetches the published artifact and the artifact guard voids the run. That is the guard working: a build that downloads its own output reproduces it perfectly and proves nothing." },
-    { "purl": "pkg:npm/isarray@2.0.5", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; no build step." },
-    { "purl": "pkg:npm/object-assign@4.1.1", "capability": "known-unreproducible",
-      "reason": "As repeat-string: present in its own dependency tree, so the guard voids the run." },
-    { "purl": "pkg:npm/strip-ansi@7.2.0", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain, no build step. Failed on a missing libatomic1 in the base image, which is our environment rather than the package." },
-    { "purl": "pkg:npm/ansi-regex@6.3.0", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; reproduces exactly." },
-    { "purl": "pkg:npm/has-flag@5.0.1", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain, no build step. Currently blocked by trigon/mirror-corrupted-artifact, which is our open bug and not a property of the package." },
-    { "purl": "pkg:npm/supports-color@11.0.0", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; reproduces exactly." },
-    { "purl": "pkg:npm/path-key@4.0.0", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; no build step." },
-    { "purl": "pkg:npm/p-limit@7.3.2", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; reproduces exactly." },
-    { "purl": "pkg:npm/yocto-queue@1.2.2", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; reproduces exactly." },
-    { "purl": "pkg:npm/callsites@4.2.0", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; reproduces exactly." },
-    { "purl": "pkg:npm/indent-string@5.0.0", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; no build step." },
-    { "purl": "pkg:npm/escalade@3.2.0", "capability": "needs-build-inference",
-      "reason": "The published tarball contains dist/index.js, dist/index.mjs and sync/ that `npm pack` alone never produces: the publish ran a build script. A recipe has to be inferred from the repository or its CI, which is what the Builder is for." },
-    { "purl": "pkg:npm/eastasianwidth@0.3.0", "capability": "trivial-deterministic",
-      "reason": "Recorded commit and toolchain; reproduces exactly." }
+    {
+      "purl": "pkg:npm/left-pad@1.3.0",
+      "capability": "trivial-deterministic",
+      "reason": "npm records gitHead and the publisher's node/npm versions, and the package has no build step. Nothing has to be searched for."
+    },
+    {
+      "purl": "pkg:npm/is-number@7.0.0",
+      "capability": "trivial-deterministic",
+      "reason": "As left-pad: a recorded commit, a recorded toolchain, no build step."
+    },
+    {
+      "purl": "pkg:npm/ms@2.1.3",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; npm pack alone reproduces it."
+    },
+    {
+      "purl": "pkg:npm/escape-string-regexp@5.0.0",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; no build step."
+    },
+    {
+      "purl": "pkg:npm/is-odd@3.0.1",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; no build step."
+    },
+    {
+      "purl": "pkg:npm/pad-left@2.1.0",
+      "capability": "known-unreproducible",
+      "reason": "The gitHead npm recorded (89347534) is not reachable in the repository: force-pushed or rebased away. No strategy can conjure a deleted commit, and source rediscovery would be building a different thing from what was published."
+    },
+    {
+      "purl": "pkg:npm/repeat-string@1.6.1",
+      "capability": "known-unreproducible",
+      "reason": "The package appears in its own devDependency tree, so installing dependencies fetches the published artifact and the artifact guard voids the run. That is the guard working: a build that downloads its own output reproduces it perfectly and proves nothing."
+    },
+    {
+      "purl": "pkg:npm/isarray@2.0.5",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; no build step."
+    },
+    {
+      "purl": "pkg:npm/object-assign@4.1.1",
+      "capability": "known-unreproducible",
+      "reason": "As repeat-string: present in its own dependency tree, so the guard voids the run."
+    },
+    {
+      "purl": "pkg:npm/strip-ansi@7.2.0",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain, no build step. Failed on a missing libatomic1 in the base image, which is our environment rather than the package."
+    },
+    {
+      "purl": "pkg:npm/ansi-regex@6.3.0",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; reproduces exactly."
+    },
+    {
+      "purl": "pkg:npm/has-flag@5.0.1",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain, no build step. Currently blocked by trigon/mirror-corrupted-artifact, which is our open bug and not a property of the package."
+    },
+    {
+      "purl": "pkg:npm/supports-color@11.0.0",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; reproduces exactly."
+    },
+    {
+      "purl": "pkg:npm/path-key@4.0.0",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; no build step."
+    },
+    {
+      "purl": "pkg:npm/p-limit@7.3.2",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; reproduces exactly."
+    },
+    {
+      "purl": "pkg:npm/yocto-queue@1.2.2",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; reproduces exactly."
+    },
+    {
+      "purl": "pkg:npm/callsites@4.2.0",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; reproduces exactly."
+    },
+    {
+      "purl": "pkg:npm/indent-string@5.0.0",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; no build step."
+    },
+    {
+      "purl": "pkg:npm/escalade@3.2.0",
+      "capability": "needs-build-inference",
+      "reason": "The published tarball contains dist/index.js, dist/index.mjs and sync/ that `npm pack` alone never creates: the manifest declares `build: bundt` with no hook npm pack runs. Answered deterministically since the resolver stopped discarding `scripts` \u2014 the heuristic runs the declared build when the repository is missing what the manifest promises, which closes six of the seven, and a definitions entry replicates the publisher's own build.ts for the seventh. Kept under this label because that is still what the target requires; it no longer requires a model, and no target in this corpus now defeats a deterministic read."
+    },
+    {
+      "purl": "pkg:npm/eastasianwidth@0.3.0",
+      "capability": "trivial-deterministic",
+      "reason": "Recorded commit and toolchain; reproduces exactly."
+    }
   ]
 }

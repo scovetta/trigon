@@ -372,3 +372,39 @@ async fn the_registry_moment_reaches_the_deps_phase() {
         Some("2024-02-25T23:20:01.196159Z")
     );
 }
+
+#[tokio::test]
+async fn a_declared_build_changes_nothing_without_a_repository_to_check_it_against() {
+    // The second condition is not optional. A package that declares a build nothing runs may still
+    // commit its output, and running the build there regenerates files the repository already holds
+    // correctly — under whatever today's floating ranges resolve to. With no source cache the rung
+    // cannot ask, so it does not act: the strategy is the one it has always emitted.
+    let mut target = npm_target(true);
+    target.intrinsics.evidence.push(Evidence::new(
+        Claim::UnrunScript {
+            name: "build".into(),
+            command: "bundt".into(),
+        },
+        Confidence::Certain,
+        "npm:scripts",
+    ));
+
+    let got = NpmInferrer::new(Client::new(ClientConfig::default()).unwrap())
+        .infer(&target)
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 1);
+    let Strategy::Flow(f) = &got[0].strategy else {
+        panic!("expected a flow")
+    };
+    let StepBody::Uses { tool, with } = &f.build[0].body else {
+        panic!("expected a tool")
+    };
+    assert_eq!(tool, "npm/build/pack", "no repository, no build step");
+    assert!(!with.contains_key("command"));
+    assert!(
+        !got[0].assumptions.iter().any(|a| a.contains("npm run")),
+        "nothing was assumed, because nothing was done: {:?}",
+        got[0].assumptions
+    );
+}

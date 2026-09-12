@@ -636,8 +636,15 @@ impl Drop for Leftovers {
         if let Some(tag) = &self.image {
             // Synchronous on purpose: `Drop` cannot await, and leaving this to an async path is
             // how it came to run only on success.
+            //
+            // No `--force`. A concurrent build on the same machine reuses this image's layers as
+            // its cache, and forcing the removal takes them out from under it: podman fails that
+            // build with `getting top layer info: layer not known`, which reads as our sandbox
+            // being broken rather than as one run deleting another's cache. Without it podman
+            // declines while anything still depends on the image, and the stale-leftover sweep
+            // collects it on a later run.
             let _ = std::process::Command::new(&self.binary)
-                .args(["rmi", "--force", tag])
+                .args(["rmi", tag])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
@@ -655,6 +662,20 @@ impl Drop for Leftovers {
 /// Keyed on the process id embedded in the run id, so a concurrent run is never disturbed. Age is
 /// required as well, because process ids are reused and deleting a live run's context because some
 /// unrelated process inherited its number would be worse than the leak.
+/// Remove what previous runs left behind.
+///
+/// Only what a **dead** process left, and only once it has been idle for ten minutes — process ids
+/// get reused, and a prune that disturbed a live run would be worse than the leak it cleans up.
+///
+/// The two halves are guarded differently on purpose. Removing a directory touches nothing else, so
+/// it happens before every build. Removing an *image* reaches into a store that concurrent builds
+/// share: they reuse cached layers belonging to images from earlier runs, so removing one pulls the
+/// store out from under a build that is using it — podman fails with `getting top layer info: layer
+/// not known`, which reads as our sandbox being broken. That half runs once per process and does
+/// not force.
+///
+/// Best effort throughout. Every failure here is ignored: a stale image costs disk, and refusing to
+/// build because the cleanup failed costs the run.
 fn prune_stale_leftovers(binary: &str) {
     const MIN_AGE: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -693,8 +714,33 @@ fn prune_stale_leftovers(binary: &str) {
         }
     }
 
+    static IMAGES: std::sync::Once = std::sync::Once::new();
+    IMAGES.call_once(|| prune_images(binary, MIN_AGE));
+}
+
+/// The half that reaches into the shared image store. See [`prune_stale_leftovers`].
+fn prune_images(binary: &str, min_age: std::time::Duration) {
+    let dead = |run_id: &str| -> bool {
+        let Some(pid) = run_id
+            .rsplit('-')
+            .next()
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        !std::path::Path::new(&format!("/proc/{pid}")).exists()
+    };
+    // `until` is not cosmetic, and neither is the missing `--force`. The dead-pid check alone is
+    // not enough: the image being removed need not be the one a live build is using — they share
+    // layers, and removing one disturbs the store underneath the other.
     let Ok(out) = std::process::Command::new(binary)
-        .args(["images", "--format", "{{.Repository}}:{{.Tag}}"])
+        .args([
+            "images",
+            "--filter",
+            &format!("until={}m", min_age.as_secs() / 60),
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+        ])
         .stderr(Stdio::null())
         .output()
     else {
@@ -706,7 +752,8 @@ fn prune_stale_leftovers(binary: &str) {
         };
         if dead(tag) {
             let _ = std::process::Command::new(binary)
-                .args(["rmi", "--force", line])
+                // No `--force`: an image another build still depends on must survive.
+                .args(["rmi", line])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
