@@ -70,6 +70,24 @@ impl Flavor {
         }
     }
 
+    /// How long to wait for one answer.
+    ///
+    /// A model on this machine is not a hosted one with a slow moment. On a CPU-only host,
+    /// `qwen3.8` processes a prompt at 0.8 tok/s and does not go faster with a longer prompt, so a
+    /// Builder prompt of a few thousand tokens is tens of minutes of arithmetic before the first
+    /// output token (`docs/16-findings.md` §3.14). Ten minutes is a correct bound for a hosted
+    /// endpoint and the wrong one here: it fails the run mid-prompt and reads as a broken provider.
+    ///
+    /// An hour rather than no bound at all, because a server that has genuinely hung should still
+    /// end the run. What stops a *sensible* run is the caller's budget — `Budget::wall_seconds`,
+    /// checked between iterations — and not this.
+    fn request_timeout(self) -> Duration {
+        match self {
+            Flavor::Ollama => Duration::from_secs(3600),
+            _ => Duration::from_secs(600),
+        }
+    }
+
     /// Whether to ask for a JSON schema rather than falling back to free-form text.
     ///
     /// False for Ollama on purpose. Local models are unreliable at structured output
@@ -89,6 +107,7 @@ pub struct OpenAiCompatible {
     flavor: Flavor,
     context_tokens: u32,
     reasoning: Reasoning,
+    timeout: Duration,
 }
 
 impl OpenAiCompatible {
@@ -100,6 +119,7 @@ impl OpenAiCompatible {
             api_key,
             flavor,
             reasoning: Reasoning::Default,
+            timeout: flavor.request_timeout(),
             // An estimate, and used only to decline gracefully rather than to size anything. The
             // endpoints disagree about how to report the real number and several will not.
             context_tokens: match flavor {
@@ -111,6 +131,16 @@ impl OpenAiCompatible {
 
     pub fn with_context_tokens(mut self, n: u32) -> Self {
         self.context_tokens = n;
+        self
+    }
+
+    /// How long to wait for one answer, overriding [`Flavor::request_timeout`].
+    ///
+    /// For an endpoint whose speed the flavour does not predict: a `compatible:` URL pointing at
+    /// llama.cpp on this machine wants the local bound, and one pointing at a hosted gateway does
+    /// not.
+    pub fn with_timeout(mut self, t: Duration) -> Self {
+        self.timeout = t;
         self
     }
 
@@ -228,7 +258,14 @@ impl Provider for OpenAiCompatible {
     fn complete(&self, req: &Request) -> Result<Response, LlmError> {
         let url = format!("{}/chat/completions", self.base);
         let body = self.body(req);
-        let doc = send(&self.client, &url, &body, self.api_key.as_deref(), Auth::Bearer)?;
+        let doc = send(
+            &self.client,
+            &url,
+            &body,
+            self.api_key.as_deref(),
+            Auth::Bearer,
+            self.timeout,
+        )?;
 
         let choice = &doc["choices"][0];
         let text = choice["message"]["content"]
@@ -279,6 +316,9 @@ pub struct Anthropic {
 /// The API version this speaks. A dated constant, because the wire format is versioned by it and
 /// "whatever is current" is not a thing a request can ask for.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Hosted, so ten minutes is the right bound: past that it is a fault rather than a slow model.
+const ANTHROPIC_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl Anthropic {
     pub fn new(api_key: impl Into<String>, base: Option<String>) -> Result<Self, LlmError> {
@@ -351,7 +391,14 @@ impl Provider for Anthropic {
     fn complete(&self, req: &Request) -> Result<Response, LlmError> {
         let url = format!("{}/v1/messages", self.base);
         let body = self.body(req);
-        let doc = send(&self.client, &url, &body, Some(&self.api_key), Auth::Anthropic)?;
+        let doc = send(
+            &self.client,
+            &url,
+            &body,
+            Some(&self.api_key),
+            Auth::Anthropic,
+            ANTHROPIC_TIMEOUT,
+        )?;
 
         // The first text block. A response may also carry thinking blocks, which are not the
         // answer and must not be concatenated into it.
@@ -414,9 +461,10 @@ enum Auth {
 fn client() -> Result<reqwest::blocking::Client, LlmError> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("trigon/", env!("CARGO_PKG_VERSION")))
-        // Generous, because a large prompt on a slow model is not a hung connection. The budget
-        // that stops a run is the caller's wall clock, not this.
-        .timeout(Duration::from_secs(600))
+        // No overall deadline here: it is set per request, because a model on this machine and a
+        // hosted endpoint want different ones (see `Flavor::request_timeout`). A connect timeout
+        // still bounds the case this is really for — a host that is not listening at all.
+        .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| LlmError::Transport(e.to_string()))
 }
@@ -428,6 +476,7 @@ fn send(
     body: &Value,
     key: Option<&str>,
     auth: Auth,
+    timeout: Duration,
 ) -> Result<Value, LlmError> {
     let mut last = LlmError::Transport("no attempt was made".into());
     for attempt in 0..ATTEMPTS {
@@ -436,7 +485,7 @@ fn send(
             // caller waiting on one target does not want a minute of it.
             std::thread::sleep(Duration::from_millis(500 << attempt));
         }
-        let mut r = client.post(url).json(body);
+        let mut r = client.post(url).json(body).timeout(timeout);
         r = match (key, auth) {
             (Some(k), Auth::Bearer) => r.bearer_auth(k),
             (Some(k), Auth::Anthropic) => r
@@ -530,6 +579,27 @@ mod tests {
         let local = openai_body(Flavor::Ollama);
         assert_eq!(local["temperature"], 0.0);
         assert_eq!(local["max_tokens"], 100);
+    }
+
+    #[test]
+    fn a_model_on_this_machine_is_given_longer_than_a_hosted_one() {
+        // Ten minutes is right for a hosted endpoint and wrong for a local one: a CPU-only host
+        // spends tens of minutes reading a Builder prompt before it writes anything, so the short
+        // bound fails the run mid-prompt and reads as a broken provider rather than a slow model.
+        let local = OpenAiCompatible::new("http://localhost:11434/v1", None, Flavor::Ollama).unwrap();
+        assert_eq!(local.timeout, Duration::from_secs(3600));
+
+        for flavor in [Flavor::OpenAi, Flavor::OpenRouter, Flavor::Other] {
+            let hosted = OpenAiCompatible::new("https://x/v1", None, flavor).unwrap();
+            assert_eq!(hosted.timeout, Duration::from_secs(600), "{flavor:?}");
+        }
+
+        // And a `compatible:` URL that happens to point at a local server can say so, because the
+        // flavour does not predict the speed of that one.
+        let llama = OpenAiCompatible::new("http://localhost:8080/v1", None, Flavor::Other)
+            .unwrap()
+            .with_timeout(Duration::from_secs(7200));
+        assert_eq!(llama.timeout, Duration::from_secs(7200));
     }
 
     #[test]

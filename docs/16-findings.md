@@ -511,8 +511,20 @@ A Builder prompt for a modest npm target — 120 repository files, two small man
 evidence — measures 4919 characters, about 1230 tokens. At 0.8 tok/s the model spends **25 minutes
 reading the question** before it writes anything. A repair iteration adds the previous strategy and a
 compressed log; `repo_files` is capped at 200 rather than 120. Two to four thousand tokens is the
-realistic range, so 40 to 80 minutes. The provider's HTTP timeout is 600 seconds. A real Builder call
-against this model on this box does not run slowly; it times out mid-prompt.
+realistic range, so 40 to 80 minutes.
+
+**The first thing that broke was ours.** The provider's HTTP timeout was a flat 600 seconds, so a
+real Builder call against this model failed mid-prompt — not slowly, but as a transport error that
+reads like a broken endpoint. Ten minutes is a correct bound for a hosted endpoint and the wrong one
+for a model on this machine, and one constant was serving both. The deadline is now per request and
+per flavour: an hour for Ollama, ten minutes for everything hosted, and `with_timeout` for a
+`compatible:` URL whose speed the flavour does not predict. An hour rather than no bound, because a
+server that has genuinely hung should still end the run.
+
+What stops a sensible run is the caller's budget, not the transport. `Budget::wall_seconds` defaults
+to twenty minutes and is checked *between* iterations, so a single long call completes and the
+*next* one is refused with `BudgetExhausted { what: "wall clock" }`. On this hardware that means one
+attempt per target and no repair, which is the honest outcome rather than a hidden one.
 
 Turning thinking off is a real saving and does not rescue it. It cuts output tokens by roughly 8×
 (52 to 6 on `{"ok":true}`) and wall clock from 150s to 27s on a trivial prompt, but it changes
@@ -526,11 +538,12 @@ hits, which we had assumed it did not.
 
 **What this says about local inference generally.** The ladder is designed so the model is the last
 rung and everything above it is free, and `docs/07-ai.md` §6 treats a falling model-invocation rate
-as the goal. That design tolerates a slow model far better than a fleet would. It does not tolerate
-one that cannot finish a single call. The usable local configuration on CPU-only hardware is a
-small model — `qwen2.5:0.5b` is 397 MB and answers in seconds — with the understanding that it is
-being asked to do search, not reasoning. A 27B model wants a GPU, and saying so is cheaper than
-engineering around a timeout.
+as the goal. That design tolerates a slow model far better than a fleet would, which is why the
+right response to the measurement was to give the local path a deadline it can meet rather than to
+declare the model unusable. It still is not the configuration to reach for: a 27B model on CPU wants
+a GPU, and the cheap local option is a small model — `qwen2.5:0.5b` is 397 MB and answers in seconds
+— asked to do search rather than reasoning. The fast path is a hosted model, and that is what the
+budgets in `docs/07-ai.md` §5 are sized for.
 
 ---
 
