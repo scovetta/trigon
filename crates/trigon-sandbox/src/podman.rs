@@ -530,7 +530,7 @@ impl BuildHandle for PodmanBuild {
         run_args.push("--volume".into());
         // `:Z` relabels for SELinux. Without it, a build on a Fedora-family host cannot write here
         // and the failure looks like the build's fault.
-        run_args.push(format!("{}:/out:Z", out_dir.display()));
+        run_args.push(format!("{}:/out:Z", crate::mount_source(&out_dir)));
         run_args.push(self.tag());
 
         let code = self.run(&run_args, Phase::Build, &mut log).await?;

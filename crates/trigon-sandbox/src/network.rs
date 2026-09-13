@@ -98,7 +98,7 @@ impl Island {
         // writing to it.
         if let Some(g) = guard {
             args.push("--volume".into());
-            args.push(format!("{}:/guard.json:ro,Z", g.display()));
+            args.push(format!("{}:/guard.json:ro,Z", crate::mount_source(g)));
         }
         args.extend([
             mirror_image.to_string(),
