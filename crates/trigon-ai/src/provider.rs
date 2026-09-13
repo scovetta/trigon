@@ -216,11 +216,26 @@ impl trigon_core::Classify for LlmError {
         }
     }
 
+    /// Every variant named, never a catch-all.
+    ///
+    /// This ended in `_ => false`, so three of five variants took their answer from a wildcard
+    /// nobody chose and a new variant would silently join them. This one gates the repair loop's
+    /// live retries, so the cost runs both ways: a transient fault marked final throws away a run
+    /// that would have succeeded, and a refusal marked retryable spends the budget re-asking a
+    /// question already answered.
     fn is_retryable(&self) -> bool {
         match self {
+            // Rate limited, or the provider's own fault. The only two worth asking again.
             LlmError::Http { status, .. } => *status == 429 || *status >= 500,
             LlmError::Transport(_) => true,
-            _ => false,
+            // A misconfiguration. The next call is addressed to the same absent model.
+            LlmError::NoModel(_) => false,
+            // The provider decided. Asking again is asking the same question.
+            LlmError::Refused(_) => false,
+            // An answer we could not read. Retrying is defensible — sampling could produce a
+            // parseable one next time — but the repair loop already owns that decision and has a
+            // budget for it, and treating it as transport-level would retry inside the retry.
+            LlmError::Malformed(_) => false,
         }
     }
 }

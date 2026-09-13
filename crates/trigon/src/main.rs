@@ -592,6 +592,13 @@ fn report_fault(e: &anyhow::Error) {
         .or_else(|| {
             e.downcast_ref::<trigon_strategy::StrategyError>()
                 .map(|e| e.fault())
+        })
+        // `AttestError` classifies every variant deliberately and this never asked, so a signing or
+        // re-derivation failure exited with its message alone while the error itself knew whose
+        // fault it was. A fault nobody reads is a comment.
+        .or_else(|| {
+            e.downcast_ref::<trigon_attest::AttestError>()
+                .map(|e| e.fault())
         });
     #[cfg(feature = "build")]
     let fault = fault
@@ -602,7 +609,16 @@ fn report_fault(e: &anyhow::Error) {
         .or_else(|| {
             e.downcast_ref::<trigon_registry::RegistryError>()
                 .map(|e| e.fault())
-        });
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_store::StoreError>()
+                .map(|e| e.fault())
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_mirror::MirrorError>()
+                .map(|e| e.fault())
+        })
+        .or_else(|| e.downcast_ref::<trigon_ai::LlmError>().map(|e| e.fault()));
     let Some(fault) = fault else { return };
     let retryable = retryable_of(e).unwrap_or_else(|| fault.is_retryable());
     let whose = match fault {
@@ -632,6 +648,10 @@ fn retryable_of(e: &anyhow::Error) -> Option<bool> {
         .or_else(|| {
             e.downcast_ref::<trigon_strategy::StrategyError>()
                 .map(Classify::is_retryable)
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_attest::AttestError>()
+                .map(Classify::is_retryable)
         });
     #[cfg(feature = "build")]
     let r = r
@@ -641,6 +661,18 @@ fn retryable_of(e: &anyhow::Error) -> Option<bool> {
         })
         .or_else(|| {
             e.downcast_ref::<trigon_registry::RegistryError>()
+                .map(Classify::is_retryable)
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_store::StoreError>()
+                .map(Classify::is_retryable)
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_mirror::MirrorError>()
+                .map(Classify::is_retryable)
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_ai::LlmError>()
                 .map(Classify::is_retryable)
         });
     r

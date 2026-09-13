@@ -55,10 +55,39 @@ impl Blobs {
         let bytes: Bytes = bytes.into();
         let digest = Digest::from_bytes(Sha256::digest(&bytes).into());
         let path = Self::path(&digest);
-        // Checked first because a blob store is overwhelmingly a cache: at fleet scale most puts
-        // are bytes some other run already stored, and a HEAD is far cheaper than a PUT.
-        if self.inner.head(&path).await.is_ok() {
-            return Ok(digest);
+        // A HEAD first because a blob store is overwhelmingly a cache: at fleet scale most puts are
+        // bytes some other run already stored, and a HEAD is far cheaper than a PUT.
+        //
+        // **But presence is not correctness**, and this used to return on presence alone. Two doc
+        // comments in this file disagreed and the code implemented the wrong one: `get`'s says "the
+        // store is exactly the thing a compromised worker can write to", which is precisely a claim
+        // that what is there may be wrong. Nothing excludes two writers from one store (threat model
+        // D7), so wrong bytes can reach a blob path — and a later run holding the *right* bytes was
+        // then told they were safely stored, dropped them, and left the store unrepairable: every
+        // subsequent put took the same short circuit, so the one path that could have fixed it was
+        // the one that refused to write.
+        //
+        // The size comes free with the HEAD, so a length mismatch is caught without reading
+        // anything. Where the length matches we pay one read to be sure, which is the price of
+        // `put`'s promise meaning what it says.
+        match self.inner.head(&path).await {
+            Ok(meta) if meta.size == bytes.len() as u64 => {
+                let found = self.inner.get(&path).await?.bytes().await?;
+                if Sha256::digest(&found)[..] == digest.as_bytes()[..] {
+                    return Ok(digest);
+                }
+                tracing::warn!(
+                    digest = %digest.to_hex(),
+                    "a blob at this address held other bytes; overwriting it"
+                );
+            }
+            Ok(meta) => tracing::warn!(
+                digest = %digest.to_hex(),
+                found_bytes = meta.size,
+                want_bytes = bytes.len(),
+                "a blob at this address was the wrong length; overwriting it"
+            ),
+            Err(_) => {}
         }
         self.inner.put(&path, PutPayload::from_bytes(bytes)).await?;
         Ok(digest)

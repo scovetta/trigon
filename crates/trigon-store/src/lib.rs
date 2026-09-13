@@ -45,6 +45,10 @@ pub enum StoreError {
     #[error("no run `{0}` in this store")]
     NoSuchRun(String),
 
+    /// A record the store cannot address and list back under the same name.
+    #[error("{0}")]
+    Malformed(String),
+
     #[error("no stabilizer set `{0}` in this store")]
     NoSuchSet(String),
 
@@ -82,12 +86,36 @@ impl Classify for StoreError {
             // true.
             StoreError::InconsistentSet { .. } => Fault::Bug,
             StoreError::NoSuchRun(_) | StoreError::NoSuchSet(_) | StoreError::Json(_) => Fault::Bug,
+            // A record this store cannot address is a caller handing it something it should not
+            // have: our own ids are `<unix>-<digest prefix>`.
+            StoreError::Malformed(_) => Fault::Bug,
             StoreError::Object(_) | StoreError::Io(_) => Fault::Infra,
         }
     }
 
+    /// Every variant named, never a catch-all.
+    ///
+    /// This was `matches!(self, Object | Io)` over an eight-variant enum, so six variants took
+    /// their answer from a wildcard nobody chose and a new variant would silently join them. The
+    /// direction matters in both ways: retrying a policy refusal forever is a loop, and refusing to
+    /// retry a transient fault throws away a run that would have succeeded.
     fn is_retryable(&self) -> bool {
-        matches!(self, StoreError::Object(_) | StoreError::Io(_))
+        match self {
+            // The disk or the network, which is what retrying is for.
+            StoreError::Object(_) | StoreError::Io(_) => true,
+            // Deterministic: the same bytes hash the same way, the same manifest recomputes the
+            // same digest, and the same id is addressable or is not. Asking twice asks the same
+            // question.
+            StoreError::Corrupt { .. }
+            | StoreError::InconsistentSet { .. }
+            | StoreError::Malformed(_)
+            | StoreError::Json(_) => false,
+            // A record that is absent now may be present later, but nothing this process does will
+            // make it so — the caller named a run that was never written.
+            StoreError::NoSuchRun(_) | StoreError::NoSuchSet(_) => false,
+            // A refusal we issued on purpose answers the same way every time.
+            StoreError::NotAttested(_) => false,
+        }
     }
 }
 
@@ -143,8 +171,37 @@ impl Store {
         ObjPath::from(format!("runs/{id}.json"))
     }
 
+    /// Whether a run id is one the store can address and list back unchanged.
+    ///
+    /// `ObjPath::from` percent-encodes what it cannot carry literally, and `list_runs` reads the
+    /// raw filename and never decodes — so an id containing `%`, `#`, a brace or a control
+    /// character was written under one name and listed under another, and `get_run` on what the
+    /// listing reported found nothing. Two halves of one store disagreeing about what a run is
+    /// called.
+    ///
+    /// Refused at the boundary rather than round-tripped through encoding, because the ids this
+    /// system generates are `<unix>-<digest prefix>` and anything else arrived from somewhere that
+    /// should say so. A store that quietly renames its records is worse than one that declines.
+    fn addressable(id: &str) -> bool {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            && !id.starts_with('.')
+    }
+
     /// Write a run record, replacing any earlier version of it.
     pub async fn put_run(&self, r: &RunRecord) -> Result<(), StoreError> {
+        if !Self::addressable(&r.id) {
+            return Err(StoreError::Malformed(format!(
+                "`{}` is not a usable run id. Letters, digits, `-`, `_` and `.` only, at most 128 \
+                 of them, not starting with a dot — anything else is percent-encoded on the way in \
+                 and not decoded on the way out, so the run would be listed under a name it cannot \
+                 be fetched by.",
+                r.id
+            )));
+        }
         let body = serde_json::to_vec_pretty(r)?;
         self.inner
             .put(&Self::run_path(&r.id), PutPayload::from(body))

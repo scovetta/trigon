@@ -894,10 +894,6 @@ async fn every_id_the_listing_reports_is_one_get_run_can_fetch() {
         // ordinary case is caught by the same test as the awkward one.
         "0001-abcdef012-4711",
         "ff00aa22bb33-9",
-        // A build id from a CI system, which is the obvious next source of run ids.
-        "build#4711",
-        // A run id that was namespaced by ecosystem — the obvious next layout change.
-        "npm/left-pad",
     ] {
         let record = RunRecord::new(
             id,
@@ -941,5 +937,43 @@ async fn every_id_the_listing_reports_is_one_get_run_can_fetch() {
             .get_run(id)
             .await
             .unwrap_or_else(|e| panic!("list_runs named `{id}` and get_run cannot fetch it: {e}"));
+    }
+
+    // And the ids that cannot round-trip are refused on the way in rather than renamed.
+    //
+    // `ObjPath::from` percent-encodes what it cannot carry and `list_runs` never decodes, so an id
+    // holding `#` or `/` was written under one name and listed under another. The fix is the
+    // boundary, not the decode: a store that quietly renames its records is worse than one that
+    // declines, and every id this system generates is `<unix>-<digest prefix>`. The two below are
+    // the obvious next sources of a run id — a CI build number, and a layout namespaced by
+    // ecosystem — so both should meet a sentence rather than a silent rename.
+    for bad in ["build#4711", "npm/left-pad", "", ".hidden", "a%2Fb"] {
+        let record = RunRecord::new(
+            bad,
+            "pkg:npm/a@1",
+            ArtifactRef {
+                name: "a.tgz".into(),
+                sha256: Digest::from_bytes([0; 32]),
+                bytes: 1,
+                stored: true,
+            },
+            Environment {
+                base_image: "i@sha256:aa".into(),
+                egress: "none".into(),
+                isolation: "UserNs".into(),
+                attestable: true,
+                registry_moment: None,
+                pin: None,
+            },
+            "t",
+        );
+        let err = store
+            .put_run(&record)
+            .await
+            .expect_err("`{bad}` cannot be listed back under its own name and was accepted anyway");
+        assert!(
+            err.to_string().contains("not a usable run id"),
+            "refused `{bad}` for the wrong reason: {err}"
+        );
     }
 }
