@@ -536,6 +536,30 @@ the reasoning trace is recorded instead of discarded, `reasoning_effort: "none"`
 suppression knob that reaches through `/v1/chat/completions`, and Ollama does report prefix-cache
 hits, which we had assumed it did not.
 
+**And the answer was good.** With the deadline raised, one real Builder prompt for
+`pkg:npm/escalade@3.2.0` ran end to end: 672 prompt tokens in, 155 out, **1483 seconds**. What came
+back parses as a `Strategy`, names only registered tools with their required parameters, and renders
+to a build script:
+
+```yaml
+schema: 1
+kind: flow
+location: { repo: https://github.com/lukeed/escalade, ref: fa5be167 }
+src:   [{ uses: git-checkout }]
+deps:  [{ uses: npm/deps/custom, with: { node_version: "20", npm_version: "10",
+                                         registry_time: "2024-01-26T00:00:00Z" } }]
+build: [{ uses: npm/build/pack, with: { npm_version: "10" } }]
+output_path: "escalade-3.2.0.tgz"
+```
+
+It would not have built, and the reason is worth keeping because it is a *model* error rather than a
+speed one: the versions are major-only. The rendered script compares `node --version` against `v20`,
+which never matches a real `v20.11.1`, and then fetches
+`/-toolchain/nodejs.org/dist/v20/node-v20-linux-x64.tar.gz`, which is not how nodejs.org names a
+release. So the first attempt fails at the toolchain fetch, and the repair loop exists for exactly
+this. On this hardware it would not get one: `Budget::wall_seconds` is twenty minutes and the first
+call took twenty-five.
+
 **What this says about local inference generally.** The ladder is designed so the model is the last
 rung and everything above it is free, and `docs/07-ai.md` §6 treats a falling model-invocation rate
 as the goal. That design tolerates a slow model far better than a fleet would, which is why the
