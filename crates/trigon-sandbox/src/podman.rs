@@ -144,7 +144,7 @@ impl BuildRunner for PodmanRunner {
         }
         // A tag resolves to different bytes on different days, which makes the run unreproducible
         // and the attestation a claim about nothing in particular.
-        if !p.base_image.contains('@') {
+        if !is_pinned(&p.base_image) {
             return Err(SandboxError::ImageNotPinned(p.base_image.clone()));
         }
 
@@ -360,6 +360,32 @@ impl BuildHandle for PodmanBuild {
         let defer_deps = network.is_some();
         dockerfile::render(&self.plan, defer_deps).write(&ctx)?;
 
+        // The checkout the host fetched, into the build context so the image can `COPY` it. `cp
+        // -a` rather than a hand-rolled walk: it preserves mtimes, which is what keeps the layer's
+        // cache key stable across attempts, and it copies `.git`, which the source phase's
+        // `git checkout --force <sha>` needs in order to be a check rather than a no-op.
+        if let Some(tree) = &self.plan.source_tree {
+            let dest = ctx.join("src");
+            std::fs::create_dir_all(&dest)?;
+            let status = std::process::Command::new("cp")
+                .arg("-a")
+                .arg(format!("{}/.", tree.display()))
+                .arg(&dest)
+                .status();
+            match status {
+                Ok(s) if s.success() => {}
+                _ => {
+                    return Err(SandboxError::Failed {
+                        phase: "source".into(),
+                        detail: format!(
+                            "could not copy the checkout at {} into the build context",
+                            tree.display()
+                        ),
+                    });
+                }
+            }
+        }
+
         // Image build: setup, source and deps are layers here.
         push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::PhaseStart(Phase::Deps));
         tracing::info!(
@@ -388,7 +414,15 @@ impl BuildHandle for PodmanBuild {
         // to join a named network, and the source phase has to clone from a forge the island has
         // no route to. That gap is real, is not closed by this, and is written down in
         // `docs/16-findings.md` §3.12 and `docs/17-backlog.md` B7.
-        if self.plan.egress == EgressTier::DenyAll {
+        // Every enforced tier, not only `DenyAll`. At `MirrorOnly` this used to be the hole: the
+        // setup and source phases are image layers, rootless `podman build` cannot join the island,
+        // and with no flag at all they had ordinary networking — so the tier the README recommends
+        // enforced nothing for three of its four phases. It can be closed here rather than by
+        // teaching the island to reach a forge, because the source arrives as a copied checkout.
+        //
+        // What it costs is stated where it is refused: with no network there is no `apt-get`, so an
+        // enforced run needs a base image that already carries the strategy's system packages.
+        if self.plan.egress != EgressTier::Open {
             build_args.push("--network".into());
             build_args.push("none".into());
         }
@@ -603,6 +637,21 @@ impl PodmanBuild {
             guard_trips: Vec::new(),
         }
     }
+}
+
+/// Whether an image reference names exact bytes.
+///
+/// A repository digest (`name@sha256:…`) or a bare image id. The id is here because a base image
+/// built on this machine has no repository digest until it is pushed, and an enforced tier is
+/// unusable without one: with no network in the image build, the packages a strategy needs have to
+/// come from a base image somebody built. An id identifies exactly one set of bytes in the local
+/// store, which is the property the check exists for.
+fn is_pinned(image: &str) -> bool {
+    if image.contains('@') {
+        return true;
+    }
+    let id = image.strip_prefix("sha256:").unwrap_or(image);
+    id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Which phase script the image build died in.

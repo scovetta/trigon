@@ -138,6 +138,36 @@ async fn a_toolchain_host_outside_the_allowlist_is_refused() {
 }
 
 #[tokio::test]
+async fn an_artifact_host_outside_the_allowlist_is_refused() {
+    // This route had no allowlist at all, and the consequence was measured rather than argued:
+    // `/-artifact/npm/<moment>/example.com/` returned 200 with example.com's home page while the
+    // toolchain route returned 403 for the same host. It also sits before the credential check, so
+    // it needed none. At `mirror-only` that made the build's only route out a general proxy to the
+    // internet — a larger hole than the one it was found while closing.
+    let m = Mirror::new().unwrap().serve(0).await.unwrap();
+    let get = |path: String| {
+        let url = format!("http://{}{path}", m.host());
+        async move { reqwest::Client::new().get(&url).send().await.unwrap() }
+    };
+
+    let resp = get("/-artifact/npm/2024-01-01T00:00:00Z/example.com/".into()).await;
+    assert_eq!(resp.status(), 403);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("example.com"), "{body}");
+    assert!(body.contains("artifact"), "the route is named: {body}");
+
+    // Exact match, not a suffix: the obvious `ends_with` rule accepts this.
+    let resp = get("/-artifact/npm/2024-01-01T00:00:00Z/registry.npmjs.org.evil.example/x".into()).await;
+    assert_eq!(resp.status(), 403);
+
+    assert!(trigon_mirror::artifact_host_allowed("registry.npmjs.org"));
+    assert!(trigon_mirror::artifact_host_allowed("files.pythonhosted.org"));
+    assert!(!trigon_mirror::artifact_host_allowed("registry.npmjs.org.evil.example"));
+    assert!(!trigon_mirror::artifact_host_allowed("example.com"));
+    m.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_toolchain_download_comes_back_through_the_mirror() {
     if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
         eprintln!("skipped: set TRIGON_LIVE=1");

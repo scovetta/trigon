@@ -1,6 +1,7 @@
 //! What a build is asked to do, and what comes back.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -129,6 +130,14 @@ pub struct OciPlan {
     /// would have to carry a port number, which would put the operator's machine into the
     /// strategy digest and make two runs of the same recipe hash differently.
     pub extra_hosts: BTreeMap<String, String>,
+    /// A checkout of the source at the commit the strategy names, fetched on the host and copied
+    /// into the image.
+    ///
+    /// `Some` at every enforced tier and `None` at `Open`. The source phase is an image-build
+    /// layer and rootless `podman build` cannot join the island, so the only way a phase that needs
+    /// the repository can run inside the boundary is for the repository to already be there. That
+    /// is what lets the image build run with no network at all.
+    pub source_tree: Option<PathBuf>,
 }
 
 /// A build to run, in whatever shape the runner understands.

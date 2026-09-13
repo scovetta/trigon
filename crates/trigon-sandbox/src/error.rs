@@ -33,6 +33,21 @@ pub enum SandboxError {
     #[error("{phase}: {detail}")]
     Failed { phase: String, detail: String },
 
+    #[error(
+        "this strategy needs the system package(s) {packages}, and `{tier}` egress gives the image \
+         build no network to install them. Build a base image that carries them and pass it with \
+         `--image`:\n\n    FROM {base_image}\n    RUN {install}\n\nThat is what `docs/08` §3 \
+         means by base images per ecosystem and toolchain family; it is also the only way an \
+         enforced tier can mean what it says, because a phase that installs packages is a phase \
+         that reaches the internet."
+    )]
+    SystemDepsUnavailable {
+        tier: crate::EgressTier,
+        packages: String,
+        base_image: String,
+        install: String,
+    },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -46,7 +61,10 @@ impl Classify for SandboxError {
             SandboxError::Unroutable(_)
             | SandboxError::EgressUnenforceable { .. }
             | SandboxError::PrivilegedUnavailable
-            | SandboxError::ImageNotPinned(_) => Fault::Policy,
+            | SandboxError::ImageNotPinned(_)
+            // A tier that cannot install packages and a strategy that needs them: a policy of
+            // ours, not a broken package and not broken infrastructure.
+            | SandboxError::SystemDepsUnavailable { .. } => Fault::Policy,
             // The package's own build did this.
             SandboxError::Timeout(_) | SandboxError::Failed { .. } => Fault::Build,
         }

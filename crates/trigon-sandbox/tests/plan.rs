@@ -21,6 +21,7 @@ fn plan(egress: EgressTier) -> BuildPlan {
         egress,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     })
 }
 
@@ -41,7 +42,7 @@ fn the_context_runs_deps_at_image_build_time_and_writes_the_build() {
 
     // Each phase is a COPY plus a RUN, which is what buys layer caching across sibling versions and
     // per-phase timings from layer metadata.
-    assert!(c.files["setup.sh"].contains("apt-get install -y --no-install-recommends curl git"));
+    assert!(c.files["setup.sh"].contains("dpkg -s"), "an enforced tier checks rather than installs");
     assert!(c.files["source.sh"].contains("git checkout --force 'cafebabe'"));
     assert!(c.files["deps.sh"].contains("python3 -m venv /deps"));
 
@@ -119,11 +120,47 @@ fn an_empty_phase_emits_no_layer() {
 
 #[test]
 fn the_package_manager_follows_the_base_image() {
-    let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
+    let BuildPlan::Oci(mut p) = plan(EgressTier::Open);
     p.base_image = "docker.io/library/alpine@sha256:abc".into();
     assert!(render_context(&p, false).files["setup.sh"].contains("apk add --no-cache"));
     p.base_image = "docker.io/library/fedora@sha256:abc".into();
     assert!(render_context(&p, false).files["setup.sh"].contains("dnf install -y"));
+}
+
+#[test]
+fn an_enforced_tier_checks_its_base_image_instead_of_installing_into_it() {
+    // The image build has no network at an enforced tier, so the setup phase cannot install. It
+    // asks the package manager's own database instead, and the query follows the distribution the
+    // same way the install command does.
+    let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
+    let setup = render_context(&p, false).files["setup.sh"].clone();
+    assert!(setup.contains("dpkg -s"), "{setup}");
+    assert!(!setup.contains("apt-get install"), "nothing is installed: {setup}");
+    // And it says what to do about a package that is absent, because "missing curl" is not an
+    // instruction.
+    assert!(setup.contains("trigon base-image"), "{setup}");
+
+    p.base_image = "docker.io/library/alpine@sha256:abc".into();
+    assert!(render_context(&p, false).files["setup.sh"].contains("apk info -e"));
+
+    // `open` still installs: it is the tier with a network, and it is where the corpus runs.
+    let BuildPlan::Oci(open) = plan(EgressTier::Open);
+    assert!(render_context(&open, false).files["setup.sh"].contains("apt-get install"));
+}
+
+#[test]
+fn a_supplied_checkout_is_copied_in_rather_than_cloned() {
+    // The source phase is an image-build layer and rootless `podman build` cannot join the island,
+    // so a phase that needs the repository can only run inside the boundary if the repository is
+    // already there.
+    let BuildPlan::Oci(mut p) = plan(EgressTier::MirrorOnly);
+    assert!(render_context(&p, false).dockerfile.contains("RUN mkdir -p /src /out"));
+    assert!(!render_context(&p, false).dockerfile.contains("COPY src /src"));
+
+    p.source_tree = Some(std::path::PathBuf::from("/somewhere/checkout"));
+    let d = render_context(&p, false).dockerfile;
+    assert!(d.contains("COPY src /src"), "{d}");
+    assert!(!d.contains("RUN mkdir -p /src /out"), "{d}");
 }
 
 #[test]
@@ -259,7 +296,9 @@ fn a_logical_system_dep_renders_for_the_base_image() {
     // A strategy names what it needs, not what a distribution calls it: one that named Debian
     // packages would only build on Debian. `python3 -m venv` needs ensurepip, which Debian ships
     // separately as python3-venv and which no other family has as its own package.
-    let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
+    // At `open`, which is the tier that installs. An enforced tier has no network in the image
+    // build, so its setup phase checks instead — covered below.
+    let BuildPlan::Oci(mut p) = plan(EgressTier::Open);
     p.system_deps = BTreeSet::from(["python3".to_string(), "git".to_string()]);
 
     p.base_image = "docker.io/library/debian@sha256:abc".into();

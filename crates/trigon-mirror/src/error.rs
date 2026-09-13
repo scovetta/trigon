@@ -32,12 +32,13 @@ pub enum MirrorError {
     Refused { url: String },
 
     #[error(
-        "refusing to fetch a toolchain from `{host}`. The toolchain route is an allowlist, and \
-         widening it is an edit to `trigon-mirror`, not a runtime decision: at mirror-only egress \
-         this proxy is the build's only route out, so any host reachable through it is a host the \
-         build can be told to fetch from."
+        "refusing to proxy `{host}` on the `{route}` route. Every route this mirror serves is an \
+         allowlist of hosts chosen here rather than by the package under test, and widening one is \
+         an edit to `trigon-mirror` rather than a runtime decision: at mirror-only egress this \
+         proxy is the build's only route out, so any host reachable through it is a host the build \
+         can be told to fetch from."
     )]
-    HostNotAllowed { host: String },
+    HostNotAllowed { host: String, route: &'static str },
 
     #[error("could not listen on port {port}: {detail}")]
     Bind { port: u16, detail: String },

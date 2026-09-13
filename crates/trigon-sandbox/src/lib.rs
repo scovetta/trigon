@@ -21,5 +21,6 @@ pub use model::{
     OciPlan, Phase, RunOpts, RunnerCaps,
 };
 pub use network::Island;
+pub use dockerfile::install_command;
 pub use podman::{PodmanRunner, failing_phase as failing_phase_for_test};
 pub use runner::{BuildHandle, BuildRunner, route};

@@ -118,31 +118,22 @@ The tests no longer race because they serialize on a lock; that is not a fix for
 not depend on timing — a store lock, per-run storage, or not removing images from the build path at
 all.
 
-## B7. The image build is outside the egress boundary at `mirror-only`
+## B7. ~~The image build is outside the egress boundary at `mirror-only`~~ — closed
 
-Found by the security sweep, and the most serious thing it found. `podman build` was invoked with no
-network flag at all, so every phase rendered as an image layer — setup and source always, deps
-unless deferred — ran with ordinary networking whatever tier was asked for. At `deny-all` a tier
-whose entire content is "reaches nothing" reached everything.
+Closed, and recorded in [`16`](16-findings.md) §3.13. The image build takes `--network none` at
+every enforced tier, the source arrives as a checkout fetched on the host and copied in, and the
+setup phase verifies the base image rather than installing into it. Proven by a probe that printed
+`REACHED-SOURCE` before and `blocked-SOURCE` after.
 
-`deny-all` is closed: the image build now runs with `--network none`. A build that needs a system
-package at that tier now fails, which is correct — the answer is a base image that carries it.
+**Its residue, which is a different claim:** the mirror's allowlists bound *which* hosts a build can
+reach through it, never *what* those hosts serve. `registry.npmjs.org` will serve any package
+anybody published, so an attacker who controls one package can publish a second one holding their
+payload and fetch it through the artifact route at any path. The guard is the control for that, not
+the tier. And there is still no network transcript, so no run is attestable at full trust at any
+tier.
 
-`mirror-only` is **not** closed, and cannot be by the same move. Rootless `podman build` refuses to
-join a named network, which is why the deps phase is already deferred into the container; the source
-phase cannot be deferred the same way because it clones from a forge the island has no route to. So
-at the tier we recommend, a `src:` step can still reach the internet — and a model-authored strategy
-is exactly where such a step comes from.
-
-The design already names the shape of the answer: `EgressTier::GitAndMirror`. Either the mirror
-proxies git (its passthrough route is most of the mechanism already), or the source is fetched on
-the host and mounted, which `--source` half does today.
-
-Until then the CLI says what is true rather than "the egress boundary held", and the store records
-the runner's own `attestable`, which is `false`.
-
-**Done when:** no phase of a `mirror-only` run reaches anything but the mirror, demonstrated by a
-test that fails if one does.
+**Done when:** a Tier-1 network transcript records host, path, method, response digest and byte
+count for everything crossing the mirror, and `attestable` can become true for a run that has one.
 
 ## B8. The three ecosystems after npm and PyPI
 

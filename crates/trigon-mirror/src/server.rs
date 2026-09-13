@@ -42,6 +42,29 @@ pub struct Stats {
 /// build picks the host, `mirror-only` means nothing.
 pub const TOOLCHAIN_HOSTS: &[&str] = &["nodejs.org", "unofficial-builds.nodejs.org"];
 
+/// Hosts the artifact route will fetch from.
+///
+/// The route exists so a build behind the boundary can fetch a dependency whose URL the index gave
+/// it, and these are exactly the hosts this mirror itself rewrites index URLs into — see
+/// `rewrite_npm_tarballs` and `rewrite_pypi_files`. Anything else was not offered by an index we
+/// served.
+///
+/// It had no allowlist at all, and the consequence was measured rather than reasoned about:
+/// `GET /-artifact/npm/<moment>/example.com/` returned **200 with example.com's home page**, while
+/// the toolchain route returned 403 for the same host. The route also sits before the credential
+/// check, so it needed none. At `mirror-only` egress this mirror is the build's only route out, so
+/// that made the tier a general HTTP proxy to the internet wearing the name of a boundary — a
+/// larger hole than the one it was found while closing.
+pub const ARTIFACT_HOSTS: &[&str] = &["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"];
+
+/// Whether the artifact route will proxy to this host.
+///
+/// Exact match, for the same reason the toolchain list is: a suffix rule written the obvious way
+/// accepts `registry.npmjs.org.evil.example`.
+pub fn artifact_host_allowed(host: &str) -> bool {
+    ARTIFACT_HOSTS.contains(&host)
+}
+
 /// Whether the toolchain route will proxy to this host.
 ///
 /// Exact match, not a suffix match: `nodejs.org.evil.example` ends with nothing in the list, but a
@@ -432,6 +455,15 @@ async fn artifact(mirror: &Mirror, rest: &str, query: &str) -> Result<Response, 
     let platform = Platform::parse(platform).ok_or_else(|| MirrorError::UnknownPlatform {
         found: platform.to_string(),
     })?;
+    // The host, before anything else. `target` is `<host>/<path>`, and without this check the
+    // route proxied any host on the internet to a build that is supposed to have no route out.
+    let host = target.split('/').next().unwrap_or_default();
+    if !artifact_host_allowed(host) {
+        return Err(MirrorError::HostNotAllowed {
+            host: host.to_string(),
+            route: "artifact",
+        });
+    }
     let filter = Filter {
         platform,
         moment: moment.to_string(),
@@ -453,6 +485,7 @@ async fn toolchain(mirror: &Mirror, rest: &str, query: &str) -> Result<Response,
     if !toolchain_host_allowed(host) {
         return Err(MirrorError::HostNotAllowed {
             host: host.to_string(),
+            route: "toolchain",
         });
     }
     mirror

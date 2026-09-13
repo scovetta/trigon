@@ -295,6 +295,26 @@ enum Cmd {
         #[arg(long, default_value = "./trigon-store")]
         store: PathBuf,
     },
+    /// Build a base image carrying the system packages an enforced tier cannot install.
+    ///
+    /// At `mirror-only` and `deny-all` the image build has no network, so nothing can `apt-get`.
+    /// That is what makes those tiers mean what they say, and it means the packages have to be in
+    /// the image already. This builds one.
+    #[cfg(feature = "build")]
+    BaseImage {
+        /// The image to build on, pinned by digest.
+        #[arg(long)]
+        from: String,
+        /// Packages to install. Defaults to the union every builtin tool asks for, which is what
+        /// the npm and PyPI corpora between them need.
+        #[arg(long)]
+        packages: Vec<String>,
+        #[arg(long, default_value = "localhost/trigon-base:latest")]
+        tag: String,
+        /// Print the Containerfile instead of building it.
+        #[arg(long)]
+        print: bool,
+    },
     /// Build the container image that runs the mirror inside a build's network island.
     ///
     /// Compiled inside a container, so nothing is needed on this machine beyond podman. The image
@@ -786,6 +806,13 @@ fn dispatch(cmd: Cmd) -> Result<()> {
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
         #[cfg(feature = "build")]
+        Cmd::BaseImage {
+            from,
+            packages,
+            tag,
+            print,
+        } => mirror::base_image(&from, &packages, &tag, print),
+        #[cfg(feature = "build")]
         Cmd::MirrorImage { tag } => mirror::build_image(&tag),
         #[cfg(feature = "build")]
         Cmd::Mirror { port, guard } => mirror::serve(port, guard.as_deref()),
@@ -823,6 +850,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             true,
             None,
             source.as_deref(),
+            None,
             None,
         ),
     }
@@ -990,13 +1018,54 @@ mod build {
         mirror_image: Option<&str>,
         verbose: bool,
         guard: Option<&Path>,
-        _source: Option<&Path>,
+        source: Option<&Path>,
         // Told as each phase starts, for anything watching this run from outside the process.
         on_event: Option<trigon_sandbox::EventSink>,
+        source_cache: Option<&Path>,
     ) -> Result<()> {
-        let (instructions, digest, _custom) =
-            crate::render_strategy(file, import, timewarp_host, false)?;
         let egress = egress_tier(egress)?;
+
+        // At an enforced tier the image build has no network, so the source cannot be cloned
+        // there. It is fetched here instead, on the host, and copied into the image — which is what
+        // lets the boundary hold for every phase rather than only for the build.
+        //
+        // At `open`, nothing: no host clone, no copy, and the in-container `git clone` runs exactly
+        // as it always has. That matters because `open` is what `rebuild` and `sweep` default to,
+        // so every published rate keeps coming from a code path this does not touch.
+        let source_tree = match (egress, source) {
+            (trigon_sandbox::EgressTier::Open, _) => None,
+            // An operator-named checkout is used as it stands. It is now a build input rather than
+            // only a hint that narrows the guard, which is a change in what `--source` means.
+            (_, Some(p)) => Some(p.to_path_buf()),
+            // Best effort, and deliberately so. A strategy whose source phase generates its own
+            // tree — or clones nothing at all — has nothing to fetch, and a mandatory fetch would
+            // refuse it for a repository it never intended to use. Failing here costs nothing the
+            // boundary depends on: the image build still has no network, so a source phase that
+            // does need to clone fails there instead, with the network error that says so.
+            (_, None) => match crate::strategy_location(file, import)
+                .and_then(|(_, loc)| {
+                    let cache = trigon_registry::SourceCache::new(
+                        source_cache
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(trigon_registry::SourceCache::default_root),
+                    );
+                    Ok(cache.checkout(&loc.repo, &loc.git_ref)?.path)
+                }) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::debug!("no host checkout, so the source phase runs as written: {e:#}");
+                    None
+                }
+            },
+        };
+
+        // With the tree in hand the checkout step has nothing to fetch, so the strategy renders
+        // with `has_repo` set and `git-checkout` collapses to the `git checkout --force <sha>` that
+        // verifies the copy landed on the commit the strategy names. The strategy digest is
+        // unchanged by this: `has_repo` drops a line from the rendered script and is not part of
+        // what is hashed.
+        let (instructions, digest, _custom) =
+            crate::render_strategy(file, import, timewarp_host, source_tree.is_some())?;
 
         // `host-gateway` is podman's name for the host as seen from the container. The strategy
         // names a stable host so that the port, which is whatever was free on this machine, stays
@@ -1031,6 +1100,7 @@ mod build {
             egress,
             privileged: instructions.requires.privileged,
             extra_hosts,
+            source_tree,
         });
 
         let run_id = format!("{}-{}", &digest[..12], std::process::id());
@@ -1491,6 +1561,30 @@ fn stabilizers(prof: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The location a strategy names, without rendering it.
+///
+/// Read separately because the source has to be fetched *before* the render: the render needs to
+/// know whether a checkout is in hand, and that is only knowable once it has been fetched.
+fn strategy_location(file: &Path, import: bool) -> Result<(String, trigon_strategy::Location)> {
+    let src =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let strategy = if import {
+        trigon_strategy::import(&src)
+            .with_context(|| format!("importing {}", file.display()))?
+            .strategy
+    } else {
+        trigon_strategy::from_yaml(&src)
+            .with_context(|| format!("parsing {}", file.display()))?
+    };
+    let loc = strategy.location().cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} names no source location, so there is nothing to fetch for an enforced tier",
+            file.display()
+        )
+    })?;
+    Ok((src, loc))
 }
 
 /// Read a strategy document, lower it if it is the prior art's format, and render it.
@@ -2168,6 +2262,7 @@ mod rebuild {
                         }
                     }) as trigon_sandbox::EventSink)
                 },
+                args.source_cache.as_deref(),
             );
 
             // A tripped guard ends the loop whatever else happened, and before another attempt can
@@ -2919,6 +3014,87 @@ mod rebuild {
 #[cfg(feature = "build")]
 mod mirror {
     use super::*;
+
+    /// Every system package a builtin tool asks for.
+    ///
+    /// The union rather than a per-ecosystem split, because it is seven packages and a wrong split
+    /// is a build that fails at the boundary for a reason that reads as the package's fault. `npm`
+    /// is deliberately absent: Debian's `npm` pulls its own Node and a system-wide `NODE_PATH` that
+    /// puts modules for it ahead of the pinned toolchain, which is `env/toolchain-crashed` on the
+    /// M1 corpus and not a vintage problem. A strategy that truly needs the distribution's npm has
+    /// to say so in its own image.
+    const DEFAULT_PACKAGES: &[&str] = &[
+        "ca-certificates",
+        "git",
+        "libatomic",
+        "python3",
+        "wget",
+    ];
+
+    /// Build a base image that carries what an enforced tier cannot install.
+    pub fn base_image(from: &str, packages: &[String], tag: &str, print: bool) -> Result<()> {
+        if !from.contains('@') {
+            bail!(
+                "pin `--from` by digest. A tag resolves to different bytes on different days, \
+                 which is exactly what a base image for a reproducibility tool must not do."
+            );
+        }
+        let packages: Vec<String> = if packages.is_empty() {
+            DEFAULT_PACKAGES.iter().map(|s| s.to_string()).collect()
+        } else {
+            packages.to_vec()
+        };
+        // The same expansion the sandbox would have used, so the image carries exactly what the
+        // setup phase would have installed rather than an operator's guess at the package names.
+        let containerfile = format!(
+            "FROM {from}\nRUN {}\n",
+            trigon_sandbox::install_command(from, &packages)
+        );
+        if print {
+            print!("{containerfile}");
+            return Ok(());
+        }
+
+        let dir = std::env::temp_dir().join(format!("trigon-base-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join("Containerfile");
+        std::fs::write(&file, &containerfile)?;
+        println!("building {tag} from {from} with: {}", packages.join(", "));
+        let status = std::process::Command::new("podman")
+            .args(["build", "--tag", tag, "--file"])
+            .arg(&file)
+            .arg(&dir)
+            .status()
+            .context("running podman build")?;
+        let _ = std::fs::remove_dir_all(&dir);
+        if !status.success() {
+            bail!("podman build failed");
+        }
+        // The digest, because `--image` refuses a tag and this is the number the operator needs.
+        let out = std::process::Command::new("podman")
+            .args(["image", "inspect", tag, "--format", "{{index .RepoDigests 0}}"])
+            .output();
+        match out {
+            Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+                println!("\n{tag} is ready: {}", String::from_utf8_lossy(&o.stdout).trim());
+            }
+            // A locally built image has no repository digest until it is pushed, so the id is what
+            // the operator passes. It names exactly one set of bytes in the local store, which is
+            // the property `--image` is checking for.
+            _ => {
+                let id = std::process::Command::new("podman")
+                    .args(["image", "inspect", tag, "--format", "{{.Id}}"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                println!("\n{tag} is ready. It has no repository digest until it is pushed, so \
+                          pass its id:\n\n    --image {id}");
+            }
+        }
+        Ok(())
+    }
 
     /// Build the mirror image from this workspace.
     ///

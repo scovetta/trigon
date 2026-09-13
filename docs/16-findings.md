@@ -446,6 +446,55 @@ against what it produces, so a 200 KB member expands to 200 MB inside our own pr
 Thirty findings were refuted by the verification pass, which is the part worth keeping: the same
 structure that surfaced the guard bug also threw away half of what was claimed.
 
+### 3.13 Closing the tier we recommend, and the larger hole found while closing it
+
+B7 was that the image build had no network flag at `mirror-only`, so setup and source — both image
+layers — ran with ordinary networking at the tier the README recommends. Proven rather than argued:
+a probe in the source phase printed `REACHED-SOURCE` against 1.1.1.1:443, and prints `blocked-SOURCE`
+after.
+
+**The larger hole was `/-artifact/`.** The route had no host allowlist at all, while `/-toolchain/`
+had one, and it sits before the credential check so it needed none. Measured:
+`GET /-artifact/npm/<moment>/example.com/` returned **200 with example.com's home page**. At
+`mirror-only` the mirror is the build's only route out, so that made the boundary a general HTTP
+proxy to the internet wearing the name of a control. It now carries the same compiled-in exact-match
+allowlist the toolchain route has, holding the three hosts this mirror itself rewrites index URLs
+into.
+
+**Why not proxy git.** The obvious fix was to teach the mirror to proxy a clone so the source phase
+could be deferred into the island like deps. It works — a 217-line proxy cloned from GitHub, GitLab
+and Codeberg — and it was the wrong change. It would have turned on only at `GitAndMirror`, making
+`mirror-only` unbuildable for every strategy that checks out source and moving everyone to a *wider*
+tier; it changes `strategy_digest` for every such strategy, re-running every cached verdict; and it
+puts ten correctness rules in the build's only route out, one of which is the same class as the gzip
+bug in §1 — git gzips an upload-pack body above 1024 bytes, so a proxy that mishandles it passes a
+`left-pad` smoke test and fails on every real repository.
+
+**What was done instead.** The pinned checkout is an input, not a fetch. At every tier but `open`
+the host fetches the commit with the `SourceCache` that already existed and copies it into the build
+context; the strategy renders with `has_repo`, so `git-checkout` collapses to the
+`git checkout --force <sha>` that verifies the copy landed on the right commit. The strategy digest
+is unchanged — `has_repo` drops a line from a rendered script and is not part of what is hashed — so
+no cached verdict re-runs. `podman build` then takes `--network none` at every enforced tier.
+
+**The setup phase verifies instead of installing.** With no network there is no `apt-get`, and the
+first design refused any strategy declaring a package before the run started. That was wrong for a
+reason worth keeping: a pre-flight refusal cannot know what a base image contains, so it refuses
+even when the image carries everything. Every package manager can answer "is this installed" from
+its own on-disk database, so at an enforced tier the setup phase becomes that check, names the
+packages that are actually missing, and prints the `trigon base-image` line that fixes it.
+`command -v` would not do — `ca-certificates` and `libatomic1` provide no binary.
+
+`left-pad 1.3.0` reproduces `normalized` at `mirror-only` against a base image built by
+`trigon base-image`, with every phase inside the boundary.
+
+**What still escapes, stated because a tier must not claim more than it enforces:** the mirror will
+still GET from five allowlisted hosts, which serve whatever is published on them — the tier bounds
+which hosts, never what they serve, and the artifact guard is the control for that. The artifact
+route applies no time filter. The source is fetched on the host with no boundary and no transcript,
+bounded only by `SourceCache`'s hardening. And no run at any tier is attestable, because there is
+still no network transcript: what changed is the reason, not the answer.
+
 ---
 
 ## 4. A stabilizer the reference does not have

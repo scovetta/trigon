@@ -197,19 +197,33 @@ network whose only route out is the time-filtered mirror, and needs that mirror'
 
 ```
 $ trigon mirror-image          # compiles trigon in a container; several minutes
-$ trigon rebuild pkg:npm/left-pad@1.3.0 --image <as above> --work ./work \
+$ trigon base-image --from <a pinned image>     # the packages an enforced tier cannot install
+$ trigon rebuild pkg:npm/left-pad@1.3.0 --image <the base image's id> --work ./work \
       --egress mirror-only --timewarp auto
 …
 ✔ normalized
 ```
 
-The image is built from this workspace's source, so it goes stale when the mirror changes. `rebuild`
-compares the two and says so before the build starts rather than after it fails inside the island.
+Both images are built from this workspace, so the mirror goes stale when the mirror code changes.
+`rebuild` compares the two and says so before the build starts rather than after it fails inside the
+island.
 
-At that tier the deps phase runs *inside* the island, so everything it fetches comes through the
-mirror — including the toolchain. Node is downloaded over the mirror's `/-toolchain/` route, which
-proxies a short compiled-in allowlist of distribution hosts and refuses everything else. A base
-image that already carries the right toolchain skips the hop entirely.
+At this tier **no phase reaches the network.** The image build runs with `--network none`, so the
+source cannot be cloned there — it is fetched on the host at the pinned commit and copied in, and
+the checkout step becomes the check that the copy landed on the right commit. The deps phase runs
+inside the island and reaches the mirror; the toolchain comes through the mirror's `/-toolchain/`
+route, and dependencies through `/-artifact/`. Both routes are compiled-in exact-match allowlists
+and refuse everything else.
+
+With no network there is also no `apt-get`, so the setup phase stops installing and starts checking:
+it reads the package manager's own database, names anything the base image is missing, and prints
+the `trigon base-image` line that fixes it.
+
+What the tier does **not** claim: the allowlists bound which hosts the mirror will fetch from, never
+what those hosts serve — `registry.npmjs.org` serves whatever anybody published. The artifact guard
+is the control for that. And the source is fetched on the host, outside the boundary, bounded only
+by the checkout's own rules: https only, a full commit id only, no ambient git configuration, no
+credential helper, and a tree that is read and copied but never executed.
 
 ### Asking a model
 

@@ -87,6 +87,7 @@ async fn a_build_runs_and_its_artifact_is_collected() {
         egress: EgressTier::DenyAll,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
 
     let h = r.start(&plan, &opts("collect-ok")).await.expect("starts");
@@ -137,6 +138,7 @@ async fn deny_all_egress_really_denies() {
         egress: EgressTier::DenyAll,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
     let h = r.start(&plan, &opts("deny-all")).await.unwrap();
     let outcome = h.wait().await.unwrap();
@@ -166,6 +168,7 @@ async fn a_failing_build_still_reports_its_phase_and_logs() {
         egress: EgressTier::DenyAll,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
     let h = r.start(&plan, &opts("fails")).await.unwrap();
     let outcome = h.wait().await.unwrap();
@@ -197,6 +200,7 @@ async fn a_failure_in_the_deps_phase_is_attributed_to_deps() {
         egress: EgressTier::DenyAll,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
     let h = r.start(&plan, &opts("deps-fail")).await.unwrap();
     let outcome = h.wait().await.unwrap();
@@ -254,6 +258,7 @@ async fn mirror_only_egress_blocks_everything_but_the_mirror() {
         egress: EgressTier::MirrorOnly,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
 
     let h = r
@@ -297,6 +302,7 @@ async fn the_same_probes_succeed_under_open_egress() {
         egress: EgressTier::Open,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
     let h = r.start(&plan, &opts("egress-open")).await.unwrap();
     let outcome = h.wait().await.unwrap();
@@ -328,6 +334,7 @@ async fn a_failed_build_leaves_nothing_behind() {
         egress: EgressTier::DenyAll,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
 
     let run_id = "leftovers";
@@ -369,6 +376,7 @@ async fn a_retained_build_keeps_its_image() {
         egress: EgressTier::DenyAll,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
     let run_id = "retained";
     let mut o = opts(run_id);
@@ -423,6 +431,7 @@ async fn a_build_prunes_leftovers_from_runs_that_were_killed() {
         egress: EgressTier::DenyAll,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
     let h = r.start(&plan, &opts("prunes")).await.unwrap();
     let _ = h.wait().await.unwrap();
@@ -484,6 +493,7 @@ async fn a_watcher_is_told_which_phase_is_running_while_it_runs() {
         egress: EgressTier::DenyAll,
         privileged: false,
         extra_hosts: Default::default(),
+        source_tree: None,
     });
     let mut o = opts("phases");
     o.on_event = Some(sink);
@@ -494,4 +504,98 @@ async fn a_watcher_is_told_which_phase_is_running_while_it_runs() {
     // Told as they happened, in order, and not only at the end.
     let seen = seen.lock().unwrap().clone();
     assert_eq!(seen, vec![Phase::Deps, Phase::Build], "{seen:?}");
+}
+
+#[tokio::test]
+async fn no_phase_of_an_enforced_run_reaches_the_internet() {
+    // The test `mirror_only_egress_blocks_everything_but_the_mirror` is the one that let B7 exist:
+    // it puts `source: "true"`, `deps: "true"` and every probe inside `build:`, and the build phase
+    // was the one phase already inside the boundary. Setup and source are image-build layers, and
+    // rootless `podman build` cannot join the island — so with no network flag at all they had
+    // ordinary networking at every tier but `deny-all`. This one probes every phase.
+    let _store = store().await;
+    let r = PodmanRunner::new(workdir()).with_mirror_image(Some(MIRROR_IMAGE.into()));
+    if !usable(&r).await || !mirror_image_available() {
+        return;
+    }
+
+    // `|| echo blocked` rather than `&& echo REACHED` alone: under `set -eu` a bare failing
+    // AND-list exits the phase, so the absence of REACHED would be satisfied by a phase that never
+    // ran. Both halves are asserted.
+    let probe = |tag: &str| format!("nc -w 3 -z 1.1.1.1 443 && echo REACHED-{tag} || echo blocked-{tag}\n");
+    let plan = BuildPlan::Oci(OciPlan {
+        base_image: ALPINE.into(),
+        // Empty on purpose: an enforced tier refuses a plan that needs packages, because with no
+        // network in the image build there is nothing to install them with.
+        system_deps: BTreeSet::new(),
+        source: probe("SOURCE"),
+        deps: probe("DEPS"),
+        build: format!("{}mkdir -p dist && echo hi > dist/out.txt", probe("BUILD")),
+        output_path: "dist/out.txt".into(),
+        egress: EgressTier::MirrorOnly,
+        privileged: false,
+        extra_hosts: Default::default(),
+        source_tree: None,
+    });
+
+    let h = r.start(&plan, &opts("allphases")).await.unwrap();
+    let outcome = h.wait().await.unwrap();
+    let log = &outcome.log_tail;
+
+    assert!(
+        !log.contains("REACHED-"),
+        "a phase reached the internet at mirror-only:\n{log}"
+    );
+    for tag in ["SOURCE", "DEPS", "BUILD"] {
+        assert!(
+            log.contains(&format!("blocked-{tag}")),
+            "the {tag} phase did not run, so its silence proves nothing:\n{log}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_enforced_tier_verifies_its_base_image_instead_of_installing() {
+    // The image build has no network at an enforced tier — that is what makes the tier mean what
+    // it says — so the setup phase cannot install. It checks instead, from the package manager's
+    // own on-disk database, and names what is missing.
+    //
+    // The first design refused the run before it started. That was wrong for a reason worth
+    // keeping: a pre-flight refusal cannot know what a base image contains, so it refuses every
+    // strategy that declares a package even when the image carries all of them. The check knows.
+    let _store = store().await;
+    let r = PodmanRunner::new(workdir());
+    if !usable(&r).await {
+        return;
+    }
+    let plan = |egress| {
+        BuildPlan::Oci(OciPlan {
+            base_image: ALPINE.into(),
+            // Alpine has `busybox` and does not have `libatomic`, so one of each.
+            system_deps: ["busybox", "libatomic"].iter().map(|s| s.to_string()).collect(),
+            source: "true".into(),
+            deps: "true".into(),
+            build: "mkdir -p dist && echo hi > dist/out.txt".into(),
+            output_path: "dist/out.txt".into(),
+            egress,
+            privileged: false,
+            extra_hosts: Default::default(),
+            source_tree: None,
+        })
+    };
+
+    let h = r.start(&plan(EgressTier::DenyAll), &opts("verify")).await.unwrap();
+    let outcome = h.wait().await.unwrap();
+    assert_ne!(outcome.exit_code, 0, "a missing package must stop the build");
+    let log = &outcome.log_tail;
+    assert!(log.contains("this base image is missing"), "{log}");
+    assert!(log.contains("libatomic"), "the missing one is named: {log}");
+    assert!(
+        log.contains("trigon base-image"),
+        "and the way to fix it is printed: {log}"
+    );
+    assert!(
+        !log.contains("busybox"),
+        "a package that is present must not be reported missing: {log}"
+    );
 }

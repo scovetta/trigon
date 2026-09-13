@@ -53,7 +53,58 @@ impl BuildContext {
 /// A guess, and it is allowed to be: a wrong guess fails in the setup phase with the package
 /// manager's own error, which is a legible failure. Silently skipping the install is not, because
 /// the build then fails later for a reason that looks like the package's fault.
-fn install_command(base_image: &str, deps: &[String]) -> String {
+/// The command that checks these packages are already present, without a network.
+///
+/// What the setup phase becomes at an enforced tier. The image build has no network there, so
+/// installing is impossible — but *verifying* is not, because every package manager can answer
+/// "is this installed" from its own on-disk database.
+///
+/// This is better than refusing the run before it starts, which was the first design: a pre-flight
+/// refusal cannot know what a base image contains, so it has to refuse every strategy that declares
+/// a package even when the image carries all of them. The check knows, and it names the ones that
+/// are actually missing.
+///
+/// `command -v` would not do. `ca-certificates` and `libatomic1` provide no binary, and a check
+/// that silently passes for them is not a check.
+pub fn verify_command(base_image: &str, deps: &[String]) -> String {
+    let img = base_image.to_ascii_lowercase();
+    let (family, query) = if img.contains("alpine") {
+        (Family::Alpine, "apk info -e")
+    } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
+        (Family::Fedora, "rpm -q")
+    } else {
+        (Family::Debian, "dpkg -s")
+    };
+    let mut names: Vec<String> = Vec::new();
+    for d in deps {
+        for n in expand(d, family) {
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+    }
+    let list = names.join(" ");
+    format!(
+        "missing=\"\"\n\
+         for p in {list}; do\n\
+        \x20 {query} \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"\n\
+         done\n\
+         if [ -n \"$missing\" ]; then\n\
+        \x20 echo \"this base image is missing:$missing\"\n\
+        \x20 echo \"an enforced egress tier gives the image build no network, so the packages a\"\n\
+        \x20 echo \"strategy needs have to be in the image already. Build one with:\"\n\
+        \x20 echo \"    trigon base-image --from <this image> --packages$missing\"\n\
+        \x20 exit 1\n\
+         fi\n\
+         echo \"base image carries: {list}\""
+    )
+}
+
+/// The command that installs these packages on this base image's distribution.
+///
+/// Public because an enforced tier refuses to run it and has to tell the operator what to put in a
+/// base image instead. The refusal is only actionable if it prints the line.
+pub fn install_command(base_image: &str, deps: &[String]) -> String {
     let img = base_image.to_ascii_lowercase();
     let (family, install) = if img.contains("alpine") {
         (Family::Alpine, "apk add --no-cache")
@@ -132,15 +183,30 @@ pub fn render(plan: &OciPlan, defer_deps: bool) -> BuildContext {
 
     if !plan.system_deps.is_empty() {
         let deps: Vec<String> = plan.system_deps.iter().cloned().collect();
-        phase(
-            &mut f,
-            &mut files,
-            "setup",
-            &install_command(&plan.base_image, &deps),
-        );
+        // Install where there is a network to install from; verify where there is not. An enforced
+        // tier has no network in the image build — that is what makes the tier mean what it says —
+        // so the setup phase stops being an installation and becomes the check that somebody
+        // already did it.
+        let script = if plan.egress == crate::EgressTier::Open {
+            install_command(&plan.base_image, &deps)
+        } else {
+            verify_command(&plan.base_image, &deps)
+        };
+        phase(&mut f, &mut files, "setup", &script);
     }
 
-    f.push_str("RUN mkdir -p /src /out\nWORKDIR /src\n\n");
+    // The source, where the host fetched it. `COPY` rather than a clone is what lets the image
+    // build run with no network at all — the source phase is a layer, and rootless `podman build`
+    // cannot join the island, so a phase that needs the repository can only run inside the boundary
+    // if the repository is already there.
+    //
+    // `.git` comes with it. The source phase's `git checkout --force <sha>` then stops being a
+    // fetch and becomes the check that the copy landed on the commit the strategy names.
+    if plan.source_tree.is_some() {
+        f.push_str("COPY src /src\nRUN mkdir -p /out\nWORKDIR /src\n\n");
+    } else {
+        f.push_str("RUN mkdir -p /src /out\nWORKDIR /src\n\n");
+    }
 
     phase(&mut f, &mut files, "source", &plan.source);
     if !defer_deps {
