@@ -1,0 +1,84 @@
+# Vendored from https://github.com/tox-dev/platformdirs/blob/b2f29d8e8c17ac18299c2a3e1833620281bb57d2/.github/workflows/release.yaml
+# Fetched 2026-09-13, verbatim apart from these three provenance lines.
+#
+name: 🚀 Release
+on:
+  push:
+    branches: ["main"]
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+permissions:
+  contents: read
+env:
+  dists-artifact-name: python-package-distributions
+jobs:
+  build:
+    name: 📦 build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history so hatch-vcs derives the version from the tag
+          persist-credentials: false
+      - name: 📦 Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false # this workflow builds the artifact that gets published; no cache to poison
+      - name: 📦 Build package
+        run: uv build --python 3.14 --python-preference only-managed --sdist --wheel . --out-dir dist
+      - name: 📤 Store the distribution packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ env.dists-artifact-name }}
+          path: dist/*
+  publish:
+    name: 🚀 publish
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    environment:
+      name: release
+      url: https://pypi.org/project/platformdirs/${{ github.ref_name }}
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 🛡️ Require a changelog section for this release
+        env:
+          VERSION: ${{ github.ref_name }}
+        # A tag reaches PyPI only through prepare-release, which builds the changelog first. A tag pushed by hand skips
+        # that, so refuse to publish a version the changelog does not document rather than ship it silently.
+        run: |
+          if ! grep -qE "^ ${VERSION//./\\.} \(" docs/changelog.rst; then
+            echo "::error::docs/changelog.rst has no section for $VERSION; release via the Prepare release workflow"
+            exit 1
+          fi
+      - name: ⬇️ Download all the dists
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ env.dists-artifact-name }}
+          path: dist/
+      - name: 🚀 Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          skip-existing: true
+      - name: 📢 Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release $VERSION already exists, skipping"
+          else
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --title="$VERSION" --verify-tag --generate-notes
+          fi

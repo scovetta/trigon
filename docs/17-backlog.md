@@ -195,3 +195,38 @@ signed for publication, because both are baked into a signed statement and expen
 **Done when:** the subject carries the ecosystem's own digests, a record schema exists with the six
 fields [`19`](19-distribution-and-lookup.md) §4 requires, and a lookup client that is not Trigon can
 answer a lockfile from a downloadable index without a network call per dependency.
+
+## B11. Wire the CI-derived rung into the ladder, once it declines correctly
+
+`crates/trigon-registry/src/ci/` exists and is **not wired**: nothing calls it, so it cannot yet
+produce a candidate. That is the right state for it, because two independent verification passes
+came back `needs-work` and a CI rung that emits a confident wrong candidate is worse than no rung —
+it displaces the heuristic that would have worked.
+
+Fixed already: `actions/github-script` was on the "cannot affect build output" list while running
+arbitrary JavaScript with `exec`, and that list was prefix-matched so anyone naming an action after
+an inert one inherited its silence; and `container:` overrode `runs-on`, so a Windows or self-hosted
+job that also declared a container escaped the out-of-scope rule ADR-0009 requires.
+
+**Outstanding, each with a probe that demonstrates it:**
+
+- `twine check` matches as a publish marker, so on the standard check-then-upload shape the wrong
+  step becomes "the publish step".
+- `actions/download-artifact` in the *build* job is grouped with cache and publish markers as
+  "provably does not matter" — but a build whose inputs are bytes fetched from an earlier job is
+  the forged-attestation shape of [`12`](12-security.md) §1.1, not an irrelevance.
+- `download-artifact`'s `pattern:` is compared as a literal name, so every publish job that fans in
+  wheels with a glob loses its build edge.
+- `sed` is in `cmd::INCIDENTAL`, so `sed -i` rewriting the tree immediately before the build
+  disappears and the candidate comes out `Strong`.
+- Two decline messages assert things that are not true of the run that produced them
+  (`NoQualifyingJob` where a job qualified but its build edge could not be followed;
+  `NoToolForBuildCommand` where a build *was* recognised).
+- **Confidence inverts around `ubuntu-latest`**: failing to resolve which release the label meant
+  yields a *more* confident candidate than resolving it. Not knowing should never raise confidence.
+- Workflow- and job-level `env:` is parsed and never read, with no note that it was dropped.
+- The publish job's own `uses:` steps are never classified when it is not the build job.
+
+**Done when:** every item above has a test that fails without the fix, both verification angles come
+back `sound`, and only then does `ladder()` in `crates/trigon/src/main.rs` call it — between the
+heuristic and the model, per [`01`](01-architecture.md) §3.

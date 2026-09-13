@@ -15,6 +15,7 @@
 //! published from; PyPI records a project URL. That is one request we were making anyway, and it
 //! is a better answer than any amount of tag matching.
 
+pub mod ci;
 mod client;
 mod definitions;
 mod error;
@@ -29,6 +30,7 @@ mod source;
 mod tags;
 pub mod wheel;
 
+pub use ci::{CiInferrer, CiReading};
 pub use client::{Client, ClientConfig};
 pub use definitions::DefinitionsInferrer;
 pub use error::RegistryError;

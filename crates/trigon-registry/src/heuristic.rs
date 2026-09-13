@@ -407,7 +407,7 @@ impl StrategyInferrer for PyPiInferrer {
 ///
 /// A deterministic read from the artifact under test, not a guess: `crate::wheel::generator_evidence`
 /// puts it in the intrinsics at fetch time and this turns it into something pip can install.
-fn build_backend_pin(target: &ResolvedTarget) -> Option<String> {
+pub(crate) fn build_backend_pin(target: &ResolvedTarget) -> Option<String> {
     target
         .intrinsics
         .evidence

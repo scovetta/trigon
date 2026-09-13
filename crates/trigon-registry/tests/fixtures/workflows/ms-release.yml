@@ -1,0 +1,52 @@
+# Vendored from https://github.com/vercel/ms/blob/567c72450037c08f543e61009b438f3dc020a233/.github/workflows/release.yml
+# Fetched 2026-09-13, verbatim apart from these three provenance lines.
+#
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+
+jobs:
+  canary:
+    name: Canary Release / Node 24
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Set NPM Auth Token
+        run: |
+          npm config set loglevel verbose
+          npm config set //registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN_ELEVATED }}
+
+      - name: Build
+        run: pnpm build
+
+      - name: Publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN_ELEVATED }}
+          NPM_CONFIG_PROVENANCE: 'true'
+        run: |
+          BASE=$(node -p "require('./package.json').version.split('-')[0]")
+          DATE=$(date +'%Y%m%d%H%M')
+          NIGHTLY="${BASE}-nightly.${DATE}"
+
+          pnpm version --no-git-tag-version "$NIGHTLY"
+          pnpm publish --tag nightly --access public --no-git-checks
