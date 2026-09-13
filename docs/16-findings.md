@@ -584,6 +584,35 @@ a GPU, and the cheap local option is a small model — `qwen2.5:0.5b` is 397 MB 
 — asked to do search rather than reasoning. The fast path is a hosted model, and that is what the
 budgets in `docs/07-ai.md` §5 are sized for.
 
+### 3.15 Two of the five archive limits are dead configuration
+
+`Limits` has five fields. Three are enforced: `recursion` (parse.rs:158), `total_expanded_bytes`
+(eight sites) and `max_entries` (zip.rs:99). **`max_inline_bytes` and `max_inline_total` are read
+nowhere outside `limits.rs`.**
+
+They have nothing to gate, because the machinery they were written for does not run.
+`SourceMap::map` — the mmap constructor, and this crate's only `unsafe` block — has no caller.
+`Body::Spilled` is matched in three places and constructed in none. An artifact arrives through
+`std::fs::read` and is kept whole, so `docs/05-archive-and-normalization.md` §2.2's claim that a 2 GB
+wheel stabilizes at near-zero heap is a description of a design rather than of this code. The 80 MB
+wheel in the M0 corpus is fine; a 2 GB one would cost 2 GB.
+
+`Body::Original` — the copy-on-write half — *is* real, and is constructed in `tar.rs:150`. So the
+finding is narrower than "COW is unimplemented": the borrow-from-the-source-buffer part works, and
+the never-hold-the-whole-file part does not.
+
+**Why this is the same bug again.** §1 named the class as configuration that looks applied and is
+not, and this is the purest instance yet: two limits with plausible defaults, a doc chapter
+describing what they bound, and no code reading either. It also reached the threat model, which
+claimed the verifier "writes a spill file above 8 MiB" as a host side effect and cited `SpillFile`
+for it. That is an over-claim in the safe direction — we said we might write a file we never write —
+but §1.5's whole value is that its negative claims are exact, and an inexact one there is worth no
+more than a guess. Corrected, and recorded as D23.
+
+The right fix is not to delete the fields. The design wants mmap and spilling, `docs/05` explains
+why, and a fleet stabilizing large wheels will need them. What is wrong is shipping the knobs for
+machinery that is not there, so until it is, the limits say so.
+
 ---
 
 ## 4. A stabilizer the reference does not have

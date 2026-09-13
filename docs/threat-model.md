@@ -154,7 +154,7 @@ docs/01-architecture.md §2.2)*. Verified at this commit: `cargo tree -p trigon
 
 | Family | Entry point | Touches | In model |
 | --- | --- | --- | --- |
-| `archive-parsing` (`trigon-archive`) | `Archive::read`, the three writers | nothing outside the process, except a spill file above 8 MiB | **in** |
+| `archive-parsing` (`trigon-archive`) | `Archive::read`, the three writers | nothing outside the process | **in** |
 | `stabilization` (`trigon-stabilize`) | `profile(id)`, `StabilizerSet::apply` | nothing | **in** |
 | `comparison-and-verdict` (`trigon-compare`, `trigon-core`) | `compare()`, `Match`, PURL parsing | nothing | **in** |
 | `attestation` (`trigon-attest`) | statement building, DSSE, `Signer` | reads a key file when signing | **in** |
@@ -279,7 +279,7 @@ Negative claims, split because the verifier and the build path are different pro
 | Network of any kind | **absent** | it links no network client *(documented, docs/01-architecture.md §2.2)* |
 | Child processes | **absent** | *(documented, docs/01-architecture.md §2.2)* |
 | Environment variables | **absent** | *(documented, docs/01-architecture.md §2.2)* |
-| Filesystem writes | **conditional** | only paths the operator named: the `stabilize` output, the `--attest` file, and a spill file above 8 MiB *(documented, crates/trigon-archive/src/limits.rs; crates/trigon-archive/src/model.rs — `SpillFile`)* |
+| Filesystem writes | **conditional** | only paths the operator named: the `stabilize` output and the `--attest` file. `SpillFile` exists as a type and is never constructed, so nothing spills *(documented, verified: no construction of `Body::Spilled` anywhere in `crates/`)* |
 | Filesystem reads | **conditional** | only paths the operator named, plus a signing key file *(documented, crates/trigon/src/main.rs — every read path is a CLI argument)* |
 | stdout / stderr | **present** | the verdict on stdout, `tracing` on stderr *(documented, docs/11-interfaces.md)* |
 | Signal handlers, global state, locale or FPU mutation | **absent** | *(assumption, Q4)* |
@@ -382,7 +382,7 @@ or §1.12 disclaimer that owns it; no claimed row exists only here.
 | archive-parsing | recursive-cyclic-topology | claimed | recursion is structural, depth-limited to 4 | P1 |
 | archive-parsing | callback-execution | N/A | the API accepts no callbacks and holds no function values | — |
 | archive-parsing | serialization-reconstruction | claimed | `parse(write(a)) == a`, proptested | P2 |
-| archive-parsing | reference-lifecycle | claimed | copy-on-write over an mmap; a body is never aliased after mutation | P2 |
+| archive-parsing | reference-lifecycle | claimed | copy-on-write from one owned buffer; a body is never aliased after mutation. Not over an mmap — see D23 | P2 |
 | archive-parsing | concurrency-reentrancy | disclaimed | no thread-safety beyond `Send`/`Sync` is stated | D8 |
 | archive-parsing | resource-complexity | claimed | every cap is enforced against produced bytes, not declared sizes; the ceiling's *size* is what D1 disclaims | P1 |
 | archive-parsing | x-filesystem-materialization | claimed | no archive member is ever written to a filesystem path | P22 |
@@ -507,7 +507,7 @@ the live example: `flate2` inflates correctly; *we* do not bound the output.
 | `git` (external binary) | fetching a checkout without honouring attacker-supplied config | *(documented, crates/trigon-registry/src/source.rs)* | upstream, unless we passed something we should not have |
 | `flate2` / `miniz_oxide` | correct inflate of attacker bytes | *(documented, docs/05 §2.1)* | upstream; **bounding the output is ours** — D1 |
 | `tar`, `zip` (readers) | correct framing of attacker bytes; we own the writers | *(documented, docs/05 §2 — "ecosystem crates for readers; hand-write all three writers")* | upstream |
-| `memmap2` | a stable mapping of a file we opened | *(documented, docs/05 §3)* | upstream |
+| `memmap2` | **nothing today.** It is a dependency of `trigon-archive` and its only use, `SourceMap::map`, has no caller — see D23 | *(documented, verified: `SourceMap::map` has no call site)* | upstream, if it is ever wired |
 | `serde_json`, `serde_yaml_ng`, `serde_path_to_error` | parsing attacker-influenced documents without executing them | *(documented, docs/17-crate-picks — `serde_yaml` is archived; `serde_yaml_ng` is the fork)* | upstream |
 | `object_store` | **path-component encoding.** `Path::from` percent-encodes `..` and `/` inside a component, so a package-derived name cannot escape the store root | *(documented, verified against object_store 0.12: `..` → `%2E%2E`)* | upstream — **and this is borrowed safety: a naive `PathBuf::join` here would be a traversal** |
 | `reqwest` + `rustls` | TLS to registries and model endpoints | *(documented, docs/17-crate-picks)* | upstream |
@@ -588,7 +588,7 @@ attacker-controllable, is `VALID`.
 
 | ID | Property | Conditions | Violation symptom | Tier |
 | --- | --- | --- | --- | --- |
-| **P1** | Parsing a hostile artifact does not panic, escape its limits, or silently change a digest. Recursion is depth-limited to 4, and a parse failure keeps the member inline and emits `NestedParseFailed`. **Every limit is enforced against what decompression produces, not against the size the input declares**, and every offset read goes through `checked_add`. | any input bytes | panic, hang, wrong digest | **security-critical** *(documented, docs/05 §2.2; crates/trigon-archive/src/zip.rs — `checked_add`; crates/trigon-archive/src/gzip.rs:25 — the output budget; tests `an_offset_that_wraps_is_a_short_read_and_not_a_panic`, `a_gzip_bomb_is_refused_at_the_limit_rather_than_inflated`, `a_zip_member_that_lies_about_its_size_is_refused`)* |
+| **P1** | Parsing a hostile artifact does not panic, escape its *enforced* limits — recursion, total expansion and entry count, but not the two D23 records as dead — or silently change a digest. Recursion is depth-limited to 4, and a parse failure keeps the member inline and emits `NestedParseFailed`. **Every limit is enforced against what decompression produces, not against the size the input declares**, and every offset read goes through `checked_add`. | any input bytes | panic, hang, wrong digest | **security-critical** *(documented, docs/05 §2.2; crates/trigon-archive/src/zip.rs — `checked_add`; crates/trigon-archive/src/gzip.rs:25 — the output budget; tests `an_offset_that_wraps_is_a_short_read_and_not_a_panic`, `a_gzip_bomb_is_refused_at_the_limit_rather_than_inflated`, `a_zip_member_that_lies_about_its_size_is_refused`)* |
 | **P2** | The stabilized form is a byte-stable function of the input: `parse(write(a)) == a`, identical across runs and threads *of a single process*. | same stabilizer set | two runs disagree on a digest | **security-critical** *(documented, docs/13-roadmap.md M0)* |
 | **P3** | Stabilizers are total and idempotent: `stab(stab(x)) == stab(x)`, no `Result`, no half-stabilized state, and none allocates more than one member at a time. | — | a digest that depends on how many times a pass ran | **security-critical** *(documented, docs/05 §4)* |
 | **P4** | `compare` refuses to compare two sides stabilized under different sets, by set digest, and classifies the refusal `Fault::Bug`. | — | a verdict derived across incomparable sets | **security-critical** *(documented, docs/09-attestations.md §7)* |
@@ -609,7 +609,7 @@ attacker-controllable, is `VALID`.
 | **P19** | Members are paired by `(path, occurrence)`, never by archive position. | — | a false divergence from reordering | correctness-only *(documented, crates/trigon-compare/src/signature.rs)* |
 | **P20** | `trigon watch` has no write path: four GET routes, and it never writes to the work directory or the store. Nothing absent is rendered as a zero, and the two denominators never merge. | — | the monitor changing what it observes; "no data" shown as a result | **security-critical** *(documented, docs/18-management-ui.md)* |
 | **P21** | `trigon-core` performs no I/O and declares no cargo features; the verifier links no runtime and no network client. Asserted by `xtask policy`, checkable with `cargo tree`. | `--no-default-features` | the verifier's independence being false | **security-critical** *(documented, docs/01-architecture.md §2.2)* |
-| **P22** | **No archive member is ever written to a filesystem path.** Archives are parsed in memory; the only writes are the operator-named output file and an over-8-MiB spill file whose name Trigon chooses. Trigon never extracts an artifact to a directory, so a hostile member path has nowhere to land. | — | a member path escaping an output directory | **security-critical** *(documented, verified: no `File::create`, `fs::write` or `create_dir_all` anywhere in `trigon-archive`, `trigon-stabilize` or `trigon-compare`)* |
+| **P22** | **No archive member is ever written to a filesystem path.** Archives are parsed in memory, and the only write is the operator-named output file. Trigon never extracts an artifact to a directory, so a hostile member path has nowhere to land. | — | a member path escaping an output directory | **security-critical** *(documented, verified: no `File::create`, `fs::write` or `create_dir_all` anywhere in `trigon-archive`, `trigon-stabilize` or `trigon-compare`)* |
 | **P23** | An archived stabilizer set is proved to agree with the compiled one before its digest is used, and a trap in the module fails the re-derivation rather than producing a digest. | `wasm` feature | an archived set silently producing a different digest | **security-critical** *(documented, docs/16-findings.md — "run an archived stabilizer set, and prove it agrees with the compiled one")* |
 | **P24** | Outcomes cross the wire as strings, with `FromStr` the exact inverse of `Display`. | — | a verdict changing meaning across a serialization boundary | correctness-only *(documented, crates/trigon-core/src/outcome.rs:46-53)* |
 | **P25** | Comparison is linear in member count; each side is walked at most twice. **Threshold:** super-linear in members is a bug; a constant factor is not. | — | a comparison that does not finish on a large artifact | correctness-only *(documented, docs/05 §5)* |
@@ -663,7 +663,8 @@ project has made.
 
 | ID | Not provided | Conditions | Tier | Provenance |
 | --- | --- | --- | --- | --- |
-| **D1** | A *small* bound on what decompression produces. Expansion is bounded — that is P1 — but the default ceiling is **4 GiB** (`total_expanded_bytes`), with 256 MiB held inline before spilling. A hostile artifact can still cost that much memory and time before it is refused, so the defence is a ceiling rather than cheapness. A caller who needs a tighter bound sets one. | any input bytes | correctness-only | *(documented, crates/trigon-archive/src/limits.rs:20-30)* |
+| **D1** | A *small* bound on what decompression produces. Expansion is bounded — that is P1 — but the default ceiling is **4 GiB** (`total_expanded_bytes`), and the whole artifact plus its whole expansion are held in memory to reach it. A hostile artifact can cost that much before it is refused, so the defence is a ceiling rather than cheapness. A caller who needs a tighter bound sets one. | any input bytes | correctness-only | *(documented, crates/trigon-archive/src/limits.rs:20-30)* |
+| **D23** | Any bound at all from `max_inline_bytes` (8 MiB) or `max_inline_total` (256 MiB). **Both are dead configuration**: nothing outside `limits.rs` reads either field. `SourceMap::map` — the mmap constructor, and this crate's only `unsafe` block — has no caller, and `Body::Spilled` is matched but never constructed. So `docs/05-archive-and-normalization.md` §2.2's claim that a 2 GB wheel stabilizes at near-zero heap does not hold: an artifact is read with `std::fs::read` and kept whole. Three of the five limits are real (`recursion`, `total_expanded_bytes`, `max_entries`); these two are not. | any input bytes | correctness-only | *(documented, verified: `grep` for `max_inline_bytes`/`max_inline_total`/`SourceMap::map`/`Body::Spilled` outside `limits.rs` and `model.rs` returns no enforcement site)* |
 | **D2** | Sanitization of anything in a `runs:` step, from a strategy or a definitions entry. | — | **security-critical** | *(documented, docs/12-security.md §5)* |
 | **D3** | Prevention of code execution inside the build container. | — | **security-critical** | *(documented, docs/08-execution.md)* |
 | **D4** | Isolation between two Trigon processes sharing a podman image store. | — | correctness-only | *(documented, docs/17-backlog.md B6)* |

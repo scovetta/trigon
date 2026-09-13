@@ -11,11 +11,11 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:43de0e6b40ff7eb44ac7dc4c0c87f5f1e40f027e6c3db934ab04b6f681e51d3f
+prose_version: docs/threat-model.md@sha256:bbdb703f64251ba95955a05bbb4b92e794a377eb651a2595e5e73b6464ebd63c
 model_status: unratified-draft
 triage_policy: strict
 confidence:
-  documented: 192
+  documented: 193
   maintainer: 0
   inferred: 5
   assumption: 3
@@ -118,11 +118,11 @@ host_side_effects:
 - effect: Filesystem writes
   stance: conditional
   components: []
-  conditions: 'only paths the operator named: the stabilize output, the --attest file, and a spill file
-    above 8 MiB'
+  conditions: 'only paths the operator named: the stabilize output and the --attest file. SpillFile exists
+    as a type and is never constructed, so nothing spills'
   provenance:
     kind: documented
-    source: crates/trigon-archive/src/limits.rs; crates/trigon-archive/src/model.rs — `SpillFile`
+    source: 'verified: no construction of `Body::Spilled` anywhere in `crates/`'
 - effect: Filesystem reads
   stance: conditional
   components: []
@@ -596,7 +596,8 @@ contract_dimensions:
 - component: archive-parsing
   dimension: reference-lifecycle
   status: claimed
-  conditions: copy-on-write over an mmap; a body is never aliased after mutation
+  conditions: copy-on-write from one owned buffer; a body is never aliased after mutation. Not over an
+    mmap — see D23
   property_id: P2
   provenance:
     kind: documented
@@ -1524,7 +1525,8 @@ dependencies:
     kind: documented
     source: docs/05 §2 — "ecosystem crates for readers; hand-write all three writers"
 - name: memmap2
-  relied_on_for: a stable mapping of a file we opened
+  relied_on_for: nothing today. It is a dependency of trigon-archive and its only use, SourceMap::map,
+    has no caller — see D23
   relied_on_properties: []
   caller_obligations_acknowledged: []
   adversary_capabilities_forwarded: []
@@ -1533,7 +1535,7 @@ dependencies:
   violation_disposition: 'OUT-OF-MODEL: dependency-contract'
   provenance:
     kind: documented
-    source: docs/05 §3
+    source: 'verified: `SourceMap::map` has no call site'
 - name: serde_json, serde_yaml_ng, serde_path_to_error
   relied_on_for: parsing attacker-influenced documents without executing them
   relied_on_properties: []
@@ -1691,10 +1693,11 @@ properties_claimed:
   conditions: any input bytes
   violation_symptoms:
   - panic, hang, wrong digest
-  statement: Parsing a hostile artifact does not panic, escape its limits, or silently change a digest.
-    Recursion is depth-limited to 4, and a parse failure keeps the member inline and emits NestedParseFailed.
-    Every limit is enforced against what decompression produces, not against the size the input declares,
-    and every offset read goes through checked_add
+  statement: Parsing a hostile artifact does not panic, escape its enforced limits — recursion, total
+    expansion and entry count, but not the two D23 records as dead — or silently change a digest. Recursion
+    is depth-limited to 4, and a parse failure keeps the member inline and emits NestedParseFailed. Every
+    limit is enforced against what decompression produces, not against the size the input declares, and
+    every
   provenance:
     kind: documented
     source: docs/05 §2.2; crates/trigon-archive/src/zip.rs — `checked_add`; crates/trigon-archive/src/gzip.rs:25
@@ -1969,9 +1972,9 @@ properties_claimed:
   conditions: —
   violation_symptoms:
   - a member path escaping an output directory
-  statement: No archive member is ever written to a filesystem path. Archives are parsed in memory; the
-    only writes are the operator-named output file and an over-8-MiB spill file whose name Trigon chooses.
-    Trigon never extracts an artifact to a directory, so a hostile member path has nowhere to land
+  statement: No archive member is ever written to a filesystem path. Archives are parsed in memory, and
+    the only write is the operator-named output file. Trigon never extracts an artifact to a directory,
+    so a hostile member path has nowhere to land
   provenance:
     kind: documented
     source: 'verified: no `File::create`, `fs::write` or `create_dir_all` anywhere in `trigon-archive`,
@@ -2090,12 +2093,27 @@ properties_disclaimed:
   tier: correctness-only
   false_friend: false
   statement: A small bound on what decompression produces. Expansion is bounded — that is P1 — but the
-    default ceiling is 4 GiB (total_expanded_bytes), with 256 MiB held inline before spilling. A hostile
-    artifact can still cost that much memory and time before it is refused, so the defence is a ceiling
-    rather than cheapness. A caller who needs a tighter bound sets one
+    default ceiling is 4 GiB (total_expanded_bytes), and the whole artifact plus its whole expansion are
+    held in memory to reach it. A hostile artifact can cost that much before it is refused, so the defence
+    is a ceiling rather than cheapness. A caller who needs a tighter bound sets one
   provenance:
     kind: documented
     source: crates/trigon-archive/src/limits.rs:20-30
+- id: D23
+  components:
+  - multiple
+  conditions: any input bytes
+  tier: correctness-only
+  false_friend: false
+  statement: 'Any bound at all from max_inline_bytes (8 MiB) or max_inline_total (256 MiB). Both are dead
+    configuration: nothing outside limits.rs reads either field. SourceMap::map — the mmap constructor,
+    and this crate''s only unsafe block — has no caller, and Body::Spilled is matched but never constructed.
+    So docs/05-archive-and-normalization.md §2.2''s claim that a 2 GB wheel stabilizes at near-zero heap
+    does'
+  provenance:
+    kind: documented
+    source: 'verified: `grep` for `max_inline_bytes`/`max_inline_total`/`SourceMap::map`/`Body::Spilled`
+      outside `limits.rs` and `model.rs` returns no enforcement site'
 - id: D2
   components:
   - definitions
