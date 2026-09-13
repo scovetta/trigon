@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use trigon_sandbox::{
-    BuildPlan, BuildRunner, EgressTier, Limits, OciPlan, Phase, PodmanRunner, RunOpts,
+    BuildEvent, BuildPlan, BuildRunner, EgressTier, Limits, OciPlan, Phase, PodmanRunner, RunOpts,
 };
 
 const ALPINE: &str = "docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e";
@@ -57,6 +57,7 @@ fn opts(run_id: &str) -> RunOpts {
         retain: false,
         mirror_port: 8129,
         guard: None,
+        on_event: None,
     }
 }
 
@@ -451,4 +452,46 @@ fn filetime_set(path: &Path, when: std::time::SystemTime) -> std::io::Result<()>
         .success()
         .then_some(())
         .ok_or_else(|| std::io::Error::other("touch failed"))
+}
+
+#[tokio::test]
+async fn a_watcher_is_told_which_phase_is_running_while_it_runs() {
+    // `events()` is a snapshot: the whole history once the build is over, and nothing at all while
+    // it is the thing you want to watch. A page that says "on left-pad for 40s" and cannot say
+    // which phase is a page that cannot tell a slow dependency install from a hung build.
+    let _store = store().await;
+    let r = PodmanRunner::new(workdir());
+    if !usable(&r).await {
+        return;
+    }
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = {
+        let seen = seen.clone();
+        std::sync::Arc::new(move |e: &BuildEvent| {
+            if let BuildEvent::PhaseStart(p) = e {
+                seen.lock().unwrap().push(*p);
+            }
+        })
+    };
+
+    let plan = BuildPlan::Oci(OciPlan {
+        base_image: ALPINE.into(),
+        system_deps: BTreeSet::new(),
+        source: "true".into(),
+        deps: "true".into(),
+        build: "mkdir -p dist && echo hi > dist/out.txt".into(),
+        output_path: "dist/out.txt".into(),
+        egress: EgressTier::DenyAll,
+        privileged: false,
+        extra_hosts: Default::default(),
+    });
+    let mut o = opts("phases");
+    o.on_event = Some(sink);
+    let h = r.start(&plan, &o).await.unwrap();
+    let outcome = h.wait().await.unwrap();
+    assert_eq!(outcome.exit_code, 0);
+
+    // Told as they happened, in order, and not only at the end.
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen, vec![Phase::Deps, Phase::Build], "{seen:?}");
 }

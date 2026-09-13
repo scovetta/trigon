@@ -16,6 +16,7 @@ mod runner;
 pub use dockerfile::{BuildContext, render as render_context};
 pub use error::SandboxError;
 pub use model::{
+    EventSink,
     BuildEvent, BuildOutcome, BuildPlan, EgressTier, IsolationClass, Limits, ObservabilityTier,
     OciPlan, Phase, RunOpts, RunnerCaps,
 };

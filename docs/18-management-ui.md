@@ -120,7 +120,12 @@ Each step is independently useful and none pays off only if the next three land.
    the sweep itself declared rather than a threshold the page invented. Driven by killing a sweep
    mid-target: the page says `stopped`, keeps every completed result, reports the in-flight target
    as having no outcome — *which is not the same as failing* — and stops refreshing itself.
-4. The phase signal, and with it the `stuck` state.
+4. ~~The phase signal, and with it the `stuck` state.~~ **Done.** `BuildEvent::PhaseStart` already
+   existed and was thrown away — `events()` returns a snapshot, which is the whole history once the
+   build is over and nothing at all while it is the thing you want to watch. `RunOpts` gained a
+   sink, and `run_one` marks the phases the sandbox cannot see: resolve, fetch, strategy, judge. The
+   phase carries its own clock, because a target twenty minutes in is healthy if nineteen of them
+   were `deps`.
 5. `failure.json` and `run.json` on every outcome — also the files you attach to a bug report.
 6. Store-backed panes, gated on `--store`: the digest chain, every applied stabilizer with its risk
    and provenance, the cap, the diff codes — and pin evidence, which [`16`](16-findings.md) §1 calls

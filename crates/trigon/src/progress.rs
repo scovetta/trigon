@@ -86,11 +86,14 @@ pub struct Current {
     /// Seconds since this target started, at the moment of the heartbeat. Carried rather than
     /// derived, so a reader with a skewed clock still reports what the sweep measured.
     pub elapsed_seconds: u64,
-    /// Which phase it is in. `None` until the phase signal lands — `docs/18` step 4 — and shown as
-    /// "not recorded" rather than as a blank, because a phase nobody wrote is not a phase of zero
-    /// length.
+    /// Which phase it is in. `None` before the first mark, and shown as "not recorded" rather than
+    /// as a blank: a phase nobody wrote is not a phase of zero length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Seconds in *this phase*, which is the number that says whether a build is hung. A target can
+    /// be twenty minutes in and perfectly healthy if nineteen of them were `deps`.
+    #[serde(default)]
+    pub phase_elapsed_seconds: u64,
 }
 
 /// The writer. Owns the heartbeat thread and stops it on drop.
@@ -131,6 +134,8 @@ impl Progress {
                         s.heartbeat = crate::now_rfc3339();
                         if let Some(c) = &mut s.current {
                             c.elapsed_seconds = c.elapsed_seconds.saturating_add(HEARTBEAT.as_secs());
+                            c.phase_elapsed_seconds =
+                                c.phase_elapsed_seconds.saturating_add(HEARTBEAT.as_secs());
                         }
                         let _ = write_atomic(&work.join("status.json"), &*s);
                     }
@@ -154,6 +159,27 @@ impl Progress {
         }
     }
 
+    /// Say which phase the target in flight is in. Written immediately.
+    ///
+    /// The phase is what turns "on left-pad for 40s" into "in deps for 40s", which is the
+    /// difference between a slow dependency install and a hung build — and it is the whole content
+    /// of `stuck`.
+    pub fn phase(&self, phase: &str) {
+        if let Ok(mut s) = self.shared.lock()
+            && let Some(c) = &mut s.current
+        {
+            if c.phase.as_deref() == Some(phase) {
+                return;
+            }
+            c.phase = Some(phase.to_string());
+            // The phase's own clock, so a page can say how long *this* phase has taken rather than
+            // how long the target has.
+            c.phase_elapsed_seconds = 0;
+            s.heartbeat = crate::now_rfc3339();
+            let _ = write_atomic(&self.work.join("status.json"), &*s);
+        }
+    }
+
     /// Say which target is in flight. Written immediately, not at the next heartbeat.
     pub fn target(&self, index: usize, purl: &str, done: usize) {
         if let Ok(mut s) = self.shared.lock() {
@@ -165,6 +191,7 @@ impl Progress {
                 started: crate::now_rfc3339(),
                 elapsed_seconds: 0,
                 phase: None,
+                phase_elapsed_seconds: 0,
             });
             s.heartbeat = crate::now_rfc3339();
             let _ = write_atomic(&self.work.join("status.json"), &*s);
@@ -314,6 +341,7 @@ mod tests {
                 started: "2026-01-01T00:00:00Z".into(),
                 elapsed_seconds,
                 phase: None,
+                phase_elapsed_seconds: elapsed_seconds,
             }),
         }
     }

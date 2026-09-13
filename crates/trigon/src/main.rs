@@ -718,6 +718,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             store,
             model,
             source_cache,
+            // One target on a terminal: the phases are already in front of whoever asked.
+            phases: None,
         }),
         #[cfg(feature = "build")]
         Cmd::Sweep {
@@ -810,6 +812,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             true,
             None,
             source.as_deref(),
+            None,
         ),
     }
 }
@@ -943,6 +946,8 @@ mod build {
         verbose: bool,
         guard: Option<&Path>,
         _source: Option<&Path>,
+        // Told as each phase starts, for anything watching this run from outside the process.
+        on_event: Option<trigon_sandbox::EventSink>,
     ) -> Result<()> {
         let (instructions, digest, _custom) =
             crate::render_strategy(file, import, timewarp_host, false)?;
@@ -1006,6 +1011,7 @@ mod build {
                 retain,
                 mirror_port: 8129,
                 guard: guard.map(Path::to_path_buf),
+                on_event,
             };
             let handle = runner.start(&plan, &opts).await?;
             let outcome = handle.wait().await?;
@@ -1715,6 +1721,11 @@ mod rebuild {
         pub model: Option<String>,
         /// Where the model rung keeps its source checkouts.
         pub source_cache: Option<PathBuf>,
+        /// Where to report which phase this target is in, when something is watching.
+        ///
+        /// `None` for a single `trigon rebuild`: nobody is watching one target, and the phases are
+        /// on the terminal already.
+        pub phases: Option<std::sync::Arc<crate::progress::Progress>>,
     }
 
     /// The ladder, in the order `docs/04-strategies.md` §6 sets out.
@@ -1805,6 +1816,15 @@ mod rebuild {
     }
 
     pub fn run_one(args: Args, verbose: bool) -> Result<Ran> {
+        // The phases before the sandbox. The build reports its own; these are ours, and without
+        // them a page watching a target sits on "not recorded" for the minute it takes to resolve
+        // a package and fetch an artifact — which is indistinguishable from a hang.
+        let mark = |phase: &str| {
+            if let Some(p) = &args.phases {
+                p.phase(phase);
+            }
+        };
+        mark("resolve");
         let target = TargetRef::from_str(&args.purl)?;
         // Before anything touches the network. A typo in `--model` should cost nothing and be
         // reported as a typo, not as a run that resolved a package and then died.
@@ -1840,6 +1860,7 @@ mod rebuild {
             println!("  artifact   {}", meta.id);
         }
 
+        mark("fetch");
         // 2. The published bytes, before anything else.
         //
         // The guard manifest is built from them, and the mirror has to be armed with it before a
@@ -1890,6 +1911,7 @@ mod rebuild {
             );
         }
 
+        mark("strategy");
         // 3. A strategy, from the first rung that has one.
         // Under `mirror-only` the mirror runs inside the build's network island rather than here:
         // a container on an internal network cannot reach the host, which is the whole point of
@@ -2043,6 +2065,15 @@ mod rebuild {
                 verbose,
                 enforced.then_some(guard_file.as_path()),
                 args.source.as_deref(),
+                // Phase marks from inside the sandbox, forwarded to whatever is watching. The
+                // build already recorded these and threw them away; only the sink was missing.
+                args.phases.clone().map(|p| -> trigon_sandbox::EventSink {
+                    std::sync::Arc::new(move |e: &trigon_sandbox::BuildEvent| {
+                        if let trigon_sandbox::BuildEvent::PhaseStart(phase) = e {
+                            p.phase(&phase.to_string());
+                        }
+                    })
+                }),
             );
 
             // A tripped guard ends the loop whatever else happened, and before another attempt can
@@ -2297,6 +2328,7 @@ mod rebuild {
             });
         }
 
+        mark("judge");
         // 5. The comparison the loop already made, with the same code path `verify` uses.
         if let Some(outcome) = compare_error {
             return Ok(Ran {
@@ -3035,7 +3067,7 @@ mod sweep {
         // What this sweep is, and where it is. Two files a second reader can watch from another
         // terminal — the sweep never talks to that reader, it only writes, which is what makes the
         // page survive this process dying. `docs/18-management-ui.md`.
-        let progress = crate::progress::Progress::start(
+        let progress = std::sync::Arc::new(crate::progress::Progress::start(
             &args.work,
             crate::progress::Sweep {
                 started: crate::now_rfc3339(),
@@ -3056,7 +3088,7 @@ mod sweep {
                 timeout_seconds: args.timeout,
                 finished: None,
             },
-        );
+        ));
 
         let mut rows: Vec<(String, Outcome, f64)> = Vec::new();
         for (i, purl) in purls.iter().enumerate() {
@@ -3104,6 +3136,7 @@ mod sweep {
                     store: args.store.clone(),
                     model: args.model.clone(),
                     source_cache: args.source_cache.clone(),
+                    phases: Some(progress.clone()),
                 },
                 false,
             )

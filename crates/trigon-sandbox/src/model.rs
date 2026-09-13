@@ -153,8 +153,18 @@ impl BuildPlan {
     }
 }
 
+/// Somewhere to send build events as they happen.
+///
+/// [`BuildHandle::events`] returns a *snapshot*: everything pushed so far, which is the whole
+/// history once the build is over and nothing at all while it is the thing you want to watch. A
+/// caller that needs to know which phase is running now needs to be told, so this is the telling.
+///
+/// A plain callback rather than a channel, because the one caller wants to write a file and a
+/// channel would oblige every other caller to drain it.
+pub type EventSink = std::sync::Arc<dyn Fn(&BuildEvent) + Send + Sync>;
+
 /// Per-run knobs that are not part of what is being built.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RunOpts {
     pub limits: Limits,
     /// Identifies the run in image tags and container names, so a triage session can find them.
@@ -168,6 +178,21 @@ pub struct RunOpts {
     /// Without it the island still enforces egress, but nothing notices if the build downloads the
     /// artifact it is meant to be reproducing from somewhere the mirror proxies.
     pub guard: Option<std::path::PathBuf>,
+    /// Called as each event is recorded. `None` is the ordinary case: nothing is watching.
+    pub on_event: Option<EventSink>,
+}
+
+impl std::fmt::Debug for RunOpts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunOpts")
+            .field("limits", &self.limits)
+            .field("run_id", &self.run_id)
+            .field("retain", &self.retain)
+            .field("mirror_port", &self.mirror_port)
+            .field("guard", &self.guard)
+            .field("on_event", &self.on_event.is_some())
+            .finish()
+    }
 }
 
 impl Default for RunOpts {
@@ -178,6 +203,7 @@ impl Default for RunOpts {
             retain: false,
             mirror_port: 8129,
             guard: None,
+            on_event: None,
         }
     }
 }

@@ -240,7 +240,7 @@ impl PodmanBuild {
                         // watching a fleet wants the phase boundaries, not the compiler output.
                         // At `-vv` it is the live progress that a silent 90-second build lacks.
                         tracing::debug!(target: "trigon::build", phase = ?phase, "{l}");
-                        push(&self.events, BuildEvent::Stdout(l.clone()));
+                        push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::Stdout(l.clone()));
                         append(log, &l);
                     }
                     None => break,
@@ -248,7 +248,7 @@ impl PodmanBuild {
                 line = err.next_line() => match line? {
                     Some(l) => {
                         tracing::debug!(target: "trigon::build", phase = ?phase, stream = "stderr", "{l}");
-                        push(&self.events, BuildEvent::Stderr(l.clone()));
+                        push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::Stderr(l.clone()));
                         append(log, &l);
                     }
                     None => break,
@@ -268,11 +268,11 @@ impl PodmanBuild {
         }
         // Drain whatever the other pipe still holds after the first one closed.
         while let Some(l) = err.next_line().await? {
-            push(&self.events, BuildEvent::Stderr(l.clone()));
+            push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::Stderr(l.clone()));
             append(log, &l);
         }
         while let Some(l) = out.next_line().await? {
-            push(&self.events, BuildEvent::Stdout(l.clone()));
+            push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::Stdout(l.clone()));
             append(log, &l);
         }
 
@@ -281,7 +281,14 @@ impl PodmanBuild {
     }
 }
 
-fn push(events: &Arc<Mutex<Vec<BuildEvent>>>, e: BuildEvent) {
+/// Record an event, and tell anything that asked to be told.
+///
+/// The sink is called before the lock is taken, so a slow watcher cannot block the build behind a
+/// mutex the build needs — and a panicking one takes only itself.
+fn push_to(sink: Option<&crate::model::EventSink>, events: &Arc<Mutex<Vec<BuildEvent>>>, e: BuildEvent) {
+    if let Some(f) = sink {
+        f(&e);
+    }
     if let Ok(mut v) = events.lock() {
         v.push(e);
     }
@@ -354,7 +361,7 @@ impl BuildHandle for PodmanBuild {
         dockerfile::render(&self.plan, defer_deps).write(&ctx)?;
 
         // Image build: setup, source and deps are layers here.
-        push(&self.events, BuildEvent::PhaseStart(Phase::Deps));
+        push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::PhaseStart(Phase::Deps));
         tracing::info!(
             run_id = %self.opts.run_id,
             image = %self.plan.base_image,
@@ -421,7 +428,8 @@ impl BuildHandle for PodmanBuild {
         }
         let code = self.run(&build_args, Phase::Deps, &mut log).await?;
         timings.push((Phase::Deps, Some(started.elapsed())));
-        push(
+        push_to(
+            self.opts.on_event.as_ref(),
             &self.events,
             BuildEvent::PhaseEnd {
                 phase: Phase::Deps,
@@ -437,7 +445,7 @@ impl BuildHandle for PodmanBuild {
             // difference between "this package does not build" and "our base image has no CA
             // bundle".
             let phase = failing_phase(&log).unwrap_or(Phase::Deps);
-            push(&self.events, BuildEvent::Exit(code));
+            push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::Exit(code));
             tracing::error!(
                 run_id = %self.opts.run_id,
                 phase = ?phase,
@@ -456,7 +464,7 @@ impl BuildHandle for PodmanBuild {
         let out_dir = self.workdir.join(&self.opts.run_id);
         std::fs::create_dir_all(&out_dir)?;
 
-        push(&self.events, BuildEvent::PhaseStart(Phase::Build));
+        push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::PhaseStart(Phase::Build));
         tracing::info!(run_id = %self.opts.run_id, "running the build");
         let started = Instant::now();
         let mut run_args = vec!["run".to_string(), "--rm".to_string()];
@@ -469,14 +477,15 @@ impl BuildHandle for PodmanBuild {
 
         let code = self.run(&run_args, Phase::Build, &mut log).await?;
         timings.push((Phase::Build, Some(started.elapsed())));
-        push(
+        push_to(
+            self.opts.on_event.as_ref(),
             &self.events,
             BuildEvent::PhaseEnd {
                 phase: Phase::Build,
                 duration: Some(started.elapsed()),
             },
         );
-        push(&self.events, BuildEvent::Exit(code));
+        push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::Exit(code));
 
         // A failed build can still have produced an artifact, and its logs are worth keeping either
         // way. Collect before deciding anything.

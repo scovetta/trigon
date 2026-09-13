@@ -461,9 +461,10 @@ fn liveness_detail(v: &View) -> String {
         L::Starting => note("no target has been attempted yet".into()),
         L::Running => match &v.status.as_ref().and_then(|s| s.current.clone()) {
             Some(c) => note(format!(
-                "on {} for {}, phase not recorded yet (docs/18 step 4)",
+                "on {} for {}{}",
                 esc(c.purl.strip_prefix("pkg:").unwrap_or(&c.purl)),
-                ago(c.elapsed_seconds).trim_end_matches(" ago")
+                ago(c.elapsed_seconds).trim_end_matches(" ago"),
+                phase_text(c),
             )),
             None => note("between targets".into()),
         },
@@ -475,10 +476,15 @@ fn liveness_detail(v: &View) -> String {
                 .and_then(|s| s.current.clone())
                 .map(|c| esc(c.purl.strip_prefix("pkg:").unwrap_or(&c.purl)))
                 .unwrap_or_default();
+            let phase = v
+                .status
+                .as_ref()
+                .and_then(|s| s.current.clone())
+                .map(|c| phase_text(&c))
+                .unwrap_or_default();
             note(format!(
-                "heartbeating, and on {on} for {}s — past the {ceiling}s ceiling this sweep set \
-                 for one target. Something is wrong by the sweep's own standard.",
-                seconds
+                "heartbeating, and on {on} for {seconds}s{phase} — past the {ceiling}s ceiling \
+                 this sweep set for one target. Something is wrong by the sweep's own standard."
             ))
         }
         L::Stopped => note(
@@ -494,6 +500,24 @@ fn liveness_detail(v: &View) -> String {
             Some(t) => note(format!("finished at {}", esc(&t))),
             None => note("finished".into()),
         },
+    }
+}
+
+/// Which phase, and how long it has been in it.
+///
+/// The phase's own clock rather than the target's: a target twenty minutes in is perfectly healthy
+/// if nineteen of them were `deps`, and the number that says otherwise is this one.
+///
+/// A phase nobody wrote is named as unrecorded rather than left blank — an absent phase is not a
+/// phase of zero length, and a blank reads as one.
+fn phase_text(c: &crate::progress::Current) -> String {
+    match &c.phase {
+        Some(p) => format!(
+            ", in <strong>{}</strong> for {}",
+            esc(p),
+            ago(c.phase_elapsed_seconds).trim_end_matches(" ago")
+        ),
+        None => ", phase not yet recorded for this target".into(),
     }
 }
 
@@ -1105,6 +1129,29 @@ mod tests {
         assert!(t.starts_with("… earlier output clipped"));
         // And a short log is untouched.
         assert_eq!(tail("short", 100), "short");
+    }
+
+    #[test]
+    fn a_phase_nobody_wrote_is_named_rather_than_left_blank() {
+        // An absent phase is not a phase of zero length, and a blank reads as one. It also matters
+        // which clock is shown: a target twenty minutes in is healthy if nineteen were `deps`.
+        let mut c = crate::progress::Current {
+            index: 0,
+            purl: "pkg:npm/a@1".into(),
+            started: "2026-01-01T00:00:00Z".into(),
+            elapsed_seconds: 1200,
+            phase: None,
+            phase_elapsed_seconds: 0,
+        };
+        assert!(phase_text(&c).contains("not yet recorded"), "{}", phase_text(&c));
+
+        c.phase = Some("deps".into());
+        c.phase_elapsed_seconds = 1140;
+        let t = phase_text(&c);
+        assert!(t.contains("deps"), "{t}");
+        // The phase's own clock, not the target's.
+        assert!(t.contains("19m"), "{t}");
+        assert!(!t.contains("20m"), "{t}");
     }
 
     #[test]
