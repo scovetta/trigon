@@ -10,6 +10,10 @@ trust us.
 Registries distribute artifacts. People audit source. Almost nothing checks that the two correspond,
 and that gap is where build-time supply-chain attacks live.
 
+**Using it?** [`docs/using-trigon.md`](docs/using-trigon.md) is the task-oriented guide: install,
+compare two artifacts, rebuild a package, read a verdict, and — the section worth reading first —
+what a verdict does *not* tell you.
+
 ## Status
 
 M0, M1 and M2 are complete, and M3 has begun. The design lives in
@@ -338,7 +342,7 @@ scripts/                  the cross-machine verification check
 ## Build and check
 
 ```
-cargo test --workspace                      # 400 tests
+cargo test --workspace                      # 653 tests
 cargo run -p xtask -- policy                # the dependency policy
 cargo run -p xtask -- differential          # against the reference implementation
 scripts/cross-machine-verify.sh             # the claim a third party can check

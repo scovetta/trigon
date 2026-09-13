@@ -26,6 +26,7 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
 
 | Doc | Read it for |
 |---|---|
+| [`using-trigon.md`](using-trigon.md) | **Start here to use it.** Install, verify, rebuild, read a verdict, and what a verdict does not say |
 | [`00-overview.md`](00-overview.md) | The problem, what the prior art got right and wrong, the thesis, goals and non-goals, glossary |
 | [`01-architecture.md`](01-architecture.md) | Pipeline, crate graph, dependency policy and its CI enforcement, the trait catalogue |
 | [`02-domain-model.md`](02-domain-model.md) | The types: `Target`, `Verdict`, `Match`, `Comparison`, `Run`, `Evidence` |
