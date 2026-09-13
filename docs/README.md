@@ -45,6 +45,8 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
 | [`16-findings.md`](16-findings.md) | **What building it changed.** Corrections to these documents, the measured rates, and what is still open |
 | [`17-backlog.md`](17-backlog.md) | Agreed work not yet done, each with what "done" means |
 | [`18-management-ui.md`](18-management-ui.md) | The plan for `trigon watch`: monitoring a sweep from outside the process running it |
+| [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) | Where a verdict is published, and how an end user looks one up — design only |
+| [`threat-model.md`](threat-model.md) | The contract with a consumer of a verdict: what is assumed, guaranteed, disclaimed, and out of scope |
 | [`adr/`](adr/) | Short records for the load-bearing decisions |
 
 ## Suggested reading order

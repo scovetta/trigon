@@ -163,3 +163,20 @@ stabilizer profile each.
 
 **Done when:** each has a `Registry`, a stabilizer profile, a labelled smoke corpus, and a published
 rate — and the engine diff for the second and third is empty.
+
+## B10. Publish verdicts somewhere a consumer can find them, and give them a command to ask
+
+[`19`](19-distribution-and-lookup.md) is the design. Two things have to be decided before anything is
+signed for publication, because both are baked into a signed statement and expensive to retrofit:
+
+- **`Subject.digest` must carry every digest the ecosystem publishes**, not sha256 alone. npm gives
+  sha1 and usually sha512 and never sha256, so a consumer holding an npm lockfile cannot look up our
+  records without downloading each tarball. Fixing it after the corpus is signed means re-signing it.
+- **Divergences go to the record store and only their digests to the transparency log.** An
+  append-only accusation cannot be retracted, and the false-mismatch rate is a tracked, non-zero
+  number with a publication kill-switch ([`09`](09-attestations.md) §5). The log keeps us honest
+  about having claimed something; the store lets us supersede it.
+
+**Done when:** the subject carries the ecosystem's own digests, a record schema exists with the six
+fields [`19`](19-distribution-and-lookup.md) §4 requires, and a lookup client that is not Trigon can
+answer a lockfile from a downloadable index without a network call per dependency.
