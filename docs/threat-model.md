@@ -336,7 +336,7 @@ a key file, a `--model` spec, a definitions ref — are **trusted** and not tabl
 
 | Entry point | Operand | Attacker-controllable | Control kind | Caller must enforce | Provenance |
 | --- | --- | --- | --- | --- | --- |
-| `archive::parse` | artifact bytes | **yes** | data, size, object-topology, serialized-state | nothing, **except** the two unfixed limits in D1 | *(documented, docs/05-archive-and-normalization.md §2.2)* |
+| `archive::parse` | artifact bytes | **yes** | data, size, object-topology, serialized-state | nothing — safe parsing is P1; only the ceiling's size is D1 | *(documented, docs/05-archive-and-normalization.md §2.2)* |
 | `archive::serialize` | the parsed archive | **yes** (derived) | data, size, object-topology | nothing — P2 | *(documented, docs/05 §3)* |
 | `compare::summarize` | artifact bytes | **yes** | data, size | nothing | *(documented, docs/08-execution.md §6)* |
 | `compare::compare` | two `Summary` values | no — produced by this process | serialized-state | both must come from one run; the set-digest check enforces it | *(documented, crates/trigon-compare/src/lib.rs:159)* |
@@ -384,7 +384,7 @@ or §1.12 disclaimer that owns it; no claimed row exists only here.
 | archive-parsing | serialization-reconstruction | claimed | `parse(write(a)) == a`, proptested | P2 |
 | archive-parsing | reference-lifecycle | claimed | copy-on-write over an mmap; a body is never aliased after mutation | P2 |
 | archive-parsing | concurrency-reentrancy | disclaimed | no thread-safety beyond `Send`/`Sync` is stated | D8 |
-| archive-parsing | resource-complexity | disclaimed | inline and total-expansion caps exist; the inflate is not bounded by what it *produces* | D1 |
+| archive-parsing | resource-complexity | claimed | every cap is enforced against produced bytes, not declared sizes; the ceiling's *size* is what D1 disclaims | P1 |
 | archive-parsing | x-filesystem-materialization | claimed | no archive member is ever written to a filesystem path | P22 |
 | stabilization | numeric-domain | claimed | stabilizers take no sizes or offsets from the input | P3 |
 | stabilization | failure-atomicity | claimed | stabilizers return no `Result`; there is no half-stabilized state | P3 |
@@ -588,7 +588,7 @@ attacker-controllable, is `VALID`.
 
 | ID | Property | Conditions | Violation symptom | Tier |
 | --- | --- | --- | --- | --- |
-| **P1** | Parsing a hostile artifact does not panic, escape its depth or inline limits, or silently change a digest. Recursion is depth-limited to 4; a parse failure keeps the member inline and emits `NestedParseFailed`. **Except the two limits D1 records as unfixed** — an unchecked `u64` add on a 42-byte zip, and an inflate not bounded by its output. Those two are known and disclaimed; everything else here is claimed. | any input bytes | panic, hang, wrong digest | **security-critical** *(documented, docs/05 §2.2)* |
+| **P1** | Parsing a hostile artifact does not panic, escape its limits, or silently change a digest. Recursion is depth-limited to 4, and a parse failure keeps the member inline and emits `NestedParseFailed`. **Every limit is enforced against what decompression produces, not against the size the input declares**, and every offset read goes through `checked_add`. | any input bytes | panic, hang, wrong digest | **security-critical** *(documented, docs/05 §2.2; crates/trigon-archive/src/zip.rs — `checked_add`; crates/trigon-archive/src/gzip.rs:25 — the output budget; tests `an_offset_that_wraps_is_a_short_read_and_not_a_panic`, `a_gzip_bomb_is_refused_at_the_limit_rather_than_inflated`, `a_zip_member_that_lies_about_its_size_is_refused`)* |
 | **P2** | The stabilized form is a byte-stable function of the input: `parse(write(a)) == a`, identical across runs and threads *of a single process*. | same stabilizer set | two runs disagree on a digest | **security-critical** *(documented, docs/13-roadmap.md M0)* |
 | **P3** | Stabilizers are total and idempotent: `stab(stab(x)) == stab(x)`, no `Result`, no half-stabilized state, and none allocates more than one member at a time. | — | a digest that depends on how many times a pass ran | **security-critical** *(documented, docs/05 §4)* |
 | **P4** | `compare` refuses to compare two sides stabilized under different sets, by set digest, and classifies the refusal `Fault::Bug`. | — | a verdict derived across incomparable sets | **security-critical** *(documented, docs/09-attestations.md §7)* |
@@ -663,7 +663,7 @@ project has made.
 
 | ID | Not provided | Conditions | Tier | Provenance |
 | --- | --- | --- | --- | --- |
-| **D1** | A bound on what decompression *produces*. `total_expanded_bytes` is checked against the size the input declares, not what it emits, so a 200 KB member can expand to 200 MB in our process; and an offset add in the zip reader is unchecked. Known and unfixed. | any input bytes | **security-critical** | *(documented, docs/16-findings.md §3.12; docs/17-backlog.md B5)* |
+| **D1** | A *small* bound on what decompression produces. Expansion is bounded — that is P1 — but the default ceiling is **4 GiB** (`total_expanded_bytes`), with 256 MiB held inline before spilling. A hostile artifact can still cost that much memory and time before it is refused, so the defence is a ceiling rather than cheapness. A caller who needs a tighter bound sets one. | any input bytes | correctness-only | *(documented, crates/trigon-archive/src/limits.rs:20-30)* |
 | **D2** | Sanitization of anything in a `runs:` step, from a strategy or a definitions entry. | — | **security-critical** | *(documented, docs/12-security.md §5)* |
 | **D3** | Prevention of code execution inside the build container. | — | **security-critical** | *(documented, docs/08-execution.md)* |
 | **D4** | Isolation between two Trigon processes sharing a podman image store. | — | correctness-only | *(documented, docs/17-backlog.md B6)* |
@@ -688,8 +688,9 @@ project has made.
 
 ### Well-known attack classes left to the caller
 
-- **Archive bombs.** We decompress attacker bytes by construction, and D1 says the output bound is
-  not in place. Run the parser where an OOM is survivable *(documented, docs/16-findings.md §3.12)*.
+- **Archive bombs.** We decompress attacker bytes by construction. The output bound *is* in place
+  (P1), so the residual risk is the ceiling's size rather than its absence: 4 GiB by default
+  *(documented, crates/trigon-archive/src/limits.rs:20-30)*.
 - **Container escape and host compromise.** Every enforced-tier run executes the package's own build
   inside podman on your machine. Isolation is podman's guarantee, not ours *(documented, §1.9;
   docs/12-security.md §6)*.
@@ -734,7 +735,8 @@ docs/09-attestations.md §2.1)*.
     provider with a real system message where the choice exists.
 12. **Keep `trigon watch` on loopback** unless you have thought about it. Build logs are not
     redacted (D14).
-13. **Run the parser where an OOM is survivable** until D1 is closed.
+13. **Set `total_expanded_bytes` to something your host can absorb.** The default ceiling is 4 GiB
+    and a hostile artifact may reach it before being refused.
 14. **Treat the rebuilt artifact as untrusted.** It is the package's own build output; do not install
     or execute it because it reproduced.
 15. **Before a real sweep, talk to the registries:** a User-Agent with a contact URL, `Retry-After`

@@ -437,11 +437,26 @@ Two more worth naming because they are the project's own recurring shapes:
   stamped `attestable: true` in the store, and the CLI told the operator "the egress boundary held"
   for a run three of whose phases were outside it.
 
-The parser findings are their own cluster and are not yet fixed: a 42-byte zip panics the archive
-parser through an unchecked `u64` addition, and neither `gzip::read` nor `zip::read_member` bounds
-the inflate — `total_expanded_bytes` is checked against a size the input declares rather than
-against what it produces, so a 200 KB member expands to 200 MB inside our own process. Those are
-`docs/17-backlog.md` B5's remaining work.
+The parser findings were their own cluster, and they were closed the next day — see the commit
+`bound what an archive can expand to, and stop an offset wrapping`. Every offset read now goes
+through `checked_add`, and every expansion limit is enforced against what decompression *produces*
+rather than against a size the input declares. Three tests hold the line:
+`an_offset_that_wraps_is_a_short_read_and_not_a_panic`,
+`a_gzip_bomb_is_refused_at_the_limit_rather_than_inflated`, and
+`a_zip_member_that_lies_about_its_size_is_refused`.
+
+**This paragraph said "not yet fixed" for a day after they were fixed, and that is the finding worth
+keeping.** `docs/threat-model.md` was written from this document and inherited the stale claim as a
+*security-critical disclaimer* — D1, saying Trigon does not bound what decompression produces, when
+it does. An under-claim is safer than an over-claim, but not harmless: a disclaimer routes a matching
+report to `BY-DESIGN: property-disclaimed` and closes it, so a real unbounded-inflate report would
+have been dismissed by citing a hole that no longer existed.
+
+The backtest did not catch it, and could not have. Two of its thirty-eight corpus items were drawn
+from *this paragraph*, so they asserted exactly what the model asserted and agreed with it. **A
+backtest corpus derived from the documents under test can only confirm their errors.** The corpus
+needs at least one leg that comes from the code — a claim checked by running something — and this
+one did not have it.
 
 Thirty findings were refuted by the verification pass, which is the part worth keeping: the same
 structure that surfaced the guard bug also threw away half of what was claimed.

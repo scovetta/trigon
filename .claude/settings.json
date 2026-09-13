@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo test *)",
+      "Bash(cargo build *)",
+      "Bash(cargo check *)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo tree *)",
+      "Bash(cargo fmt --check *)",
+      "Bash(npm run check)",
+      "Bash(podman images *)",
+      "Bash(podman ps *)",
+      "Bash(podman inspect *)"
+    ]
+  }
+}

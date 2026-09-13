@@ -11,7 +11,7 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:929c72ab685d4cad15659d44a215986ee8709a599c6e8aab1434c22dc06c70b1
+prose_version: docs/threat-model.md@sha256:43de0e6b40ff7eb44ac7dc4c0c87f5f1e40f027e6c3db934ab04b6f681e51d3f
 model_status: unratified-draft
 triage_policy: strict
 confidence:
@@ -225,7 +225,7 @@ entry_points:
     - size
     - object-topology
     - serialized-state
-    caller_must_enforce: nothing, except the two unfixed limits in D1
+    caller_must_enforce: nothing — safe parsing is P1; only the ceiling's size is D1
     provenance:
       kind: documented
       source: docs/05-archive-and-normalization.md §2.2
@@ -611,9 +611,10 @@ contract_dimensions:
     source: docs/threat-model.md §1.7
 - component: archive-parsing
   dimension: resource-complexity
-  status: disclaimed
-  conditions: inline and total-expansion caps exist; the inflate is not bounded by what it produces
-  property_id: D1
+  status: claimed
+  conditions: every cap is enforced against produced bytes, not declared sizes; the ceiling's size is
+    what D1 disclaims
+  property_id: P1
   provenance:
     kind: documented
     source: docs/threat-model.md §1.7
@@ -1690,14 +1691,15 @@ properties_claimed:
   conditions: any input bytes
   violation_symptoms:
   - panic, hang, wrong digest
-  statement: Parsing a hostile artifact does not panic, escape its depth or inline limits, or silently
-    change a digest. Recursion is depth-limited to 4; a parse failure keeps the member inline and emits
-    NestedParseFailed. Except the two limits D1 records as unfixed — an unchecked u64 add on a 42-byte
-    zip, and an inflate not bounded by its output. Those two are known and disclaimed; everything else
-    here is clai
+  statement: Parsing a hostile artifact does not panic, escape its limits, or silently change a digest.
+    Recursion is depth-limited to 4, and a parse failure keeps the member inline and emits NestedParseFailed.
+    Every limit is enforced against what decompression produces, not against the size the input declares,
+    and every offset read goes through checked_add
   provenance:
     kind: documented
-    source: docs/05 §2.2
+    source: docs/05 §2.2; crates/trigon-archive/src/zip.rs — `checked_add`; crates/trigon-archive/src/gzip.rs:25
+      — the output budget; tests `an_offset_that_wraps_is_a_short_read_and_not_a_panic`, `a_gzip_bomb_is_refused_at_the_limit_rather_than_inflated`,
+      `a_zip_member_that_lies_about_its_size_is_refused`
 - id: P2
   kind: correctness
   components:
@@ -2083,16 +2085,17 @@ properties_claimed:
 properties_disclaimed:
 - id: D1
   components:
-  - archive-parsing
+  - multiple
   conditions: any input bytes
-  tier: security-critical
+  tier: correctness-only
   false_friend: false
-  statement: A bound on what decompression produces. total_expanded_bytes is checked against the size
-    the input declares, not what it emits, so a 200 KB member can expand to 200 MB in our process; and
-    an offset add in the zip reader is unchecked. Known and unfixed
+  statement: A small bound on what decompression produces. Expansion is bounded — that is P1 — but the
+    default ceiling is 4 GiB (total_expanded_bytes), with 256 MiB held inline before spilling. A hostile
+    artifact can still cost that much memory and time before it is refused, so the defence is a ceiling
+    rather than cheapness. A caller who needs a tighter bound sets one
   provenance:
     kind: documented
-    source: docs/16-findings.md §3.12; docs/17-backlog.md B5
+    source: crates/trigon-archive/src/limits.rs:20-30
 - id: D2
   components:
   - definitions
@@ -2564,9 +2567,9 @@ downstream_responsibilities:
     source: docs/threat-model.md §1.13
 - id: dr-13
   component: multiple
-  statement: Run the parser where an OOM is survivable until D1 is closed
-  enforces:
-  - D1
+  statement: Set total_expanded_bytes to something your host can absorb. The default ceiling is 4 GiB
+    and a hostile artifact may reach it before being refused
+  enforces: []
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13

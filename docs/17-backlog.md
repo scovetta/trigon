@@ -97,10 +97,17 @@ and requires `NOTOOLS` back — and the MSRV bump is confined to that feature.
 
 ## B5. A bug sweep
 
-Not a review of the last change: a sweep of the whole thing, looking for the classes this project
-keeps producing — configuration that looks applied and is not, an error that reads as the package's
-fault when it is ours, a silent zero where there is no data, a cache key that is not a function of
-everything it depends on.
+**The parser half is closed.** The two defects §3.12 recorded — an unchecked `u64` add and an
+inflate bounded by declared rather than produced size — were fixed in `bound what an archive can
+expand to, and stop an offset wrapping`, with three tests. §3.12 went on saying they were open for a
+day afterwards, and `docs/threat-model.md` inherited the stale claim as a security-critical
+disclaimer; both are corrected, and the lesson is written up in §3.12.
+
+What remains is the sweep itself. Not a review of the last change: a sweep of the whole thing,
+looking for the classes this project keeps producing — configuration that looks applied and is not,
+an error that reads as the package's fault when it is ours, a silent zero where there is no data, a
+cache key that is not a function of everything it depends on, **and a document that describes a
+defect it no longer has**.
 
 **Done when:** every confirmed bug is fixed or filed with a failing test, and the sweep's negative
 result is recorded so the next one starts from here rather than from nothing.
