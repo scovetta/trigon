@@ -59,6 +59,44 @@ exercise what they claim to.
 **Done when:** a coverage number exists per crate, the judgement half is at a stated bar, and every
 gap that is deliberate is named as deliberate.
 
+## B9. Talk to Copilot through its SDK rather than its CLI
+
+We spawn `copilot -p … --output-format json` and parse the JSONL. That works and is verified against
+the real CLI, and it has a real cost I understated when I chose it: **the event shape is not an API.**
+`assistant.message`, and especially
+`session.usage_checkpoint.promptCacheBreakState[0].models[<model>].prompt_tokens`, are internals
+that can move without notice, and when they do this provider returns an empty answer or zero tokens
+rather than an error.
+
+The reason I gave — the crate needs Rust 1.94 against our 1.85 — is weaker than I made it sound.
+`rust-version` is per package, the dependency would be optional, and the verifier
+(`--no-default-features`) does not link `trigon-ai` at all, so the claim that matters keeps its
+floor. `default-features = false` also drops the embedded CLI binary, which was the other objection.
+
+The reason that is real: **the control that makes this provider safe is that the model never sees a
+tool**, and the SDK does not expose the flag that does it. `SessionConfig::with_tools` registers
+*local* tools and the docs say the CLI may still advertise its own; `deny_all_permissions` denies
+requests, which is a weaker posture — and in `-p` mode the CLI was measured running `bash` without
+raising a permission request at all.
+
+What changes the answer: `ClientOptions` has `prefix_args` and `extra_args`, so
+`--available-tools=<inert>` can be passed through the SDK. That gets the typed protocol *and* the
+filter, which is the combination worth having.
+
+**Done when:** the provider uses the SDK behind an optional `copilot` feature, the tool filter is
+passed through and **proved** by the existing live test — the one that asks it to run a shell command
+and requires `NOTOOLS` back — and the MSRV bump is confined to that feature.
+
+## B5. A bug sweep
+
+Not a review of the last change: a sweep of the whole thing, looking for the classes this project
+keeps producing — configuration that looks applied and is not, an error that reads as the package's
+fault when it is ours, a silent zero where there is no data, a cache key that is not a function of
+everything it depends on.
+
+**Done when:** every confirmed bug is fixed or filed with a failing test, and the sweep's negative
+result is recorded so the next one starts from here rather than from nothing.
+
 ## B6. Two Trigon runs on one machine can disturb each other's container store
 
 Found by an intermittent sandbox test that passed in isolation. Podman's local image store is
@@ -106,12 +144,31 @@ the runner's own `attestable`, which is `false`.
 **Done when:** no phase of a `mirror-only` run reaches anything but the mirror, demonstrated by a
 test that fails if one does.
 
-## B5. A bug sweep
+## B8. The three ecosystems after npm and PyPI
 
-Not a review of the last change: a sweep of the whole thing, looking for the classes this project
-keeps producing — configuration that looks applied and is not, an error that reads as the package's
-fault when it is ours, a silent zero where there is no data, a cache key that is not a function of
-everything it depends on.
+`nuget.org`, `crates.io` and `rubygems.org`. [`03`](03-ecosystems.md) has a chapter on each and
+[`13`](13-roadmap.md) puts them in M5; what makes them worth naming here is that they are the test of
+the extension seam. Adding one should be a `Registry` implementation plus some YAML tools, with no
+change to the engine — and if any of them needs a special case in the ladder, the seam is wrong and
+that is the finding.
 
-**Done when:** every confirmed bug is fixed or filed with a failing test, and the sweep's negative
-result is recorded so the next one starts from here rather than from nothing.
+Each is a different kind of interesting, and they are not equally hard:
+
+- **crates.io** is highly reproducible by design and the game is toolchain-window inference: Cargo
+  rewrites `Cargo.toml` at package time and the rules changed across releases, which pins the
+  toolchain far tighter than a release date. It also needs a registry moment that is a **git commit
+  in the index**, not a timestamp — `RegistryMoment` is already an enum for exactly this and nothing
+  has exercised the other arm.
+- **RubyGems** went from 0% to 99.9% reproducible since 3.6.7 and **nobody verifies it
+  independently**. Cheapest large win and the clearest differentiation. Needs nested archives
+  (`data.tar.gz`, `metadata.gz`, `checksums.yaml.gz`), which the archive model supports and no
+  corpus has yet driven.
+- **NuGet** has trusted publishing and essentially no reproducibility infrastructure, so we would be
+  partly inventing the ecosystem's story. Sequenced last, and honestly caveated when published.
+
+Two things they share that the current code does not have: a version algebra each (`semver` is
+Cargo-flavoured; RubyGems and NuGet have no usable Rust crate, so both are hand-rolled), and a
+stabilizer profile each.
+
+**Done when:** each has a `Registry`, a stabilizer profile, a labelled smoke corpus, and a published
+rate — and the engine diff for the second and third is empty.

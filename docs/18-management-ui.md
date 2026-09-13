@@ -95,8 +95,7 @@ Each of these is small, and each is named with the view that is impossible witho
 | ~~`<work>/sweep.json`~~ **done** — the targets file and the sha256 of its bytes, image, egress, timewarp, model, version, pid, and the per-target timeout | View 1 has no denominator, and two sweeps cannot be told to be of the same corpus |
 | ~~`<work>/status.json`~~ **done** — atomic, a 10-second heartbeat, and an immediate write when a target starts | View 1 is impossible; liveness falls back to inferring from file appearance, which already misreads a repair loop as going backwards |
 | A phase signal into `status.json` — `BuildEvent::PhaseStart/PhaseEnd` are already emitted and thrown away | No `stuck` state, which is the one that pages a human |
-| `<work>/NNN/failure.json` — the `FailureSignature` at classification time | Clusters are re-derived under whatever the rule table says today rather than what it said then |
-| `<work>/NNN/run.json` on **every** terminal outcome, not only past a comparison | View 6 is four "not measured" lines; the void table cannot split by reason |
+| ~~`<work>/NNN/run.json` on **every** terminal outcome~~ **done** — carrying the failure signature as classified at the time, so it cannot drift from a moved rule table | View 6 was four "not measured" lines |
 | Throttle counters in `trigon-registry` | View 8 — and [`11`](11-interfaces.md) §4 says backoff state ships before the first real sweep, because upstream reputation breaks first |
 | Three trailing columns on `results.tsv` for tokens | Model spend is invisible; written as empty strings where no model ran, so "no model" never renders as zero |
 
@@ -126,12 +125,20 @@ Each step is independently useful and none pays off only if the next three land.
    sink, and `run_one` marks the phases the sandbox cannot see: resolve, fetch, strategy, judge. The
    phase carries its own clock, because a target twenty minutes in is healthy if nineteen of them
    were `deps`.
-5. `failure.json` and `run.json` on every outcome — also the files you attach to a bug report.
-6. Store-backed panes, gated on `--store`: the digest chain, every applied stabilizer with its risk
-   and provenance, the cap, the diff codes — and pin evidence, which [`16`](16-findings.md) §1 calls
-   the most valuable unbuilt thing on the list.
-7. Cross-sweep: the impact preview over `trigon_ai::flips` and `score`, which needs no
-   instrumentation at all. Refuses to compare two sweeps whose targets-file digests differ.
+5. ~~`failure.json` and `run.json` on every outcome.~~ **Done**, as *one* file: two of them invites
+   the question of which is authoritative when they disagree, and they would — the signature is
+   classified where the log is in hand and everything else is known at the end. `run_one` became a
+   thin wrapper so "on every terminal outcome" is a property of the control flow rather than a line
+   to remember at each of eight returns. Timings come back through the event sink that step 4 added,
+   `None` still meaning no data.
+6. ~~Store-backed panes, gated on `--store`.~~ **Done.** The digest chain, the environment, the
+   guard trips and whether the pin bound — and a missing record says *why* (the store keeps only
+   runs that reached a comparison) rather than rendering an empty pane. The join is O(runs) and the
+   page prints what it cost, so the moment it stops being fine is visible rather than felt.
+7. ~~Cross-sweep: the impact preview.~~ **Done.** `trigon watch --baseline <other work dir>` names
+   the flips in both directions, keeps "stopped producing evidence" separate from "regressed"
+   because an infrastructure fault is ours, and refuses when the two targets-file digests differ —
+   a comparison across different lists is a number about the lists.
 
 ## 6. What this is not, and the one risk that matters
 

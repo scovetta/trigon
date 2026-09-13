@@ -218,6 +218,47 @@ struct Sweep {
     work: PathBuf,
     targets: Option<PathBuf>,
     bind: String,
+    /// A store to enrich a compared run from, where the sweep was given one.
+    ///
+    /// Only ever an enrichment. The store records a run **only past a comparison** — `record_run`
+    /// sits after the early return that unwraps it — so a page rooted here would report a perfect
+    /// rate on a sweep where nothing built. It hangs off a row; it is never the root.
+    store: Option<PathBuf>,
+    /// Another sweep of the same corpus, to say what changed.
+    baseline: Option<PathBuf>,
+}
+
+/// One run record, and how long it took to find it.
+///
+/// The join is O(runs): `list_runs` returns ids without opening records, so finding the one for a
+/// target means opening them. Fine for twenty and wrong for a fleet, which is what M4's Postgres
+/// exists to replace — so the page prints the cost, and the moment it stops being fine is visible
+/// rather than felt.
+struct Found {
+    record: trigon_store::RunRecord,
+    read: usize,
+    millis: u128,
+}
+
+async fn find_record(store: &Path, purl: &str) -> Option<Found> {
+    let started = std::time::Instant::now();
+    let store = trigon_store::Store::local(store).ok()?;
+    let ids = store.list_runs().await.ok()?;
+    for (n, id) in ids.into_iter().enumerate() {
+        let read = n + 1;
+        // `get_run` re-hashes the blob it reads, which is the check the store exists to provide;
+        // reading `blobs/` directly would skip it.
+        if let Ok(r) = store.get_run(&id).await
+            && r.target == purl
+        {
+            return Some(Found {
+                record: r,
+                read,
+                millis: started.elapsed().as_millis(),
+            });
+        }
+    }
+    None
 }
 
 struct View {
@@ -612,6 +653,127 @@ fn clusters_panel(rows: &[Row]) -> String {
     body
 }
 
+/// What changed against an earlier sweep of the same corpus.
+///
+/// The question a change has to answer, and the one an aggregate rate cannot: not "did the rate go
+/// up" but "which targets flipped, in which direction". A change that fixes one package and breaks
+/// two leaves the rate untouched.
+///
+/// Refuses to compare two sweeps of different corpora. Both record the sha256 of their targets
+/// file, so "these are the same twenty packages" is checkable rather than assumed — and a
+/// comparison across different lists is a number about the lists.
+fn baseline_panel(sweep: &Sweep, v: &View) -> String {
+    let Some(path) = &sweep.baseline else {
+        return String::new();
+    };
+    let other = Sweep {
+        work: path.clone(),
+        targets: None,
+        bind: String::new(),
+        store: None,
+        baseline: None,
+    };
+    let b = other.read();
+
+    let mut out = format!(
+        "<h2>Against {}</h2>",
+        esc(&path.display().to_string())
+    );
+    match (
+        v.sweep.as_ref().and_then(|s| s.targets_sha256.clone()),
+        b.sweep.as_ref().and_then(|s| s.targets_sha256.clone()),
+    ) {
+        (Some(a), Some(c)) if a != c => {
+            return out
+                + "<p class=\"note\">these are sweeps of different corpora — the targets files \
+                   hash differently, so a comparison between them would be a number about the \
+                   lists rather than about the change</p>";
+        }
+        (Some(_), Some(_)) => {}
+        // One of them predates `sweep.json`. Comparable, and said so rather than silently assumed.
+        _ => out.push_str(
+            "<p class=\"note\">one of these sweeps recorded no corpus digest, so that they are \
+             the same corpus is an assumption rather than a check</p>",
+        ),
+    }
+
+    let obs = |rows: &[Row]| -> Vec<trigon_ai::Observation> {
+        rows.iter()
+            .map(|r| trigon_ai::Observation {
+                purl: r.purl.clone(),
+                outcome: r.label.parse::<trigon_core::Match>().ok().map(|m| m.to_string()),
+                model_calls: r.model_calls.unwrap_or(0),
+                is_evidence: Family::of(&r.label).is_evidence(),
+            })
+            .collect()
+    };
+    let f = trigon_ai::flips(&obs(&b.rows), &obs(&v.rows));
+
+    let sections: [(&str, &[String]); 5] = [
+        ("now reproduces", &f.fixed),
+        ("NO LONGER REPRODUCES", &f.broken),
+        // Ours, not the change's. Filing it as a regression would make every flaky sweep look like
+        // a bad change.
+        ("stopped producing evidence — ours, not the change's", &f.lost_evidence),
+        ("now produces evidence", &f.gained_evidence),
+        ("in this sweep and not the baseline", &f.added),
+    ];
+    let mut said = false;
+    for (heading, list) in sections {
+        if list.is_empty() {
+            continue;
+        }
+        said = true;
+        out.push_str(&format!("<p><strong>{} {heading}</strong></p><ul>", list.len()));
+        for p in list {
+            out.push_str(&format!("<li><code>{}</code></li>", esc(p)));
+        }
+        out.push_str("</ul>");
+    }
+    if !f.changed.is_empty() {
+        said = true;
+        out.push_str(&format!(
+            "<p><strong>{} reproduce differently</strong></p><ul>",
+            f.changed.len()
+        ));
+        for c in &f.changed {
+            out.push_str(&format!(
+                "<li><code>{}</code> {} → {}</li>",
+                esc(&c.purl),
+                esc(&c.from),
+                esc(&c.to)
+            ));
+        }
+        out.push_str("</ul>");
+    }
+    if !f.dropped.is_empty() {
+        said = true;
+        // A corpus that quietly shrank is how a rate improves without anything improving.
+        out.push_str(&format!(
+            "<p><strong>{} in the baseline and not this sweep</strong></p><ul>",
+            f.dropped.len()
+        ));
+        for p in &f.dropped {
+            out.push_str(&format!("<li><code>{}</code></li>", esc(p)));
+        }
+        out.push_str("</ul>");
+    }
+    if !said {
+        out.push_str("<p class=\"note\">nothing changed</p>");
+    }
+    out.push_str(&format!(
+        "<p><strong>{}</strong></p>",
+        if f.is_net_gain() {
+            "A net gain: something was fixed and nothing regressed."
+        } else if !f.broken.is_empty() {
+            "NOT a net gain: something that reproduced no longer does."
+        } else {
+            "Not a gain: nothing was fixed."
+        }
+    ));
+    out
+}
+
 fn board_panel(sweep: &Sweep, v: &View) -> String {
     if v.rows.is_empty() {
         return String::new();
@@ -747,6 +909,7 @@ async fn board(State(sweep): State<std::sync::Arc<Sweep>>) -> Response {
         clusters_panel(&v.rows),
         board_panel(&sweep, &v),
     );
+    let body = format!("{body}{}", baseline_panel(&sweep, &v));
     page("trigon watch", live, &body, &sweep.bind).into_response()
 }
 
@@ -943,17 +1106,252 @@ async fn run(State(sweep): State<std::sync::Arc<Sweep>>, UrlPath(index): UrlPath
         ),
     }
 
-    body.push_str(
-        "<h2>Not recorded</h2><ul class=\"note\">\
-         <li>per-phase timings: measured in the sandbox, printed under <code>-v</code>, never \
-         persisted (docs/18 step 5)</li>\
-         <li>the repair history and its stop reason: same</li>\
-         <li>what the mirror observed: only reaches a store, and only where <code>--store</code> \
-         was passed (step 6)</li></ul>",
-    );
+    body.push_str(&report_panel(&dir));
+    if let (Some(store), Some(r)) = (&sweep.store, row) {
+        body.push_str(&store_panel(store, &r.purl).await);
+    } else if sweep.store.is_none() {
+        body.push_str(
+            "<h2>Run record</h2><p class=\"note\">no store was configured for this watch — pass \
+             <code>--store</code> to show the digest chain and the stabilizers that fired</p>",
+        );
+    }
     body.push_str("<p><a href=\"/\">← all targets</a></p>");
 
     page(&format!("target {index:03}"), v.live.is_live(), &body, &sweep.bind).into_response()
+}
+
+/// What the run recorded about itself.
+///
+/// Written on every terminal outcome, unlike the store, which records only runs that reached a
+/// comparison. Each absent fact is named together with why, because an empty panel reads as a run
+/// that produced nothing.
+fn report_panel(dir: &Path) -> String {
+    let Some(r) = std::fs::read_to_string(dir.join("run.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<crate::progress::RunReport>(&t).ok())
+    else {
+        return "<h2>What the run recorded</h2><p class=\"note\">no run.json — this target ran \
+                before the record existed, or was never attempted</p>"
+            .into();
+    };
+
+    let mut out = String::from("<h2>What the run recorded</h2><table>");
+    let mut row = |k: &str, v: String| {
+        out.push_str(&format!("<tr><td class=\"dim\">{k}</td><td>{v}</td></tr>"));
+    };
+    row("started", esc(&r.started));
+    if let Some(f) = &r.finished {
+        row("finished", esc(f));
+    }
+    if let Some(d) = &r.derivation {
+        row(
+            "derivation",
+            format!(
+                "{}{}",
+                esc(d),
+                match &r.confidence {
+                    Some(c) => format!(" · confidence {}", esc(c)),
+                    None => String::new(),
+                }
+            ),
+        );
+    }
+    if let Some(d) = &r.strategy_digest {
+        row("strategy", format!("<code>{}</code>", esc(&d[..16.min(d.len())])));
+    }
+    if let Some(e) = &r.egress {
+        row(
+            "egress",
+            format!(
+                "{}{}",
+                esc(e),
+                match r.attestable {
+                    // The runner's own answer, not the flag's. A local run records no network
+                    // transcript and is never attestable at full trust whatever tier was asked for.
+                    Some(false) => " · <span class=\"note\">not attestable: this runner records no \
+                                    network transcript</span>",
+                    Some(true) => " · attestable",
+                    None => "",
+                }
+            ),
+        );
+    }
+    if let Some(v) = &r.void_reason {
+        row("void", format!("<span class=\"void\">{}</span>", esc(v)));
+    }
+    if let Some(m) = &r.model {
+        row(
+            "model",
+            format!("{} · {} call(s)", esc(m), r.model_calls),
+        );
+    }
+    out.push_str("</table>");
+
+    if !r.timings.is_empty() {
+        out.push_str("<h2>Timeline</h2><table><tr><th>phase</th><th class=\"n\">seconds</th></tr>");
+        for (phase, secs) in &r.timings {
+            out.push_str(&format!(
+                "<tr><td>{}</td><td class=\"n\">{}</td></tr>",
+                esc(phase),
+                // `None` is no data, never zero: a timing we failed to read is not a fast phase,
+                // and averaging the two quietly understates every build.
+                match secs {
+                    Some(s) => format!("{s:.1}"),
+                    None => "<span class=\"note\">no data</span>".into(),
+                }
+            ));
+        }
+        out.push_str("</table>");
+    }
+
+    if let Some(f) = &r.failure {
+        out.push_str(&format!(
+            "<h2>Failure, as classified at the time</h2><p><code>{}</code>{} · \
+             <span class=\"dim\">{:?}, {}, {}</span></p><pre>{}</pre>\
+             <p class=\"note\">recorded when the log was in hand, so it cannot drift from the \
+             rule table the way a re-classification does</p>",
+            esc(&f.code),
+            match &f.subject {
+                Some(s) => format!(" <code>{}</code>", esc(s)),
+                None => String::new(),
+            },
+            f.fault,
+            if f.retryable { "retryable" } else { "not retryable" },
+            if f.repairable { "repairable" } else { "nothing to repair" },
+            esc(&f.evidence),
+        ));
+    }
+
+    if !r.assumptions.is_empty() {
+        out.push_str("<h2>What the rung assumed</h2><ul>");
+        for a in &r.assumptions {
+            out.push_str(&format!("<li>{}</li>", esc(a)));
+        }
+        out.push_str("</ul><p class=\"note\">a divergence has to be readable against the guesses \
+                      that produced it rather than taken as a fact about the package</p>");
+    }
+
+    if !r.repairs.is_empty() || r.repair_stopped.is_some() {
+        out.push_str("<h2>Repairs</h2><ul>");
+        for a in &r.repairs {
+            out.push_str(&format!("<li>{}</li>", esc(a)));
+        }
+        if let Some(stop) = &r.repair_stopped {
+            out.push_str(&format!("<li class=\"note\">stopped: {}</li>", esc(stop)));
+        }
+        out.push_str("</ul>");
+    }
+
+    if let Some(p) = &r.pin {
+        out.push_str(&format!(
+            "<h2>Registry pin</h2><table>\
+             <tr><td class=\"dim\">index requests</td><td>{}</td></tr>\
+             <tr><td class=\"dim\">versions withheld</td><td>{}</td></tr>\
+             <tr><td class=\"dim\">artifacts</td><td>{}</td></tr>\
+             <tr><td class=\"dim\">toolchain</td><td>{}</td></tr>\
+             <tr><td class=\"dim\">refused</td><td>{}</td></tr></table><p class=\"note\">{}</p>",
+            p.index_requests,
+            p.versions_withheld,
+            p.artifact_requests,
+            p.toolchain_requests,
+            p.rejected,
+            if p.pin_bound() {
+                "non-zero index requests are proof the pin reached the client — the failure this \
+                 exists to catch is silent: pip ignores an untrusted plain-HTTP index after one \
+                 warning and resolves against the live one"
+            } else if p.contacted() {
+                "the mirror was contacted and served no index document. Either this build needed \
+                 no dependencies, or the pin did not reach the client"
+            } else {
+                "the mirror was never contacted. Either this build needed no dependencies, or it \
+                 resolved somewhere else"
+            }
+        ));
+    }
+    out
+}
+
+/// What the store holds about this run.
+///
+/// Present only for a run that reached a comparison, because that is the only kind the store keeps.
+/// Said out loud rather than rendered as an empty pane: a missing record here means the run was a
+/// void, a build failure or an error of ours, not that the store lost it.
+async fn store_panel(store: &Path, purl: &str) -> String {
+    let Some(found) = find_record(store, purl).await else {
+        return "<h2>Run record</h2><p class=\"note\">no record in the store for this target. The \
+                store keeps only runs that reached a comparison — a void, a build failure and an \
+                error of ours all write nothing there, by design: no statement may be written about \
+                a run that is evidence of nothing</p>"
+            .into();
+    };
+    let r = &found.record;
+    let mut out = format!(
+        "<h2>Run record</h2><p class=\"dim\">{} · read {} record(s) in {}ms</p>",
+        esc(&r.id),
+        found.read,
+        found.millis
+    );
+    out.push_str("<table>");
+    let mut row = |k: &str, v: String| out.push_str(&format!("<tr><td class=\"dim\">{k}</td><td>{v}</td></tr>"));
+    row("outcome", esc(r.outcome.as_deref().unwrap_or("—")));
+    row(
+        "upstream",
+        format!("<code>{}</code>", esc(&r.upstream.sha256.to_hex()[..16])),
+    );
+    match &r.rebuild {
+        Some(b) => row(
+            "rebuild",
+            format!(
+                "<code>{}</code>{}",
+                esc(&b.sha256.to_hex()[..16]),
+                if b.stored {
+                    ""
+                } else {
+                    " · <span class=\"note\">bytes pruned; a match can be re-derived, and a \
+                       divergence keeps its bytes</span>"
+                }
+            ),
+        ),
+        None => row("rebuild", "<span class=\"note\">none recorded</span>".into()),
+    }
+    row(
+        "environment",
+        format!(
+            "{} · {}",
+            esc(&r.environment.egress),
+            if r.environment.attestable {
+                "attestable"
+            } else {
+                "not attestable at full trust"
+            }
+        ),
+    );
+    if let Some(d) = &r.derivation {
+        row("derivation", esc(d));
+    }
+    if !r.guard_trips.is_empty() {
+        row(
+            "guard",
+            format!("<span class=\"void\">{}</span>", esc(&r.guard_trips.join("; "))),
+        );
+    }
+    if !r.attestations.is_empty() {
+        row("signed", format!("{} statement(s)", r.attestations.len()));
+    }
+    out.push_str("</table>");
+
+    if let Some(p) = &r.environment.pin {
+        out.push_str(&format!(
+            "<p class=\"note\">the pin {}</p>",
+            if p.bound() {
+                "bound: the index served documents through the time filter"
+            } else {
+                "cannot be confirmed from this run — the mirror served no index document, which is \
+                 ambiguous: a package with no dependencies asks for nothing"
+            }
+        ));
+    }
+    out
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -978,7 +1376,13 @@ fn tail(s: &str, n: usize) -> String {
 }
 
 /// Serve a read-only view of one sweep's work directory.
-pub fn serve(work: PathBuf, targets: Option<PathBuf>, bind: String) -> Result<()> {
+pub fn serve(
+    work: PathBuf,
+    targets: Option<PathBuf>,
+    bind: String,
+    store: Option<PathBuf>,
+    baseline: Option<PathBuf>,
+) -> Result<()> {
     if !work.is_dir() {
         anyhow::bail!("{} is not a directory", work.display());
     }
@@ -986,6 +1390,8 @@ pub fn serve(work: PathBuf, targets: Option<PathBuf>, bind: String) -> Result<()
         work,
         targets,
         bind: bind.clone(),
+        store,
+        baseline,
     });
 
     let app = axum::Router::new()

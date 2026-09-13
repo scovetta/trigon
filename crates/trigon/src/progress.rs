@@ -422,3 +422,100 @@ mod tests {
         assert!(back.finished.is_none());
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// What one target did, written whatever happened to it.
+// ---------------------------------------------------------------------------------------------
+
+/// Everything one run knows about itself, on disk beside its logs.
+///
+/// One file rather than the two the plan sketched — a `failure.json` beside a `run.json` invites
+/// the question of which is authoritative when they disagree, and they will: the signature is
+/// classified where the log is in hand and everything else is known at the end.
+///
+/// Written on **every** terminal outcome. The store is not: `record_run` sits past the early return
+/// that unwraps the comparison, so a void, a build failure, a no-strategy and an error of ours all
+/// write nothing there. That is right for an attestor — no statement may be written about a run
+/// that is evidence of nothing — and it is exactly why something else has to record the rest.
+///
+/// Every `Option` is a real absence. A timing we failed to read is not a phase that took no time,
+/// and a run with no strategy digest is not a run whose strategy hashed to nothing.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RunReport {
+    pub purl: String,
+    pub started: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<String>,
+    /// The label the sweep would write: `exact`, `build-failed:deps`, `void`, and so on. Absent
+    /// when the run did not reach an outcome at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// Our own error, where one stopped the run before it had an outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<trigon_core::FailureSignature>,
+    /// Why the run is evidence of nothing, where it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub void_reason: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+    /// What the rung had to assume. Printed beside a divergence so the result can be read against
+    /// the guesses that produced it rather than as a fact about the package.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+
+    /// Per-phase durations in seconds. `None` means no data, never zero, and the convention
+    /// survives the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timings: Vec<(String, Option<f64>)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+    /// Whether the runner claims the run can be attested at full trust. Taken from the runner, not
+    /// from the flag that asked for a tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestable: Option<bool>,
+
+    /// One entry per repair the loop attempted, and why it stopped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repairs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_stopped: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub model_calls: u32,
+
+    /// What the mirror served, where one ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<trigon_mirror::Observed>,
+}
+
+impl RunReport {
+    pub fn new(purl: &str) -> RunReport {
+        RunReport {
+            purl: purl.to_string(),
+            started: crate::now_rfc3339(),
+            ..Default::default()
+        }
+    }
+
+    /// Write it into the target's work directory.
+    ///
+    /// Best effort and loud about failing: losing the record is a thing to report, not a reason to
+    /// throw away the verdict the caller asked for.
+    pub fn write(&mut self, work: &Path) {
+        self.finished = Some(crate::now_rfc3339());
+        if let Err(e) = write_atomic(&work.join("run.json"), self) {
+            tracing::warn!("could not write run.json: {e}");
+        }
+    }
+}

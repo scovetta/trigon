@@ -373,6 +373,15 @@ enum Cmd {
         /// logs that may carry credentials from a build environment.
         #[arg(long, default_value = "127.0.0.1:8099")]
         bind: String,
+        /// A store the sweep was given, to enrich a compared run with its digest chain.
+        ///
+        /// Only an enrichment: the store records a run only past a comparison, so a page rooted in
+        /// it would report a perfect rate on a sweep where nothing built.
+        #[arg(long)]
+        store: Option<PathBuf>,
+        /// An earlier sweep of the same corpus, to say what changed.
+        #[arg(long)]
+        baseline: Option<PathBuf>,
     },
     /// Ask a registry what it knows about a package.
     #[cfg(feature = "build")]
@@ -771,7 +780,9 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             work,
             targets,
             bind,
-        } => watch::serve(work, targets, bind),
+            store,
+            baseline,
+        } => watch::serve(work, targets, bind, store, baseline),
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
         #[cfg(feature = "build")]
@@ -833,9 +844,23 @@ mod registry {
 
     pub fn resolve(purl: &str, output: OutputFormat) -> Result<()> {
         let target = TargetRef::from_str(purl)?;
-        let registry = for_ecosystem(target.ecosystem, Client::new(ClientConfig::default())?)?;
+        let client = Client::new(ClientConfig::default())?;
+        let registry = for_ecosystem(target.ecosystem, client.clone())?;
+        let rt = runtime()?;
 
-        let resolved = runtime()?.block_on(registry.resolve(&target))?;
+        let resolved = rt.block_on(registry.resolve(&target))?;
+
+        // The registry did not record a commit, which is every PyPI project. A tag named for the
+        // version usually exists and is what a rebuild will use, so `resolve` asks the same
+        // question rather than reporting a dead end the next command silently answers.
+        let tag = match &resolved.source {
+            Some(s) if s.commit.is_empty() => rt.block_on(trigon_registry::resolve_version_tag(
+                &client,
+                &s.repo_url,
+                &target.version,
+            )),
+            _ => None,
+        };
 
         match output {
             OutputFormat::Json => {
@@ -855,10 +880,30 @@ mod registry {
                     }
                     Some(s) => {
                         println!("  source     {} (no commit)", s.repo_url);
-                        println!(
-                            "  found by   {:?}: something still has to find the commit",
-                            s.how
-                        );
+                        match &tag {
+                            Some((sha, name, how)) => {
+                                println!("  tag        {name} -> {sha}");
+                                println!(
+                                    "  found by   {:?}, which is what a rebuild would use",
+                                    how
+                                );
+                                // The caveat is the point. A tag is a mutable reference: it can be
+                                // moved or deleted after a release, and `pad-left 2.1.0` in the
+                                // corpus is a package whose recorded commit was force-pushed away.
+                                // What a tag gives is a good approximation, and a divergence
+                                // against one has to be read against that.
+                                println!(
+                                    "             a tag is mutable — it can be moved after the \
+                                     release, so this identifies the commit the tag points at \
+                                     today rather than the one that was published"
+                                );
+                            }
+                            None => println!(
+                                "  found by   {:?}: no tag matches this version, so something \
+                                 stronger has to find the commit",
+                                s.how
+                            ),
+                        }
                     }
                     None => println!("  source     not declared"),
                 }
@@ -1801,6 +1846,9 @@ mod rebuild {
     /// not of the verdict: a target that reproduced after two calls and one that reproduced after
     /// none are the same verdict and very different data points, and the eval harness needs the
     /// second number to say whether the invocation rate is trending down.
+    /// Per-phase durations as they arrive, shared with the event sink that collects them.
+    type Timings = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<f64>)>>>;
+
     pub struct Ran {
         pub outcome: Outcome,
         pub model_calls: u32,
@@ -1815,7 +1863,29 @@ mod rebuild {
         }
     }
 
+    /// One rebuild, with a record of it written whatever happened.
+    ///
+    /// A thin wrapper so that "on every terminal outcome" is a property of the control flow rather
+    /// than a line somebody has to remember at each of the eight places this returns. The store
+    /// deliberately records only runs that reached a comparison — no statement may be written about
+    /// a run that is evidence of nothing — and that is exactly why something else has to record the
+    /// rest: a monitor rooted in successes reports a perfect rate on a sweep where nothing built.
     pub fn run_one(args: Args, verbose: bool) -> Result<Ran> {
+        let work = args.work.clone();
+        let purl = args.purl.clone();
+        let mut report = crate::progress::RunReport::new(&purl);
+        let out = run_inner(args, verbose, &mut report);
+        match &out {
+            Ok(ran) => report.outcome = Some(ran.outcome.label()),
+            // Our own error, not the package's. Recorded as such rather than left absent, because
+            // an absent outcome and a failure of ours read alike to anybody counting.
+            Err(e) => report.error = Some(e.to_string()),
+        }
+        report.write(&work);
+        out
+    }
+
+    fn run_inner(args: Args, verbose: bool, report: &mut crate::progress::RunReport) -> Result<Ran> {
         // The phases before the sandbox. The build reports its own; these are ours, and without
         // them a page watching a target sits on "not recorded" for the minute it takes to resolve
         // a package and fetch an artifact — which is indistinguishable from a hang.
@@ -1971,6 +2041,7 @@ mod rebuild {
             attestable: false,
         };
 
+        report.model = model.as_ref().map(|m| m.describe());
         if let (Some(m), true) = (&model, verbose) {
             println!(
                 "  model      {}, asked only where nothing deterministic answers",
@@ -1991,6 +2062,9 @@ mod rebuild {
                 model_calls: calls(&model),
             });
         };
+        report.derivation = Some(format!("{:?}", candidate.derivation).to_lowercase());
+        report.confidence = Some(format!("{:?}", candidate.confidence).to_lowercase());
+        report.assumptions = candidate.assumptions.clone();
         let loc = candidate.strategy.location().cloned().unwrap_or_default();
         if verbose {
             println!("  source     {} @ {}", loc.repo, loc.git_ref);
@@ -2032,6 +2106,10 @@ mod rebuild {
         // Read on the first repair and not before. A run whose build works never touches the
         // repository, and a `--model` that is only there as a fallback should cost nothing.
         let mut repo_inputs: Option<crate::inferrer::Inputs> = None;
+        // Timings come back through the same event sink the phase marks use: `PhaseEnd` already
+        // carries the duration, and `None` there means no data rather than a phase of zero length,
+        // which is the convention the record has to preserve.
+        let timings: Timings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         // What the comparison said, when there was one to make. Carried out of the loop rather
         // than returned from inside it, because the mirror is torn down after the loop and an
         // early return would leave it running.
@@ -2051,6 +2129,7 @@ mod rebuild {
             let strategy_digest = trigon_strategy::ToolRegistry::builtin()
                 .and_then(|tools| trigon_strategy::strategy_digest(&strategy, &tools))
                 .ok();
+            report.strategy_digest = strategy_digest.clone();
             let built = crate::build::run_with(
                 &strategy_file,
                 false,
@@ -2065,15 +2144,30 @@ mod rebuild {
                 verbose,
                 enforced.then_some(guard_file.as_path()),
                 args.source.as_deref(),
-                // Phase marks from inside the sandbox, forwarded to whatever is watching. The
-                // build already recorded these and threw them away; only the sink was missing.
-                args.phases.clone().map(|p| -> trigon_sandbox::EventSink {
-                    std::sync::Arc::new(move |e: &trigon_sandbox::BuildEvent| {
-                        if let trigon_sandbox::BuildEvent::PhaseStart(phase) = e {
-                            p.phase(&phase.to_string());
+                // Phase marks from inside the sandbox, forwarded to whatever is watching, and the
+                // timings on the way past. The build already recorded both and threw them away;
+                // only the sink was missing.
+                {
+                    let (phases, timings) = (args.phases.clone(), timings.clone());
+                    Some(std::sync::Arc::new(move |e: &trigon_sandbox::BuildEvent| {
+                        match e {
+                            trigon_sandbox::BuildEvent::PhaseStart(phase) => {
+                                if let Some(p) = &phases {
+                                    p.phase(&phase.to_string());
+                                }
+                            }
+                            trigon_sandbox::BuildEvent::PhaseEnd { phase, duration } => {
+                                if let Ok(mut t) = timings.lock() {
+                                    t.push((
+                                        phase.to_string(),
+                                        duration.map(|d| d.as_secs_f64()),
+                                    ));
+                                }
+                            }
+                            _ => {}
                         }
-                    })
-                }),
+                    }) as trigon_sandbox::EventSink)
+                },
             );
 
             // A tripped guard ends the loop whatever else happened, and before another attempt can
@@ -2116,6 +2210,7 @@ mod rebuild {
                         if verbose {
                             println!("  repair     stopped: {}", stop_reason(&reason));
                         }
+                        report.repair_stopped = Some(stop_reason(&reason));
                         tracing::info!(?reason, "the repair loop stopped after a divergence");
                         judged = Some((rebuilt, comparison));
                         break (built, strategy_digest);
@@ -2143,6 +2238,11 @@ mod rebuild {
                         let before = cfg.spent();
                         let proposed = cfg.repair_divergence(read, &strategy_yaml, &brief);
                         let after = cfg.spent();
+                        report.repairs.push(format!(
+                            "attempt {} on {}",
+                            repairs.attempts().len() + 1,
+                            failure.key()
+                        ));
                         repairs.record(trigon_ai::Attempt {
                             signature: failure.key(),
                             // The build reached the end; what differs is what it produced.
@@ -2167,10 +2267,10 @@ mod rebuild {
             };
             // Only a failure the build itself reported carries a signature. Our own errors and a
             // void run are not something a different recipe fixes.
-            let Some(failure) = e
+            report.failure = e
                 .downcast_ref::<crate::BuildFailure>()
-                .map(|f| f.signature.clone())
-            else {
+                .map(|f| f.signature.clone());
+            let Some(failure) = report.failure.clone() else {
                 break (built, strategy_digest);
             };
             let Some(cfg) = &model else {
@@ -2185,6 +2285,7 @@ mod rebuild {
                     if verbose {
                         println!("  repair     stopped: {}", stop_reason(&reason));
                     }
+                    report.repair_stopped = Some(stop_reason(&reason));
                     tracing::info!(?reason, "the repair loop stopped");
                     break (built, strategy_digest);
                 }
@@ -2222,6 +2323,11 @@ mod rebuild {
                     // nothing still cost tokens and still counts against the budget; not recording
                     // it is how a loop spends its cap on calls it threw away.
                     let after = cfg.spent();
+                    report.repairs.push(format!(
+                        "attempt {} on {}",
+                        repairs.attempts().len() + 1,
+                        failure.key()
+                    ));
                     repairs.record(trigon_ai::Attempt {
                         signature: failure.key(),
                         reached: e
@@ -2247,6 +2353,14 @@ mod rebuild {
                 }
             }
         };
+        if let Ok(t) = timings.lock() {
+            report.timings = t.clone();
+        }
+        report.egress = Some(args.egress.clone());
+        report.attestable = Some(
+            trigon_sandbox::BuildRunner::caps(&trigon_sandbox::PodmanRunner::new(&args.work))
+                .attestable,
+        );
         let derivation = if repairs.attempts().is_empty() {
             format!("{:?}", candidate.derivation).to_lowercase()
         } else {
@@ -2262,6 +2376,7 @@ mod rebuild {
             // whole time and reading exactly like a build that needed nothing.
             let observed = m.observed();
             pin = Some(observed);
+            report.pin = Some(observed);
             if verbose {
                 // The denominator is stated inline because the count is a total across every
                 // packument the build fetched, not the target's own. left-pad publishes fifteen
@@ -2304,10 +2419,10 @@ mod rebuild {
             if let Some(t) = trips.first() {
                 // Checked before the build's exit status is even considered. A tripped guard means
                 // the run cannot be used, whether the build succeeded or failed.
+                let reason = format!("{:?} arrived from {}", t.matched, t.url);
+                report.void_reason = Some(reason.clone());
                 return Ok(Ran {
-                    outcome: Outcome::Void {
-                        reason: format!("{:?} arrived from {}", t.matched, t.url),
-                    },
+                    outcome: Outcome::Void { reason },
                     model_calls: calls(&model),
                 });
             }
@@ -2315,6 +2430,7 @@ mod rebuild {
         if let Err(e) = built {
             let text = e.to_string();
             if let Some(reason) = text.strip_prefix("void: ") {
+                report.void_reason = Some(reason.to_string());
                 return Ok(Ran {
                     outcome: Outcome::Void {
                         reason: reason.to_string(),
@@ -2392,6 +2508,7 @@ mod rebuild {
                 tracing::warn!("could not record this run: {e:#}");
             }
         }
+        report.model_calls = calls(&model);
         Ok(Ran {
             outcome: Outcome::Compared(comparison.outcome),
             model_calls: calls(&model),

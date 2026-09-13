@@ -290,8 +290,15 @@ impl StrategyInferrer for PyPiInferrer {
             .await
             {
                 Some((sha, tag, how)) => {
+                    // Named as mutable, not merely as "from a tag". A tag can be moved or deleted
+                    // after a release — `pad-left 2.1.0` in the corpus is a package whose recorded
+                    // commit was force-pushed away — so this is the commit the tag points at
+                    // today, which is a good approximation and not the same claim as a commit the
+                    // registry recorded at publish time.
                     assumptions.push(format!(
-                        "the commit comes from tag `{tag}`, not the registry"
+                        "the commit comes from tag `{tag}` rather than from the registry, and a \
+                         tag is mutable: this is where it points today, not necessarily what was \
+                         published"
                     ));
                     (sha, how)
                 }
