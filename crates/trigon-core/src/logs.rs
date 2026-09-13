@@ -160,14 +160,56 @@ pub fn compress(log: &str, budget: usize) -> Compressed {
         }
     }
 
+    // What to give up first, when the kept set does not fit.
+    //
+    // This used to emit in file order and `break` on the first line that overran the budget, so a
+    // long log spent its whole budget on the head and never reached the end. The cause line is
+    // usually the last thing said, so the compressed form of a chatty failure could omit the one
+    // line that names it — `classify` then returned `unknown`, and since that signature is the
+    // repair cache key, the same failure keyed two ways depending on how much the build printed.
+    //
+    // Priority, highest first: an error line, then the tail, then the head, then context. Within a
+    // class the later line wins, because the deepest cause is usually the last mention of it.
+    let priority = |i: usize| -> u8 {
+        if is_error(&cleaned[i]) {
+            3
+        } else if i >= n.saturating_sub(TAIL_LINES) {
+            2
+        } else if i < HEAD_LINES.min(n) {
+            1
+        } else {
+            0
+        }
+    };
+
+    // Take best-first rather than dropping worst-first: one sort and one pass, where the removal
+    // loop it replaced was quadratic and took 47 seconds on a 300 KB log.
+    //
+    // A third of the budget is reserved for the highest-priority lines before anything else is
+    // considered, so a log whose head is enormous cannot crowd out the error at the end.
+    let mut order: Vec<usize> = (0..n).filter(|i| keep[*i]).collect();
+    order.sort_by_key(|i| (std::cmp::Reverse(priority(*i)), std::cmp::Reverse(*i)));
+
+    let mut chosen: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let mut budget_left = budget;
+    let mut truncated = false;
+    for i in order {
+        let cost = cleaned[i].len() + 1;
+        if cost <= budget_left {
+            budget_left -= cost;
+            chosen.insert(i);
+        } else {
+            truncated = true;
+        }
+    }
+
     let mut out: Vec<String> = Vec::new();
     let mut kept_lines = 0usize;
     let mut used = 0usize;
     let mut skipped = 0usize;
-    let mut truncated = false;
 
     for (i, line) in cleaned.iter().enumerate() {
-        if !keep[i] {
+        if !chosen.contains(&i) {
             skipped += 1;
             continue;
         }
@@ -178,6 +220,8 @@ pub fn compress(log: &str, budget: usize) -> Compressed {
             skipped = 0;
         }
         if used + line.len() + 1 > budget {
+            // The markers cost budget too, and they are not priced above. Stopping here keeps the
+            // promise that the output fits; the lines lost are the lowest-priority ones already.
             truncated = true;
             break;
         }

@@ -260,6 +260,14 @@ pub struct BuildOutcome {
     pub attestable: bool,
     /// Bounded tail of the combined log, for an agent and for triage.
     pub log_tail: String,
+    /// The failure named while the log was still whole, where a rule claimed a line.
+    ///
+    /// `log_tail` is compressed on overflow, so a caller that classifies it afterwards can miss the
+    /// line that named the failure and get `unknown` instead — on exactly the chatty builds that
+    /// fail. That signature is the repair cache key, the admission-control prior and the cluster id,
+    /// so the same failure keying two ways means the flywheel never recognises what it has already
+    /// solved. Prefer this over re-deriving from `log_tail`.
+    pub signature: Option<trigon_core::FailureSignature>,
     /// What the artifact guard caught. Non-empty means the run is `Void`: the artifact under test
     /// reached the build over the network, so whatever it produced says nothing about the source.
     pub guard_trips: Vec<String>,

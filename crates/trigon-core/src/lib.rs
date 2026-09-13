@@ -23,7 +23,7 @@ pub use evidence::{
     Claim, Confidence, Evidence, Intrinsics, RegistryMoment, SourceDiscovery, SourceProvenance,
     ToolchainResolution, resolve_toolchain,
 };
-pub use failure::{FailureSignature, classify};
+pub use failure::{FailureSignature, classify, classify_line};
 pub use fault::{Classify, Fault, Phase};
 pub use format::{Format, UnknownFormat};
 pub use logs::{Compressed, compress};

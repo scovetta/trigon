@@ -1205,9 +1205,15 @@ mod build {
             }
 
             if !outcome.succeeded() {
-                // Named here, where the log is in hand. Re-deriving it later from an error string
-                // would mean classifying our own prose instead of the build's output.
-                let signature = trigon_core::classify(&outcome.log_tail);
+                // The runner's own naming, taken while its log was whole. `log_tail` is
+                // compressed on overflow, so classifying it here — which is what this did — missed
+                // the line that named the failure on exactly the builds chatty enough to trip the
+                // threshold, and called them `unknown`. Falling back to the tail only where no rule
+                // claimed a line as it streamed.
+                let signature = outcome
+                    .signature
+                    .clone()
+                    .unwrap_or_else(|| trigon_core::classify(&outcome.log_tail));
                 if verbose {
                     // The compressed form, not the raw tail. A hundred kilobytes of dependency
                     // chatter in a terminal buries the four lines that say what happened, and the

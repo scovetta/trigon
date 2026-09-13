@@ -150,6 +150,7 @@ impl BuildRunner for PodmanRunner {
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let handle = PodmanBuild {
+            named: Arc::new(Mutex::new(None)),
             binary: self.binary.clone(),
             plan: p.clone(),
             opts: opts.clone(),
@@ -168,6 +169,12 @@ struct PodmanBuild {
     workdir: PathBuf,
     mirror_image: Option<String>,
     events: Arc<Mutex<Vec<BuildEvent>>>,
+    /// The failure this build named while its log was still whole.
+    ///
+    /// `log_tail` is compressed on overflow, so classifying it afterwards can miss the line that
+    /// named the failure and fall back to `unknown` — on the chatty builds, which are the ones that
+    /// fail. Kept here so the signature survives the compression that happens beside it.
+    named: Arc<Mutex<Option<trigon_core::FailureSignature>>>,
 }
 
 impl PodmanBuild {
@@ -241,7 +248,7 @@ impl PodmanBuild {
                         // At `-vv` it is the live progress that a silent 90-second build lacks.
                         tracing::debug!(target: "trigon::build", phase = ?phase, "{l}");
                         push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::Stdout(l.clone()));
-                        append(log, &l);
+                        append(log, &l, &self.named);
                     }
                     None => break,
                 },
@@ -249,7 +256,7 @@ impl PodmanBuild {
                     Some(l) => {
                         tracing::debug!(target: "trigon::build", phase = ?phase, stream = "stderr", "{l}");
                         push_to(self.opts.on_event.as_ref(), &self.events, BuildEvent::Stderr(l.clone()));
-                        append(log, &l);
+                        append(log, &l, &self.named);
                     }
                     None => break,
                 },
@@ -273,7 +280,7 @@ impl PodmanBuild {
                 &self.events,
                 BuildEvent::Stderr(l.clone()),
             );
-            append(log, &l);
+            append(log, &l, &self.named);
         }
         while let Some(l) = out.next_line().await? {
             push_to(
@@ -281,7 +288,7 @@ impl PodmanBuild {
                 &self.events,
                 BuildEvent::Stdout(l.clone()),
             );
-            append(log, &l);
+            append(log, &l, &self.named);
         }
 
         let status = child.wait().await?;
@@ -315,7 +322,21 @@ fn push_to(
 /// for a human reading it, and for the classifier and the repair loop that read it next.
 ///
 /// Compression runs only on overflow, so the per-line cost stays amortized constant.
-fn append(log: &mut String, line: &str) {
+fn append(log: &mut String, line: &str, named: &Mutex<Option<trigon_core::FailureSignature>>) {
+    // Named as it passes, not at the end. `log_tail` is compressed here on overflow, and the
+    // consumer then classified *that* — so on a build chatty enough to trip the threshold the line
+    // that named the failure could already be gone and the signature came out `unknown`. The same
+    // failure therefore keyed two different cache entries depending on how much the build printed,
+    // and `unknown` is the bucket the repair loop treats as novel: a repair learned on a quiet
+    // build never matched the noisy one.
+    //
+    // Last match wins, which is what `classify` does over a whole log — the deepest cause is
+    // usually the last thing said about it.
+    if let Some(sig) = trigon_core::classify_line(line)
+        && let Ok(mut n) = named.lock()
+    {
+        *n = Some(sig);
+    }
     log.push_str(line);
     log.push('\n');
     if log.len() > LOG_TAIL_BYTES * 2 {
@@ -652,6 +673,7 @@ impl PodmanBuild {
         log_tail: String,
     ) -> BuildOutcome {
         BuildOutcome {
+            signature: self.named.lock().ok().and_then(|n| n.clone()),
             exit_code,
             artifact,
             timings,

@@ -494,18 +494,65 @@ pub fn classify(log: &str) -> FailureSignature {
     FailureSignature::unknown(last_interesting(&lines))
 }
 
-fn classify_line(line: &str) -> Option<FailureSignature> {
+/// Name one line, or `None` if no rule claims it.
+///
+/// Public because a log that is compressed as it streams cannot be classified at the end: by then
+/// the line that named the failure may be gone. A caller holding the raw stream names each line as
+/// it passes and keeps the last one that matched, which is what [`classify`] does over a whole log.
+pub fn classify_line(line: &str) -> Option<FailureSignature> {
+    // Matched and captured against the *plain* line.
+    //
+    // This ran the needles and the capture over the raw bytes, and `clip` stripped control
+    // characters only on the way into `evidence`. A build that emits colour therefore produced a
+    // different signature from the same build that did not: an escape landing inside a needle
+    // breaks the match and the failure keys as `unknown`, and an escape inside a captured subject
+    // becomes part of the cache key. One failure, three keys, depending on whether the compiler
+    // felt like colouring — and this key is the repair cache, the admission-control prior and the
+    // cluster id all at once (`docs/07-ai.md` §5), so the flywheel never recognises a failure it
+    // has already solved.
+    let plain = strip_controls(line);
     let rule = RULES
         .iter()
-        .find(|r| r.needles.iter().all(|n| line.contains(n)))?;
+        .find(|r| r.needles.iter().all(|n| plain.contains(n)))?;
     Some(FailureSignature {
         code: Cow::Borrowed(rule.code),
-        subject: capture(line, rule.capture).map(|s| normalize_subject(&s)),
+        subject: capture(&plain, rule.capture).map(|s| normalize_subject(&s)),
         fault: rule.fault,
         retryable: rule.retryable,
         repairable: rule.repairable,
-        evidence: clip(line.trim()),
+        evidence: clip(plain.trim()),
     })
+}
+
+/// A line with terminal control sequences removed, so matching sees what a human reads.
+///
+/// ANSI SGR is `ESC [ ... m`, and the parameters in between are ordinary printable characters, so
+/// dropping control characters alone leaves `[1;31m` behind — which is still not what the build
+/// printed. The whole sequence goes.
+fn strip_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI: `ESC [` then parameter and intermediate bytes, ended by a byte in `@`..=`~`.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for t in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&t) {
+                        break;
+                    }
+                }
+            } else {
+                // A two-character escape. Drop the pair.
+                chars.next();
+            }
+            continue;
+        }
+        if !c.is_control() || c == '\t' {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn capture(line: &str, how: Capture) -> Option<String> {
@@ -553,13 +600,15 @@ fn normalize_subject(s: &str) -> String {
 /// Bounded and stripped of control characters. A build script can print anything, including text
 /// shaped like our own output, and this string reaches a model.
 fn last_interesting(lines: &[&str]) -> String {
+    // Stripped for the same reason `classify_line` strips: this becomes the evidence on an
+    // `unknown` signature, and an evidence string that differs only by colour clusters as two
+    // failures in the UI that a human would read as one.
     lines
         .iter()
         .rev()
-        .map(|l| l.trim())
+        .map(|l| strip_controls(l).trim().to_string())
         .find(|l| !l.is_empty() && l.len() > 8)
-        .unwrap_or("")
-        .to_string()
+        .unwrap_or_default()
 }
 
 fn clip(s: &str) -> String {
