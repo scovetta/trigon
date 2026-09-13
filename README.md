@@ -342,10 +342,15 @@ scripts/                  the cross-machine verification check
 ## Build and check
 
 ```
-cargo test --workspace                      # 653 tests
+cargo test --workspace                      # 653 pass, 4 fail on purpose (see below)
 cargo run -p xtask -- policy                # the dependency policy
 cargo run -p xtask -- differential          # against the reference implementation
 scripts/cross-machine-verify.sh             # the claim a third party can check
+
+# Four tests are committed red. Each one documents a confirmed bug nobody has fixed
+# yet — two in the store, two in how errors report the fault they already know — and
+# each names the defect in its own failure message. Deleting them to reach a green
+# suite is how a bug becomes invisible again, so they stay until the bug goes.
 
 # The archived stabilizer set, which needs a second target and is not in the default run:
 cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
