@@ -1475,11 +1475,15 @@ fn print_text(c: &Comparison, explain: bool) {
         println!("  capped below `normalized`: {reason}");
     }
 
+    // Both parses and the comparison. The comparison's notes were missing, so
+    // `ExecutableContentDiffers` — which the enum calls never benign and `is_noteworthy()` promises
+    // reaches a human even on a clean match — had no way to get here.
     let notes: Vec<_> = c
         .upstream
         .notes
         .iter()
         .chain(&c.rebuild.notes)
+        .chain(&c.notes)
         .filter(|n| n.code.is_noteworthy())
         .collect();
     if !notes.is_empty() {

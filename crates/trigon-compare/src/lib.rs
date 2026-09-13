@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256, Sha512 as Sha512Hasher};
 use trigon_archive::{ArchiveError, Limits, parse, serialize};
 use trigon_core::{
-    Digest, Format, Match, MultiDigest, Note, ProfileId, Provenance, RiskTier, Sha512,
+    Digest, Format, Match, MultiDigest, Note, NoteCode, ProfileId, Provenance, RiskTier, Sha512,
 };
 use trigon_stabilize::{Applied, StabilizerSet, apply};
 
@@ -119,6 +119,17 @@ pub struct Comparison {
     pub rebuild: Summary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffReport>,
+    /// What the comparison observed about the two archives, as opposed to what either side's parse
+    /// observed about itself.
+    ///
+    /// `docs/02-domain-model.md` §5 puts this on `Comparison` and it was missing, which is why the
+    /// four `NoteCode` variants about membership — `MemberOnlyInUpstream`, `MemberOnlyInRebuild`,
+    /// `MemberContentDiffers`, `ExecutableContentDiffers` — were declared and never constructed.
+    /// `ExecutableContentDiffers` is the one that matters: the enum calls it "never benign" and
+    /// `is_noteworthy()` promises it reaches a human even on a clean match, and nothing could emit
+    /// it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
 }
 
 impl Comparison {
@@ -207,6 +218,35 @@ pub fn compare(
         d.codes = signature::signature(u, r);
     }
 
+    // Membership notes, from the report the walker already built. One per differing member rather
+    // than a count, because "four members differ" is an accusation and a named path is a thing to
+    // go and look at — the same reason `codes` exists.
+    let mut notes = Vec::new();
+    if let Some(d) = &diff {
+        for f in &d.files {
+            let code = match f.status {
+                FileStatus::Identical => continue,
+                FileStatus::OnlyUpstream => NoteCode::MemberOnlyInUpstream,
+                FileStatus::OnlyRebuild => NoteCode::MemberOnlyInRebuild,
+                // Executable first: a difference there is never benign, and saying only that some
+                // member differs loses exactly the distinction the verdict turns on.
+                FileStatus::Differs if f.kind == ContentKind::Executable => {
+                    NoteCode::ExecutableContentDiffers
+                }
+                FileStatus::Differs => NoteCode::MemberContentDiffers,
+            };
+            notes.push(Note::at(
+                code,
+                f.path.clone(),
+                match f.status {
+                    FileStatus::OnlyUpstream => "in the published artifact and not the rebuild",
+                    FileStatus::OnlyRebuild => "in the rebuild and not the published artifact",
+                    _ => "the two copies differ",
+                },
+            ));
+        }
+    }
+
     // One event carrying the verdict and the digests it rests on. This is the line a fleet
     // aggregates, so it names the outcome as a string rather than an ordinal: a downstream filter
     // written against an integer breaks the moment an outcome is inserted.
@@ -223,6 +263,7 @@ pub fn compare(
         upstream,
         rebuild,
         diff,
+        notes,
     })
 }
 

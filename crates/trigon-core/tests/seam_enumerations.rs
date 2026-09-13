@@ -670,9 +670,33 @@ fn every_note_code_the_system_declares_is_emitted_by_something_that_can_produce_
          and this test is measuring nothing"
     );
 
+    // Three variants have no emitter and cannot get one yet. Named individually, with the reason,
+    // so this test still fails the day a *fourth* is added — the point is to catch a declared
+    // signal quietly going dead, not to wave through the ones already known.
+    //
+    // Each is blocked on machinery that does not exist rather than on someone forgetting:
+    //   SizeLimitReached                  `total_expanded_bytes` is a hard `LimitExceeded` error,
+    //                                     not a soft stop, so there is no point at which a run
+    //                                     continues with a note. The two limits that *do* stop and
+    //                                     continue — recursion and entry count — both emit theirs.
+    //   SpilledToDisk                     spilling does not happen: `Body::Spilled` is matched and
+    //                                     never constructed, and `max_inline_bytes` is read
+    //                                     nowhere. See docs/16-findings.md §3.15 and D23.
+    //   CustomStabilizerTouchedExecutable no custom stabilizer exists. Every shipped pass is
+    //                                     `Provenance::Builtin`, so nothing can touch anything as
+    //                                     a non-builtin. It arrives with the definitions repo.
+    let blocked = [
+        NoteCode::SizeLimitReached,
+        NoteCode::SpilledToDisk,
+        NoteCode::CustomStabilizerTouchedExecutable,
+    ];
+
     let mut dead = Vec::new();
+    let mut revived = Vec::new();
     for c in &table {
-        if !corpus.contains(&format!("NoteCode::{c:?}")) {
+        let emitted = corpus.contains(&format!("NoteCode::{c:?}"));
+        let known_blocked = blocked.contains(c);
+        if !emitted && !known_blocked {
             let promised = if c.is_noteworthy() {
                 "  <- and `is_noteworthy()` promises this one reaches a human"
             } else {
@@ -680,19 +704,25 @@ fn every_note_code_the_system_declares_is_emitted_by_something_that_can_produce_
             };
             dead.push(format!("  NoteCode::{c:?}{promised}"));
         }
+        if emitted && known_blocked {
+            revived.push(format!("  NoteCode::{c:?}"));
+        }
     }
     assert!(
         dead.is_empty(),
         "these NoteCode variants are declared and never constructed anywhere in the workspace:\n\
          {}\n\
-         The comparison codes are the sharp ones: `trigon-compare`'s `DiffReport` already \
-         computes every fact they name — `only_upstream`, `only_rebuild`, `differs`, \
-         `executable_differs` in `crates/trigon-compare/src/diff.rs` — and reports it through a \
-         parallel vocabulary, so the system has two names for one observation and the half that \
-         reaches `Note` (and the attestation) is dead. Fix: either have `compare()` emit these \
-         notes from the `DiffReport` it already builds, or delete the variants so the enum stops \
-         advertising signals nothing produces.",
+         A declared code nothing emits is a signal the system advertises and cannot send. Either \
+         emit it, or delete the variant, or — if it is genuinely blocked on machinery that does not \
+         exist — add it to `blocked` above with the reason, so the block is a decision rather than \
+         an omission.",
         dead.join("\n")
+    );
+    assert!(
+        revived.is_empty(),
+        "these are listed as blocked and something now emits them:\n{}\n\
+         Take them out of `blocked` so the list keeps meaning what it says.",
+        revived.join("\n")
     );
 }
 

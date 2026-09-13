@@ -61,6 +61,7 @@ fn a_pass_that_fired_only_on_the_rebuild_reaches_the_signed_statement() {
             0x11,
         ),
         diff: None,
+        notes: Vec::new(),
     };
 
     let s = trigon_attest::Statement::equivalence("x-1.0-py3-none-any.whl", &c);
@@ -102,6 +103,7 @@ fn a_model_authored_pass_on_the_rebuild_clears_all_builtin() {
             0x22,
         ),
         diff: None,
+        notes: Vec::new(),
     };
 
     let p = &trigon_attest::Statement::equivalence("x.whl", &c).predicate;
@@ -127,6 +129,7 @@ fn each_applied_entry_names_its_side() {
             0x33,
         ),
         diff: None,
+        notes: Vec::new(),
     };
     let p = &trigon_attest::Statement::equivalence("x.whl", &c).predicate;
     let sides: Vec<&str> = p["applied"]
