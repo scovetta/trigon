@@ -140,7 +140,25 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
             local_offset = off;
         }
 
-        expanded = expanded.saturating_add(uncomp_size);
+        // A declared size is worth one cheap refusal before we read anything — an artifact whose
+        // directory already adds up to more than the ceiling is not worth opening — but it is not
+        // what the ceiling is charged. That is done below, against the bytes each member yielded.
+        if expanded.saturating_add(uncomp_size) > limits.total_expanded_bytes {
+            return Err(ArchiveError::LimitExceeded {
+                limit: "total_expanded_bytes",
+                actual: expanded.saturating_add(uncomp_size),
+                allowed: limits.total_expanded_bytes,
+            });
+        }
+
+        let remaining = limits.total_expanded_bytes.saturating_sub(expanded);
+        let data = read_member(b, local_offset, method, comp_size, uncomp_size, remaining)?;
+
+        // **What it yielded, not what it declared.** Charging the declaration let many directory
+        // entries point at one large local header and each add its own small `uncomp_size` to the
+        // running total while every one of them materialised the whole body — a multiplier on the
+        // exact limit that is supposed to bound it.
+        expanded = expanded.saturating_add(data.len() as u64);
         if expanded > limits.total_expanded_bytes {
             return Err(ArchiveError::LimitExceeded {
                 limit: "total_expanded_bytes",
@@ -148,13 +166,6 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
                 allowed: limits.total_expanded_bytes,
             });
         }
-
-        // The budget is what is left of the artifact's ceiling, not the size the directory
-        // declared: `uncomp_size` is a number the input wrote, and checking it against the limit
-        // above while inflating without one meant the limit constrained the claim rather than the
-        // bytes. A 200 KB member declaring 64 bytes expanded to 200 MB in this process.
-        let remaining = limits.total_expanded_bytes.saturating_sub(expanded);
-        let data = read_member(b, local_offset, method, comp_size, uncomp_size, remaining)?;
         let path = EntryPath::new(name);
         // Zip has no type flags. A trailing slash is the universal convention for a directory.
         let kind = if path.as_bytes().ends_with(b"/") {
@@ -321,7 +332,21 @@ fn read_member(
 
     let raw = c.take(usize::try_from(comp).map_err(|_| bad("compressed size overflow"))?)?;
     match method {
-        METHOD_STORE => Ok(raw.to_vec()),
+        METHOD_STORE => {
+            // Checked, like the deflate arm beside it. This returned `raw` unexamined, so a
+            // *stored* member escaped `total_expanded_bytes` entirely — and the walker charged the
+            // ceiling the size the central directory declared, which is a number the input wrote.
+            // `docs/threat-model.md` P1 claims every limit is enforced against what decompression
+            // produces rather than against a declared size; for method 0 that was not true.
+            if raw.len() as u64 > budget {
+                return Err(ArchiveError::LimitExceeded {
+                    limit: "total_expanded_bytes",
+                    actual: raw.len() as u64,
+                    allowed: budget,
+                });
+            }
+            Ok(raw.to_vec())
+        }
         METHOD_DEFLATE => {
             use std::io::Read as _;
             // Not `with_capacity(uncomp)`: that is an allocation sized from a header field, which

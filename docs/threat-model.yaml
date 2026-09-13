@@ -11,7 +11,7 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:bbdb703f64251ba95955a05bbb4b92e794a377eb651a2595e5e73b6464ebd63c
+prose_version: docs/threat-model.md@sha256:c730bd685454b45592cd40e8d0a00c2b1f92105de4437b55a7a735f206cf685c
 model_status: unratified-draft
 triage_policy: strict
 confidence:
@@ -573,7 +573,7 @@ contract_dimensions:
 - component: archive-parsing
   dimension: recursive-cyclic-topology
   status: claimed
-  conditions: recursion is structural, depth-limited to 4
+  conditions: recursion is structural; the default of 4 descends three levels (N parses N-1)
   property_id: P1
   provenance:
     kind: documented
@@ -1695,9 +1695,8 @@ properties_claimed:
   - panic, hang, wrong digest
   statement: Parsing a hostile artifact does not panic, escape its enforced limits — recursion, total
     expansion and entry count, but not the two D23 records as dead — or silently change a digest. Recursion
-    is depth-limited to 4, and a parse failure keeps the member inline and emits NestedParseFailed. Every
-    limit is enforced against what decompression produces, not against the size the input declares, and
-    every
+    is bounded by Limits::recursion, whose default of 4 descends three levels below the top — N parses
+    N-1, stricter than the name reads — and a parse failure keeps the member inline and emits NestedParseFailed.
   provenance:
     kind: documented
     source: docs/05 §2.2; crates/trigon-archive/src/zip.rs — `checked_add`; crates/trigon-archive/src/gzip.rs:25

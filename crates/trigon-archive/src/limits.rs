@@ -6,6 +6,13 @@
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// How deep nested archives may go before the walker stops descending.
+    ///
+    /// **`N` descends into `N - 1` levels.** `descend` is entered at depth 1 and returns when
+    /// `depth >= recursion`, so the shipped default of 4 parses three levels below the top and
+    /// `recursion: 1` descends into nothing. The name and this comment both read as four, and the
+    /// off-by-one is in the entry depth rather than in the comparison — so anyone correcting the
+    /// comparison to match the prose would *loosen* a limit on attacker-controlled nesting. Stated
+    /// rather than changed, because the direction is the safe one.
     pub recursion: u8,
     /// Above this, a member body spills to a temp file rather than sitting on the heap.
     pub max_inline_bytes: u64,
