@@ -156,7 +156,10 @@ impl Rates {
             .filter(|f| f.is_evidence())
             .collect();
         Rates {
-            reproduced: evidence.iter().filter(|f| **f == Family::Reproduced).count(),
+            reproduced: evidence
+                .iter()
+                .filter(|f| **f == Family::Reproduced)
+                .count(),
             evidence: evidence.len(),
             attempted: rows.len(),
         }
@@ -297,9 +300,10 @@ impl Sweep {
         // The sweep's own account of itself. A `status.json` that is present and will not parse is
         // `Unreadable` rather than absent: somebody wrote something, and a reader that treats the
         // two alike turns a torn write into "no sweep here".
-        let sweep: Option<crate::progress::Sweep> = std::fs::read_to_string(self.work.join("sweep.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok());
+        let sweep: Option<crate::progress::Sweep> =
+            std::fs::read_to_string(self.work.join("sweep.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok());
         let status_text = std::fs::read_to_string(self.work.join("status.json")).ok();
         let status: Option<crate::progress::Status> = status_text
             .as_deref()
@@ -497,7 +501,8 @@ fn liveness_detail(v: &View) -> String {
         ),
         L::Unreadable => note(
             "status.json is present and did not parse — a torn write, or a file from another \
-             version. The results below are still what the sweep recorded.".into(),
+             version. The results below are still what the sweep recorded."
+                .into(),
         ),
         L::Starting => note("no target has been attempted yet".into()),
         L::Running => match &v.status.as_ref().and_then(|s| s.current.clone()) {
@@ -535,7 +540,8 @@ fn liveness_detail(v: &View) -> String {
         ),
         L::Unresponsive => note(
             "the heartbeat stopped and the process is still there — wedged in a way that took the \
-             heartbeat with it. Worse than stopped.".into(),
+             heartbeat with it. Worse than stopped."
+                .into(),
         ),
         L::Finished => match v.sweep.as_ref().and_then(|s| s.finished.clone()) {
             Some(t) => note(format!("finished at {}", esc(&t))),
@@ -606,9 +612,11 @@ fn rates_panel(r: &Rates) -> String {
     let reproduction = match r.reproduction() {
         // `summarize`'s own sentence, and for its reason: 0% is a claim about the packages, and no
         // comparison happened to make it.
-        None => "<div><div class=\"note\" style=\"max-width:22rem\">no target reached a comparison, \
+        None => {
+            "<div><div class=\"note\" style=\"max-width:22rem\">no target reached a comparison, \
                  so there is no reproduction rate to report</div></div>"
-            .to_string(),
+                .to_string()
+        }
         Some(f) => format!(
             "<div><div class=\"rate ok\">{:.0}%</div>\
              <div class=\"dim\">{} of {} compared targets reproduced</div></div>",
@@ -675,10 +683,7 @@ fn baseline_panel(sweep: &Sweep, v: &View) -> String {
     };
     let b = other.read();
 
-    let mut out = format!(
-        "<h2>Against {}</h2>",
-        esc(&path.display().to_string())
-    );
+    let mut out = format!("<h2>Against {}</h2>", esc(&path.display().to_string()));
     match (
         v.sweep.as_ref().and_then(|s| s.targets_sha256.clone()),
         b.sweep.as_ref().and_then(|s| s.targets_sha256.clone()),
@@ -701,7 +706,11 @@ fn baseline_panel(sweep: &Sweep, v: &View) -> String {
         rows.iter()
             .map(|r| trigon_ai::Observation {
                 purl: r.purl.clone(),
-                outcome: r.label.parse::<trigon_core::Match>().ok().map(|m| m.to_string()),
+                outcome: r
+                    .label
+                    .parse::<trigon_core::Match>()
+                    .ok()
+                    .map(|m| m.to_string()),
                 model_calls: r.model_calls.unwrap_or(0),
                 is_evidence: Family::of(&r.label).is_evidence(),
             })
@@ -714,7 +723,10 @@ fn baseline_panel(sweep: &Sweep, v: &View) -> String {
         ("NO LONGER REPRODUCES", &f.broken),
         // Ours, not the change's. Filing it as a regression would make every flaky sweep look like
         // a bad change.
-        ("stopped producing evidence — ours, not the change's", &f.lost_evidence),
+        (
+            "stopped producing evidence — ours, not the change's",
+            &f.lost_evidence,
+        ),
         ("now produces evidence", &f.gained_evidence),
         ("in this sweep and not the baseline", &f.added),
     ];
@@ -724,7 +736,10 @@ fn baseline_panel(sweep: &Sweep, v: &View) -> String {
             continue;
         }
         said = true;
-        out.push_str(&format!("<p><strong>{} {heading}</strong></p><ul>", list.len()));
+        out.push_str(&format!(
+            "<p><strong>{} {heading}</strong></p><ul>",
+            list.len()
+        ));
         for p in list {
             out.push_str(&format!("<li><code>{}</code></li>", esc(p)));
         }
@@ -938,7 +953,10 @@ async fn cluster(
     let mut lines: BTreeMap<String, usize> = BTreeMap::new();
     let mut unread = 0;
     for m in &members {
-        match sweep.dir_of(&v, &m.purl).and_then(|(i, _)| read_log(&sweep.work, i)) {
+        match sweep
+            .dir_of(&v, &m.purl)
+            .and_then(|(i, _)| read_log(&sweep.work, i))
+        {
             Some(log) => {
                 let sig = trigon_core::classify(&log);
                 *lines.entry(sig.evidence.trim().to_string()).or_default() += 1;
@@ -1011,10 +1029,18 @@ async fn cluster(
 fn read_log(work: &Path, index: usize) -> Option<String> {
     // `<work>/NNN/rebuild/build.log`, which is where `run_one` writes it: the collect directory is
     // `args.work.join("rebuild")` and the log goes beside the artifacts in it.
-    std::fs::read_to_string(work.join(format!("{index:03}")).join("rebuild").join("build.log")).ok()
+    std::fs::read_to_string(
+        work.join(format!("{index:03}"))
+            .join("rebuild")
+            .join("build.log"),
+    )
+    .ok()
 }
 
-async fn run(State(sweep): State<std::sync::Arc<Sweep>>, UrlPath(index): UrlPath<usize>) -> Response {
+async fn run(
+    State(sweep): State<std::sync::Arc<Sweep>>,
+    UrlPath(index): UrlPath<usize>,
+) -> Response {
     let v = sweep.read();
     // The only path parameter anywhere, parsed as an integer by the extractor and re-formatted
     // before it is joined to anything, so no request string reaches the filesystem.
@@ -1117,7 +1143,13 @@ async fn run(State(sweep): State<std::sync::Arc<Sweep>>, UrlPath(index): UrlPath
     }
     body.push_str("<p><a href=\"/\">← all targets</a></p>");
 
-    page(&format!("target {index:03}"), v.live.is_live(), &body, &sweep.bind).into_response()
+    page(
+        &format!("target {index:03}"),
+        v.live.is_live(),
+        &body,
+        &sweep.bind,
+    )
+    .into_response()
 }
 
 /// What the run recorded about itself.
@@ -1157,7 +1189,10 @@ fn report_panel(dir: &Path) -> String {
         );
     }
     if let Some(d) = &r.strategy_digest {
-        row("strategy", format!("<code>{}</code>", esc(&d[..16.min(d.len())])));
+        row(
+            "strategy",
+            format!("<code>{}</code>", esc(&d[..16.min(d.len())])),
+        );
     }
     if let Some(e) = &r.egress {
         row(
@@ -1168,7 +1203,8 @@ fn report_panel(dir: &Path) -> String {
                 match r.attestable {
                     // The runner's own answer, not the flag's. A local run records no network
                     // transcript and is never attestable at full trust whatever tier was asked for.
-                    Some(false) => " · <span class=\"note\">not attestable: this runner records no \
+                    Some(false) =>
+                        " · <span class=\"note\">not attestable: this runner records no \
                                     network transcript</span>",
                     Some(true) => " · attestable",
                     None => "",
@@ -1180,10 +1216,7 @@ fn report_panel(dir: &Path) -> String {
         row("void", format!("<span class=\"void\">{}</span>", esc(v)));
     }
     if let Some(m) = &r.model {
-        row(
-            "model",
-            format!("{} · {} call(s)", esc(m), r.model_calls),
-        );
+        row("model", format!("{} · {} call(s)", esc(m), r.model_calls));
     }
     out.push_str("</table>");
 
@@ -1216,8 +1249,16 @@ fn report_panel(dir: &Path) -> String {
                 None => String::new(),
             },
             f.fault,
-            if f.retryable { "retryable" } else { "not retryable" },
-            if f.repairable { "repairable" } else { "nothing to repair" },
+            if f.retryable {
+                "retryable"
+            } else {
+                "not retryable"
+            },
+            if f.repairable {
+                "repairable"
+            } else {
+                "nothing to repair"
+            },
             esc(&f.evidence),
         ));
     }
@@ -1227,8 +1268,10 @@ fn report_panel(dir: &Path) -> String {
         for a in &r.assumptions {
             out.push_str(&format!("<li>{}</li>", esc(a)));
         }
-        out.push_str("</ul><p class=\"note\">a divergence has to be readable against the guesses \
-                      that produced it rather than taken as a fact about the package</p>");
+        out.push_str(
+            "</ul><p class=\"note\">a divergence has to be readable against the guesses \
+                      that produced it rather than taken as a fact about the package</p>",
+        );
     }
 
     if !r.repairs.is_empty() || r.repair_stopped.is_some() {
@@ -1292,7 +1335,9 @@ async fn store_panel(store: &Path, purl: &str) -> String {
         found.millis
     );
     out.push_str("<table>");
-    let mut row = |k: &str, v: String| out.push_str(&format!("<tr><td class=\"dim\">{k}</td><td>{v}</td></tr>"));
+    let mut row = |k: &str, v: String| {
+        out.push_str(&format!("<tr><td class=\"dim\">{k}</td><td>{v}</td></tr>"))
+    };
     row("outcome", esc(r.outcome.as_deref().unwrap_or("—")));
     row(
         "upstream",
@@ -1312,7 +1357,10 @@ async fn store_panel(store: &Path, purl: &str) -> String {
                 }
             ),
         ),
-        None => row("rebuild", "<span class=\"note\">none recorded</span>".into()),
+        None => row(
+            "rebuild",
+            "<span class=\"note\">none recorded</span>".into(),
+        ),
     }
     row(
         "environment",
@@ -1332,7 +1380,10 @@ async fn store_panel(store: &Path, purl: &str) -> String {
     if !r.guard_trips.is_empty() {
         row(
             "guard",
-            format!("<span class=\"void\">{}</span>", esc(&r.guard_trips.join("; "))),
+            format!(
+                "<span class=\"void\">{}</span>",
+                esc(&r.guard_trips.join("; "))
+            ),
         );
     }
     if !r.attestations.is_empty() {
@@ -1523,7 +1574,10 @@ mod tests {
     #[test]
     fn a_cluster_key_survives_the_query_string() {
         // Real keys carry slashes and colons: `cc/missing-header:python.h`.
-        assert_eq!(urlencode("cc/missing-header:python.h"), "cc%2Fmissing-header%3Apython.h");
+        assert_eq!(
+            urlencode("cc/missing-header:python.h"),
+            "cc%2Fmissing-header%3Apython.h"
+        );
         assert_eq!(urlencode("plain-key"), "plain-key");
     }
 
@@ -1549,7 +1603,11 @@ mod tests {
             phase: None,
             phase_elapsed_seconds: 0,
         };
-        assert!(phase_text(&c).contains("not yet recorded"), "{}", phase_text(&c));
+        assert!(
+            phase_text(&c).contains("not yet recorded"),
+            "{}",
+            phase_text(&c)
+        );
 
         c.phase = Some("deps".into());
         c.phase_elapsed_seconds = 1140;

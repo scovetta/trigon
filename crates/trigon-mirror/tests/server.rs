@@ -113,7 +113,10 @@ async fn a_toolchain_host_outside_the_allowlist_is_refused() {
     // internet under a different path.
     let m = Mirror::new().unwrap().serve(0).await.unwrap();
     let resp = reqwest::Client::new()
-        .get(format!("http://{}/-toolchain/evil.example/x.tar.gz", m.host()))
+        .get(format!(
+            "http://{}/-toolchain/evil.example/x.tar.gz",
+            m.host()
+        ))
         .send()
         .await
         .unwrap();
@@ -133,7 +136,9 @@ async fn a_toolchain_host_outside_the_allowlist_is_refused() {
     assert_eq!(resp.status(), 403);
 
     assert!(trigon_mirror::toolchain_host_allowed("nodejs.org"));
-    assert!(!trigon_mirror::toolchain_host_allowed("nodejs.org.evil.example"));
+    assert!(!trigon_mirror::toolchain_host_allowed(
+        "nodejs.org.evil.example"
+    ));
     m.shutdown().await;
 }
 
@@ -157,12 +162,17 @@ async fn an_artifact_host_outside_the_allowlist_is_refused() {
     assert!(body.contains("artifact"), "the route is named: {body}");
 
     // Exact match, not a suffix: the obvious `ends_with` rule accepts this.
-    let resp = get("/-artifact/npm/2024-01-01T00:00:00Z/registry.npmjs.org.evil.example/x".into()).await;
+    let resp =
+        get("/-artifact/npm/2024-01-01T00:00:00Z/registry.npmjs.org.evil.example/x".into()).await;
     assert_eq!(resp.status(), 403);
 
     assert!(trigon_mirror::artifact_host_allowed("registry.npmjs.org"));
-    assert!(trigon_mirror::artifact_host_allowed("files.pythonhosted.org"));
-    assert!(!trigon_mirror::artifact_host_allowed("registry.npmjs.org.evil.example"));
+    assert!(trigon_mirror::artifact_host_allowed(
+        "files.pythonhosted.org"
+    ));
+    assert!(!trigon_mirror::artifact_host_allowed(
+        "registry.npmjs.org.evil.example"
+    ));
     assert!(!trigon_mirror::artifact_host_allowed("example.com"));
     m.shutdown().await;
 }
@@ -183,7 +193,12 @@ async fn a_toolchain_download_comes_back_through_the_mirror() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert!(resp.text().await.unwrap().contains("node-v9.2.1-linux-x64.tar.gz"));
+    assert!(
+        resp.text()
+            .await
+            .unwrap()
+            .contains("node-v9.2.1-linux-x64.tar.gz")
+    );
     assert_eq!(m.observed().toolchain_requests, 1);
     // And it counts as contact, so a run cannot report "the mirror was never asked for anything"
     // while the toolchain came through it.

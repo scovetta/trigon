@@ -249,7 +249,10 @@ impl Provider for Replaying {
 }
 
 fn sha(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -375,7 +378,10 @@ mod tests {
         let mut req = request("sys", "body");
         req.model = "claude-latest".into();
         r.complete(&req).unwrap();
-        assert_eq!(r.transcript("t").turns[0].model, "claude-haiku-4-5-20251001");
+        assert_eq!(
+            r.transcript("t").turns[0].model,
+            "claude-haiku-4-5-20251001"
+        );
         assert!(r.transcript("t").replayable());
     }
 

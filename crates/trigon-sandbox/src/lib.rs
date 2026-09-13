@@ -13,14 +13,13 @@ mod network;
 mod podman;
 mod runner;
 
+pub use dockerfile::install_command;
 pub use dockerfile::{BuildContext, render as render_context};
 pub use error::SandboxError;
 pub use model::{
-    EventSink,
-    BuildEvent, BuildOutcome, BuildPlan, EgressTier, IsolationClass, Limits, ObservabilityTier,
-    OciPlan, Phase, RunOpts, RunnerCaps,
+    BuildEvent, BuildOutcome, BuildPlan, EgressTier, EventSink, IsolationClass, Limits,
+    ObservabilityTier, OciPlan, Phase, RunOpts, RunnerCaps,
 };
 pub use network::Island;
-pub use dockerfile::install_command;
 pub use podman::{PodmanRunner, failing_phase as failing_phase_for_test};
 pub use runner::{BuildHandle, BuildRunner, route};

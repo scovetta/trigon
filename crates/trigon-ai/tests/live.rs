@@ -47,7 +47,10 @@ fn ollama_answers_and_reports_what_it_spent() {
         pinned.starts_with(&model) && pinned.contains('@'),
         "the tag was not pinned to a digest: {pinned}"
     );
-    assert!(trigon_ai::is_snapshot(&pinned), "{pinned} is not replayable");
+    assert!(
+        trigon_ai::is_snapshot(&pinned),
+        "{pinned} is not replayable"
+    );
 
     let resp = p.complete(&request(&model, "Say hello.")).unwrap();
     assert!(!resp.text.trim().is_empty());
@@ -58,7 +61,10 @@ fn ollama_answers_and_reports_what_it_spent() {
     // And the pinned form is what a run addresses it by: the digest is stripped on the way out and
     // put back on the way in. Asking for it literally returns `invalid model name`.
     let pinned_resp = p.complete(&request(&pinned, "Say hello.")).unwrap();
-    assert_eq!(pinned_resp.model, pinned, "the pin was lost: {pinned_resp:?}");
+    assert_eq!(
+        pinned_resp.model, pinned,
+        "the pin was lost: {pinned_resp:?}"
+    );
 }
 
 #[test]

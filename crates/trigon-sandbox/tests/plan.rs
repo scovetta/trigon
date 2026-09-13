@@ -42,7 +42,10 @@ fn the_context_runs_deps_at_image_build_time_and_writes_the_build() {
 
     // Each phase is a COPY plus a RUN, which is what buys layer caching across sibling versions and
     // per-phase timings from layer metadata.
-    assert!(c.files["setup.sh"].contains("dpkg -s"), "an enforced tier checks rather than installs");
+    assert!(
+        c.files["setup.sh"].contains("dpkg -s"),
+        "an enforced tier checks rather than installs"
+    );
     assert!(c.files["source.sh"].contains("git checkout --force 'cafebabe'"));
     assert!(c.files["deps.sh"].contains("python3 -m venv /deps"));
 
@@ -135,7 +138,10 @@ fn an_enforced_tier_checks_its_base_image_instead_of_installing_into_it() {
     let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
     let setup = render_context(&p, false).files["setup.sh"].clone();
     assert!(setup.contains("dpkg -s"), "{setup}");
-    assert!(!setup.contains("apt-get install"), "nothing is installed: {setup}");
+    assert!(
+        !setup.contains("apt-get install"),
+        "nothing is installed: {setup}"
+    );
     // And it says what to do about a package that is absent, because "missing curl" is not an
     // instruction.
     assert!(setup.contains("trigon base-image"), "{setup}");
@@ -154,8 +160,16 @@ fn a_supplied_checkout_is_copied_in_rather_than_cloned() {
     // so a phase that needs the repository can only run inside the boundary if the repository is
     // already there.
     let BuildPlan::Oci(mut p) = plan(EgressTier::MirrorOnly);
-    assert!(render_context(&p, false).dockerfile.contains("RUN mkdir -p /src /out"));
-    assert!(!render_context(&p, false).dockerfile.contains("COPY src /src"));
+    assert!(
+        render_context(&p, false)
+            .dockerfile
+            .contains("RUN mkdir -p /src /out")
+    );
+    assert!(
+        !render_context(&p, false)
+            .dockerfile
+            .contains("COPY src /src")
+    );
 
     p.source_tree = Some(std::path::PathBuf::from("/somewhere/checkout"));
     let d = render_context(&p, false).dockerfile;

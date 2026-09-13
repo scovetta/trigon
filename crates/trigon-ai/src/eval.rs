@@ -319,8 +319,14 @@ mod tests {
         // stabilizer that no longer has to fire is a fact about the rebuild.
         assert_eq!(f.changed.len(), 1);
         assert_eq!(f.changed[0].purl, "pkg:npm/c@1");
-        assert_eq!((f.changed[0].from.as_str(), f.changed[0].to.as_str()), ("normalized", "exact"));
-        assert!(!f.is_net_gain(), "one fixed and one broken is a trade, not a gain");
+        assert_eq!(
+            (f.changed[0].from.as_str(), f.changed[0].to.as_str()),
+            ("normalized", "exact")
+        );
+        assert!(
+            !f.is_net_gain(),
+            "one fixed and one broken is a trade, not a gain"
+        );
     }
 
     #[test]
@@ -333,7 +339,10 @@ mod tests {
         lost.is_evidence = false;
         let f = flips(&before, &[lost]);
 
-        assert!(f.broken.is_empty(), "an infra fault is not a package that stopped reproducing");
+        assert!(
+            f.broken.is_empty(),
+            "an infra fault is not a package that stopped reproducing"
+        );
         assert_eq!(f.lost_evidence, ["pkg:npm/a@1"]);
         // And it is not a gain either: nothing was fixed and something is unexplained.
         assert!(!f.is_net_gain());
@@ -347,7 +356,10 @@ mod tests {
         let f = flips(&before, &after);
         assert_eq!(f.dropped, ["pkg:npm/gone@1"]);
         assert_eq!(f.added, ["pkg:npm/new@1"]);
-        assert!(f.fixed.is_empty(), "a target that was not in the baseline was not fixed by this");
+        assert!(
+            f.fixed.is_empty(),
+            "a target that was not in the baseline was not fixed by this"
+        );
     }
 
     #[test]

@@ -89,7 +89,12 @@ impl SourceCache {
         })?;
 
         git(&path, &["init", "--quiet"], &repo, self.local)?;
-        git(&path, &["remote", "add", "origin", &repo], &repo, self.local)?;
+        git(
+            &path,
+            &["remote", "add", "origin", &repo],
+            &repo,
+            self.local,
+        )?;
         git(
             &path,
             &["fetch", "--quiet", "--depth", "1", "origin", &commit],
@@ -268,7 +273,12 @@ fn git(dir: &Path, args: &[&str], repo: &str, local: bool) -> Result<(), Registr
     Ok(())
 }
 
-fn git_output(dir: &Path, args: &[&str], repo: &str, local: bool) -> Result<Vec<u8>, RegistryError> {
+fn git_output(
+    dir: &Path,
+    args: &[&str],
+    repo: &str,
+    local: bool,
+) -> Result<Vec<u8>, RegistryError> {
     let out = command(dir, local)
         .args(args)
         .output()

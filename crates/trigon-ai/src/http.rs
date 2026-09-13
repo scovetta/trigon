@@ -112,7 +112,11 @@ pub struct OpenAiCompatible {
 
 impl OpenAiCompatible {
     /// `base` is everything up to `/chat/completions`, usually ending in `/v1`.
-    pub fn new(base: impl Into<String>, api_key: Option<String>, flavor: Flavor) -> Result<Self, LlmError> {
+    pub fn new(
+        base: impl Into<String>,
+        api_key: Option<String>,
+        flavor: Flavor,
+    ) -> Result<Self, LlmError> {
         Ok(OpenAiCompatible {
             client: client()?,
             base: base.into().trim_end_matches('/').to_string(),
@@ -192,7 +196,10 @@ impl OpenAiCompatible {
         // caches at all caches on an exact prefix. Joined rather than sent one message per part:
         // the split that matters is the cache breakpoint, and the rest is noise on the wire.
         let at = req.prompt.cache_breakpoint();
-        for (parts, _) in [(&req.prompt.parts[..at], true), (&req.prompt.parts[at..], false)] {
+        for (parts, _) in [
+            (&req.prompt.parts[..at], true),
+            (&req.prompt.parts[at..], false),
+        ] {
             if parts.is_empty() {
                 continue;
             }
@@ -522,7 +529,9 @@ fn send(
 #[cfg(test)]
 fn probe(system: &str) -> Request {
     Request {
-        prompt: crate::provider::Prompt::new(system).stable("prelude").volatile("this target"),
+        prompt: crate::provider::Prompt::new(system)
+            .stable("prelude")
+            .volatile("this target"),
         model: "m".into(),
         max_output_tokens: 100,
         temperature: 0.0,
@@ -586,7 +595,8 @@ mod tests {
         // Ten minutes is right for a hosted endpoint and wrong for a local one: a CPU-only host
         // spends tens of minutes reading a Builder prompt before it writes anything, so the short
         // bound fails the run mid-prompt and reads as a broken provider rather than a slow model.
-        let local = OpenAiCompatible::new("http://localhost:11434/v1", None, Flavor::Ollama).unwrap();
+        let local =
+            OpenAiCompatible::new("http://localhost:11434/v1", None, Flavor::Ollama).unwrap();
         assert_eq!(local.timeout, Duration::from_secs(3600));
 
         for flavor in [Flavor::OpenAi, Flavor::OpenRouter, Flavor::Other] {

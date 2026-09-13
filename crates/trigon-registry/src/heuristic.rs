@@ -24,12 +24,16 @@ use crate::tags;
 /// The build this package declares that its packaging tool will not run, from the evidence the
 /// resolver recorded.
 fn unrun_build(target: &ResolvedTarget) -> Option<(String, String)> {
-    target.intrinsics.evidence.iter().find_map(|e| match &e.claim {
-        trigon_core::Claim::UnrunScript { name, command } => {
-            Some((name.clone(), command.clone()))
-        }
-        _ => None,
-    })
+    target
+        .intrinsics
+        .evidence
+        .iter()
+        .find_map(|e| match &e.claim {
+            trigon_core::Claim::UnrunScript { name, command } => {
+                Some((name.clone(), command.clone()))
+            }
+            _ => None,
+        })
 }
 
 /// Whether a command is one program with literal arguments.
@@ -198,7 +202,12 @@ impl StrategyInferrer for NpmInferrer {
                              `npm pack` runs no script that would build {}, so `npm run {script}` \
                              is run first",
                             plural(missing.len(), "file"),
-                            missing.iter().take(4).cloned().collect::<Vec<_>>().join(", "),
+                            missing
+                                .iter()
+                                .take(4)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", "),
                             if missing.len() == 1 { "it" } else { "them" },
                         ));
                         assumptions.push(format!(

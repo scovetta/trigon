@@ -592,7 +592,11 @@ mod tests {
         let s = classify("+ npx --yes pack\n/build: 2: npx: not found");
         assert_eq!(s.code, "env/missing-tool");
         assert_eq!(s.subject.as_deref(), Some("npx"));
-        assert_eq!(s.fault, Fault::Bug, "our image lacks it, the package is fine");
+        assert_eq!(
+            s.fault,
+            Fault::Bug,
+            "our image lacks it, the package is fine"
+        );
         assert!(s.repairable);
     }
 
@@ -665,8 +669,16 @@ mod tests {
             "--2026-09-12 13:44:18--  http://timewarp:8129/-toolchain/nodejs.org/dist/v9.2.1/node-v9.2.1-linux-x64.tar.gz\n             Connecting to timewarp (timewarp)|10.89.0.2|:8129... connected.\n             HTTP request sent, awaiting response... 400 Bad Request\n             2026-09-12 13:44:18 ERROR 400: Bad Request.",
         );
         assert_eq!(s.code, "net/http-error");
-        assert_eq!(s.subject.as_deref(), Some("400"), "the status is what clusters");
-        assert_eq!(s.fault, Fault::Policy, "the route was wrong, not the package");
+        assert_eq!(
+            s.subject.as_deref(),
+            Some("400"),
+            "the status is what clusters"
+        );
+        assert_eq!(
+            s.fault,
+            Fault::Policy,
+            "the route was wrong, not the package"
+        );
         assert!(s.repairable);
         assert!(!s.retryable, "the same request gets the same answer");
     }

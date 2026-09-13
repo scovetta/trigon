@@ -411,7 +411,10 @@ mod tests {
                 "scripts": { "build": "tsc", hook: "npm run build" },
                 "devDependencies": { "tsc": "2.0.0" },
             }));
-            assert_eq!(got, None, "a declared `{hook}` means something already builds");
+            assert_eq!(
+                got, None,
+                "a declared `{hook}` means something already builds"
+            );
         }
     }
 
@@ -448,7 +451,10 @@ mod tests {
 
     #[test]
     fn a_package_with_no_build_says_nothing() {
-        assert_eq!(doc(serde_json::json!({ "scripts": { "test": "mocha" } })), None);
+        assert_eq!(
+            doc(serde_json::json!({ "scripts": { "test": "mocha" } })),
+            None
+        );
         assert_eq!(doc(serde_json::json!({})), None);
         // Present but empty, or not a string: absent, not a claim about an empty command.
         assert_eq!(doc(serde_json::json!({ "scripts": { "build": "" } })), None);

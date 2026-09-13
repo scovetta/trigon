@@ -223,7 +223,10 @@ fn parse(stdout: &str, stderr: &str, asked_for: &str) -> Result<Response, LlmErr
             None => LlmError::Malformed(format!(
                 "no assistant message among {} events; the last was {}",
                 events.len(),
-                events.last().map(|e| e["type"].to_string()).unwrap_or_default()
+                events
+                    .last()
+                    .map(|e| e["type"].to_string())
+                    .unwrap_or_default()
             )),
         });
     };
@@ -249,12 +252,21 @@ fn parse(stdout: &str, stderr: &str, asked_for: &str) -> Result<Response, LlmErr
         usage,
         // What answered. `--model auto` lets Copilot choose, and this is the only place that says
         // which one it chose.
-        model: answer["data"]["model"].as_str().unwrap_or(asked_for).to_string(),
+        model: answer["data"]["model"]
+            .as_str()
+            .unwrap_or(asked_for)
+            .to_string(),
         stop_reason: events
             .iter()
             .find(|e| e["type"] == "result")
             .and_then(|e| e["exitCode"].as_i64())
-            .map(|c| if c == 0 { "end_turn".into() } else { format!("exit_{c}") })
+            .map(|c| {
+                if c == 0 {
+                    "end_turn".into()
+                } else {
+                    format!("exit_{c}")
+                }
+            })
             .unwrap_or_else(|| "unknown".into()),
     })
 }

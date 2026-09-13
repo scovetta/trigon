@@ -254,7 +254,11 @@ fn a_gzip_bomb_is_refused_at_the_limit_rather_than_inflated() {
     // *declares*, and gzip took no limits at all — so this inflated in full whatever the caller
     // asked for. `.tar.gz` is every npm package, so this is the hot path, not an exotic one.
     let bomb = gzip_bomb(64 * 1024 * 1024);
-    assert!(bomb.len() < 100_000, "the point is that it is small: {}", bomb.len());
+    assert!(
+        bomb.len() < 100_000,
+        "the point is that it is small: {}",
+        bomb.len()
+    );
 
     let limits = Limits {
         total_expanded_bytes: 1024 * 1024,

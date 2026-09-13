@@ -144,7 +144,10 @@ impl trigon_registry::StrategyInferrer for ModelInferrer {
 /// art spent three on. It is printed beside a divergence so the result can be read against the
 /// reasoning that produced it rather than as a fact about the package.
 fn assumptions(c: &trigon_ai::Candidate) -> Vec<String> {
-    let mut out = vec![format!("a model proposed this recipe: {}", first_line(&c.diagnosis))];
+    let mut out = vec![format!(
+        "a model proposed this recipe: {}",
+        first_line(&c.diagnosis)
+    )];
     if let Some(said) = &c.confidence {
         out.push(format!(
             "the model called its own confidence `{said}`, which nothing downstream acts on"
@@ -272,10 +275,14 @@ impl Provider for Counting {
         self.inner.reasoning()
     }
 
-    fn complete(&self, req: &trigon_ai::Request) -> Result<trigon_ai::Response, trigon_ai::LlmError> {
+    fn complete(
+        &self,
+        req: &trigon_ai::Request,
+    ) -> Result<trigon_ai::Response, trigon_ai::LlmError> {
         // Before the call, not after it: a call that failed still cost something and still happened,
         // and a counter that only counts successes understates exactly the runs worth looking at.
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let resp = self.inner.complete(req)?;
         if let Ok(mut u) = self.spent.lock() {
             u.input += resp.usage.input;
@@ -344,7 +351,11 @@ impl Configured {
                     std::env::temp_dir().join("trigon-copilot"),
                 )?),
                 // `auto` lets Copilot pick, and the transcript records what answered.
-                if rest.is_empty() { "auto".into() } else { rest.to_string() },
+                if rest.is_empty() {
+                    "auto".into()
+                } else {
+                    rest.to_string()
+                },
             )),
             "anthropic" => Ok(Self::live(
                 Box::new(trigon_ai::Anthropic::new(
@@ -452,7 +463,9 @@ impl Configured {
             .source
             .as_ref()
             .filter(|s| !s.commit.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("no source commit, so there is no repository to read"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("no source commit, so there is no repository to read")
+            })?;
         let checkout = SourceCache::new(&self.cache_root)
             .checkout(&source.repo_url, &source.commit)
             .context("fetching the source for a repair")?;
@@ -655,7 +668,10 @@ mod tests {
 
         let got = r.infer(&target(&repo, &commit)).await.unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].derivation, trigon_registry::Derivation::ModelAssisted);
+        assert_eq!(
+            got[0].derivation,
+            trigon_registry::Derivation::ModelAssisted
+        );
         // Never promoted on what the model said about itself, whatever it said.
         assert_eq!(got[0].confidence, Confidence::Weak);
         assert!(
@@ -690,7 +706,10 @@ mod tests {
             .infer(&t)
             .await
             .unwrap();
-        assert_eq!(replayed, live, "the replay did not reproduce the derivation");
+        assert_eq!(
+            replayed, live,
+            "the replay did not reproduce the derivation"
+        );
     }
 
     #[tokio::test]

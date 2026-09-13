@@ -881,14 +881,13 @@ mod registry {
         // The registry did not record a commit, which is every PyPI project. A tag named for the
         // version usually exists and is what a rebuild will use, so `resolve` asks the same
         // question rather than reporting a dead end the next command silently answers.
-        let tag = match &resolved.source {
-            Some(s) if s.commit.is_empty() => rt.block_on(trigon_registry::resolve_version_tag(
-                &client,
-                &s.repo_url,
-                &target.version,
-            )),
-            _ => None,
-        };
+        let tag =
+            match &resolved.source {
+                Some(s) if s.commit.is_empty() => rt.block_on(
+                    trigon_registry::resolve_version_tag(&client, &s.repo_url, &target.version),
+                ),
+                _ => None,
+            };
 
         match output {
             OutputFormat::Json => {
@@ -1042,15 +1041,14 @@ mod build {
             // refuse it for a repository it never intended to use. Failing here costs nothing the
             // boundary depends on: the image build still has no network, so a source phase that
             // does need to clone fails there instead, with the network error that says so.
-            (_, None) => match crate::strategy_location(file, import)
-                .and_then(|(_, loc)| {
-                    let cache = trigon_registry::SourceCache::new(
-                        source_cache
-                            .map(Path::to_path_buf)
-                            .unwrap_or_else(trigon_registry::SourceCache::default_root),
-                    );
-                    Ok(cache.checkout(&loc.repo, &loc.git_ref)?.path)
-                }) {
+            (_, None) => match crate::strategy_location(file, import).and_then(|(_, loc)| {
+                let cache = trigon_registry::SourceCache::new(
+                    source_cache
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(trigon_registry::SourceCache::default_root),
+                );
+                Ok(cache.checkout(&loc.repo, &loc.git_ref)?.path)
+            }) {
                 Ok(p) => Some(p),
                 Err(e) => {
                     tracing::debug!("no host checkout, so the source phase runs as written: {e:#}");
@@ -1578,8 +1576,7 @@ fn strategy_location(file: &Path, import: bool) -> Result<(String, trigon_strate
             .with_context(|| format!("importing {}", file.display()))?
             .strategy
     } else {
-        trigon_strategy::from_yaml(&src)
-            .with_context(|| format!("parsing {}", file.display()))?
+        trigon_strategy::from_yaml(&src).with_context(|| format!("parsing {}", file.display()))?
     };
     let loc = strategy.location().cloned().ok_or_else(|| {
         anyhow::anyhow!(
@@ -1982,7 +1979,11 @@ mod rebuild {
         out
     }
 
-    fn run_inner(args: Args, verbose: bool, report: &mut crate::progress::RunReport) -> Result<Ran> {
+    fn run_inner(
+        args: Args,
+        verbose: bool,
+        report: &mut crate::progress::RunReport,
+    ) -> Result<Ran> {
         // The phases before the sandbox. The build reports its own; these are ours, and without
         // them a page watching a target sits on "not recorded" for the minute it takes to resolve
         // a package and fetch an artifact — which is indistinguishable from a hang.
@@ -2246,8 +2247,8 @@ mod rebuild {
                 // only the sink was missing.
                 {
                     let (phases, timings) = (args.phases.clone(), timings.clone());
-                    Some(std::sync::Arc::new(move |e: &trigon_sandbox::BuildEvent| {
-                        match e {
+                    Some(
+                        std::sync::Arc::new(move |e: &trigon_sandbox::BuildEvent| match e {
                             trigon_sandbox::BuildEvent::PhaseStart(phase) => {
                                 if let Some(p) = &phases {
                                     p.phase(&phase.to_string());
@@ -2255,15 +2256,12 @@ mod rebuild {
                             }
                             trigon_sandbox::BuildEvent::PhaseEnd { phase, duration } => {
                                 if let Ok(mut t) = timings.lock() {
-                                    t.push((
-                                        phase.to_string(),
-                                        duration.map(|d| d.as_secs_f64()),
-                                    ));
+                                    t.push((phase.to_string(), duration.map(|d| d.as_secs_f64())));
                                 }
                             }
                             _ => {}
-                        }
-                    }) as trigon_sandbox::EventSink)
+                        }) as trigon_sandbox::EventSink,
+                    )
                 },
                 args.source_cache.as_deref(),
             );
@@ -2302,8 +2300,11 @@ mod rebuild {
                 // difference codes. Two divergences that differ the same way are the model
                 // restating, exactly as two builds that fail the same way are.
                 let failure = divergence_signature(&comparison);
-                match repairs.next(&failure, &trigon_ai::NoPrior, repair_started.elapsed().as_secs())
-                {
+                match repairs.next(
+                    &failure,
+                    &trigon_ai::NoPrior,
+                    repair_started.elapsed().as_secs(),
+                ) {
                     trigon_ai::Decision::Stop(reason) => {
                         if verbose {
                             println!("  repair     stopped: {}", stop_reason(&reason));
@@ -2375,7 +2376,11 @@ mod rebuild {
                 break (built, strategy_digest);
             };
 
-            match repairs.next(&failure, &trigon_ai::NoPrior, repair_started.elapsed().as_secs()) {
+            match repairs.next(
+                &failure,
+                &trigon_ai::NoPrior,
+                repair_started.elapsed().as_secs(),
+            ) {
                 trigon_ai::Decision::Stop(reason) => {
                     // Said out loud. Which stop rule fired is the difference between "the budget
                     // is too small", "we have no rule for this" and "working as intended", and a
@@ -2755,7 +2760,6 @@ mod rebuild {
         })
     }
 
-
     /// An error that stopped one target, as an outcome.
     fn classify<E: trigon_core::Classify + std::fmt::Display>(e: &E) -> Outcome {
         Outcome::Failed {
@@ -2825,7 +2829,8 @@ mod rebuild {
         for code in codes.into_iter().flatten() {
             classes.insert(code.split('@').next().unwrap_or(code));
         }
-        let subject = (!classes.is_empty()).then(|| classes.into_iter().collect::<Vec<_>>().join(","));
+        let subject =
+            (!classes.is_empty()).then(|| classes.into_iter().collect::<Vec<_>>().join(","));
         trigon_core::FailureSignature {
             code: std::borrow::Cow::Borrowed("divergence"),
             subject,
@@ -2902,9 +2907,9 @@ mod rebuild {
                 "two attempts failed the same way ({signature}), so the model is restating rather \
                  than searching"
             ),
-            S::BelowPrevalenceThreshold { score, threshold } => format!(
-                "prevalence {score:.3} is below the sweep's threshold of {threshold:.3}"
-            ),
+            S::BelowPrevalenceThreshold { score, threshold } => {
+                format!("prevalence {score:.3} is below the sweep's threshold of {threshold:.3}")
+            }
             S::IterationCap { cap } => format!("the iteration cap of {cap} was reached"),
             S::BudgetExhausted { what } => format!("the {what} budget was exhausted"),
             S::Repaired => "the build succeeded".into(),
@@ -2968,7 +2973,8 @@ mod rebuild {
         use super::*;
 
         fn tmpdir(tag: &str) -> PathBuf {
-            let d = std::env::temp_dir().join(format!("trigon-collect-{tag}-{}", std::process::id()));
+            let d =
+                std::env::temp_dir().join(format!("trigon-collect-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
             std::fs::create_dir_all(&d).unwrap();
             d
@@ -3026,13 +3032,7 @@ mod mirror {
     /// puts modules for it ahead of the pinned toolchain, which is `env/toolchain-crashed` on the
     /// M1 corpus and not a vintage problem. A strategy that truly needs the distribution's npm has
     /// to say so in its own image.
-    const DEFAULT_PACKAGES: &[&str] = &[
-        "ca-certificates",
-        "git",
-        "libatomic",
-        "python3",
-        "wget",
-    ];
+    const DEFAULT_PACKAGES: &[&str] = &["ca-certificates", "git", "libatomic", "python3", "wget"];
 
     /// Build a base image that carries what an enforced tier cannot install.
     pub fn base_image(from: &str, packages: &[String], tag: &str, print: bool) -> Result<()> {
@@ -3075,11 +3075,20 @@ mod mirror {
         }
         // The digest, because `--image` refuses a tag and this is the number the operator needs.
         let out = std::process::Command::new("podman")
-            .args(["image", "inspect", tag, "--format", "{{index .RepoDigests 0}}"])
+            .args([
+                "image",
+                "inspect",
+                tag,
+                "--format",
+                "{{index .RepoDigests 0}}",
+            ])
             .output();
         match out {
             Ok(o) if o.status.success() && !o.stdout.is_empty() => {
-                println!("\n{tag} is ready: {}", String::from_utf8_lossy(&o.stdout).trim());
+                println!(
+                    "\n{tag} is ready: {}",
+                    String::from_utf8_lossy(&o.stdout).trim()
+                );
             }
             // A locally built image has no repository digest until it is pushed, so the id is what
             // the operator passes. It names exactly one set of bytes in the local store, which is
@@ -3092,8 +3101,10 @@ mod mirror {
                     .filter(|o| o.status.success())
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .unwrap_or_default();
-                println!("\n{tag} is ready. It has no repository digest until it is pushed, so \
-                          pass its id:\n\n    --image {id}");
+                println!(
+                    "\n{tag} is ready. It has no repository digest until it is pushed, so \
+                          pass its id:\n\n    --image {id}"
+                );
             }
         }
         Ok(())
@@ -3140,7 +3151,10 @@ mod mirror {
         println!("building {tag} (this compiles trigon in a container; it takes a few minutes)");
         let status = std::process::Command::new("podman")
             .arg("build")
-            .args(["--label", &format!("{SOURCE_LABEL}={}", source_digest(&root)?)])
+            .args([
+                "--label",
+                &format!("{SOURCE_LABEL}={}", source_digest(&root)?),
+            ])
             .args(["--tag", tag, "--file"])
             .arg(&dockerfile)
             .arg("--ignorefile")
@@ -3191,7 +3205,12 @@ mod mirror {
         files.sort();
         let mut h = sha2::Sha256::new();
         for f in &files {
-            h.update(f.strip_prefix(root).unwrap_or(f).to_string_lossy().as_bytes());
+            h.update(
+                f.strip_prefix(root)
+                    .unwrap_or(f)
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
             h.update([0]);
             h.update(std::fs::read(f).with_context(|| format!("reading {}", f.display()))?);
             h.update([0]);
@@ -3496,7 +3515,12 @@ mod sweep {
                 let calls = f.next().and_then(|c| c.parse().ok()).unwrap_or(0);
                 out.insert(
                     purl.to_string(),
-                    (label.to_string(), secs.parse().unwrap_or(0.0), cluster, calls),
+                    (
+                        label.to_string(),
+                        secs.parse().unwrap_or(0.0),
+                        cluster,
+                        calls,
+                    ),
                 );
             }
         }
@@ -3648,7 +3672,10 @@ mod sweep {
             let got = completed(&p);
             let (_, _, _, calls) = got.get("pkg:npm/a@1").unwrap();
             assert_eq!(*calls, 3);
-            assert_eq!(Outcome::Recorded("normalized".into(), None, *calls).model_calls(), 3);
+            assert_eq!(
+                Outcome::Recorded("normalized".into(), None, *calls).model_calls(),
+                3
+            );
         }
 
         #[test]
@@ -3922,7 +3949,10 @@ fn score_run(
         let sections: [(&str, &[String]); 5] = [
             ("now reproduces", &f.fixed),
             ("NO LONGER REPRODUCES", &f.broken),
-            ("stopped producing evidence (ours, not the rule's)", &f.lost_evidence),
+            (
+                "stopped producing evidence (ours, not the rule's)",
+                &f.lost_evidence,
+            ),
             ("now produces evidence", &f.gained_evidence),
             ("in this run and not the baseline", &f.added),
         ];

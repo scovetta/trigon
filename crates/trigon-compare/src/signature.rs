@@ -322,7 +322,10 @@ mod tests {
         let ours = tar(&["pkg/package.json", "pkg/readme.md"]);
 
         let codes = signature(&published, &ours);
-        assert!(codes.contains("member-only-in-reference@pkg/dist/index.js"), "{codes:?}");
+        assert!(
+            codes.contains("member-only-in-reference@pkg/dist/index.js"),
+            "{codes:?}"
+        );
         assert!(
             !codes.iter().any(|c| c.starts_with("member-only-in-ours@")),
             "the rebuild has no file the published artifact lacks: {codes:?}"

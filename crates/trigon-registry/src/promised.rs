@@ -170,7 +170,12 @@ mod tests {
         // what the manifest promises, byte for byte, and re-generating it under today's floating
         // dependency versions is how a rule meant to fix a divergence creates one.
         let manifest = serde_json::json!({ "main": "dist/axios.js", "types": "index.d.ts" });
-        let repo = tracked(&["dist/axios.js", "index.d.ts", "lib/axios.js", "package.json"]);
+        let repo = tracked(&[
+            "dist/axios.js",
+            "index.d.ts",
+            "lib/axios.js",
+            "package.json",
+        ]);
         assert!(shortfall(&manifest, &repo).is_empty());
     }
 

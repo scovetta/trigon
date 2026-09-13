@@ -38,7 +38,11 @@ fn git(dir: &Path, args: &[&str]) {
 fn fixture(root: &Path) -> (PathBuf, String) {
     let repo = root.join("origin");
     std::fs::create_dir_all(repo.join("src")).unwrap();
-    std::fs::write(repo.join("package.json"), "{\"name\":\"a\",\"version\":\"1.0.0\"}\n").unwrap();
+    std::fs::write(
+        repo.join("package.json"),
+        "{\"name\":\"a\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
     std::fs::write(repo.join("src").join("index.js"), "module.exports = 1;\n").unwrap();
     git(&repo, &["init", "--quiet", "-b", "main"]);
     git(&repo, &["add", "-A"]);
@@ -151,5 +155,8 @@ fn the_reader_lists_tracked_files_and_reads_the_manifests_it_knows() {
     assert!(c.read(&["package.json"], 4).is_empty());
 
     // And nothing outside the checkout, whatever the caller asks for.
-    assert!(c.read(&["../../etc/passwd", "/etc/passwd"], 64 * 1024).is_empty());
+    assert!(
+        c.read(&["../../etc/passwd", "/etc/passwd"], 64 * 1024)
+            .is_empty()
+    );
 }

@@ -133,7 +133,8 @@ impl Progress {
                     if let Ok(mut s) = shared.lock() {
                         s.heartbeat = crate::now_rfc3339();
                         if let Some(c) = &mut s.current {
-                            c.elapsed_seconds = c.elapsed_seconds.saturating_add(HEARTBEAT.as_secs());
+                            c.elapsed_seconds =
+                                c.elapsed_seconds.saturating_add(HEARTBEAT.as_secs());
                             c.phase_elapsed_seconds =
                                 c.phase_elapsed_seconds.saturating_add(HEARTBEAT.as_secs());
                         }
@@ -261,7 +262,9 @@ pub enum Liveness {
     Starting,
     Running,
     /// Alive, heartbeating, and on the same target for longer than the sweep's own timeout.
-    Stuck { seconds: u64 },
+    Stuck {
+        seconds: u64,
+    },
     /// The heartbeat stopped and the process is gone.
     Stopped,
     /// The heartbeat stopped and the process is still there. Worse than stopped: it is wedged in a
@@ -363,9 +366,15 @@ mod tests {
         // Not a threshold this page invented: the sweep declared how long one target may take, and
         // a target past it is wrong by that standard.
         let s = status("running", Some(700));
-        assert_eq!(Liveness::of(&s, 2, true, 600), Liveness::Stuck { seconds: 700 });
+        assert_eq!(
+            Liveness::of(&s, 2, true, 600),
+            Liveness::Stuck { seconds: 700 }
+        );
         // Under the ceiling it is just a slow build, which is most builds.
-        assert_eq!(Liveness::of(&status("running", Some(500)), 2, true, 600), Liveness::Running);
+        assert_eq!(
+            Liveness::of(&status("running", Some(500)), 2, true, 600),
+            Liveness::Running
+        );
         // And a sweep with no declared ceiling is never called stuck, rather than being measured
         // against zero.
         assert_eq!(Liveness::of(&s, 2, true, 0), Liveness::Running);

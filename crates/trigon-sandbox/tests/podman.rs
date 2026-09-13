@@ -27,7 +27,9 @@ const ALPINE: &str = "docker.io/library/alpine@sha256:c64c687cbea9300178b30c9583
 /// here, the answer is to stop racing.
 async fn store() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
 }
 
 async fn usable(r: &PodmanRunner) -> bool {
@@ -522,7 +524,8 @@ async fn no_phase_of_an_enforced_run_reaches_the_internet() {
     // `|| echo blocked` rather than `&& echo REACHED` alone: under `set -eu` a bare failing
     // AND-list exits the phase, so the absence of REACHED would be satisfied by a phase that never
     // ran. Both halves are asserted.
-    let probe = |tag: &str| format!("nc -w 3 -z 1.1.1.1 443 && echo REACHED-{tag} || echo blocked-{tag}\n");
+    let probe =
+        |tag: &str| format!("nc -w 3 -z 1.1.1.1 443 && echo REACHED-{tag} || echo blocked-{tag}\n");
     let plan = BuildPlan::Oci(OciPlan {
         base_image: ALPINE.into(),
         // Empty on purpose: an enforced tier refuses a plan that needs packages, because with no
@@ -572,7 +575,10 @@ async fn an_enforced_tier_verifies_its_base_image_instead_of_installing() {
         BuildPlan::Oci(OciPlan {
             base_image: ALPINE.into(),
             // Alpine has `busybox` and does not have `libatomic`, so one of each.
-            system_deps: ["busybox", "libatomic"].iter().map(|s| s.to_string()).collect(),
+            system_deps: ["busybox", "libatomic"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             source: "true".into(),
             deps: "true".into(),
             build: "mkdir -p dist && echo hi > dist/out.txt".into(),
@@ -584,9 +590,15 @@ async fn an_enforced_tier_verifies_its_base_image_instead_of_installing() {
         })
     };
 
-    let h = r.start(&plan(EgressTier::DenyAll), &opts("verify")).await.unwrap();
+    let h = r
+        .start(&plan(EgressTier::DenyAll), &opts("verify"))
+        .await
+        .unwrap();
     let outcome = h.wait().await.unwrap();
-    assert_ne!(outcome.exit_code, 0, "a missing package must stop the build");
+    assert_ne!(
+        outcome.exit_code, 0,
+        "a missing package must stop the build"
+    );
     let log = &outcome.log_tail;
     assert!(log.contains("this base image is missing"), "{log}");
     assert!(log.contains("libatomic"), "the missing one is named: {log}");
