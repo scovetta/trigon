@@ -50,7 +50,7 @@ fn cx_for(s: &Strategy) -> Context {
             arch: "x86_64".into(),
             platform: "linux".into(),
             has_repo: false,
-            timewarp_base: Some("timewarp".into()),
+            timewarp_base: "timewarp".into(),
             ..Default::default()
         },
         ..Default::default()

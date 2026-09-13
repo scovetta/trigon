@@ -68,13 +68,20 @@ impl ToolRegistry {
     }
 
     pub fn add(&mut self, t: Tool) -> Result<(), StrategyError> {
-        if let Some(prev) = self.tools.insert(t.id.clone(), t) {
+        // Look before inserting. `insert` returns the *evicted* value, so the old code had already
+        // replaced the builtin by the time it decided to refuse — the registry kept the shadowing
+        // definition it had just rejected, and the message named the tool it had thrown away. A
+        // refusal that leaves the thing it refused in place is worse than no check, and
+        // `docs/threat-model.md` P27 claims this seam is where an unknown or duplicate tool is a
+        // hard error rather than a silent substitution.
+        if self.tools.contains_key(&t.id) {
             return Err(StrategyError::Invalid(format!(
                 "tool `{}` is registered twice. A definitions repo overriding a builtin has to say \
                  so explicitly rather than shadowing it by load order.",
-                prev.id
+                t.id
             )));
         }
+        self.tools.insert(t.id.clone(), t);
         Ok(())
     }
 
@@ -158,7 +165,15 @@ impl ToolRegistry {
         let missing: Vec<&str> = tool
             .params
             .iter()
-            .filter(|(k, p)| p.required && !with.contains_key(*k) && p.default.is_none())
+            // Present *and* non-empty. This asked only whether the key existed, so
+            // `with: { venv: "" }` satisfied a required parameter and `pypi/deps/basic` rendered
+            // `/bin/pip install build` — a path with its root missing, failing three steps from its
+            // cause. A required parameter supplied as nothing was not supplied.
+            .filter(|(k, p)| {
+                p.required
+                    && p.default.is_none()
+                    && with.get(*k).is_none_or(|v| v.trim().is_empty())
+            })
             .map(|(k, _)| k.as_str())
             .collect();
         if !missing.is_empty() {

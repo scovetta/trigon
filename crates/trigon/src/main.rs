@@ -1088,6 +1088,11 @@ mod build {
             _ => {}
         }
 
+        // Before anything is built. A plan whose build phase renders empty produces nothing and
+        // ends as "the build succeeded and left no artifact", which blames the run rather than the
+        // recipe.
+        instructions.executable()?;
+
         let plan = BuildPlan::Oci(OciPlan {
             base_image: image.to_string(),
             system_deps: instructions.requires.system_deps.clone(),
@@ -1639,7 +1644,7 @@ fn render_strategy(
             arch: "x86_64".into(),
             platform: "linux".into(),
             has_repo,
-            timewarp_base: Some(timewarp.to_string()),
+            timewarp_base: timewarp.to_string(),
             ..Default::default()
         },
         ..Default::default()

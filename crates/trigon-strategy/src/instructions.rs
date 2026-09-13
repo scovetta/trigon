@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::StrategyError;
 use crate::model::Location;
 
 /// A shell fragment, already rendered. Never a template.
@@ -59,4 +60,29 @@ pub struct Instructions {
     /// Where the artifact lands, relative to the working tree.
     pub output_path: String,
     pub requires: Requirements,
+}
+
+impl Instructions {
+    /// Whether this plan would actually build something.
+    ///
+    /// Separate from `render` on purpose: rendering is a pure function and `trigon strategy render`
+    /// exists to *look at* what a strategy produces, including a deps-only fragment. Refusing to
+    /// render one would break the inspection command. What must be refused is **executing** a plan
+    /// whose build phase is empty, because the executor runs it, produces nothing, and the run ends
+    /// as "the build succeeded and left no artifact" — which reports that the recipe ran and failed
+    /// to produce, rather than that the recipe does not build anything.
+    ///
+    /// The shape that survives review is the second one: every build step carries an `if:`, and on
+    /// this run every condition is false. The document reads like a build and the render is silence.
+    pub fn executable(&self) -> Result<(), StrategyError> {
+        if self.build.trim().is_empty() {
+            return Err(StrategyError::Invalid(
+                "this strategy renders an empty build phase, so running it would produce nothing \
+                 and report that the build succeeded. Either it declares no build steps, or every \
+                 step it declares was skipped by its own `if:` on this run."
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }

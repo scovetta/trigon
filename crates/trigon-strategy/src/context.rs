@@ -49,20 +49,35 @@ pub struct TargetCtx {
 pub struct EnvCtx {
     /// The moment the registry is filtered to, as RFC 3339. A string rather than a time value,
     /// because a template that can do date arithmetic can produce a different answer tomorrow.
-    pub registry_moment: Option<String>,
+    ///
+    /// **Empty means absent, never `None`** — the same rule as [`LocationCtx::subdir`] and for the
+    /// same reason, applied here after a strategy forwarding `{{ intrinsics.publish_time }}` into a
+    /// tool's `with` produced the literal string `none`, which is truthy: the guard in
+    /// `pypi/setup-registry` fired and pinned the index to `http://pypi:none@timewarp/simple`. An
+    /// empty string still answers `{% if %}` and renders as nothing.
+    pub registry_moment: String,
+    /// Absent is **omitted**, not `none`.
+    ///
+    /// The string-valued fields here use an empty string for absent, which a shell treats as
+    /// nothing. A number has no such value, so this is skipped instead: under
+    /// `UndefinedBehavior::Strict` a template that prints it when it is absent gets the hard error
+    /// `render.rs` promises, rather than `SOURCE_DATE_EPOCH=None` in a build script.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_date_epoch: Option<i64>,
     pub arch: String,
     pub platform: String,
     /// Whether the working tree is already present, which decides whether `git-checkout` clones.
     pub has_repo: bool,
-    /// Base URL of the time-filtering registry mirror, when one is in play.
-    pub timewarp_base: Option<String>,
+    /// Base URL of the time-filtering registry mirror, when one is in play. Empty means absent.
+    pub timewarp_base: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct IntrinsicsCtx {
-    pub publish_time: Option<String>,
+    /// Empty means absent. See [`EnvCtx::registry_moment`] for what a `none` costs here.
+    pub publish_time: String,
     /// Toolchain versions the evidence narrowed to, keyed by toolchain name.
     pub toolchains: BTreeMap<String, String>,
-    pub backend: Option<String>,
+    /// Empty means absent.
+    pub backend: String,
 }

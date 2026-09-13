@@ -193,18 +193,37 @@ fn render_str(
     cx: &Context,
 ) -> Result<String, StrategyError> {
     env.render_str(template, cx)
-        .map_err(|e| StrategyError::Template(template_message(&e)))
+        .map_err(|e| StrategyError::Template(template_message(&e, template)))
 }
 
 /// `minijinja` errors carry a cause chain, and the cause is usually the useful half.
-fn template_message(e: &minijinja::Error) -> String {
+///
+/// **The template text is appended**, because for the error that matters most it is the only place
+/// the author's own words appear. `UndefinedBehavior::Strict` is chosen so a typo'd
+/// `{{ Targt.Version }}` is a hard error rather than a silent empty string — this module's own
+/// documentation says the error names the variable — but minijinja reports `undefined value (in
+/// <string>:1)` and nothing else. A line number into an anonymous string is not a diagnosis, and
+/// this message is the repair loop's input as well as a human's.
+fn template_message(e: &minijinja::Error, template: &str) -> String {
     let mut parts = vec![e.to_string()];
     let mut cur: Option<&dyn std::error::Error> = std::error::Error::source(e);
     while let Some(c) = cur {
         parts.push(c.to_string());
         cur = std::error::Error::source(c);
     }
-    parts.join(": ")
+    let mut msg = parts.join(": ");
+    // The offending line where minijinja gave one, else the whole template. Clipped, because a
+    // `runs:` step can be a long script and this ends up in a log line and a failure signature.
+    let line = e
+        .line()
+        .and_then(|n| template.lines().nth(n.saturating_sub(1)))
+        .unwrap_or(template)
+        .trim();
+    if !line.is_empty() {
+        let clipped: String = line.chars().take(200).collect();
+        msg.push_str(&format!(" — in `{clipped}`"));
+    }
+    msg
 }
 
 fn prefix(what: &str, e: StrategyError) -> StrategyError {
@@ -273,13 +292,23 @@ fn environment(cx: &Context) -> Environment<'static> {
     env.add_function(
         "timewarp_url",
         move |ecosystem: String, moment: String| -> Result<String, minijinja::Error> {
-            let Some(base) = &base else {
+            if base.is_empty() {
                 return Err(minijinja::Error::new(
                     minijinja::ErrorKind::InvalidOperation,
                     "timewarp_url was called but no mirror is configured for this run. A build \
                      that pins a registry moment needs one, or it resolves against the live index.",
                 ));
-            };
+            }
+            // An absent moment is empty, not the word `none`, and pinning to nothing is not a pin.
+            // Forwarding `{{ intrinsics.publish_time }}` from a run with no publish time used to
+            // produce `http://pypi:none@timewarp/simple`, which the mirror reads as a real filter.
+            if moment.is_empty() {
+                return Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    "timewarp_url was given no moment to pin to. Whatever was forwarded here was \
+                     absent, and a mirror URL carrying an empty filter is not a pinned index.",
+                ));
+            }
             Ok(format!("{}://{ecosystem}:{moment}@{}", "http", base))
         },
     );
@@ -297,9 +326,10 @@ fn environment(cx: &Context) -> Environment<'static> {
         "toolchain_url",
         move |host: String, path: String| -> String {
             let path = path.trim_start_matches('/');
-            match &base {
-                Some(base) => format!("http://{base}/-toolchain/{host}/{path}"),
-                None => format!("https://{host}/{path}"),
+            if base.is_empty() {
+                format!("https://{host}/{path}")
+            } else {
+                format!("http://{base}/-toolchain/{host}/{path}")
             }
         },
     );
@@ -315,12 +345,13 @@ fn environment(cx: &Context) -> Environment<'static> {
     env.add_function(
         "timewarp_host",
         move || -> Result<String, minijinja::Error> {
-            base.clone().ok_or_else(|| {
-                minijinja::Error::new(
+            if base.is_empty() {
+                return Err(minijinja::Error::new(
                     minijinja::ErrorKind::InvalidOperation,
                     "timewarp_host was called but no mirror is configured for this run.",
-                )
-            })
+                ));
+            }
+            Ok(base.clone())
         },
     );
     env

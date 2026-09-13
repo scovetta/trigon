@@ -33,10 +33,19 @@ pub fn from_yaml(src: &str) -> Result<Strategy, StrategyError> {
         ));
     };
 
-    let schema = map
-        .remove(Value::from("schema"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(CURRENT_SCHEMA as u64) as u32;
+    // Absent and unreadable are different. `.and_then(as_u64).unwrap_or(CURRENT)` treated
+    // `schema: "1"`, `schema: 1.5` and `schema: true` as "no schema given, assume the current one" —
+    // so a document declaring a version this build cannot honour was rendered anyway, which is the
+    // opposite of what a version field is for. Absent still means current; unreadable is an error.
+    let schema = match map.remove(Value::from("schema")) {
+        None => CURRENT_SCHEMA as u64,
+        Some(v) => v.as_u64().ok_or_else(|| {
+            StrategyError::Invalid(format!(
+                "`schema` has to be a whole number, and this one is `{v:?}`. A document whose \
+                 version cannot be read is not a document this build can promise to understand."
+            ))
+        })?,
+    } as u32;
     if schema > CURRENT_SCHEMA {
         return Err(StrategyError::SchemaTooNew {
             found: schema,

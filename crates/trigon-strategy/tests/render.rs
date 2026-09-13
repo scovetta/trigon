@@ -18,11 +18,11 @@ fn cx() -> Context {
             artifact: "requests_toolbelt-1.0.0-py2.py3-none-any.whl".into(),
         },
         env: EnvCtx {
-            registry_moment: Some("2023-05-01T04:11:28Z".into()),
+            registry_moment: "2023-05-01T04:11:28Z".into(),
             arch: "x86_64".into(),
             platform: "linux".into(),
             has_repo: false,
-            timewarp_base: Some("timewarp".into()),
+            timewarp_base: "timewarp".into(),
             ..Default::default()
         },
         ..Default::default()
@@ -246,7 +246,7 @@ fn pinning_a_registry_moment_with_no_mirror_is_an_error() {
     )
     .unwrap();
     let mut c = cx();
-    c.env.timewarp_base = None;
+    c.env.timewarp_base = String::new();
     let m = render(&s, &c, &ToolRegistry::builtin().unwrap())
         .unwrap_err()
         .to_string();
@@ -313,7 +313,7 @@ fn a_toolchain_download_goes_through_the_mirror_when_there_is_one() {
     // And straight upstream when there is no mirror, because a pinned toolchain URL names its own
     // version: there is nothing for a time filter to do, so needing one would be a false dependency.
     let mut plain = cx();
-    plain.env.timewarp_base = None;
+    plain.env.timewarp_base = String::new();
     let plain = render(&strategy, &plain, &tools).unwrap();
     assert!(
         plain
