@@ -47,6 +47,7 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
 | [`18-management-ui.md`](18-management-ui.md) | The plan for `trigon watch`: monitoring a sweep from outside the process running it |
 | [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) | Where a verdict is published, and how an end user looks one up — design only |
 | [`threat-model.md`](threat-model.md) | The contract with a consumer of a verdict: what is assumed, guaranteed, disclaimed, and out of scope |
+| [`threat-model.yaml`](threat-model.yaml) | The same, as a machine-readable index for triage. Generated from the prose by `scripts/threat-model-sidecar.py` |
 | [`adr/`](adr/) | Short records for the load-bearing decisions |
 
 ## Suggested reading order

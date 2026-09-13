@@ -21,19 +21,27 @@ directory, a strategy's template rendering into a shell script.
 **Done when:** every finding is either fixed or written down with a reason it is acceptable, and
 each one has a test that would catch the regression.
 
-## B2. A threat model for Trigon
+## B2. ~~A threat model for Trigon~~ — closed, as an unratified draft
 
-The implicit security contract between this project and the people who depend on its verdicts:
-what it assumes, what it guarantees, what it explicitly does not, and which misuses are out of
-scope. [`12`](12-security.md) is a controls document and is not this.
+[`threat-model.md`](threat-model.md) and its generated companion
+[`threat-model.yaml`](threat-model.yaml). 192 documented claims, 3 assumptions and 5 inferences, each
+of the last eight resolving to a question in §1.18. A 38-item corpus — 13 real findings from the
+adversarial sweep and the git history, 25 built to reach families and contract dimensions history
+does not — routed blind to exactly one disposition each.
 
-The interesting questions are the ones a consumer of an attestation has to answer: what does a
-signed `equivalence` predicate actually claim, what would have to be true for it to be wrong, and
-what is the reader expected to check themselves.
+**What the backtest was actually for.** Not to confirm the model: to break it. It found four defects
+and each produced a revision — a zip-slip report that nothing in the model answered (now P22, after
+verifying no judgement-half crate writes a file at all); a store-path report whose safety turned out
+to be **borrowed from `object_store`**, which percent-encodes `..`, and is now named as borrowed
+rather than claimed; a `flate2` report whose close was *illegal* because §1.9 carried no provenance
+tags; and fourteen ambiguous routings that produced the `ESCALATE: unratified-claim` outcome for the
+case the disposition set had no word for — a rule matches, but the claim licensing it is unratified.
 
-**Done when:** `docs/threat-model.md` exists as prose with a machine-readable companion, every
-non-trivial claim is marked as documented / maintainer-stated / inferred, and it routes a corpus of
-real findings to exactly one disposition each.
+**What remains, and it is the point of leaving it open:** it is a *draft*. Only a maintainer can
+promote an assumption to a decision, and until §1.18 is answered the model can escalate a report and
+must not close one on those eight claims. Q17 is the sharpest: there is no `SECURITY.md`, no
+disclosure address and no supported-versions statement, so a document that says "report this
+privately" currently names no channel.
 
 ## B3. Documentation that is accurate and reads for a user
 

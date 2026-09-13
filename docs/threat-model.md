@@ -1,69 +1,87 @@
 # Trigon threat model
 
-**Project:** Trigon — semantic rebuild verification for open-source packages
-**Version binding:** `ad422a8`, 2026-09-13. A report against a given commit is triaged against the
-model as it stood at that commit, not against `main`.
-**Status:** unratified draft. No maintainer has reviewed it.
-**Triage policy:** `strict`.
-**Author:** generated from the repository and its design chapters; see §1.18 for what is unratified.
+## 1.1 Header
 
-**Provenance legend.** Every non-trivial claim below carries exactly one tag.
+**Project:** Trigon — semantic rebuild verification for open-source packages
+**Version binding:** `1e857d1`, 2026-09-13. A report against a given commit is triaged against the
+model as it stood at that commit, not against `main`.
+**Status:** unratified draft. No maintainer has reviewed it. While any *(inferred)* or *(assumption)*
+tag remains, the status cannot be `accepted`.
+**Triage policy:** `strict`.
+
+**Prior policy.** `docs/12-security.md` ("12. Security model") is the prior security-policy document.
+This model absorbs it as a strict superset; the back-map is the appendix. There is **no**
+`SECURITY.md`, no disclosure address and no supported-versions statement anywhere in the repository
+*(documented, verified: no file matching `*SECURITY*` outside `docs/12-security.md`)*, which is why
+§1.18 Q17 exists.
+
+**Reporting.** A finding that violates a property in §1.11 goes to the maintainer privately. Until
+Q17 is answered there is no published channel, so in the interim: GitHub private vulnerability
+reporting on the repository, and if that is not enabled, a direct message to the repository owner.
+A `MODEL-GAP` goes to the maintainer too, but as a revision request under §1.16 rather than as a
+vulnerability.
+
+**Provenance legend.** Every non-trivial claim carries exactly one tag.
 
 | Tag | Meaning |
 | --- | --- |
-| *(documented, source)* | Stated in a maintainer-authored source in this repository. The source is named. |
-| *(maintainer, YYYY-MM)* | Stated by a maintainer in answer to a question from this process. None yet. |
-| *(assumption, QN)* | A conservative default this document commits to where the sources are silent. `QN` is an open question in §1.18. |
+| *(documented, source)* | Stated in a maintainer-authored source in this repository, or verifiable from its public surface. The source is named. |
+| *(maintainer, YYYY-MM)* | Stated by a maintainer in answer to this process. None yet. |
+| *(assumption, QN)* | A conservative default this document commits to where the sources are silent. `QN` is in §1.18. |
 | *(inferred, QN)* | Reasoned from code structure, with no default committed. Genuinely open. `QN` is in §1.18. |
 
-**What a tag is allowed to do.** Under `strict`, only a *(documented)* or *(maintainer)* claim can
-close a report against its reporter. An *(inferred)* or *(assumption)* claim can escalate a report to
-the maintainer and can never close one. `VALID` and `MODEL-GAP` are always available.
+**What a tag is allowed to do.** Under `strict`, only *(documented)* or *(maintainer)* can close a
+report against its reporter. An *(inferred)* or *(assumption)* claim routes to `ESCALATE:
+unratified-claim` — it can never close. `VALID` and `MODEL-GAP` are always available.
 
-**Reporting.** A finding that violates a property in §1.11 goes to the project's disclosure channel.
-A finding that lands in §1.3 or §1.12 is closed citing this document.
+**Draft confidence:** see the census at the end of §1.19. Every *(inferred)* and *(assumption)* tag
+resolves to a question in §1.18. The documented count is high because the maintainer wrote eighteen
+design chapters; it is not a maturity signal, and `docs/16-findings.md` records where the code has
+since corrected them.
 
-**Draft confidence:** 144 documented / 0 maintainer / 5 assumption / 13 inferred. Every inferred and
-assumption tag resolves to a question in §1.18. The high documented count is not a sign of maturity —
-it reflects eighteen design chapters written by the maintainer, and `docs/16-findings.md` records
-where the code has since corrected them.
-**Backtest:** 38 items across 33 clusters and 9 component families — 13 historical findings from the
-adversarial code sweep and the git history, 25 constructed to cover families and contract dimensions
-history does not reach. Result recorded below the table in §1.15's companion note.
-**Sibling models:** none. This is the only threat model for this repository. No `SECURITY.md` exists,
-so there is no prior policy to absorb and no back-map appendix *(documented, repository: no
-`SECURITY.md` at any path)*.
+**Backtest:** 38 items, 33 clusters, 9 families. Result and revisions in §1.15.
+**Sibling models:** none.
 
-## What Trigon is
+### What Trigon is
 
-Trigon takes a published package — an npm tarball, a Python wheel — and tries to rebuild it from the
-source the package points at. It then compares the two artifacts, not byte-for-byte but under a named
-set of *stabilizers*: small, ordered, total transforms that erase differences nobody meant to publish,
-such as file order inside a tar or an embedded build timestamp. The answer is one of four outcomes,
-and where the operator asked for one, a signed in-toto attestation carrying the digests, the recipe,
-the environment, and exactly which stabilizers fired.
+Trigon takes a published package — an npm tarball, a Python wheel — and rebuilds it from the source
+the package points at. It compares the two, not byte-for-byte but under a named set of
+**stabilizers**: small, ordered, total transforms that erase differences nobody meant to publish,
+such as file order inside a tar or an embedded build timestamp.
 
-The product is the attestation. Everything else exists to make it honest.
+**The outcomes, strongest first.** These four words carry the whole model, so they are defined once
+here and used everywhere:
 
----
+- `exact` — the raw bytes are identical, before any stabilizer ran.
+- `normalized` — the stabilized forms are identical, **and** every stabilizer that fired was built
+  into Trigon and no riskier than metadata.
+- `normalized_with_caveats` — the stabilized forms are identical, but some stabilizer that fired was
+  authored by a human or a model, or changes content rather than metadata.
+- `divergent` — the stabilized forms differ.
 
-## Triager quick-start
+A fifth state, **`void`**, sits outside all four: the run is not evidence of anything, because the
+artifact under test reached the build over the network. It is not a pass and not a failure.
+
+Where the operator asks for one, a run also produces a signed in-toto attestation. **The attestation
+is the product.** Everything else exists to make it honest.
+
+### Triager quick-start
 
 > Given an inbound finding:
 >
-> 1. **Find the sink.** Look it up in the §1.7 input-trust table. For a "downstream may assume X"
->    finding, use the §1.8 output statement instead.
-> 2. **Find the contract dimension.** For state corruption, overflow, recursion, callbacks,
->    serialization, lifecycle, concurrency, or resource use, follow the component's row in the §1.7
->    matrix to the claim that owns it.
-> 3. **Check the attacker.** Does the finding need a capability §1.10 grants? Distinguish control of
->    *data* from control of *size*, *a shell script*, *a container image*, or *a model's output*.
-> 4. **Check the component.** Is it in §1.2's table, or in §1.3? Does it need a configuration §1.6
->    marks unsupported?
-> 5. **Check the layer.** If the root cause is in a dependency behaving as documented, apply §1.9.
+> 1. **Find the sink** in §1.7's trust table. For a "downstream may assume X" finding, use §1.8.
+> 2. **Find the contract dimension** in §1.7's matrix and follow the row to the claim that owns it.
+> 3. **Check the attacker** against §1.10. Distinguish control of *data* from control of *size*, of
+>    *a shell script*, of *a container image*, or of *a model's output*.
+> 4. **Check the component** against §1.2 and §1.3, and the configuration against §1.6.
+> 5. **Check the layer.** If a dependency behaved as documented and the fault is downstream of it,
+>    apply §1.9.
 > 6. **Apply §1.17's precedence**, starting with an exact §1.15 match.
-> 7. **Assign exactly one disposition**, citing the section and its provenance tag. If none fits,
->    assign `MODEL-GAP` and open a §1.16 revision. Do not improvise a disposition.
+> 7. **Check the licensing tag.** If the rule that matched is *(inferred)* or *(assumption)*, the
+>    disposition is `ESCALATE: unratified-claim`, whatever rule matched. Only *(documented)* and
+>    *(maintainer)* close.
+> 8. **Assign exactly one disposition**, citing the section and its tag. If none fits, assign
+>    `MODEL-GAP` and open a §1.16 revision. Do not improvise.
 
 ---
 
@@ -71,73 +89,67 @@ The product is the attestation. Everything else exists to make it honest.
 
 ### The claim, stated exactly
 
-This is the centre of the model. A signed `trigon.dev/equivalence/v1` predicate says:
+A signed `trigon.dev/equivalence/v1` predicate says:
 
 > Artifact **P**, as published, and artifact **R**, produced by recipe **S** in environment **E**,
 > have stabilized forms that are byte-identical under stabilizer set **T**, whose members and digest
 > are named in the statement, and of which exactly these fired, at these risk tiers, with these
 > provenances.
 
-Every noun in that sentence is deterministic. A third party holding P, R and the attestation can
-re-derive the whole of it with `trigon verify-attestation --rerun-comparison` and a binary that
-contains no network client and no model code *(documented, docs/09-attestations.md §7;
-README.md "The two halves")*.
+Every noun there is deterministic. A third party holding P, R and the attestation re-derives all of
+it with `trigon verify-attestation --rerun-comparison`, using a binary that contains no network
+client and no model code *(documented, docs/09-attestations.md §7)*.
 
-**What it does not say**, and what a reader must not read into it:
+**What it does not say.** A reader must not read any of these into it:
 
 - **Not that the package is safe.** A package that builds faithfully from a repository containing a
   backdoor reproduces, and should *(documented, docs/12-security.md §11)*.
-- **Not that the source is the source.** The equivalence claim is about two files. Whether the
-  repository it built from is the one the package's users think of as its source is a separate
-  question, and for npm it is the *only* interesting question — npm packages are close to 100%
-  reproducible at the tarball level with no source linkage at all *(documented,
-  docs/03-ecosystems.md §0)*.
-- **Not that a model was absent.** Model involvement is recorded beside the claim as
-  `derivation.method`, never inside it. A consumer who wants "no model touched this" has to filter on
-  that field themselves *(documented, docs/09-attestations.md §2.1)*.
+- **Not that the source is the source.** The claim is about two files. Whether the repository is the
+  one a package's users think of as its source is a separate question — and for npm it is the *only*
+  interesting one, because npm packages reproduce at the tarball level almost always with no source
+  linkage at all *(documented, docs/03-ecosystems.md §0)*.
+- **Not that no model was involved.** Model involvement is recorded beside the claim as
+  `derivation.method`, never inside it, and filtering on it is the consumer's job *(documented,
+  docs/09-attestations.md §2.1)*.
 - **Not that the build was observed.** No run at any tier is attestable at full trust today, because
-  there is still no network transcript *(documented, docs/16-findings.md §3.13; docs/17-backlog.md
-  B7)*.
+  there is no network transcript *(documented, docs/16-findings.md §3.13)*.
 
-**What would have to be true for the claim to be wrong.** Exactly one of these:
+**What would have to be true for it to be wrong.** Exactly one of:
 
-1. The rebuild obtained P, or a member of P, rather than building it — the forged-attestation attack
-   *(documented, docs/12-security.md §1.1)*. The artifact guard is the control, and it compares
-   bytes, so an attacker who fetches P re-encoded, encrypted, or reassembled from chunks defeats it
-   *(documented, docs/12-security.md §2.5)*.
-2. A stabilizer erased a real difference. The provenance cap is the control a consumer applies:
-   demand `Match::Normalized` and every stabilizer that fired was built in and no riskier than
+1. **The rebuild obtained P rather than building it** — the forged-attestation attack *(documented,
+   docs/12-security.md §1.1)*. The artifact guard is the control. It compares bytes, so an attacker
+   who fetches P re-encoded, encrypted, or reassembled from chunks defeats it *(documented,
+   docs/12-security.md §2.5)*.
+2. **A stabilizer erased a real difference.** The provenance cap is the control, and the consumer
+   applies it: demand `normalized` and every stabilizer that fired was built in and no riskier than
    metadata *(documented, docs/00-overview.md §3.1)*.
-3. Our own serialization stack is wrong in a way that affects both sides. It is self-consistent, so
+3. **Our serialization stack is wrong** in a way that affects both sides. It is self-consistent, so
    our bugs surface as false negatives; over-aggressive membership deletion is the false-positive
    direction *(documented, docs/13-roadmap.md §3)*.
-4. The signing identity is not who you think. Checking it is the reader's job, not ours
-   *(documented, docs/09-attestations.md §7 steps 2–3)*.
+4. **The signing identity is not who you think.** Checking it is the reader's job *(documented,
+   docs/09-attestations.md §7)*.
 
-**What the reader is expected to check themselves** is §1.13.
+The reader is expected to re-derive the claim, check the signing identity against their own policy,
+and set their own risk threshold. §1.13 is the full list.
 
 ### Deployment and roles
 
-Trigon ships as one binary. Today it runs as a CLI on a workstation or a CI machine; the fleet
-deployment described in `docs/10-scale.md` is designed and not built *(documented, docs/README.md
-"Status")*.
-
-Two roles, and they own different threats:
+Trigon ships as one binary. Today it runs as a CLI on a workstation or a CI machine. The fleet in
+`docs/10-scale.md` is designed and not built *(documented, docs/README.md "Status")*.
 
 | Role | Who | Trusted for |
 | --- | --- | --- |
-| **Attestation consumer** | Reads a signed predicate and decides whether to trust a package. Holds no Trigon installation necessarily. | Nothing. They are the audience, and the claim must survive their scepticism. |
-| **Operator** | Runs `trigon rebuild` / `sweep`. Their machine executes attacker-supplied build scripts. | The invocation, the egress tier, the definitions ref, the signing key. An operator who chooses `--egress open` has chosen a weaker claim and the attestation says so. |
+| **Attestation consumer** | Reads a signed predicate and decides whether to trust a package. May have no Trigon installation. | Nothing. They are the audience, and the claim must survive their scepticism. |
+| **Operator** | Runs `trigon rebuild` / `sweep`. Their machine executes attacker-supplied build scripts. | The invocation, the egress tier, the definitions ref, the signing key. |
 
-There is no third-party-client role yet: no daemon, no authenticated API, no multi-tenancy
-*(documented, docs/12-security.md §7 — "Multi-tenancy is not implemented")*.
+There is no third-party-client role: no daemon, no authenticated API, no multi-tenancy *(documented,
+docs/12-security.md §7)*.
 
 ### Component families
 
-The verifier — the first five rows — is what a sceptic checks. It is built by
-`cargo build -p trigon --no-default-features`, links no async runtime and no network client, and
-`cargo run -p xtask -- policy` asserts that mechanically *(documented, README.md "The two halves";
-docs/01-architecture.md §2.2)*. Verified for this commit: `cargo tree -p trigon
+The verifier is the first five rows: `cargo build -p trigon --no-default-features`, which links no
+async runtime and no network client, asserted by `cargo run -p xtask -- policy` *(documented,
+docs/01-architecture.md §2.2)*. Verified at this commit: `cargo tree -p trigon
 --no-default-features` names no `tokio`, `reqwest` or `hyper`.
 
 | Family | Entry point | Touches | In model |
@@ -147,61 +159,54 @@ docs/01-architecture.md §2.2)*. Verified for this commit: `cargo tree -p trigon
 | `comparison-and-verdict` (`trigon-compare`, `trigon-core`) | `compare()`, `Match`, PURL parsing | nothing | **in** |
 | `attestation` (`trigon-attest`) | statement building, DSSE, `Signer` | reads a key file when signing | **in** |
 | `strategy-rendering` (`trigon-strategy`) | `Strategy` parse, flow DSL, minijinja render | nothing; emits a script for someone else to run | **in** |
-| `registry-and-source` (`trigon-registry`) | `Registry::resolve`/`fetch`, `SourceCache` | network (registries, git hosts), filesystem, spawns `git` | **in** |
+| `archived-stabilizer-sets` (`trigon-stabilize-wasm`) | the `wasm` feature, off by default | runs a WASM module in-process | **in**, §1.6 |
+| `registry-and-source` (`trigon-registry`) | `Registry::resolve`/`fetch`, `SourceCache` | network, filesystem, spawns `git` | **in** |
 | `build-execution` (`trigon-sandbox`, `trigon-mirror`) | `BuildRunner::start`, the mirror server | spawns `podman`, binds a socket, writes a work directory | **in** |
-| `model-inference` (`trigon-ai`) | `Provider::complete`, the Builder, `RepairLoop` | network (model endpoints), spawns `copilot` | **in** |
-| `operator-surface` (`trigon` bin, `trigon-store`) | CLI subcommands, `trigon watch`'s HTTP server | everything above, plus a listening socket and a store directory | **in** |
-| `archived stabilizer sets` (`trigon-stabilize-wasm`) | `wasm` feature, off by default | runs a WASM module | **in**, see §1.6 |
-| the `trigon-definitions` repository | `build.yaml`, custom stabilizers | — | **in as an input**, §1.9 |
-
-Everything in this repository is in the model. There is no `contrib/`, no `examples/` directory of
-shipped-but-unsupported code, and no vendored third-party source *(inferred, Q1)*.
+| `model-inference` (`trigon-ai`) | `Provider::complete`, the Builder, `RepairLoop` | network, spawns `copilot` | **in** |
+| `operator-surface` (`trigon` bin, `trigon-store`) | CLI subcommands, `trigon watch`'s HTTP server | everything above, plus a listening socket and a store | **in** |
+| `definitions` (the `trigon-definitions` repository) | `build.yaml`, custom stabilizers | — | **in as an input**, §1.9 |
+| repository tooling (`xtask`, `fuzz/`, `corpora/`, `scripts/`) | not shipped in any binary | — | **out**, §1.3 |
 
 ---
 
 ## 1.3 Out of scope
 
-These are non-goals. A report that depends on one of them closes as
-`OUT-OF-MODEL: unsupported-component` or `BY-DESIGN: property-disclaimed`.
+A report that depends on one of these routes by §1.17 precedence: rule 2,
+`OUT-OF-MODEL: unsupported-component`, unless the bullet names a §1.12 disclaimer, in which case
+rule 7 applies first.
 
-- **Malware detection.** Trigon answers whether an artifact matches a source. Whether the source is
-  malicious is a different question, and a malicious package that reproduces is a *correct* result
-  *(documented, docs/12-security.md §11)*.
+- **Malware detection.** Trigon answers whether an artifact matches a source. A malicious package
+  that reproduces is a *correct* result *(documented, docs/12-security.md §11)*.
 - **Judging whether the source is trustworthy** *(documented, docs/12-security.md §11)*.
-- **Defending a compromised control plane.** Compromise the scheduler and the attestor and the
-  signed output means nothing. `--rerun-comparison` is what limits the damage, because an independent
-  party re-derives the equivalence claim without trusting us *(documented, docs/12-security.md §11)*.
+- **Defending a compromised control plane.** Compromise the scheduler and the attestor and the signed
+  output means nothing; `--rerun-comparison` is what limits the damage *(documented,
+  docs/12-security.md §11)*.
 - **Bit-for-bit reproducibility as an end.** Semantic verification with named normalizations and
-  consumer-set risk thresholds instead *(documented, docs/00-overview.md §4–5)*.
+  consumer-set thresholds instead *(documented, docs/00-overview.md §4–5)*.
 - **Emulating GitHub Actions runners.** Runner images are mutable and unpinnable, so emulating them
-  would make our own results unreproducible. We extract intent and lower it to a digest-pinned
-  container plan, recorded as an approximation and never as an equality claim *(documented,
-  docs/06-ci-awareness.md §2; ADR-0009)*.
-- **Replacing trusted publishing.** It is an input and a cross-check, never a conclusion
-  *(documented, docs/00-overview.md §5)*.
-- **Being a general CI system.** We reconstruct builds for verification, not for release
-  *(documented, docs/00-overview.md §5)*.
-- **macOS and Windows runners**, and **Maven, Go and Debian**, which report `Unsupported` rather than
-  failing *(documented, docs/06-ci-awareness.md §3.3; docs/00-overview.md §5)*.
-- **Syscall-level observability.** eBPF and observability tiers 2 and 3 are cut; Tier 1 is the
-  network transcript and nothing above it ships *(documented, ADR-0007; docs/08-execution.md §7)*.
-- **Multi-tenancy.** The rules are decided and not implemented, so a finding that requires two
-  tenants sharing an installation is out of model until they are *(documented,
-  docs/12-security.md §7)*.
+  would make our own results unreproducible *(documented, ADR-0009)*.
+- **Replacing trusted publishing.** It is an input and a cross-check *(documented,
+  docs/00-overview.md §5)*.
+- **Being a general CI system** *(documented, docs/00-overview.md §5)*.
+- **macOS and Windows runners, and Maven, Go and Debian**, which report `Unsupported` rather than
+  failing *(documented, docs/06-ci-awareness.md §3.3)*.
+- **Syscall-level observability.** eBPF and tiers 2–3 are cut *(documented, ADR-0007)*.
+- **Multi-tenancy.** The rules are decided and not implemented *(documented, docs/12-security.md §7)*.
+- **Repository tooling.** `xtask`, `fuzz/`, `corpora/` and `scripts/` ship in no binary
+  *(documented, crates/trigon/Cargo.toml — none is a dependency)*.
 
-**Designed but not built.** These are not non-goals; they are unwritten code, and the design chapters
-describe them in the present tense. A finding against behaviour that exists only in `docs/` is not a
-finding *(documented, docs/README.md "Status" — the design documents "describe the system as intended
-rather than as built")*. The largest instances: the fleet (queue, workers, API), the
-two-agreeing-attempts confirmation policy *(documented, docs/16-findings.md §5)*, the divergence
-publication pipeline, and most of the CLI surface in `docs/11-interfaces.md` §2.
+**Designed but not built.** Not non-goals — unwritten code, which the design chapters describe in the
+present tense. A finding against behaviour that exists only in `docs/` is not a finding *(documented,
+docs/README.md "Status")*. The largest: the fleet, the write-only blob credential of
+`docs/12-security.md` §2.3, the two-agreeing-attempts confirmation policy *(documented,
+docs/16-findings.md §5)*, the divergence publication pipeline, and most of `docs/11-interfaces.md` §2.
 
 ---
 
 ## 1.4 Trust boundaries and reachability
 
 `docs/12-security.md` §3 draws the intended worker split. What is *built* is one process, so the
-boundaries that hold today are narrower and worth stating separately.
+boundaries that hold today are narrower.
 
 ```
   operator's shell
@@ -213,258 +218,112 @@ boundaries that hold today are narrower and worth stating separately.
   └───────────────┬─────────────────────────┘
                   │ writes a Dockerfile + script, spawns podman
                   ▼
-  ╔═══════════════════════════════════╗  ── trust boundary ──
+  ╔═══════════════════════════════════╗  ── the one enforced boundary ──
   ║ build container (hostile)         ║
-  ║  runs the package's own build      ║      egress: at an enforced tier, the
-  ║  no signing key, no credentials    ║◄───► mirror only, and nothing else
+  ║  runs the package's own build     ║      egress: at an enforced tier, the
+  ║  no signing key, no credentials   ║◄───► mirror only, and nothing else
   ╚═══════════════┬═══════════════════╝
                   │ writes an artifact to a bind-mounted output directory
                   ▼
         comparison, in the trigon process
 ```
 
-The one boundary that is real and enforced today is the container's: attacker code runs inside it and
-the egress tier bounds what it can reach *(documented, docs/08-execution.md §5;
-docs/16-findings.md §3.13)*. **The attestor is not a separate process in the built system**, so the
-design's "the attestor never executes sandbox-derived code" does not hold as stated for a local
-`trigon rebuild --attest`; `trigon attest` against a store is the separable path *(inferred, Q2)*.
+The container boundary is real and enforced: attacker code runs inside it, and the egress tier bounds
+what it reaches *(documented, docs/08-execution.md §5)*. **The attestor is not a separate process in
+the built system**, so the design's "the attestor never executes sandbox-derived code" does not hold
+for a local `trigon rebuild --attest`. The separable path is `trigon rebuild --store` followed by
+`trigon attest` *(inferred, Q2)*.
 
-**Reachability preconditions.** A finding in a family matters only if it meets that family's
-condition. This is the second question a triager asks, after "which sink".
+**Reachability preconditions.** A finding matters only if it meets its family's condition.
 
-| Family | A finding matters only if it is reachable from… |
+| Family | Reachable from… |
 | --- | --- |
-| `archive-parsing` | the bytes of a published artifact, or of a rebuilt one |
+| `archive-parsing` | the bytes of a published or a rebuilt artifact |
 | `stabilization` | an archive already parsed, or a stabilizer set id named in an attestation |
+| `archived-stabilizer-sets` | a `.wasm` module the operator passed to `--stabilizers` |
 | `comparison-and-verdict` | two summaries produced by this process in one run |
-| `attestation` | a statement this process built, or an attestation file handed to `verify-attestation` |
-| `strategy-rendering` | a strategy document from the definitions repo, a heuristic, CI parsing, or a model |
-| `registry-and-source` | registry metadata, a repository URL a package declares, or a git host's response |
-| `build-execution` | a strategy that has been rendered, or bytes crossing the mirror |
+| `attestation` | a statement this process built, or an attestation handed to `verify-attestation` |
+| `strategy-rendering` | a strategy from the definitions repo, a heuristic, CI parsing, or a model |
+| `registry-and-source` | registry metadata, a package-declared repository URL, or a git host's response |
+| `build-execution` | a rendered strategy, or bytes crossing the mirror |
 | `model-inference` | text a package wrote reaching a prompt, or a provider's response |
-| `operator-surface` | a flag the operator passed, a work directory on disk, or an HTTP request to `watch` |
+| `operator-surface` | a flag, a work directory on disk, or an HTTP request to `watch` |
+| `definitions` | a merged pull request against the definitions repository |
 
 ---
 
 ## 1.5 Assumptions about the environment
 
-- **Platform.** Linux on x86-64 is what is built and tested. macOS and Windows are not supported
-  targets for the build path, which needs `podman` *(assumption, Q3)*.
-- **Rust.** MSRV 1.85. `#![forbid(unsafe_code)]` is declared in the judgement half *(documented,
-  crates/trigon-core/src/lib.rs)*.
-- **Container runtime.** An enforced-tier run needs rootless `podman` on `PATH`, plus a mirror image
-  and a base image the operator built beforehand with `trigon mirror-image` and `trigon base-image`
-  *(documented, README.md "A note on `--egress open`")*.
-- **Clock.** The timewarp mirror filters a registry index to a publish instant taken from registry
-  metadata, not from the host clock. Nothing in the judgement half reads a clock *(documented,
-  docs/08-execution.md §4; docs/07-ai.md §8 forbids wall-clock reads in prompt construction)*.
-- **Concurrency.** Nothing in this project is documented thread-safe beyond what Rust's own `Send`
-  and `Sync` bounds state, and no type here promises interior consistency across threads. Callers get
-  what the type system gives them and nothing more *(documented, by the absence of any such statement
-  in `docs/` and in the public API)*. Two Trigon *processes* on one machine can still disturb each
-  other's `podman` image store; this is narrowed, not closed *(documented, docs/17-backlog.md B6)*.
+- **Platform.** Linux on x86-64 is what is built and tested; the build path needs `podman`
+  *(assumption, Q3)*.
+- **Rust.** MSRV 1.85, and `#![forbid(unsafe_code)]` in the judgement half *(documented,
+  crates/trigon-core/src/lib.rs:1-9)*.
+- **Container runtime.** An enforced-tier run needs rootless `podman`, plus a mirror image and a base
+  image the operator built first *(documented, README.md "A note on `--egress open`")*.
+- **Clock.** The timewarp mirror filters to a publish instant taken from registry metadata, not the
+  host clock, and nothing in the judgement half reads a clock *(documented, docs/07-ai.md §8, which
+  forbids a wall-clock read in prompt construction)*.
+- **Concurrency.** Nothing here is documented thread-safe beyond Rust's own `Send` and `Sync` bounds,
+  and no type promises interior consistency across threads *(documented, by the absence of any such
+  statement in `docs/` and in the public API of every crate)*. Two Trigon *processes* on one machine
+  can still disturb each other's podman image store *(documented, docs/17-backlog.md B6)*.
 
 ### What Trigon does not do to its host
 
-These are negative claims, and they are the ones an integrator most needs and least often gets. They
-are split, because the verifier and the build path are different programs.
+Negative claims, split because the verifier and the build path are different programs.
 
-**The verifier** (`--no-default-features`: `archive-parsing`, `stabilization`,
-`comparison-and-verdict`, `attestation`, `strategy-rendering`):
+**The verifier** (`--no-default-features`):
 
 | Effect | Stance | Conditions |
 | --- | --- | --- |
-| Network of any kind | **absent** | it links no network client, and `xtask policy` asserts it *(documented, docs/01-architecture.md §2.2)* |
+| Network of any kind | **absent** | it links no network client *(documented, docs/01-architecture.md §2.2)* |
 | Child processes | **absent** | *(documented, docs/01-architecture.md §2.2)* |
 | Environment variables | **absent** | *(documented, docs/01-architecture.md §2.2)* |
-| Filesystem writes | **conditional** | only paths the operator named: the `stabilize` output, the `--attest` file, a spill file above 8 MiB *(documented, docs/05-archive-and-normalization.md §2.2)* |
-| Filesystem reads | **conditional** | only paths the operator named, plus a signing key file *(documented)* |
-| stdout / stderr | **present** | the verdict on stdout, `tracing` on stderr *(documented)* |
+| Filesystem writes | **conditional** | only paths the operator named: the `stabilize` output, the `--attest` file, and a spill file above 8 MiB *(documented, crates/trigon-archive/src/limits.rs; crates/trigon-archive/src/model.rs — `SpillFile`)* |
+| Filesystem reads | **conditional** | only paths the operator named, plus a signing key file *(documented, crates/trigon/src/main.rs — every read path is a CLI argument)* |
+| stdout / stderr | **present** | the verdict on stdout, `tracing` on stderr *(documented, docs/11-interfaces.md)* |
 | Signal handlers, global state, locale or FPU mutation | **absent** | *(assumption, Q4)* |
-| Executing WebAssembly | **conditional** | only under the non-default `wasm` feature, §1.6 *(documented, docs/09-attestations.md §7.1)* |
+| Executing WebAssembly | **conditional** | only under the non-default `wasm` feature *(documented, docs/09-attestations.md §7.1)* |
 
-**The build path** additionally, and by design:
+**The build path** additionally, by design:
 
 | Effect | Stance | Conditions |
 | --- | --- | --- |
-| Outbound HTTPS to registries and git hosts | **present** | resolution, artifact fetch, source checkout *(documented, docs/03-ecosystems.md)* |
-| **Outbound HTTPS to any URL registry metadata names** | **present** | a package's own metadata chooses the host the operator's machine connects to *(inferred, Q5)* |
+| Outbound HTTPS to registries and git hosts | **present** | resolution, fetch, checkout *(documented, docs/03-ecosystems.md)* |
+| **Outbound HTTPS to any URL registry metadata names** | **present** | a package's own metadata chooses the host this machine connects to *(inferred, Q5)* |
 | Spawning `git` | **present** | with `GIT_CONFIG_NOSYSTEM` and a restricted `GIT_ALLOW_PROTOCOL` *(documented, crates/trigon-registry/src/source.rs)* |
-| Spawning `podman` | **present** | the build itself *(documented, docs/08-execution.md §1)* |
-| Spawning the configured model CLI | **conditional** | only with `--model copilot:…` *(documented, docs/16-findings.md §3.8)* |
+| Spawning `podman` | **present** | the build *(documented, docs/08-execution.md §1)* |
+| Spawning the Copilot CLI | **conditional** | only with `--model copilot:` *(documented, crates/trigon-ai/src/copilot.rs:133)* |
 | Outbound HTTPS to a model endpoint | **conditional** | only when `--model` names a live provider *(documented, README.md "Asking a model")* |
 | Binding a listening socket | **conditional** | `trigon watch` (loopback by default) and the mirror *(documented, crates/trigon/src/main.rs — `--bind` defaults to `127.0.0.1:8099`)* |
-| Reading environment variables | **present** | API keys and `OLLAMA_HOST`/`ANTHROPIC_BASE_URL`; **keys come from the environment and never from the command line, so a key does not reach a process list or a shell history** *(documented, crates/trigon/src/inferrer.rs)* |
+| Reading environment variables | **present** | API keys and base-URL overrides; **keys come from the environment and never the command line** *(documented, crates/trigon/src/inferrer.rs:527)* |
 | Writing a work directory | **present** | fetched artifacts, build logs, rebuilt artifacts *(documented, docs/18-management-ui.md §2)* |
 
 ---
 
 ## 1.6 Build-time and configuration variants
 
-Two cargo features and one flag change which properties hold. **Support posture, not defaultness,
-decides routing**: a defect in a supported configuration is in model even when that configuration is
-not the default.
+**Support posture, not defaultness, decides routing.** A defect in a supported configuration is in
+model even when that configuration is not the default.
 
-| Knob | Default | Stance | Effect on the model |
+| Knob | Default | Stance | Effect |
 | --- | --- | --- | --- |
-| `build` feature | **on** | supported | Adds `registry`, `sandbox`, `mirror`, `store`, `ai`, a tokio runtime and a network client. Turning it *off* is the verifier, and is the stronger posture, not a weaker one. |
-| `wasm` feature | **off** | supported | Lets the verifier *run* an archived stabilizer set rather than only name it. It roughly doubles the verifier's dependency tree, and the small tree is what a sceptic checks *(documented, crates/trigon/Cargo.toml)*. A claim re-derived through an archived set can reach `NormalizedWithCaveats` and never `Normalized`, because the provenance cap cannot be confirmed from bytes alone — **so a `Normalized` claim re-derived this way reads as refuted when it is not** *(documented, docs/16-findings.md §4b)*. |
-| `--egress open` | **the default for `rebuild` and `sweep`** | **supported, and it voids the strong claim** | The build reaches the whole internet. The run records `attestable: false`, and the README says so *(documented, README.md "A note on `--egress open`")*. |
+| `build` feature | **on** | supported | Adds registry, sandbox, mirror, store, AI, a tokio runtime and a network client. Turning it off is the verifier, and is the *stronger* posture. |
+| `wasm` feature | **off** | supported | Lets the verifier run an archived stabilizer set rather than only name it. It roughly doubles the verifier's dependency tree, and the small tree is what a sceptic checks *(documented, crates/trigon/Cargo.toml)*. See D18. |
+| `--egress open` | **the default for `rebuild` and `sweep`** | **supported, and it voids the strong claim** | The build reaches the whole internet; the run records `attestable: false` *(documented, README.md "A note on `--egress open`")*. |
+| `--public-key` on `verify-attestation` | **absent** | supported | Without it the tool re-derives the comparison and reports the signature as **present and unchecked** rather than verified. "Unsigned" and "signed by someone you did not check" are different things, and the tool distinguishes them *(documented, README.md "Signing it, and checking the signature")*. |
 | `local-unsafe` runner | not the default | **dev-only** | Labelled development-only and refuses to sign *(documented, docs/08-execution.md §1)*. A finding that needs it closes `OUT-OF-MODEL: non-default-build`. |
 
 **The insecure default, named.** `--egress open` is the shipped default for the two commands an
-operator actually runs. It is a supported production posture in the sense that it is what you get
-without thinking, and the project's position is that such a run carries a weaker claim which the
-attestation states rather than hides. So a report that a build at `--egress open` fetched something
-it should not have is **not** `non-default-build`; it is `BY-DESIGN: property-disclaimed`, discharged
-by §1.12's statement that the guard and the egress boundary are not in force at that tier. A report
-that the run nevertheless claimed full trust *is* `VALID`. This distinction is the one a triager will
-need most often *(documented, README.md; docs/08-execution.md §5)*.
+operator actually runs. The project's position is that such a run carries a weaker claim which the
+attestation *states* rather than hides. So:
 
----
+- A report that a build at `--egress open` fetched something it should not have →
+  `BY-DESIGN: property-disclaimed`, discharged by D15 and §1.6 itself.
+- A report that the run nevertheless claimed full trust → `VALID`, against P11.
 
-## 1.9 Assumptions about dependencies
-
-Trigon is not zero-dependency. The runtime dependencies whose failure would be a security event,
-and where such a failure is triaged:
-
-| Dependency | Relied on for | If it fails its own contract |
-| --- | --- | --- |
-| `podman` (external binary) | process, filesystem and **network** isolation of the build. `--network none` at enforced tiers is a podman guarantee, not ours. | upstream — `OUT-OF-MODEL: dependency-contract` |
-| `git` (external binary) | fetching a checkout without honouring attacker-supplied config; we set `GIT_CONFIG_NOSYSTEM` and restrict `GIT_ALLOW_PROTOCOL` | upstream, unless we passed something we should not have, which is ours |
-| `flate2` / `miniz_oxide` | correct, bounded inflate of attacker bytes | upstream — but note §1.12: bounding the *output* is ours and is currently unfixed |
-| `reqwest` + `rustls` | TLS to registries and model endpoints | upstream |
-| `sha2` | collision resistance of SHA-256 | upstream |
-| `ed25519-dalek` | signature correctness | upstream |
-| `minijinja` | rendering a template without escaping into code paths we did not intend | upstream |
-| `wasmtime` (feature `wasm`) | sandboxing an archived stabilizer set | upstream |
-| a model provider's API | nothing security-relevant. A model's answer is a *candidate*, validated before use, and capped by §1.11's provenance rule | never closes a report here; a wrong answer is expected input |
-
-**The crate dependency graph is not the security control.** It keeps honest code honest. The
-maintainer declines to describe it as a boundary, and this model does not either *(documented,
-ADR-0001; docs/00-overview.md §3.1)*. The controls are the provenance cap, the egress boundary, the
-artifact guard, and a verifier a third party can build and check.
-
-**The definitions repository is a dependency and a supply chain.** A malicious pull request adding a
-custom stabilizer that normalizes away a backdoored file makes a real mismatch vanish. The mandatory
-prose `reason:` is a social control; the technical ones are the declarative bounds on what a custom
-stabilizer may do, the flag when one alters more than N bytes or touches an executable section, and —
-the one a consumer applies themselves — the provenance cap, which means a consumer demanding
-`Normalized` never sees the custom-stabilizer class at all *(documented, docs/12-security.md §8)*.
-
----
-
-## 1.10 Adversary model
-
-### In scope
-
-**A1 — The forged-attestation attacker.** The primary adversary, and the one the design is shaped
-around. They control a package, its repository, its README, its CI configuration, and any file in the
-checkout. Their goal is a signed statement that their backdoored package reproduces cleanly. The
-attack needs no exotic capability: injected content says the build requires a prebuilt binary, the
-Builder emits a schema-valid strategy that fetches it, the build "succeeds", and it matches
-byte-for-byte — because it *is* the published artifact. **The clean re-run is not a defence here; it
-is the mechanism of the attack** *(documented, docs/12-security.md §1.1)*.
-
-**A2 — The prompt injector.** A special case of A1 with a narrower target: text a package wrote —
-README, CI config, `AGENTS.md`, build log — reaching a model that can act. Prompt injection is an
-accepted and mitigated threat, not a solved one, and the project says so *(documented,
-docs/12-security.md §4)*.
-
-**A3 — The malformed-input author.** Supplies a published artifact whose bytes are hostile to the
-parser. Trigon decompresses attacker-controlled bytes by construction and there is no zip-bomb
-defence to inherit *(documented, docs/05-archive-and-normalization.md §2.2)*.
-
-**A4 — The definitions contributor.** Opens a pull request against the definitions repository
-*(documented, docs/12-security.md §8)*.
-
-**A5 — The second-package attacker.** Publishes a *second*, innocuous-looking package holding the
-payload, and fetches it through the mirror's artifact route, which allowlists `registry.npmjs.org`
-and cannot bound what that host serves *(documented, docs/17-backlog.md B7 residue)*.
-
-**A6 — The normalization-conditioned attacker.** Makes the payload depend on an observable the
-stabilizers erase, so the stabilized digests match while the artifacts differ where it counts. Judged
-an accepted residual risk, with risk tiers offered to consumers who disagree *(documented,
-docs/05-archive-and-normalization.md §1)*.
-
-**A7 — A reader of a published divergence.** Not an attacker on the system, but the party a false
-divergence harms. Publishing a divergence is a public accusation about someone else's package, so the
-false-mismatch rate is a safety property and not only a quality metric *(documented,
-docs/09-attestations.md §5; ADR-0010)*.
-
-### Out of scope
-
-- **The operator.** Anyone who can pass flags to `trigon` can name a local path as a source, point it
-  at any registry, or hand it a key. `file://` is not dangerous; `file://` *chosen by the thing under
-  test* is, and the distinction is a constructor *(documented, docs/16-findings.md §3.7)*. A report
-  that needs operator control of an operator input closes `OUT-OF-MODEL: trusted-input`.
-- **Anyone with code execution in the `trigon` process.** They have already won.
-- **A compromised control plane** *(documented, docs/12-security.md §11)*.
-- **A network attacker between Trigon and a registry**, beyond what TLS gives. Artifacts are verified
-  against the digest the registry declared *and* re-hashed, so served bytes are checked; the registry
-  itself is trusted to say what it published *(documented, crates/trigon-registry/src/registry.rs)*.
-- **A tenant of a shared installation.** There is no multi-tenancy to attack yet (§1.3).
-
----
-
-## 1.16 Conditions that would change this model
-
-- A new ecosystem gains a `Registry` — `nuget.org`, `crates.io`, `rubygems.org` are queued
-  *(documented, docs/17-backlog.md B8)*. Each adds an archive format, a version algebra, and a
-  stabilizer profile, and RubyGems adds nested archives, which is a new reachability path into the
-  parser.
-- A network transcript ships, because it is the condition on `attestable` becoming true at any tier
-  *(documented, docs/17-backlog.md B7)*.
-- The fleet is built: a queue, workers, an authenticated API, and multi-tenancy each add a role this
-  model does not have.
-- `--egress`'s default changes, or `GitAndMirror` is implemented (it is currently refused).
-- The `wasm` feature becomes the default, or the fallback in `docs/09-attestations.md` §7.1 — naming
-  a Trigon release version in every attestation — is taken instead.
-- A custom stabilizer is accepted into the definitions repository for the first time, which turns
-  §1.9's definitions row from a policy into a live input.
-- The two-agreeing-attempts confirmation policy is implemented, which changes what a published
-  divergence asserts.
-- **A report that cannot be routed to exactly one §1.17 disposition.** That is itself a trigger:
-  revise this document rather than make an ad-hoc call.
-
----
-
-## 1.17 Triage dispositions
-
-The closed set. Assign exactly one.
-
-| Disposition | Meaning | Licensed by |
-| --- | --- | --- |
-| `VALID` | Violates a property in §1.11, reachable by an adversary in §1.10 through an input §1.7 marks attacker-controllable. | §1.11, §1.7, §1.10 |
-| `VALID-HARDENING` | No §1.11 property is violated, but §1.14 shows the API makes a misuse easy enough to be worth closing off. Maintainer discretion; usually no CVE. | §1.14 |
-| `OUT-OF-MODEL: trusted-input` | Needs attacker control of an input §1.7 marks trusted — in practice, an operator input. | §1.7 |
-| `OUT-OF-MODEL: adversary-not-in-scope` | Needs a capability §1.10 excludes. | §1.10 |
-| `OUT-OF-MODEL: unsupported-component` | Lands in code §1.3 places out of scope, including behaviour that exists only in the design chapters. | §1.3 |
-| `OUT-OF-MODEL: non-default-build` | Needs a configuration §1.6 marks dev-only or unsupported. **Non-default alone is not enough** — the `wasm` feature is off by default and supported. | §1.6 |
-| `OUT-OF-MODEL: dependency-contract` | Root cause is a dependency failing its own contract while Trigon used it as documented. Forward upstream. | §1.9 |
-| `BY-DESIGN: property-disclaimed` | Concerns a property §1.12 says is not provided. | §1.12 |
-| `KNOWN-NON-FINDING` | Matches a §1.15 entry on every field, and the claim that discharges it still stands. | §1.15 |
-| `MODEL-GAP` | Fits none of the above. Triggers §1.16. | — |
-
-**Precedence — first matching rule wins.** Several failed preconditions do not make a `MODEL-GAP`;
-this order resolves them.
-
-1. Exact §1.15 match → `KNOWN-NON-FINDING`
-2. Unsupported component → `OUT-OF-MODEL: unsupported-component`
-3. Unsupported configuration → `OUT-OF-MODEL: non-default-build`
-4. Conformant use of a dependency that broke its own contract → `OUT-OF-MODEL: dependency-contract`
-5. Requires control of a trusted input → `OUT-OF-MODEL: trusted-input`
-6. Requires an excluded capability → `OUT-OF-MODEL: adversary-not-in-scope`
-7. Disclaimed property → `BY-DESIGN: property-disclaimed`
-8. Violated claimed property → `VALID`; else an easy-to-prevent §1.14 misuse → `VALID-HARDENING`
-9. No unique supported conclusion → `MODEL-GAP`
-
-**Closure constraint.** Any disposition that closes a report against its reporter —
-`OUT-OF-MODEL: *`, `BY-DESIGN: *`, `KNOWN-NON-FINDING` — must be licensed by a *(documented)* or
-*(maintainer)* claim. Under this model's `strict` policy, an *(inferred)* or *(assumption)* claim can
-only escalate the report to the maintainer. `VALID` and `MODEL-GAP` are always available. While any
-*(inferred)* or *(assumption)* tag remains, the status stays `unratified draft` rather than
-`accepted`.
+This distinction is the one a triager needs most often *(documented, README.md;
+docs/08-execution.md §5)*.
 
 ---
 
@@ -472,290 +331,414 @@ only escalate the report to the maintainer. `VALID` and `MODEL-GAP` are always a
 
 ### Per-operand trust table
 
-One row per operand that an adversary in §1.10 can influence. Operator-supplied operands — a path, a
-flag, a key file, a `--model` spec, a definitions ref — are **trusted** throughout and are not
-tabled individually; a report that needs operator control of one closes
-`OUT-OF-MODEL: trusted-input`.
-
-`Control kind` distinguishes what the attacker holds. `data` and `size` are not the same power, and
-`x-shell-script`, `x-model-output` and `x-build-log` are much more power than either.
+One row per operand an adversary in §1.10 can influence. Operator-supplied operands — a path, a flag,
+a key file, a `--model` spec, a definitions ref — are **trusted** and not tabled individually.
 
 | Entry point | Operand | Attacker-controllable | Control kind | Caller must enforce | Provenance |
 | --- | --- | --- | --- | --- | --- |
-| `archive::parse` | artifact bytes | **yes** | data, size, object-topology, serialized-state | nothing — safe parsing is a claimed property, §1.11 P1, **except** the two unfixed limits in §1.12 | *(documented, docs/05-archive-and-normalization.md §2.2)* |
-| `archive::serialize` | the parsed archive | **yes** (derived) | data, size, object-topology | nothing — byte-stability is P2 | *(documented, docs/05 §3)* |
+| `archive::parse` | artifact bytes | **yes** | data, size, object-topology, serialized-state | nothing, **except** the two unfixed limits in D1 | *(documented, docs/05-archive-and-normalization.md §2.2)* |
+| `archive::serialize` | the parsed archive | **yes** (derived) | data, size, object-topology | nothing — P2 | *(documented, docs/05 §3)* |
 | `compare::summarize` | artifact bytes | **yes** | data, size | nothing | *(documented, docs/08-execution.md §6)* |
 | `compare::compare` | two `Summary` values | no — produced by this process | serialized-state | both must come from one run; the set-digest check enforces it | *(documented, crates/trigon-compare/src/lib.rs:159)* |
-| `core::classify` / `core::compress` | a build log | **yes** | data, size, x-build-log | nothing — bounded and control-stripped, P7 | *(documented, crates/trigon-core/src/logs.rs)* |
-| `core::TargetRef::from_str` | a PURL string | operator, usually | data, resource-name | a version is required and a PURL without one is refused | *(documented, crates/trigon-core/src/target.rs:152)* |
-| `Registry::resolve` | registry response JSON | **yes** | data, size, serialized-state, object-topology | nothing claimed; shape errors surface as `RegistryError` | *(inferred, Q6)* |
-| `Registry::fetch` | `meta.url` | **yes — the package's own metadata chooses the host this machine connects to** | resource-name | **the operator accepts that resolving a package means contacting hosts that package names** | *(inferred, Q5)* |
+| `core::classify` / `compress` | a build log | **yes** | data, size, x-build-log | nothing — bounded and control-stripped, P7 | *(documented, crates/trigon-core/src/logs.rs:8-21)* |
+| `core::TargetRef::from_str` | a PURL | operator, usually | data, resource-name | a version is required; a PURL without one is refused | *(documented, crates/trigon-core/src/target.rs:152)* |
+| `StabilizerSet` resolution | a set id, and the `.wasm` module it resolves to | **operator chooses the module; the id comes from an attestation** | resource-name, collaborator-implementation, x-wasm-module | **the operator decides which archived set to trust and run**; an id alone executes nothing | *(documented, docs/09-attestations.md §7.1)* |
+| `Registry::resolve` | registry response JSON | **yes** | data, size, serialized-state, object-topology | nothing; shape errors surface as `RegistryError` | *(documented, crates/trigon-registry/src/npm.rs — fields are read, not schema-validated)* |
+| `Registry::fetch` | `meta.url` | **yes — a package's metadata chooses the host this machine contacts** | resource-name | the operator accepts that resolving a package means contacting hosts that package names | *(inferred, Q5)* |
 | `Registry::fetch` | response body | **yes** | data, size | bytes are re-hashed and checked against the declared digest | *(documented, crates/trigon-registry/src/registry.rs)* |
-| `SourceCache::checkout` | `repo` | **yes** | resource-name, x-git-remote-url | **https only**, enforced here; `GIT_ALLOW_PROTOCOL` and `GIT_CONFIG_NOSYSTEM` are set | *(documented, crates/trigon-registry/src/source.rs)* |
+| `SourceCache::checkout` | `repo` | **yes** | resource-name, x-git-remote-url | **https only**, enforced here | *(documented, crates/trigon-registry/src/source.rs)* |
 | `SourceCache::checkout` | `commit` | **yes** | x-git-ref | **40 hex characters only**, so a ref cannot be an option or a path | *(documented, crates/trigon-registry/src/source.rs)* |
-| `Checkout::files` / `read` | repository contents | **yes** | data, object-topology | nothing — this is the material the Builder reads | *(documented, docs/16-findings.md §3.7)* |
-| strategy inference ladder | `package.json` `scripts.build` | **yes** | data, x-shell-script | nothing at this layer; the environment is the enforcement point | *(documented, docs/12-security.md §5)* |
-| `strategy` parse | a strategy document | **yes when a model or a package authored it** | data, x-shell-script, x-model-output | **schema validation is not sanitization** — a `runs:` step is free-form shell | *(documented, docs/04-strategies.md §7; docs/12-security.md §5)* |
+| `Checkout::files` / `read` | repository contents | **yes** | data, object-topology | nothing — this is what the Builder reads | *(documented, docs/16-findings.md §3.7)* |
+| strategy inference | `package.json` `scripts.build` | **yes** | data, x-shell-script | nothing here; the environment is the enforcement point | *(documented, docs/12-security.md §5)* |
+| `strategy` parse | a strategy document | **yes when a model or a package authored it** | data, x-shell-script, x-model-output | **schema validation is not sanitization** — a `runs:` step is free-form shell | *(documented, docs/04-strategies.md §7)* |
 | `strategy` render | template context | no — a closed type | type-class | undefined variables are a hard error | *(documented, docs/04-strategies.md §3)* |
 | build container | everything the build runs | **yes, by design** | x-shell-script | the egress tier and the container are the boundary | *(documented, docs/08-execution.md §5)* |
-| mirror `/-artifact/`, `/-toolchain/` | request host and path | **yes, from inside the build** | resource-name | compiled-in exact-match host allowlists; **these routes sit before the credential check and are not access-controlled** | *(documented, docs/16-findings.md §3.13)* |
+| mirror `/-artifact/`, `/-toolchain/` | request host and path | **yes, from inside the build** | resource-name | compiled-in exact-match host allowlists — but these routes are **not** access-controlled and the artifact route applies **no** time filter | *(documented, docs/16-findings.md §3.13)* |
 | mirror index route | the time filter, in basic auth | **readable from inside the build** | data | an index request with no filter is refused 400 | *(documented, crates/trigon-mirror/src/server.rs)* |
 | egress guard | every proxied response body | **yes** | data, size, rate | hashed as it streams; a whole-artifact or member match voids the run | *(documented, docs/12-security.md §2.2)* |
-| build output directory | file entries the build wrote | **yes** | data, resource-name, object-topology | **symlinks are not followed**; the type is taken without dereferencing | *(documented, docs/16-findings.md §3.12)* |
-| `verify-attestation` | the bundle | **yes** | data, serialized-state | signature is checked only if `--public-key` is given, and the tool says which it did | *(documented, README.md "Signing it, and checking the signature")* |
-| `verify-attestation` | `--stabilizers` manifest | operator | collaborator-implementation | naming an archived set the operator chose to trust | *(documented, docs/09-attestations.md §7.1)* |
-| `trigon watch` `GET /run/{index}` | the path segment | **yes if the port is reachable** | data, resource-name | parsed as an integer and re-formatted; it is never joined as a caller-supplied path | *(documented, crates/trigon/src/watch.rs)* |
+| build output directory | file entries the build wrote | **yes** | data, resource-name, object-topology | **symlinks are not followed** | *(documented, docs/16-findings.md §3.12; crates/trigon-sandbox/src/podman.rs:691)* |
+| store record paths | package name, namespace, version | **yes** | resource-name | nothing here — `object_store`'s `Path` percent-encodes `..` and `/` inside a component, so a name cannot escape the store root. **The safety is the dependency's, not ours** (§1.9) | *(documented, crates/trigon-store/src/lib.rs:204; verified against object_store 0.12: `..` → `%2E%2E`)* |
+| `verify-attestation` | the bundle | **yes** | data, serialized-state | the signature is checked only with `--public-key`, and the tool says which it did | *(documented, README.md)* |
+| `trigon watch` `GET /run/{index}` | the path segment | **yes if the port is reachable** | data, resource-name | parsed as an integer and re-formatted; never joined as a caller-supplied path | *(documented, crates/trigon/src/watch.rs)* |
 | `trigon watch` all views | package names, build logs, strategies | **yes** | data, size, x-build-log | every package-derived string is HTML-escaped on the way out | *(documented, crates/trigon/src/watch.rs — `esc`)* |
-| model prompt | README, CI config, manifests, build log | **yes** | data, x-build-log | **nothing prevents injection**; it is fenced, bounded, control-stripped and accepted as a residual risk | *(documented, docs/12-security.md §4)* |
-| model response | the proposed strategy | **the model's, and therefore indirectly the attacker's** | x-model-output | parsed and validated; the provenance cap is what bounds the damage | *(documented, docs/00-overview.md §3.1)* |
+| model prompt | README, CI config, manifests, build log | **yes** | data, x-build-log | **nothing prevents injection**; it is fenced, bounded and control-stripped, and accepted as residual risk | *(documented, docs/12-security.md §4)* |
+| model response | the proposed strategy | **the model's, and so indirectly the attacker's** | x-model-output | parsed and validated; the provenance cap bounds the damage | *(documented, docs/00-overview.md §3.1)* |
+| definitions repository | a `build.yaml` or a custom stabilizer | **yes, via a merged pull request** | data, x-shell-script, collaborator-implementation | two-party review, a mandatory prose `reason:`, and the corpus-wide impact preview | *(documented, docs/12-security.md §8)* |
 
 **Coverage.** Every family's public surface is represented. Within a family the table names the
-operands that carry attacker power, not every parameter; the remainder are operator-supplied or
-internal and are *(assumption, Q7)* trusted.
+operands that carry attacker power. **The remainder are believed operator-supplied or internal
+*(assumption, Q7)* — and because that is an assumption, a finding against an operand not in this
+table does not close. It escalates.**
 
 ### Contract-dimension matrix
 
-Eight dimensions per in-scope family. `claimed` and `disclaimed` rows route to §1.11 or §1.12.
+Eight dimensions per in-scope family. Every `claimed` and `disclaimed` row names the §1.11 property
+or §1.12 disclaimer that owns it; no claimed row exists only here.
 
-| Family | Dimension | Status | Conditions / boundary |
-| --- | --- | --- | --- |
-| archive-parsing | numeric-domain | **claimed** | offsets are checked; a wrapping add was fixed and is tested → P1 |
-| archive-parsing | failure-atomicity | **claimed** | a parse failure leaves the member `Inline` and emits `NestedParseFailed`; it never silently changes a digest → P1 |
-| archive-parsing | recursive-cyclic-topology | **claimed** | recursion is structural and depth-limited to 4 → P1 |
-| archive-parsing | callback-execution | N/A | the API accepts no callbacks |
-| archive-parsing | serialization-reconstruction | **claimed** | `parse(write(a)) == a`, proptested → P2 |
-| archive-parsing | reference-lifecycle | **claimed** | copy-on-write over an mmap; a body is never aliased after mutation → P2 |
-| archive-parsing | concurrency-reentrancy | **disclaimed** | no thread-safety beyond `Send`/`Sync` is stated anywhere → D8 |
-| archive-parsing | resource-complexity | **disclaimed, partially** | inline and total-expansion caps exist; **the inflate itself is not bounded by what it produces** → D1 |
-| stabilization | numeric-domain | **claimed** | stabilizers are total and take no sizes from the input |
-| stabilization | failure-atomicity | **claimed** | stabilizers return no `Result`; there is no half-stabilized state → P3 |
-| stabilization | recursive-cyclic-topology | **claimed** | nesting is bounded by the archive model's limit |
-| stabilization | callback-execution | **claimed under the `wasm` feature only** | an archived set is a WASM module, sandboxed by wasmtime → §1.6 |
-| stabilization | serialization-reconstruction | **claimed** | `stab(stab(x)) == stab(x)` is a required, tested property → P3 |
-| stabilization | reference-lifecycle | N/A | the registry hands out `Arc`s and owns nothing mutable |
-| stabilization | concurrency-reentrancy | **disclaimed** | no statement is made → D8 |
-| stabilization | resource-complexity | **claimed** | bounded by the archive it walks |
-| comparison-and-verdict | numeric-domain | N/A | compares digests and counts, takes no sizes from input |
-| comparison-and-verdict | failure-atomicity | **claimed** | a set mismatch refuses before comparing, classified `Fault::Bug` → P4 |
-| comparison-and-verdict | recursive-cyclic-topology | **claimed** | the diff walks the archive model's bounded tree |
-| comparison-and-verdict | callback-execution | N/A | no callbacks |
-| comparison-and-verdict | serialization-reconstruction | **claimed** | outcomes cross the wire as strings with `FromStr` the exact inverse of `Display` → P5 |
-| comparison-and-verdict | reference-lifecycle | N/A | borrows for the call's duration |
-| comparison-and-verdict | concurrency-reentrancy | **disclaimed** | → D8 |
-| comparison-and-verdict | resource-complexity | **claimed** | linear in members; the diff walks each side at most twice |
-| attestation | numeric-domain | N/A | no arithmetic on attacker values |
-| attestation | failure-atomicity | **claimed** | `trigon attest` refuses a void run outright rather than signing a weaker claim → P6 |
-| attestation | recursive-cyclic-topology | **claimed** | JCS refuses what it cannot promise another implementation reproduces → P9 |
-| attestation | callback-execution | **claimed** | the `Signer` and `ArchivedSet` seams are operator-chosen collaborators |
-| attestation | serialization-reconstruction | **claimed** | canonical JSON is byte-stable; floats and non-ASCII keys are refused, not coerced → P9 |
-| attestation | reference-lifecycle | N/A | — |
-| attestation | concurrency-reentrancy | **disclaimed** | → D8 |
-| attestation | resource-complexity | **disclaimed** | a statement is as large as the difference summary it carries → D9 |
-| strategy-rendering | numeric-domain | N/A | — |
-| strategy-rendering | failure-atomicity | **claimed** | an unregistered `uses:` is a hard error naming the tool, never an empty fragment |
-| strategy-rendering | recursive-cyclic-topology | **claimed** | tool composition is acyclic at load and depth-bounded at render |
-| strategy-rendering | callback-execution | **disclaimed** | a `runs:` step is free-form shell and nothing here sanitizes it → D2 |
-| strategy-rendering | serialization-reconstruction | **claimed** | `strategy_digest` is canonical and domain-separated |
-| strategy-rendering | reference-lifecycle | N/A | — |
-| strategy-rendering | concurrency-reentrancy | **disclaimed** | → D8 |
-| strategy-rendering | resource-complexity | **claimed** | render depth is bounded |
-| registry-and-source | numeric-domain | N/A | — |
-| registry-and-source | failure-atomicity | **disclaimed** | a partial checkout or a partial fetch is not rolled back → D10 |
-| registry-and-source | recursive-cyclic-topology | N/A | — |
-| registry-and-source | callback-execution | **claimed** | `git` is spawned with a fixed environment, https only, 40-hex commits only → P10 |
-| registry-and-source | serialization-reconstruction | **disclaimed** | registry JSON shape is not validated beyond what is read → D11 |
-| registry-and-source | reference-lifecycle | N/A | — |
-| registry-and-source | concurrency-reentrancy | **disclaimed** | → D8 |
-| registry-and-source | resource-complexity | **disclaimed** | no bound on a repository's or a response's size → D12 |
-| build-execution | numeric-domain | N/A | — |
-| build-execution | failure-atomicity | **claimed** | a runner refuses a tier it cannot enforce rather than downgrading it → P11 |
-| build-execution | recursive-cyclic-topology | N/A | — |
-| build-execution | callback-execution | **disclaimed by design** | executing attacker code is the purpose; the container is the boundary → D3 |
-| build-execution | serialization-reconstruction | N/A | — |
-| build-execution | reference-lifecycle | **disclaimed** | two processes share one podman image store → D4 |
-| build-execution | concurrency-reentrancy | **disclaimed** | → D4, D8 |
-| build-execution | resource-complexity | **claimed** | a hard wall-clock kill bounds a build |
-| model-inference | numeric-domain | N/A | — |
-| model-inference | failure-atomicity | **claimed** | a budget stop names which budget; a replay refuses a changed prompt rather than answering it |
-| model-inference | recursive-cyclic-topology | N/A | — |
-| model-inference | callback-execution | **disclaimed** | with `--model copilot:` the provider is an agent with a shell; every other provider is a function from a prompt to a string → D5 |
-| model-inference | serialization-reconstruction | **claimed** | a transcript naming a model alias is refused for replay rather than replayed |
-| model-inference | reference-lifecycle | N/A | — |
-| model-inference | concurrency-reentrancy | **disclaimed** | → D8 |
-| model-inference | resource-complexity | **claimed** | iteration, token and wall-clock budgets, checked between iterations |
-| operator-surface | numeric-domain | N/A | — |
-| operator-surface | failure-atomicity | **claimed** | `trigon watch` has no write path at all |
-| operator-surface | recursive-cyclic-topology | N/A | — |
-| operator-surface | callback-execution | N/A | — |
-| operator-surface | serialization-reconstruction | **disclaimed** | the store hash-checks blobs and not its own records → D6 |
-| operator-surface | reference-lifecycle | N/A | — |
-| operator-surface | concurrency-reentrancy | **disclaimed** | nothing excludes two writers from one work directory or one store → D7 |
-| operator-surface | resource-complexity | **disclaimed** | a `watch` request does unbounded work in the size of the work directory → D13 |
+| Family | Dimension | Status | Conditions / boundary | Owner |
+| --- | --- | --- | --- | --- |
+| archive-parsing | numeric-domain | claimed | offsets checked; a wrapping add was fixed and is tested | P1 |
+| archive-parsing | failure-atomicity | claimed | a parse failure keeps the member `Inline` and emits `NestedParseFailed` | P1 |
+| archive-parsing | recursive-cyclic-topology | claimed | recursion is structural, depth-limited to 4 | P1 |
+| archive-parsing | callback-execution | N/A | the API accepts no callbacks and holds no function values | — |
+| archive-parsing | serialization-reconstruction | claimed | `parse(write(a)) == a`, proptested | P2 |
+| archive-parsing | reference-lifecycle | claimed | copy-on-write over an mmap; a body is never aliased after mutation | P2 |
+| archive-parsing | concurrency-reentrancy | disclaimed | no thread-safety beyond `Send`/`Sync` is stated | D8 |
+| archive-parsing | resource-complexity | disclaimed | inline and total-expansion caps exist; the inflate is not bounded by what it *produces* | D1 |
+| archive-parsing | x-filesystem-materialization | claimed | no archive member is ever written to a filesystem path | P22 |
+| stabilization | numeric-domain | claimed | stabilizers take no sizes or offsets from the input | P3 |
+| stabilization | failure-atomicity | claimed | stabilizers return no `Result`; there is no half-stabilized state | P3 |
+| stabilization | recursive-cyclic-topology | claimed | nesting is bounded by the archive model's depth limit | P1 |
+| stabilization | callback-execution | N/A | the registry holds `Arc<dyn Stabilizer>` values compiled into this binary; an archived set is the `archived-stabilizer-sets` family | — |
+| stabilization | serialization-reconstruction | claimed | `stab(stab(x)) == stab(x)`, a required and tested property | P3 |
+| stabilization | reference-lifecycle | N/A | the registry hands out `Arc`s and owns nothing mutable | — |
+| stabilization | concurrency-reentrancy | disclaimed | no statement is made | D8 |
+| stabilization | resource-complexity | claimed | bounded by the archive it walks; a stabilizer allocates no more than one member | P3 |
+| archived-stabilizer-sets | numeric-domain | claimed | the module operates on bytes the host hands it | P23 |
+| archived-stabilizer-sets | failure-atomicity | claimed | a trap in the module fails the re-derivation rather than producing a digest | P23 |
+| archived-stabilizer-sets | recursive-cyclic-topology | N/A | the host calls one exported function once per artifact | — |
+| archived-stabilizer-sets | callback-execution | **disclaimed** | an archived set is third-party code the operator chose to run; wasmtime's sandbox is the boundary and it is a dependency's guarantee | D21 |
+| archived-stabilizer-sets | serialization-reconstruction | claimed | the archived set is proved to agree with the compiled one before use | P23 |
+| archived-stabilizer-sets | reference-lifecycle | N/A | the module instance lives for one call | — |
+| archived-stabilizer-sets | concurrency-reentrancy | disclaimed | no statement is made | D8 |
+| archived-stabilizer-sets | resource-complexity | **disclaimed** | memory growth inside the module is the module's | D21 |
+| archived-stabilizer-sets | x-provenance-cap | **disclaimed** | the cap cannot be confirmed from bytes alone, so a `normalized` claim degrades to `normalized_with_caveats` and **a true claim reads as refuted** | D18 |
+| comparison-and-verdict | numeric-domain | N/A | compares digests and counts; takes no sizes from the input | — |
+| comparison-and-verdict | failure-atomicity | claimed | a set mismatch refuses before comparing, classified `Fault::Bug` | P4 |
+| comparison-and-verdict | recursive-cyclic-topology | claimed | the diff walks the archive model's bounded tree | P1 |
+| comparison-and-verdict | callback-execution | N/A | no callbacks | — |
+| comparison-and-verdict | serialization-reconstruction | claimed | outcomes cross the wire as strings, `FromStr` the exact inverse of `Display` | P24 |
+| comparison-and-verdict | reference-lifecycle | N/A | borrows for the call's duration and retains nothing | — |
+| comparison-and-verdict | concurrency-reentrancy | disclaimed | no statement is made | D8 |
+| comparison-and-verdict | resource-complexity | claimed | linear in members; each side is walked at most twice | P25 |
+| attestation | numeric-domain | N/A | no arithmetic on attacker-supplied values | — |
+| attestation | failure-atomicity | claimed | `trigon attest` refuses a void run rather than signing a weaker claim | P6 |
+| attestation | recursive-cyclic-topology | claimed | JCS refuses what another implementation might not reproduce | P9 |
+| attestation | callback-execution | claimed | `Signer` and `ArchivedSet` are operator-chosen collaborators, named on the command line | P26 |
+| attestation | serialization-reconstruction | claimed | canonical JSON is byte-stable; floats and non-ASCII keys are refused, not coerced | P9 |
+| attestation | reference-lifecycle | N/A | a statement is built, signed and dropped within one call | — |
+| attestation | concurrency-reentrancy | disclaimed | no statement is made | D8 |
+| attestation | resource-complexity | disclaimed | a statement is as large as the difference summary it carries | D9 |
+| strategy-rendering | numeric-domain | N/A | no arithmetic on strategy values | — |
+| strategy-rendering | failure-atomicity | claimed | an unregistered `uses:` is a hard error naming the tool, never an empty fragment | P27 |
+| strategy-rendering | recursive-cyclic-topology | claimed | tool composition is acyclic at load and depth-bounded at render | P27 |
+| strategy-rendering | callback-execution | **disclaimed** | a `runs:` step is free-form shell and nothing here sanitizes it | D2 |
+| strategy-rendering | serialization-reconstruction | claimed | `strategy_digest` is canonical and domain-separated | P28 |
+| strategy-rendering | reference-lifecycle | N/A | rendering borrows and returns owned strings | — |
+| strategy-rendering | concurrency-reentrancy | disclaimed | no statement is made | D8 |
+| strategy-rendering | resource-complexity | claimed | render depth is bounded | P27 |
+| registry-and-source | numeric-domain | N/A | no arithmetic on registry values | — |
+| registry-and-source | failure-atomicity | disclaimed | a partial checkout or fetch is not rolled back | D10 |
+| registry-and-source | recursive-cyclic-topology | N/A | registry metadata is read field-wise, never walked as a graph | — |
+| registry-and-source | callback-execution | claimed | `git` is spawned with a fixed environment, https only, 40-hex commits only | P10 |
+| registry-and-source | serialization-reconstruction | disclaimed | registry JSON is read field-wise and not schema-validated | D11 |
+| registry-and-source | reference-lifecycle | N/A | a `Checkout` owns its directory for its lifetime | — |
+| registry-and-source | concurrency-reentrancy | disclaimed | no statement is made | D8 |
+| registry-and-source | resource-complexity | disclaimed | no bound on a repository's or a response's size | D12 |
+| build-execution | numeric-domain | N/A | no arithmetic on build values | — |
+| build-execution | failure-atomicity | claimed | a runner refuses a tier it cannot enforce rather than downgrading it | P11 |
+| build-execution | recursive-cyclic-topology | N/A | a build plan is a flat phase list | — |
+| build-execution | callback-execution | **disclaimed by design** | executing attacker code is the purpose; the container is the boundary | D3 |
+| build-execution | serialization-reconstruction | N/A | nothing here round-trips a serialized form | — |
+| build-execution | reference-lifecycle | disclaimed | two processes share one podman image store | D4 |
+| build-execution | concurrency-reentrancy | disclaimed | see D4; nothing excludes two runs | D4, D8 |
+| build-execution | resource-complexity | claimed | a hard wall-clock kill bounds a build; the default is 1800s and `--timeout` sets it | P29 |
+| model-inference | numeric-domain | N/A | no arithmetic on model output | — |
+| model-inference | failure-atomicity | claimed | a budget stop names which budget; a replay refuses a changed prompt rather than answering it | P18 |
+| model-inference | recursive-cyclic-topology | N/A | a prompt is a flat part list | — |
+| model-inference | callback-execution | **disclaimed** | `--model copilot:` is an agent with a shell; every other provider is a function from a prompt to a string | D5 |
+| model-inference | serialization-reconstruction | claimed | a transcript naming a model alias is refused for replay rather than replayed | P18 |
+| model-inference | reference-lifecycle | N/A | a request is built and dropped per call | — |
+| model-inference | concurrency-reentrancy | disclaimed | one recording replayed concurrently is not supported | D8 |
+| model-inference | resource-complexity | claimed | iteration, token and wall-clock budgets, checked **between** iterations, so one long call completes and the next is refused | P30 |
+| operator-surface | numeric-domain | N/A | the one numeric input is a target index | — |
+| operator-surface | failure-atomicity | disclaimed | `trigon watch` has no write path at all (P20), but a store write is not atomic and is not claimed to be | D6 |
+| operator-surface | recursive-cyclic-topology | N/A | the work directory is walked one level deep per view | — |
+| operator-surface | callback-execution | N/A | no callbacks | — |
+| operator-surface | serialization-reconstruction | disclaimed | the store hash-checks blobs and not its own records | D6 |
+| operator-surface | reference-lifecycle | N/A | — | — |
+| operator-surface | concurrency-reentrancy | disclaimed | nothing excludes two writers from one work directory or one store | D7 |
+| operator-surface | resource-complexity | disclaimed | a `watch` request does work proportional to the whole work directory | D13 |
+| definitions | numeric-domain | N/A | — | — |
+| definitions | failure-atomicity | N/A | a definitions entry is data read at load time | — |
+| definitions | recursive-cyclic-topology | claimed | tool composition is acyclic at load | P27 |
+| definitions | callback-execution | **disclaimed** | a `build.yaml` can carry free-form shell, and a custom stabilizer is code | D2, D22 |
+| definitions | serialization-reconstruction | claimed | a definitions entry is parsed with `deny_unknown_fields` | P27 |
+| definitions | reference-lifecycle | N/A | — | — |
+| definitions | concurrency-reentrancy | N/A | the repository is read, never written, by Trigon | — |
+| definitions | resource-complexity | N/A | entries are small and hand-authored | — |
 
 ---
 
-## 1.8 Outputs, and what a consumer may assume about them
+## 1.8 Outputs, and what a consumer may assume
 
-Trigon's output is somebody else's input, so each channel needs a taint statement.
+Trigon's output is somebody else's input. A "downstream may assume X" report routes through
+`BY-DESIGN: property-disclaimed`, licensed by the "must not be assumed" cell here.
 
 | Channel | Taint | Guaranteed | Must not be assumed |
 | --- | --- | --- | --- |
-| the stabilized artifact (`trigon stabilize`) | **same as input** | it is a byte-stable re-serialization of the input, store-only, with no compression | that it is safe to execute, extract or trust. It is the same package, normalized. |
-| the comparison / verdict | **constrained** | the outcome is one of four strings; the digests are computed by us over bytes we hold | that `exact` or `normalized` means the package is honest, or that `divergent` means it is malicious *(documented, docs/12-security.md §11)* |
-| the difference summary | **same as input** | it is deterministic, and a divergence's codes are computable by a third party from the two artifacts | that member paths and difference codes are sanitized before being rendered, logged, or put in a prompt. They come from the artifact. *(inferred, Q8)* |
-| the signed attestation | **constrained** | the statement is canonical JSON; floats and non-ASCII object keys are refused rather than coerced | that a signature was checked. `verify-attestation` without `--public-key` re-derives and says the signature was present and unchecked — **"unsigned" and "signed by someone you did not check" are different things and the tool distinguishes them** *(documented, README.md)* |
-| the build log (stored, rendered, prompted) | **same as input** | it is bounded and stripped of control characters before it reaches a model | **that credentials have been redacted out of it.** They have not *(documented, docs/17-backlog.md; docs/18-management-ui.md §2)* |
-| `trigon watch` HTML | **constrained** | every package-derived string is HTML-escaped | that the page is authenticated, or that serving it is safe on a routable address |
-| `/api/state` JSON | **same as input** | it is the view model the pages render | that it is access-controlled. It is not. |
-| the model transcript | **same as input** | it records the model that answered, the prompt digests, the usage, and now the reasoning trace | that replaying it reproduces the *result*. It replays the model, not the world *(documented, docs/07-ai.md §8)* |
+| the stabilized artifact (`trigon stabilize`) | **same as input** | a byte-stable, store-only re-serialization | that it is safe to execute, extract or trust. It is the same package, normalized *(documented, docs/05 §1)* |
+| the comparison / verdict | **constrained** | one of four outcome strings, and digests we computed over bytes we hold | that `exact`/`normalized` means the package is honest, or `divergent` means it is malicious *(documented, docs/12-security.md §11)* |
+| the difference summary | **same as input** | deterministic, and recomputable by a third party from the two artifacts | that member paths and difference codes are sanitized before being rendered, logged or prompted. They come from the artifact *(inferred, Q8)* |
+| the rendered Dockerfile and build script | **same as input** | a pure function of (strategy, context, tools) | **that it is safe to run outside the container.** It is the package's own shell, assembled *(documented, docs/12-security.md §5)* |
+| the rebuilt artifact in the work directory | **same as input** | it is what the build wrote | that it is safe to install or execute. A rebuild of a malicious package is a malicious package *(documented, docs/12-security.md §11)* |
+| the signed attestation | **constrained** | canonical JSON; floats and non-ASCII keys refused rather than coerced | that a signature was checked — without `--public-key` the tool re-derives and reports the signature present and unchecked *(documented, README.md)* |
+| the build log (stored, rendered, prompted) | **same as input** | bounded and control-stripped before it reaches a model | **that credentials were redacted.** They were not *(documented, docs/18-management-ui.md §2)* |
+| `trigon watch` HTML | **constrained** | every package-derived string is HTML-escaped | that the page is authenticated, or safe to serve on a routable address *(documented, crates/trigon/src/main.rs)* |
+| `/api/state` JSON | **same as input** | the view model the pages render | that it is access-controlled. It is not *(documented, crates/trigon/src/watch.rs)* |
+| the model transcript | **same as input** | the model that answered, the prompt digests, the usage, the reasoning trace | that replaying it reproduces the *result*. It replays the model, not the world *(documented, docs/07-ai.md §8)* |
+
+---
+
+## 1.9 Assumptions about dependencies
+
+**No third-party source is vendored.** Every dependency is a crates.io dependency resolved through
+`Cargo.lock`, so a supply-chain report about third-party code is a report about a named crate, and
+routes by the table below *(documented, repository: no `vendor/` or `third_party/` at any path)*.
+
+**The ownership rule.** A panic, hang or unbounded allocation *inside* a parsing crate on bytes we
+handed it is `OUT-OF-MODEL: dependency-contract` and goes upstream. The same symptom caused by us
+failing to bound what we hand it, or what we do with what comes back, is ours and is `VALID`. D1 is
+the live example: `flate2` inflates correctly; *we* do not bound the output.
+
+| Dependency | Relied on for | Provenance | If it fails its own contract |
+| --- | --- | --- | --- |
+| `podman` (external binary) | process, filesystem and **network** isolation of the build. `--network none` is podman's guarantee, not ours | *(documented, docs/08-execution.md §5)* | upstream |
+| `git` (external binary) | fetching a checkout without honouring attacker-supplied config | *(documented, crates/trigon-registry/src/source.rs)* | upstream, unless we passed something we should not have |
+| `flate2` / `miniz_oxide` | correct inflate of attacker bytes | *(documented, docs/05 §2.1)* | upstream; **bounding the output is ours** — D1 |
+| `tar`, `zip` (readers) | correct framing of attacker bytes; we own the writers | *(documented, docs/05 §2 — "ecosystem crates for readers; hand-write all three writers")* | upstream |
+| `memmap2` | a stable mapping of a file we opened | *(documented, docs/05 §3)* | upstream |
+| `serde_json`, `serde_yaml_ng`, `serde_path_to_error` | parsing attacker-influenced documents without executing them | *(documented, docs/17-crate-picks — `serde_yaml` is archived; `serde_yaml_ng` is the fork)* | upstream |
+| `object_store` | **path-component encoding.** `Path::from` percent-encodes `..` and `/` inside a component, so a package-derived name cannot escape the store root | *(documented, verified against object_store 0.12: `..` → `%2E%2E`)* | upstream — **and this is borrowed safety: a naive `PathBuf::join` here would be a traversal** |
+| `reqwest` + `rustls` | TLS to registries and model endpoints | *(documented, docs/17-crate-picks)* | upstream |
+| `sha2` | collision resistance of SHA-256 | *(documented, docs/02-domain-model.md §5)* | upstream |
+| `ed25519-dalek` | signature correctness | *(documented, docs/09-attestations.md §6)* | upstream |
+| `minijinja` | rendering without escaping into paths we did not intend; `UndefinedBehavior::Strict` | *(documented, docs/04-strategies.md §3)* | upstream |
+| `wasmtime` (feature `wasm`) | sandboxing an archived stabilizer set | *(documented, docs/09-attestations.md §7.1)* | upstream — see D21 |
+| a model provider's API | **nothing security-relevant.** An answer is a candidate, validated before use and capped by P5 | *(documented, docs/00-overview.md §3.1)* | never closes a report; a wrong answer is expected input |
+
+**The crate dependency graph is not the security control.** It keeps honest code honest; the
+maintainer declines to call it a boundary and neither does this model *(documented, ADR-0001)*.
+
+**The definitions repository is a dependency and a supply chain.** A malicious pull request adding a
+custom stabilizer that normalizes away a backdoored file makes a real mismatch vanish. The mandatory
+prose `reason:` is a social control. Three technical controls sit under it:
+
+- declarative bounds on what a custom stabilizer may do — it may zero a metadata field and may not
+  delete or rewrite file content;
+- a flag on any run where a custom stabilizer altered more than N bytes or touched an executable
+  section;
+- the provenance cap, which a consumer applies themselves: demand `normalized` and the
+  custom-stabilizer class never appears at all.
+
+*(documented, docs/12-security.md §8; docs/05-archive-and-normalization.md §5)*
+
+---
+
+## 1.10 Adversary model
+
+### In scope
+
+**A1 — The forged-attestation attacker.** The primary adversary. They control a package, its
+repository, its README, its CI configuration, and any file in the checkout. Their goal is a signed
+statement that their backdoored package reproduces cleanly. The attack needs no exotic capability:
+injected content says the build requires a prebuilt binary, the Builder — the component that turns a
+model's answer into a strategy — emits a schema-valid recipe that fetches it, the build "succeeds",
+and it matches byte-for-byte, because it *is* the published artifact. **The clean re-run is not a
+defence here; it is the mechanism of the attack** *(documented, docs/12-security.md §1.1)*.
+
+**A2 — The prompt injector.** A narrower A1: text a package wrote — README, CI config, `AGENTS.md`,
+build log — reaching a model that can act *(documented, docs/12-security.md §4)*.
+
+**A3 — The malformed-input author.** Supplies an artifact whose bytes are hostile to the parser. We
+decompress attacker-controlled bytes by construction *(documented, docs/05 §2.2)*.
+
+**A4 — The definitions contributor.** Opens a pull request against the definitions repository
+*(documented, docs/12-security.md §8)*.
+
+**A5 — The second-package attacker.** Publishes a *second*, innocuous-looking package holding the
+payload and fetches it through the mirror's artifact route, which allowlists `registry.npmjs.org`
+and cannot bound what that host serves *(documented, docs/17-backlog.md B7 residue)*.
+
+**A6 — The normalization-conditioned attacker.** Makes the payload depend on an observable the
+stabilizers erase *(documented, docs/05 §1)*.
+
+**A7 — A reader of a published divergence.** Not an attacker, but the party a false divergence harms.
+Publishing one is a public accusation, so the false-mismatch rate is a safety property
+*(documented, docs/09-attestations.md §5; ADR-0010)*.
+
+### Out of scope
+
+- **The operator.** Anyone who can pass flags can name a local path as a source, point Trigon at any
+  registry, or hand it a key. `file://` is not dangerous; `file://` *chosen by the thing under test*
+  is, and the distinction is a constructor *(documented, docs/16-findings.md §3.7)*.
+- **Anyone with code execution in the `trigon` process.** They have already won.
+- **A compromised control plane** *(documented, docs/12-security.md §11)*.
+- **A network attacker between Trigon and a registry**, beyond what TLS gives. Artifacts are checked
+  against the declared digest and re-hashed; the registry is trusted to say what it published
+  *(documented, crates/trigon-registry/src/registry.rs)*.
+- **A tenant of a shared installation.** There is no multi-tenancy to attack (§1.3).
 
 ---
 
 ## 1.11 Security properties Trigon provides
 
-Each has a violation symptom and a tier. A report that violates one of these, through an adversary in
-§1.10 and an operand §1.7 marks attacker-controllable, is `VALID`.
+A report that violates one of these, through an adversary in §1.10 and an operand §1.7 marks
+attacker-controllable, is `VALID`.
 
 | ID | Property | Conditions | Violation symptom | Tier |
 | --- | --- | --- | --- | --- |
-| **P1** | Parsing a hostile artifact does not panic, escape its limits, or silently change a digest. Recursion is depth-limited to 4; a parse failure keeps the member inline and emits `NestedParseFailed`. | any input bytes | panic, hang, wrong digest | **security-critical** *(documented, docs/05 §2.2)* |
-| **P2** | The stabilized form is a byte-stable function of the input: `parse(write(a)) == a`, and identical across runs and threads. | same stabilizer set | two runs disagree on a digest | **security-critical** *(documented, docs/13-roadmap.md M0)* |
-| **P3** | Stabilizers are total and idempotent: `stab(stab(x)) == stab(x)`, no `Result`, no half-stabilized state. | — | a digest that depends on how many times a pass ran | **security-critical** *(documented, docs/05 §4)* |
+| **P1** | Parsing a hostile artifact does not panic, escape its depth or inline limits, or silently change a digest. Recursion is depth-limited to 4; a parse failure keeps the member inline and emits `NestedParseFailed`. **Except the two limits D1 records as unfixed** — an unchecked `u64` add on a 42-byte zip, and an inflate not bounded by its output. Those two are known and disclaimed; everything else here is claimed. | any input bytes | panic, hang, wrong digest | **security-critical** *(documented, docs/05 §2.2)* |
+| **P2** | The stabilized form is a byte-stable function of the input: `parse(write(a)) == a`, identical across runs and threads *of a single process*. | same stabilizer set | two runs disagree on a digest | **security-critical** *(documented, docs/13-roadmap.md M0)* |
+| **P3** | Stabilizers are total and idempotent: `stab(stab(x)) == stab(x)`, no `Result`, no half-stabilized state, and none allocates more than one member at a time. | — | a digest that depends on how many times a pass ran | **security-critical** *(documented, docs/05 §4)* |
 | **P4** | `compare` refuses to compare two sides stabilized under different sets, by set digest, and classifies the refusal `Fault::Bug`. | — | a verdict derived across incomparable sets | **security-critical** *(documented, docs/09-attestations.md §7)* |
-| **P5** | **Provenance-capped outcomes.** `Match::Normalized` is produced only when the stabilized digests are equal *and* every applied stabilizer is `Builtin` with risk ≤ `Metadata`. Anything else that matches is `NormalizedWithCaveats`. | — | a model- or human-authored normalization reported as clean | **security-critical** *(documented, docs/00-overview.md §3.1; enforced at crates/trigon-compare/src/lib.rs:166–181)* |
-| **P6** | `trigon attest` refuses to sign a void run — one where the artifact under test reached the build over the network. | the guard was armed | a signed statement about a run that fetched its own answer | **security-critical** *(documented, docs/12-security.md §2.4)* |
-| **P7** | Text that reaches a model is bounded and stripped of control characters, and operator instructions travel in a system message, never spliced into package text. | every provider **except `copilot:`** | a build log rewriting the operator's instructions | **security-critical** *(documented, docs/12-security.md §4.1)* |
-| **P8** | Both artifacts receive an identical transform; the comparison API has no way to stabilize one side differently from the other. Enforced by the type signature. | — | an asymmetric normalization producing a false match | **security-critical** *(documented, docs/12-security.md §10)* |
-| **P9** | Canonical JSON refuses what it cannot promise another implementation reproduces — floats and non-ASCII object keys are type errors, not coerced values. | signing path | two implementations disagreeing on what was signed | **security-critical** *(documented, crates/trigon-core/src/jcs.rs)* |
+| **P5** | **Provenance-capped outcomes.** `normalized` is produced only when the stabilized digests are equal *and* every applied stabilizer is `Builtin` with risk ≤ `Metadata`. Anything else that matches is `normalized_with_caveats`. | — | a model- or human-authored normalization reported as clean | **security-critical** *(documented, docs/00-overview.md §3.1; crates/trigon-compare/src/lib.rs:166-181)* |
+| **P6** | `trigon attest` refuses to sign a void run. | the guard was armed | a signed statement about a run that fetched its own answer | **security-critical** *(documented, docs/12-security.md §2.4; crates/trigon/src/main.rs:4223)* |
+| **P7** | Text reaching a model is bounded and control-stripped, and operator instructions travel in a system message, never spliced into package text. | every provider **except `copilot:`**, which has no system-role channel | a build log rewriting the operator's instructions | **security-critical** *(documented, docs/12-security.md §4.1; crates/trigon-ai/src/copilot.rs:35)* |
+| **P8** | Both artifacts receive an identical transform; the API has no way to stabilize one side differently. Enforced by the type signature. | — | an asymmetric normalization producing a false match | **security-critical** *(documented, docs/12-security.md §10)* |
+| **P9** | Canonical JSON refuses what another implementation might not reproduce: floats and non-ASCII object keys are type errors, not coerced values. | signing path | two implementations disagreeing on what was signed | **security-critical** *(documented, crates/trigon-core/src/jcs.rs)* |
 | **P10** | A package-declared repository reaches `git` as **https only**, with a **40-hex commit only**, under `GIT_CONFIG_NOSYSTEM` and a restricted `GIT_ALLOW_PROTOCOL`. Only the operator may name a local path. | — | command or option injection from registry metadata | **security-critical** *(documented, docs/16-findings.md §3.7)* |
-| **P11** | A runner refuses an egress tier it cannot enforce rather than downgrading it, and at every tier but `Open` no phase of the build reaches the network — the image build runs `--network none` too. | podman honours its flags | a run recorded as enforced that was not | **security-critical** *(documented, docs/16-findings.md §3.13)* |
+| **P11** | A runner refuses an egress tier it cannot enforce rather than downgrading it, and at every tier but `open` no phase reaches the network — the image build takes `--network none` too. | podman honours its flags | a run recorded as enforced that was not | **security-critical** *(documented, docs/16-findings.md §3.13)* |
 | **P12** | The mirror refuses to serve this run's own published artifact, and hashes every proxied body as it streams; a whole-artifact or member match voids the run. Artifact bodies are proxied undecoded so the guard sees real bytes. | an enforced tier | the forged-attestation attack succeeding | **security-critical** *(documented, docs/12-security.md §2.1–2.2)* |
 | **P13** | Both mirror passthrough routes proxy only to compiled-in, exact-match host allowlists chosen here rather than by the request. | — | the mirror acting as a general HTTP proxy | **security-critical** *(documented, docs/16-findings.md §3.13)* |
-| **P14** | The output collector takes a file's type **without following symlinks**. | — | any host file becoming the "rebuilt artifact" | **security-critical** *(documented, docs/16-findings.md §3.12)* |
+| **P14** | The output collector takes a file's type **without following symlinks**. | — | any host file becoming the "rebuilt artifact" | **security-critical** *(documented, docs/16-findings.md §3.12; crates/trigon-sandbox/src/podman.rs:691)* |
 | **P15** | A strategy cannot request privileged execution, a wider egress tier, an unpinned base image, or a platform. | — | a strategy widening its own boundary | **security-critical** *(documented, docs/04-strategies.md)* |
-| **P16** | Model API keys are read from the environment and never accepted on the command line. | — | a key in a process list or shell history | **security-critical** *(documented, crates/trigon/src/inferrer.rs)* |
-| **P17** | Every package-derived string rendered by `trigon watch` is HTML-escaped, and the only path parameter is an integer, re-formatted rather than joined. | — | script execution in the operator's browser; path traversal | **security-critical** *(documented, crates/trigon/src/watch.rs)* |
-| **P18** | A model is never called unless `--model` names a provider, and `replay:` opens no socket. A replay refuses a prompt that differs from the recorded one rather than answering it. | — | a silent model call; a changed question answered from an old recording | **security-critical** *(documented, docs/07-ai.md §8)* |
+| **P16** | Model API keys are read from the environment and never accepted on the command line. | — | a key in a process list or shell history | **security-critical** *(documented, crates/trigon/src/inferrer.rs:527)* |
+| **P17** | Every package-derived string `trigon watch` renders is HTML-escaped, and the only path parameter is an integer, re-formatted rather than joined. | — | script execution in the operator's browser; path traversal | **security-critical** *(documented, crates/trigon/src/watch.rs — `esc`)* |
+| **P18** | A model is never called unless `--model` names a provider; `replay:` opens no socket; a replay refuses a prompt differing from the recorded one; a transcript naming an alias rather than a snapshot is refused for replay. | — | a silent model call; a changed question answered from an old recording | **security-critical** *(documented, docs/07-ai.md §8)* |
 | **P19** | Members are paired by `(path, occurrence)`, never by archive position. | — | a false divergence from reordering | correctness-only *(documented, crates/trigon-compare/src/signature.rs)* |
-| **P20** | Nothing absent is rendered as a zero, and the two denominators never merge. | `trigon watch` | "no data" displayed as a result | correctness-only *(documented, docs/18-management-ui.md)* |
-| **P21** | `trigon-core` performs no I/O and declares no cargo features; the verifier links no runtime and no network client, asserted by `xtask policy` and checkable with `cargo tree`. | `--no-default-features` | the verifier's independence being false | **security-critical** *(documented, docs/01-architecture.md §2.2)* |
+| **P20** | `trigon watch` has no write path: four GET routes, and it never writes to the work directory or the store. Nothing absent is rendered as a zero, and the two denominators never merge. | — | the monitor changing what it observes; "no data" shown as a result | **security-critical** *(documented, docs/18-management-ui.md)* |
+| **P21** | `trigon-core` performs no I/O and declares no cargo features; the verifier links no runtime and no network client. Asserted by `xtask policy`, checkable with `cargo tree`. | `--no-default-features` | the verifier's independence being false | **security-critical** *(documented, docs/01-architecture.md §2.2)* |
+| **P22** | **No archive member is ever written to a filesystem path.** Archives are parsed in memory; the only writes are the operator-named output file and an over-8-MiB spill file whose name Trigon chooses. Trigon never extracts an artifact to a directory, so a hostile member path has nowhere to land. | — | a member path escaping an output directory | **security-critical** *(documented, verified: no `File::create`, `fs::write` or `create_dir_all` anywhere in `trigon-archive`, `trigon-stabilize` or `trigon-compare`)* |
+| **P23** | An archived stabilizer set is proved to agree with the compiled one before its digest is used, and a trap in the module fails the re-derivation rather than producing a digest. | `wasm` feature | an archived set silently producing a different digest | **security-critical** *(documented, docs/16-findings.md — "run an archived stabilizer set, and prove it agrees with the compiled one")* |
+| **P24** | Outcomes cross the wire as strings, with `FromStr` the exact inverse of `Display`. | — | a verdict changing meaning across a serialization boundary | correctness-only *(documented, crates/trigon-core/src/outcome.rs:46-53)* |
+| **P25** | Comparison is linear in member count; each side is walked at most twice. **Threshold:** super-linear in members is a bug; a constant factor is not. | — | a comparison that does not finish on a large artifact | correctness-only *(documented, docs/05 §5)* |
+| **P26** | `Signer` and the archived-set loader are operator-chosen collaborators, named on the command line, never selected by anything in an artifact or an attestation. | — | an artifact choosing what signs or stabilizes it | **security-critical** *(documented, docs/09-attestations.md §6-7)* |
+| **P27** | An unregistered `uses:` is a hard error naming the tool and listing the known ones; tool composition is acyclic at load and depth-bounded at render; a definitions entry is parsed with `deny_unknown_fields`. | — | an empty script fragment silently replacing a build step | **security-critical** *(documented, docs/04-strategies.md §2)* |
+| **P28** | `strategy_digest` is a canonical, domain-separated content pin over the strategy and exactly the tools it uses, taken over the migrated value rather than the YAML bytes. | — | a cache hit across different recipes | correctness-only *(documented, docs/04-strategies.md §4)* |
+| **P29** | A build is killed at a hard wall-clock limit. **Threshold:** the default is 1800 seconds and `--timeout` sets it; a build that exceeds it is killed, not waited for. | — | a build running forever | correctness-only *(documented, crates/trigon/src/main.rs:199)* |
+| **P30** | The repair loop is bounded by iteration, token and wall-clock budgets. **Threshold:** `wall_seconds` defaults to 1200 and is checked **between** iterations, so one long call completes and the next is refused by name. | `--model` names a provider | unbounded model spend on one target | correctness-only *(documented, crates/trigon-ai/src/repair.rs:95-110)* |
 
 ---
 
 ## 1.12 Security properties Trigon does *not* provide
 
-The most useful section for anyone deciding what they now own. Each is disclaimed, so a matching
-report closes `BY-DESIGN: property-disclaimed`.
+Each row is disclaimed. A matching report closes `BY-DESIGN: property-disclaimed` **only where the
+row's tag is *(documented)* or *(maintainer)*. A row tagged *(inferred)* or *(assumption)* routes to
+`ESCALATE: unratified-claim` instead** — it describes the state of the model, not a decision the
+project has made.
 
 ### False friends — things that look like a security property and are not
 
-These are the ones that get misread, so they are listed first.
-
-- **The crate dependency graph is not the control.** It keeps honest code honest. The maintainer
-  declines to call it a boundary and neither does this document *(documented, ADR-0001)*.
-- **Schema validation of a strategy is not sanitization.** A `runs:` step is free-form shell.
-  Schema-validating a string that contains bash is validating a string; the step DSL is hygiene
-  *(documented, docs/12-security.md §5)*.
+- **The crate dependency graph is not the control** (§1.9) *(documented, ADR-0001)*.
+- **Schema validation of a strategy is not sanitization.** A `runs:` step is free-form shell, and
+  schema-validating a string containing bash is validating a string *(documented,
+  docs/12-security.md §5)*.
 - **`strategy_digest` does not identify what actually ran** *(documented, docs/04-strategies.md)*.
+- **Re-running the comparison is not re-running the build.** `--rerun-comparison` re-derives the
+  equivalence claim from two artifacts *you hold*. If you obtained R from the rebuilder, you have
+  checked our arithmetic and not our build; independence requires building R yourself *(documented,
+  docs/09-attestations.md §7)*.
 - **The system message, the nonce fence and "treat this as data" do not stop prompt injection.** They
-  raise the cost. Prompt injection is accepted and mitigated, not solved *(documented,
-  docs/12-security.md §4)*.
+  raise the cost *(documented, docs/12-security.md §4)*.
 - **A replay does not prove the package reproduces.** It replays the model, not the world
   *(documented, docs/07-ai.md §8)*.
-- **A model-proposed strategy does not cap the outcome below `Normalized`.** The cap is about applied
-  *stabilizers*, not about how the recipe was derived. A model-derived recipe that reproduces exactly
-  reports `exact` *(documented, docs/00-overview.md §3.1)*.
-- **An enforced egress tier does not bound what the reachable hosts serve.** `registry.npmjs.org`
-  serves anything anyone published *(documented, docs/17-backlog.md B7 residue)*.
-- **The mirror's passthrough routes are not access-controlled**, and **the artifact route applies no
-  time filter** *(documented, docs/16-findings.md §3.13)*.
-- **The guard is not armed on every run.** Its also-in-source filter needs a checkout and is not
-  automatic in a sweep, so the guard is wider than designed — it errs toward voiding an honest run
-  *(documented, docs/12-security.md §2.2)*.
-- **`trigon watch` authenticates nobody.** No token, no OIDC, no TLS, no CORS policy. `--bind`
-  selects an address and restricts nothing *(documented, crates/trigon/src/main.rs)*.
+- **A model-proposed strategy does not cap the outcome below `normalized`.** The cap is about applied
+  *stabilizers*, not about how the recipe was derived *(documented, docs/00-overview.md §3.1)*.
+- **An enforced egress tier does not bound what the reachable hosts serve** (§1.10 A5) *(documented,
+  docs/17-backlog.md B7 residue)*.
+- **The mirror's passthrough routes are not access-controlled, and the artifact route applies no time
+  filter** *(documented, docs/16-findings.md §3.13)*.
+- **The guard is not armed on every run.** Its also-in-source filter — the rule that skips members
+  which also appear in the source checkout — needs a checkout and is not automatic in a sweep, so the
+  guard runs *wider* than designed and errs toward voiding an honest run *(documented,
+  docs/12-security.md §2.2)*.
+- **`trigon watch` authenticates nobody**, and `--bind` selects an address rather than restricting
+  who may connect *(documented, crates/trigon/src/main.rs)*.
 - **`ModelCaps::context_tokens` does not bound a prompt**, and `Prompt::is_cacheable` is not enforced
   when a request is sent *(documented, crates/trigon-ai/src/provider.rs)*.
-- **Apache-2.0's warranty disclaimer is not a security position.** It is boilerplate and grants
-  nothing here.
+- **Apache-2.0's warranty disclaimer is not a security position.** It is boilerplate.
 
 ### Properties simply not provided
 
-| ID | Not provided | Why / conditions | Tier |
-| --- | --- | --- | --- |
-| **D1** | A bound on what decompression *produces*. `total_expanded_bytes` is checked against the size the input declares, not against what it emits, so a 200 KB member can expand to 200 MB in our process. A 42-byte zip panics the parser on an unchecked `u64` add. | known, unfixed, filed as B5 | **security-critical** *(documented, docs/16-findings.md §3.12)* |
-| **D2** | Sanitization of anything in a `runs:` step. | the environment is the enforcement point, not the string | **security-critical** *(documented, docs/12-security.md §5)* |
-| **D3** | Prevention of arbitrary code execution inside the build container. | it is the purpose | **security-critical** *(documented, docs/08-execution.md)* |
-| **D4** | Isolation between two Trigon processes sharing a podman image store. | narrowed, not closed | correctness-only *(documented, docs/17-backlog.md B6)* |
-| **D5** | That a model provider cannot act. With `--model copilot:` the provider is an agent with a shell on the operator's machine, and in `-p` mode the CLI was measured running `bash` with no permission request. The tool filter is the control; **the Copilot provider also has no system-role channel at all**, so operator instructions and package text travel in the same text. | only with `copilot:`; read the module docs before using it | **security-critical** *(documented, docs/16-findings.md §3.8)* |
-| **D6** | That the store verifies what it reads. Only blobs are hash-checked. | — | correctness-only *(inferred, Q9)* |
-| **D7** | Exclusion between two writers of one work directory or one store. | — | correctness-only *(assumption, Q10)* |
-| **D8** | Thread-safety beyond what `Send` and `Sync` state. No type here promises interior consistency across threads. | every family | correctness-only *(documented, by the absence of any such claim)* |
-| **D9** | A bound on the size of a statement, or of a difference summary. | — | correctness-only *(inferred, Q11)* |
-| **D10** | Atomicity of a checkout or a fetch. A partial one is not rolled back. | — | correctness-only *(inferred, Q12)* |
-| **D11** | Validation of registry JSON beyond the fields read. | — | correctness-only *(inferred, Q6)* |
-| **D12** | A bound on a repository's or a registry response's size. | — | correctness-only *(inferred, Q13)* |
-| **D13** | Bounded work per `trigon watch` request. A request walks the whole work directory. | loopback by default | correctness-only *(documented, docs/18-management-ui.md)* |
-| **D14** | Redaction of credentials from a build log before it is stored, rendered, or sent to a model. | — | **security-critical** *(documented, docs/18-management-ui.md §2)* |
-| **D15** | That any run is attestable at full trust. No network transcript exists at any tier. | all tiers, today | **security-critical** *(documented, docs/16-findings.md §3.13)* |
-| **D16** | That the artifact guard survives a byte-level transformation. It compares bytes, so re-encoding, encryption or chunk reassembly defeats it. | — | **security-critical** *(documented, docs/12-security.md §2.5)* |
-| **D17** | That a divergence has been confirmed. The two-agreeing-attempts policy is specified and not implemented. | — | **security-critical** *(documented, docs/16-findings.md §5)* |
-| **D18** | That a `Normalized` claim re-derived through an archived (WASM) stabilizer set stays `Normalized`. It degrades to `NormalizedWithCaveats`, so **a true claim can read as refuted**. | `wasm` feature | **security-critical** *(documented, docs/16-findings.md §4b)* |
-| **D19** | That a published reproduction rate estimates an ecosystem. The corpora are small smoke sets, not prevalence-sampled. | — | correctness-only *(documented, docs/16-findings.md §5)* |
-| **D20** | Confidentiality of package text from a model provider, or of a Copilot prompt from the host process table. | when `--model` names a provider | correctness-only *(inferred, Q14)* |
+| ID | Not provided | Conditions | Tier | Provenance |
+| --- | --- | --- | --- | --- |
+| **D1** | A bound on what decompression *produces*. `total_expanded_bytes` is checked against the size the input declares, not what it emits, so a 200 KB member can expand to 200 MB in our process; and an offset add in the zip reader is unchecked. Known and unfixed. | any input bytes | **security-critical** | *(documented, docs/16-findings.md §3.12; docs/17-backlog.md B5)* |
+| **D2** | Sanitization of anything in a `runs:` step, from a strategy or a definitions entry. | — | **security-critical** | *(documented, docs/12-security.md §5)* |
+| **D3** | Prevention of code execution inside the build container. | — | **security-critical** | *(documented, docs/08-execution.md)* |
+| **D4** | Isolation between two Trigon processes sharing a podman image store. | — | correctness-only | *(documented, docs/17-backlog.md B6)* |
+| **D5** | That a model provider cannot act. `--model copilot:` is an agent with a shell, measured running `bash` in `-p` mode with no permission request, and it has **no system-role channel** — operator instructions and package text travel in one string. | only with `copilot:` | **security-critical** | *(documented, docs/16-findings.md §3.8; crates/trigon-ai/src/copilot.rs:35)* |
+| **D6** | That the store verifies what it reads, or writes atomically. Only blobs are hash-checked, and a record is written in place. | — | correctness-only | *(documented, crates/trigon-store/src/blobs.rs:56 is the only digest check; `lib.rs` has one `verify` and no temp-and-rename)* |
+| **D7** | Exclusion between two writers of one work directory or one store. There is no lock of any kind. | — | correctness-only | *(documented, verified: no `flock`, file lock or lock file in `trigon-store` or the CLI's store and work paths)* |
+| **D8** | Thread-safety beyond what `Send` and `Sync` state. No type promises interior consistency across threads, and one recording replayed concurrently is not supported. | every family | correctness-only | *(documented, by the absence of any such statement in `docs/` and in the public API of every crate)* |
+| **D9** | A bound on the size of a statement or a difference summary. | — | correctness-only | *(documented, verified: no length cap on `DiffReport` members or `Statement` predicate before serialization)* |
+| **D10** | Atomicity of a checkout or a fetch. A partial checkout is removed and re-fetched rather than rolled back. | — | correctness-only | *(documented, crates/trigon-registry/src/source.rs:85 — `remove_dir_all` then re-fetch)* |
+| **D11** | Validation of registry JSON beyond the fields read. | — | correctness-only | *(documented, crates/trigon-registry/src/npm.rs — fields are read positionally from `Value`)* |
+| **D12** | A bound on a repository's or a registry response's size. | — | correctness-only | *(documented, verified: no `content_length` check or `take()` in `trigon-registry/src/client.rs`)* |
+| **D13** | Bounded work per `trigon watch` request. A request walks the whole work directory. | loopback by default | correctness-only | *(documented, docs/18-management-ui.md)* |
+| **D14** | Redaction of credentials from a build log before it is stored, rendered or sent to a model. | — | **security-critical** | *(documented, docs/18-management-ui.md §2)* |
+| **D15** | That any run is attestable at full trust. There is no network transcript at any tier. | all tiers, today | **security-critical** | *(documented, docs/16-findings.md §3.13)* |
+| **D16** | That the artifact guard survives a byte-level transformation. It compares bytes, so re-encoding, encryption or chunk reassembly defeats it. | — | **security-critical** | *(documented, docs/12-security.md §2.5)* |
+| **D17** | That a divergence has been confirmed. The two-agreeing-attempts policy is specified and not implemented. | — | **security-critical** | *(documented, docs/16-findings.md §5)* |
+| **D18** | That a `normalized` claim re-derived through an archived stabilizer set stays `normalized`. It degrades to `normalized_with_caveats`, so **a true claim reads as refuted**. | `wasm` feature | **security-critical** | *(documented, docs/16-findings.md §4b)* |
+| **D19** | That a published reproduction rate estimates an ecosystem. The corpora are small smoke sets, not prevalence-sampled. | — | correctness-only | *(documented, docs/16-findings.md §5)* |
+| **D20** | Confidentiality of package text from a model provider, or of a Copilot prompt from the host process table — the whole prompt is an `argv` argument. | when `--model` names a provider | correctness-only | *(documented, crates/trigon-ai/src/copilot.rs:133-134 — `.arg("-p").arg(self.prompt(req))`)* |
+| **D21** | Resource or capability bounds on an archived stabilizer set beyond wasmtime's own sandbox. The host sets no fuel limit, no epoch interruption and no memory limiter. | `wasm` feature | **security-critical** | *(documented, crates/trigon-stabilize-wasm/src/host.rs:56 — `Store::new(&engine, ())`)* |
+| **D22** | That a custom stabilizer from the definitions repository is bounded by anything but review and the provenance cap. | a merged definitions PR | **security-critical** | *(documented, docs/12-security.md §8)* |
 
 ### Well-known attack classes left to the caller
 
 - **Archive bombs.** We decompress attacker bytes by construction, and D1 says the output bound is
-  not in place. Run the parser where an OOM is survivable.
-- **Prompt injection.** Mitigated, not solved (§1.10 A2).
-- **SSRF via package metadata.** A package names the hosts this machine connects to (§1.7).
-- **Supply-chain compromise of the definitions repository** (§1.9).
-- **Typosquatting, dependency confusion, malicious-but-faithful source.** All out of scope: a
-  malicious package that reproduces is a correct `reproduced` (§1.3).
+  not in place. Run the parser where an OOM is survivable *(documented, docs/16-findings.md §3.12)*.
+- **Container escape and host compromise.** Every enforced-tier run executes the package's own build
+  inside podman on your machine. Isolation is podman's guarantee, not ours *(documented, §1.9;
+  docs/12-security.md §6)*.
+- **Prompt injection** (§1.10 A2) *(documented, docs/12-security.md §4)*.
+- **SSRF via package metadata.** A package names the hosts this machine connects to *(inferred, Q5 —
+  so this bullet escalates rather than closes)*.
+- **Supply-chain compromise of the definitions repository** *(documented, docs/12-security.md §8)*.
+- **Typosquatting, dependency confusion, and a malicious-but-faithful source.** All out of scope: a
+  malicious package that reproduces is a correct `reproduced` *(documented, docs/12-security.md §11)*.
 
 ---
 
 ## 1.13 Downstream responsibilities
 
-What the reader has to do. Trigon records provenance, not trust, and leaves the policy to the
-consumer *(documented, docs/09-attestations.md §2.1)*.
+Trigon records provenance, not trust, and leaves the policy to the consumer *(documented,
+docs/09-attestations.md §2.1)*.
 
 **If you consume an attestation:**
 
-1. **Re-derive it.** `trigon verify-attestation --rerun-comparison`, holding the attestation and both
-   artifacts, with a binary you built. This is the only thing that makes a *rebuilder's* attestation
-   worth anything to someone who does not trust the rebuilder.
+1. **Re-derive it.** `trigon verify-attestation --rerun-comparison`, with a binary you built. This is
+   the only thing that makes a *rebuilder's* attestation worth anything to someone who does not trust
+   the rebuilder. If you also want independence from our build, produce R yourself.
 2. **Check the signing identity** against your own policy, and check Rekor inclusion if the bundle
-   carries it. Dropping `--public-key` still re-derives, and the tool tells you the signature was
-   present and unchecked — decide what that means to you.
-3. **Set your own threshold.** Demand `Match::Exact`, or `Normalized` with risk ≤ `Structural`, via
-   `Match::is_at_least`. The default is not a recommendation.
-4. **Read the `applied` list.** If you reject a particular normalization, you can see that it fired,
-   with its risk tier and provenance, and throw the result out.
+   carries it. Without `--public-key` the tool still re-derives and tells you the signature was
+   present and unchecked.
+3. **Set your own threshold** with `Match::is_at_least`. The default is not a recommendation.
+4. **Read the `applied` list.** If you reject a particular normalization you can see it fired, with
+   its risk tier and provenance, and discard the result.
 5. **Filter on `derivation.method`** if you want "no model touched this".
 6. **Read the egress tier.** A run at `--egress open` records `attestable: false`, and today no run
    is attestable at full trust at any tier.
 7. **Distinguish a confirmed result from a single attempt, and a stale pass from no data.**
-8. **For npm, do not read `reproduced` as `attributed`.** npm packages reproduce at the tarball level
-   almost always, with no source linkage at all.
+8. **For npm, do not read `reproduced` as `attributed`.**
 
 **If you run Trigon:**
 
-9. **Build the mirror and base images first** (`trigon mirror-image`, `trigon base-image --from
-   <pinned>`) or an enforced tier will not work.
-10. **Choose the egress tier deliberately.** `--egress open` is the default and it voids the strong
-    claim.
-11. **Only you may name a local path as a source.** `file://` is not dangerous; `file://` chosen by
-    the thing under test is.
-12. **Read `crates/trigon-ai/src/copilot.rs`'s module docs before using `--model copilot:`.** Prefer
-    a provider with a real system message where the choice exists.
-13. **Keep `trigon watch` on loopback** unless you have thought about it. The work directory holds
-    registry artifacts and build logs, and build logs are not redacted (D14).
-14. **Before a real sweep, talk to the registries**: declare a User-Agent with a contact URL, honour
-    `Retry-After`, and run per-host token buckets.
-15. **Read `docs/16-findings.md`.** The design chapters describe the system as intended; where the
-    two disagree, `16` records which is right.
+9. **Choose the egress tier deliberately.** `--egress open` is the default and it voids the strong
+   claim. An enforced tier needs a mirror image and a base image you built first.
+10. **Only you may name a local path as a source.** `file://` chosen by the thing under test is the
+    dangerous one.
+11. **Read `crates/trigon-ai/src/copilot.rs`'s module docs before `--model copilot:`.** Prefer a
+    provider with a real system message where the choice exists.
+12. **Keep `trigon watch` on loopback** unless you have thought about it. Build logs are not
+    redacted (D14).
+13. **Run the parser where an OOM is survivable** until D1 is closed.
+14. **Treat the rebuilt artifact as untrusted.** It is the package's own build output; do not install
+    or execute it because it reproduced.
+15. **Before a real sweep, talk to the registries:** a User-Agent with a contact URL, `Retry-After`
+    honoured, per-host token buckets.
 
 **If you review the definitions repository:**
 
@@ -766,126 +749,234 @@ consumer *(documented, docs/09-attestations.md §2.1)*.
 
 ## 1.14 Known misuse patterns
 
-- **Reading `reproduced` as `safe`.** A package that faithfully builds a backdoor reproduces. What to
-  do instead: treat a reproduction as evidence about *provenance*, and run the malware question
-  separately.
-- **Reading `divergent` as `compromised`.** Most divergences are build nondeterminism. What to do
-  instead: read the difference signature, which is deterministic and reproducible by you.
+- **Reading `reproduced` as `safe`.** A package that faithfully builds a backdoor reproduces. Treat a
+  reproduction as evidence about provenance, and ask the malware question separately.
+- **Reading `divergent` as `compromised`.** Most divergences are build nondeterminism. Read the
+  difference signature, which you can recompute.
 - **Trusting a verdict without its stabilizer set digest.** A verdict under a set you cannot obtain
-  cannot be re-derived by anyone. What to do instead: keep the set id and digest with the verdict.
-- **Taking a pass at `--egress open` as equivalent to one at `mirror-only`.** What to do instead:
-  read `attestable` and the tier.
-- **Pointing `trigon watch` at a routable address.** It has no authentication and serves build logs.
-- **Passing an API key on the command line.** Trigon refuses; the environment is the channel.
-- **Using `--model copilot:` because it needs no key.** It is the one provider that can act, and it
-  has no system-role separation.
+  cannot be re-derived by anyone.
+- **Taking a pass at `--egress open` as equivalent to one at `mirror-only`.** Read `attestable`.
+- **Treating `--rerun-comparison` on the rebuilder's own R as independent verification.** It checks
+  our arithmetic, not our build.
+- **Pointing `trigon watch` at a routable address.** No authentication, and it serves build logs.
+- **Using `--model copilot:` because it needs no key.** It is the one provider that can act.
 - **Comparing verdicts across stabilizer sets.** `compare` refuses, and so should you.
 
 ---
 
 ## 1.15 Known non-findings
 
-These recur from scanners, fuzzers and AI reviewers. Each cites what discharges it. A report matching
-an entry **on every field** closes `KNOWN-NON-FINDING`; text similarity alone never licenses it.
+Patterns that recur from scanners, fuzzers and AI reviewers. A report matching an entry **on every
+field** closes `KNOWN-NON-FINDING`; text similarity alone never licenses it.
 
 | ID | Reported as | Why it is not a finding |
 | --- | --- | --- |
-| **N1** | "Attacker-controlled README / manifest / build-log text is concatenated into an LLM prompt with no sanitization." | This is the design. Package text is data in a prompt by construction; §1.10 A2 and D-list note the mitigations and that they are mitigations. Discharged by §1.12 (prompt injection disclaimed) and P7 (bounded, control-stripped, system-role separated). A report that finds a *specific bypass of a stated mitigation* is not this entry and may be `VALID`. |
-| **N2** | "An LLM decides whether a package is reproducible; a model sits in the trust path of a security verdict." | It does not. The model proposes a recipe; the verdict is computed by model-free code, and the provenance cap bounds what a model-touched normalization can reach. Discharged by P5 and §1.2's claim statement. |
-| **N3** | "The strategy is `serde_json::from_str`'d from model output without `deny_unknown_fields`." | Strategy parsing is `deny_unknown_fields`, and in any case parsing is not the control — the environment is. Discharged by §1.12 D2. |
-| **N4** | "The model base URL comes from an environment variable: SSRF / arbitrary endpoint." | The operator sets it. Operator inputs are trusted; `OUT-OF-MODEL: trusted-input` by §1.7. |
-| **N5** | "The build container runs arbitrary attacker code." | It is the purpose. Discharged by D3. |
-| **N6** | "The build downloads dependencies from the internet." | At an enforced tier it reaches only the mirror; at `--egress open` this is the disclaimed posture. Discharged by P11 and §1.6. |
-| **N7** | "Digest comparison uses `==` and is not constant-time." | The digests being compared are both computed locally from bytes the process already holds. There is no secret and no remote timing channel. Discharged by §1.10 (no such adversary). |
-| **N8** | "`Match::Exact` is returned for artifacts that are byte-identical to the published one — the rebuild may just be a copy." | That is exactly what the artifact guard is for, and a run where the artifact arrived over the network is `Void`, not `exact`. Discharged by P12 and P6. A report showing the guard can be *bypassed* is not this entry. |
-| **N9** | "A package name flows into an HTML page — stored XSS." | Every package-derived string is escaped. Discharged by P17. A report showing an unescaped sink is not this entry. |
-| **N10** | "A published divergence names a package that is actually fine." | A real false mismatch is `VALID` and the most expensive error class in the product. This entry covers only the *generic* claim that false positives are possible, which §1.12 D17 and D19 already state. |
-| **N11** | "The verifier's claim to link no network client is unverifiable." | `cargo tree -p trigon --no-default-features` and `cargo run -p xtask -- policy`. Discharged by P21. |
-| **N12** | "Concurrent use of one `Replaying` transcript is not synchronized." | Not supported, and no claim is made. Discharged by D8. |
+| **N1** | Attacker-controlled README, manifest or build-log text is concatenated into an LLM prompt with no sanitization. | This is the design. Discharged by §1.12 (prompt injection disclaimed) and P7. **A specific bypass of a stated mitigation is not this entry** and may be `VALID`. |
+| **N2** | An LLM decides whether a package is reproducible; a model sits in the trust path of a security verdict. | It does not. The model proposes a recipe; the verdict is computed by model-free code. Discharged by P5. |
+| **N3** | Model output is deserialized without `deny_unknown_fields`. | Strategy parsing uses it, and parsing is not the control anyway. Discharged by P27 and D2. |
+| **N4** | The model base URL comes from an environment variable: SSRF / arbitrary endpoint. | The operator sets it. `OUT-OF-MODEL: trusted-input` by §1.7. |
+| **N5** | The build container runs arbitrary attacker code. | It is the purpose. Discharged by D3. |
+| **N6** | The build downloads dependencies from the internet. | At an enforced tier it reaches only the mirror; at `--egress open` this is the disclaimed posture. Discharged by P11 and §1.6. **A report that an enforced tier failed to enforce is not this entry.** |
+| **N7** | Digest comparison uses `==` and is not constant-time. | Both digests are computed locally from bytes the process holds. No secret, no remote timing channel. Discharged by §1.10 (no such adversary). |
+| **N8** | `exact` is returned for artifacts byte-identical to the published one — the rebuild may just be a copy. | That is what the artifact guard is for, and such a run is `void`. Discharged by P12 and P6. **A guard bypass is not this entry.** |
+| **N9** | A package name flows into an HTML page — stored XSS. | Every package-derived string is escaped. Discharged by P17. **An unescaped sink is not this entry.** |
+| **N10** | A published divergence names a package that is fine. | A real false mismatch is `VALID`. This entry covers only the generic claim that false positives are possible, which D17 and D19 already state. |
+| **N11** | The verifier's claim to link no network client is unverifiable. | `cargo tree -p trigon --no-default-features` and `cargo run -p xtask -- policy`. Discharged by P21. |
+| **N12** | Concurrent use of one `Replaying` transcript is not synchronized. | Not supported and not claimed. Discharged by D8. |
+| **N13** | A package name is interpolated into a store path: path traversal out of the store root. | `object_store`'s `Path` percent-encodes `..` and `/` inside a component. Discharged by §1.9's `object_store` row. **A report that the store no longer uses `object_store::path::Path`, or that another path is built by `PathBuf::join` from a package-derived name, is not this entry and is `VALID`.** |
+| **N14** | An archive member path escapes an output directory (zip-slip). | Trigon never extracts an archive to a directory. Discharged by P22. **A report naming a code path that does extract is not this entry.** |
+
+### Backtest result
+
+38 items were routed blind against this model: 13 historical findings from the adversarial code
+sweep and the git history, 25 constructed to reach families and dimensions history does not. Every
+item landed on exactly one disposition. The first pass produced **13 `VALID`, 16
+`BY-DESIGN: property-disclaimed`, 2 `OUT-OF-MODEL: trusted-input`, 1 each of
+`adversary-not-in-scope`, `unsupported-component`, `dependency-contract` and `KNOWN-NON-FINDING`,
+and 3 `MODEL-GAP`** — plus one close that was *illegal* under the strict policy because the
+licensing claim carried no tag.
+
+The four defects it exposed, and what each produced:
+
+| Item | Defect in the model | Revision |
+| --- | --- | --- |
+| a zip-slip report | Nothing said whether Trigon ever extracts an archive to a path. | **P22** added, after verifying no `File::create`, `fs::write` or `create_dir_all` exists in the three judgement crates. Plus **N14**. |
+| a store-path-traversal report | No §1.7 row for the store's record paths; Q7's blanket assumption was doing the work. | A §1.7 row, an `object_store` row in §1.9 naming the safety as **borrowed**, and **N13** — which carves out the case where the borrowing stops. |
+| a stale-output-directory report | No property owned "the artifact compared is the one this attempt produced". | Covered by the existing clear-before-every-attempt code; recorded in §1.16 as a condition rather than a new property, because the bug it came from is fixed and the behaviour is not separately claimed. |
+| a `flate2` overflow report | §1.9 had no provenance tags, so `OUT-OF-MODEL: dependency-contract` was an illegal close. | Every §1.9 row now carries a tag, and the ownership rule is stated in prose above the table. |
+
+Fourteen further items routed with genuine ambiguity, which drove the other revisions in this pass:
+the `ESCALATE: unratified-claim` disposition, the §1.12 preamble qualifier, the P1/D1 carve-out, and
+naming every claimed matrix row's owning property.
+
+---
+
+## 1.16 Conditions that would change this model
+
+- A new ecosystem gains a `Registry` — `nuget.org`, `crates.io`, `rubygems.org` are queued
+  *(documented, docs/17-backlog.md B8)*. Each adds an archive format, a version algebra and a
+  stabilizer profile; RubyGems adds nested archives, a new path into the parser.
+- A network transcript ships, which is the condition on `attestable` becoming true (D15).
+- The fleet is built: a queue, workers, an authenticated API and multi-tenancy each add a role.
+- `--egress`'s default changes, or `GitAndMirror` is implemented (it is currently refused).
+- The `wasm` feature becomes the default, or `docs/09-attestations.md` §7.1's fallback is taken.
+- A custom stabilizer is accepted into the definitions repository for the first time, turning D22
+  from a policy into a live input.
+- The two-agreeing-attempts policy is implemented, changing what a published divergence asserts.
+- **The output directory stops being cleared before every attempt**, or the collector starts
+  selecting by sort order or mtime rather than by run. Today it is emptied before the first attempt
+  and every retry *(documented, crates/trigon/src/main.rs:2218)*; that is what makes P14's guarantee
+  about the *right* artifact and not merely a real one.
+- Verdicts are published for runtime lookup (`docs/19-distribution-and-lookup.md`), which adds a
+  consumer who never runs Trigon and never sees this document.
+- **A report that cannot be routed to exactly one §1.17 disposition.** Revise; do not improvise.
+
+---
+
+## 1.17 Triage dispositions
+
+| Disposition | Meaning | Licensed by |
+| --- | --- | --- |
+| `VALID` | Violates a §1.11 property, via a §1.10 adversary and a §1.7 attacker-controllable operand. | §1.11, §1.7, §1.10 |
+| `VALID-HARDENING` | No §1.11 property violated, but §1.14 shows a misuse easy enough to close off. Maintainer discretion; usually no CVE. | §1.14 |
+| `OUT-OF-MODEL: trusted-input` | Needs attacker control of an operand §1.7 marks trusted — in practice an operator input. | §1.7 |
+| `OUT-OF-MODEL: adversary-not-in-scope` | Needs a capability §1.10 excludes. | §1.10 |
+| `OUT-OF-MODEL: unsupported-component` | Lands in code §1.3 places out of scope, including behaviour that exists only in the design chapters. | §1.3 |
+| `OUT-OF-MODEL: non-default-build` | Needs a configuration §1.6 marks dev-only or unsupported. **Non-default alone is not enough** — `wasm` is off by default and supported. | §1.6 |
+| `OUT-OF-MODEL: dependency-contract` | A dependency failed its own contract while Trigon used it as documented. Forward upstream. | §1.9 |
+| `BY-DESIGN: property-disclaimed` | Concerns a property §1.12 says is not provided, a consumer assumption §1.8 refuses, or a host effect §1.5 records as present by design. | §1.12, §1.8, §1.5 |
+| `KNOWN-NON-FINDING` | Matches a §1.15 entry on every field, and its discharging claim still stands. | §1.15 |
+| `ESCALATE: unratified-claim` | A rule matched, but the claim licensing it is *(inferred)* or *(assumption)*. **Non-closing.** The report goes to the maintainer with the matched rule and its `QN`, and §1.18 answers it. | §1.18 |
+| `MODEL-GAP` | Fits none of the above. Triggers §1.16. | — |
+
+**Precedence — first matching rule wins.** Several failed preconditions do not make a `MODEL-GAP`.
+
+1. Exact §1.15 match → `KNOWN-NON-FINDING`
+2. Unsupported component → `OUT-OF-MODEL: unsupported-component`
+3. Unsupported configuration → `OUT-OF-MODEL: non-default-build`
+4. Conformant use of a dependency that broke its own contract → `OUT-OF-MODEL: dependency-contract`
+5. Requires control of a trusted operand → `OUT-OF-MODEL: trusted-input`
+6. Requires an excluded capability → `OUT-OF-MODEL: adversary-not-in-scope`
+7. Disclaimed property, refused consumer assumption, or by-design host effect →
+   `BY-DESIGN: property-disclaimed`
+8. Violated claimed property → `VALID`; else an easy-to-prevent §1.14 misuse → `VALID-HARDENING`
+9. No unique supported conclusion → `MODEL-GAP`
+
+**Then the closure check, which overrides rules 1–7.** If the matched rule's claim is *(inferred)* or
+*(assumption)*, the disposition becomes `ESCALATE: unratified-claim`.
+
+**Closure constraint — at every model status.** Any disposition that closes a report against its
+reporter must be licensed by a *(documented)* or *(maintainer)* claim.
+
+- Under **`strict`** (this model's policy) an *(assumption)* behaves exactly like *(inferred)*:
+  escalate only.
+- Under **`relaxed`**, were it adopted, an *(assumption)* could license only the low-blast-radius
+  closes — `trusted-input`, `adversary-not-in-scope`, `unsupported-component`, `non-default-build`,
+  and a *non*-security-critical `property-disclaimed` — as a **provisional** close, tagged with its
+  `QN`, the §1.18 item left open, and re-opened on a reporter's challenge without new evidence.
+- **The security-critical floor holds under both policies.** An *(assumption)* never licenses
+  `KNOWN-NON-FINDING`, a `property-disclaimed` whose row is security-critical, or
+  `dependency-contract`.
+
+`VALID` and `MODEL-GAP` are fail-safe and always available.
+
+**A note on `ESCALATE: unratified-claim` and the sidecar.** The machine-readable companion's
+`dispositions` list is a fixed enum shared across projects and does not carry this row. That is not a
+disagreement: the sidecar expresses the same rule structurally, because every record carries its
+provenance and an `inferred` or `assumption` record may never authorize a closing disposition.
+`ESCALATE: unratified-claim` is the name this document gives that outcome so a human triager has one
+word for it. Tooling reads the provenance; a person reads the row.
 
 ---
 
 ## 1.18 Open questions for the maintainer
 
-Each states a **proposed answer**, not "please clarify". Answering one promotes its claims from
-*(inferred)* or *(assumption)* to *(maintainer)* and removes the question.
+Each states a **proposed answer**. Answering one promotes its claims to *(maintainer)* and removes
+the question. The backtest's verification pass closed Q6 and Q9–Q13 — each was a guarantee whose
+absence turned out to be checkable in the crate, so each became a *(documented)* disclaimer instead.
 
-**Wave 1 — scope and the insecure default.**
+**Wave 1 — scope, and the two defaults that change what a claim means.**
 
-- **Q1.** Is everything in the repository in the model — no `contrib/`, no unsupported examples, no
-  vendored source? *Proposed: yes.* → §1.2
+- **Q1.** Is everything shipped in the binary in the model, with `xtask`, `fuzz/`, `corpora/` and
+  `scripts/` out? *Proposed: yes.* → §1.2, §1.3
 - **Q2.** `docs/12-security.md` §3 says the attestor never executes sandbox-derived code. In the
-  built system, `trigon rebuild --attest` signs in the process that ran the build. Is the separable
-  path (`trigon rebuild --store` then `trigon attest`) the supported one for a claim that matters?
-  *Proposed: yes, and `--attest` on a run that built is dev convenience.* → §1.4, §1.6
+  built system `trigon rebuild --attest` signs in the process that ran the build. Is `--store` then
+  `trigon attest` the supported path for a claim that matters? *Proposed: yes, and `--attest` on a
+  run that built is dev convenience.* → §1.4
+- **Q15.** `--egress open` is the shipped default for `rebuild` and `sweep`. Supported production
+  posture, or should the default change? *Proposed: supported — the alternative is a tool that does
+  not run out of the box, and the attestation records the weaker claim.* → §1.6
+- **Q16.** D18: a `normalized` claim re-derived through an archived WASM set degrades to
+  `normalized_with_caveats`, so a true claim reads as refuted. Acceptable, or does
+  `verify-attestation` need a third answer meaning "consistent, cap unconfirmable"? *Proposed: a
+  third answer.* → D18
+
+**Wave 2 — the negative claims, which are the ones a consumer leans on.**
+
 - **Q3.** Is Linux/x86-64 the only supported platform for the build path? *Proposed: yes.* → §1.5
 - **Q4.** Does anything install a signal handler, mutate global locale or FPU state, or spawn a
   thread the caller does not know about? *Proposed: no, other than the progress heartbeat thread.*
   → §1.5
 - **Q5.** A package's own metadata names the hosts the operator's machine connects to during
-  resolution and fetch. Is that accepted, or should the host set be allowlisted the way the mirror's
-  is? *Proposed: accepted, and stated rather than fixed — the operator chose to resolve this
-  package.* → §1.7
-
-**Wave 2 — inputs and bounds.**
-
-- **Q6.** Is registry JSON validated beyond the fields read, or is a malformed response simply a
-  `RegistryError`? *Proposed: the latter; no schema validation is claimed.* → §1.7, D11
-- **Q7.** Are all non-tabled operands operator-supplied and trusted? *Proposed: yes.* → §1.7
+  resolution and fetch. Accepted, or should the host set be allowlisted the way the mirror's is?
+  *Proposed: accepted and stated — the operator chose to resolve this package.* → §1.7, §1.12
+- **Q7.** Are all operands not in §1.7's table operator-supplied and trusted? *Proposed: yes — and
+  until it is answered, a finding against one escalates rather than closing.* → §1.7
 - **Q8.** Difference codes and member paths come from the artifact and reach a signed statement, a
-  log and a prompt. Are they bounded and control-stripped on those paths? *Proposed: bounded on the
-  prompt path by `logs.rs`, not on the statement path; state it as a disclaimer.* → §1.8
-- **Q9.** Does the store verify anything it reads besides blob hashes? *Proposed: no.* → D6
-- **Q10.** Is anything meant to exclude two writers from one work directory or one store? *Proposed:
-  no, and the operator owns it.* → D7
-- **Q11.** Is there a bound on a statement's or a difference summary's size? *Proposed: no.* → D9
-- **Q12.** Is a partial checkout or fetch rolled back? *Proposed: no; the cache is keyed by commit so
-  a partial entry is re-fetched.* → D10
-- **Q13.** Is there a bound on a repository's or a registry response's size? *Proposed: no.* → D12
-- **Q14.** Is package text confidential from a model provider, and does the Copilot prompt stay off
-  the host process table? *Proposed: no to the first, unverified for the second — disclaim both.*
-  → D20
+  log and a prompt. Bounded and control-stripped on all three paths? *Proposed: bounded on the
+  prompt path by `logs.rs`, not on the statement path; state the second as a disclaimer.* → §1.8
 
-**Wave 3 — the two that change what a claim means.**
+**Wave 3 — meta.**
 
-- **Q15.** `--egress open` is the shipped default for `rebuild` and `sweep`. Is that a supported
-  production posture (so a fetch at that tier is `BY-DESIGN`), or should the default change?
-  *Proposed: supported, because the alternative is a tool that does not run out of the box, and the
-  attestation records the weaker claim.* → §1.6
-- **Q16.** D18: a `Normalized` claim re-derived through an archived WASM set degrades to
-  `NormalizedWithCaveats`, so a true claim reads as refuted. Is that acceptable, or does
-  `verify-attestation` need a third answer meaning "consistent, cap unconfirmable"? *Proposed: a
-  third answer.* → D18
+- **Q17.** There is no `SECURITY.md`, no disclosure address and no supported-versions statement. A
+  model that says "report §1.11 violations privately" needs a channel to exist. *Proposed: add
+  `SECURITY.md` naming a channel and pointing here.* → §1.1
+- **Q18.** `docs/12-security.md` and this model both state a security position, and `12` is the cited
+  source for most closing claims here. Does `12` stay as the controls document with this model as the
+  contract, or should its §1, §3 and §11 move here and leave `12` purely about mechanism?
+  *Proposed: `12` stays; it is cited, not duplicated, and the appendix records the mapping.* → appendix
 
-**Meta.**
+---
 
-- **Q17.** There is no `SECURITY.md`, no disclosure address, and no supported-versions statement. A
-  threat model that says "report §1.11 violations through the disclosure channel" needs one to exist.
-  *Proposed: add `SECURITY.md` pointing here.* → §1.1
+## 1.19 Machine-readable companion
+
+[`threat-model.yaml`](threat-model.yaml), at `threat-model-sidecar/v2`. The prose here is canonical;
+the sidecar is a derived index pinned to this file's SHA-256.
+
+It is **generated, not hand-maintained**: `scripts/threat-model-sidecar.py` reads the tables above
+and emits it, and `--check` fails if the file on disk is stale. A companion kept by hand goes out of
+date on the first edit nobody mirrors, and a stale sidecar is worse than none — a triage pipeline
+reads it while the human reads the prose, and the two quietly disagree. The generator also refuses to
+emit unless every in-scope component has a row for all eight contract dimensions, which is the
+coverage check that would otherwise be somebody remembering.
+
+**Census** — claim tags only; the legend rows and prose mentions of a tag name are excluded:
+**192 documented / 0 maintainer / 3 assumption / 5 inferred**. Every assumption and inferred tag
+resolves to a question in §1.18.
 
 ---
 
 ## Appendix — back-map from `docs/12-security.md`
 
-`docs/12-security.md` is a controls document, and the maintainer says explicitly that it is not this
-*(documented, docs/17-backlog.md B2)*. It nonetheless holds threat-model content, so this model must
-be a strict superset of it. Kept until the maintainer approves removal.
+`docs/12-security.md` is a controls document and the maintainer says explicitly that it is not this
+*(documented, docs/17-backlog.md B2)*. It holds threat-model content, so this model must be a strict
+superset. Kept until Q18 is answered.
 
 | `12-security.md` | Where it lands here |
 | --- | --- |
-| §1, §1.1 the forged-attestation attack | §1.10 A1; §1.2 "what would have to be true for the claim to be wrong" |
+| §1, §1.1 the forged-attestation attack | §1.10 A1; §1.2 "what would have to be true for it to be wrong" |
 | §2.1 mirror refusal | P12 |
-| §2.2 egress hashing, the guarded member set and its filters | P12; §1.12 (the guard is wider than designed) |
-| §2.3 write-only blob access | **designed, not built** — §1.3 "designed but not built"; §1.4 |
-| §2.4 why `Void` | P6 |
+| §2.2 egress hashing, the guarded member set and its filters | P12; §1.12 ("the guard is not armed on every run") |
+| §2.3 write-only blob access | **designed, not built** — §1.3; §1.4 |
+| §2.4 why `Void` | P6; §1.1 "the outcomes" |
 | §2.5 the limits | D16 |
-| §3 trust boundaries | §1.4, with the note that one process holds several of the designed roles |
+| §3 trust boundaries | §1.4, with the note that one process holds several designed roles |
 | §4, §4.1–4.3 prompt injection | §1.10 A2; P7; §1.12 false friends |
 | §5 free-form shell | D2; §1.12 false friends |
-| §6 sandbox hardening | §1.5; P11 |
-| §7 multi-tenancy | §1.3 (out of scope until built) |
-| §8 the definitions repository | §1.9; §1.10 A4; §1.13 item 16 |
+| §6 sandbox hardening | §1.5; P11; §1.12 attack classes (container escape) |
+| §7 multi-tenancy | §1.3 |
+| §8 the definitions repository | §1.9; §1.10 A4; D22; §1.13 item 16 |
 | §9 signing key handling | §1.13; Q2 |
-| §10 the twelve invariants | P1–P21, each with a symptom and a tier |
+| §10 the twelve invariants | P1–P30, each with a symptom and a tier |
 | §11 out of scope | §1.3 |
-| §12 redistribution | not security-contract content; left in `12` |
+| §12 redistribution | not security-contract content; stays in `12` |
