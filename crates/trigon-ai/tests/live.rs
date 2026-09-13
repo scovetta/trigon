@@ -22,6 +22,7 @@ fn request(model: &str, body: &str) -> Request {
         max_output_tokens: 32,
         temperature: 0.0,
         schema: None,
+        reasoning: trigon_ai::Reasoning::Default,
     }
 }
 

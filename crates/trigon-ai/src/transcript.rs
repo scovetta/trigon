@@ -20,7 +20,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::provider::{LlmError, ModelCaps, Provider, Request, Response, Usage};
+use crate::provider::{LlmError, ModelCaps, Provider, Reasoning, Request, Response, Usage};
 
 /// One exchange, with everything a replay needs to be honest about what it is repeating.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -39,6 +39,16 @@ pub struct Turn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_sha256: Option<String>,
     pub answer: String,
+    /// What the model reasoned before answering, where the provider returned it separately.
+    ///
+    /// Recorded rather than dropped: it was charged as output and it is the derivation. A
+    /// transcript whose answer is a build recipe and whose reasoning is gone can say *what* was
+    /// proposed and never *why*, which is the half a reviewer needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// What was asked for, which is part of the question in the same way `temperature` is.
+    #[serde(default, skip_serializing_if = "Reasoning::is_default")]
+    pub reasoning_asked: Reasoning,
     pub usage: Usage,
     pub stop_reason: String,
 }
@@ -152,6 +162,8 @@ impl<P: Provider> Provider for Recorder<P> {
                 .as_ref()
                 .map(|s| sha(serde_json::to_string(s).unwrap_or_default().as_bytes())),
             answer: resp.text.clone(),
+            reasoning: resp.reasoning.clone(),
+            reasoning_asked: req.reasoning,
             usage: resp.usage,
             stop_reason: resp.stop_reason.clone(),
         };
@@ -188,6 +200,15 @@ impl Provider for Replaying {
         "replaying"
     }
 
+    /// What the recording was made under. The caller copies this into its request, so replaying a
+    /// no-reasoning recording asks a no-reasoning question rather than a different one.
+    fn reasoning(&self) -> Reasoning {
+        self.turns
+            .first()
+            .map(|t| t.reasoning_asked)
+            .unwrap_or_default()
+    }
+
     fn caps(&self) -> ModelCaps {
         ModelCaps {
             structured_output: true,
@@ -219,6 +240,7 @@ impl Provider for Replaying {
         }
         Ok(Response {
             text: turn.answer.clone(),
+            reasoning: turn.reasoning.clone(),
             usage: turn.usage,
             model: turn.model.clone(),
             stop_reason: turn.stop_reason.clone(),
@@ -242,6 +264,7 @@ mod tests {
             max_output_tokens: 100,
             temperature: 0.0,
             schema: None,
+            reasoning: Reasoning::Default,
         }
     }
 
@@ -328,6 +351,8 @@ mod tests {
             system_sha256: sha(b"s"),
             schema_sha256: None,
             answer: "a".into(),
+            reasoning: None,
+            reasoning_asked: Reasoning::Default,
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
         });
@@ -342,6 +367,7 @@ mod tests {
         // on record, so the provider's reported model wins.
         let r = Recorder::new(Replay::new(vec![Response {
             text: "a".into(),
+            reasoning: None,
             usage: Usage::default(),
             model: "claude-haiku-4-5-20251001".into(),
             stop_reason: "end_turn".into(),
@@ -358,6 +384,7 @@ mod tests {
         let r = Recorder::new(Replay::new(vec![
             Response {
                 text: "one".into(),
+                reasoning: None,
                 usage: Usage {
                     input: 100,
                     cached_input: 80,
@@ -368,6 +395,7 @@ mod tests {
             },
             Response {
                 text: "two".into(),
+                reasoning: None,
                 usage: Usage {
                     input: 200,
                     cached_input: 150,

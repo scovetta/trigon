@@ -176,6 +176,9 @@ pub fn propose(provider: &dyn Provider, model: &str, task: &Task) -> Result<Cand
         max_output_tokens: 4096,
         temperature: 0.0,
         schema: caps.structured_output.then(candidate_schema),
+        // The provider's, not this call's: whether a reasoning trace is worth its tokens is a
+        // property of the endpoint the operator named, and the same question is asked either way.
+        reasoning: provider.reasoning(),
     };
     parse_candidate(&provider.complete(&req)?.text)
 }

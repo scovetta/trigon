@@ -268,6 +268,10 @@ impl Provider for Counting {
         self.inner.caps()
     }
 
+    fn reasoning(&self) -> trigon_ai::Reasoning {
+        self.inner.reasoning()
+    }
+
     fn complete(&self, req: &trigon_ai::Request) -> Result<trigon_ai::Response, trigon_ai::LlmError> {
         // Before the call, not after it: a call that failed still cost something and still happened,
         // and a counter that only counts successes understates exactly the runs worth looking at.
@@ -302,8 +306,16 @@ impl Configured {
                 let base = std::env::var("OLLAMA_HOST")
                     .unwrap_or_else(|_| "http://localhost:11434".into());
                 let base = format!("{}/v1", base.trim_end_matches('/').trim_end_matches("/v1"));
-                let p = trigon_ai::OpenAiCompatible::new(base, None, trigon_ai::Flavor::Ollama)?;
-                let model = p.pinned_model(&named(rest, "ollama")?);
+                // `+no-reasoning` rather than a flag, so everything about which model answers stays
+                // in one string. `+` is not a character an Ollama name can contain, so a tag can
+                // never be read as carrying this by accident.
+                let (tag, reasoning) = match rest.strip_suffix("+no-reasoning") {
+                    Some(tag) => (tag, trigon_ai::Reasoning::Off),
+                    None => (rest, trigon_ai::Reasoning::Default),
+                };
+                let p = trigon_ai::OpenAiCompatible::new(base, None, trigon_ai::Flavor::Ollama)?
+                    .with_reasoning(reasoning);
+                let model = p.pinned_model(&named(tag, "ollama")?);
                 Ok(Self::live(Box::new(p), model))
             }
             "openai" => Ok(Self::live(
@@ -388,7 +400,8 @@ impl Configured {
             }
             other => anyhow::bail!(
                 "`{other}` is not a provider this build knows. One of: \
-                 `ollama:<model>`, `anthropic:<model>`, `openai:<model>`, `openrouter:<model>`, \
+                 `ollama:<model>[+no-reasoning]`, `anthropic:<model>`, `openai:<model>`, \
+                 `openrouter:<model>`, \
                  `copilot:<model|auto>`, `compatible:<base-url>#<model>`, or \
                  `replay:<transcript.json>`."
             ),
@@ -718,6 +731,8 @@ mod tests {
             system_sha256: "1".repeat(64),
             schema_sha256: None,
             answer: ANSWER.into(),
+            reasoning: None,
+            reasoning_asked: Default::default(),
             usage: Default::default(),
             stop_reason: "end_turn".into(),
         });

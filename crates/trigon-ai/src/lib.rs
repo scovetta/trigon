@@ -21,7 +21,9 @@ mod transcript;
 
 pub use builder::{Candidate, Task, candidate_schema, parse_candidate, prompt, propose};
 pub use eval::{Capability, Change, Flips, Labelled, Observation, Rate, Scorecard, flips, score};
-pub use provider::{LlmError, ModelCaps, Part, Prompt, Provider, Replay, Request, Response, Usage};
+pub use provider::{
+    LlmError, ModelCaps, Part, Prompt, Provider, Reasoning, Replay, Request, Response, Usage,
+};
 pub use copilot::Copilot;
 pub use http::{Anthropic, Flavor, OpenAiCompatible};
 pub use transcript::{Recorder, Replaying, Transcript, Turn, is_snapshot};

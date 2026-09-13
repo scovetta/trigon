@@ -21,6 +21,37 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// How much a model should spend thinking before it answers.
+///
+/// A thinking model emits a reasoning trace and then an answer, and the trace is charged as output.
+/// It is worth being able to decline: on a local 27B model, asking for `{"ok":true}` costs 52 output
+/// tokens with reasoning and 6 without, and the wall clock on a CPU-only host moves with it.
+///
+/// The trace itself is not thrown away when it does arrive — see [`Response::reasoning`]. Paying for
+/// derivation and then dropping it is the failure `docs/07-ai.md` §8 is about, so the choice here is
+/// between not buying it and keeping it, never between buying it and losing it.
+///
+/// This is a request the provider may ignore. `Off` is honoured by Ollama through
+/// `reasoning_effort` and ignored by endpoints that do not know the field, which is a difference in
+/// speed rather than in what comes back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reasoning {
+    /// Whatever the model does when nothing is said.
+    #[default]
+    Default,
+    /// Answer without a reasoning trace.
+    Off,
+}
+
+impl Reasoning {
+    /// For `skip_serializing_if`, so a transcript from a run that said nothing does not grow a
+    /// field and stop comparing equal to the one recorded before this existed.
+    pub fn is_default(&self) -> bool {
+        matches!(self, Reasoning::Default)
+    }
+}
+
 /// What a model can do, asked before it is asked to do it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCaps {
@@ -120,12 +151,24 @@ pub struct Request {
     /// A JSON schema the answer must satisfy. Ignored, with a fallback, when the provider cannot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<serde_json::Value>,
+    /// Recorded for the same reason `temperature` is: it changes the answer, so two calls that
+    /// differ only here are not the same question and a replay must be able to say so.
+    #[serde(default, skip_serializing_if = "Reasoning::is_default")]
+    pub reasoning: Reasoning,
 }
 
 /// What came back, and what it cost.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Response {
     pub text: String,
+    /// The reasoning trace, where the provider returned one separately from the answer.
+    ///
+    /// Kept rather than dropped because it was paid for as output and it is the derivation — the
+    /// part of a transcript that says *why* this recipe and not another. Absent when the model did
+    /// not think, when [`Reasoning::Off`] was asked for, or when the provider folds its reasoning
+    /// into the answer instead of alongside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     pub usage: Usage,
     /// The snapshot the provider says answered, which is not always the one asked for.
     pub model: String,
@@ -193,6 +236,12 @@ pub trait Provider: Send + Sync {
     fn id(&self) -> &str;
     fn caps(&self) -> ModelCaps;
     fn complete(&self, req: &Request) -> Result<Response, LlmError>;
+
+    /// What this provider was configured to ask for. Not a capability — a choice the operator made
+    /// when they named the endpoint, which the caller copies into the request so it is recorded.
+    fn reasoning(&self) -> Reasoning {
+        Reasoning::Default
+    }
 }
 
 impl fmt::Debug for dyn Provider {
@@ -225,6 +274,7 @@ impl Replay {
     pub fn once(text: impl Into<String>) -> Self {
         Self::new(vec![Response {
             text: text.into(),
+            reasoning: None,
             usage: Usage::default(),
             model: "replay".into(),
             stop_reason: "end_turn".into(),
@@ -309,6 +359,7 @@ mod tests {
             max_output_tokens: 10,
             temperature: 0.0,
             schema: None,
+            reasoning: Reasoning::Default,
         };
         assert_eq!(p.complete(&req).unwrap().text, "first");
         let e = p.complete(&req).unwrap_err();

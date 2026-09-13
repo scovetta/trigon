@@ -244,6 +244,8 @@ fn parse(stdout: &str, stderr: &str, asked_for: &str) -> Result<Response, LlmErr
 
     Ok(Response {
         text: answer["data"]["content"].as_str().unwrap_or("").to_string(),
+        // The CLI reports an answer, not the model's reasoning, so there is nothing to keep.
+        reasoning: None,
         usage,
         // What answered. `--model auto` lets Copilot choose, and this is the only place that says
         // which one it chose.
@@ -271,6 +273,7 @@ mod tests {
             max_output_tokens: 100,
             temperature: 0.0,
             schema: None,
+            reasoning: crate::Reasoning::Default,
         }
     }
 

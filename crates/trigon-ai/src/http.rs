@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::provider::{LlmError, ModelCaps, Provider, Request, Response, Usage};
+use crate::provider::{LlmError, ModelCaps, Provider, Reasoning, Request, Response, Usage};
 
 /// How many times a call is attempted in total.
 ///
@@ -88,6 +88,7 @@ pub struct OpenAiCompatible {
     api_key: Option<String>,
     flavor: Flavor,
     context_tokens: u32,
+    reasoning: Reasoning,
 }
 
 impl OpenAiCompatible {
@@ -98,6 +99,7 @@ impl OpenAiCompatible {
             base: base.into().trim_end_matches('/').to_string(),
             api_key,
             flavor,
+            reasoning: Reasoning::Default,
             // An estimate, and used only to decline gracefully rather than to size anything. The
             // endpoints disagree about how to report the real number and several will not.
             context_tokens: match flavor {
@@ -109,6 +111,17 @@ impl OpenAiCompatible {
 
     pub fn with_context_tokens(mut self, n: u32) -> Self {
         self.context_tokens = n;
+        self
+    }
+
+    /// Ask this endpoint to answer without a reasoning trace.
+    ///
+    /// Only Ollama is sent the field. OpenAI's `reasoning_effort` takes a different set of values
+    /// and answers 400 on one it does not know, and sending a parameter that some endpoint in the
+    /// "OpenAI-compatible" family might reject is how a provider starts failing for reasons that
+    /// read as ours. Widen it per flavour, on evidence, rather than by hope.
+    pub fn with_reasoning(mut self, r: Reasoning) -> Self {
+        self.reasoning = r;
         self
     }
 
@@ -172,6 +185,9 @@ impl OpenAiCompatible {
         if self.flavor.takes_temperature() {
             body["temperature"] = json!(req.temperature);
         }
+        if (self.flavor, req.reasoning) == (Flavor::Ollama, Reasoning::Off) {
+            body["reasoning_effort"] = json!("none");
+        }
         if let (true, Some(schema)) = (self.flavor.structured_output(), &req.schema) {
             body["response_format"] = json!({
                 "type": "json_schema",
@@ -194,9 +210,19 @@ impl Provider for OpenAiCompatible {
             // Every one of these caches automatically on a prefix, with nothing to declare. The
             // breakpoint still shapes the request, which is why this is `true` rather than a
             // statement that the flag is ignored.
-            prompt_cache: !matches!(self.flavor, Flavor::Ollama),
+            //
+            // Ollama included: it reuses the KV cache across requests to a loaded model and reports
+            // the hit in `prompt_tokens_details.cached_tokens` like the hosted endpoints do —
+            // observed at 16 of 18 tokens on a repeated prompt. This read `false` on the assumption
+            // that a local model has no such thing, which understated the value of ordering stable
+            // material first in exactly the setting where prompt processing is slowest.
+            prompt_cache: true,
             context_tokens: self.context_tokens,
         }
+    }
+
+    fn reasoning(&self) -> Reasoning {
+        self.reasoning
     }
 
     fn complete(&self, req: &Request) -> Result<Response, LlmError> {
@@ -211,6 +237,13 @@ impl Provider for OpenAiCompatible {
         let usage = &doc["usage"];
         Ok(Response {
             text: text.to_string(),
+            // A thinking model answers with the trace beside the content rather than inside it.
+            // Ollama and OpenRouter both name it `reasoning`; keeping it costs nothing and losing
+            // it would mean paying output rates for a derivation nobody can read afterwards.
+            reasoning: choice["message"]["reasoning"]
+                .as_str()
+                .filter(|r| !r.is_empty())
+                .map(str::to_string),
             usage: Usage {
                 input: usage["prompt_tokens"].as_u64().unwrap_or(0),
                 // Reported by OpenAI, absent everywhere else, and a subset of `input` rather than
@@ -346,6 +379,9 @@ impl Provider for Anthropic {
         let read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
         Ok(Response {
             text: text.to_string(),
+            // Extended thinking is off unless `thinking` is set on the request, and it is not set
+            // here, so there is no trace to keep rather than one being dropped.
+            reasoning: None,
             usage: Usage {
                 // Anthropic reports the cached and written parts *alongside* the uncached input, so
                 // the total this system records is their sum. Reading `input_tokens` alone
@@ -442,6 +478,7 @@ fn probe(system: &str) -> Request {
         max_output_tokens: 100,
         temperature: 0.0,
         schema: Some(json!({"type": "object"})),
+        reasoning: Reasoning::Default,
     }
 }
 
@@ -493,6 +530,55 @@ mod tests {
         let local = openai_body(Flavor::Ollama);
         assert_eq!(local["temperature"], 0.0);
         assert_eq!(local["max_tokens"], 100);
+    }
+
+    #[test]
+    fn declining_a_reasoning_trace_reaches_ollama_and_nobody_else() {
+        // `reasoning_effort` means different things to different endpoints and OpenAI answers 400
+        // on a value it does not know, so this is sent where it has been observed to work and
+        // nowhere else. Asked-for-and-not-sent is a silent no-op; asked-for-and-rejected is a run
+        // that fails for what reads like our reason.
+        let mut req = probe("s");
+        req.reasoning = Reasoning::Off;
+        let ollama = OpenAiCompatible::new("http://x/v1", None, Flavor::Ollama)
+            .unwrap()
+            .with_reasoning(Reasoning::Off)
+            .body(&req);
+        assert_eq!(ollama["reasoning_effort"], "none");
+
+        for flavor in [Flavor::OpenAi, Flavor::OpenRouter, Flavor::Other] {
+            let body = OpenAiCompatible::new("http://x/v1", None, flavor)
+                .unwrap()
+                .with_reasoning(Reasoning::Off)
+                .body(&req);
+            assert!(body.get("reasoning_effort").is_none(), "{flavor:?}: {body}");
+        }
+
+        // And the default says nothing at all, so a model that thinks by default still does.
+        let quiet = OpenAiCompatible::new("http://x/v1", None, Flavor::Ollama)
+            .unwrap()
+            .body(&probe("s"));
+        assert!(quiet.get("reasoning_effort").is_none(), "{quiet}");
+    }
+
+    #[test]
+    fn a_reasoning_trace_is_kept_rather_than_dropped() {
+        // It is charged at output rates and it is the derivation. A transcript holding the recipe
+        // and not the reasoning can say what was proposed and never why.
+        let doc = json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "{}", "reasoning": "because X"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 18, "completion_tokens": 39},
+            "model": "qwen3.8:latest",
+        });
+        let choice = &doc["choices"][0];
+        let kept = choice["message"]["reasoning"]
+            .as_str()
+            .filter(|r| !r.is_empty())
+            .map(str::to_string);
+        assert_eq!(kept.as_deref(), Some("because X"));
     }
 
     #[test]
