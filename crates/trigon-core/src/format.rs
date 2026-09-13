@@ -7,18 +7,26 @@ use serde::{Deserialize, Serialize};
 /// Recorded in the equivalence attestation, because a verifier holding an attestation and two
 /// artifacts has no `EcosystemSpec` to ask. A verifier that guesses reads a `.gem` as a plain tar
 /// and produces a different digest for a correct artifact. See `docs/09-attestations.md` §2.2.
+/// **The serde name is the `Display` name.** `rename_all = "kebab-case"` gave `TarGz` the wire
+/// spelling `tar-gz` while `Display` wrote `tar+gzip`, so one type had two names and three
+/// hand-written parsers accepting different subsets of them. The attestation carries the `Display`
+/// form, which is the one a verifier reads, so that is the one everything now uses.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum Format {
     /// tar wrapped in gzip: `.tgz`, `.tar.gz`, `.crate`.
+    #[serde(rename = "tar+gzip")]
     TarGz,
     /// bare tar: `.tar`, and `.gem`, whose members are themselves gzipped.
+    #[serde(rename = "tar")]
     Tar,
     /// zip: `.zip`, `.whl`, `.jar`, `.nupkg`, `.egg`.
+    #[serde(rename = "zip")]
     Zip,
     /// gzip wrapping something that is not a tar.
+    #[serde(rename = "gzip")]
     Gzip,
     /// Opaque bytes. Compared whole, never walked.
+    #[serde(rename = "raw")]
     Raw,
 }
 
@@ -58,6 +66,38 @@ impl Format {
         }
     }
 }
+
+/// The one parser. `trigon`'s `resolve_format` and `trigon-attest`'s `parse_format` were two
+/// hand-written tables over the same strings with different vocabularies — one took `tar.gz` and
+/// `tgz`, the other took `tar-gz`, and neither took everything the other did. An alias belongs in
+/// exactly one place.
+impl std::str::FromStr for Format {
+    type Err = UnknownFormat;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            // The canonical name, then every spelling that has ever been written down for it.
+            "tar+gzip" | "tar-gz" | "tar-gzip" | "tar.gz" | "tgz" => Format::TarGz,
+            "tar" => Format::Tar,
+            "zip" => Format::Zip,
+            "gzip" | "gz" => Format::Gzip,
+            "raw" => Format::Raw,
+            other => return Err(UnknownFormat(other.to_string())),
+        })
+    }
+}
+
+/// A format name nothing knows, carrying the name so the caller can say which.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownFormat(pub String);
+
+impl fmt::Display for UnknownFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown format `{}`", self.0)
+    }
+}
+
+impl std::error::Error for UnknownFormat {}
 
 impl fmt::Display for Format {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

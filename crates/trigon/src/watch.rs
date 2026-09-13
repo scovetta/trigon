@@ -711,7 +711,10 @@ fn baseline_panel(sweep: &Sweep, v: &View) -> String {
                     .parse::<trigon_core::Match>()
                     .ok()
                     .map(|m| m.to_string()),
-                model_calls: r.model_calls.unwrap_or(0),
+                // Already `Option` here, and it stays one: `watch` renders an absent count as an
+                // em dash per row, and flattening it to zero on the way into a scorecard is the
+                // bug the other reader had.
+                model_calls: r.model_calls,
                 is_evidence: Family::of(&r.label).is_evidence(),
             })
             .collect()

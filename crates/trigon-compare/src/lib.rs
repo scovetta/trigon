@@ -137,7 +137,18 @@ impl Comparison {
     }
 
     /// Whether the outcome was capped below `Normalized` by provenance or risk, and why.
+    ///
+    /// **Gated on the outcome it describes.** This used to report the first pass that *would* cap,
+    /// whatever the outcome was, and `trigon verify` prints the answer — so a `divergent` run was
+    /// told "capped below `normalized`: cargo-vcs-hash is Builtin at Content risk" when nothing had
+    /// been capped and the artifacts simply differed, and an `exact` run was told the same when
+    /// `Exact` outranks `Normalized` and nothing was below anything. `cargo-vcs-hash` is `Content`
+    /// risk and fires on any crate carrying `.cargo_vcs_info.json`, so that was every crates.io
+    /// artifact the tool has ever looked at.
     pub fn cap_reason(&self) -> Option<String> {
+        if self.outcome != Match::NormalizedWithCaveats {
+            return None;
+        }
         self.applied()
             .into_iter()
             .find(|a| a.provenance != Provenance::Builtin || a.risk > RiskTier::Metadata)

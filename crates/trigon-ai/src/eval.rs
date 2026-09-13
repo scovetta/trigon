@@ -87,9 +87,14 @@ pub struct Observation {
     /// `exact`, `normalized`, `normalized_with_caveats`, `divergent`, or absent where the run never
     /// reached a comparison. A string, for the same reason it is one on the wire.
     pub outcome: Option<String>,
-    /// How many times a model was called for this target. Zero is the expected value for most of a
-    /// healthy corpus, and the only acceptable value for `trivial-deterministic`.
-    pub model_calls: u32,
+    /// How many times a model was called for this target, or `None` where the run did not record it.
+    ///
+    /// Zero is the expected value for most of a healthy corpus and the only acceptable one for
+    /// `trivial-deterministic`. **`None` is not zero.** `results.tsv` grew this column after the
+    /// cluster column, so a sweep resumed across that boundary has rows that never counted beside
+    /// rows that counted zero, and reading the first kind as the second reports a check nobody made
+    /// as a check that passed.
+    pub model_calls: Option<u32>,
     /// Whether the run said anything about the package at all. An infrastructure fault is not an
     /// unreproducible package, and counting it as one makes a rate a measure of our own
     /// reliability.
@@ -200,6 +205,12 @@ pub struct Scorecard {
     /// Targets whose label forbids a model and which called one anyway. **Any entry here is a
     /// regression**, whatever happened to the rate.
     pub forbidden_model_calls: Vec<String>,
+    /// Targets whose label forbids a model and whose count the run never recorded.
+    ///
+    /// Not a regression and not a pass: the check could not be made. Kept separate from
+    /// `forbidden_model_calls` because one is an accusation and this is an absence, and folded into
+    /// neither because a gate that counts unmade checks as passes is not a gate.
+    pub unknown_model_calls: Vec<String>,
     /// Labelled targets the run did not report on. Named rather than counted: a corpus quietly
     /// shrinking is how a rate improves without anything improving.
     pub missing: Vec<String>,
@@ -233,6 +244,8 @@ impl Scorecard {
     /// Deliberately not "did the rate go up". A model firing where it was forbidden fails
     /// regardless of the rate, and that asymmetry is the entire point of labelling.
     pub fn acceptable(&self) -> bool {
+        // `unknown_model_calls` is deliberately not here: an unrecorded count is not a failure, and
+        // the caller is told about it separately so a vacuous pass is visible rather than silent.
         self.forbidden_model_calls.is_empty() && self.missing.is_empty()
     }
 }
@@ -260,9 +273,13 @@ pub fn score(corpus: &[Labelled], observed: &[Observation]) -> Scorecard {
                 r.reproduced += 1;
             }
         }
-        card.model_calls += o.model_calls;
-        if l.capability.forbids_model() && o.model_calls > 0 {
-            card.forbidden_model_calls.push(l.purl.clone());
+        card.model_calls += o.model_calls.unwrap_or(0);
+        if l.capability.forbids_model() {
+            match o.model_calls {
+                Some(c) if c > 0 => card.forbidden_model_calls.push(l.purl.clone()),
+                Some(_) => {}
+                None => card.unknown_model_calls.push(l.purl.clone()),
+            }
         }
     }
     for o in observed {
@@ -289,7 +306,7 @@ mod tests {
         Observation {
             purl: purl.into(),
             outcome: outcome.map(str::to_string),
-            model_calls: calls,
+            model_calls: Some(calls),
             is_evidence: outcome.is_some(),
         }
     }
@@ -420,7 +437,7 @@ mod tests {
         let run = vec![Observation {
             purl: "pkg:npm/a@1".into(),
             outcome: None,
-            model_calls: 0,
+            model_calls: Some(0),
             is_evidence: false,
         }];
         let card = score(&corpus, &run);
@@ -469,7 +486,7 @@ mod tests {
             Observation {
                 purl: "pkg:npm/b@1".into(),
                 outcome: None,
-                model_calls: 0,
+                model_calls: Some(0),
                 is_evidence: false,
             },
         ];

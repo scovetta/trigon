@@ -103,7 +103,13 @@ impl GuardManifest {
                     continue;
                 };
                 let digest = Digest::from_bytes(Sha256::digest(&body).into());
-                if !guardable(&e.path, &body) || in_source.contains(&digest) {
+                // `guardable` exempts executables from every filter "unconditionally", and the
+                // also-in-source check sat after it behind an `||`, so it dropped them anyway. An
+                // executable that the repository also contains is exactly the case worth guarding:
+                // a build fetching a prebuilt binary is the attack in `docs/12-security.md` §1.1,
+                // and "the repo has a copy too" is what that attack looks like from here.
+                let exempt = ContentKind::classify(&e.path) == ContentKind::Executable;
+                if !guardable(&e.path, &body) || (!exempt && in_source.contains(&digest)) {
                     filtered_out += 1;
                     continue;
                 }
@@ -119,8 +125,13 @@ impl GuardManifest {
         }
     }
 
+    /// Whether this manifest guards nothing at all.
+    ///
+    /// **Counts `refuse_url`.** It did not, while `is_armed` did, so a manifest carrying only a
+    /// refusal URL was simultaneously "empty" and "armed" depending on which question was asked —
+    /// and the two are asked by different callers deciding whether the guard is doing anything.
     pub fn is_empty(&self) -> bool {
-        self.artifact.is_none() && self.members.is_empty()
+        self.artifact.is_none() && self.members.is_empty() && self.refuse_url.is_none()
     }
 }
 
@@ -248,6 +259,15 @@ pub enum GuardMatch {
 pub struct Guard {
     manifest: GuardManifest,
     trips: Mutex<Vec<Trip>>,
+    /// URLs whose bodies were hashed whole but never decomposed, because they crossed
+    /// [`MAX_DECOMPOSE_BYTES`].
+    ///
+    /// **Not a trip.** Voiding a run for downloading a large file would fire on honest builds, and
+    /// a control that fires on honest runs is one people turn off. But the skip cannot be silent
+    /// either: the member check is what catches the target's files arriving inside something else,
+    /// the size that suppresses it is chosen by the thing under test, and without this a run whose
+    /// every download was too large read exactly like a run that was opened and cleared.
+    undecomposed: Mutex<Vec<String>>,
 }
 
 /// The line a trip writes.
@@ -262,11 +282,13 @@ impl Guard {
         Guard {
             manifest,
             trips: Mutex::new(Vec::new()),
+            undecomposed: Mutex::new(Vec::new()),
         }
     }
 
     pub fn is_armed(&self) -> bool {
-        !self.manifest.is_empty() || self.manifest.refuse_url.is_some()
+        // One question, one answer: `is_empty` now counts `refuse_url` itself.
+        !self.manifest.is_empty()
     }
 
     /// Whether the body has to be kept, not just hashed.
@@ -291,6 +313,29 @@ impl Guard {
             url: url.to_string(),
             matched: GuardMatch::RefusedUrl,
         });
+    }
+
+    /// Bodies that were hashed whole and never opened, because they were too large.
+    ///
+    /// A non-empty list means the guard answered a narrower question than it was asked. The run is
+    /// not void — see the field's own note — but an operator reading a clean result is entitled to
+    /// know the member check did not run on these.
+    pub fn undecomposed(&self) -> Vec<String> {
+        self.undecomposed
+            .lock()
+            .map(|u| u.clone())
+            .unwrap_or_default()
+    }
+
+    /// As [`Self::observe`], for a body the stream stopped collecting because of its size.
+    ///
+    /// The whole-artifact hash still runs — that half never needed the bytes — and the member half
+    /// is recorded as not having run rather than as having found nothing.
+    pub fn observe_oversized(&self, url: &str, body_digest: Digest) {
+        if let Ok(mut u) = self.undecomposed.lock() {
+            u.push(url.to_string());
+        }
+        self.observe(url, body_digest, None);
     }
 
     /// Check a response body that has finished streaming.

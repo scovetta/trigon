@@ -266,16 +266,9 @@ fn hex(b: &[u8]) -> String {
 }
 
 fn parse_format(s: &str) -> Result<Format, AttestError> {
-    Ok(match s {
-        "tar+gzip" | "tar-gz" => Format::TarGz,
-        "tar" => Format::Tar,
-        "zip" => Format::Zip,
-        "gzip" => Format::Gzip,
-        "raw" => Format::Raw,
-        other => {
-            return Err(AttestError::Malformed(format!(
-                "unknown archive format `{other}`"
-            )));
-        }
-    })
+    // One parser, in `trigon-core`. This was a second table that accepted `tar-gz` where the
+    // binary's accepted `tar.gz` and `tgz`, so the same string was a format in one process and an
+    // error in the other.
+    s.parse::<Format>()
+        .map_err(|e| AttestError::Malformed(e.to_string()))
 }

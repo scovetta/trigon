@@ -46,6 +46,25 @@ pub enum Derivation {
     ModelAssisted,
 }
 
+/// The one spelling, because this reaches a signed statement.
+///
+/// It was written two ways from two branches of one `if` in `trigon rebuild`: the first candidate's
+/// derivation went through `format!("{:?}", d).to_lowercase()`, giving `modelassisted` and
+/// `ciderived`, while a repaired run wrote the literal `model_assisted`. So the same run recorded a
+/// different `derivation.method` depending on whether it needed a repair, and a consumer filtering
+/// on "no model touched this" — which `docs/09-attestations.md` §2.1 makes their job — had two
+/// strings to know about and was told about one.
+impl std::fmt::Display for Derivation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Derivation::Definition => "definition",
+            Derivation::CiDerived => "ci_derived",
+            Derivation::Heuristic => "heuristic",
+            Derivation::ModelAssisted => "model_assisted",
+        })
+    }
+}
+
 #[async_trait]
 pub trait StrategyInferrer: Send + Sync {
     fn name(&self) -> &'static str;

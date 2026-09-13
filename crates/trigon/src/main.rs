@@ -1342,14 +1342,9 @@ fn stabilize_one(
 
 fn resolve_format(path: &Path, explicit: Option<&str>) -> Result<Format> {
     if let Some(s) = explicit {
-        return match s {
-            "tar+gzip" | "tar.gz" | "tgz" => Ok(Format::TarGz),
-            "tar" => Ok(Format::Tar),
-            "zip" => Ok(Format::Zip),
-            "gzip" | "gz" => Ok(Format::Gzip),
-            "raw" => Ok(Format::Raw),
-            other => bail!("unknown format `{other}`"),
-        };
+        // `Format::from_str`, not a table here. There were three of these over the same strings
+        // with different vocabularies, and an alias added to one was missing from the others.
+        return s.parse::<Format>().map_err(|e| anyhow::anyhow!("{e}"));
     }
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     Format::from_file_name(&name).with_context(|| {
@@ -1395,13 +1390,24 @@ fn resolve_profile(
         Some("crate")
     } else if name.ends_with(".gem") {
         Some("gem")
-    } else if name.ends_with(".nupkg") {
-        Some("nupkg")
     } else {
+        // No `.nupkg` arm. It named a `nupkg` profile that `trigon-stabilize` does not have, and
+        // `by_kind.and_then(profile)` swallowed the miss and fell through to the plain zip set — so
+        // the table claimed a NuGet-specific normalization the system could not perform, and said
+        // nothing when it did not. A `.nupkg` still gets the zip set; the difference is that it is
+        // now the documented fallback rather than a silently failed lookup. `docs/17-backlog.md`
+        // B8 adds the profile, and the assertion below is what will notice when it does.
         None
     };
-    match by_kind.and_then(profile) {
-        Some(set) => Ok(set),
+    match by_kind {
+        // Compiled-in on both sides, so a name here that the registry does not know is a
+        // programming error rather than anything a user did, and it must not read as a fallback.
+        Some(id) => Ok(profile(id).unwrap_or_else(|| {
+            panic!(
+                "the artifact-kind table names profile `{id}`, which trigon-stabilize does not \
+                    have; add it to profiles.rs or remove the arm"
+            )
+        })),
         None => Ok(default_for(fmt)),
     }
 }
@@ -2160,7 +2166,7 @@ mod rebuild {
                 model_calls: calls(&model),
             });
         };
-        report.derivation = Some(format!("{:?}", candidate.derivation).to_lowercase());
+        report.derivation = Some(candidate.derivation.to_string());
         report.confidence = Some(format!("{:?}", candidate.confidence).to_lowercase());
         report.assumptions = candidate.assumptions.clone();
         let loc = candidate.strategy.location().cloned().unwrap_or_default();
@@ -2465,10 +2471,12 @@ mod rebuild {
                 .attestable,
         );
         let derivation = if repairs.attempts().is_empty() {
-            format!("{:?}", candidate.derivation).to_lowercase()
+            candidate.derivation.to_string()
         } else {
-            // Whatever produced the first candidate, what ran is what a model last proposed.
-            "model_assisted".to_string()
+            // Whatever produced the first candidate, what ran is what a model last proposed. Via
+            // the enum rather than a literal: the two branches spelled it differently for as long
+            // as both existed.
+            trigon_registry::Derivation::ModelAssisted.to_string()
         };
 
         if let Some(m) = mirror {
@@ -3853,8 +3861,13 @@ fn read_results(path: &Path) -> Result<(Vec<trigon_ai::Observation>, bool)> {
             let mut f = line.split('\t');
             let purl = f.next()?.to_string();
             let label = f.next()?;
+            // The seconds column, required. `watch::parse_results` and `sweep::completed` both
+            // require it and this did not, so a half-written final row — purl and label flushed,
+            // seconds not yet — was a target to `trigon score` and not a target to `trigon watch`,
+            // and the two reported different rates for one file.
+            f.next().filter(|s| !s.is_empty())?;
             let calls = f
-                .nth(2)
+                .nth(1)
                 .filter(|c| !c.is_empty())
                 .and_then(|c| c.parse::<u32>().ok());
             recorded |= calls.is_some();
@@ -3864,7 +3877,11 @@ fn read_results(path: &Path) -> Result<(Vec<trigon_ai::Observation>, bool)> {
                     .parse::<trigon_core::Match>()
                     .ok()
                     .map(|m| m.to_string()),
-                model_calls: calls.unwrap_or(0),
+                // Per row. This was `calls.unwrap_or(0)` beside a `recorded` flag for the whole
+                // file, so one counted row suppressed the caveat for every uncounted one and the
+                // uncounted rows were summed in as zeroes — in the function whose own comment says
+                // absent is not zero.
+                model_calls: calls,
                 is_evidence: label.parse::<trigon_core::Match>().is_ok(),
             })
         })
@@ -3893,11 +3910,24 @@ fn score_run(
 
     let card = trigon_ai::score(&corpus.labels, &observed);
     if recorded {
-        println!(
-            "{} targets, {} model call(s)\n",
-            corpus.labels.len(),
-            card.model_calls
-        );
+        // The total counts only the rows that carry a count. Where some rows do and some do not —
+        // a sweep resumed across this column's introduction — saying so is the whole point: a
+        // total presented as if it covered every target is a claim the file does not support.
+        let unknown = observed.iter().filter(|o| o.model_calls.is_none()).count();
+        if unknown == 0 {
+            println!(
+                "{} targets, {} model call(s)\n",
+                corpus.labels.len(),
+                card.model_calls
+            );
+        } else {
+            println!(
+                "{} targets, {} model call(s) across {} that recorded one; {unknown} did not\n",
+                corpus.labels.len(),
+                card.model_calls,
+                observed.len() - unknown,
+            );
+        }
     } else {
         println!(
             "{} targets, model calls not recorded by this sweep\n",
@@ -3923,6 +3953,17 @@ fn score_run(
     if !card.forbidden_model_calls.is_empty() {
         println!("\n  REGRESSION: a model fired on targets labelled trivial-deterministic:");
         for p in &card.forbidden_model_calls {
+            println!("    {p}");
+        }
+    }
+    // Not a regression and not a pass. The gate this command exists to hold is "no model fired on a
+    // target labelled trivial-deterministic", and on a target whose count was never recorded that
+    // check cannot be made. Reporting it as passed is how a gate stops being one.
+    if !card.unknown_model_calls.is_empty() {
+        println!(
+            "\n  NOT CHECKED: these forbid a model and recorded no count, so the gate did not run:"
+        );
+        for p in &card.unknown_model_calls {
             println!("    {p}");
         }
     }

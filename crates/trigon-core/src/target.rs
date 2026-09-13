@@ -12,17 +12,31 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+/// The registry an artifact came from.
+///
+/// **Every name here is written out, not derived.** `rename_all = "snake_case"` looked right and
+/// was not: it renders `PyPI` as `py_p_i`, `CratesIo` as `crates_io`, `NuGet` as `nu_get` and
+/// `GitHub` as `git_hub` — five of six variants under a spelling that appears nowhere else in the
+/// system and that `from_purl_type` refuses. `trigon resolve --output json` printed those names.
+/// The serde name is the PURL type, which is also what `Display`, `from_purl_type` and
+/// `trigon-store`'s path layout use, and a test asserts the two stay equal for every variant.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Ecosystem {
+    #[serde(rename = "npm")]
     Npm,
+    #[serde(rename = "pypi")]
     PyPI,
+    #[serde(rename = "cargo")]
     CratesIo,
+    #[serde(rename = "gem")]
     RubyGems,
+    #[serde(rename = "nuget")]
     NuGet,
+    #[serde(rename = "maven")]
     Maven,
     /// A repository rather than a registry. Its artifact is a release asset or a source archive,
     /// which is why it needs no special case anywhere else.
+    #[serde(rename = "github")]
     GitHub,
 }
 

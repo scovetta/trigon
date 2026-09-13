@@ -1,0 +1,509 @@
+//! **Absent must never render as zero.**
+//!
+//! `docs/16-findings.md` §1 names the bug class that dominated this project: *configuration that
+//! looks applied and is not, with the failure surfacing somewhere that implicates the package
+//! instead of us.* Four of its six instances produced a **number that looked like a package
+//! problem** — a low reproduction rate, a corrupt artifact, an upstream error. The counter that
+//! eventually exposed the `PIP_TRUSTED_HOST` finding had been printing `0 index request(s)` for
+//! weeks, and a zero there reads exactly like a build that happened not to need anything.
+//!
+//! So the design goes out of its way: per-phase timings are `Option<Duration>` where `None` means
+//! *no data, never zero*; `Rates::reproduction()` is `None` when nothing was compared rather than
+//! 0%; `trigon watch`'s footer promises in so many words that "absent measurements are never shown
+//! as zero"; and `docs/11-interfaces.md` §4 says a stale pass is worse than no data, because it
+//! looks like data.
+//!
+//! Every one of those is a **seam**: something produces an absence, something else renders it, and
+//! nothing asserts the two still agree. `watch.rs` and `eval.rs` both have careful unit tests for
+//! their own halves — and unit tests are exactly what missed the five bugs found on 2026-09-13,
+//! because each unit was correct in isolation.
+//!
+//! These tests therefore assert against the **rendered form a human or a CI gate actually sees**,
+//! produced by running the real binary: the HTML and JSON `trigon watch` serves, and the stdout and
+//! exit code of `trigon score`. Each constructs the *no data* case and the *genuine zero* case side
+//! by side and asserts they do not read alike.
+//!
+//! Gated on `build` because `watch` and `score` are: the verifier binary
+//! (`--no-default-features`) carries neither.
+
+#![cfg(feature = "build")]
+
+use std::io::{Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_trigon")
+}
+
+/// A fresh, empty work directory named for the test that owns it.
+///
+/// Named rather than numbered so a failure leaves something readable behind, and cleared on entry
+/// so a re-run never reads the previous one's files.
+fn work(name: &str) -> PathBuf {
+    let d = std::env::temp_dir()
+        .join(format!("trigon-absent-{}", std::process::id()))
+        .join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn write(path: &Path, body: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, body).unwrap();
+}
+
+/// Now, in the shape `progress.rs` writes heartbeats in.
+///
+/// A heartbeat several beats old is `Unresponsive`, and `liveness_detail` says nothing about the
+/// target in flight for a sweep it believes is wedged — so any test about what *running* renders
+/// has to hand the page a timestamp it reads as current. Civil-from-days, the same algorithm
+/// `main.rs::now_rfc3339` uses, because the reader is its exact inverse.
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (days, tod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// A real `trigon watch`, over a real socket.
+//
+// The page is the product here: `watch.rs`'s own unit tests check `Rates::reproduction()` returns
+// `None`, which is the half that was never in doubt. What this pins is that the `None` survives
+// every step between the file on disk and the sentence an operator reads — the parse, the rate,
+// the panel, the escape, the JSON. That is the span the five bugs of 2026-09-13 all lived in.
+// ---------------------------------------------------------------------------------------------
+
+struct Watch {
+    child: Child,
+    port: u16,
+}
+
+impl Watch {
+    fn on(dir: &Path) -> Watch {
+        // Three attempts: the port is chosen by asking the OS for one and then letting go of it,
+        // so a parallel test can take it in between. Losing that race must not fail the assertion
+        // under test.
+        for attempt in 0..3 {
+            let port = TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let mut child = Command::new(bin())
+                .arg("watch")
+                .arg(dir)
+                .args(["--bind", &format!("127.0.0.1:{port}")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawning trigon watch");
+            for _ in 0..200 {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {}
+                    Err(e) => panic!("waiting on trigon watch: {e}"),
+                }
+                if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    return Watch { child, port };
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(
+                attempt < 2,
+                "trigon watch never came up on {}",
+                dir.display()
+            );
+        }
+        unreachable!()
+    }
+
+    /// The body of one response. HTTP/1.0 with `Connection: close`, so the read ends at EOF and
+    /// this needs no client library the crate does not already have.
+    fn get(&self, path: &str) -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        write!(
+            s,
+            "GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        match text.split_once("\r\n\r\n") {
+            Some((_, body)) => body.to_string(),
+            None => text,
+        }
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The `<tr>` whose first cell names `phase`. Enough HTML parsing to name a row, and no more.
+fn row_for<'a>(html: &'a str, first_cell: &str) -> &'a str {
+    let needle = format!(">{first_cell}</td>");
+    html.split("<tr>")
+        .find(|r| r.contains(&needle))
+        .unwrap_or_else(|| panic!("no row for {first_cell} in:\n{html}"))
+}
+
+/// Run `trigon score` and return what a person and a CI job each see: stdout, and the exit code.
+fn score(results: &Path, labels: &Path) -> (String, i32) {
+    let out = Command::new(bin())
+        .arg("score")
+        .arg(results)
+        .arg("--labels")
+        .arg(labels)
+        .output()
+        .expect("running trigon score");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_sweep_that_compared_nothing_reports_no_reproduction_rate_rather_than_zero_percent() {
+    // The headline number, and the one place this rule is load-bearing rather than tidy.
+    // "Nothing reproduced" is a claim about the packages; "nothing reached a comparison" is a claim
+    // about us, and `docs/16-findings.md` §1 is explicit that a rate which silently absorbs our own
+    // faults "becomes a measure of our own reliability wearing the costume of a claim about
+    // packages." Both of these sweeps have `reproduced == 0`. Only one of them has a rate.
+    let absent = work("rate-absent");
+    write(
+        &absent.join("results.tsv"),
+        "pkg:npm/a@1\tbuild-failed:deps\t12.0\tnpm/peer-conflict\t0\n\
+         pkg:npm/b@1\terror:infra\t3.0\ttrigon/mirror-corrupted-artifact\t0\n",
+    );
+    let zero = work("rate-zero");
+    write(
+        &zero.join("results.tsv"),
+        "pkg:npm/a@1\tdivergent\t12.0\t\t0\n\
+         pkg:npm/b@1\tdivergent\t3.0\t\t0\n",
+    );
+
+    let (a, z) = (Watch::on(&absent), Watch::on(&zero));
+    let (a_api, z_api) = (a.get("/api/state"), z.get("/api/state"));
+
+    // On the wire the two answers are different JSON values, not the same one twice. A consumer
+    // that plots `reproduction` must be able to leave a gap rather than draw a line to the floor.
+    assert!(a_api.contains("\"reproduction\":null"), "{a_api}");
+    assert!(z_api.contains("\"reproduction\":0.0"), "{z_api}");
+    // And the denominators stay apart: nothing was compared in the first, everything in the second.
+    assert!(a_api.contains("\"evidence\":0"), "{a_api}");
+    assert!(z_api.contains("\"evidence\":2"), "{z_api}");
+
+    let (a_html, z_html) = (a.get("/"), z.get("/"));
+    assert!(
+        a_html.contains("no target reached a comparison"),
+        "a sweep that compared nothing has to say so:\n{a_html}"
+    );
+    assert!(
+        !a_html.contains("class=\"rate ok\""),
+        "and must not print a percentage at all:\n{a_html}"
+    );
+    assert!(
+        z_html.contains("class=\"rate ok\">0%"),
+        "two real divergences are a real 0%:\n{z_html}"
+    );
+}
+
+#[test]
+fn a_directory_with_no_results_is_not_a_sweep_whose_results_are_zero_seconds_old() {
+    // Freshness is the other number `docs/11-interfaces.md` §4 cares about: "a stale pass is worse
+    // than no data, because it looks like data." An age of zero says the sweep wrote something a
+    // moment ago. No file at all says nobody has written anything here — possibly because this is
+    // not a sweep directory. Rendering the second as the first invents a heartbeat.
+    let nothing = work("age-absent");
+    let empty = work("age-zero");
+    // Present and empty: zero rows, and an mtime. Distinct from having no file.
+    write(&empty.join("results.tsv"), "");
+
+    let (n, e) = (Watch::on(&nothing), Watch::on(&empty));
+    let (n_api, e_api) = (n.get("/api/state"), e.get("/api/state"));
+
+    assert!(n_api.contains("\"results_age_seconds\":null"), "{n_api}");
+    assert!(
+        !e_api.contains("\"results_age_seconds\":null"),
+        "a file that exists has an age, even with nothing in it:\n{e_api}"
+    );
+    // Both are honestly zero *attempted*: that is a count, and the count really is zero.
+    assert!(n_api.contains("\"attempted\":0"), "{n_api}");
+    assert!(e_api.contains("\"attempted\":0"), "{e_api}");
+
+    let n_html = n.get("/");
+    assert!(
+        n_html.contains("no results.tsv here yet"),
+        "an absent file is named, together with what it would mean:\n{n_html}"
+    );
+    assert!(
+        e.get("/").contains("last result"),
+        "and a present one is dated"
+    );
+}
+
+#[test]
+fn a_sweep_that_wrote_no_status_is_not_a_sweep_that_has_started_and_done_nothing() {
+    // `Liveness::Unknown` and `Liveness::Starting` both have `done == 0` and no current target.
+    // They are opposite findings: the first means the page could not look, the second means it
+    // looked and the sweep has genuinely not begun a target. `progress.rs` says it out loud —
+    // "we did not look and find nothing, there was nothing to look at" — and only the rendering
+    // can prove the distinction survived.
+    let unknown = work("live-absent");
+    let starting = work("live-zero");
+    write(
+        &starting.join("status.json"),
+        &format!(
+            r#"{{"heartbeat":"{}","pid":{},"state":"starting","done":0,"total":20}}"#,
+            now_rfc3339(),
+            std::process::id()
+        ),
+    );
+
+    let (u, s) = (Watch::on(&unknown), Watch::on(&starting));
+    let (u_api, s_api) = (u.get("/api/state"), s.get("/api/state"));
+
+    assert!(u_api.contains("\"state\":\"state unknown\""), "{u_api}");
+    assert!(s_api.contains("\"state\":\"starting\""), "{s_api}");
+    // The detail is where the honesty lives, and it is carried into the JSON stripped of its
+    // markup so a script reader gets the same caveat a person does.
+    assert!(
+        u_api.contains("no status.json"),
+        "an absent heartbeat has to name itself as absent:\n{u_api}"
+    );
+    assert!(
+        s_api.contains("no target has been attempted yet"),
+        "and a real zero has to say it is a real zero:\n{s_api}"
+    );
+}
+
+#[test]
+fn a_phase_with_no_timing_renders_differently_from_a_phase_that_took_no_time() {
+    // The convention `docs/02-domain-model.md` inherited from the prior art, and the one every
+    // downstream average depends on: `None` is no data, never zero. It has to survive four hops —
+    // the sandbox's `Option<Duration>`, the event sink's `Option<f64>`, `run.json` on disk, and the
+    // page. A `0.0` that started life as "we failed to read the clock" understates every build it
+    // is averaged into, and nothing downstream can tell.
+    let w = work("timings");
+    write(&w.join("results.tsv"), "pkg:npm/a@1\texact\t54.0\t\t0\n");
+    write(
+        &w.join("000").join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z",
+            "timings":[["source",null],["deps",0.0],["build",41.5]]}"#,
+    );
+
+    let html = Watch::on(&w).get("/run/0");
+    let (source, deps, build) = (
+        row_for(&html, "source"),
+        row_for(&html, "deps"),
+        row_for(&html, "build"),
+    );
+    assert!(
+        source.contains("no data"),
+        "an unread timing says so:\n{source}"
+    );
+    assert!(
+        deps.contains(">0.0<") && !deps.contains("no data"),
+        "a phase that genuinely took no measurable time shows the number:\n{deps}"
+    );
+    assert!(build.contains(">41.5<"), "{build}");
+    // And the two are not merely styled differently: the absent one carries no number at all, so
+    // nothing scraping this page can read it as a duration.
+    assert!(
+        !source.contains("0.0"),
+        "no data must not be spelled with a digit:\n{source}"
+    );
+}
+
+#[test]
+fn a_mirror_that_never_ran_is_not_a_mirror_that_served_nothing() {
+    // The canonical instance of the whole class, from `docs/16-findings.md` §1. `PIP_INDEX_URL`
+    // without `PIP_TRUSTED_HOST` makes pip warn once and resolve against the live index, so every
+    // PyPI run recorded a pin it did not have — and the counter that would have shown it sat at
+    // zero, reading exactly like a build that needed no dependencies. The repair was not to hide
+    // the zero but to make the page say which of the two readings applies, and to keep "no mirror
+    // ran at all" a third state rather than the same zero.
+    let never = work("pin-absent");
+    write(&never.join("results.tsv"), "pkg:npm/a@1\texact\t1.0\t\t0\n");
+    write(
+        &never.join("000").join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z"}"#,
+    );
+
+    let silent = work("pin-zero");
+    write(
+        &silent.join("results.tsv"),
+        "pkg:npm/a@1\texact\t1.0\t\t0\n",
+    );
+    write(
+        &silent.join("000").join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z",
+            "pin":{"index_requests":0,"versions_withheld":0,"artifact_requests":0,
+                   "toolchain_requests":0,"rejected":0}}"#,
+    );
+
+    let bound = work("pin-bound");
+    write(&bound.join("results.tsv"), "pkg:npm/a@1\texact\t1.0\t\t0\n");
+    write(
+        &bound.join("000").join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z",
+            "pin":{"index_requests":7,"versions_withheld":1044,"artifact_requests":3,
+                   "toolchain_requests":0,"rejected":0}}"#,
+    );
+
+    let n = Watch::on(&never).get("/run/0");
+    let s = Watch::on(&silent).get("/run/0");
+    let b = Watch::on(&bound).get("/run/0");
+
+    assert!(
+        !n.contains("Registry pin"),
+        "no mirror ran, so there are no counters to show — not five zeroes:\n{n}"
+    );
+    assert!(s.contains("Registry pin"), "{s}");
+    assert!(
+        s.contains("the mirror was never contacted"),
+        "a zeroed counter is ambiguous and has to be read out as ambiguous:\n{s}"
+    );
+    assert!(
+        b.contains("proof the pin reached the client"),
+        "and a non-zero one is the evidence the finding asked for:\n{b}"
+    );
+    // The three readings are three different sentences, which is the whole repair.
+    assert!(!s.contains("proof the pin reached the client"), "{s}");
+}
+
+#[test]
+fn a_target_nobody_ran_is_named_rather_than_scored_as_a_target_that_needed_nothing() {
+    // `trigon_ai::score` splits these: a labelled target with no row lands in `missing` and in no
+    // denominator, while a target that ran and called no model is scored at zero. Collapsing the
+    // first into the second is `eval.rs`'s own stated failure mode — "a corpus quietly shrinking is
+    // how a rate improves without anything improving" — and it also flips the verdict, because
+    // `Scorecard::acceptable()` refuses a corpus with anything missing.
+    let d = work("score-missing");
+    write(
+        &d.join("labels.json"),
+        r#"{"labels":[
+            {"purl":"pkg:npm/ran@1","capability":"trivial-deterministic","reason":"pure tarball"},
+            {"purl":"pkg:npm/never@1","capability":"trivial-deterministic","reason":"pure tarball"}]}"#,
+    );
+    write(&d.join("one.tsv"), "pkg:npm/ran@1\texact\t1.0\t\t0\n");
+    write(
+        &d.join("two.tsv"),
+        "pkg:npm/ran@1\texact\t1.0\t\t0\npkg:npm/never@1\texact\t1.0\t\t0\n",
+    );
+
+    let (one, one_code) = score(&d.join("one.tsv"), &d.join("labels.json"));
+    let (two, two_code) = score(&d.join("two.tsv"), &d.join("labels.json"));
+
+    assert!(
+        one.contains("labelled but not reported on") && one.contains("pkg:npm/never@1"),
+        "the unrun target is named, not averaged over:\n{one}"
+    );
+    // The rate is over what was measured. Reporting `1/2` would fold the unmeasured target into
+    // the denominator as a failure; reporting `of 2 labelled` would claim it was scored.
+    assert!(one.contains("of 1 labelled"), "{one}");
+    assert!(two.contains("of 2 labelled"), "{two}");
+    assert_eq!(
+        one_code, 1,
+        "a corpus that shrank is not acceptable:\n{one}"
+    );
+    assert_eq!(two_code, 0, "and a complete one is:\n{two}");
+}
+
+#[test]
+fn watch_and_score_agree_that_an_unrecorded_model_call_count_is_not_a_count_of_zero() {
+    // Two readers of one file, in one binary — the shape of every bug found on 2026-09-13.
+    //
+    // `results.tsv` grew its model-call column after the cluster column did, so a row written by an
+    // older binary has four fields and a row written by this one has five. A sweep resumed across
+    // that boundary produces a file with both: `completed()` re-reads the old rows and appends new
+    // ones beside them.
+    //
+    // `watch.rs::parse_results` reads the column as `Option<u32>` and the board renders an absent
+    // count as an em dash, per row. `main.rs::read_results` reads it as `u32` with `unwrap_or(0)`
+    // and tracks "was anything counted" as a single flag for the whole file — so one counted row is
+    // enough to suppress the caveat for every uncounted one, and the uncounted rows are then summed
+    // in as zeroes.
+    //
+    // What that costs: `trigon score` is the promotion gate, and the one regression it exists to
+    // catch is a model firing on a target labelled `trivial-deterministic`. On a row whose count
+    // was never recorded that check cannot be made — and a silent zero reports it as passed.
+    let d = work("score-model-calls");
+    write(
+        &d.join("labels.json"),
+        r#"{"labels":[
+            {"purl":"pkg:npm/old@1","capability":"trivial-deterministic","reason":"pure tarball"},
+            {"purl":"pkg:npm/new@1","capability":"trivial-deterministic","reason":"pure tarball"}]}"#,
+    );
+    // Resumed across the column's introduction: the first row never counted, the second counted
+    // zero. The only difference between this file and the next is that one fact.
+    let mixed = "pkg:npm/old@1\texact\t1.0\npkg:npm/new@1\texact\t1.0\t\t0\n";
+    let counted = "pkg:npm/old@1\texact\t1.0\t\t0\npkg:npm/new@1\texact\t1.0\t\t0\n";
+    write(&d.join("mixed.tsv"), mixed);
+    write(&d.join("counted.tsv"), counted);
+
+    // The half that is right. Two work directories differing only in that one column.
+    let wm = work("watch-model-mixed");
+    write(&wm.join("results.tsv"), mixed);
+    let wc = work("watch-model-counted");
+    write(&wc.join("results.tsv"), counted);
+    let (m_html, c_html) = (Watch::on(&wm).get("/"), Watch::on(&wc).get("/"));
+    // The model cell of the board, exactly as `board_panel` writes it. Matched on the whole cell
+    // rather than on a bare dash, because the page's own prose uses em dashes too.
+    let dash = "<td class=\"n\"><span class=\"note\">—</span></td>";
+    let zero = "<td class=\"n\">0</td>";
+    assert!(
+        m_html.contains(dash) && m_html.contains(zero),
+        "the board renders a count nobody took as a dash, beside a real zero as a zero:\n{m_html}"
+    );
+    assert!(
+        !c_html.contains(dash),
+        "and a file where every row counted has no dashed cell at all:\n{c_html}"
+    );
+
+    // The half under test. Same two files, same binary, and the answer has to distinguish them
+    // too — either by naming the uncounted rows or by refusing to state a total it cannot know.
+    let (m_out, _) = score(&d.join("mixed.tsv"), &d.join("labels.json"));
+    let (c_out, _) = score(&d.join("counted.tsv"), &d.join("labels.json"));
+    assert_ne!(
+        m_out, c_out,
+        "trigon score reports a sweep that never counted one target's model calls identically to \
+         one that counted zero for both — and `trigon watch`, reading the same file in the same \
+         binary, distinguishes them. The total on the first line is a claim the data does not \
+         support, and the trivial-deterministic gate silently passes a target it could not check.\n\
+         mixed:\n{m_out}\ncounted:\n{c_out}"
+    );
+}

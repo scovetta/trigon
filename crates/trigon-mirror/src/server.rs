@@ -650,6 +650,9 @@ where
         inner: S,
         hasher: sha2::Sha256,
         body: Option<Vec<u8>>,
+        /// Set when the body was dropped for being too large, as opposed to never collected.
+        /// `observe` cannot tell those apart from a `None`, and they mean opposite things.
+        oversized: bool,
         guard: Arc<crate::guard::Guard>,
         url: String,
     }
@@ -660,6 +663,7 @@ where
         inner,
         hasher: sha2::Sha256::new(),
         body: keep_body.then(Vec::new),
+        oversized: false,
         guard,
         url,
     };
@@ -675,6 +679,7 @@ where
                             b.extend_from_slice(&chunk);
                         } else {
                             s.body = None;
+                            s.oversized = true;
                         }
                     }
                 }
@@ -685,7 +690,11 @@ where
             None => {
                 if armed {
                     let digest = trigon_core::Digest::from_bytes(s.hasher.finalize().into());
-                    s.guard.observe(&s.url, digest, s.body.as_deref());
+                    if s.oversized {
+                        s.guard.observe_oversized(&s.url, digest);
+                    } else {
+                        s.guard.observe(&s.url, digest, s.body.as_deref());
+                    }
                 }
                 None
             }

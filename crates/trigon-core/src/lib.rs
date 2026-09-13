@@ -25,7 +25,7 @@ pub use evidence::{
 };
 pub use failure::{FailureSignature, classify};
 pub use fault::{Classify, Fault, Phase};
-pub use format::Format;
+pub use format::{Format, UnknownFormat};
 pub use logs::{Compressed, compress};
 pub use note::{Note, NoteCode};
 pub use outcome::{Match, ProfileId, Provenance, RiskTier, StabilizerId};
