@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # The full golden corpus is 595 MB, which is too much to fetch per pull request and not too
+    # much once a night.
+    - cron: "17 4 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -36,6 +40,41 @@ jobs:
       # Feature unification is the failure mode a plain build hides.
       - run: cargo install cargo-hack --locked
       - run: cargo hack check --feature-powerset -p trigon-core -p trigon-archive -p trigon-stabilize -p trigon-compare
+
+  # The stabilized digest is the value we sign, and it is a pure function of our whole hand-written
+  # serialization stack (docs/13-roadmap.md §3). This job is the only thing that notices when it
+  # moves. It was missing, and the corpus was red for two days across several commits before anyone
+  # ran it by hand: `wheel-metadata-eol` joined the wheel profile and nobody re-golded.
+  #
+  # The smoke set is five artifacts and 0.1 MB, one per profile, so it runs on every pull request.
+  # It would not have caught that particular drift — its wheel has LF endings, so the pass that
+  # moved the other two does nothing to it — which is exactly why `golden-full` exists below.
+  golden:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # `xtask golden` shells out to target/debug/trigon, which building xtask does not produce.
+      - run: cargo build -p trigon
+      - run: cargo run -p xtask -- corpus fetch --manifest corpora/m0-smoke.toml
+      - run: cargo run -p xtask -- golden --manifest corpora/m0-smoke.toml
+
+  # The full 58-artifact corpus, nightly. Artifacts are pinned by sha256 and cached, so a repeat run
+  # downloads nothing.
+  golden-full:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: cache the corpus
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trigon/corpora
+          key: corpora-m0-${{ hashFiles('corpora/m0.toml') }}
+      - run: cargo build -p trigon
+      - run: cargo run -p xtask -- corpus fetch --manifest corpora/m0.toml
+      - run: cargo run -p xtask -- golden --manifest corpora/m0.toml
 
   # "Here is a binary with no network client and no model code that reproduces our verdict."
   verifier:

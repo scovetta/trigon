@@ -94,32 +94,48 @@ fn digests(m: &trigon_core::MultiDigest, bytes: Option<u64>) -> serde_json::Valu
 }
 
 fn equivalence_predicate(c: &Comparison) -> serde_json::Value {
-    let applied: Vec<serde_json::Value> = c
-        .upstream
-        .applied
-        .iter()
-        .map(|a| {
-            serde_json::json!({
-                "id": a.id.as_str(),
-                "risk": format!("{:?}", a.risk).to_lowercase(),
-                "provenance": provenance_name(&a.provenance),
-                "entriesTouched": a.entries_touched,
-                "bytesChanged": a.bytes_changed,
+    // **Both sides.** `apply` returns only the stabilizers that actually changed something, so the
+    // two sides routinely differ: a wheel whose `RECORD` needed regenerating on the rebuild and not
+    // upstream produces a `wheel-record` entry on one side only, and that pass is `Content` risk.
+    // Reading `c.upstream.applied` here — as this did — left such a pass out of the signed document
+    // while `compare()` correctly counted it in the cap, so the statement could read
+    // `allBuiltin: true` and `maxRiskApplied: metadata` beside an outcome of
+    // `normalized_with_caveats`, with nothing in `applied` to explain the caveat. A consumer doing
+    // what `docs/threat-model.md` §1.13 tells them to do — read `applied` and reject a
+    // normalization they do not accept — could not see the one that caused it.
+    let side_of = |side: &'static str, xs: &[trigon_stabilize::Applied]| {
+        xs.iter()
+            .map(|a| {
+                serde_json::json!({
+                    "id": a.id.as_str(),
+                    // Which artifact it fired on. A stabilizer that fired on one side and not the
+                    // other is a fact worth having rather than a duplicate to deduplicate away.
+                    "side": side,
+                    "risk": format!("{:?}", a.risk).to_lowercase(),
+                    "provenance": provenance_name(&a.provenance),
+                    "entriesTouched": a.entries_touched,
+                    "bytesChanged": a.bytes_changed,
+                })
             })
-        })
+            .collect::<Vec<_>>()
+    };
+    let applied: Vec<serde_json::Value> = side_of("upstream", &c.upstream.applied)
+        .into_iter()
+        .chain(side_of("rebuild", &c.rebuild.applied))
         .collect();
 
     // The provenance cap, stated outright rather than left for a consumer to re-derive from
     // `applied`. It is the invariant the whole design rests on, and a consumer that re-derived it
     // would be reimplementing our rule and could reimplement it differently.
+    //
+    // `c.applied()` is the same merged view `compare()` caps on, so these three fields and the
+    // outcome cannot disagree.
     let all_builtin = c
-        .upstream
-        .applied
+        .applied()
         .iter()
         .all(|a| matches!(a.provenance, trigon_core::Provenance::Builtin));
     let max_risk = c
-        .upstream
-        .applied
+        .applied()
         .iter()
         .map(|a| a.risk)
         .max()

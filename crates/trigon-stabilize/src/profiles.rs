@@ -85,6 +85,12 @@ pub fn profile(id: &str) -> Option<StabilizerSet> {
 }
 
 /// Every profile this build knows, for `trigon stabilizers` and for the registry.
+///
+/// **Must list exactly what [`profile`] answers to.** `wheel` was missing, and the omission was not
+/// cosmetic: the WASM parity test iterates this list to prove an archived set reproduces the
+/// compiled one's digest, so the single profile PyPI uses — and the only one carrying a `Finalize`
+/// pass — was the one never checked. A `stabilizers` listing and an "unknown profile" message that
+/// under-report are the visible half; the unchecked parity was the half that mattered.
 pub fn all_profiles() -> Vec<&'static str> {
     vec![
         "tar",
@@ -94,6 +100,7 @@ pub fn all_profiles() -> Vec<&'static str> {
         "npm-tarball",
         "crate",
         "gem",
+        "wheel",
         "raw",
     ]
 }
@@ -108,4 +115,36 @@ pub fn default_for(format: Format) -> StabilizerSet {
         Format::Raw => "raw",
     };
     profile(id).expect("builtin profile")
+}
+
+#[cfg(test)]
+mod profile_coverage {
+    #[test]
+    fn every_listed_profile_resolves_and_every_resolving_profile_is_listed() {
+        // The second half is what `wheel` failed. A profile that resolves but is unlisted is
+        // invisible to every consumer that enumerates, including the parity test that proves an
+        // archived stabilizer set still reproduces the digest a claim was signed under.
+        for id in super::all_profiles() {
+            assert!(
+                super::profile(id).is_some(),
+                "all_profiles lists `{id}` and profile() refuses it"
+            );
+        }
+        for id in [
+            "tar",
+            "tar-gzip",
+            "zip",
+            "gzip",
+            "npm-tarball",
+            "crate",
+            "gem",
+            "wheel",
+            "raw",
+        ] {
+            assert!(
+                super::all_profiles().contains(&id),
+                "profile() answers to `{id}` and all_profiles() omits it"
+            );
+        }
+    }
 }

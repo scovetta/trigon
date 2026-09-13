@@ -7,7 +7,7 @@
 //! implementation or lives behind an async façade in a crate below the line.
 
 use base64::Engine as _;
-use ed25519_dalek::{Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
 use sha2::{Digest as _, Sha256};
 
 use crate::AttestError;
@@ -115,7 +115,13 @@ pub fn verify(pae: &[u8], sig: &Signature, public_hex: &str) -> Result<(), Attes
         .try_into()
         .map_err(|_| AttestError::Malformed("an ed25519 signature is 64 bytes".into()))?;
 
-    key.verify(pae, &ed25519_dalek::Signature::from_bytes(&raw))
+    // `verify_strict`, not `verify`. The permissive form implements RFC 8032's verification
+    // equation and accepts a small-order public key and a non-canonical encoding, which together
+    // mean a signature does not uniquely bind to one key or to one byte string. The practical
+    // exposure here is small — the key comes from the operator's `--public-key`, not from the
+    // bundle — but the strict form costs nothing and the thing being checked is the only reason to
+    // trust any of this.
+    key.verify_strict(pae, &ed25519_dalek::Signature::from_bytes(&raw))
         .map_err(|_| AttestError::BadSignature)
 }
 

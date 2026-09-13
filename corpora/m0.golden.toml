@@ -1,7 +1,7 @@
 # Golden stabilized digests. Regenerate with `xtask golden --write --reason`.
 # A moved digest is reviewed, never rubber-stamped: see docs/05 §6.
 
-reason = "first recording for the stratified corpus"
+reason = "wheel-metadata-eol joined the wheel profile in bc7d3ff and the corpus was never regolded, so two wheel digests have been red since 2026-09-12. Verified as a deliberate pass rather than drift: the only two entries that move are wheels, both move by exactly the addition of wheel-metadata-eol to the applied list, and the new digests are stable across three runs."
 corpus_hash = "c1cec98d27144d7d85cedfebb03054e434ecc45fde57630695eeb092f3af70a7"
 
 [[entry]]
@@ -251,8 +251,8 @@ applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "acid_vault-2.1.0-py3-none-any.whl"
-stabilized = "80ee4b8ab6f6a74e879f6a97ea446d73e6c67e0448610207b58f1116f9c69e32"
-applied = ["pyc-header", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
+stabilized = "87e00f4c8084b368d8a56209c81014dfa439e18c9e8ae8ac7811121a25b5d00b"
+applied = ["pyc-header", "wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
 
 [[entry]]
 file = "aegisx-0.0.4.tar.gz"
@@ -271,8 +271,8 @@ applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wh
 
 [[entry]]
 file = "feagi_bv_windows-2.3.37-py3-none-any.whl"
-stabilized = "b428eac4b9af5c9e115b4049d773a0cfa21ad609dea40d8afa07e8ae314c5a08"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
+stabilized = "025a9c2ef932a54ef925621ca47d935d85a57d700703a824fc3b68125e782689"
+applied = ["wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
 
 [[entry]]
 file = "homecom_alt-1.7.2-py3-none-any.whl"

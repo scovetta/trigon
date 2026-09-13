@@ -1300,10 +1300,13 @@ fn stabilize_one(
     report: bool,
 ) -> Result<()> {
     let fmt = resolve_format(infile, format)?;
-    let base = match prof {
-        Some(p) => profile(p).with_context(|| format!("unknown profile `{p}`"))?,
-        None => default_for(fmt),
-    };
+    // `resolve_profile`, not `default_for`. The container format is not enough — a wheel and an
+    // arbitrary zip are both `Format::Zip` — and this used `default_for(fmt)`, so `trigon stabilize`
+    // on a `.whl` silently ran the plain zip set and skipped `pyc-header`, `wheel-metadata-eol` and
+    // `wheel-record`. `trigon verify` already called `resolve_profile`, so the two commands in one
+    // binary computed different stabilized digests for the same file, which is the one thing the
+    // judgement half must never do.
+    let base = resolve_profile(infile, prof, fmt)?;
     let set = base.filtered(enable, disable);
 
     let bytes = std::fs::read(infile).with_context(|| format!("reading {}", infile.display()))?;
