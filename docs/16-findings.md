@@ -495,6 +495,43 @@ route applies no time filter. The source is fetched on the host with no boundary
 bounded only by `SourceCache`'s hardening. And no run at any tier is attestable, because there is
 still no network transcript: what changed is the reason, not the answer.
 
+### 3.14 A 27B model on a CPU is not slow, it is out of reach
+
+`qwen3.8:latest` is 27.3B parameters at Q4_K_M with a 262144-token context, and it answers
+correctly. It is also unusable here, and the reason is worth writing down because it is not the one
+you reach for first.
+
+The host has no GPU. `/api/ps` reports `size_vram: 0`, so every token is computed on eight CPU
+cores. Output generation runs at **0.4–0.5 tok/s**. That sounds survivable. The number that is not
+survivable is prompt processing: **0.8 tok/s at 22 tokens, and 0.8 tok/s at 476**. It does not
+improve with batch size on this hardware, which is the assumption that would have saved it — on a
+GPU, prompt eval is where the parallelism is.
+
+A Builder prompt for a modest npm target — 120 repository files, two small manifests, two lines of
+evidence — measures 4919 characters, about 1230 tokens. At 0.8 tok/s the model spends **25 minutes
+reading the question** before it writes anything. A repair iteration adds the previous strategy and a
+compressed log; `repo_files` is capped at 200 rather than 120. Two to four thousand tokens is the
+realistic range, so 40 to 80 minutes. The provider's HTTP timeout is 600 seconds. A real Builder call
+against this model on this box does not run slowly; it times out mid-prompt.
+
+Turning thinking off is a real saving and does not rescue it. It cuts output tokens by roughly 8×
+(52 to 6 on `{"ok":true}`) and wall clock from 150s to 27s on a trivial prompt, but it changes
+nothing about the 25 minutes spent reading. The knob is worth having for any CPU-hosted thinking
+model; it is not what makes this one usable.
+
+Three things came out of the attempt that outlive it, and they are in the commit rather than here:
+the reasoning trace is recorded instead of discarded, `reasoning_effort: "none"` is the one
+suppression knob that reaches through `/v1/chat/completions`, and Ollama does report prefix-cache
+hits, which we had assumed it did not.
+
+**What this says about local inference generally.** The ladder is designed so the model is the last
+rung and everything above it is free, and `docs/07-ai.md` §6 treats a falling model-invocation rate
+as the goal. That design tolerates a slow model far better than a fleet would. It does not tolerate
+one that cannot finish a single call. The usable local configuration on CPU-only hardware is a
+small model — `qwen2.5:0.5b` is 397 MB and answers in seconds — with the understanding that it is
+being asked to do search, not reasoning. A 27B model wants a GPU, and saying so is cheaper than
+engineering around a timeout.
+
 ---
 
 ## 4. A stabilizer the reference does not have
