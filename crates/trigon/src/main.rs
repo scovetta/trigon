@@ -497,6 +497,40 @@ fn exit_quietly_on_broken_pipe() {
 
 #[cfg(feature = "build")]
 mod inferrer;
+
+/// The current instant, as RFC 3339 UTC.
+///
+/// Hand-rolled rather than pulling in a date library for one format. UTC only, and seconds
+/// precision, which is all a run record needs.
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    // Civil-from-days, Howard Hinnant's algorithm: exact, branch-free and about ten lines,
+    // against a dependency whose only other use here would be formatting.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
+#[cfg(feature = "build")]
+mod progress;
 #[cfg(feature = "build")]
 mod watch;
 
@@ -2451,7 +2485,7 @@ mod rebuild {
                         rejected: o.rejected,
                     }),
                 },
-                now_rfc3339(),
+                crate::now_rfc3339(),
             );
             record.state = RunState::Done;
             record.strategy_digest = args.strategy_digest.clone();
@@ -2465,7 +2499,7 @@ mod rebuild {
             });
             record.comparison = Some(comparison);
             record.build_log = build_log;
-            record.finished = Some(now_rfc3339());
+            record.finished = Some(crate::now_rfc3339());
             store.put_run(&record).await?;
             if verbose {
                 println!("\n  recorded   run {id} in {}", dir.display());
@@ -2474,36 +2508,6 @@ mod rebuild {
         })
     }
 
-    /// The current instant, as RFC 3339 UTC.
-    ///
-    /// Hand-rolled rather than pulling in a date library for one format. UTC only, and seconds
-    /// precision, which is all a run record needs.
-    fn now_rfc3339() -> String {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let days = secs.div_euclid(86_400);
-        let tod = secs.rem_euclid(86_400);
-        // Civil-from-days, Howard Hinnant's algorithm: exact, branch-free and about ten lines,
-        // against a dependency whose only other use here would be formatting.
-        let z = days + 719_468;
-        let era = z.div_euclid(146_097);
-        let doe = z.rem_euclid(146_097);
-        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-        let y = yoe + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let d = doy - (153 * mp + 2) / 5 + 1;
-        let m = if mp < 10 { mp + 3 } else { mp - 9 };
-        let y = if m <= 2 { y + 1 } else { y };
-        format!(
-            "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-            tod / 3600,
-            (tod % 3600) / 60,
-            tod % 60
-        )
-    }
 
     /// An error that stopped one target, as an outcome.
     fn classify<E: trigon_core::Classify + std::fmt::Display>(e: &E) -> Outcome {
@@ -3028,6 +3032,32 @@ mod sweep {
             results.display()
         );
 
+        // What this sweep is, and where it is. Two files a second reader can watch from another
+        // terminal — the sweep never talks to that reader, it only writes, which is what makes the
+        // page survive this process dying. `docs/18-management-ui.md`.
+        let progress = crate::progress::Progress::start(
+            &args.work,
+            crate::progress::Sweep {
+                started: crate::now_rfc3339(),
+                pid: std::process::id(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                targets_path: Some(args.targets.display().to_string()),
+                // The corpus by content as well as by path: the digest is what says two sweeps are
+                // of the same corpus, and a path says only where somebody's file was.
+                targets_sha256: crate::progress::digest_of(&args.targets),
+                targets_count: purls.len(),
+                resumed_from: already.len(),
+                image: args.image.clone(),
+                egress: args.egress.clone(),
+                timewarp: args.timewarp.clone(),
+                model: args.model.clone(),
+                store: args.store.as_ref().map(|p| p.display().to_string()),
+                definitions: args.definitions.as_ref().map(|p| p.display().to_string()),
+                timeout_seconds: args.timeout,
+                finished: None,
+            },
+        );
+
         let mut rows: Vec<(String, Outcome, f64)> = Vec::new();
         for (i, purl) in purls.iter().enumerate() {
             if let Some((label, secs, cluster, calls)) = already.get(*purl) {
@@ -3046,6 +3076,7 @@ mod sweep {
                 ));
                 continue;
             }
+            progress.target(i, purl, rows.len());
             let started = Instant::now();
             // A per-target directory, or one run's artifacts are collected as another's.
             let work = args.work.join(format!("{i:03}"));
@@ -3111,6 +3142,9 @@ mod sweep {
             rows.push((purl.to_string(), outcome, secs));
         }
 
+        // Before the summary, so a reader watching the page sees `finished` at the same moment the
+        // terminal does.
+        progress.finish(rows.len());
         summarize(&rows);
         Ok(())
     }

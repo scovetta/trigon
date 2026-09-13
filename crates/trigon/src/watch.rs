@@ -227,6 +227,10 @@ struct View {
     age: Option<u64>,
     /// Target purls in the order the sweep will attempt them, when a targets file was named.
     targets: Option<Vec<String>>,
+    /// What the sweep said about itself, where it wrote it down.
+    sweep: Option<crate::progress::Sweep>,
+    status: Option<crate::progress::Status>,
+    live: crate::progress::Liveness,
 }
 
 impl Sweep {
@@ -249,11 +253,40 @@ impl Sweep {
                     .collect(),
             )
         });
+        // The sweep's own account of itself. A `status.json` that is present and will not parse is
+        // `Unreadable` rather than absent: somebody wrote something, and a reader that treats the
+        // two alike turns a torn write into "no sweep here".
+        let sweep: Option<crate::progress::Sweep> = std::fs::read_to_string(self.work.join("sweep.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok());
+        let status_text = std::fs::read_to_string(self.work.join("status.json")).ok();
+        let status: Option<crate::progress::Status> = status_text
+            .as_deref()
+            .and_then(|t| serde_json::from_str(t).ok());
+        let live = match (&status, status_text.is_some()) {
+            (Some(st), _) => {
+                let age = rfc3339_age(&st.heartbeat).unwrap_or(u64::MAX);
+                crate::progress::Liveness::of(
+                    st,
+                    age,
+                    // `None` on a platform with no `/proc`: a wrong answer here is a page calling a
+                    // running sweep dead, so an unknown pid is treated as alive.
+                    crate::progress::pid_alive(st.pid).unwrap_or(true),
+                    sweep.as_ref().map(|s| s.timeout_seconds).unwrap_or(0),
+                )
+            }
+            (None, true) => crate::progress::Liveness::Unreadable,
+            (None, false) => crate::progress::Liveness::Unknown,
+        };
+
         View {
             rows,
             dropped,
             age,
             targets,
+            sweep,
+            status,
+            live,
         }
     }
 
@@ -343,7 +376,12 @@ fn page(title: &str, live: bool, body: &str, bind: &str) -> Html<String> {
 /// The strip that appears on every page.
 fn state_strip(v: &View, targets_path: Option<&Path>) -> String {
     let attempted = v.rows.len();
-    let total = v.targets.as_ref().map(|t| t.len());
+    // The targets file if one was named, otherwise the count the sweep recorded about itself.
+    let total = v
+        .targets
+        .as_ref()
+        .map(|t| t.len())
+        .or_else(|| v.sweep.as_ref().map(|s| s.targets_count));
 
     let progress = match total {
         Some(n) => format!("{attempted} of {n} attempted"),
@@ -381,10 +419,117 @@ fn state_strip(v: &View, targets_path: Option<&Path>) -> String {
         .unwrap_or_default();
 
     format!(
-        "<div class=\"state\"><strong>{progress}</strong> · {freshness}{targets_note}{dropped}\
-         <br><span class=\"note\">whether the sweep process is still alive cannot be told from this \
-         directory — it writes no heartbeat yet (docs/18 step 3)</span></div>"
+        "<div class=\"state\"><strong>{}</strong> · {progress} · {freshness}{targets_note}{dropped}\
+         {}</div>",
+        liveness_text(v),
+        liveness_detail(v),
     )
+}
+
+/// The sweep's state, in a word.
+fn liveness_text(v: &View) -> String {
+    use crate::progress::Liveness as L;
+    match &v.live {
+        L::Unknown => "state unknown".into(),
+        L::Unreadable => "state unreadable".into(),
+        L::Starting => "starting".into(),
+        L::Running => "running".into(),
+        L::Stuck { .. } => "STUCK".into(),
+        L::Stopped => "stopped".into(),
+        L::Unresponsive => "UNRESPONSIVE".into(),
+        L::Finished => "finished".into(),
+    }
+}
+
+/// The sentence under it, which is where the honesty lives.
+fn liveness_detail(v: &View) -> String {
+    use crate::progress::Liveness as L;
+    let note = |s: String| format!("<br><span class=\"note\">{s}</span>");
+    match &v.live {
+        // A sweep from before the heartbeat existed, or a directory that is not one. Named as
+        // absent rather than reported as stopped: we did not look and find nothing, there was
+        // nothing to look at.
+        L::Unknown => note(
+            "this directory has no status.json — either the sweep predates the heartbeat, or it \
+             is not a sweep work directory. Whether a process is running cannot be told from here."
+                .into(),
+        ),
+        L::Unreadable => note(
+            "status.json is present and did not parse — a torn write, or a file from another \
+             version. The results below are still what the sweep recorded.".into(),
+        ),
+        L::Starting => note("no target has been attempted yet".into()),
+        L::Running => match &v.status.as_ref().and_then(|s| s.current.clone()) {
+            Some(c) => note(format!(
+                "on {} for {}, phase not recorded yet (docs/18 step 4)",
+                esc(c.purl.strip_prefix("pkg:").unwrap_or(&c.purl)),
+                ago(c.elapsed_seconds).trim_end_matches(" ago")
+            )),
+            None => note("between targets".into()),
+        },
+        L::Stuck { seconds } => {
+            let ceiling = v.sweep.as_ref().map(|s| s.timeout_seconds).unwrap_or(0);
+            let on = v
+                .status
+                .as_ref()
+                .and_then(|s| s.current.clone())
+                .map(|c| esc(c.purl.strip_prefix("pkg:").unwrap_or(&c.purl)))
+                .unwrap_or_default();
+            note(format!(
+                "heartbeating, and on {on} for {}s — past the {ceiling}s ceiling this sweep set \
+                 for one target. Something is wrong by the sweep's own standard.",
+                seconds
+            ))
+        }
+        L::Stopped => note(
+            "the heartbeat stopped and the process is gone. Everything below is what it recorded \
+             before that; the target it was on has no outcome, which is not the same as failing."
+                .into(),
+        ),
+        L::Unresponsive => note(
+            "the heartbeat stopped and the process is still there — wedged in a way that took the \
+             heartbeat with it. Worse than stopped.".into(),
+        ),
+        L::Finished => match v.sweep.as_ref().and_then(|s| s.finished.clone()) {
+            Some(t) => note(format!("finished at {}", esc(&t))),
+            None => note("finished".into()),
+        },
+    }
+}
+
+/// Seconds since an RFC 3339 UTC instant of the shape this project writes.
+///
+/// `None` when it will not parse, which the caller treats as "very old" rather than as "now": a
+/// timestamp we cannot read must not make a dead sweep look alive.
+fn rfc3339_age(s: &str) -> Option<u64> {
+    let (date, rest) = s.split_once('T')?;
+    let time = rest.strip_suffix('Z')?;
+    let mut d = date.split('-');
+    let (y, m, day): (i64, i64, i64) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
+    let mut t = time.split(':');
+    let (hh, mm, ss): (i64, i64, i64) = (
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+    );
+    // Days from civil, the inverse of the formatter in main.rs.
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let then = days * 86_400 + hh * 3600 + mm * 60 + ss;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some((now - then).max(0) as u64)
 }
 
 fn rates_panel(r: &Rates) -> String {
@@ -492,10 +637,84 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+/// The whole view model as one object.
+///
+/// The same numbers the page renders, so a script, a TUI, or a page polling without a full reload
+/// reads exactly what a person does. Every `Option` stays an `Option` on the wire: absent is the
+/// answer, and a JSON zero would be a different one.
+#[derive(serde::Serialize)]
+struct ApiState {
+    state: String,
+    detail: String,
+    attempted: usize,
+    total: Option<usize>,
+    /// `None` when nothing was compared. Not zero.
+    reproduction: Option<f64>,
+    reproduced: usize,
+    evidence: usize,
+    evidence_rate: Option<f64>,
+    dropped_rows: usize,
+    results_age_seconds: Option<u64>,
+    current: Option<crate::progress::Current>,
+    clusters: Vec<ApiCluster>,
+}
+
+#[derive(serde::Serialize)]
+struct ApiCluster {
+    key: String,
+    members: usize,
+}
+
+async fn api_state(State(sweep): State<std::sync::Arc<Sweep>>) -> Response {
+    let v = sweep.read();
+    let r = Rates::of(&v.rows);
+    axum::Json(ApiState {
+        state: liveness_text(&v),
+        // The rendered sentence, stripped of its markup: a reader of the JSON gets the same
+        // caveat a reader of the page does, rather than a bare word they have to interpret.
+        detail: strip_tags(&liveness_detail(&v)),
+        attempted: r.attempted,
+        total: v
+            .targets
+            .as_ref()
+            .map(|t| t.len())
+            .or_else(|| v.sweep.as_ref().map(|s| s.targets_count)),
+        reproduction: r.reproduction(),
+        reproduced: r.reproduced,
+        evidence: r.evidence,
+        evidence_rate: r.evidence_rate(),
+        dropped_rows: v.dropped,
+        results_age_seconds: v.age,
+        current: v.status.as_ref().and_then(|s| s.current.clone()),
+        clusters: clusters(&v.rows)
+            .into_iter()
+            .map(|c| ApiCluster {
+                key: c.key,
+                members: c.members.len(),
+            })
+            .collect(),
+    })
+    .into_response()
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for c in s.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&quot;", "\"").trim().to_string()
+}
+
 async fn board(State(sweep): State<std::sync::Arc<Sweep>>) -> Response {
     let v = sweep.read();
     let rates = Rates::of(&v.rows);
-    let live = v.age.is_some_and(|a| a < 600);
+    let live = v.live.is_live();
     let body = format!(
         "<h1>{}</h1>{}{}{}{}",
         esc(&sweep.work.display().to_string()),
@@ -599,7 +818,7 @@ async fn cluster(
     ));
     body.push_str("<p><a href=\"/\">← all targets</a></p>");
 
-    page(&q.key, v.age.is_some_and(|a| a < 600), &body, &sweep.bind).into_response()
+    page(&q.key, v.live.is_live(), &body, &sweep.bind).into_response()
 }
 
 fn read_log(work: &Path, index: usize) -> Option<String> {
@@ -710,13 +929,7 @@ async fn run(State(sweep): State<std::sync::Arc<Sweep>>, UrlPath(index): UrlPath
     );
     body.push_str("<p><a href=\"/\">← all targets</a></p>");
 
-    page(
-        &format!("target {index:03}"),
-        v.age.is_some_and(|a| a < 600),
-        &body,
-        &sweep.bind,
-    )
-    .into_response()
+    page(&format!("target {index:03}"), v.live.is_live(), &body, &sweep.bind).into_response()
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -755,6 +968,7 @@ pub fn serve(work: PathBuf, targets: Option<PathBuf>, bind: String) -> Result<()
         .route("/", axum::routing::get(board))
         .route("/cluster", axum::routing::get(cluster))
         .route("/run/{index}", axum::routing::get(run))
+        .route("/api/state", axum::routing::get(api_state))
         .with_state(sweep);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -891,6 +1105,43 @@ mod tests {
         assert!(t.starts_with("… earlier output clipped"));
         // And a short log is untouched.
         assert_eq!(tail("short", 100), "short");
+    }
+
+    #[test]
+    fn a_timestamp_we_cannot_read_does_not_make_a_dead_sweep_look_alive() {
+        // The caller treats `None` as very old. A parse failure that answered "now" would report a
+        // stopped sweep as running, which is the one direction this must not err in.
+        assert_eq!(rfc3339_age("not a timestamp"), None);
+        assert_eq!(rfc3339_age("2026-01-01T00:00Z"), None);
+        // A round trip against the writer's own format, which is the only format this has to read.
+        let now = crate::now_rfc3339();
+        let age = rfc3339_age(&now).expect("the formatter's own output");
+        assert!(age <= 2, "{now} read back as {age}s old");
+    }
+
+    #[test]
+    fn the_api_says_absent_rather_than_zero() {
+        // A JSON zero is a different answer from an absent field, and the page and the API must
+        // give the same one.
+        let r = Rates::of(&rows("a\tbuild-failed:deps\t1.0\tx\t0\n"));
+        assert_eq!(r.reproduction(), None);
+        let json = serde_json::to_string(&ApiState {
+            state: "running".into(),
+            detail: "on a for 3s".into(),
+            attempted: r.attempted,
+            total: None,
+            reproduction: r.reproduction(),
+            reproduced: r.reproduced,
+            evidence: r.evidence,
+            evidence_rate: r.evidence_rate(),
+            dropped_rows: 0,
+            results_age_seconds: None,
+            current: None,
+            clusters: Vec::new(),
+        })
+        .unwrap();
+        assert!(json.contains("\"reproduction\":null"), "{json}");
+        assert!(json.contains("\"total\":null"), "{json}");
     }
 
     #[test]

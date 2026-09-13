@@ -92,8 +92,8 @@ Each of these is small, and each is named with the view that is impossible witho
 
 | Write | Without it |
 |---|---|
-| `<work>/sweep.json` once at start — targets file and the sha256 of its bytes, image digest, egress, timewarp, model, version, pid | View 1 has no denominator, and two sweeps cannot be told to be of the same corpus |
-| `<work>/status.json`, atomically, on every phase transition and a 10-second heartbeat | View 1 is impossible; liveness falls back to inferring from file appearance, which already misreads a repair loop as going backwards |
+| ~~`<work>/sweep.json`~~ **done** — the targets file and the sha256 of its bytes, image, egress, timewarp, model, version, pid, and the per-target timeout | View 1 has no denominator, and two sweeps cannot be told to be of the same corpus |
+| ~~`<work>/status.json`~~ **done** — atomic, a 10-second heartbeat, and an immediate write when a target starts | View 1 is impossible; liveness falls back to inferring from file appearance, which already misreads a repair loop as going backwards |
 | A phase signal into `status.json` — `BuildEvent::PhaseStart/PhaseEnd` are already emitted and thrown away | No `stuck` state, which is the one that pages a human |
 | `<work>/NNN/failure.json` — the `FailureSignature` at classification time | Clusters are re-derived under whatever the rule table says today rather than what it said then |
 | `<work>/NNN/run.json` on **every** terminal outcome, not only past a comparison | View 6 is four "not measured" lines; the void table cannot split by reason |
@@ -115,7 +115,11 @@ Each step is independently useful and none pays off only if the next three land.
 2. **Still no engine change.** The triage loop: cluster → deduplicated evidence lines with counts →
    member table → run page with prev/next and "7 of 41". The only path from 500 red rows to 12
    tickets *and back*.
-3. `sweep.json` and `status.json`, and a `GET /api/state` returning the view model as one object.
+3. ~~`sweep.json` and `status.json`, and a `GET /api/state`.~~ **Done.** The strip says running /
+   finished / stopped / unresponsive / stuck, and `stuck` is measured against the per-target timeout
+   the sweep itself declared rather than a threshold the page invented. Driven by killing a sweep
+   mid-target: the page says `stopped`, keeps every completed result, reports the in-flight target
+   as having no outcome — *which is not the same as failing* — and stops refreshing itself.
 4. The phase signal, and with it the `stuck` state.
 5. `failure.json` and `run.json` on every outcome — also the files you attach to a bug report.
 6. Store-backed panes, gated on `--store`: the digest chain, every applied stabilizer with its risk
