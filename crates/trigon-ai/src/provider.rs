@@ -244,6 +244,42 @@ pub trait Provider: Send + Sync {
     }
 }
 
+/// Delegating impls, so a provider can be wrapped and still be one.
+///
+/// Without these a `Recorder` cannot sit inside a `Counting` — `Recorder<P>` needs `P: Provider`
+/// and the thing being wrapped is a `Box<dyn Provider>`, which was not one. That is the whole
+/// reason production never recorded a transcript: the wrapper existed, the store had a field for
+/// its digest, and there was no way to compose the two.
+impl<P: Provider + ?Sized> Provider for Box<P> {
+    fn id(&self) -> &str {
+        (**self).id()
+    }
+    fn caps(&self) -> ModelCaps {
+        (**self).caps()
+    }
+    fn complete(&self, req: &Request) -> Result<Response, LlmError> {
+        (**self).complete(req)
+    }
+    fn reasoning(&self) -> Reasoning {
+        (**self).reasoning()
+    }
+}
+
+impl<P: Provider + ?Sized> Provider for std::sync::Arc<P> {
+    fn id(&self) -> &str {
+        (**self).id()
+    }
+    fn caps(&self) -> ModelCaps {
+        (**self).caps()
+    }
+    fn complete(&self, req: &Request) -> Result<Response, LlmError> {
+        (**self).complete(req)
+    }
+    fn reasoning(&self) -> Reasoning {
+        (**self).reasoning()
+    }
+}
+
 impl fmt::Debug for dyn Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Provider({})", self.id())

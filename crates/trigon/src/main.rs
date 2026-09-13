@@ -2148,6 +2148,9 @@ mod rebuild {
             strategy_digest: None,
             derivation: None,
             pin: None,
+            // Filled where the run reaches a comparison, from the recorder wrapped around the
+            // provider. `None` here means nothing has been asked yet, not that nothing was.
+            transcript: None,
             // Overwritten below from what the runner reported. `false` until then, because
             // claiming a run is attestable when we do not yet know is the one direction this must
             // not err in.
@@ -2621,6 +2624,9 @@ mod rebuild {
                     &args.work,
                 ))
                 .attestable,
+                // What the model was asked, where one was configured. Empty for the healthy
+                // majority of a corpus, which is the point of measuring the invocation rate.
+                transcript: model.as_ref().map(|m| m.transcript(&args.purl)),
                 ..inputs.clone()
             };
             if let Err(e) = record_run(dir, &inputs, &upstream_path, &rebuilt, &comparison, verbose)
@@ -2685,6 +2691,13 @@ mod rebuild {
         pin: Option<trigon_mirror::Observed>,
         /// What the runner reported about its own enforcement, never what the flag asked for.
         attestable: bool,
+        /// What the model was asked and what it said, when one was asked anything.
+        ///
+        /// `None` when no provider was configured — the common case, and not the same as a model
+        /// that was asked and said nothing. `RunRecord::transcript` says why it is kept: a
+        /// `derivation: model_assisted` with no transcript is an assertion, and one with a
+        /// transcript is evidence.
+        transcript: Option<trigon_ai::Transcript>,
     }
 
     fn record_run(
@@ -2712,6 +2725,16 @@ mod rebuild {
             {
                 Ok(b) => Some(store.blobs().put(b).await?),
                 Err(_) => None,
+            };
+            // Only where a model was actually asked something. An empty transcript and an absent
+            // one mean different things and the store keeps the difference: no provider configured
+            // is `None`, and a provider that answered nothing is a recorded transcript with no
+            // turns.
+            let transcript = match &args.transcript {
+                Some(t) if !t.turns.is_empty() => {
+                    Some(store.blobs().put(serde_json::to_vec(t)?).await?)
+                }
+                _ => None,
             };
 
             // Time-ordered, so listing a store gives the most recent run first without reading
@@ -2768,6 +2791,7 @@ mod rebuild {
             });
             record.comparison = Some(comparison);
             record.build_log = build_log;
+            record.transcript = transcript;
             record.finished = Some(crate::now_rfc3339());
             store.put_run(&record).await?;
             if verbose {

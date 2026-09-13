@@ -225,6 +225,16 @@ impl Inputs {
 #[derive(Debug)]
 pub struct Configured {
     provider: Arc<Counting>,
+    /// The same provider, one layer in, so the run can ask what was said.
+    ///
+    /// `Recorder` and `RunRecord::transcript` both existed and were never connected: production
+    /// wrapped the provider in `Counting` and nothing else, so no run has ever written a
+    /// transcript and `docs/13-roadmap.md` M3's "replay reproduces a recorded run" was true only of
+    /// the provider seam, with nothing to replay. `docs/07-ai.md` §8 is clear about what a
+    /// transcript is worth and what it is not — it replays the model, not the world — but a
+    /// `derivation: model_assisted` with no transcript beside it is an assertion rather than
+    /// evidence, which is exactly what `RunRecord::transcript`'s own comment says.
+    recorder: Arc<trigon_ai::Recorder<Box<dyn Provider>>>,
     model: String,
     cache_root: std::path::PathBuf,
 }
@@ -420,11 +430,23 @@ impl Configured {
     }
 
     fn live(provider: Box<dyn Provider>, model: String) -> Self {
+        // Recorder innermost, so it sees what the provider actually answered; Counting outside it,
+        // so a call that failed still counts. Both hold the same inner provider through an `Arc`.
+        let recorder = Arc::new(trigon_ai::Recorder::new(provider));
         Configured {
-            provider: Arc::new(Counting::new(provider)),
+            provider: Arc::new(Counting::new(Box::new(recorder.clone()))),
+            recorder,
             model,
             cache_root: trigon_registry::SourceCache::default_root(),
         }
+    }
+
+    /// What the model was asked and what it said, for the run to record.
+    ///
+    /// Empty when nothing was asked, which is the common and healthy case: `docs/07-ai.md` §6 wants
+    /// the model-invocation rate to trend down, so most targets should produce no turns at all.
+    pub fn transcript(&self, target: &str) -> trigon_ai::Transcript {
+        self.recorder.transcript(target)
     }
 
     /// Where checkouts are kept.
@@ -682,6 +704,48 @@ mod tests {
         assert!(
             got[0].assumptions.iter().any(|a| a.contains("likely")),
             "the model's own confidence is recorded rather than acted on"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_provider_a_run_actually_uses_records_what_it_was_asked() {
+        // The test below exercises `Recorder` at the provider seam, which is where M3's replay
+        // criterion was met. Production does not build a rung that way: it builds a `Configured`,
+        // and `Configured` wrapped the provider in `Counting` and nothing else — so `Recorder`
+        // existed, `RunRecord::transcript` had a field for the digest, and no run ever wrote one.
+        // This is the seam that was missing, so this is the test that has to exist.
+        let d = tmpdir("configured-records");
+        let (repo, commit) = fixture(&d);
+        let cfg = Configured::live(Box::new(Replay::once(ANSWER)), "replay".into())
+            .with_cache_root(Some(d.join("cache")));
+
+        assert!(
+            cfg.transcript("pkg:npm/left-pad@1.3.0").turns.is_empty(),
+            "nothing has been asked yet, and an empty transcript is the honest state for that"
+        );
+
+        // The rung is built from `cfg`'s own provider — the thing that was not being recorded —
+        // but with the test helper's source cache, because `Configured::rung` correctly refuses a
+        // local repository path (P10: a repo URL comes from package metadata and is https-only
+        // unless the *operator* named a path) and weakening that to make a test pass would trade a
+        // security control for a convenience.
+        rung(cfg.provider.clone(), &d.join("cache"))
+            .infer(&target(&repo, &commit))
+            .await
+            .unwrap();
+
+        let t = cfg.transcript("pkg:npm/left-pad@1.3.0");
+        assert_eq!(
+            t.turns.len(),
+            1,
+            "the provider a real run uses recorded nothing: {t:?}"
+        );
+        assert_eq!(t.target, "pkg:npm/left-pad@1.3.0");
+        // And the count the eval harness reads still works through the extra layer.
+        assert_eq!(
+            cfg.calls(),
+            1,
+            "Counting stopped counting once Recorder sat inside it"
         );
     }
 
