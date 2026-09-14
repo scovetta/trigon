@@ -146,6 +146,17 @@ fn an_enforced_tier_checks_its_base_image_instead_of_installing_into_it() {
     // And it says what to do about a package that is absent, because "missing curl" is not an
     // instruction.
     assert!(setup.contains("trigon base-image"), "{setup}");
+    // **With the real reference, not a placeholder.** This printed the literal `<this image>`, so
+    // the one command a reader needs at the moment they need it was the one thing they had to
+    // assemble by hand — from a digest that had scrolled off the top of the same output.
+    assert!(
+        setup.contains(&format!("--from {}", p.base_image)),
+        "the fix names the image it is about: {setup}"
+    );
+    assert!(
+        !setup.contains("<this image>"),
+        "a placeholder is not an instruction: {setup}"
+    );
 
     p.base_image = "docker.io/library/alpine@sha256:abc".into();
     assert!(render_context(&p, false).files["setup.sh"].contains("apk info -e"));

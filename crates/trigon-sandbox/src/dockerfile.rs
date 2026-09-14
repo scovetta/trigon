@@ -84,6 +84,12 @@ pub fn verify_command(base_image: &str, deps: &[String]) -> String {
         }
     }
     let list = names.join(" ");
+    // The real reference, not a placeholder. This printed the literal `<this image>`, so the one
+    // command a reader needs at the moment they need it was the one thing they had to go and
+    // assemble by hand — from a digest scrolled off the top of the same output. `is_pinned` has
+    // already refused anything but a digest reference or a bare image id by the time this renders,
+    // so there is nothing here that can break out of the quoting.
+    let from_ref = base_image;
     format!(
         "missing=\"\"\n\
          for p in {list}; do\n\
@@ -93,7 +99,7 @@ pub fn verify_command(base_image: &str, deps: &[String]) -> String {
         \x20 echo \"this base image is missing:$missing\"\n\
         \x20 echo \"an enforced egress tier gives the image build no network, so the packages a\"\n\
         \x20 echo \"strategy needs have to be in the image already. Build one with:\"\n\
-        \x20 echo \"    trigon base-image --from <this image> --packages$missing\"\n\
+        \x20 echo \"    trigon base-image --from {from_ref} --packages$missing\"\n\
         \x20 exit 1\n\
          fi\n\
          echo \"base image carries: {list}\""

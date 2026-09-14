@@ -98,7 +98,13 @@ M1 needs **two** corpora, and conflating them was a mistake in an earlier draft.
       and it declines when no tag matches. No CI-derived rung yet, which is what would supply the
       toolchain PyPI does not record.
 - [ ] The `smoke` benchmark corpus (~50 targets) is green and runs in under ten minutes.
-- [ ] Per-phase timings and costs recorded, with `None` meaning "no data".
+- [x] Per-phase timings and costs recorded, with `None` meaning "no data". `Costs` carries
+      `inference_seconds` (timed around the provider call alone, so it is comparable with
+      `build_seconds`), tokens per model and never summed across them, `build_seconds` summing only
+      the phases that were read, `egress_bytes` straight off the network transcript, and the blob
+      totals. Every field is `Option` and `None` is no data rather than zero. No prices: `$` per
+      *verdict gained* needs a denominator one run cannot see, and a rate table baked into a record
+      rewrites history when it is corrected.
 
 **The artifact-hash check is in**, ahead of its milestone, because the egress work made it cheap:
 everything a build fetches now crosses one process. Both controls from
