@@ -388,8 +388,20 @@ fn a_mirror_that_never_ran_is_not_a_mirror_that_served_nothing() {
     let s = Watch::on(&silent).get("/run/0");
     let b = Watch::on(&bound).get("/run/0");
 
+    // **A heading with a caveat, not a blank.** This used to assert the section was absent
+    // entirely, which is the bug this file is about, asserted into place: the one section that says
+    // whether the dependency index was really pinned simply vanished on every run that could not
+    // answer. What must not appear is five zeroes; what must appear is why there are no counters.
     assert!(
-        !n.contains("Registry pin"),
+        n.contains("Registry pin"),
+        "a run that cannot answer still owes the reader the question:\n{n}"
+    );
+    assert!(
+        n.contains("not five zeroes"),
+        "the absence has to name itself:\n{n}"
+    );
+    assert!(
+        !n.contains("<td>0</td>"),
         "no mirror ran, so there are no counters to show — not five zeroes:\n{n}"
     );
     assert!(s.contains("Registry pin"), "{s}");
@@ -506,4 +518,151 @@ fn watch_and_score_agree_that_an_unrecorded_model_call_count_is_not_a_count_of_z
          support, and the trivial-deterministic gate silently passes a target it could not check.\n\
          mixed:\n{m_out}\ncounted:\n{c_out}"
     );
+}
+
+// --- The network transcript's three states ---------------------------------------------------
+//
+// `attestable` is derived from whether a complete account of the build's egress exists, and the
+// transcript is that account. So its three states carry the whole claim: no file means no account
+// exists, an empty file is a complete account of a build that fetched nothing, and a file that will
+// not parse is neither. Rendering any two of them alike would put the project's own headline
+// control behind a sentence that is not true.
+
+#[test]
+fn an_absent_transcript_and_an_empty_one_are_not_the_same_page() {
+    // The distinction the store keeps with an empty blob versus no blob, carried one level out to
+    // the reader. A page that said "0 responses" for both would turn "we never looked" into "we
+    // looked and nothing crossed" — which is the difference between an `open`-tier run, where
+    // nothing is in a position to record, and a `deny-all` run, where the kernel guarantees it.
+    let absent = work("transcript-absent");
+    write(
+        &absent.join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z","outcome":"normalized"}"#,
+    );
+
+    let empty = work("transcript-empty");
+    write(
+        &empty.join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z","outcome":"normalized"}"#,
+    );
+    write(&empty.join("rebuild").join("network.jsonl"), "");
+
+    let a = Watch::on(&absent).get("/run/0");
+    let e = Watch::on(&empty).get("/run/0");
+
+    assert!(
+        a.contains("no complete account"),
+        "an absent transcript says no account exists:\n{a}"
+    );
+    assert!(
+        e.contains("nothing crossed"),
+        "an empty one is an account, of nothing:\n{e}"
+    );
+    assert_ne!(
+        a, e,
+        "the two states must not render alike — that is the whole distinction"
+    );
+    for (name, page) in [("absent", &a), ("empty", &e)] {
+        assert!(
+            !page.contains("0 response"),
+            "`{name}` renders a count where a state belongs:\n{page}"
+        );
+    }
+    // And an absent one must not read as an accusation: at `--egress open` it is the ordinary case.
+    assert!(
+        a.contains("ordinary case"),
+        "no transcript is normal at open egress, and the page has to say so:\n{a}"
+    );
+}
+
+#[test]
+fn a_withheld_count_of_zero_is_not_a_row_that_withheld_nothing_knowable() {
+    // `withheld` is `Option<u64>`: `None` means the row is not a filtered index document at all —
+    // a dependency tarball is no evidence about the pin — and `Some(0)` means the filter ran and
+    // found nothing to remove. Rendering the first as `0` merges the two readings the field exists
+    // for, and the sum of those zeroes is the number that says whether the pin bound anything.
+    let d = work("transcript-withheld");
+    write(
+        &d.join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z","outcome":"normalized"}"#,
+    );
+    write(
+        &d.join("rebuild").join("network.jsonl"),
+        // One index row that withheld nothing, one artifact row that cannot withhold anything.
+        "{\"route\":\"index\",\"url\":\"https://r/x\",\"sha256\":\"aa\",\"bytes\":10,\
+         \"checked\":\"generated\",\"withheld\":0}\n\
+         {\"route\":\"artifact\",\"url\":\"https://r/y.tgz\",\"sha256\":\"bb\",\"bytes\":20,\
+         \"checked\":\"hashed\"}\n",
+    );
+
+    let p = Watch::on(&d).get("/run/0/network");
+    // The em dash is the artifact row's cell; the digit is the index row's. Both must be present,
+    // which is only possible if they render differently.
+    assert!(
+        p.contains("—"),
+        "a row that cannot withhold anything gets no digit:\n{p}"
+    );
+    assert!(
+        p.contains("recomputed from these rows"),
+        "the pin evidence is recomputed where the reader can check it:\n{p}"
+    );
+    // One index document, and zero versions withheld across it — a real zero, and it must survive.
+    assert!(
+        p.contains("1</strong> index request(s)") || p.contains("<strong>1</strong> index"),
+        "the recomputed count is the rows the reader is looking at:\n{p}"
+    );
+}
+
+#[test]
+fn a_transcript_that_will_not_parse_is_not_a_transcript_of_nothing() {
+    // The third state. A version skew or a torn write must not become a clean, short, believable
+    // account — that is the shape that would let a run claim its egress was accounted for when the
+    // account could not be read.
+    let d = work("transcript-torn");
+    write(
+        &d.join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z","outcome":"normalized"}"#,
+    );
+    write(
+        &d.join("rebuild").join("network.jsonl"),
+        "{not json at all\n",
+    );
+
+    let p = Watch::on(&d).get("/run/0");
+    assert!(
+        p.contains("unknown rather than nothing"),
+        "an unreadable account is not an empty one:\n{p}"
+    );
+    assert!(!p.contains("nothing crossed"), "{p}");
+}
+
+#[test]
+fn the_page_says_what_it_does_not_observe_even_on_a_clean_run() {
+    // A reader arriving at a page titled "network" will reasonably expect it to say what the build
+    // *did*, and nothing here can: Tier 2 and Tier 3 observability are a deliberate cut, not a
+    // missing feature. Rendering that gap as a blank would be this project's own bug on the page
+    // built to prevent it, so the note is unconditional — it appears on a clean run too.
+    let d = work("not-collected");
+    write(
+        &d.join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z","outcome":"exact"}"#,
+    );
+    write(
+        &d.join("rebuild").join("network.jsonl"),
+        "{\"route\":\"artifact\",\"url\":\"https://r/y.tgz\",\"sha256\":\"bb\",\"bytes\":20,\
+         \"checked\":\"opened\"}\n",
+    );
+
+    for route in ["/run/0", "/run/0/network"] {
+        let p = Watch::on(&d).get(route);
+        assert!(
+            p.contains("not recorded") && p.contains("syscall"),
+            "`{route}` must name what it does not observe:\n{p}"
+        );
+        // And say it is a decision rather than an oversight, or it reads as a bug report.
+        assert!(
+            p.contains("deliberate cut"),
+            "`{route}` must say the gap is a decision:\n{p}"
+        );
+    }
 }

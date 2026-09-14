@@ -264,7 +264,33 @@ async fn find_record(store: &Path, purl: &str) -> Option<Found> {
     None
 }
 
+/// Which shape of work directory this is.
+///
+/// `watch` was written for a sweep and understood nothing else, so a plain
+/// `trigon rebuild --work ./work` — the command the README opens with — rendered "no results". The
+/// two layouts are told apart by what is on disk rather than by a flag, because a flag is a second
+/// thing that has to agree with the directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    /// `results.tsv` is present. Evidence lives in `<work>/{index:03}`.
+    Sweep,
+    /// No `results.tsv`, but a run left its report or its strategy at the root. One target, whose
+    /// evidence directory *is* `<work>`.
+    Single,
+    /// Neither. Not a work directory this page can read, which is a different answer from an empty
+    /// sweep and is said in those words.
+    Unknown,
+}
+
 struct View {
+    layout: Layout,
+    /// The single run's report, where this is a `Single` directory and one parsed.
+    ///
+    /// `Some` and `None` are both meaningful: a report that is present and will not parse is a torn
+    /// write, not an absent run, and the page says which.
+    report: Option<crate::progress::RunReport>,
+    /// Set when `run.json` exists and could not be read, which is not the same as no run.
+    report_unreadable: bool,
     rows: Vec<Row>,
     dropped: usize,
     /// `None` when there is no `results.tsv` at all — which is not an empty sweep.
@@ -282,6 +308,57 @@ impl Sweep {
         let results = self.work.join("results.tsv");
         let text = std::fs::read_to_string(&results).unwrap_or_default();
         let (rows, dropped) = parse_results(&text);
+
+        // Decided from disk, before anything is rendered. `results.tsv` is written only by a sweep;
+        // `run.json` and `strategy.yaml` only by a single rebuild. A directory with neither is
+        // neither, and saying so beats rendering an empty sweep over it.
+        let run_json = self.work.join("run.json");
+        let report_text = std::fs::read_to_string(&run_json).ok();
+        let report: Option<crate::progress::RunReport> = report_text
+            .as_deref()
+            .and_then(|t| serde_json::from_str(t).ok());
+        let report_unreadable = report_text.is_some() && report.is_none();
+        let layout = if results.is_file() {
+            Layout::Sweep
+        } else if report_text.is_some() || self.work.join("strategy.yaml").is_file() {
+            Layout::Single
+        } else {
+            Layout::Unknown
+        };
+
+        // One synthetic row, so the board, the run page and every panel below them keep working
+        // against `View.rows` rather than growing a second code path. What the row cannot carry —
+        // that its evidence directory is the work root rather than `{index:03}` — is `Layout`'s
+        // job, which is why the two travel together.
+        let (rows, dropped) = match (layout, &report) {
+            (Layout::Single, Some(r)) => (
+                vec![Row {
+                    purl: r.purl.clone(),
+                    // A report with no outcome is a run that raised before a verdict. `Family::of`
+                    // sends anything it does not recognise to `Error`, which is the safe direction:
+                    // an unlabelled run is never counted against the package.
+                    label: r
+                        .outcome
+                        .clone()
+                        .or_else(|| r.error.as_ref().map(|_| "error:infra".to_string()))
+                        .unwrap_or_else(|| "error:unknown".into()),
+                    // Seconds are the started→finished bracket, which is the only honest duration a
+                    // report carries. `0.0` where it cannot be computed, and the page says so
+                    // rather than letting a zero read as an instant run.
+                    seconds: r
+                        .finished
+                        .as_deref()
+                        .and_then(rfc3339_epoch)
+                        .zip(rfc3339_epoch(&r.started))
+                        .map(|(f, s)| (f - s).max(0) as f64)
+                        .unwrap_or(0.0),
+                    cluster: r.failure.as_ref().map(|f| f.key()),
+                    model_calls: Some(r.model_calls),
+                }],
+                0,
+            ),
+            _ => (rows, dropped),
+        };
         let age = std::fs::metadata(&results)
             .ok()
             .and_then(|m| m.modified().ok())
@@ -325,6 +402,9 @@ impl Sweep {
         };
 
         View {
+            layout,
+            report,
+            report_unreadable,
             rows,
             dropped,
             age,
@@ -340,6 +420,19 @@ impl Sweep {
     /// The sweep names them by the target's index in the targets file, so without that file this
     /// falls back to the row's position — which is the same number only if the sweep was not
     /// resumed against a reordered list. The page says which of the two it used.
+    /// Where one target's evidence lives.
+    ///
+    /// One function, because the join was written out twice — in `read_log` and in `run` — and a
+    /// layout where the answer is not `{index:03}` would have had to be taught to both. Under
+    /// `Single` there is one target and its directory *is* the work root: a rebuild writes
+    /// `rebuild/build.log` and `run.json` straight into `--work`.
+    fn target_dir(&self, view: &View, index: usize) -> PathBuf {
+        match view.layout {
+            Layout::Single => self.work.clone(),
+            _ => self.work.join(format!("{index:03}")),
+        }
+    }
+
     fn dir_of(&self, view: &View, purl: &str) -> Option<(usize, bool)> {
         if let Some(targets) = &view.targets {
             return targets.iter().position(|t| t == purl).map(|i| (i, true));
@@ -386,6 +479,9 @@ a{color:inherit}
 .state{border:1px solid var(--line);background:var(--card);border-radius:6px;padding:.6rem .8rem;margin:0 0 1.5rem}
 .dim{color:var(--dim)}
 .note{color:var(--dim);font-style:italic}
+/* A transcript URL is the longest string on any of these pages and the least useful to read in
+   full, so it wraps rather than pushing the columns that matter off the side. */
+.url{word-break:break-all;max-width:38em;font-size:.9em}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th{text-align:left;font-weight:600;color:var(--dim);font-size:.8rem;padding:.3rem .5rem;border-bottom:1px solid var(--line)}
 td{padding:.3rem .5rem;border-bottom:1px solid var(--line)}
@@ -420,6 +516,40 @@ fn page(title: &str, live: bool, body: &str, bind: &str) -> Html<String> {
 
 /// The strip that appears on every page.
 fn state_strip(v: &View, targets_path: Option<&Path>) -> String {
+    // A single run has no corpus, no denominator and no `results.tsv`, so the sweep's own strip —
+    // "0 attempted, of an unknown total · no results.tsv here yet" — was three sentences of the
+    // wrong vocabulary about a run that had in fact completed. Its strip answers the questions a
+    // single run has instead.
+    if v.layout == Layout::Single {
+        let what = match (&v.report, v.report_unreadable) {
+            (Some(r), _) => {
+                // The only honest duration a report carries, and it brackets the whole of `run_one`
+                // — resolve, fetch, infer, build, compare — not the build alone.
+                let bracket = match (&r.finished, rfc3339_epoch(&r.started)) {
+                    (Some(f), Some(st)) => match rfc3339_epoch(f) {
+                        Some(fin) => format!(" · {}s end to end", (fin - st).max(0)),
+                        None => " · <span class=\"note\">finished at an instant this page cannot \
+                                 read</span>"
+                            .into(),
+                    },
+                    // Written on every terminal outcome, so an absent `finished` means the process
+                    // died before it could write one — not that the run is still going.
+                    _ => " · <span class=\"note\">no finish recorded: the process did not reach \
+                          the end of the run</span>"
+                        .into(),
+                };
+                format!("one run · {}{bracket}", esc(&r.purl))
+            }
+            (None, true) => "one run · <span class=\"note\">run.json is here and will not parse: \
+                             a torn write, not an absent run</span>"
+                .to_string(),
+            (None, false) => "one run · <span class=\"note\">no run.json, so this page is reading \
+                              the files a rebuild leaves rather than its own report</span>"
+                .to_string(),
+        };
+        return format!("<div class=\"state\"><strong>single rebuild</strong> · {what}</div>");
+    }
+
     let attempted = v.rows.len();
     // The targets file if one was named, otherwise the count the sweep recorded about itself.
     let total = v
@@ -573,6 +703,19 @@ fn phase_text(c: &crate::progress::Current) -> String {
 /// `None` when it will not parse, which the caller treats as "very old" rather than as "now": a
 /// timestamp we cannot read must not make a dead sweep look alive.
 fn rfc3339_age(s: &str) -> Option<u64> {
+    let then = rfc3339_epoch(s)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some((now - then).max(0) as u64)
+}
+
+/// The same instant as epoch seconds.
+///
+/// Split out rather than copied: a single-run page needs the started→finished bracket, and a second
+/// implementation of days-from-civil is a second thing that has to agree with this one.
+fn rfc3339_epoch(s: &str) -> Option<i64> {
     let (date, rest) = s.split_once('T')?;
     let time = rest.strip_suffix('Z')?;
     let mut d = date.split('-');
@@ -595,12 +738,7 @@ fn rfc3339_age(s: &str) -> Option<u64> {
     let doy = (153 * mp + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
-    let then = days * 86_400 + hh * 3600 + mm * 60 + ss;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64;
-    Some((now - then).max(0) as u64)
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
 }
 
 fn rates_panel(r: &Rates) -> String {
@@ -958,7 +1096,7 @@ async fn cluster(
     for m in &members {
         match sweep
             .dir_of(&v, &m.purl)
-            .and_then(|(i, _)| read_log(&sweep.work, i))
+            .and_then(|(i, _)| read_log(&sweep.target_dir(&v, i)))
         {
             Some(log) => {
                 let sig = trigon_core::classify(&log);
@@ -1029,15 +1167,230 @@ async fn cluster(
     page(&q.key, v.live.is_live(), &body, &sweep.bind).into_response()
 }
 
-fn read_log(work: &Path, index: usize) -> Option<String> {
-    // `<work>/NNN/rebuild/build.log`, which is where `run_one` writes it: the collect directory is
-    // `args.work.join("rebuild")` and the log goes beside the artifacts in it.
-    std::fs::read_to_string(
-        work.join(format!("{index:03}"))
-            .join("rebuild")
-            .join("build.log"),
-    )
-    .ok()
+/// What the mirror served into this build, read from the run's own `network.jsonl`.
+///
+/// **Three states, decided before a single number is printed.** The file being absent and the file
+/// being empty mean opposite things, and the difference is the one `attestable` is derived from: no
+/// file means no complete account exists — which at `--egress open` is the ordinary case and not a
+/// fault — while an empty file is a complete account of a build that fetched nothing.
+fn read_transcript(dir: &Path) -> Transcript {
+    let path = dir.join("rebuild").join("network.jsonl");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Transcript::Absent;
+    };
+    let bytes = text.len() as u64;
+    match trigon_mirror::Exchange::parse_jsonl(&text) {
+        // A parse failure is neither of the honest states. Saying "0 responses" here would turn a
+        // version skew or a torn write into a clean, short, believable account.
+        Err(detail) => Transcript::Unreadable(detail),
+        Ok(rows) => Transcript::Present { rows, bytes },
+    }
+}
+
+enum Transcript {
+    Absent,
+    Unreadable(String),
+    Present {
+        rows: Vec<trigon_mirror::Exchange>,
+        bytes: u64,
+    },
+}
+
+/// The summary that sits on the run page, linking to the full table.
+fn network_panel(dir: &Path, index: usize) -> String {
+    let mut out = String::from("<h2>Network</h2>");
+    match read_transcript(dir) {
+        Transcript::Absent => out.push_str(
+            "<p class=\"note\">no <code>network.jsonl</code>, so no complete account of what \
+             crossed into this build exists. At <code>--egress open</code> that is the ordinary \
+             case rather than a fault: the build can reach the internet directly, so nothing is in \
+             a position to write the account. An enforced tier records one.</p>",
+        ),
+        Transcript::Unreadable(detail) => out.push_str(&format!(
+            "<p class=\"void\">the transcript is here and will not parse, so what crossed is \
+             unknown rather than nothing: {}</p>",
+            esc(&detail)
+        )),
+        Transcript::Present { rows, bytes } => {
+            if rows.is_empty() {
+                out.push_str(
+                    "<p>a complete account, and <strong>nothing crossed the network into this \
+                     build</strong>. <span class=\"note\">Which is what it means either way, but \
+                     not always what a reader wants to know: a run that died before its build phase \
+                     never got as far as fetching anything, so check the phase it reached before \
+                     reading this as a build that needed nothing.</span></p>",
+                );
+            } else {
+                let total: u64 = rows.iter().map(|e| e.bytes).sum();
+                let count =
+                    |c: trigon_mirror::Checked| rows.iter().filter(|e| e.checked == c).count();
+                let opened = count(trigon_mirror::Checked::Opened);
+                let partial = count(trigon_mirror::Checked::Partial);
+                let unarmed = count(trigon_mirror::Checked::Unarmed);
+                out.push_str(&format!(
+                    "<p><strong>{} response(s)</strong> crossed into this build, carrying {}. \
+                     <a href=\"/run/{index}/network\">Every row →</a></p>",
+                    rows.len(),
+                    human_bytes(total),
+                ));
+                // Every figure with its denominator, because "12 opened" on its own reads as a
+                // total rather than as a share.
+                out.push_str(&format!(
+                    "<p class=\"dim\">{opened} of {} opened and member-checked by the artifact \
+                     guard</p>",
+                    rows.len()
+                ));
+                if unarmed > 0 {
+                    out.push_str(&format!(
+                        "<p class=\"note\">{unarmed} of {} arrived with no guard manifest \
+                         loaded, so nothing was compared against anything</p>",
+                        rows.len()
+                    ));
+                }
+                if partial > 0 {
+                    out.push_str(&format!(
+                        "<p class=\"note\">{partial} of {} were abandoned part-way, so their \
+                         bytes crossed unchecked and their digest is of a prefix rather than of \
+                         the resource</p>",
+                        rows.len()
+                    ));
+                }
+            }
+            out.push_str(&format!(
+                "<p class=\"dim\">source: <code>rebuild/network.jsonl</code>, {}</p>",
+                human_bytes(bytes)
+            ));
+        }
+    }
+    out.push_str(&not_collected_note());
+    out
+}
+
+/// Bytes, at the precision a page needs.
+fn human_bytes(b: u64) -> String {
+    match b {
+        0..=1023 => format!("{b} B"),
+        1024..=1_048_575 => format!("{:.1} KB", b as f64 / 1024.0),
+        1_048_576..=1_073_741_823 => format!("{:.1} MB", b as f64 / 1_048_576.0),
+        _ => format!("{:.2} GB", b as f64 / 1_073_741_824.0),
+    }
+}
+
+/// Said on every run, including a clean one.
+///
+/// The transcript answers what the build *fetched*. A reader will reasonably expect it to answer
+/// what the build *did*, and nothing here can: Tier 2 and Tier 3 observability are cut by decision,
+/// not missing by accident. Rendering the gap as a blank would be this project's own bug —
+/// absence read as presence — on the page that exists to prevent it.
+fn not_collected_note() -> String {
+    "<p class=\"note\"><strong>What ran inside the sandbox is not recorded.</strong> There is no \
+     process tree, no syscall log and no record of which files the build opened. Trigon ships Tier 1 \
+     observability — this transcript — and Tiers 2 and 3 are a deliberate cut, not an omission: \
+     eBPF does not compose with gVisor, it breaks on managed Kubernetes, and it needs privilege the \
+     sandbox otherwise refuses (<code>docs/08-execution.md</code> §7, ADR-0007). What stands in \
+     their place is this list of everything that crossed the network, the per-phase timings, and \
+     the build log.</p>"
+        .into()
+}
+
+/// Every response the mirror served into one build, in the order it finished serving them.
+///
+/// The whole list rather than a sample. It is the evidence behind `attestable`, and a page that
+/// showed the first twenty rows of it would be asking to be believed about the rest.
+async fn network(
+    State(sweep): State<std::sync::Arc<Sweep>>,
+    UrlPath(index): UrlPath<usize>,
+) -> Response {
+    let v = sweep.read();
+    let dir = sweep.target_dir(&v, index);
+    let title = v
+        .rows
+        .iter()
+        .find(|r| sweep.dir_of(&v, &r.purl).map(|(i, _)| i) == Some(index))
+        .map(|r| esc(r.purl.strip_prefix("pkg:").unwrap_or(&r.purl)))
+        .unwrap_or_else(|| format!("target {index:03}"));
+
+    let mut body = format!(
+        "<h1>{title} · network</h1><p><a href=\"/run/{index}\">← the run</a></p>{}",
+        not_collected_note()
+    );
+
+    match read_transcript(&dir) {
+        Transcript::Absent | Transcript::Unreadable(_) => {
+            body.push_str(&network_panel(&dir, index));
+        }
+        Transcript::Present { rows, bytes } => {
+            body.push_str(&format!(
+                "<p class=\"dim\">{} row(s) · {} on disk · <code>rebuild/network.jsonl</code></p>",
+                rows.len(),
+                human_bytes(bytes)
+            ));
+            if rows.is_empty() {
+                body.push_str(&network_panel(&dir, index));
+            } else {
+                // The pin evidence, recomputed here from the rows rather than copied from the
+                // report. Two ways to compute one thing — and this is the side that can be checked,
+                // because the reader is looking at the rows it was computed from.
+                let o = trigon_mirror::Observed::from_transcript(&rows, 0);
+                body.push_str(&format!(
+                    "<p>recomputed from these rows: <strong>{}</strong> index request(s), \
+                     <strong>{}</strong> version(s) withheld across them, {} artifact, {} \
+                     toolchain. <span class=\"note\">Refusals are not in this file, so the \
+                     rejected count is not recomputable here and is left out rather than shown as \
+                     zero.</span></p>",
+                    o.index_requests,
+                    o.versions_withheld,
+                    o.artifact_requests,
+                    o.toolchain_requests
+                ));
+                body.push_str(
+                    "<table><tr><th>#</th><th>route</th><th>checked</th><th>bytes</th>\
+                     <th>withheld</th><th>sha256</th><th>url</th></tr>",
+                );
+                for (n, e) in rows.iter().enumerate() {
+                    body.push_str(&format!(
+                        "<tr><td class=\"dim\">{}</td><td>{}</td><td>{}</td>\
+                         <td style=\"text-align:right\">{}</td><td style=\"text-align:right\">{}</td>\
+                         <td><code>{}</code></td><td class=\"url\">{}</td></tr>",
+                        n + 1,
+                        esc(&e.route),
+                        checked_cell(e.checked),
+                        human_bytes(e.bytes),
+                        // An em dash, never a digit. `None` means this was not a filtered index
+                        // document at all, and `Some(0)` means the filter ran and removed nothing:
+                        // rendering the first as `0` merges the two readings the field exists for.
+                        match e.withheld {
+                            Some(w) => w.to_string(),
+                            None => "—".into(),
+                        },
+                        esc(&e.sha256[..16.min(e.sha256.len())]),
+                        esc(&e.url),
+                    ));
+                }
+                body.push_str("</table>");
+            }
+        }
+    }
+    page(&format!("{title} · network"), false, &body, &sweep.bind).into_response()
+}
+
+/// How far the guard got, in words rather than in an enum name.
+fn checked_cell(c: trigon_mirror::Checked) -> &'static str {
+    match c {
+        trigon_mirror::Checked::Opened => "opened",
+        trigon_mirror::Checked::Hashed => "<span class=\"dim\">hashed only</span>",
+        trigon_mirror::Checked::Generated => "<span class=\"dim\">mirror-composed</span>",
+        trigon_mirror::Checked::Unarmed => "<span class=\"note\">unarmed</span>",
+        trigon_mirror::Checked::Partial => "<span class=\"void\">partial</span>",
+    }
+}
+
+fn read_log(dir: &Path) -> Option<String> {
+    // `<target dir>/rebuild/build.log`, which is where `run_one` writes it: the collect directory
+    // is `args.work.join("rebuild")` and the log goes beside the artifacts in it. The target
+    // directory comes from `Sweep::target_dir` rather than being rebuilt here, so a layout whose
+    // answer is not `{index:03}` does not have to be taught to two places.
+    std::fs::read_to_string(dir.join("rebuild").join("build.log")).ok()
 }
 
 async fn run(
@@ -1047,7 +1400,7 @@ async fn run(
     let v = sweep.read();
     // The only path parameter anywhere, parsed as an integer by the extractor and re-formatted
     // before it is joined to anything, so no request string reaches the filesystem.
-    let dir = sweep.work.join(format!("{index:03}"));
+    let dir = sweep.target_dir(&v, index);
     let row = v
         .rows
         .iter()
@@ -1107,8 +1460,10 @@ async fn run(
         }
     }
 
+    body.push_str(&network_panel(&dir, index));
+
     body.push_str("<h2>Build log</h2>");
-    match read_log(&sweep.work, index) {
+    match read_log(&dir) {
         Some(log) => {
             let sig = trigon_core::classify(&log);
             body.push_str(&format!(
@@ -1290,7 +1645,22 @@ fn report_panel(dir: &Path) -> String {
         out.push_str("</ul>");
     }
 
-    if let Some(p) = &r.pin {
+    // **Always a heading, never a blank.** `None` rendered as nothing at all, and a test asserted
+    // that it did — so the one section that says whether the dependency index was really pinned
+    // simply vanished on every run that could not answer, which is the file's own third rule
+    // broken in the file that states it. The counters are absent for three different reasons and
+    // the reader is owed which one, because two of them are ordinary and one is a gap.
+    let Some(p) = &r.pin else {
+        out.push_str(
+            "<h2>Registry pin</h2><p class=\"note\">no counters, which is not five zeroes. Either \
+             no mirror ran — <code>--timewarp</code> was not asked for, or the tier is \
+             <code>deny-all</code>, where there is no index to resolve against — or the build ended \
+             before the mirror's record could be read. Whether this build's dependency graph was \
+             pinned is unknown from here, rather than known to be unpinned.</p>",
+        );
+        return out;
+    };
+    {
         out.push_str(&format!(
             "<h2>Registry pin</h2><table>\
              <tr><td class=\"dim\">index requests</td><td>{}</td></tr>\
@@ -1496,6 +1866,7 @@ pub fn serve(
         .route("/", axum::routing::get(board))
         .route("/cluster", axum::routing::get(cluster))
         .route("/run/{index}", axum::routing::get(run))
+        .route("/run/{index}/network", axum::routing::get(network))
         .route("/api/state", axum::routing::get(api_state))
         .with_state(sweep);
 
