@@ -468,6 +468,14 @@ pub struct RunReport {
     /// Why the run is evidence of nothing, where it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub void_reason: Option<String>,
+    /// Times the build asked for its own published artifact and the mirror refused it.
+    ///
+    /// **Not a void**: nothing arrived. Kept because it is usually the explanation for whatever
+    /// failed next — a package that appears anywhere in its own dependency tree makes the build ask
+    /// for the version under test — and because a sweep run without `--store` has only this file,
+    /// so leaving it out lost the fact entirely.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_artifact: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_digest: Option<String>,

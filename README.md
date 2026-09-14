@@ -46,16 +46,18 @@ Measured on the M1 smoke corpora, at `--egress open`:
 | npm | 14 of 15 (93%) | 15 of 20 |
 | PyPI | 12 of 15 (80%) | 15 of 17 |
 
-And PyPI measured again at **`--egress mirror-only`** — the tier this README recommends, where the
+And both measured again at **`--egress mirror-only`** — the tier this README recommends, where the
 build's only route out is a time-filtered mirror that writes down everything it serves:
 
-| | reproduce | reach a comparison |
-|---|---|---|
-| PyPI, enforced | **12 of 14 (86%)** | 14 of 17 |
+| | reproduce | reach a comparison | of which `exact` |
+|---|---|---|---|
+| npm, enforced | **14 of 15 (93%)** | 15 of 20 | 6 |
+| PyPI, enforced | **12 of 14 (86%)** | 14 of 17 | 3 |
 
-The enforced tier reproduces at a *higher* rate than `open`, and three of the twelve are `exact`
-rather than normalized — byte-for-byte identical to what PyPI published, built in a sandbox whose
-only route out is the mirror.
+npm matches its `open` rate exactly and PyPI beats it, and nine of those reproductions are `exact`
+rather than normalized — byte-for-byte identical to what the registry published, built in a sandbox
+with no other route out. The `open` runs report no `exact` at all, because at `open` the build
+installs its own toolchain unpinned and picks up whatever the registry holds today.
 
 Three targets still reach no comparison, and each is named rather than silently lost. One is a
 package whose build backend fetches over HTTPS during `get_requires_for_build_wheel`, so the tier

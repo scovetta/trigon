@@ -1061,6 +1061,10 @@ mod build {
         /// `PIP_TRUSTED_HOST` finding was blank on exactly the tier that recommends itself, and
         /// present at `open`, where a build can ignore the mirror entirely.
         pub pin: Option<trigon_mirror::Observed>,
+        /// Times the build asked for its own published artifact and was refused. Not a void —
+        /// nothing arrived — but usually the explanation for whatever failed next, and a sweep
+        /// without `--store` has only `run.json` to find it in.
+        pub refused_artifact: Vec<String>,
         /// Where the runner collected the rebuilt artifact, when it collected exactly one.
         ///
         /// The runner knows this — it mounted the directory the build wrote into — and the caller
@@ -1401,6 +1405,7 @@ mod build {
                 attestable: outcome.attestable,
                 transcript: outcome.transcript,
                 pin: outcome.pin,
+                refused_artifact: outcome.refused_artifact,
                 artifact: outcome.artifact,
             })
         })
@@ -2684,6 +2689,10 @@ mod rebuild {
             report.timings = t.clone();
         }
         report.egress = Some(args.egress.clone());
+        report.refused_artifact = built
+            .as_ref()
+            .map(|b| b.refused_artifact.clone())
+            .unwrap_or_default();
         // From the run, not from a runner constructed afterwards to be asked. `None` where the
         // build never finished, which is a third answer: an unknown is not a `false`, and a report
         // that says "not attestable" about a build that never ran sends the reader after the wrong

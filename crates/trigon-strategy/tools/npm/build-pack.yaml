@@ -1,6 +1,12 @@
 # The plain case: set the version if asked, then pack.
 id: npm/build/pack
 params:
+  registry_time:
+    required: false
+    doc: >-
+      Passed to `npm/npx`, which exports it before anything runs. The build phase calls npx too, so
+      without it a build whose pinned npm differs from the image's downloads that npm from the
+      default registry — the same failure the deps phase had, one phase later.
   npm_version:
     required: true
   version_override:
@@ -20,6 +26,7 @@ steps:
       dir: "{{ location.subdir }}"
   - uses: npm/npx
     with:
+      registry_time: "{{ with.registry_time }}"
       command: npm pack
       npm_version: "{{ with.npm_version }}"
       dir: "{{ location.subdir }}"

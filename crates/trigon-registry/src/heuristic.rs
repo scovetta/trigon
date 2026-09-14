@@ -170,7 +170,17 @@ impl StrategyInferrer for NpmInferrer {
         // keeps the rule off a package that declares a build *and commits its output*: running that
         // build regenerates files the repository already holds correctly, under whatever today's
         // floating ranges resolve to, which is a divergence manufactured by the fix.
-        let mut build = BTreeMap::from([("npm_version".to_string(), deps["npm_version"].clone())]);
+        // The registry moment travels to the build phase as well as the deps phase. Both call
+        // `npm/npx`, and npx downloads the pinned npm before it runs anything — so a build phase
+        // without it goes to the default registry and dies at an enforced tier exactly as the deps
+        // phase did, one phase later.
+        let mut build = BTreeMap::from([
+            ("npm_version".to_string(), deps["npm_version"].clone()),
+            (
+                "registry_time".to_string(),
+                deps.get("registry_time").cloned().unwrap_or_default(),
+            ),
+        ]);
         let mut build_tool = "npm/build/pack";
         if let Some((script, command)) = unrun_build(target)
             && bare_program(&command)

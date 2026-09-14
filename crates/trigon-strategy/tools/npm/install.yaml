@@ -14,7 +14,11 @@ params:
 steps:
   - uses: npm/npx
     with:
-      command: "{% if with.registry_time %}npm_config_registry={{ timewarp_url('npm', with.registry_time) }} {% endif %}npm install --force --no-audit"
+      # The registry is set by `npm/npx` for the whole script now, so it covers npx's own
+      # `--package` download as well as this command. Prefixing it here too would be a second
+      # place that has to agree with the first.
+      command: "npm install --force --no-audit"
+      registry_time: "{{ with.registry_time }}"
       npm_version: "{{ with.npm_version }}"
       dir: "{{ location.subdir }}"
       locator: "{{ with.locator }}"

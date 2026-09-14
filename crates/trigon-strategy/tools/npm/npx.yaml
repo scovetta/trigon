@@ -27,8 +27,23 @@
 # the capability and `podman run` does not, so the same strategy worked in one phase and not the
 # next. Running as root in a disposable container is the intent, and the tar stabilizer zeroes
 # ownership either way.
+# **The registry has to be set for `npx` itself, not only for the command it runs.** `npx
+# --package=npm@6.1.0` downloads that npm before it runs anything, and that download used the
+# default registry — so at `mirror-only` the build fetched Node through the mirror, then went
+# straight to `registry.npmjs.org` for npm and died with `ENETUNREACH`. Setting it inside the
+# command string configured the *inner* npm and not the fetch that has to happen first.
+#
+# Exported once at the top of the script, so npx's own download and everything it then runs inherit
+# it. Third instance of this shape in a day: a step that configures the mirror running after a step
+# that needs it.
 id: npm/npx
 params:
+  registry_time:
+    required: false
+    doc: >-
+      The instant to pin the registry to. Exported as `npm_config_registry` before anything runs, so
+      npx's own `--package` download is time-warped too. Empty leaves the registry alone, which is
+      what `--egress open` without `--timewarp` wants.
   command:
     required: true
   npm_version:
@@ -43,6 +58,9 @@ steps:
   # what keeps Debian's nodejs out of an image that already has the one we pinned.
   - runs: |
       export npm_config_unsafe_perm=true
+      {%- if with.registry_time %}
+      export npm_config_registry={{ timewarp_url('npm', with.registry_time) }}
+      {%- endif %}
       TRIGON_NPM_CMD='{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'
       if [ "$({{ with.locator }}npm --version 2>/dev/null)" = "{{ with.npm_version }}" ]; then
         sh -c "$TRIGON_NPM_CMD"
@@ -52,6 +70,9 @@ steps:
     if: "{{ with.locator }}"
   - runs: |
       export npm_config_unsafe_perm=true
+      {%- if with.registry_time %}
+      export npm_config_registry={{ timewarp_url('npm', with.registry_time) }}
+      {%- endif %}
       TRIGON_NPM_CMD='{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'
       if [ "$(npm --version 2>/dev/null)" = "{{ with.npm_version }}" ]; then
         sh -c "$TRIGON_NPM_CMD"
