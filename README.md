@@ -403,6 +403,7 @@ scripts/                  the cross-machine verification check
 
 ```
 cargo test --workspace                      # 680 pass, 0 fail
+TRIGON_LIVE=1 cargo test --workspace        # plus the ones that need a network
 cargo run -p xtask -- policy                # the dependency policy
 cargo run -p xtask -- differential          # against the reference implementation
 scripts/cross-machine-verify.sh             # the claim a third party can check
@@ -419,11 +420,16 @@ cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
 cargo test  -p trigon-stabilize-wasm --features host
 ```
 
-The judgement half — `core`, `archive`, `stabilize`, `compare`, `attest` — is at **89% of lines**;
-the workspace is at 70%. That split is deliberate: the judgement half is what the verifier binary
-contains, what a third party re-derives a verdict with, and the only part whose bugs are silent. A
-divergence is self-consistent, so both sides get the same wrong treatment and the failure surfaces
-as a wrong verdict rather than a crash.
+The judgement half — `core`, `archive`, `stabilize`, `compare`, `attest` — is at **89.3% of lines**;
+the workspace is at 69.6%, or 72.8% with `TRIGON_LIVE=1` set so the tests that need a network run.
+That split is deliberate: the judgement half is what the verifier binary contains, what a third party
+re-derives a verdict with, and the only part whose bugs are silent. A divergence is self-consistent,
+so both sides get the same wrong treatment and the failure surfaces as a wrong verdict rather than a
+crash.
+
+**The judgement half is the one number that does not move between those two runs.** It is 89.3%
+either way, which is the architecture's central claim measured rather than asserted: every line of
+that half which is covered at all is covered by a test that opens no socket.
 
 Rust 1.85 or later, edition 2024. Rebuilds additionally need `podman`; nothing else has
 prerequisites, and `trigon verify` has none at all.
