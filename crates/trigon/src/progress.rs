@@ -488,10 +488,36 @@ pub struct RunReport {
     pub egress: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<String>,
-    /// Whether the runner claims the run can be attested at full trust. Taken from the runner, not
-    /// from the flag that asked for a tier.
+    /// Whether this run can account for everything that crossed into the build. Taken from the run
+    /// itself, never from the flag that asked for a tier.
+    ///
+    /// Three states, and the third is load-bearing: `None` is a build that never finished and so
+    /// has told us nothing. Rendering that as `false` sends a reader after an egress tier when the
+    /// problem is a build that died.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestable: Option<bool>,
+    /// How many responses crossed the network into the build. `None` where no transcript exists;
+    /// `Some(0)` where one does and nothing came through, which is what `deny-all` produces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_exchanges: Option<usize>,
+    /// Bytes those responses carried. `None` and `Some(0)` are the same two answers as above, one
+    /// level out: `docs/10-scale.md` §1 puts dependency bytes first among the things that break at
+    /// fleet scale, and a denominator that cannot tell "fetched nothing" from "not measured" is
+    /// not a measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_bytes: Option<u64>,
+    /// Seconds spent waiting on a model, and the tokens it cost. `None` where none was asked,
+    /// which `docs/07-ai.md` §6 says should be the healthy majority of a corpus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_out: Option<u64>,
+    /// Cached tokens, **a subset of `tokens_in` and never an addition**. Cache-read rate is an SLO
+    /// (`docs/07-ai.md` §5), and summing the two inverts its sign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_cached: Option<u64>,
 
     /// One entry per repair the loop attempted, and why it stopped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

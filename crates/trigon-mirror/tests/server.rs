@@ -561,3 +561,186 @@ fn the_source_filter_narrows_a_real_package() {
         narrow.members.len()
     );
 }
+
+// --- The network transcript ---------------------------------------------------------------
+//
+// Tier 1 of `docs/08-execution.md` §7. The mirror already hashed every body that crossed it, to
+// feed the artifact guard, and kept the hash only when it matched — so the answer to "what did
+// this build download" was computed on every run and dropped. These cover the two halves that can
+// go wrong without anything failing: the line surviving the trip out through a container log, and
+// the guard reporting how far it actually got rather than how far it could have got.
+
+#[test]
+fn a_transcript_line_survives_the_trip_out_through_a_container_log() {
+    // The escape is `podman logs`, so a line is written by one process, interleaved with unrelated
+    // output, and read back by another. Round-tripped through the real formatter rather than a
+    // hand-written copy of it: two spellings of one format is the bug this whole codebase keeps
+    // finding, and here it would show up as a transcript that is silently short.
+    let e = trigon_mirror::Exchange {
+        route: "artifact".into(),
+        url: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".into(),
+        sha256: "e1".repeat(32),
+        bytes: 2361,
+        checked: trigon_mirror::Checked::Opened,
+    };
+    let log = format!(
+        "2026-09-13T10:00:00Z  INFO trigon_mirror: listening\n{}\nsomething else entirely\n",
+        e.line()
+    );
+    assert_eq!(trigon_mirror::Exchange::parse_log(&log).unwrap(), vec![e]);
+}
+
+#[test]
+fn an_unreadable_transcript_line_is_an_error_rather_than_a_shorter_transcript() {
+    // "We could not read one of these" and "there were fewer of these" are different answers, and
+    // only one of them leaves the run attestable. Skipping the line would turn a truncated log or
+    // a version skew into a clean, short, believable transcript.
+    let log = format!("{} {{not json at all\n", trigon_mirror::EXCHANGE_MARKER);
+    let e = trigon_mirror::Exchange::parse_log(&log).unwrap_err();
+    assert!(e.contains("unreadable transcript line"), "{e}");
+}
+
+#[test]
+fn a_log_with_no_transcript_lines_reads_as_a_transcript_of_nothing() {
+    // The empty case has to be `Ok(vec![])` rather than an error: a build that downloaded nothing
+    // is a real build, and it is the one `deny-all` produces every time.
+    assert_eq!(
+        trigon_mirror::Exchange::parse_log("listening\nfiltered a packument\n").unwrap(),
+        vec![]
+    );
+}
+
+#[test]
+fn the_guard_reports_how_far_it_got_and_not_how_far_it_could_have() {
+    use trigon_core::Digest;
+    use trigon_mirror::{Checked, Guard, GuardManifest};
+
+    // Every reason the member check stops early lives inside `observe`, so `observe` is what says
+    // whether it ran. A caller reconstructing this from a size limit would call a body `opened`
+    // that was never an archive — which is exactly the difference between a check that ran and one
+    // that only looks like it did.
+    let armed = Guard::new(GuardManifest {
+        artifact: Some(Digest::from_bytes([1; 32])),
+        members: [Digest::from_bytes([2; 32])].into_iter().collect(),
+        ..Default::default()
+    });
+    let other = Digest::from_bytes([9; 32]);
+
+    // Not an archive: hashed whole, never opened.
+    assert_eq!(
+        armed.observe("https://x/notes.txt", other, Some(b"plain text")),
+        Checked::Hashed
+    );
+    // No body collected at all: the same answer, for a different reason, and neither is `opened`.
+    assert_eq!(
+        armed.observe("https://x/big.tgz", other, None),
+        Checked::Hashed
+    );
+    // A real archive the guard walked. The manifest member is not in it, so nothing trips — and
+    // that is the case where saying `opened` is a claim worth making.
+    assert_eq!(
+        armed.observe("https://x/dep.tgz", other, Some(&tiny_gzip_tar())),
+        Checked::Opened
+    );
+
+    // With no manifest there is nothing to compare against, and a transcript that said `opened`
+    // here would describe a check that does not exist on this run.
+    let unarmed = Guard::default();
+    assert_eq!(
+        unarmed.observe("https://x/dep.tgz", other, Some(&tiny_gzip_tar())),
+        Checked::Unarmed
+    );
+}
+
+/// The smallest thing `sniff` accepts and `trigon_archive::parse` can walk.
+fn tiny_gzip_tar() -> Vec<u8> {
+    let mut tar = Vec::new();
+    let mut header = [0u8; 512];
+    header[..8].copy_from_slice(b"a.txt\0\0\0");
+    header[100..108].copy_from_slice(b"0000644\0");
+    header[108..116].copy_from_slice(b"0000000\0");
+    header[116..124].copy_from_slice(b"0000000\0");
+    header[124..136].copy_from_slice(b"00000000002\0");
+    header[136..148].copy_from_slice(b"00000000000\0");
+    header[156] = b'0';
+    // The checksum is computed with the checksum field read as spaces, then written into it.
+    header[148..156].copy_from_slice(b"        ");
+    let sum: u32 = header.iter().map(|b| *b as u32).sum();
+    let text = format!("{sum:06o}\0 ");
+    header[148..156].copy_from_slice(text.as_bytes());
+    tar.extend_from_slice(&header);
+    let mut body = [0u8; 512];
+    body[..2].copy_from_slice(b"hi");
+    tar.extend_from_slice(&body);
+    tar.extend_from_slice(&[0u8; 1024]);
+
+    let mut out = Vec::new();
+    let mut enc = flate2::write::GzEncoder::new(&mut out, flate2::Compression::none());
+    std::io::Write::write_all(&mut enc, &tar).unwrap();
+    enc.finish().unwrap();
+    out
+}
+
+#[test]
+fn a_credential_in_a_url_does_not_reach_the_transcript() {
+    // `docs/08-execution.md` §6: the proxy sees plaintext and transcripts are shown to users. The
+    // mirror's own rewritten URLs carry the pinned moment as a password, so the shape is one the
+    // codebase already produces — and the cheap place to stop it is the one place an `Exchange` is
+    // built, rather than in each of its readers.
+    let e = trigon_mirror::Exchange::new(
+        "index",
+        "http://npm:2018-04-09T01:10:45Z@timewarp:8129/left-pad",
+        "aa".repeat(32),
+        12,
+        trigon_mirror::Checked::Generated,
+    );
+    assert_eq!(e.url, "http://timewarp:8129/left-pad");
+}
+
+#[test]
+fn an_at_sign_outside_the_authority_is_left_alone() {
+    // Every scoped npm package has one in its path, and a redactor that ate those would quietly
+    // rewrite the URLs that matter most.
+    for url in [
+        "https://registry.npmjs.org/@babel/core/-/core-7.24.0.tgz",
+        "https://files.pythonhosted.org/packages/a/b/x.whl?sig=a@b",
+        "https://nodejs.org/dist/v20.11.0/SHASUMS256.txt",
+    ] {
+        let e = trigon_mirror::Exchange::new(
+            "artifact",
+            url,
+            "bb".repeat(32),
+            1,
+            trigon_mirror::Checked::Hashed,
+        );
+        assert_eq!(e.url, url);
+    }
+}
+
+#[test]
+fn the_stored_form_and_the_log_form_are_read_by_different_readers() {
+    // The marker is the container log's escape mechanism and is stripped before storage, so the
+    // two forms differ. A single tolerant reader would read a blob of the wrong format as an empty
+    // transcript — and an empty transcript is a *claim* here, that the build fetched nothing,
+    // rather than an absence. That is the claim `attestable` is derived from.
+    let e = trigon_mirror::Exchange::new(
+        "index",
+        "https://registry.npmjs.org/left-pad",
+        "cc".repeat(32),
+        4096,
+        trigon_mirror::Checked::Generated,
+    );
+    let stored = format!("{}\n", serde_json::to_string(&e).unwrap());
+    assert_eq!(
+        trigon_mirror::Exchange::parse_jsonl(&stored).unwrap(),
+        vec![e.clone()]
+    );
+    // The log form carries the marker, so the stored reader must refuse it rather than read it as
+    // nothing.
+    assert!(trigon_mirror::Exchange::parse_jsonl(&e.line()).is_err());
+    // And a trailing newline — which every writer produces — is not an unreadable line.
+    assert_eq!(
+        trigon_mirror::Exchange::parse_jsonl("").unwrap(),
+        Vec::<trigon_mirror::Exchange>::new()
+    );
+}

@@ -144,11 +144,31 @@ setup phase verifies the base image rather than installing into it. Proven by a 
 reach through it, never *what* those hosts serve. `registry.npmjs.org` will serve any package
 anybody published, so an attacker who controls one package can publish a second one holding their
 payload and fetch it through the artifact route at any path. The guard is the control for that, not
-the tier. And there is still no network transcript, so no run is attestable at full trust at any
-tier.
+the tier. That residue is still open.
 
-**Done when:** a Tier-1 network transcript records host, path, method, response digest and byte
-count for everything crossing the mirror, and `attestable` can become true for a run that has one.
+**The transcript half is done.** Tier 1 records the route, URL, response digest, byte count and how
+far the guard got for everything crossing the mirror, and `attestable` is now derived from whether a
+complete account exists rather than being the literal `false` it was in two places. See
+[`08`](08-execution.md) §7.2 and §7.3.
+
+## B7b. The pin evidence is blank on the tier that needs it most
+
+`PinEvidence` — index requests served, versions withheld — is the counter that exposed the
+`PIP_TRUSTED_HOST` finding ([`16`](16-findings.md) §1), and it reads `null` on every `mirror-only`
+run. The counters live on the `Mirror` object, the mirror under an enforced tier runs *inside the
+build's network island*, and the host has no route to it. So the one control that says "the pin
+actually bound something" is present at `open`, where it is least needed, and absent at
+`mirror-only`, where it is the claim.
+
+The network transcript now makes it derivable without a new channel: an entry with
+`route: "index"` **is** an index request served through the time filter, and the build's own
+resolution came out of those documents. Sixty-nine of them appear in the `left-pad` run above.
+What it cannot derive is `versions_withheld`, which is a fact about the filtering rather than about
+the response, and would still have to come out of the container.
+
+**Done when:** `environment.pin` is populated at `mirror-only`, from the transcript where that
+suffices and from the mirror's own counters where it does not — and a run where neither is available
+says so rather than reading as a run that resolved nothing.
 
 ## B8. The three ecosystems after npm and PyPI
 

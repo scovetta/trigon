@@ -388,22 +388,50 @@ to prove that every phase finished.
 
 ```rust
 pub struct Costs {
-    pub inference_seconds: f64,
-    pub tokens: Vec<TokenUsage>,     // one per model used; never summed across models
-    pub build_seconds: f64,
-    pub egress_bytes: u64,
-    pub log_bytes: u64,
-    pub artifact_bytes: u64,
-    pub container_bytes: u64,
+    pub inference_seconds: Option<f64>,
+    pub tokens: Vec<Tokens>,          // one per model used; never summed across models
+    pub build_seconds: Option<f64>,
+    pub egress_bytes: Option<u64>,
+    pub blob_bytes: Option<u64>,      // everything this run wrote
+    pub artifact_bytes: Option<u64>,  // a subset of blob_bytes
+    pub log_bytes: Option<u64>,       // ditto
 }
 
-pub struct TokenUsage { pub input: u64, pub cached_input: u64, pub output: u64, pub model: String }
+pub struct Tokens {
+    pub input: u64, pub cached_input: u64, pub output: u64,
+    pub model: String, pub calls: u32,
+}
 ```
 
 `cached_input` is a **subset** of `input`, matching the prior art's schema so their published cost
 data stays comparable with ours. `tokens` holds a vector rather than a sum, because adding token
 counts across models with different prices produces a number that means nothing. The prior art panics
 rather than allow it, and we follow them.
+
+**Every field is `Option`, and `None` means no data — never zero.** The same rule the phase timings
+keep, for the same reason: a run that asked no model and a run whose token counts we failed to read
+are different facts, and averaging the second as zero understates every figure built on top of it.
+The figures built on top of it are what decide where money goes.
+
+Three of these are measured rather than estimated, and it is worth saying by what:
+
+- `inference_seconds` is timed **around the provider call alone**, inside the counting wrapper, so
+  it is comparable with `build_seconds`. A rung that reads a repository and then asks a question
+  must not bill the reading as inference.
+- `build_seconds` sums only the phases we have a reading for, dropping the rest instead of counting
+  them as zero, so it is a floor and never an overstatement.
+- `egress_bytes` comes straight off the **network transcript** ([`08`](08-execution.md) §7.2). Before
+  that existed this number could only be guessed at, and `None` versus `Some(0)` carries the same
+  distinction the transcript does: no account, versus a complete account of nothing.
+
+`container_bytes` is not recorded: nothing measures image-layer growth per run, and a field nobody
+fills is worse than a field that is not there.
+
+**What is deliberately absent: prices.** No currency, no per-model rate table, no dollar figure. The
+unit that matters is `$` per *verdict gained* rather than per target ([`07-ai.md`](07-ai.md) §5), and
+that division needs a denominator a single run cannot see. A price table baked into a run record is
+wrong within a quarter and silently rewrites history when it is corrected, so the record stores the
+numerator and the reporting layer does the arithmetic.
 
 We track repository-level cost separately, because a handful of monorepos dominate clone expense
 and thousands of targets share them:

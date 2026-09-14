@@ -1204,12 +1204,14 @@ fn report_panel(dir: &Path) -> String {
                 "{}{}",
                 esc(e),
                 match r.attestable {
-                    // The runner's own answer, not the flag's. A local run records no network
-                    // transcript and is never attestable at full trust whatever tier was asked for.
+                    // The run's own answer, not the flag's. Three states, and the third is the
+                    // point: a build that never finished has not told us anything, and rendering
+                    // that as "not attestable" sends the reader after an egress tier when the
+                    // problem is a build that died.
                     Some(false) =>
-                        " · <span class=\"note\">not attestable: this runner records no \
-                                    network transcript</span>",
-                    Some(true) => " · attestable",
+                        " · <span class=\"note\">no network transcript: this run cannot \
+                                    say what the build fetched</span>",
+                    Some(true) => " · transcript recorded",
                     None => "",
                 }
             ),
@@ -1371,11 +1373,53 @@ async fn store_panel(store: &Path, purl: &str) -> String {
             "{} · {}",
             esc(&r.environment.egress),
             if r.environment.attestable {
-                "attestable"
+                "egress fully accounted for"
             } else {
-                "not attestable at full trust"
+                "no network transcript"
             }
         ),
+    );
+    if let Some(c) = &r.costs {
+        // Every figure carries its unit, and what is not known is left out rather than printed as
+        // zero: a `0` here would be read as a measurement, and `docs/03` §3 is explicit that on
+        // this record `None` means no data and never zero.
+        let mut parts = Vec::new();
+        if let Some(s) = c.build_seconds {
+            parts.push(format!("{s:.1}s building"));
+        }
+        if let Some(s) = c.inference_seconds {
+            parts.push(format!("{s:.1}s inference"));
+        }
+        for t in &c.tokens {
+            parts.push(format!(
+                "{} in / {} out over {} to {}",
+                t.input,
+                t.output,
+                match t.calls {
+                    1 => "1 call".to_string(),
+                    n => format!("{n} calls"),
+                },
+                esc(&t.model)
+            ));
+        }
+        if let Some(b) = c.egress_bytes {
+            parts.push(format!("{b} bytes fetched"));
+        }
+        if !parts.is_empty() {
+            row("cost", parts.join(" · "));
+        }
+    }
+    // Stated on every run, including the runs that have none. A row that appears only when there
+    // is a transcript makes "this run was at open egress" and "this view has not been updated yet"
+    // the same observation, and the reader cannot tell which.
+    row(
+        "network",
+        match &r.network_transcript {
+            Some(d) => format!("transcript <code>{}</code>", esc(&d.to_hex()[..16])),
+            None => "<span class=\"note\">no transcript: this run cannot say what the build \
+                     fetched</span>"
+                .into(),
+        },
     );
     if let Some(d) = &r.derivation {
         row("derivation", esc(d));

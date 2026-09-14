@@ -51,11 +51,11 @@ pub struct Environment {
     pub base_image: String,
     pub egress: String,
     pub isolation: String,
-    /// Whether this run may be attested at full trust.
+    /// Whether this run can account for everything that crossed into the build.
     ///
-    /// False where the runner enforced no mirror and recorded no network transcript: such a run
-    /// cannot claim the build fetched nothing it should not have, and saying so here keeps that
-    /// out of the signed statement rather than leaving it to be inferred.
+    /// True exactly when `network_transcript` is present. A run without one cannot claim the build
+    /// fetched nothing it should not have, and saying so here keeps that out of the signed
+    /// statement rather than leaving it to be inferred.
     pub attestable: bool,
     /// The instant the dependency index was pinned to, where one was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +94,78 @@ impl PinEvidence {
     pub fn bound(&self) -> bool {
         self.index_requests > 0
     }
+}
+
+/// What one run cost, in the units `docs/03-pipeline-and-run-record.md` §3 asks for.
+///
+/// Every field is optional and **`None` means no data, never zero** — the same convention the phase
+/// timings keep, and for the same reason. A run that asked no model and a run whose token counts we
+/// failed to read are different facts; averaging the second as zero understates every figure built
+/// on top of it, and the figures built on top of it are what decide where money goes.
+///
+/// The unit that matters downstream is `$` per *verdict gained*, not per target
+/// ([`07-ai.md`](../docs/07-ai.md) §5). That division needs a denominator this record cannot see,
+/// so what is stored here is the numerator and nothing else: no prices, no model-price table, no
+/// currency. A price table baked into a run record is wrong within a quarter and quietly rewrites
+/// history when it changes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Costs {
+    /// Wall-clock seconds spent waiting on a model. `None` where none was asked.
+    ///
+    /// Measured around the provider call alone, so it is comparable with `build_seconds`: a rung
+    /// that reads a repository and then asks a question must not bill the reading as inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_seconds: Option<f64>,
+    /// One entry per model used, and **never summed across them**. Adding token counts from models
+    /// with different prices produces a number that means nothing; the prior art panics rather than
+    /// allow it, and this keeps them apart instead. Empty where no model was asked anything, which
+    /// `docs/07-ai.md` §6 wants to be the healthy majority of a corpus.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tokens: Vec<Tokens>,
+    /// Wall-clock seconds inside the sandbox, summed over the phases we have a timing for.
+    ///
+    /// `None` where no phase was timed. Phases whose timing we failed to read are left out rather
+    /// than counted as zero, so this is a floor on the true figure and never an overstatement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_seconds: Option<f64>,
+    /// Bytes that crossed the network into the build, from the network transcript.
+    ///
+    /// `None` where there is no transcript, `Some(0)` where there is one and nothing crossed. That
+    /// distinction is the whole point of the field: `docs/10-scale.md` §1 puts dependency bytes
+    /// first among the things that break at fleet scale — ~22 TB per cold 100k sweep — and a
+    /// denominator that cannot tell "fetched nothing" from "was not measured" is not a measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_bytes: Option<u64>,
+    /// Bytes this run added to the blob store in total: both artifacts, the log, the comparison,
+    /// both transcripts. The budget `docs/10-scale.md` §1 sets is ~3 MB per run and ~270 GB per
+    /// sweep, and this is the figure it is set against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_bytes: Option<u64>,
+    /// The two halves of `blob_bytes` worth separating, because they are governed by different
+    /// rules. Artifact bytes are what the retention policy drops on a match and keeps on a
+    /// divergence (`docs/09-attestations.md` §6); log bytes are what the compression budget is set
+    /// against. Both are subsets of `blob_bytes`, never additions to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_bytes: Option<u64>,
+}
+
+/// What the model calls cost, in tokens.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tokens {
+    pub input: u64,
+    /// **A subset of `input`, not an addition.** Adding the two double-counts every cached token
+    /// and makes a well-cached run look more expensive than a cold one — which inverts the sign of
+    /// the one lever `docs/07-ai.md` §5 cares most about, since cache-read rate is an SLO.
+    pub cached_input: u64,
+    pub output: u64,
+    /// The pinned model id. Without it a token count is not comparable to anything: the same count
+    /// is two orders of magnitude apart in price between a local 0.5B and a frontier model.
+    pub model: String,
+    /// How many times a model was asked. The numerator of the model-invocation rate, which
+    /// `docs/07-ai.md` §6 wants trending down.
+    pub calls: u32,
 }
 
 /// Everything one run produced, with the large parts left in the blob store.
@@ -166,6 +238,24 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<Digest>,
 
+    /// Everything that crossed the network into the build, as JSON Lines — one
+    /// `trigon_mirror::Exchange` per line, in the order the mirror finished serving them. Tier 1
+    /// of `docs/08-execution.md` §7, and the body of the `buildobservation/v1` predicate.
+    ///
+    /// **Present and empty is not the same as absent.** A stored blob of zero bytes says the
+    /// build's egress was completely accounted for and nothing crossed — which at `deny-all` is
+    /// what having no network interface means. Absent says no complete account exists. Collapsing
+    /// the two would turn "we never looked" into "we looked and it was clean", which is the exact
+    /// reading this field exists to make impossible; `attestable` is derived from which of the two
+    /// it is, so the distinction is load-bearing rather than decorative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_transcript: Option<Digest>,
+
+    /// What this run cost. `None` on a record written before costs were measured, which is a third
+    /// state and not a free run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub costs: Option<Costs>,
+
     /// Set once a statement has been signed for this run. Read by the prune path, which must not
     /// discard the bytes a signature is about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -201,6 +291,8 @@ impl RunRecord {
             timings: Vec::new(),
             failure: None,
             transcript: None,
+            network_transcript: None,
+            costs: None,
             attestations: Vec::new(),
         }
     }

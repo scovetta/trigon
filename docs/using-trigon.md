@@ -292,9 +292,11 @@ producing the rebuild yourself.
 
 Sourced from [`threat-model.md`](threat-model.md), which states the contract precisely.
 
-- **No run is attestable at full trust today.** There is no network transcript yet, so no run can
-  show that the build fetched nothing it should not have. Every run records `attestable: false`, and
-  says why.
+- **`attestable` means the egress is accounted for, and nothing more.** A run at `mirror-only` or
+  `deny-all` records a network transcript — every response that crossed into the build, with its
+  digest — and `attestable: true` says that account is complete. It does **not** say the sandbox
+  class, the base image or the strategy are good enough to sign. A run at `open` records no
+  transcript and says so.
 - **The artifact guard compares bytes.** A build that fetches the published artifact re-encoded,
   encrypted, or reassembled from chunks defeats it.
 - **An enforced egress tier bounds which hosts a build reaches, never what those hosts serve.**

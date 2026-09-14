@@ -19,7 +19,9 @@ use std::collections::BTreeSet;
 use std::path::{Path as FsPath, PathBuf};
 
 use trigon_core::{Classify as _, Digest, Ecosystem, Fault, TargetRef};
-use trigon_store::{ArtifactRef, Environment, PinEvidence, RunRecord, RunState, Store, StoreError};
+use trigon_store::{
+    ArtifactRef, Costs, Environment, PinEvidence, RunRecord, RunState, Store, StoreError, Tokens,
+};
 
 /// Every file under `root`, relative and slash-separated.
 ///
@@ -114,6 +116,26 @@ fn every_field_populated() -> RunRecord {
             "fatal error: Python.h: No such file or directory",
         )),
         transcript: Some(Digest::from_bytes([7; 32])),
+        network_transcript: Some(Digest::from_bytes([8; 32])),
+        costs: Some(Costs {
+            inference_seconds: Some(41.5),
+            tokens: vec![Tokens {
+                input: 120_400,
+                // Deliberately non-zero and *less* than `input`: it is a subset, and a record that
+                // read it back as an addition would double-count every cached token.
+                cached_input: 98_000,
+                output: 3_140,
+                model: "claude-opus-5".into(),
+                calls: 3,
+            }],
+            build_seconds: Some(212.75),
+            // Not zero. Zero is the other interesting value and it means something different, so
+            // the populated record uses a number no default would produce.
+            egress_bytes: Some(268_435_456),
+            blob_bytes: Some(3_145_728),
+            artifact_bytes: Some(2_469_134),
+            log_bytes: Some(65_536),
+        }),
         attestations: vec![
             "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/equivalence.intoto.json".into(),
             "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/rebuild.intoto.json".into(),
@@ -205,6 +227,18 @@ async fn every_field_of_a_run_record_survives_the_file_it_is_written_to() {
         "failure.subject: half the cluster key, and the only optional field in the signature"
     );
     assert_eq!(back.transcript, record.transcript, "transcript");
+    assert_eq!(
+        back.network_transcript, record.network_transcript,
+        "network_transcript: present and empty is not the same as absent, and `attestable` is \
+         derived from which of the two it is"
+    );
+    assert_eq!(back.costs, record.costs, "costs");
+    let tokens = &back.costs.as_ref().unwrap().tokens[0];
+    assert!(
+        tokens.cached_input < tokens.input,
+        "cached_input is a subset of input, not an addition: reading it back as one makes a \
+         well-cached run look more expensive than a cold one"
+    );
     assert_eq!(back.attestations, record.attestations, "attestations");
 
     // And the whole thing, which catches anything the list above forgot to name.
@@ -247,6 +281,8 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "timings",
         "failure",
         "transcript",
+        "network_transcript",
+        "costs",
         "attestations",
     ]
     .into_iter()
@@ -362,6 +398,8 @@ async fn a_record_with_nothing_optional_in_it_reads_back_as_nothing_rather_than_
         "timings",
         "failure",
         "transcript",
+        "network_transcript",
+        "costs",
         "attestations",
     ] {
         assert!(

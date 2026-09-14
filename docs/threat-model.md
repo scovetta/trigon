@@ -111,8 +111,10 @@ client and no model code *(documented, docs/09-attestations.md §7)*.
 - **Not that no model was involved.** Model involvement is recorded beside the claim as
   `derivation.method`, never inside it, and filtering on it is the consumer's job *(documented,
   docs/09-attestations.md §2.1)*.
-- **Not that the build was observed.** No run at any tier is attestable at full trust today, because
-  there is no network transcript *(documented, docs/16-findings.md §3.13)*.
+- **Not that the build was observed beyond its network.** A run at `mirror-only` or `deny-all`
+  records a network transcript — every response that crossed into the build, with its digest — and
+  `attestable: true` says that account is complete. It says nothing about what the build did with
+  those bytes: Tier 2 and Tier 3 are not implemented *(documented, docs/08-execution.md §7.3)*.
 
 **What would have to be true for it to be wrong.** Exactly one of:
 
@@ -678,7 +680,9 @@ project has made.
 | **D12** | A bound on a repository's or a registry response's size. | — | correctness-only | *(documented, verified: no `content_length` check or `take()` in `trigon-registry/src/client.rs`)* |
 | **D13** | Bounded work per `trigon watch` request. A request walks the whole work directory. | loopback by default | correctness-only | *(documented, docs/18-management-ui.md)* |
 | **D14** | Redaction of credentials from a build log before it is stored, rendered or sent to a model. | — | **security-critical** | *(documented, docs/18-management-ui.md §2)* |
-| **D15** | That any run is attestable at full trust. There is no network transcript at any tier. | all tiers, today | **security-critical** | *(documented, docs/16-findings.md §3.13)* |
+| **D15** | That `attestable` means full trust. It means one thing: the egress boundary was enforced and the run can say what crossed it. It is not a claim about the sandbox class, the base image or the strategy. | all tiers | **security-critical** | *(documented, docs/08-execution.md §7.3)* |
+| **D15b** | Observability above Tier 1. The transcript says what crossed the network, never what the build did with it — no syscalls, no file access, no process tree. | all tiers | correctness-only | *(documented, docs/08-execution.md §7, Tier 2 and 3 are unimplemented by decision)* |
+| **D15c** | That `environment.pin` is populated at an enforced tier. The mirror's counters live inside the build's network island and the host has no route to them, so the control that caught the `PIP_TRUSTED_HOST` finding reads `null` on exactly the tier where it is the claim. | `mirror-only` | **security-critical** | *(documented, docs/17-backlog.md B7b)* |
 | **D16** | That the artifact guard survives a byte-level transformation. It compares bytes, so re-encoding, encryption or chunk reassembly defeats it. | — | **security-critical** | *(documented, docs/12-security.md §2.5)* |
 | **D17** | That a divergence has been confirmed. The two-agreeing-attempts policy is specified and not implemented. | — | **security-critical** | *(documented, docs/16-findings.md §5)* |
 | **D18** | That a `normalized` claim re-derived through an archived stabilizer set stays `normalized`. It degrades to `normalized_with_caveats`, so **a true claim reads as refuted**. | `wasm` feature | **security-critical** | *(documented, docs/16-findings.md §4b)* |
@@ -721,8 +725,10 @@ docs/09-attestations.md §2.1)*.
 4. **Read the `applied` list.** If you reject a particular normalization you can see it fired, with
    its risk tier and provenance, and discard the result.
 5. **Filter on `derivation.method`** if you want "no model touched this".
-6. **Read the egress tier.** A run at `--egress open` records `attestable: false`, and today no run
-   is attestable at full trust at any tier.
+6. **Read the egress tier, and read `attestable` as exactly what it says.** A run at
+   `--egress open` records `attestable: false` and carries no transcript. A run at `mirror-only` or
+   `deny-all` records `attestable: true` and a transcript you can fetch by hash and read — which is
+   a claim about egress being accounted for, and not a claim about anything else.
 7. **Distinguish a confirmed result from a single attempt, and a stale pass from no data.**
 8. **For npm, do not read `reproduced` as `attributed`.**
 
@@ -819,7 +825,9 @@ naming every claimed matrix row's owning property.
 - A new ecosystem gains a `Registry` — `nuget.org`, `crates.io`, `rubygems.org` are queued
   *(documented, docs/17-backlog.md B8)*. Each adds an archive format, a version algebra and a
   stabilizer profile; RubyGems adds nested archives, a new path into the parser.
-- A network transcript ships, which is the condition on `attestable` becoming true (D15).
+- Observability rises above Tier 1 (D15b), or the pin evidence reaches the host from inside the
+  island (D15c) — the first widens what a run can assert, the second closes a control that is blank
+  on the tier the README recommends.
 - The fleet is built: a queue, workers, an authenticated API and multi-tenancy each add a role.
 - `--egress`'s default changes, or `GitAndMirror` is implemented (it is currently refused).
 - The `wasm` feature becomes the default, or `docs/09-attestations.md` §7.1's fallback is taken.

@@ -93,11 +93,16 @@ impl BuildRunner for PodmanRunner {
                 ],
                 None => vec![EgressTier::DenyAll, EgressTier::Open],
             },
-            observability: ObservabilityTier::None,
+            // The mirror is what makes a transcript possible: it is the build's only route out
+            // under `MirrorOnly`, and it writes down every body it serves. Without an image to run
+            // it from there is no proxy and nothing to transcribe — `DenyAll` still accounts for
+            // egress completely, but by having no interface rather than by observing one, which is
+            // not what this tier names.
+            observability: match &self.mirror_image {
+                Some(_) => ObservabilityTier::Network,
+                None => ObservabilityTier::None,
+            },
             max_concurrency: self.max_concurrency,
-            // Local, unproxied, with no network transcript. Good enough to build and compare, not
-            // good enough to sign at full trust.
-            attestable: false,
         }
     }
 
@@ -527,7 +532,10 @@ impl BuildHandle for PodmanBuild {
                 exit = code,
                 "image build failed"
             );
-            return Ok(self.outcome(code, None, timings, Some(phase), log));
+            // No mirror read: under `MirrorOnly` this failure is in the image build, whose
+            // phases have no network at all, so there is nothing the mirror could have served and
+            // nothing to go and fetch from a container we are tearing down.
+            return Ok(self.outcome(code, None, timings, Some(phase), log, None));
         }
         tracing::info!(
             run_id = %self.opts.run_id,
@@ -600,16 +608,20 @@ impl BuildHandle for PodmanBuild {
             ),
         }
 
-        let mut guard_trips = Vec::new();
+        let mut seen = None;
         if let Some(i) = island {
             // The island is destroyed either way, and the read happens first: a failure to read the
             // guard must not leave a network behind, and must not be swallowed.
-            let read = i.guard_trips().await;
+            let read = i.observations().await;
             i.destroy().await;
-            guard_trips = read?;
+            seen = Some(read?);
         }
 
-        let mut outcome = self.outcome(code, artifact, timings, failed_in, log);
+        let (guard_trips, from_mirror) = match seen {
+            Some(s) => (s.trips, Some(s.transcript)),
+            None => (Vec::new(), None),
+        };
+        let mut outcome = self.outcome(code, artifact, timings, failed_in, log, from_mirror);
         outcome.guard_trips = guard_trips;
         Ok(outcome)
     }
@@ -664,6 +676,23 @@ impl PodmanBuild {
         a
     }
 
+    /// The complete account of what crossed into this build, or `None` when there is none.
+    ///
+    /// One function, so the rule exists once. Written per-call-site it would be two rules that had
+    /// to agree with nothing asserting they did, which is the bug this codebase keeps finding.
+    ///
+    /// `DenyAll` needs no mirror to be complete: `--network none` on both the image build and the
+    /// run means the build has no interface, so "nothing crossed" is enforced by the kernel rather
+    /// than observed by a proxy. `MirrorOnly` is complete exactly when the mirror's log was read —
+    /// a read that fails is an error out of `wait`, not an empty list here. `Open` is never
+    /// complete, which is the entire content of the tier.
+    fn transcript(
+        &self,
+        from_mirror: Option<Vec<trigon_mirror::Exchange>>,
+    ) -> Option<Vec<trigon_mirror::Exchange>> {
+        complete_account(self.plan.egress, from_mirror)
+    }
+
     fn outcome(
         &self,
         exit_code: i32,
@@ -671,7 +700,9 @@ impl PodmanBuild {
         timings: Vec<(Phase, Option<Duration>)>,
         failed_in: Option<Phase>,
         log_tail: String,
+        from_mirror: Option<Vec<trigon_mirror::Exchange>>,
     ) -> BuildOutcome {
+        let transcript = self.transcript(from_mirror);
         BuildOutcome {
             signature: self.named.lock().ok().and_then(|n| n.clone()),
             exit_code,
@@ -680,11 +711,12 @@ impl PodmanBuild {
             failed_in,
             egress: self.plan.egress,
             isolation: IsolationClass::UserNs,
-            // Still not full trust even under MirrorOnly: the egress boundary holds, but there is
-            // no network transcript, so we cannot say what the build fetched from the mirror.
-            attestable: false,
+            // Derived, never asserted. The claim is exactly "we can say what crossed into this
+            // build", which is true when a complete account exists and false otherwise.
+            attestable: transcript.is_some(),
             log_tail,
             guard_trips: Vec::new(),
+            transcript,
         }
     }
 }
@@ -892,8 +924,66 @@ fn prune_images(binary: &str, min_age: std::time::Duration) {
     }
 }
 
+/// See [`PodmanBuild::transcript`]. A free function so the one rule that decides whether a run is
+/// attestable can be tested without a container runtime — it is the last thing that should only be
+/// covered by a test that skips when podman is missing.
+fn complete_account(
+    egress: EgressTier,
+    from_mirror: Option<Vec<trigon_mirror::Exchange>>,
+) -> Option<Vec<trigon_mirror::Exchange>> {
+    match egress {
+        EgressTier::DenyAll => Some(from_mirror.unwrap_or_default()),
+        EgressTier::MirrorOnly => from_mirror,
+        EgressTier::Open | EgressTier::GitAndMirror => None,
+    }
+}
+
 fn tempdir(run_id: &str) -> Result<PathBuf, SandboxError> {
     let d = std::env::temp_dir().join(format!("trigon-ctx-{run_id}"));
     std::fs::create_dir_all(&d)?;
     Ok(d)
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    fn one() -> Vec<trigon_mirror::Exchange> {
+        vec![trigon_mirror::Exchange {
+            route: "artifact".into(),
+            url: "https://registry.npmjs.org/a/-/a-1.0.0.tgz".into(),
+            sha256: "aa".repeat(32),
+            bytes: 10,
+            checked: trigon_mirror::Checked::Opened,
+        }]
+    }
+
+    #[test]
+    fn deny_all_accounts_for_egress_without_a_proxy() {
+        // `--network none` on both the image build and the run: the build has no interface, so
+        // "nothing crossed" is enforced by the kernel rather than observed. An account, and an
+        // empty one — which is a claim, not an absence.
+        let account = complete_account(EgressTier::DenyAll, None);
+        assert_eq!(account.as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn mirror_only_is_accounted_for_only_when_the_mirror_was_read() {
+        assert_eq!(
+            complete_account(EgressTier::MirrorOnly, Some(one())),
+            Some(one())
+        );
+        // Not `Some(vec![])`. A mirror we failed to read and a mirror that served nothing are
+        // different answers, and turning the first into the second is how "we never looked"
+        // becomes "we looked and it was clean".
+        assert_eq!(complete_account(EgressTier::MirrorOnly, None), None);
+    }
+
+    #[test]
+    fn open_egress_is_never_accounted_for() {
+        // The tier's entire content is that there is no boundary, so there is nothing to account
+        // for and nothing that could produce a complete account of it. Even handed a transcript.
+        assert_eq!(complete_account(EgressTier::Open, None), None);
+        assert_eq!(complete_account(EgressTier::Open, Some(one())), None);
+    }
 }

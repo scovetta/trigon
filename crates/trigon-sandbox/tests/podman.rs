@@ -109,9 +109,14 @@ async fn a_build_runs_and_its_artifact_is_collected() {
     );
 
     assert_eq!(outcome.egress, EgressTier::DenyAll);
+    // `deny-all` accounts for egress completely without a proxy: `--network none` on both the image
+    // build and the run means the build has no interface, so "nothing crossed" is enforced by the
+    // kernel rather than observed. An *empty* account, not an absent one — flattening the two is
+    // how "we never looked" comes to read as "we looked and it was clean".
+    assert_eq!(outcome.transcript.as_deref(), Some(&[][..]));
     assert!(
-        !outcome.attestable,
-        "a local unproxied run is not full-trust"
+        outcome.attestable,
+        "a run that reached nothing can say so, and that is the whole claim"
     );
     assert!(outcome.failed_in.is_none());
 
@@ -280,9 +285,85 @@ async fn mirror_only_egress_blocks_everything_but_the_mirror() {
         outcome.log_tail
     );
     assert_eq!(outcome.egress, EgressTier::MirrorOnly);
-    // The boundary holds, and it is still not enough to sign: with no network transcript we cannot
-    // say what the build fetched from the mirror itself.
-    assert!(!outcome.attestable);
+    // The boundary holds *and* the run can now say what went through it. The mirror hashed every
+    // body it served all along — that is how the artifact guard works — and threw all of it away
+    // unless the hash matched; the transcript is those discarded observations, read back out of the
+    // container log the same way a guard trip is.
+    let transcript = outcome
+        .transcript
+        .as_ref()
+        .expect("mirror-only accounts for egress completely");
+    assert!(
+        outcome.attestable,
+        "a boundary that holds and is observed is exactly what `attestable` means"
+    );
+    // The probes are refused rather than served, so nothing should be listed. What is under test is
+    // that the list exists and is the complete account: an empty transcript here says the mirror
+    // served nothing, which is a claim, and it is checkable against the probe output above.
+    assert!(
+        transcript
+            .iter()
+            .all(|e| ["index", "artifact", "toolchain", "passthrough"].contains(&e.route.as_str())),
+        "every entry names one of the three routes: {transcript:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_mirror_only_build_transcribes_what_it_fetched() {
+    let _store = store().await;
+    let r = PodmanRunner::new(workdir()).with_mirror_image(Some(MIRROR_IMAGE.into()));
+    if !usable(&r).await || !mirror_image_available() {
+        return;
+    }
+
+    // The test above proves the boundary holds. This one proves we can say what went through it,
+    // which is the other half and the one that was missing: an enforced tier whose traffic nobody
+    // records answers "did the build fetch something it should not have?" with a shrug.
+    //
+    // The toolchain route, because it needs no registry pin and names an exact file — so the digest
+    // in the transcript is checkable against the same URL fetched any other way.
+    let url = "http://mirror:8129/-toolchain/nodejs.org/dist/v20.11.0/SHASUMS256.txt";
+    let plan = BuildPlan::Oci(OciPlan {
+        base_image: ALPINE.into(),
+        system_deps: BTreeSet::new(),
+        source: "true".into(),
+        // At run time, not image-build time: the image build has no network at any enforced tier,
+        // and the island is where the mirror is reachable.
+        deps: "true".into(),
+        build: format!("wget -q -O /tmp/sums {url} && echo fetched-ok"),
+        output_path: ".".into(),
+        egress: EgressTier::MirrorOnly,
+        privileged: false,
+        extra_hosts: [("mirror".to_string(), "mirror".to_string())]
+            .into_iter()
+            .collect(),
+        source_tree: None,
+    });
+
+    let h = r.start(&plan, &opts("transcribed")).await.expect("starts");
+    let outcome = h.wait().await.expect("completes");
+    if !outcome.log_tail.contains("fetched-ok") {
+        // Upstream is not ours to depend on. A skip that says why beats a red suite that means
+        // nothing, and the assertion below would otherwise pass vacuously on an empty transcript.
+        eprintln!(
+            "skipped: nodejs.org was not reachable through the mirror:\n{}",
+            outcome.log_tail
+        );
+        return;
+    }
+
+    let transcript = outcome.transcript.expect("mirror-only records one");
+    let fetched = transcript
+        .iter()
+        .find(|e| e.url.contains("SHASUMS256.txt"))
+        .unwrap_or_else(|| panic!("the fetch is not in the transcript: {transcript:?}"));
+    assert_eq!(
+        fetched.route, "toolchain",
+        "the route is a claim of its own: a toolchain is the one thing a build fetches that then runs"
+    );
+    assert_eq!(fetched.sha256.len(), 64, "{fetched:?}");
+    assert!(fetched.bytes > 0, "{fetched:?}");
+    assert!(outcome.attestable);
 }
 
 #[tokio::test]

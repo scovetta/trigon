@@ -26,7 +26,7 @@ mod blobs;
 mod record;
 
 pub use blobs::Blobs;
-pub use record::{ArtifactRef, Environment, PinEvidence, RunRecord, RunState};
+pub use record::{ArtifactRef, Costs, Environment, PinEvidence, RunRecord, RunState, Tokens};
 
 use std::path::Path;
 use std::sync::Arc;

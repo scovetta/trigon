@@ -75,9 +75,13 @@ pub struct RunnerCaps {
     pub egress_modes: Vec<EgressTier>,
     pub observability: ObservabilityTier,
     pub max_concurrency: usize,
-    /// Whether an attestation from this runner may claim full trust.
-    pub attestable: bool,
 }
+
+// There is deliberately no `attestable` here. It used to sit alongside these, and its only two
+// readers built a *fresh, mirror-less* runner to ask — so a run that had been done by a
+// mirror-equipped runner was recorded with the mirror-less one's answer. Whether a run may be
+// attested is a fact about that run, not a property advertised in advance, and it lives on
+// [`BuildOutcome`] where it is computed from what actually happened.
 
 /// Resource ceilings and the wall-clock kill.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,7 +260,13 @@ pub struct BuildOutcome {
     /// The tier actually enforced, which the attestation records.
     pub egress: EgressTier,
     pub isolation: IsolationClass,
-    /// Whether this run may be attested at full trust.
+    /// Whether this run can account for everything that crossed into the build.
+    ///
+    /// Exactly [`BuildOutcome::transcript`]`.is_some()`, and nothing more: it says the egress
+    /// boundary was enforced *and* we can say what came through it. It is not a statement that the
+    /// sandbox class, the base image or the strategy are good enough to sign — those are separate
+    /// claims made elsewhere, and reading this as "full trust" is how a control starts reporting
+    /// success it has not earned.
     pub attestable: bool,
     /// Bounded tail of the combined log, for an agent and for triage.
     pub log_tail: String,
@@ -271,6 +281,17 @@ pub struct BuildOutcome {
     /// What the artifact guard caught. Non-empty means the run is `Void`: the artifact under test
     /// reached the build over the network, so whatever it produced says nothing about the source.
     pub guard_trips: Vec<String>,
+    /// Everything that crossed the network into this build — Tier 1 observability of
+    /// `docs/08-execution.md` §7, and what makes `attestable` a computed value rather than the
+    /// constant `false` it used to be.
+    ///
+    /// **The complete account, or none at all.** `Some` means every byte that crossed into the
+    /// build is listed here; `Some(vec![])` means nothing crossed, which under `DenyAll` is what
+    /// having no interface means and under `MirrorOnly` is a mirror that served nothing. `None`
+    /// means no complete account exists — an `Open` run, or a read that failed. Nothing downstream
+    /// may turn a `None` into an empty list: "we could not look" and "nothing came through" are
+    /// the two answers this type exists to keep apart.
+    pub transcript: Option<Vec<trigon_mirror::Exchange>>,
 }
 
 impl BuildOutcome {

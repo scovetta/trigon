@@ -11,11 +11,11 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:c730bd685454b45592cd40e8d0a00c2b1f92105de4437b55a7a735f206cf685c
+prose_version: docs/threat-model.md@sha256:301a0e4c74b5bdc7129510c7f1deb172f7dfdc01fd77f6791b29c113e3e31bb4
 model_status: unratified-draft
 triage_policy: strict
 confidence:
-  documented: 193
+  documented: 195
   maintainer: 0
   inferred: 5
   assumption: 3
@@ -2262,13 +2262,15 @@ properties_disclaimed:
 - id: D15
   components:
   - multiple
-  conditions: all tiers, today
+  conditions: all tiers
   tier: security-critical
   false_friend: false
-  statement: That any run is attestable at full trust. There is no network transcript at any tier
+  statement: 'That attestable means full trust. It means one thing: the egress boundary was enforced and
+    the run can say what crossed it. It is not a claim about the sandbox class, the base image or the
+    strategy'
   provenance:
     kind: documented
-    source: docs/16-findings.md §3.13
+    source: docs/08-execution.md §7.3
 - id: D16
   components:
   - multiple
@@ -2529,8 +2531,10 @@ downstream_responsibilities:
     source: docs/threat-model.md §1.13
 - id: dr-6
   component: multiple
-  statement: 'Read the egress tier. A run at --egress open records attestable: false, and today no run
-    is attestable at full trust at any tier'
+  statement: 'Read the egress tier, and read attestable as exactly what it says. A run at --egress open
+    records attestable: false and carries no transcript. A run at mirror-only or deny-all records attestable:
+    true and a transcript you can fetch by hash and read — which is a claim about egress being accounted
+    for'
   enforces: []
   provenance:
     kind: documented

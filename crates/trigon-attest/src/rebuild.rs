@@ -26,10 +26,18 @@ pub struct RunFacts<'a> {
     pub base_image: &'a str,
     pub egress: &'a str,
     pub isolation: &'a str,
-    /// False where the runner enforced no mirror and recorded no transcript. Stated in the
-    /// statement rather than left out of it: a consumer who cannot tell an enforced run from an
-    /// unenforced one will read every run as enforced.
+    /// Whether this run can account for everything that crossed into the build — true exactly
+    /// when `network_transcript` is present. Stated in the statement rather than left out of it: a
+    /// consumer who cannot tell an accounted-for run from an unaccounted one will read every run
+    /// as accounted for.
     pub attestable: bool,
+    /// The network transcript: every response that crossed into the build, one JSON object per
+    /// line, named by hash rather than embedded.
+    ///
+    /// What it buys is that the tier claimed below stops being an assertion — a reader who wants to
+    /// know what the build downloaded fetches these bytes, checks them against this hash, and reads
+    /// them, rather than taking our word that we looked.
+    pub network_transcript: Option<TranscriptRef<'a>>,
     pub registry_moment: Option<&'a str>,
     /// Evidence the pin above bound anything: `(index_requests, versions_withheld)`.
     ///
@@ -52,6 +60,21 @@ pub struct RunFacts<'a> {
     pub guarded_members: Option<u64>,
 }
 
+/// A network transcript, summarised beside its hash.
+///
+/// The three travel together so they cannot come apart, and every one of them is **derived from the
+/// transcript bytes by the attestor**, never copied out of the run record. The attestor exists
+/// precisely because the record was written by the process that ran the build: a count it was told
+/// and a count it can check are different kinds of claim, and only the second belongs in something
+/// signed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranscriptRef<'a> {
+    /// Hex SHA-256 of the transcript blob.
+    pub digest: &'a str,
+    pub requests: u64,
+    pub bytes: u64,
+}
+
 impl Statement {
     /// How the rebuilt artifact came to exist.
     ///
@@ -69,6 +92,9 @@ impl Statement {
         }
         if let Some(d) = f.instructions {
             byproducts.push(json!({ "name": "instructions", "digest": { "sha256": d } }));
+        }
+        if let Some(t) = f.network_transcript {
+            byproducts.push(json!({ "name": "network.jsonl", "digest": { "sha256": t.digest } }));
         }
 
         let mut predicate = json!({
@@ -142,7 +168,16 @@ impl Statement {
         let predicate = json!({
             // Tier 1 is the network transcript, which is what the mirror gives us and about eighty
             // per cent of the forensic value. Higher tiers are not claimed because they are not run.
-            "tier": if f.attestable { 1 } else { 0 },
+            //
+            // Derived from the transcript rather than from `attestable`, so the number and the
+            // thing it describes cannot come apart: claiming tier 1 beside a null transcript is
+            // exactly the shape of statement this project exists to refuse.
+            "tier": if f.network_transcript.is_some() { 1 } else { 0 },
+            "networkTranscript": f.network_transcript.map(|t| json!({
+                "sha256": t.digest,
+                "requests": t.requests,
+                "bytes": t.bytes,
+            })),
             "egressTier": f.egress,
             "isolation": f.isolation,
             "artifactHashCheck": {
@@ -188,6 +223,11 @@ mod tests {
             egress: "mirror-only",
             isolation: "UserNs",
             attestable: true,
+            network_transcript: Some(TranscriptRef {
+                digest: "cc".repeat(32).leak(),
+                requests: 214,
+                bytes: 18_244_912,
+            }),
             registry_moment: Some("2018-04-09T01:10:45Z"),
             pin_observed: Some((153, 903)),
             strategy_digest: Some("be7ffd47303e29ca"),
@@ -313,6 +353,7 @@ mod tests {
             &d,
             &RunFacts {
                 attestable: false,
+                network_transcript: None,
                 ..facts()
             },
         );
@@ -320,5 +361,58 @@ mod tests {
             s.predicate["tier"], 0,
             "a tier we did not achieve is not claimed"
         );
+        assert!(s.predicate["networkTranscript"].is_null());
+    }
+
+    #[test]
+    fn the_bytes_a_statement_is_about_are_named_in_it() {
+        // Three byproduct digests were passed as `None` by the only caller that builds these,
+        // because `RunFacts` borrows and `to_hex` allocates and nothing owned the strings. The
+        // effect was a signed statement that named neither the build log, nor the scripts that
+        // actually ran, nor what the build fetched — all three of which were sitting in the record.
+        // A statement that omits the bytes it is about is one nobody can check.
+        let d = Digest::from_bytes([2; 32]);
+        let s = Statement::rebuild("a.tgz", &d, &facts());
+        let names: Vec<&str> = s.predicate["runDetails"]["byproducts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"build.log"), "{names:?}");
+        assert!(names.contains(&"network.jsonl"), "{names:?}");
+    }
+
+    #[test]
+    fn the_tier_and_the_transcript_cannot_come_apart() {
+        // The tier used to be read off `attestable`, which is a second field that had to agree with
+        // this one and nothing asserted that it did. A statement claiming tier 1 beside a null
+        // transcript is the exact shape of claim this project exists to refuse, so the number is
+        // derived from the thing it describes.
+        let d = Digest::from_bytes([5; 32]);
+        let lying = RunFacts {
+            attestable: true,
+            network_transcript: None,
+            ..facts()
+        };
+        let s = Statement::build_observation("a.tgz", &d, &lying);
+        assert_eq!(
+            s.predicate["tier"], 0,
+            "tier 1 was claimed with nothing to back it"
+        );
+
+        // And the other way: a transcript is named, by hash, so a reader fetches those bytes and
+        // reads them rather than taking our word that we looked.
+        let s = Statement::build_observation("a.tgz", &d, &facts());
+        assert_eq!(s.predicate["tier"], 1);
+        assert_eq!(
+            s.predicate["networkTranscript"]["sha256"],
+            "cc".repeat(32).as_str()
+        );
+        // The count and the byte total beside the hash, both derived from the bytes the hash is
+        // over — so a reader gets the shape of the answer without a fetch, and can check it with
+        // one.
+        assert_eq!(s.predicate["networkTranscript"]["requests"], 214);
+        assert_eq!(s.predicate["networkTranscript"]["bytes"], 18_244_912);
     }
 }

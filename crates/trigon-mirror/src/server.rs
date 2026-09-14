@@ -340,7 +340,7 @@ async fn npm_request(
             .stats
             .passthrough_requests
             .fetch_add(1, Ordering::Relaxed);
-        return proxy(mirror, &url, filter).await;
+        return proxy(mirror, &url, filter, "artifact").await;
     }
 
     let resp = fetch(mirror, &url, filter, &[]).await?;
@@ -360,7 +360,7 @@ async fn npm_request(
         "filtered a packument"
     );
 
-    Ok(json_response(&doc, "application/json"))
+    Ok(json_response(&url, &doc, "application/json"))
 }
 
 /// PyPI: `/simple/{project}/` is the index, everything else passes through.
@@ -380,7 +380,10 @@ async fn pypi_request(
             .stats
             .passthrough_requests
             .fetch_add(1, Ordering::Relaxed);
-        return proxy(mirror, &url, filter).await;
+        // `passthrough`, not `artifact`: anything on the index host that is not a filtered
+        // simple page comes through here, and calling all of it a dependency download would put a
+        // wrong label on a signed record to avoid adding a word.
+        return proxy(mirror, &url, filter, "passthrough").await;
     }
 
     // Always ask upstream for JSON, whatever the client wanted. The HTML simple API carries no
@@ -409,10 +412,15 @@ async fn pypi_request(
     );
 
     if accept.contains("json") {
-        return Ok(json_response(&doc, "application/vnd.pypi.simple.v1+json"));
+        return Ok(json_response(
+            &url,
+            &doc,
+            "application/vnd.pypi.simple.v1+json",
+        ));
     }
     let project = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
     let html = crate::pypi::render_html(&doc, project);
+    transcribe_generated(&url, html.as_bytes());
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/vnd.pypi.simple.v1+html")],
@@ -472,7 +480,13 @@ async fn artifact(mirror: &Mirror, rest: &str, query: &str) -> Result<Response, 
         .stats
         .passthrough_requests
         .fetch_add(1, Ordering::Relaxed);
-    proxy(mirror, &format!("https://{target}{query}"), &filter).await
+    proxy(
+        mirror,
+        &format!("https://{target}{query}"),
+        &filter,
+        "artifact",
+    )
+    .await
 }
 
 /// Proxy a toolchain download, from an allowlisted host only.
@@ -497,7 +511,13 @@ async fn toolchain(mirror: &Mirror, rest: &str, query: &str) -> Result<Response,
         platform: Platform::Npm,
         moment: String::new(),
     };
-    proxy(mirror, &format!("https://{host}/{path}{query}"), &filter).await
+    proxy(
+        mirror,
+        &format!("https://{host}/{path}{query}"),
+        &filter,
+        "toolchain",
+    )
+    .await
 }
 
 /// The prefix a rewritten artifact URL is built from.
@@ -565,7 +585,12 @@ fn rewrite_pypi_files(doc: &mut serde_json::Value, host: &str) {
 }
 
 /// Stream an upstream response through, headers and all.
-async fn proxy(mirror: &Mirror, url: &str, filter: &Filter) -> Result<Response, MirrorError> {
+async fn proxy(
+    mirror: &Mirror,
+    url: &str,
+    filter: &Filter,
+    route: &'static str,
+) -> Result<Response, MirrorError> {
     // The cheapest control there is: at mirror-only egress this is the only reachable host, so a
     // build that asks for its own published artifact gets nothing. Refused before the request is
     // made, so the bytes never leave the registry.
@@ -616,7 +641,12 @@ async fn proxy(mirror: &Mirror, url: &str, filter: &Filter) -> Result<Response, 
 
     // Streamed, not buffered: an artifact can be gigabytes and the mirror serves a whole fleet.
     // The guard hashes as the bytes go past rather than holding them.
-    let stream = guarded_stream(resp.bytes_stream(), mirror.guard.clone(), url.to_string());
+    let stream = guarded_stream(
+        resp.bytes_stream(),
+        mirror.guard.clone(),
+        url.to_string(),
+        route,
+    );
     let mut out = (
         StatusCode::OK,
         [(header::CONTENT_TYPE, content_type)],
@@ -631,16 +661,23 @@ async fn proxy(mirror: &Mirror, url: &str, filter: &Filter) -> Result<Response, 
     Ok(out)
 }
 
-/// Pass a body through, hashing it, and check it once it has finished.
+/// Pass a body through, hashing it, checking it, and transcribing it.
 ///
 /// The body is also collected when it is small enough to decompose, because the case worth
 /// catching is not the artifact arriving under its own name but one of its members arriving inside
 /// something unrelated. Above that size only the whole-body hash applies, which is stated in
 /// `guard.rs` rather than left as a silent limit.
+///
+/// **Hashing is unconditional.** It used to run only when the guard was armed, which was right
+/// while the hash existed solely to feed the guard. It is also the transcript's digest, and a run
+/// with no guard manifest still downloads things — gating it would have given every unarmed run a
+/// transcript full of the digest of nothing, which is worse than no transcript. What stays
+/// conditional is *collecting* the body, which is the expensive half.
 fn guarded_stream<S>(
     inner: S,
     guard: Arc<crate::guard::Guard>,
     url: String,
+    route: &'static str,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>>
 where
     S: futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
@@ -653,57 +690,85 @@ where
         /// Set when the body was dropped for being too large, as opposed to never collected.
         /// `observe` cannot tell those apart from a `None`, and they mean opposite things.
         oversized: bool,
+        bytes: u64,
         guard: Arc<crate::guard::Guard>,
         url: String,
+        route: &'static str,
     }
-    let armed = guard.is_armed();
-    // Hashing always; keeping the bytes only when something will look at them.
+    // Keeping the bytes only when something will look at them.
     let keep_body = guard.wants_body();
     let state = State {
         inner,
         hasher: sha2::Sha256::new(),
         body: keep_body.then(Vec::new),
         oversized: false,
+        bytes: 0,
         guard,
         url,
+        route,
     };
     futures::stream::unfold(Some(state), move |s| async move {
         let mut s = s?;
         match futures::StreamExt::next(&mut s.inner).await {
             Some(Ok(chunk)) => {
-                if armed {
-                    s.hasher.update(&chunk);
-                    // Stop collecting once it is too big to decompose; the hash continues.
-                    if let Some(b) = &mut s.body {
-                        if b.len() + chunk.len() <= crate::guard::MAX_DECOMPOSE_BYTES {
-                            b.extend_from_slice(&chunk);
-                        } else {
-                            s.body = None;
-                            s.oversized = true;
-                        }
+                s.hasher.update(&chunk);
+                s.bytes += chunk.len() as u64;
+                // Stop collecting once it is too big to decompose; the hash continues.
+                if let Some(b) = &mut s.body {
+                    if b.len() + chunk.len() <= crate::guard::MAX_DECOMPOSE_BYTES {
+                        b.extend_from_slice(&chunk);
+                    } else {
+                        s.body = None;
+                        s.oversized = true;
                     }
                 }
                 Some((Ok(chunk), Some(s)))
             }
-            // An error mid-stream means we never saw the whole body, so there is nothing to check.
+            // An error mid-stream means we never saw the whole body, so there is nothing to check
+            // and nothing honest to transcribe: a partial body recorded under a whole body's URL
+            // and digest is the one line a reader must never be handed.
             Some(Err(e)) => Some((Err(e), None)),
             None => {
-                if armed {
-                    let digest = trigon_core::Digest::from_bytes(s.hasher.finalize().into());
-                    if s.oversized {
-                        s.guard.observe_oversized(&s.url, digest);
-                    } else {
-                        s.guard.observe(&s.url, digest, s.body.as_deref());
-                    }
-                }
+                let digest = trigon_core::Digest::from_bytes(s.hasher.finalize().into());
+                let checked = if s.oversized {
+                    s.guard.observe_oversized(&s.url, digest)
+                } else {
+                    s.guard.observe(&s.url, digest, s.body.as_deref())
+                };
+                crate::Exchange::new(s.route, &s.url, digest.to_hex(), s.bytes, checked).emit();
                 None
             }
         }
     })
 }
 
-fn json_response(doc: &serde_json::Value, content_type: &'static str) -> Response {
+/// Transcribe a body the mirror composed itself.
+///
+/// A filtered index is not proxied — it is rebuilt here from an upstream document with versions
+/// removed — so the guard never sees it and [`guarded_stream`] never runs over it. It is still the
+/// most consequential thing the build received, because every version it resolved came out of it,
+/// so it belongs in the transcript with `Checked::Generated` saying plainly that no guard applied.
+fn transcribe_generated(url: &str, body: &[u8]) {
+    use sha2::Digest as _;
+    let digest = trigon_core::Digest::from_bytes(sha2::Sha256::digest(body).into());
+    crate::Exchange::new(
+        "index",
+        url,
+        digest.to_hex(),
+        body.len() as u64,
+        crate::Checked::Generated,
+    )
+    .emit();
+}
+
+/// Serve a document the mirror composed, and transcribe exactly the bytes served.
+///
+/// The serialization happens once and both the response and the digest come out of it. Hashing a
+/// second serialization would be hashing something the build never saw, which is the same class of
+/// mistake as recording a partial body.
+fn json_response(url: &str, doc: &serde_json::Value, content_type: &'static str) -> Response {
     let body = serde_json::to_vec(doc).unwrap_or_default();
+    transcribe_generated(url, &body);
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     (StatusCode::OK, headers, Body::from(body)).into_response()

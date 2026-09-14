@@ -224,7 +224,8 @@ mirror, and the git cache.
 - [ ] Per-ecosystem reproduction rates measured and published, including the honest ones.
 - [ ] **RubyGems verification exists**, the first independent rebuild verification infrastructure
       that ecosystem has had.
-- [ ] The network transcript and the artifact-hash guard are live on every run.
+- [x] The network transcript and the artifact-hash guard are live on every run. Tier 1 only
+      ([`08`](08-execution.md) §7.2); the guard has been live since M2.
 - [ ] Divergence publication is live, with all five safeguards from
       [`09-attestations.md`](09-attestations.md) §5 enforced, including the false-mismatch
       kill-switch.

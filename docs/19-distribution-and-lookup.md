@@ -130,9 +130,10 @@ Every record must carry, and every client must be able to render:
    wrong, they are **no longer re-derivable by a current binary**. A record without the set digest
    cannot be checked by anyone, ever.
 3. **When**, and **which Trigon version**.
-4. **The egress tier and whether the run was `attestable`.** Today no run is attestable at full trust
-   at any tier, because there is no network transcript (`docs/17-backlog.md` B7). A record that does
-   not say so is overclaiming.
+4. **The egress tier and whether the run was `attestable`.** `attestable: true` means one thing —
+   the egress boundary was enforced and the run can say what crossed it, by naming a network
+   transcript a consumer can fetch and check (`docs/08-execution.md` §7.3). It is not a claim about
+   the sandbox class or the strategy, and a record that lets it read as one is overclaiming.
 5. **`derivation.method`** — whether a model was involved — so a consumer can filter it out
    themselves, which `docs/09-attestations.md` §2.1 makes their job rather than ours.
 6. **The falsifying command**, verbatim: the exact `trigon verify-attestation --rerun-comparison`

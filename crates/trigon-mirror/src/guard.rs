@@ -277,6 +277,147 @@ pub struct Guard {
 /// this is a fixed prefix.
 pub const TRIP_MARKER: &str = "GUARD-TRIPPED";
 
+/// The prefix on every line of the network transcript.
+///
+/// Tier 1 of `docs/08-execution.md` §7, and the only observability tier v1 ships. The mirror
+/// already computed all of this and threw it away: it hashes every body as it streams past, which
+/// is how the guard works, and then kept the hash only when it matched. A transcript is those
+/// discarded observations written down.
+///
+/// **Stdout, not `tracing`.** Trips go through `tracing::error!` and survive the default `warn`
+/// filter; an `info!` line would not, and the mirror container is started with no `-v` and no
+/// `RUST_LOG`. A record that appears only when somebody set an environment variable is the
+/// "configuration that looks applied and isn't" bug wearing a different hat — and this one decides
+/// whether a run is attestable. Rust's stdout is line-buffered and `println!` holds the lock for
+/// the whole line, so lines stay whole across concurrent responses.
+///
+/// The escape is the container log, same as [`TRIP_MARKER`] and for the same reason: the mirror
+/// sits inside the island and the host has no route to it. One JSON object per line behind a fixed
+/// prefix, so a line the host cannot read is visibly a line it cannot read rather than a silently
+/// shorter transcript. Only the mirror writes to this log, so a build cannot forge a line into it
+/// the way it can into its own output.
+pub const EXCHANGE_MARKER: &str = "NET-EXCHANGE";
+
+/// One response body the mirror served into the build.
+///
+/// This is what answers "what did this build download?" — which `docs/08` §7 calls the question
+/// people actually ask, and the reason Tier 1 carries most of the forensic value by itself.
+///
+/// Only bodies that were actually served appear. A refused request is not a download: it is a
+/// counter on [`Observed`](crate::Observed), and a refusal the guard cared about is a trip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exchange {
+    /// Which route served it, because each is a different claim: an `index` response is the
+    /// registry pin working, an `artifact` is a dependency, a `toolchain` is the one thing a build
+    /// fetches that then *runs*, and a `passthrough` is something on an index host that no filter
+    /// applied to. A vaguer label would be a wrong label on a record we sign.
+    pub route: String,
+    pub url: String,
+    /// SHA-256 of the bytes as served, undecoded. The same digest the guard compared, so a reader
+    /// can check the guard's verdict rather than take it.
+    pub sha256: String,
+    pub bytes: u64,
+    /// How far the guard got with it. Without this, "opened and clean" and "never opened" read
+    /// identically, and they are the difference between a check and the appearance of one.
+    pub checked: Checked,
+}
+
+/// How far the artifact guard got with one body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Checked {
+    /// Opened: every member was hashed and compared against the manifest.
+    Opened,
+    /// The whole-body digest was compared and nothing more — the body was past
+    /// [`MAX_DECOMPOSE_BYTES`], was not an archive we parse, or the manifest carries no members.
+    /// The artifact arriving under its own name is still caught; a file of it hidden inside
+    /// something else is not.
+    Hashed,
+    /// The mirror composed this body itself — a filtered index — so there is nothing for the guard
+    /// to catch. Transcribed anyway, because it is what the build resolved against.
+    Generated,
+    /// No guard manifest was loaded, so nothing was compared against anything.
+    Unarmed,
+}
+
+impl Exchange {
+    /// One exchange, with anything credential-shaped taken out of the URL first.
+    ///
+    /// The URLs that reach here are the *upstream* ones — `https://registry.npmjs.org/…`, built
+    /// from an allowlisted host and a path — so there is nothing to redact today. This exists
+    /// because the mirror's own rewritten form carries the pinned moment as a password
+    /// (`http://npm:2018-04-09T01:10:45Z@timewarp/…`), one refactor could route that form through
+    /// here, and `docs/08-execution.md` §6 is explicit: the proxy sees plaintext and transcripts
+    /// are shown to users. Redacting at the one place an `Exchange` is built is cheaper than
+    /// finding out later which of its readers leaked it.
+    pub fn new(route: &str, url: &str, sha256: String, bytes: u64, checked: Checked) -> Self {
+        Exchange {
+            route: route.to_string(),
+            url: redact_userinfo(url),
+            sha256,
+            bytes,
+            checked,
+        }
+    }
+
+    /// The exact line [`emit`](Self::emit) writes.
+    ///
+    /// Split out from the writing so a test can round-trip through the real formatter rather than
+    /// through a second copy of it that has to agree with this one.
+    pub fn line(&self) -> String {
+        match serde_json::to_string(self) {
+            Ok(json) => format!("{EXCHANGE_MARKER} {json}"),
+            // Four strings and an integer do not fail to serialize, but a transcript that quietly
+            // loses a line is worse than one that says which line it lost.
+            Err(e) => format!("{EXCHANGE_MARKER} {{\"unserializable\":\"{e}\"}}"),
+        }
+    }
+
+    /// Write one transcript line. See [`EXCHANGE_MARKER`] for why this is `println!`.
+    pub fn emit(&self) {
+        println!("{}", self.line());
+    }
+
+    /// Read a transcript back out of a container log.
+    ///
+    /// A line carrying the marker but no readable object is an error rather than a skip. A short
+    /// transcript and a corrupted one look identical to a caller, and only one of them leaves the
+    /// run attestable.
+    pub fn parse_log(logs: &str) -> Result<Vec<Exchange>, String> {
+        Self::read(
+            logs.lines()
+                .filter_map(|l| l.split_once(EXCHANGE_MARKER).map(|(_, r)| r)),
+        )
+    }
+
+    /// Read a transcript back out of its **stored** form: one JSON object per line, no marker.
+    ///
+    /// The marker is the container log's escape mechanism and nothing else, so it is stripped
+    /// before a transcript is stored. A separate reader rather than one that tolerates both: a
+    /// reader that skips what it does not recognise would read a blob of the wrong format as an
+    /// empty transcript, and an empty transcript is a *claim* here — that the build fetched
+    /// nothing — rather than an absence.
+    pub fn parse_jsonl(blob: &str) -> Result<Vec<Exchange>, String> {
+        Self::read(blob.lines())
+    }
+
+    fn read<'a>(lines: impl Iterator<Item = &'a str>) -> Result<Vec<Exchange>, String> {
+        let mut out = Vec::new();
+        for line in lines {
+            let line = line.trim();
+            // A trailing newline is one empty line, and every writer produces one.
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Exchange>(line) {
+                Ok(e) => out.push(e),
+                Err(e) => return Err(format!("unreadable transcript line `{line}`: {e}")),
+            }
+        }
+        Ok(out)
+    }
+}
+
 impl Guard {
     pub fn new(manifest: GuardManifest) -> Self {
         Guard {
@@ -331,29 +472,42 @@ impl Guard {
     ///
     /// The whole-artifact hash still runs — that half never needed the bytes — and the member half
     /// is recorded as not having run rather than as having found nothing.
-    pub fn observe_oversized(&self, url: &str, body_digest: Digest) {
+    pub fn observe_oversized(&self, url: &str, body_digest: Digest) -> Checked {
         if let Ok(mut u) = self.undecomposed.lock() {
             u.push(url.to_string());
         }
-        self.observe(url, body_digest, None);
+        self.observe(url, body_digest, None)
     }
 
-    /// Check a response body that has finished streaming.
-    pub fn observe(&self, url: &str, body_digest: Digest, body: Option<&[u8]>) {
+    /// Check a response body that has finished streaming, and report how far the check got.
+    ///
+    /// The return value is what the transcript records, and it is returned from here rather than
+    /// inferred by the caller because every reason the member check stops early lives in this
+    /// function. A caller reconstructing it from a size limit would call a body `opened` that was
+    /// never an archive, or that arrived while the manifest carried no members — which is the
+    /// difference between a check that ran and one that only looks like it did.
+    pub fn observe(&self, url: &str, body_digest: Digest, body: Option<&[u8]>) -> Checked {
+        if !self.is_armed() {
+            return Checked::Unarmed;
+        }
         if self.manifest.artifact == Some(body_digest) {
             self.record(Trip {
                 url: url.to_string(),
                 matched: GuardMatch::WholeArtifact,
             });
-            return;
+            return Checked::Hashed;
         }
         // The interesting case: not the artifact under its own name, but one of its files arriving
         // inside something unrelated.
-        let Some(body) = body else { return };
+        let Some(body) = body else {
+            return Checked::Hashed;
+        };
         if self.manifest.members.is_empty() || body.len() > MAX_DECOMPOSE_BYTES {
-            return;
+            return Checked::Hashed;
         }
-        let Some(format) = sniff(body) else { return };
+        let Some(format) = sniff(body) else {
+            return Checked::Hashed;
+        };
         let mut notes = Vec::new();
         let Ok(parsed) = trigon_archive::parse(
             body.to_vec(),
@@ -361,7 +515,9 @@ impl Guard {
             &trigon_archive::Limits::default(),
             &mut notes,
         ) else {
-            return;
+            // It looked like an archive and would not open. The member check did not run, and
+            // saying it did would be the exact lie this return value exists to prevent.
+            return Checked::Hashed;
         };
         for e in &parsed.archive.entries {
             let Ok(bytes) = e.stabilized_bytes() else {
@@ -373,9 +529,10 @@ impl Guard {
                     url: url.to_string(),
                     matched: GuardMatch::Member { digest: d.to_hex() },
                 });
-                return;
+                return Checked::Opened;
             }
         }
+        Checked::Opened
     }
 
     pub fn trips(&self) -> Vec<Trip> {
@@ -392,6 +549,24 @@ impl Guard {
         if let Ok(mut t) = self.trips.lock() {
             t.push(trip);
         }
+    }
+}
+
+/// Replace `scheme://user:pass@host/…` with `scheme://host/…`.
+///
+/// Only the authority, and only up to the first `/` after `//`, so a `@` in a path or a query — npm
+/// scopes are full of them — is left alone.
+fn redact_userinfo(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("//") else {
+        return url.to_string();
+    };
+    let (authority, tail) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}//{host}{tail}"),
+        None => url.to_string(),
     }
 }
 

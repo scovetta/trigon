@@ -279,6 +279,68 @@ programs. Writing our own is a six-month project sitting at right angles to the 
 That is why a **failed** rebuild still produces something worth keeping, and it departs from the
 prior art's emphasis on successes.
 
+### 7.2 How Tier 1 is implemented
+
+Almost all of it already existed. The mirror hashes **every** body as it streams past, because that
+is how the artifact guard works — and then kept the hash only when it matched the run's guard
+manifest. Every clean observation, which is to say every ordinary download, was computed and dropped
+on the floor. The transcript is those discarded observations written down.
+
+One line per response body served, behind the fixed prefix `NET-EXCHANGE`:
+
+```json
+{"route":"artifact","url":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+ "sha256":"e1c6…","bytes":2361,"checked":"opened"}
+```
+
+- **`route`** is `index`, `artifact`, `toolchain` or `passthrough`, because each is a different
+  claim: an index response is the registry pin working, an artifact is a dependency, a toolchain is
+  the one thing a build fetches that then *runs*, and a passthrough is something on an index host
+  that no filter applied to.
+- **`sha256`** is over the bytes as served, undecoded — the same digest the guard compares. A reader
+  can therefore check the guard's verdict rather than take it.
+- **`checked`** says how far the guard got: `opened` (every member compared against the manifest),
+  `hashed` (whole-body digest only — too large to open, not an archive, or a manifest with no
+  members), `generated` (a body the mirror composed itself, so no guard applies), or `unarmed` (no
+  manifest on this run). Without this field, "opened and clean" and "never opened" read identically,
+  and they are the difference between a check and the appearance of one.
+
+**The channel out is the container log**, the same one guard trips use. The mirror sits inside the
+build's network island and the host has no route to it — that is the point of the island — so the
+host reads both streams with `podman logs` and filters on the marker. Two properties make this safe
+rather than merely convenient: only the mirror writes to that log, so the build cannot forge a line
+into it the way it can into its own output; and a marker line the host cannot parse is an **error**,
+not a skipped line, because a truncated transcript and a clean short one must not look alike.
+
+The lines are written to **stdout**, not through `tracing`. Trips go through `tracing::error!` and
+survive the default `warn` filter; an `info!` line would not, and the mirror container is started
+with no `-v` and no `RUST_LOG`. A record that appears only when somebody set an environment variable
+is the "configuration that looks applied and isn't" failure again — and this one decides whether a
+run is attestable.
+
+### 7.3 What "attestable" now means
+
+A run is attestable exactly when a **complete account** of what crossed into the build exists. Not
+"the tier we asked for", and not "the runner we have": it is derived from the transcript and nothing
+else, in one function with one match, so the tiers cannot come apart from the claim.
+
+| Tier | Account | Why |
+|---|---|---|
+| `deny-all` | complete, and empty | `--network none` on the image build *and* the run: the build has no interface, so "nothing crossed" is enforced by the kernel rather than observed |
+| `mirror-only` | complete, and listed | the mirror is the only route out, and it writes down every body it serves |
+| `open` | none | there is no boundary to account for, which is the entire content of the tier |
+
+**Present and empty is not the same as absent.** An empty transcript says the build's egress was
+completely accounted for and nothing came through — which at `deny-all` is what having no network
+interface *means*. An absent one says no account exists. The store keeps them apart by writing an
+empty blob in the first case and no blob in the second, and `attestable` is derived from which of
+the two it is. Collapsing them would turn "we never looked" into "we looked and it was clean", which
+is the reading the whole design exists to make impossible.
+
+What it does **not** assert: that the sandbox class, the base image or the strategy are good enough
+to sign. Those are separate claims made elsewhere. Reading this one as "full trust" is how a control
+starts reporting success it has not earned.
+
 ## 8. Sandbox hardening
 
 We treat the build container as hostile, since it executes the package's own build scripts by

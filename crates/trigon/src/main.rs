@@ -884,7 +884,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             source.as_deref(),
             None,
             None,
-        ),
+        )
+        .map(|_| ()),
     }
 }
 
@@ -1034,6 +1035,37 @@ mod build {
         })
     }
 
+    /// What a build left behind that only the runner could know.
+    ///
+    /// Returned rather than printed. The two observability facts about a run — whether its egress
+    /// is completely accounted for, and what crossed — were computed inside the sandbox and dropped
+    /// on the floor, so the record was filled in from a *freshly constructed, mirror-less* runner's
+    /// advertised capabilities. That is a different object than the one that ran, and it answered a
+    /// different question.
+    pub struct Built {
+        /// Exactly `transcript.is_some()`; see [`trigon_sandbox::BuildOutcome::attestable`].
+        pub attestable: bool,
+        /// The complete account of what crossed into the build, or `None` when none exists. An
+        /// empty `Some` means nothing crossed and must never be flattened into `None`.
+        pub transcript: Option<Vec<trigon_mirror::Exchange>>,
+        /// Where the runner collected the rebuilt artifact, when it collected exactly one.
+        ///
+        /// The runner knows this — it mounted the directory the build wrote into — and the caller
+        /// was rediscovering it by walking the *parent* for the newest file. That guess had to
+        /// keep agreeing with every file this process writes beside the artifact, and it stopped:
+        /// adding `network.jsonl` there was enough to make a run judge its own network transcript
+        /// as the thing it had just built.
+        pub artifact: Option<std::path::PathBuf>,
+    }
+
+    /// Files this process writes into a run's output directory.
+    ///
+    /// One list, declared where they are written, because [`crate::rebuild::newest_file`] walks
+    /// that directory looking for the rebuilt artifact and has no other way to tell our bytes from
+    /// the build's. It is a backstop and not the mechanism — `Built::artifact` is — but a backstop
+    /// spread across two files is the shape of bug this whole project keeps finding.
+    pub const OURS: &[&str] = &["build.log", "network.jsonl"];
+
     /// Render a strategy and run it, saying where the mirror is and what the strategy calls it.
     #[allow(clippy::too_many_arguments)]
     pub fn run_with(
@@ -1053,7 +1085,7 @@ mod build {
         // Told as each phase starts, for anything watching this run from outside the process.
         on_event: Option<trigon_sandbox::EventSink>,
         source_cache: Option<&Path>,
-    ) -> Result<()> {
+    ) -> Result<Built> {
         let egress = egress_tier(egress)?;
 
         // At an enforced tier the image build has no network, so the source cannot be cloned
@@ -1166,6 +1198,36 @@ mod build {
             let handle = runner.start(&plan, &opts).await?;
             let outcome = handle.wait().await?;
 
+            // Written before anything is reported, so a run that goes on to fail still leaves the
+            // account of what it fetched. `create_dir_all` first for the same reason the log does
+            // it: a build that died during the *image* build never reached the point where the
+            // output directory was made, and those are the runs whose evidence nobody can
+            // otherwise see.
+            //
+            // One JSON object per line, the same shape `RunRecord::network_transcript` stores, so
+            // what a person reads here and what a verifier reads out of the store are the same
+            // bytes rather than two renderings that have to agree.
+            let transcript_path = outcome.transcript.as_ref().and_then(|t| {
+                let path = out.join("network.jsonl");
+                let mut buf = Vec::new();
+                for e in t {
+                    match serde_json::to_vec(e) {
+                        Ok(line) => {
+                            buf.extend_from_slice(&line);
+                            buf.push(b'\n');
+                        }
+                        Err(e) => tracing::warn!("could not write a transcript line: {e}"),
+                    }
+                }
+                match std::fs::create_dir_all(out).and_then(|()| std::fs::write(&path, &buf)) {
+                    Ok(()) => Some(path),
+                    Err(e) => {
+                        tracing::warn!("could not write {}: {e}", path.display());
+                        None
+                    }
+                }
+            });
+
             if verbose {
                 println!("strategy {}", &digest[..16]);
                 println!("  egress    {}", outcome.egress);
@@ -1178,34 +1240,44 @@ mod build {
                         None => println!("  {phase:?}      no data"),
                     }
                 }
-                if !outcome.attestable {
-                    // Three different reasons, and naming the wrong one sends the reader to the
-                    // wrong fix.
-                    //
-                    // The middle one used to say "the egress boundary held", and that was not
-                    // true: rootless `podman build` cannot join the island, so at `mirror-only`
-                    // the setup and source phases run as image layers with ordinary networking.
-                    // Only `deny-all` closes the image build, and it does so by having no network
-                    // there at all. Saying the boundary held when one phase ran outside it is the
-                    // kind of claim this whole system exists to refuse.
-                    let why = match outcome.egress {
-                        trigon_sandbox::EgressTier::Open => {
-                            "this run enforced no mirror and recorded no network transcript"
+                match &outcome.transcript {
+                    // The count, and what it was made of. A bare "network  12 responses" hides the
+                    // one number worth seeing: whether the guard opened them or only weighed them,
+                    // which is the difference between the member check having run and not.
+                    Some(t) => {
+                        let opened = t
+                            .iter()
+                            .filter(|e| e.checked == trigon_mirror::Checked::Opened)
+                            .count();
+                        println!(
+                            "  network   {} response{} crossed into the build, {opened} opened \
+                             and checked",
+                            t.len(),
+                            if t.len() == 1 { "" } else { "s" },
+                        );
+                        if let Some(p) = &transcript_path {
+                            println!("            {}", p.display());
                         }
-                        trigon_sandbox::EgressTier::DenyAll => {
-                            "the build reached nothing, but this runner records no network \
-                             transcript to show it"
-                        }
-                        _ => {
-                            "the build phase was inside the boundary, the image build was not \
-                             (setup and source run as layers, which rootless podman cannot put on \
-                             the island), and this runner records no network transcript"
-                        }
-                    };
-                    println!(
-                        "\n  not attestable: {why}, so it cannot claim the build fetched nothing \
-                         it should not have"
-                    );
+                    }
+                    // Two reasons, and naming the wrong one sends the reader to the wrong fix.
+                    // The first draft of this had one reason and told a `mirror-only` run that it
+                    // "enforced no egress boundary" — which is what `docs/16-findings.md` §3.6
+                    // records happening the last time this message was written from one variable
+                    // instead of two.
+                    None => {
+                        let why = match outcome.egress {
+                            trigon_sandbox::EgressTier::Open => {
+                                "this run enforced no egress boundary, so there was nothing to \
+                                 account for. Use `--egress mirror-only` or `deny-all`."
+                            }
+                            _ => {
+                                "the tier was enforced, but the build ended before the mirror's \
+                                 record of it could be read — so what crossed is unknown rather \
+                                 than nothing."
+                            }
+                        };
+                        println!("\n  not attestable: {why}");
+                    }
                 }
                 match (&outcome.artifact, outcome.succeeded()) {
                     (Some(p), _) => println!("\n  artifact  {}", p.display()),
@@ -1268,7 +1340,11 @@ mod build {
                 }
                 .into());
             }
-            Ok(())
+            Ok(Built {
+                attestable: outcome.attestable,
+                transcript: outcome.transcript,
+                artifact: outcome.artifact,
+            })
         })
     }
 }
@@ -2189,10 +2265,17 @@ mod rebuild {
             // Filled where the run reaches a comparison, from the recorder wrapped around the
             // provider. `None` here means nothing has been asked yet, not that nothing was.
             transcript: None,
-            // Overwritten below from what the runner reported. `false` until then, because
-            // claiming a run is attestable when we do not yet know is the one direction this must
-            // not err in.
+            // Both overwritten below from what the runner reported. `false` and `None` until
+            // then, because claiming a run is attestable — or that its egress was accounted for —
+            // when we do not yet know is the one direction these must not err in.
             attestable: false,
+            network_transcript: None,
+            // Likewise filled at the end, from the counters the run itself kept. `None` is no
+            // data, never zero: a run that asked no model and one whose counts we lost are
+            // different facts, and the second read as zero understates every figure built on it.
+            inference_seconds: None,
+            tokens: Vec::new(),
+            timings: Vec::new(),
         };
 
         report.model = model.as_ref().map(|m| m.describe());
@@ -2333,7 +2416,15 @@ mod rebuild {
                 // A build that ran is not yet an answer. The comparison happens here, inside the
                 // loop, because a divergence is the repair case that matters most: the recipe
                 // works and builds something that is not what was published.
-                let Some(rebuilt) = newest_file(&out) else {
+                // What the runner collected, and only then a walk of the directory. The walk is
+                // for builds whose output lands in a subdirectory, which `collect` deliberately
+                // does not reach; it is not a second opinion about the common case.
+                let collected = built
+                    .as_ref()
+                    .ok()
+                    .and_then(|b| b.artifact.clone())
+                    .or_else(|| newest_file(&out));
+                let Some(rebuilt) = collected else {
                     break (built, strategy_digest);
                 };
                 let comparison = match judge(&upstream_path, &rebuilt) {
@@ -2516,10 +2607,28 @@ mod rebuild {
             report.timings = t.clone();
         }
         report.egress = Some(args.egress.clone());
-        report.attestable = Some(
-            trigon_sandbox::BuildRunner::caps(&trigon_sandbox::PodmanRunner::new(&args.work))
-                .attestable,
-        );
+        // From the run, not from a runner constructed afterwards to be asked. `None` where the
+        // build never finished, which is a third answer: an unknown is not a `false`, and a report
+        // that says "not attestable" about a build that never ran sends the reader after the wrong
+        // thing entirely.
+        report.attestable = built.as_ref().ok().map(|b| b.attestable);
+        report.network_exchanges = built
+            .as_ref()
+            .ok()
+            .and_then(|b| b.transcript.as_ref())
+            .map(Vec::len);
+        report.network_bytes = built
+            .as_ref()
+            .ok()
+            .and_then(|b| b.transcript.as_ref())
+            .map(|t| t.iter().map(|e| e.bytes).sum());
+        report.inference_seconds = model.as_ref().and_then(|m| m.inference_seconds());
+        if calls(&model) > 0 {
+            let u = model.as_ref().map(|m| m.spent()).unwrap_or_default();
+            report.tokens_in = Some(u.input);
+            report.tokens_out = Some(u.output);
+            report.tokens_cached = Some(u.cached_input);
+        }
         let derivation = if repairs.attempts().is_empty() {
             candidate.derivation.to_string()
         } else {
@@ -2654,14 +2763,37 @@ mod rebuild {
                 strategy_digest: strategy_digest.clone(),
                 derivation: Some(derivation.clone()),
                 pin,
-                // Asked of the runner that ran it, rather than derived from the flag that asked
-                // for a tier. The local runner reports `false` at every tier — it records no
-                // network transcript — and deriving this from `--egress` stamped `attestable:
-                // true` on runs whose image-build phases were outside the boundary entirely.
-                attestable: trigon_sandbox::BuildRunner::caps(&trigon_sandbox::PodmanRunner::new(
-                    &args.work,
-                ))
-                .attestable,
+                // From the run itself. This used to build a *fresh* `PodmanRunner` — with no
+                // mirror image, so not the runner that ran anything — and read its advertised
+                // capability, which answered "could some run on this runner be attested" and was
+                // recorded as though it answered "was this one". Deriving it from `--egress`
+                // instead was worse still: that stamped `attestable: true` on runs whose
+                // image-build phases were outside the boundary entirely.
+                attestable: built.as_ref().is_ok_and(|b| b.attestable),
+                network_transcript: built.as_ref().ok().and_then(|b| b.transcript.clone()),
+                // What the run's own counters say, not what a budget allowed. `docs/03` §3 puts
+                // costs beside the timings for one reason: the number that decides where money
+                // goes is dollars per *verdict gained*, and a denominator nobody records is a
+                // denominator nobody can divide by.
+                inference_seconds: model.as_ref().and_then(|m| m.inference_seconds()),
+                tokens: match &model {
+                    // One entry, because one model is configured per run. A vector rather than an
+                    // option because adding counts across models with different prices produces a
+                    // number that means nothing, and the shape should refuse that before a second
+                    // model exists rather than after.
+                    Some(m) if calls(&model) > 0 => {
+                        let u = m.spent();
+                        vec![trigon_store::Tokens {
+                            input: u.input,
+                            cached_input: u.cached_input,
+                            output: u.output,
+                            model: m.model_id().to_string(),
+                            calls: calls(&model),
+                        }]
+                    }
+                    _ => Vec::new(),
+                },
+                timings: report.timings.clone(),
                 // What the model was asked, where one was configured. Empty for the healthy
                 // majority of a corpus, which is the point of measuring the invocation rate.
                 transcript: model.as_ref().map(|m| m.transcript(&args.purl)),
@@ -2729,6 +2861,18 @@ mod rebuild {
         pin: Option<trigon_mirror::Observed>,
         /// What the runner reported about its own enforcement, never what the flag asked for.
         attestable: bool,
+        /// Everything that crossed the network into the build, or `None` where no complete account
+        /// exists. An empty `Some` is stored as an empty blob and means nothing crossed; flattening
+        /// it to `None` would turn "we looked and it was clean" into "we never looked".
+        network_transcript: Option<Vec<trigon_mirror::Exchange>>,
+        /// Wall-clock seconds spent waiting on a model, and what the calls cost in tokens. `None`
+        /// and empty where nothing was asked, which is the healthy majority of a corpus.
+        inference_seconds: Option<f64>,
+        tokens: Vec<trigon_store::Tokens>,
+        /// Per-phase durations as the run reported them. Summed into `build_seconds` at write
+        /// time, dropping the phases with no reading rather than counting them as zero — so the
+        /// figure is a floor and never an overstatement.
+        timings: Vec<(String, Option<f64>)>,
         /// What the model was asked and what it said, when one was asked anything.
         ///
         /// `None` when no provider was configured — the common case, and not the same as a model
@@ -2757,11 +2901,23 @@ mod rebuild {
             let rb_bytes = std::fs::read(rebuilt)?;
             let up = store.blobs().put(up_bytes.clone()).await?;
             let rb = store.blobs().put(rb_bytes.clone()).await?;
-            let comparison = store.blobs().put(serde_json::to_vec(c)?).await?;
+            // Everything this run adds to the store, counted as each blob goes in rather than
+            // estimated afterwards. `docs/10-scale.md` §1 budgets ~3 MB a run and ~270 GB a sweep,
+            // and a budget with nothing measuring it is a wish.
+            let mut blob_bytes = (up_bytes.len() + rb_bytes.len()) as u64;
+            let mut log_bytes = 0u64;
+
+            let comparison_bytes = serde_json::to_vec(c)?;
+            blob_bytes += comparison_bytes.len() as u64;
+            let comparison = store.blobs().put(comparison_bytes).await?;
             let build_log = match std::fs::read(args.work.join("rebuild").join("build.log"))
                 .or_else(|_| std::fs::read(args.work.join("build.log")))
             {
-                Ok(b) => Some(store.blobs().put(b).await?),
+                Ok(b) => {
+                    log_bytes = b.len() as u64;
+                    blob_bytes += log_bytes;
+                    Some(store.blobs().put(b).await?)
+                }
                 Err(_) => None,
             };
             // Only where a model was actually asked something. An empty transcript and an absent
@@ -2770,9 +2926,29 @@ mod rebuild {
             // turns.
             let transcript = match &args.transcript {
                 Some(t) if !t.turns.is_empty() => {
-                    Some(store.blobs().put(serde_json::to_vec(t)?).await?)
+                    let bytes = serde_json::to_vec(t)?;
+                    blob_bytes += bytes.len() as u64;
+                    Some(store.blobs().put(bytes).await?)
                 }
                 _ => None,
+            };
+
+            // One line per exchange rather than one JSON array, so a transcript from a build that
+            // fetched ten thousand files can be grepped, tailed and appended to without a parser
+            // holding all of it. `None` and `Some(vec![])` are kept apart by storing a blob in the
+            // second case and none in the first: an empty blob is a complete account of a build
+            // that fetched nothing, which is a claim, and no blob is the absence of one.
+            let network_transcript = match &args.network_transcript {
+                Some(t) => {
+                    let mut buf = Vec::new();
+                    for e in t {
+                        buf.extend_from_slice(&serde_json::to_vec(e)?);
+                        buf.push(b'\n');
+                    }
+                    blob_bytes += buf.len() as u64;
+                    Some(store.blobs().put(buf).await?)
+                }
+                None => None,
             };
 
             // Time-ordered, so listing a store gives the most recent run first without reading
@@ -2800,11 +2976,9 @@ mod rebuild {
                     egress: args.egress.clone(),
                     isolation: String::new(),
                     // What the runner reported, not what the flag asked for. Deriving this from
-                    // `--egress` stamped `attestable: true` on a local podman run — which is never
-                    // attestable at full trust, because it records no network transcript, and
-                    // whose image-build phases are outside the boundary at every tier but
-                    // `deny-all`. A claim about enforcement has to come from the thing that
-                    // enforced it.
+                    // `--egress` stamped `attestable: true` on runs whose image-build phases were
+                    // outside the boundary entirely. A claim about enforcement has to come from
+                    // the thing that enforced it.
                     attestable: args.attestable,
                     registry_moment: args.timewarp.clone(),
                     pin: args.pin.map(|o| trigon_store::PinEvidence {
@@ -2830,13 +3004,77 @@ mod rebuild {
             record.comparison = Some(comparison);
             record.build_log = build_log;
             record.transcript = transcript;
+            record.network_transcript = network_transcript;
+            record.costs = Some(trigon_store::Costs {
+                inference_seconds: args.inference_seconds,
+                tokens: args.tokens.clone(),
+                // Summed over the phases we have a reading for, and `None` when that is none of
+                // them. A phase whose duration we failed to read is dropped rather than counted as
+                // zero, which makes this a floor on the true figure instead of an understatement
+                // dressed up as a measurement.
+                build_seconds: {
+                    let read: Vec<f64> = args.timings.iter().filter_map(|(_, d)| *d).collect();
+                    (!read.is_empty()).then(|| read.iter().sum())
+                },
+                // Straight off the network transcript, which is the thing that made this
+                // measurable at all: before it, "how many bytes did this build pull" could only be
+                // guessed at. `None` where there is no transcript and `Some(0)` where there is one
+                // and nothing crossed — the same distinction, carried one level further out.
+                egress_bytes: args
+                    .network_transcript
+                    .as_ref()
+                    .map(|t| t.iter().map(|e| e.bytes).sum()),
+                blob_bytes: Some(blob_bytes),
+                artifact_bytes: Some((up_bytes.len() + rb_bytes.len()) as u64),
+                log_bytes: Some(log_bytes),
+            });
             record.finished = Some(crate::now_rfc3339());
             store.put_run(&record).await?;
             if verbose {
                 println!("\n  recorded   run {id} in {}", dir.display());
+                if let Some(c) = &record.costs {
+                    // Said out loud, because a cost nobody sees is a cost discovered on an invoice.
+                    // Every figure carries its unit and omits what it does not know, rather than
+                    // printing a zero that reads as a measurement.
+                    let mut parts = Vec::new();
+                    if let Some(s) = c.build_seconds {
+                        parts.push(format!("{s:.1}s building"));
+                    }
+                    if let Some(s) = c.inference_seconds {
+                        parts.push(format!("{s:.1}s inference"));
+                    }
+                    for t in &c.tokens {
+                        parts.push(format!(
+                            "{} in / {} out over {} call{} to {}",
+                            t.input,
+                            t.output,
+                            t.calls,
+                            if t.calls == 1 { "" } else { "s" },
+                            t.model
+                        ));
+                    }
+                    match c.egress_bytes {
+                        Some(b) => parts.push(format!("{} fetched", human_bytes(b))),
+                        None => parts.push("egress not measured".into()),
+                    }
+                    if let Some(b) = c.blob_bytes {
+                        parts.push(format!("{} stored", human_bytes(b)));
+                    }
+                    println!("  cost       {}", parts.join(", "));
+                }
             }
             anyhow::Ok(())
         })
+    }
+
+    /// Bytes, at the precision a person reading a cost line needs.
+    fn human_bytes(b: u64) -> String {
+        match b {
+            0..=1023 => format!("{b} B"),
+            1024..=1_048_575 => format!("{:.1} KB", b as f64 / 1024.0),
+            1_048_576..=1_073_741_823 => format!("{:.1} MB", b as f64 / 1_048_576.0),
+            _ => format!("{:.2} GB", b as f64 / 1_073_741_824.0),
+        }
     }
 
     /// An error that stopped one target, as an outcome.
@@ -3035,10 +3273,19 @@ mod rebuild {
                         path = %p.display(),
                         "ignoring a collected entry that is not a regular file"
                     );
-                // Belt and braces beside writing the log elsewhere. Anything that is obviously ours
-                // rather than the build's has no business being mistaken for the artifact, and the
-                // failure when it is — a log parsed as a zip — names the wrong culprit.
-                } else if p.file_name() != Some(std::ffi::OsStr::new("build.log")) {
+                // Anything that is obviously ours rather than the build's has no business being
+                // mistaken for the artifact, and the failure when it is — a log parsed as a zip,
+                // a JSON-Lines transcript parsed as a gzip — names the wrong culprit entirely.
+                //
+                // The list lives beside the code that writes those files rather than here, because
+                // this used to name `build.log` and nothing else: adding a second file next to the
+                // artifact was enough to make a `mirror-only` run report `malformed gzip: not a
+                // gzip member` about a tarball it had built perfectly well.
+                } else if !p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| crate::build::OURS.contains(&n))
+                {
                     found.push(p);
                 }
             }
@@ -3078,6 +3325,32 @@ mod rebuild {
 
             // A real file beside it is still found, and the symlink still is not.
             let real = out.join("aaa.tgz");
+            std::fs::write(&real, b"built here").unwrap();
+            assert_eq!(newest_file(&out), Some(real));
+        }
+
+        #[test]
+        fn nothing_this_process_writes_is_ever_taken_for_the_artifact() {
+            // Driven off the same list the writers use, so the two cannot drift. They did: this
+            // check named `build.log` and nothing else, and writing the network transcript beside
+            // the artifact was enough to make a `mirror-only` run judge its own transcript as the
+            // tarball it had just built — reported as `malformed gzip: not a gzip member`, which
+            // reads as a broken build rather than as us handing the comparator the wrong file.
+            let d = tmpdir("ours");
+            let out = d.join("rebuild");
+            std::fs::create_dir_all(&out).unwrap();
+            for name in crate::build::OURS {
+                std::fs::write(out.join(name), b"ours, not the build's").unwrap();
+            }
+            assert_eq!(
+                newest_file(&out),
+                None,
+                "a file this process wrote was offered as the rebuilt artifact"
+            );
+
+            // And the artifact is still found with all of them sitting beside it, including the
+            // ones that sort after it.
+            let real = out.join("aaa-1.0.0.tgz");
             std::fs::write(&real, b"built here").unwrap();
             assert_eq!(newest_file(&out), Some(real));
         }
@@ -4460,7 +4733,8 @@ mod attestor {
             }
 
             // 2. How the rebuild came to exist, and what the build was observed to do.
-            let facts = facts(&record);
+            let hex = Hex::of(&store, &record).await?;
+            let facts = facts(&record, &hex);
             if let Some(rebuilt) = &record.rebuild {
                 let st = Statement::rebuild(&rebuilt.name, &rebuilt.sha256, &facts);
                 written.push(put(&store, &record, &st, signer.as_ref()).await?);
@@ -4521,7 +4795,56 @@ mod attestor {
             .await?)
     }
 
-    fn facts(r: &RunRecord) -> RunFacts<'_> {
+    /// The hex forms [`RunFacts`] borrows.
+    ///
+    /// `RunFacts` holds `&str` so that `trigon-attest` never has to own anything, and `to_hex`
+    /// allocates — so the strings have to live somewhere outside the call. Somewhere was nowhere,
+    /// which is why three byproduct digests were passed as `None`: the build log, the rendered
+    /// instructions and now the network transcript were all in the record and none of them reached
+    /// the statement. A statement that omits the bytes it is about is one nobody can check.
+    #[derive(Default)]
+    struct Hex {
+        network_transcript: Option<(String, u64, u64)>,
+        build_log: Option<String>,
+        instructions: Option<String>,
+    }
+
+    impl Hex {
+        /// The transcript's count and byte total are **counted from the blob**, never copied out of
+        /// the record's `costs`. This process exists because the record was written by the one that
+        /// ran the build: a number it was handed and a number it can check are different kinds of
+        /// claim, and only the second belongs in something signed.
+        async fn of(store: &Store, r: &RunRecord) -> Result<Self> {
+            let network_transcript = match r.network_transcript {
+                Some(d) => {
+                    let bytes = store.blobs().get(&d).await.with_context(|| {
+                        format!("reading the network transcript {} names", r.id)
+                    })?;
+                    let text = String::from_utf8_lossy(&bytes);
+                    // Strict: a transcript blob we cannot read stops the attestation rather than
+                    // being summarised as empty. An empty transcript is the claim that the build
+                    // fetched nothing, and signing that off a parse failure is the one mistake
+                    // this whole path exists to avoid.
+                    let lines = trigon_mirror::Exchange::parse_jsonl(&text).map_err(|e| {
+                        anyhow::anyhow!("the network transcript {} names cannot be read: {e}", r.id)
+                    })?;
+                    Some((
+                        d.to_hex(),
+                        lines.len() as u64,
+                        lines.iter().map(|e| e.bytes).sum(),
+                    ))
+                }
+                None => None,
+            };
+            Ok(Hex {
+                network_transcript,
+                build_log: r.build_log.map(|d| d.to_hex()),
+                instructions: r.instructions.map(|d| d.to_hex()),
+            })
+        }
+    }
+
+    fn facts<'a>(r: &'a RunRecord, hex: &'a Hex) -> RunFacts<'a> {
         RunFacts {
             run_id: &r.id,
             started: &r.started,
@@ -4530,6 +4853,14 @@ mod attestor {
             egress: &r.environment.egress,
             isolation: &r.environment.isolation,
             attestable: r.environment.attestable,
+            network_transcript: hex
+                .network_transcript
+                .as_ref()
+                .map(|(digest, requests, bytes)| trigon_attest::TranscriptRef {
+                    digest,
+                    requests: *requests,
+                    bytes: *bytes,
+                }),
             registry_moment: r.environment.registry_moment.as_deref(),
             pin_observed: r
                 .environment
@@ -4537,8 +4868,8 @@ mod attestor {
                 .map(|p| (p.index_requests, p.versions_withheld)),
             strategy_digest: r.strategy_digest.as_deref(),
             derivation: r.derivation.as_deref(),
-            instructions: None,
-            build_log: None,
+            instructions: hex.instructions.as_deref(),
+            build_log: hex.build_log.as_deref(),
             trigon_version: env!("CARGO_PKG_VERSION"),
             stabilizer_set: None,
             guard_trips: &r.guard_trips,

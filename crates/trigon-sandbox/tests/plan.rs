@@ -5,7 +5,8 @@
 use std::collections::BTreeSet;
 
 use trigon_sandbox::{
-    BuildPlan, BuildRunner, EgressTier, OciPlan, PodmanRunner, RunOpts, render_context, route,
+    BuildPlan, BuildRunner, EgressTier, ObservabilityTier, OciPlan, PodmanRunner, RunOpts,
+    render_context, route,
 };
 
 const PINNED: &str = "docker.io/library/python@sha256:aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999";
@@ -236,11 +237,18 @@ fn routing_says_what_was_on_offer_when_nothing_matches() {
 }
 
 #[test]
-fn a_local_podman_run_is_not_attestable_at_full_trust() {
-    // Unproxied, with no network transcript. Good enough to build and compare; not good enough to
-    // sign a claim that nothing was fetched.
-    assert!(!PodmanRunner::new(std::env::temp_dir()).caps().attestable);
-    assert!(!PodmanRunner::new(std::env::temp_dir()).caps().exec);
+fn a_runner_with_no_mirror_records_no_network_transcript() {
+    // The mirror is what makes the transcript: it is the build's only route out under
+    // `mirror-only`, and it writes down every body it serves. With no image to run one from there
+    // is nothing observing the boundary, and advertising `network` observability would be a claim
+    // about a proxy that does not exist.
+    let bare = PodmanRunner::new(std::env::temp_dir());
+    assert_eq!(bare.caps().observability, ObservabilityTier::None);
+    assert!(!bare.caps().exec);
+
+    let equipped = PodmanRunner::new(std::env::temp_dir())
+        .with_mirror_image(Some("localhost/trigon-mirror:latest".into()));
+    assert_eq!(equipped.caps().observability, ObservabilityTier::Network);
 }
 
 #[tokio::test]
@@ -264,9 +272,9 @@ async fn mirror_only_is_offered_only_when_a_mirror_image_exists() {
         equipped.caps().egress_modes
     );
 
-    // Still not full trust. The egress boundary holds, but with no network transcript we cannot
-    // say what the build fetched from the mirror.
-    assert!(!equipped.caps().attestable);
+    // And the tier that can be enforced is also the tier that can be observed: the same mirror
+    // container is both the only route out and the thing that writes down what went through it.
+    assert_eq!(equipped.caps().observability, ObservabilityTier::Network);
 }
 
 #[tokio::test]

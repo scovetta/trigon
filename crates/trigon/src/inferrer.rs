@@ -252,6 +252,13 @@ pub struct Counting {
     /// Tokens, so the repair loop's budgets are enforceable rather than decorative. Summed across
     /// every call this run made, which is what a per-target budget is about.
     spent: std::sync::Mutex<trigon_ai::Usage>,
+    /// Nanoseconds spent inside `complete`, summed.
+    ///
+    /// Here rather than around the ladder, because this is the only place that sees exactly the
+    /// time spent *waiting on a model* — a rung that reads a repository and then asks a question
+    /// would otherwise bill the reading as inference. `docs/03` §3 wants this beside the build
+    /// seconds, and the two are only comparable if they measure the same kind of thing.
+    nanos: std::sync::atomic::AtomicU64,
 }
 
 impl Counting {
@@ -260,6 +267,19 @@ impl Counting {
             inner,
             calls: std::sync::atomic::AtomicU32::new(0),
             spent: std::sync::Mutex::new(trigon_ai::Usage::default()),
+            nanos: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Wall-clock seconds spent waiting on a model, or `None` if it was never asked.
+    ///
+    /// `None` rather than `0.0`, and for the reason the phase timings give: a run that asked
+    /// nothing and a run whose timing we lost are different facts, and averaging the second as zero
+    /// understates every figure downstream.
+    fn inference_seconds(&self) -> Option<f64> {
+        match self.nanos.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            n => Some(n as f64 / 1e9),
         }
     }
 
@@ -293,7 +313,16 @@ impl Provider for Counting {
         // and a counter that only counts successes understates exactly the runs worth looking at.
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let resp = self.inner.complete(req)?;
+        let started = std::time::Instant::now();
+        let resp = self.inner.complete(req);
+        // Timed whether or not it worked, for the same reason the call is counted before it runs: a
+        // provider that hangs for ninety seconds and then fails cost ninety seconds, and a figure
+        // that counts only successes flatters exactly the runs worth investigating.
+        self.nanos.fetch_add(
+            started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let resp = resp?;
         if let Ok(mut u) = self.spent.lock() {
             u.input += resp.usage.input;
             u.cached_input += resp.usage.cached_input;
@@ -465,6 +494,20 @@ impl Configured {
     /// How many times a model was asked, so far.
     pub fn calls(&self) -> u32 {
         self.provider.calls()
+    }
+
+    /// Wall-clock seconds spent waiting on a model, or `None` if it was never asked.
+    pub fn inference_seconds(&self) -> Option<f64> {
+        self.provider.inference_seconds()
+    }
+
+    /// The pinned model id these costs are against.
+    ///
+    /// A cost figure without one is not comparable to anything: the same token count is two orders
+    /// of magnitude apart in price between a local 0.5B and a frontier model, so the id travels
+    /// with the tokens rather than being looked up from a config that has since changed.
+    pub fn model_id(&self) -> &str {
+        &self.model
     }
 
     /// What those calls have cost, so far.

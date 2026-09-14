@@ -508,7 +508,8 @@ still GET from five allowlisted hosts, which serve whatever is published on them
 which hosts, never what they serve, and the artifact guard is the control for that. The artifact
 route applies no time filter. The source is fetched on the host with no boundary and no transcript,
 bounded only by `SourceCache`'s hardening. And no run at any tier is attestable, because there is
-still no network transcript: what changed is the reason, not the answer.
+still no network transcript: what changed is the reason, not the answer. *(That last clause is no
+longer true — see §3.16.)*
 
 ### 3.14 A 27B model on a CPU is not slow, it is out of reach
 
@@ -614,6 +615,64 @@ why, and a fleet stabilizing large wheels will need them. What is wrong is shipp
 machinery that is not there, so until it is, the limits say so.
 
 ---
+
+### 3.16 The transcript was already being computed, and thrown away
+
+`attestable` was the literal `false` in two places in `podman.rs`, and the stated reason was that
+the runner records no network transcript. Finding out what it would take to record one turned up an
+answer the code had been sitting on the whole time.
+
+**The mirror hashes every body as it streams past.** It has to: that is how the artifact guard
+works. `guarded_stream` knows the URL, computes the SHA-256, counts the bytes, and decomposes
+archives small enough to open — and then `Guard::observe` kept the result only when it *matched* the
+run's guard manifest. Every clean observation, which is to say every ordinary download on every
+honest run, was computed and dropped on the floor. Tier 1 was three fields and a `println!` away
+and had been for months.
+
+Four things worth writing down from doing it:
+
+- **`Guard::observe` now returns how far it got** rather than the caller reconstructing it. Every
+  reason the member check stops early — too large, not an archive, an archive that would not open, a
+  manifest with no members — lives inside that function. A caller inferring `opened` from a size
+  limit would call a body checked that was never opened, which is precisely the difference between a
+  check and the appearance of one. The first draft of this change made exactly that mistake.
+- **The hash became unconditional.** It used to run only when the guard was armed, which was right
+  while its only consumer was the guard. Left as it was, every unarmed run would have produced a
+  transcript full of the digest of nothing — worse than no transcript. What stays conditional is
+  *collecting the body*, which is the expensive half.
+- **The lines go to stdout, not through `tracing`.** Trips use `tracing::error!` and clear the
+  default `warn` filter; an `info!` line does not, and the mirror container starts with no `-v` and
+  no `RUST_LOG`. A record that appears only when somebody set an environment variable is the
+  project's own recurring bug — configuration that looks applied and isn't — attached this time to
+  the field that decides whether a run is attestable.
+- **`RunnerCaps::attestable` was deleted, not updated.** Its only two readers built a *fresh,
+  mirror-less* `PodmanRunner` to ask, so a run performed by a mirror-equipped runner was recorded
+  with the mirror-less one's answer. It advertised "could some run here be attested" and was read as
+  "was this one". That is the recurring shape again: two things that had to agree, with nothing
+  asserting they did. Whether a run may be attested is a fact about that run, and it now lives on
+  `BuildOutcome`, derived in one function from one match.
+
+**A bug this change introduced, found by running it.** The transcript is written next to the build
+log, in the directory `newest_file` walks looking for the rebuilt artifact — and that walk excluded
+exactly one filename, `build.log`, hard-coded at the walk. So the first live `mirror-only` rebuild
+after the change judged its own network transcript as the tarball it had just built, and reported
+`malformed gzip: not a gzip member` about an artifact that was perfectly well-formed. Inside an hour
+of writing the paragraph above about two things that had to agree with nothing asserting they did.
+
+The fix is both halves, because only one of them is the mechanism: the caller now takes the artifact
+path the *runner* collected — the runner mounted the directory, it has never had to guess — and the
+walk, which remains for builds whose output lands in a subdirectory, consults a single `OURS` list
+declared beside the code that writes those files. A test writes every name in that list into an
+output directory and asserts nothing is offered as the artifact, so the list cannot drift from the
+writers again.
+
+**And `deny-all` is attestable too**, which was not the expected result. Its account of egress is
+complete and empty: `--network none` on both the image build and the run means the build has no
+interface, so "nothing crossed" is enforced by the kernel rather than observed by a proxy. Leaving
+the stricter tier marked less trustworthy than the looser one would have been backwards. What keeps
+this honest is that present-and-empty and absent are kept apart all the way down — an empty blob in
+the store, no blob, and `attestable` derived from which — so "we never looked" cannot become "we
+looked and it was clean".
 
 ## 4. A stabilizer the reference does not have
 

@@ -46,6 +46,16 @@ pub struct Island {
     pub mirror_host: Option<String>,
 }
 
+/// What one run's mirror recorded.
+#[derive(Clone, Debug, Default)]
+pub struct MirrorLog {
+    /// Marker lines from the artifact guard. Non-empty means the run is `Void`.
+    pub trips: Vec<String>,
+    /// Every response body the mirror served into the build, in the order it finished serving
+    /// them. Empty means the build downloaded nothing — a read that failed is an error, not this.
+    pub transcript: Vec<trigon_mirror::Exchange>,
+}
+
 impl Island {
     /// Create the network and start the mirror on it.
     pub async fn create(
@@ -201,28 +211,44 @@ impl Island {
         &self.name
     }
 
-    /// Whatever the guard caught, read from the mirror container's log.
+    /// What the mirror saw, read out of its container log.
     ///
     /// The log rather than an endpoint, because the mirror sits inside the island and the host has
-    /// no route to it: that is the point of the island. The marker is a fixed prefix so this does
-    /// not depend on parsing prose.
+    /// no route to it: that is the point of the island. Both markers are fixed prefixes so this
+    /// does not depend on parsing prose, and only the mirror writes to this log, so nothing the
+    /// build prints can forge a line into it.
     ///
     /// **Both streams, and an error when they cannot be read.** This used to take stdout only, and
     /// the mirror writes its trip through `tracing`, which writes to *stderr* — so the single most
     /// important control in the system reported nothing on the only tier that enforces it. A
     /// failure to read is an error rather than an empty list for the same reason: "we could not
     /// look" and "nothing tripped" are different answers, and only one of them means the run is
-    /// evidence of anything.
-    pub async fn guard_trips(&self) -> Result<Vec<String>, SandboxError> {
+    /// evidence of anything. The transcript is read the same way and for the same reason: an empty
+    /// transcript must mean the build downloaded nothing, never that we failed to ask.
+    ///
+    /// One read, both answers. Two `podman logs` calls against a container being torn down can
+    /// disagree, and a trip list from one read beside a transcript from another is two accounts of
+    /// one run.
+    pub async fn observations(&self) -> Result<MirrorLog, SandboxError> {
         let Some(container) = &self.mirror else {
-            return Ok(Vec::new());
+            return Ok(MirrorLog::default());
         };
         let logs = run_both(&self.binary, &["logs", container]).await?;
-        Ok(logs
-            .lines()
-            .filter(|l| l.contains(trigon_mirror::TRIP_MARKER))
-            .map(str::to_owned)
-            .collect())
+        Ok(MirrorLog {
+            trips: logs
+                .lines()
+                .filter(|l| l.contains(trigon_mirror::TRIP_MARKER))
+                .map(str::to_owned)
+                .collect(),
+            transcript: trigon_mirror::Exchange::parse_log(&logs).map_err(|detail| {
+                SandboxError::Failed {
+                    phase: "build".into(),
+                    detail: format!(
+                        "the mirror wrote a transcript line this build cannot read, so what the                          build downloaded is unknown rather than empty: {detail}"
+                    ),
+                }
+            })?,
+        })
     }
 
     /// The mirror's address on the island.
