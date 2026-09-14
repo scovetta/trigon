@@ -783,12 +783,24 @@ worth anything. Built and run by hand, **it passes**. It had simply never run he
 the target and greps for the two test names, so a run that finds no module fails rather than exiting
 zero.
 
-**The numbers**, from `cargo llvm-cov --workspace --no-fail-fast` with `TRIGON_LIVE=1`, lines:
+**The numbers**, lines covered, measured twice — once offline and once with `TRIGON_LIVE=1`, because
+the difference between them is the honest measure of "needs the network" versus "untested":
 
-| | |
-|---|---|
-| **Judgement half** (`core`, `archive`, `stabilize`, `compare`, `attest`) | **89%** |
-| Workspace | 70% |
+| | offline | live |
+|---|---|---|
+| **Judgement half** (`core`, `archive`, `stabilize`, `compare`, `attest`) | **89.3%** | **89.3%** |
+| `trigon-mirror` | 73.6% | 90.7% |
+| `trigon-ai` | 80.9% | 87.3% |
+| `trigon-registry` | 71.4% | 76.3% |
+| `trigon-sandbox` | 78.0% | 78.7% |
+| `trigon` (CLI + UI) | 40.4% | 41.4% |
+| Workspace | 69.6% | 72.8% |
+
+**The judgement half moves by 0.0%.** That is worth more than the number beside it. It is the
+central architectural claim — that the half which decides a verdict is deterministic and reaches no
+network — measured rather than asserted: every line of it that is covered at all is covered by a
+test that opens no socket. The crates that move are exactly the ones that are supposed to: the
+mirror gains 17 points, `npm.rs` and `client.rs` roughly double.
 
 The judgement half is the half that matters: it is what the verifier binary contains, what a third
 party re-derives a verdict with, and the only part whose bugs are silent — a divergence is

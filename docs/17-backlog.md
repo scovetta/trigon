@@ -70,10 +70,18 @@ cargo llvm-cov --workspace --no-fail-fast --summary-only \
 The leading `/` matters: `'tests?/'` without it silently excludes all of `trigon-attest`, because
 `attest/` contains `test/`.
 
-| | lines |
-|---|---|
-| **Judgement half** — `core`, `archive`, `stabilize`, `compare`, `attest` | **89%** |
-| Workspace | 70% |
+Measured twice, because the gap between them is the honest measure of "needs the network" versus
+"untested" — add `TRIGON_LIVE=1` for the second.
+
+| | offline | live |
+|---|---|---|
+| **Judgement half** — `core`, `archive`, `stabilize`, `compare`, `attest` | **89.3%** | **89.3%** |
+| `trigon-mirror` | 73.6% | 90.7% |
+| Workspace | 69.6% | 72.8% |
+
+The judgement half moving by **0.0%** is the result worth keeping: the half that decides a verdict is
+covered entirely by tests that open no socket, which is the architecture's central claim measured
+rather than asserted.
 
 Measuring it found two things that were not about coverage: the regex above, and that
 `trigon-stabilize-wasm`'s parity test — a milestone criterion — had never run in this workspace and
