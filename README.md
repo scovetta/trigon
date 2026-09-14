@@ -51,14 +51,20 @@ build's only route out is a time-filtered mirror that writes down everything it 
 
 | | reproduce | reach a comparison |
 |---|---|---|
-| PyPI, enforced | **9 of 11 (82%)** | 11 of 17 |
+| PyPI, enforced | **12 of 14 (86%)** | 14 of 17 |
 
-The rate holds at the enforced tier, and three of the nine are `exact` rather than normalized —
-byte-for-byte identical to what PyPI published. What drops is the denominator: of the six that reach
-no comparison, three are packages that are *part of the machinery that builds packages*, so the
-build asks the mirror for the very package under test and is refused. Those are a standing problem
-with a name (`env/needs-the-package-under-test`) rather than a silent loss, and
-[`16-findings.md`](docs/16-findings.md) §3.22 says what closing them would take.
+The enforced tier reproduces at a *higher* rate than `open`, and three of the twelve are `exact`
+rather than normalized — byte-for-byte identical to what PyPI published, built in a sandbox whose
+only route out is the mirror.
+
+Three targets still reach no comparison, and each is named rather than silently lost. One is a
+package whose build backend fetches over HTTPS during `get_requires_for_build_wheel`, so the tier
+blocks it — a finding about that package rather than about Trigon, and recorded as
+`net/build-fetches-directly`. The other two are packages that are *part of the machinery that builds
+packages*: their builds now complete, and the artifact guard voids them because the adjacent release
+it resolved shares byte-identical files with the version under test, which the guard cannot tell
+from the real thing. [`16-findings.md`](docs/16-findings.md) §3.22 says what closing that would
+take.
 
 PyPI was 5 of 15 that morning. The lift came from three deterministic fixes and no model at all;
 [`docs/16-findings.md`](docs/16-findings.md) §2 has the arithmetic.

@@ -945,6 +945,25 @@ which moved from `void` to `build-failed:deps` and now carry a named cluster eac
 "nothing to repair". The rate is unchanged at 9 of 11 (82%), which is the right result: the change
 was to a verdict, not to a build, and it moved exactly the runs it should have and nothing else.
 
+**After fixing what the sweep surfaced**, the same seventeen targets: **12 of 14 compared
+reproduced (86%)**, 14 of 17 reaching a comparison, no `no-strategy` and no `build-failed:source`.
+`certifi`, `tomli` and `toml` all recovered.
+
+The three that remain are worth separating, because two of them are the same problem at different
+depths. `zipp` is the tier working: its backend calls `urlopen` to fetch licence text, so the build
+reaches the open internet and is blocked — a finding about the package, recorded as
+`net/build-fetches-directly` with nothing to repair. `packaging` and `pyproject-hooks` now *build*,
+which the self-exclusion constraint bought, and then void: pip resolved the adjacent release, and
+adjacent releases of the same package share byte-identical files, so a guarded member of the version
+under test arrives inside a version that is not it.
+
+That last one is sharper than it first looked, and it is why the constraint fixed `toml` and not the
+other two. It is not "the build cannot run" any more. It is that **rebuilding a package whose
+adjacent release is nearly identical will always trip the member guard**, because the guard compares
+bytes and cannot tell a file of 26.3 from a byte-identical file of 26.2. Closing it means deciding
+that a member arriving inside a *different version of the same package* is not a catch — a
+bootstrapping policy rather than a code change, and not one to make by loosening a control.
+
 **Two more defects the sweep surfaced, both tier-independent:** `tomli`'s source discovery produced
 `https://github.com/hukkin/tomli/blob/master/CHANGELOG.md/` as a repository URL, because
 `canonicalize_repo` does not strip a `/blob/…` file path off what PyPI's metadata supplies; and
