@@ -336,3 +336,40 @@ fn a_logical_system_dep_renders_for_the_base_image() {
         "there is no such package outside Debian: {setup}"
     );
 }
+
+#[test]
+fn an_island_whose_process_is_gone_is_collectable_even_while_its_mirror_runs() {
+    // `prune_orphans` skipped every *running* container, and a killed-parent orphan is only ever
+    // running: a process felled by a wall-clock timeout, a Ctrl-C or an OOM leaves its mirror up,
+    // not exited. So the sweep collected only islands that had already tidied themselves, and the
+    // leak it exists for survived every later run — one was found at seven hours with that code in
+    // place, which is what this test is named after.
+    //
+    // The predicate is what decides it. Errs toward *alive*, because the failure that matters is
+    // one Trigon deleting the network out from under another's running build.
+    use trigon_sandbox::owner_is_gone;
+
+    // Our own pid: alive, so its island is never collected however long it has been up.
+    let mine = format!("trigon-abc123def456-{}", std::process::id());
+    assert!(
+        !owner_is_gone(&mine),
+        "a live run's island must be left alone"
+    );
+
+    // A pid that cannot exist. `/proc` has no entry, so the island is collectable.
+    assert!(
+        owner_is_gone("trigon-abc123def456-4294967294"),
+        "an island whose process is gone is nobody's"
+    );
+
+    // A name with no parseable pid is treated as owned rather than guessed at. Somebody may have
+    // created it by hand, and a sweeper that removes what it does not understand is worse than one
+    // that leaks.
+    for odd in [
+        "trigon-no-pid-here",
+        "trigon-",
+        "trigon-abc123def456-notanumber",
+    ] {
+        assert!(!owner_is_gone(odd), "`{odd}` should be left alone");
+    }
+}

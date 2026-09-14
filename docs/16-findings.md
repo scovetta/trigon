@@ -817,6 +817,52 @@ The deliberate gaps, named:
 - **The `TRIGON_LIVE=1` delta** is the honest measure of "needs the network" versus "untested", and
   it is why the number above is quoted with the flag set rather than without.
 
+### 3.20 Four defects behind one user's first failed run
+
+A reader followed the README — `--egress mirror-only` against a stock Debian image — and reported
+what came back. The build failed for the right reason and said so clearly:
+
+```
+this base image is missing: ca-certificates git libatomic1 wget
+an enforced egress tier gives the image build no network, so the packages a
+strategy needs have to be in the image already. Build one with:
+    trigon base-image --from <this image> --packages ca-certificates git libatomic1 wget
+
+  failure   unknown
+```
+
+**`unknown`, directly under our own paragraph saying exactly what was wrong.** The setup phase
+writes that line; nothing in the failure taxonomy claimed it. So a run that diagnosed itself
+perfectly reported that it had no idea — and the failure could not cluster, could not key the repair
+cache, and could not be recognised by the flywheel the next thousand times it happened. It is also
+the *first* failure a new reader hits, because that command is what the README suggests trying.
+Named `env/base-image-incomplete`, `Fault::Policy` — the tier is doing what it was asked — and
+unrepairable, since no strategy change helps. One cluster rather than one per combination of
+missing packages: the operator action is identical whichever is absent.
+
+Three more in the same fifteen lines:
+
+- **`Deps 1.9s` for a build that died in `Setup`.** `failing_phase(&log)` already knew, and was
+  read *after* the timing row had been pushed as `Deps`. So one line said `phase=Setup` and another
+  two below it said `Deps`. Read once now, used for both.
+- **"what crossed is unknown rather than nothing", about a phase that provably had no interface.**
+  The early return tore the island down without reading it. The image build has `--network none` at
+  every enforced tier, so the honest answer was an *empty* account, not no account — the pessimistic
+  mirror of the mistake this file is otherwise full of. It reads the log before destroying now, and
+  the run reports `0 responses crossed into the build`.
+- **The stale-mirror check never fires for an installed binary.** This is the one worth the most.
+  `warn_if_stale` computed the expected digest by walking up from the *current directory* to find
+  the workspace, and returned silently when it could not. The reader saw the warning only because
+  they happened to run from `target/debug`, which is inside the checkout; from anywhere else it is
+  silent, and anywhere else is where an installed Trigon is always run. A control that fails open
+  and says nothing while doing it — guarding against precisely the confusing in-container failure
+  this reader then hit.
+
+  It is also the wrong question. "Is this image older than the mirror code *this binary* speaks" is
+  a fact about the binary, so the digest is baked in by `build.rs` now. The hashing rule lives in
+  one file that `build.rs` and the binary both `include!`, because two copies would either never
+  match — warning on every run — or match by luck and never warn.
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher

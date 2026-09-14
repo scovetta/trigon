@@ -13,6 +13,11 @@ default-run = "trigon"
 name = "trigon"
 path = "src/main.rs"
 
+[build-dependencies]
+# Shared with the binary through `include!("src/mirror_source.rs")`, so the digest the mirror
+# image is labelled with and the digest the staleness check compares come from one function.
+sha2.workspace = true
+
 [dependencies]
 trigon-core.workspace = true
 trigon-archive.workspace = true

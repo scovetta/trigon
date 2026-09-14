@@ -20,7 +20,7 @@ pub use model::{
     BuildEvent, BuildOutcome, BuildPlan, EgressTier, EventSink, IsolationClass, Limits,
     ObservabilityTier, OciPlan, Phase, RunOpts, RunnerCaps,
 };
-pub use network::Island;
+pub use network::{Island, MirrorLog, owner_is_gone};
 pub use podman::{PodmanRunner, failing_phase as failing_phase_for_test};
 pub use runner::{BuildHandle, BuildRunner, route};
 

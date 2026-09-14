@@ -524,6 +524,11 @@ fn exit_quietly_on_broken_pipe() {
     }));
 }
 
+// Shared with `build.rs` through `include!`, so the digest the mirror image is labelled with and
+// the digest the staleness check compares come from one function rather than two.
+#[cfg(feature = "build")]
+include!("mirror_source.rs");
+
 #[cfg(feature = "build")]
 mod inferrer;
 
@@ -3585,43 +3590,15 @@ mod mirror {
     /// changes, and a warning that fires on every commit is one people learn to ignore. The routes,
     /// the time filter and the guard all live in this one crate, so this is where staleness that
     /// changes what a build sees comes from.
+    /// The label `mirror-image` stamps on the image it builds.
+    ///
+    /// Reads the workspace, and correctly so: that command builds the image *out of* the workspace,
+    /// so the label has to describe what was copied in. The staleness check on the other side reads
+    /// a digest baked in at compile time, because it is asking about the binary. Both call the one
+    /// function in `src/mirror_source.rs`, which `build.rs` includes too — two copies of a hashing
+    /// rule would either never match, and warn on every run, or match by luck and never warn.
     fn source_digest(root: &Path) -> Result<String> {
-        use sha2::Digest as _;
-        let mut files = Vec::new();
-        for crate_name in ["trigon-mirror"] {
-            let dir = root.join("crates").join(crate_name);
-            files.push(dir.join("Cargo.toml"));
-            let mut stack = vec![dir.join("src")];
-            while let Some(d) = stack.pop() {
-                for entry in std::fs::read_dir(&d)
-                    .with_context(|| format!("reading {}", d.display()))?
-                    .flatten()
-                {
-                    let p = entry.path();
-                    if p.is_dir() {
-                        stack.push(p);
-                    } else {
-                        files.push(p);
-                    }
-                }
-            }
-        }
-        // Sorted, because a directory listing is in whatever order the filesystem feels like and a
-        // digest that depends on that is a digest that changes for no reason.
-        files.sort();
-        let mut h = sha2::Sha256::new();
-        for f in &files {
-            h.update(
-                f.strip_prefix(root)
-                    .unwrap_or(f)
-                    .to_string_lossy()
-                    .as_bytes(),
-            );
-            h.update([0]);
-            h.update(std::fs::read(f).with_context(|| format!("reading {}", f.display()))?);
-            h.update([0]);
-        }
-        Ok(format!("{:x}", h.finalize())[..16].to_string())
+        Ok(crate::mirror_source_digest(root)?)
     }
 
     /// Say so when the mirror image predates the source it is being used with.
@@ -3635,10 +3612,20 @@ mod mirror {
     /// A warning and never an error. The image may be deliberately older, the workspace may not be
     /// present at all, and refusing to run would turn a diagnostic into an obstacle.
     pub fn warn_if_stale(tag: &str) {
-        let Ok(root) = workspace_root() else { return };
-        let Ok(want) = source_digest(&root) else {
+        // Baked in by `build.rs`, not read off the disk. This walked up from the current directory
+        // to find the workspace and returned silently when it could not — so the check worked from
+        // inside the checkout and did nothing at all from anywhere else, which is everywhere an
+        // installed Trigon is actually run. A control that fails open and says nothing while it
+        // does. It is also the honest question: "is this image older than the mirror code *this
+        // binary* speaks" is a fact about the binary, not about whatever source is on the disk.
+        let want = env!("TRIGON_MIRROR_SOURCE");
+        if want == "unknown" {
+            tracing::warn!(
+                "cannot tell whether {tag} is current: this binary was built without the mirror's \
+                 source to hash, so nothing checked it"
+            );
             return;
-        };
+        }
         let out = std::process::Command::new("podman")
             .args(["image", "inspect", tag, "--format"])
             .arg(format!("{{{{index .Labels \"{SOURCE_LABEL}\"}}}}"))

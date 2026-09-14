@@ -390,12 +390,44 @@ fn container_start_timeout() -> std::time::Duration {
 /// Keyed on whether the mirror container is still running rather than on age, so a concurrent run
 /// is never disturbed: a live island always has one. A network that outlives its mirror can never
 /// be used again, because the mirror was its only route out.
+/// Whether the process that created this island is gone.
+///
+/// The network is named `trigon-{run_id}` and a run id ends in the pid that built it, so the
+/// question has an answer without inspecting anything. Errs toward *alive*: a name with no
+/// parseable pid, or a pid that still exists, is left alone. That direction is the safe one — the
+/// failure it prevents is one Trigon deleting the network out from under another's running build,
+/// and the failure it permits is a leak surviving one more sweep.
+///
+/// Pid reuse can only produce the harmless answer. A live run always has its `/proc` entry, so a
+/// reused pid makes this say "alive" about a dead owner and the orphan waits; it can never say
+/// "gone" about a live one.
+pub fn owner_is_gone(network: &str) -> bool {
+    let Some(pid) = network
+        .rsplit('-')
+        .next()
+        .and_then(|p| p.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    !std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
 async fn prune_orphans(binary: &str) {
     let Ok(list) = run_ok(binary, &["network", "ls", "--format", "{{.Name}}"]).await else {
         return;
     };
     for name in list.lines().filter(|n| n.starts_with("trigon-")) {
         let container = format!("{name}-mirror");
+        // **Running is not the same as owned.** This used to skip every running container, which
+        // is the one state a killed-parent orphan is ever in: a process felled by a wall-clock
+        // timeout, a Ctrl-C or an OOM leaves its mirror *running*, not exited. So the sweep could
+        // only ever collect islands that had already tidied themselves, and the leak it was written
+        // for — this function's own doc comment describes "a container up for eleven hours" —
+        // survived every subsequent run. One was found at seven hours with this code in place.
+        //
+        // The sibling sweeper for build contexts and images had the missing half all along: a run
+        // id ends in the pid of the process that made it, so ownership is a question with an
+        // answer. Two sweepers for one class of leak, and only one of them asked.
         let running = run_ok(
             binary,
             &["inspect", "--format", "{{.State.Status}}", &container],
@@ -403,7 +435,7 @@ async fn prune_orphans(binary: &str) {
         .await
         .map(|s| s == "running")
         .unwrap_or(false);
-        if running {
+        if running && !owner_is_gone(name) {
             continue;
         }
         let _ = run_ok(binary, &["rm", "--force", &container]).await;

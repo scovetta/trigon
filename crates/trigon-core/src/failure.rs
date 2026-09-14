@@ -190,6 +190,33 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // **Our own message, and it keyed as `unknown`.** The setup phase at an enforced tier
+        // checks the base image for the packages the strategy needs and prints this when they are
+        // absent, along with the exact `trigon base-image` line that fixes it. Nothing claimed the
+        // line, so a run that diagnosed itself perfectly reported `failure unknown` — which reads
+        // as "we have no idea" directly underneath a paragraph saying precisely what was wrong.
+        //
+        // It is also the first failure a new reader hits: `mirror-only` against a stock image is
+        // what the README suggests trying, and this is what that does. Unnamed, it could not
+        // cluster, could not key the repair cache and could not be recognised by the flywheel the
+        // next thousand times it happened (`docs/07-ai.md` §5).
+        //
+        // `Fault::Policy`, not `Bug`: the tier is doing what it was asked to. The operator builds
+        // an image or picks a looser tier, and no strategy change helps, so it is not repairable.
+        //
+        // No capture, deliberately. `WordAfter` would key on the first of however many packages are
+        // listed — `env/base-image-incomplete:ca-certificates` for a line naming four — which both
+        // reads wrong and splits one cluster into a combination per image. The operator action is
+        // the same whichever package is absent, so this is one cluster; which packages they were is
+        // in the evidence line, where a fleet report can still count them.
+        code: "env/base-image-incomplete",
+        needles: &["this base image is missing:"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
         code: "env/no-ca-certificates",
         needles: &["server certificate verification failed"],
         fault: Fault::Bug,
@@ -622,6 +649,36 @@ fn clip(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_setup_phases_own_diagnostic_is_named_rather_than_unknown() {
+        // Trigon writes this line itself: the setup phase at an enforced tier checks the base image
+        // for what the strategy needs, prints the exact `trigon base-image` command that fixes it,
+        // and exits. Nothing claimed the line, so a run that diagnosed itself perfectly reported
+        // `failure unknown` — "we have no idea", printed directly under a paragraph saying exactly
+        // what was wrong.
+        //
+        // It is also the first failure a new reader hits, because `mirror-only` against a stock
+        // image is what the README suggests trying.
+        let log = "\
+this base image is missing: ca-certificates git libatomic1 wget\n\
+an enforced egress tier gives the image build no network, so the packages a\n\
+strategy needs have to be in the image already. Build one with:\n\
+    trigon base-image --from <this image> --packages ca-certificates git libatomic1 wget\n";
+        let s = super::classify(log);
+        assert_eq!(s.code, "env/base-image-incomplete");
+        // Policy, not Bug: the tier is doing exactly what it was asked to. And no strategy change
+        // helps, so a model iterating here would spend money to reach the same place.
+        assert_eq!(
+            s.fault,
+            crate::Fault::Policy,
+            "the tier is working as asked"
+        );
+        assert!(!s.repairable);
+        // One cluster, not one per combination of missing packages: the operator action is the same
+        // whichever is absent, and a key naming the first of four reads wrong.
+        assert_eq!(s.key(), "env/base-image-incomplete");
+    }
+
     use super::*;
 
     #[test]

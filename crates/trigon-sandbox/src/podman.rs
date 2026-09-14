@@ -503,24 +503,35 @@ impl BuildHandle for PodmanBuild {
             build_args.push(format!("{name}:{addr}"));
         }
         let code = self.run(&build_args, Phase::Deps, &mut log).await?;
-        timings.push((Phase::Deps, Some(started.elapsed())));
+        // Which script the span belongs to, not just "the image build". Setup, source and deps are
+        // all image-build-time layers, and calling every one of them a dependency phase is the
+        // difference between "this package does not build" and "our base image has no CA bundle".
+        //
+        // Read once and used for both the timing and `failed_in`. It used to be read only for
+        // `failed_in`, after the timing row had already been pushed as `Deps`, so a build that died
+        // in setup reported `phase=Setup` on one line and `Deps 1.9s` two lines below it.
+        let reached = failing_phase(&log).unwrap_or(Phase::Deps);
+        timings.push((reached, Some(started.elapsed())));
         push_to(
             self.opts.on_event.as_ref(),
             &self.events,
             BuildEvent::PhaseEnd {
-                phase: Phase::Deps,
+                phase: reached,
                 duration: Some(started.elapsed()),
             },
         );
         if code != 0 {
+            // Read before the island goes, even here. The image build has no network at any
+            // enforced tier, so the honest answer is an *empty* account rather than no account —
+            // and reporting "what crossed is unknown" about a phase that provably had no interface
+            // is the pessimistic mirror of the mistake this codebase keeps finding.
+            let mut seen = None;
             if let Some(i) = island {
+                let read = i.observations().await;
                 i.destroy().await;
+                seen = Some(read?);
             }
-            // Which script died, not just "the image build failed". Setup, source and deps are all
-            // image-build-time layers, and calling every one of them a dependency failure is the
-            // difference between "this package does not build" and "our base image has no CA
-            // bundle".
-            let phase = failing_phase(&log).unwrap_or(Phase::Deps);
+            let phase = reached;
             push_to(
                 self.opts.on_event.as_ref(),
                 &self.events,
@@ -532,10 +543,7 @@ impl BuildHandle for PodmanBuild {
                 exit = code,
                 "image build failed"
             );
-            // No mirror read: under `MirrorOnly` this failure is in the image build, whose
-            // phases have no network at all, so there is nothing the mirror could have served and
-            // nothing to go and fetch from a container we are tearing down.
-            return Ok(self.outcome(code, None, timings, Some(phase), log, None));
+            return Ok(self.outcome(code, None, timings, Some(phase), log, seen));
         }
         tracing::info!(
             run_id = %self.opts.run_id,
