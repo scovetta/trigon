@@ -13,12 +13,13 @@
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use trigon_core::Confidence;
-use trigon_strategy::{FlowStrategy, Location, Step, StepBody, Strategy};
+use trigon_strategy::{FlowStrategy, Location, Step, StepBody, Strategy, VENV};
 
 use crate::client::Client;
 use crate::error::RegistryError;
 use crate::infer::{Candidate, Derivation, StrategyInferrer, confidence_of};
 use crate::model::ResolvedTarget;
+
 use crate::tags;
 
 /// The build this package declares that its packaging tool will not run, from the evidence the
@@ -323,7 +324,21 @@ impl StrategyInferrer for PyPiInferrer {
             (source.commit.clone(), source.how)
         };
 
-        let mut deps = BTreeMap::from([("venv".to_string(), "/deps".to_string())]);
+        // See `VENV`: the path is a constant because four places have to agree on it.
+        // `/trigon/deps`, not `/deps`. The root directory of a Debian image is mode 0555, and root
+        // writes there only through `CAP_DAC_OVERRIDE` — which the sandbox drops, deliberately and
+        // by name. So `python3 -m venv /deps` is `Permission denied` for root, and only at an
+        // enforced tier: `defer_deps` moves the deps phase out of the image build and into the
+        // container run, so the same recipe worked at `--egress open` with full capabilities and
+        // failed at `mirror-only` with none. A build that succeeds at one tier and fails at another
+        // for a reason that has nothing to do with the package, reported as the package's fault.
+        //
+        // `/trigon` is ours and already in the image — the phase scripts are copied there — so it
+        // exists at run time, is owned by root at 0755, and needs no capability to write to.
+        // `/tmp` would also work today and is the worse choice: it is world-writable, and a tmpfs
+        // mounted over it (which `docs/12-security.md` §5 wants) would empty it between the image
+        // build and the run without anything saying so.
+        let mut deps = BTreeMap::from([("venv".to_string(), VENV.to_string())]);
         match (&target.intrinsics.publish_time, &self.mirror) {
             (Some(t), Some(_)) => {
                 deps.insert("registry_time".into(), t.clone());
@@ -367,12 +382,15 @@ impl StrategyInferrer for PyPiInferrer {
             build: vec![uses(
                 "pypi/build/wheel",
                 BTreeMap::from([
-                    ("locator".to_string(), "/deps/bin/".to_string()),
+                    // Both derived from `VENV` rather than written out, so the venv the deps
+                    // phase creates and the one the build phase looks in cannot come apart. They
+                    // were three literals agreeing by eye.
+                    ("locator".to_string(), format!("{VENV}/bin/")),
                     (
                         "constraints".to_string(),
                         backend
                             .as_ref()
-                            .map(|_| "/deps/constraints.txt".to_string())
+                            .map(|_| format!("{VENV}/constraints.txt"))
                             .unwrap_or_default(),
                     ),
                     // Isolation stays on. `-n` makes the frontend *check* for each declared build

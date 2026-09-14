@@ -379,7 +379,7 @@ fn lower_pypi(
         }
     };
 
-    let mut deps = BTreeMap::from([("venv".to_string(), "/deps".to_string())]);
+    let mut deps = BTreeMap::from([("venv".to_string(), trigon_strategy::VENV.to_string())]);
 
     // The interpreter, from the workflow if it pinned one and from `uv build --python` otherwise.
     let python = recipe
@@ -449,12 +449,15 @@ fn lower_pypi(
         build: vec![uses(
             "pypi/build/wheel",
             BTreeMap::from([
-                ("locator".to_string(), "/deps/bin/".to_string()),
+                (
+                    "locator".to_string(),
+                    format!("{}/bin/", trigon_strategy::VENV),
+                ),
                 (
                     "constraints".to_string(),
                     backend
                         .as_ref()
-                        .map(|_| "/deps/constraints.txt".to_string())
+                        .map(|_| format!("{}/constraints.txt", trigon_strategy::VENV))
                         .unwrap_or_default(),
                 ),
                 // Isolation stays on for the same reason it does in the heuristic: `-n` makes the

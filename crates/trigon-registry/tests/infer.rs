@@ -315,7 +315,7 @@ async fn a_pin_travels_to_the_build_phase_as_a_constraint() {
         tool_params(&s, "build")
             .get("constraints")
             .map(String::as_str),
-        Some("/deps/constraints.txt")
+        Some(format!("{}/constraints.txt", trigon_strategy::VENV).as_str())
     );
     let (unpinned, _) = pypi_strategy(None).await;
     assert_eq!(

@@ -141,7 +141,7 @@ fn pypi_pure_wheel(body: &Value) -> Result<Strategy, StrategyError> {
     };
 
     let mut with = BTreeMap::from([
-        ("venv".to_string(), "/deps".to_string()),
+        ("venv".to_string(), crate::VENV.to_string()),
         ("requirements".to_string(), requirements),
     ]);
     if let Some(t) = string(body.get("registry_time")) {
@@ -161,7 +161,7 @@ fn pypi_pure_wheel(body: &Value) -> Result<Strategy, StrategyError> {
         build: vec![uses(
             "pypi/build/wheel",
             BTreeMap::from([
-                ("locator".to_string(), "/deps/bin/".to_string()),
+                ("locator".to_string(), format!("{}/bin/", crate::VENV)),
                 ("dir".to_string(), dir),
             ]),
         )],

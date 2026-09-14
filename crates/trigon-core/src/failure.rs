@@ -217,6 +217,32 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // **Ours, and it read as the package's.** A Debian image's root directory is mode 0555, and
+        // root writes there only through `CAP_DAC_OVERRIDE` — which the sandbox drops by name. So a
+        // recipe naming a path under `/` fails at an enforced tier and nowhere else, because
+        // `defer_deps` moves the phase out of the image build (full capabilities) and into the
+        // container run (none). The PyPI heuristic named `/deps`, so every PyPI build succeeded at
+        // `--egress open` and failed at `mirror-only` with `Errno 13`, keyed `unknown`, attributed
+        // to the package.
+        //
+        // The path moved, which fixes the instance. This names the class, because the next recipe
+        // to reach for a path under `/` — a hand-written definition, a model's proposal, an
+        // imported `build.yaml` — will do it again, and it should arrive as a cluster rather than
+        // as a thousand unknowns.
+        //
+        // `Fault::Bug`: the recipe chose the path and the sandbox chose the capabilities. Nothing
+        // about the package is implicated, and a retry changes nothing — but a *different recipe*
+        // fixes it, which is what `repairable` means.
+        code: "env/cannot-write-path",
+        needles: &["Permission denied"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        // The path is the whole diagnosis, and it is the thing that differs between instances, so
+        // it keys the cluster: `env/cannot-write-path:/deps` and `…:/opt/x` are separate repairs.
+        capture: Capture::Between("'", "'"),
+    },
+    Rule {
         code: "env/no-ca-certificates",
         needles: &["server certificate verification failed"],
         fault: Fault::Bug,
@@ -649,6 +675,32 @@ fn clip(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_path_the_sandbox_cannot_write_is_ours_and_is_named() {
+        // A Debian image's root directory is mode 0555 and the sandbox drops `CAP_DAC_OVERRIDE`, so
+        // a recipe naming a path under `/` fails at an enforced tier and nowhere else. Every PyPI
+        // build did: `python3 -m venv /deps` succeeded at `--egress open`, where the phase is an
+        // image layer with full capabilities, and failed at `mirror-only`, where `defer_deps` moves
+        // it into the container run with none. It keyed `unknown` and was attributed to the package.
+        for log in [
+            "Error: [Errno 13] Permission denied: '/deps'",
+            "mkdir: cannot create directory '/opt/build': Permission denied",
+        ] {
+            let s = super::classify(log);
+            assert_eq!(s.code, "env/cannot-write-path", "{log}");
+            // Ours: the recipe chose the path and the sandbox chose the capabilities. Nothing about
+            // the package is implicated.
+            assert_eq!(s.fault, crate::Fault::Bug, "{log}");
+            // A retry changes nothing; a different recipe fixes it, which is what this means.
+            assert!(s.repairable && !s.retryable, "{log}");
+            assert_ne!(
+                s.key(),
+                "env/cannot-write-path",
+                "the path keys the cluster: {log}"
+            );
+        }
+    }
+
     #[test]
     fn the_setup_phases_own_diagnostic_is_named_rather_than_unknown() {
         // Trigon writes this line itself: the setup phase at an enforced tier checks the base image

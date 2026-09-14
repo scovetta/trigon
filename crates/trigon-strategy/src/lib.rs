@@ -30,4 +30,4 @@ pub use model::{
 };
 pub use parse::{from_yaml, to_yaml};
 pub use render::render;
-pub use tool::{Tool, ToolParam, ToolRegistry};
+pub use tool::{Tool, ToolParam, ToolRegistry, VENV};

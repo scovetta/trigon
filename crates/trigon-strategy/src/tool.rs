@@ -187,6 +187,28 @@ impl ToolRegistry {
     }
 }
 
+/// Where a PyPI build's virtualenv goes.
+///
+/// **Not under `/`.** The root directory of a Debian image is mode 0555, and root writes there only
+/// through `CAP_DAC_OVERRIDE` — which the sandbox drops, deliberately and by name. So
+/// `python3 -m venv /deps` is `Permission denied` for root, and only at an enforced tier:
+/// `defer_deps` moves the deps phase out of the image build and into the container run, so the same
+/// recipe worked at `--egress open` with full capabilities and failed at `mirror-only` with none. A
+/// build that succeeds at one tier and fails at another, for a reason that has nothing to do with
+/// the package, reported as the package's fault.
+///
+/// `/trigon` is ours and already in the image — the phase scripts are copied there — so it exists at
+/// run time, is owned by root at 0755, and needs no capability to write into. `/tmp` would work
+/// today and is the worse choice: it is world-writable, and a tmpfs mounted over it (which
+/// `docs/12-security.md` §5 wants) would empty it between the image build and the run with nothing
+/// saying so.
+///
+/// A constant because five places have to agree on it: the venv the deps phase creates, the
+/// interpreter the build phase looks for, the constraints file written between them, the CI rung's
+/// copy of the same recipe, and the default in `tools/pypi/deps-basic.yaml`. They were five
+/// literals agreeing by eye.
+pub const VENV: &str = "/trigon/deps";
+
 const BUILTIN_TOOLS: &[&str] = &[
     include_str!("../tools/git-checkout.yaml"),
     include_str!("../tools/pypi/setup-venv.yaml"),

@@ -195,6 +195,27 @@ correct, only that it ran and what it removed. And `Seen` retains at most 10,000
 serving a very long build reports `truncated > 0` and its rows become a sample — the counters stay
 exact, which is why `observed()` still reads them.
 
+## B12. A VCS-versioned project needs its tags, and the checkout does not carry them
+
+`chardet 7.4.3` now builds at `mirror-only` and compares `divergent`, and the reason is one thing:
+the rebuilt wheel is `chardet-0.1.dev1+g8f404a5a9`, not `chardet-7.4.3`. Twenty-nine of its
+thirty-five members are byte-identical; every difference is in `dist-info/`, and every one of those
+follows from the version string.
+
+`hatch-vcs` — and `setuptools-scm`, and every sibling — derives the version from `git describe`. The
+source phase checks out a commit, and a commit with no reachable tag describes as a dev version off
+the nearest ancestor. So the recipe is right, the source is right, the build is deterministic, and
+the artifact is wrong in the one field that names it.
+
+It is a whole class rather than one package: it fires on any project whose version comes from its
+VCS, which on PyPI is common, and it produces a *divergence* rather than a build failure — a public
+accusation about a package whose only fault is that we cloned it without its tags.
+
+**Done when:** a checkout carries the tags that describe its commit, or the inferrer detects a
+VCS-derived version and says so in `assumptions` rather than producing a confident wrong one.
+Worth checking whether `SourceCache` fetches tags at all, and what `git-checkout.yaml` does with a
+shallow clone.
+
 ## B8. The three ecosystems after npm and PyPI
 
 `nuget.org`, `crates.io` and `rubygems.org`. [`03`](03-ecosystems.md) has a chapter on each and

@@ -22,7 +22,7 @@ params:
       identical.
   constraints:
     required: false
-    default: /deps/constraints.txt
+    default: /trigon/deps/constraints.txt
     doc: Where the pin is written for the build phase to pick up.
 steps:
   - uses: pypi/setup-venv
@@ -30,10 +30,16 @@ steps:
       locator: /usr/bin/
       path: "{{ with.venv }}"
       python_version: "{{ with.python_version }}"
-  - runs: "{{ with.venv }}/bin/pip install build"
+  # **Before any pip runs.** This sat *after* the `pip install build` below, so the one pip
+  # invocation that installs the build frontend resolved against the live index — at `mirror-only`
+  # it cannot reach one and the build dies with `Network is unreachable`; at `--egress open` it
+  # quietly installed whatever PyPI held today, into a run whose whole claim is that it resolved
+  # against the publish moment. A pin that looks applied and is not, which is the failure
+  # `docs/16-findings.md` §1 is named for, in the phase that exists to apply it.
   - uses: pypi/setup-registry
     with:
       registry_time: "{{ with.registry_time }}"
+  - runs: "{{ with.venv }}/bin/pip install build"
   # A constraint file rather than an install, because the environment that matters is not this one.
   # The frontend builds an isolated environment and installs the project's declared build
   # requirements into it; pre-installing the backend here does nothing for that environment, and
