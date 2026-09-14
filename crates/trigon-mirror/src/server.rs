@@ -102,6 +102,33 @@ pub struct Observed {
 }
 
 impl Observed {
+    /// Derive the same counters from a network transcript.
+    ///
+    /// **The second of two ways to compute one thing, and the reason there is a test asserting they
+    /// agree.** The first is [`Mirror::observed`], reading atomics the request path bumps. That one
+    /// cannot leave the island: under an enforced tier the mirror runs inside the build's network
+    /// namespace, the host has no route to it, and the counter that caught the `PIP_TRUSTED_HOST`
+    /// finding read `null` on exactly the tier where it is the claim. The transcript does leave,
+    /// through the container log, so this reads the same facts off it.
+    ///
+    /// Every field here is a count of rows rather than a number carried out of the container, which
+    /// is what makes it checkable: a reader holding the transcript can redo this arithmetic.
+    pub fn from_transcript(exchanges: &[crate::Exchange], refusals: u64) -> Observed {
+        let count = |r: &str| exchanges.iter().filter(|e| e.route == r).count() as u64;
+        Observed {
+            index_requests: count("index"),
+            // Only index documents carry a `withheld`, and `None` there means "not an index
+            // response" rather than zero — so summing the `Some`s is the whole of it.
+            versions_withheld: exchanges.iter().filter_map(|e| e.withheld).sum(),
+            // Both routes are the build fetching a file rather than resolving against an index,
+            // which is the distinction this counter draws. `passthrough` is an index host serving
+            // something no filter applied to; `artifact` is a dependency under its own name.
+            artifact_requests: count("artifact") + count("passthrough"),
+            toolchain_requests: count("toolchain"),
+            rejected: refusals,
+        }
+    }
+
     /// Whether anything was served through the time filter.
     ///
     /// Not the same question as "is the pin correct": a build that asked once and got what it
@@ -139,6 +166,70 @@ pub struct Mirror {
     passthrough: reqwest::Client,
     stats: Arc<Stats>,
     guard: Arc<crate::guard::Guard>,
+    seen: Arc<Seen>,
+}
+
+/// What this mirror served, kept in memory beside the counters that count it.
+///
+/// Two ways to answer one question is the shape of bug this project keeps finding, so this exists
+/// mainly so a test can assert the two agree: [`Mirror::observed`] reads the atomics the request
+/// path bumps, [`Observed::from_transcript`] reads the rows, and for the same traffic they must
+/// produce the same `Observed`. Only the second can leave the island, which is why the second has
+/// to be right.
+///
+/// The counters remain the source of truth for `observed()` because they are exact and unbounded;
+/// the rows are capped, since a long-running `trigon mirror` would otherwise grow without limit.
+/// Passing the cap drops rows and is visible as `truncated`, never as a smaller count.
+#[derive(Debug, Default)]
+pub struct Seen {
+    exchanges: std::sync::Mutex<Vec<crate::Exchange>>,
+    refusals: std::sync::Mutex<Vec<crate::Refusal>>,
+    truncated: AtomicU64,
+}
+
+/// Rows retained in memory before this stops keeping them. One run's build fetches a few hundred.
+const MAX_RETAINED: usize = 10_000;
+
+impl Seen {
+    /// Write one exchange to the transcript and keep a copy.
+    ///
+    /// One function, so the line that leaves the container and the row a test inspects are the same
+    /// object. Split across two call sites they would be two things that had to agree.
+    fn exchange(&self, e: crate::Exchange) {
+        e.emit();
+        if let Ok(mut v) = self.exchanges.lock() {
+            if v.len() < MAX_RETAINED {
+                v.push(e);
+            } else {
+                self.truncated.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn refusal(&self, r: crate::Refusal) {
+        r.emit();
+        if let Ok(mut v) = self.refusals.lock() {
+            if v.len() < MAX_RETAINED {
+                v.push(r);
+            } else {
+                self.truncated.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn exchanges(&self) -> Vec<crate::Exchange> {
+        self.exchanges.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    pub fn refusals(&self) -> Vec<crate::Refusal> {
+        self.refusals.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    /// Rows dropped for exceeding [`MAX_RETAINED`]. Non-zero means `exchanges()` is a sample and
+    /// `Observed::from_transcript` over it would undercount — which the counters would not.
+    pub fn truncated(&self) -> u64 {
+        self.truncated.load(Ordering::Relaxed)
+    }
 }
 
 /// A running mirror.
@@ -146,6 +237,7 @@ pub struct MirrorHandle {
     pub addr: SocketAddr,
     stats: Arc<Stats>,
     guard: Arc<crate::guard::Guard>,
+    seen: Arc<Seen>,
     shutdown: tokio::sync::oneshot::Sender<()>,
     joined: tokio::task::JoinHandle<()>,
 }
@@ -156,8 +248,9 @@ impl MirrorHandle {
         self.addr.to_string()
     }
 
-    pub fn stats(&self) -> &Stats {
-        &self.stats
+    /// What this mirror served, row by row. See [`Seen`] for why this exists beside the counters.
+    pub fn seen(&self) -> &Seen {
+        &self.seen
     }
 
     /// What the mirror actually did, as plain numbers a caller can act on.
@@ -199,6 +292,7 @@ impl Mirror {
                 .build()?,
             stats: Arc::new(Stats::default()),
             guard: Arc::new(crate::guard::Guard::default()),
+            seen: Arc::new(Seen::default()),
         })
     }
 
@@ -215,6 +309,7 @@ impl Mirror {
     pub async fn serve(self, port: u16) -> Result<MirrorHandle, MirrorError> {
         let stats = self.stats.clone();
         let guard = self.guard.clone();
+        let seen = self.seen.clone();
         let app = axum::Router::new()
             .fallback(handle)
             .with_state(Arc::new(self));
@@ -239,6 +334,7 @@ impl Mirror {
             addr,
             stats,
             guard,
+            seen,
             shutdown: tx,
             joined,
         })
@@ -246,6 +342,8 @@ impl Mirror {
 }
 
 async fn handle(State(mirror): State<Arc<Mirror>>, req: Request) -> Response {
+    // Taken before the request is consumed, so a refusal can say what was asked for.
+    let path = req.uri().path().to_string();
     match serve_one(&mirror, req).await {
         Ok(r) => r,
         Err(e) => {
@@ -253,6 +351,13 @@ async fn handle(State(mirror): State<Arc<Mirror>>, req: Request) -> Response {
                 .stats
                 .rejected_requests
                 .fetch_add(1, Ordering::Relaxed);
+            // Out through the log beside the transcript, because the counter beside it cannot
+            // leave the island — and "somebody asked and was refused" reads nothing like silence.
+            mirror.seen.refusal(crate::Refusal {
+                path: path.clone(),
+                status: e.status(),
+                reason: e.to_string(),
+            });
             tracing::warn!("{e}");
             (
                 StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -360,7 +465,13 @@ async fn npm_request(
         "filtered a packument"
     );
 
-    Ok(json_response(&url, &doc, "application/json"))
+    Ok(json_response(
+        &mirror.seen,
+        &url,
+        &doc,
+        "application/json",
+        removed as u64,
+    ))
 }
 
 /// PyPI: `/simple/{project}/` is the index, everything else passes through.
@@ -413,14 +524,16 @@ async fn pypi_request(
 
     if accept.contains("json") {
         return Ok(json_response(
+            &mirror.seen,
             &url,
             &doc,
             "application/vnd.pypi.simple.v1+json",
+            removed as u64,
         ));
     }
     let project = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
     let html = crate::pypi::render_html(&doc, project);
-    transcribe_generated(&url, html.as_bytes());
+    transcribe_generated(&mirror.seen, &url, html.as_bytes(), removed as u64);
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/vnd.pypi.simple.v1+html")],
@@ -644,6 +757,7 @@ async fn proxy(
     let stream = guarded_stream(
         resp.bytes_stream(),
         mirror.guard.clone(),
+        mirror.seen.clone(),
         url.to_string(),
         route,
     );
@@ -676,6 +790,7 @@ async fn proxy(
 fn guarded_stream<S>(
     inner: S,
     guard: Arc<crate::guard::Guard>,
+    seen: Arc<Seen>,
     url: String,
     route: &'static str,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>>
@@ -692,6 +807,7 @@ where
         oversized: bool,
         bytes: u64,
         guard: Arc<crate::guard::Guard>,
+        seen: Arc<Seen>,
         url: String,
         route: &'static str,
     }
@@ -704,6 +820,7 @@ where
         oversized: false,
         bytes: 0,
         guard,
+        seen,
         url,
         route,
     };
@@ -735,7 +852,13 @@ where
                 } else {
                     s.guard.observe(&s.url, digest, s.body.as_deref())
                 };
-                crate::Exchange::new(s.route, &s.url, digest.to_hex(), s.bytes, checked).emit();
+                s.seen.exchange(crate::Exchange::new(
+                    s.route,
+                    &s.url,
+                    digest.to_hex(),
+                    s.bytes,
+                    checked,
+                ));
                 None
             }
         }
@@ -748,17 +871,22 @@ where
 /// removed — so the guard never sees it and [`guarded_stream`] never runs over it. It is still the
 /// most consequential thing the build received, because every version it resolved came out of it,
 /// so it belongs in the transcript with `Checked::Generated` saying plainly that no guard applied.
-fn transcribe_generated(url: &str, body: &[u8]) {
+fn transcribe_generated(seen: &Seen, url: &str, body: &[u8], withheld: u64) {
     use sha2::Digest as _;
     let digest = trigon_core::Digest::from_bytes(sha2::Sha256::digest(body).into());
-    crate::Exchange::new(
-        "index",
-        url,
-        digest.to_hex(),
-        body.len() as u64,
-        crate::Checked::Generated,
-    )
-    .emit();
+    seen.exchange(
+        crate::Exchange::new(
+            "index",
+            url,
+            digest.to_hex(),
+            body.len() as u64,
+            crate::Checked::Generated,
+        )
+        // Always recorded on an index response, including when it is zero. Zero withheld is
+        // evidence the filter ran and found nothing to remove; absent would say it was never an
+        // index document at all.
+        .withholding(withheld),
+    );
 }
 
 /// Serve a document the mirror composed, and transcribe exactly the bytes served.
@@ -766,9 +894,15 @@ fn transcribe_generated(url: &str, body: &[u8]) {
 /// The serialization happens once and both the response and the digest come out of it. Hashing a
 /// second serialization would be hashing something the build never saw, which is the same class of
 /// mistake as recording a partial body.
-fn json_response(url: &str, doc: &serde_json::Value, content_type: &'static str) -> Response {
+fn json_response(
+    seen: &Seen,
+    url: &str,
+    doc: &serde_json::Value,
+    content_type: &'static str,
+    withheld: u64,
+) -> Response {
     let body = serde_json::to_vec(doc).unwrap_or_default();
-    transcribe_generated(url, &body);
+    transcribe_generated(seen, url, &body, withheld);
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     (StatusCode::OK, headers, Body::from(body)).into_response()

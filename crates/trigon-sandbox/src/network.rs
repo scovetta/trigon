@@ -54,6 +54,23 @@ pub struct MirrorLog {
     /// Every response body the mirror served into the build, in the order it finished serving
     /// them. Empty means the build downloaded nothing — a read that failed is an error, not this.
     pub transcript: Vec<trigon_mirror::Exchange>,
+    /// Every request the mirror turned away. Separate from the transcript because a refusal serves
+    /// no body and has no digest — and because "somebody asked and was refused" is a different
+    /// thing to investigate than silence.
+    pub refusals: Vec<trigon_mirror::Refusal>,
+}
+
+impl MirrorLog {
+    /// The registry-pin evidence, derived from what crossed rather than read off a counter.
+    ///
+    /// This is why refusals are carried out beside the transcript. The counters live on the
+    /// `Mirror` object; under an enforced tier that object is inside the build's network island and
+    /// the host has no route to it — so the control that caught the `PIP_TRUSTED_HOST` finding read
+    /// `null` on exactly the tier where it is the claim, and read fine at `open`, where it matters
+    /// least. See `docs/17-backlog.md` B7b.
+    pub fn observed(&self) -> trigon_mirror::Observed {
+        trigon_mirror::Observed::from_transcript(&self.transcript, self.refusals.len() as u64)
+    }
 }
 
 impl Island {
@@ -245,6 +262,15 @@ impl Island {
                     phase: "build".into(),
                     detail: format!(
                         "the mirror wrote a transcript line this build cannot read, so what the                          build downloaded is unknown rather than empty: {detail}"
+                    ),
+                }
+            })?,
+            refusals: trigon_mirror::Refusal::parse_log(&logs).map_err(|detail| {
+                SandboxError::Failed {
+                    phase: "build".into(),
+                    detail: format!(
+                        "the mirror wrote a refusal line this build cannot read, so whether the \
+                         build was turned away is unknown rather than no: {detail}"
                     ),
                 }
             })?,

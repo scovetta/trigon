@@ -682,7 +682,7 @@ project has made.
 | **D14** | Redaction of credentials from a build log before it is stored, rendered or sent to a model. | — | **security-critical** | *(documented, docs/18-management-ui.md §2)* |
 | **D15** | That `attestable` means full trust. It means one thing: the egress boundary was enforced and the run can say what crossed it. It is not a claim about the sandbox class, the base image or the strategy. | all tiers | **security-critical** | *(documented, docs/08-execution.md §7.3)* |
 | **D15b** | Observability above Tier 1. The transcript says what crossed the network, never what the build did with it — no syscalls, no file access, no process tree. | all tiers | correctness-only | *(documented, docs/08-execution.md §7, Tier 2 and 3 are unimplemented by decision)* |
-| **D15c** | That `environment.pin` is populated at an enforced tier. The mirror's counters live inside the build's network island and the host has no route to them, so the control that caught the `PIP_TRUSTED_HOST` finding reads `null` on exactly the tier where it is the claim. | `mirror-only` | **security-critical** | *(documented, docs/17-backlog.md B7b)* |
+| **D15c** | That the registry pin served the *right* index. `environment.pin` now says the filter ran and how many versions it removed, at every tier; it does not check that what was served matches what the registry held at that moment. | all tiers | correctness-only | *(documented, docs/16-findings.md §3.17)* |
 | **D16** | That the artifact guard survives a byte-level transformation. It compares bytes, so re-encoding, encryption or chunk reassembly defeats it. | — | **security-critical** | *(documented, docs/12-security.md §2.5)* |
 | **D17** | That a divergence has been confirmed. The two-agreeing-attempts policy is specified and not implemented. | — | **security-critical** | *(documented, docs/16-findings.md §5)* |
 | **D18** | That a `normalized` claim re-derived through an archived stabilizer set stays `normalized`. It degrades to `normalized_with_caveats`, so **a true claim reads as refuted**. | `wasm` feature | **security-critical** | *(documented, docs/16-findings.md §4b)* |
@@ -825,9 +825,7 @@ naming every claimed matrix row's owning property.
 - A new ecosystem gains a `Registry` — `nuget.org`, `crates.io`, `rubygems.org` are queued
   *(documented, docs/17-backlog.md B8)*. Each adds an archive format, a version algebra and a
   stabilizer profile; RubyGems adds nested archives, a new path into the parser.
-- Observability rises above Tier 1 (D15b), or the pin evidence reaches the host from inside the
-  island (D15c) — the first widens what a run can assert, the second closes a control that is blank
-  on the tier the README recommends.
+- Observability rises above Tier 1 (D15b) — that widens what a run can assert beyond its network.
 - The fleet is built: a queue, workers, an authenticated API and multi-tenancy each add a role.
 - `--egress`'s default changes, or `GitAndMirror` is implemented (it is currently refused).
 - The `wasm` feature becomes the default, or `docs/09-attestations.md` §7.1's fallback is taken.

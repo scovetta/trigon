@@ -292,6 +292,17 @@ pub struct BuildOutcome {
     /// may turn a `None` into an empty list: "we could not look" and "nothing came through" are
     /// the two answers this type exists to keep apart.
     pub transcript: Option<Vec<trigon_mirror::Exchange>>,
+    /// What the mirror served and refused, as the registry-pin counters.
+    ///
+    /// `None` where no mirror ran — at `deny-all` there is nothing to resolve against and at `open`
+    /// the build can bypass the mirror entirely, so neither can produce this. `Some` with
+    /// `index_requests == 0` is the interesting value and the one this exists for: it says the
+    /// mirror was up, the build talked to it, and it never asked for an index — which is either a
+    /// build that needed no dependencies or a pin that did not reach the client.
+    ///
+    /// Derived from the transcript rather than carried out as a number, so a reader holding the
+    /// transcript can redo the arithmetic instead of trusting it.
+    pub pin: Option<trigon_mirror::Observed>,
 }
 
 impl BuildOutcome {

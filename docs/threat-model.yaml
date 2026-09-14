@@ -11,7 +11,7 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:301a0e4c74b5bdc7129510c7f1deb172f7dfdc01fd77f6791b29c113e3e31bb4
+prose_version: docs/threat-model.md@sha256:8db61cd885bd089568c11c54a2752bd77c499613290f9846f03fa0edc2a3673e
 model_status: unratified-draft
 triage_policy: strict
 confidence:

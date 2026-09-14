@@ -674,6 +674,36 @@ this honest is that present-and-empty and absent are kept apart all the way down
 the store, no blob, and `attestable` derived from which — so "we never looked" cannot become "we
 looked and it was clean".
 
+### 3.17 The control that was blank on the tier that recommends itself
+
+`PinEvidence` is the answer to "did the registry pin bind anything?", and it is the counter that
+eventually exposed §1's `PIP_TRUSTED_HOST` finding after weeks of reading zero. On every
+`mirror-only` run it read `null`.
+
+The reason is the same shape as §3.16 and arrives from the opposite direction. The counters live on
+the `Mirror` object. Under an enforced tier that object runs *inside the build's network island*,
+and the host has no route to it — which is not a bug, it is the definition of the island. So the
+control was present at `open`, where a build can bypass the mirror entirely and the evidence is
+nearly worthless, and absent at `mirror-only`, where it is the claim being made.
+
+Three things came out of fixing it:
+
+- **`versions_withheld` was never a counter.** It is computed per index document, by the filter that
+  removes the versions, and then added to a running total. Moving it onto the index row put it where
+  it always belonged, and the transcript carries it out for free.
+- **Refusals needed their own marker.** A refusal serves no body, so it has no digest and no byte
+  count, and forcing it into the transcript would have put a row of nulls beside every real one.
+  It is also the more interesting half: `rejected` collapsed "no filter", "host not on the
+  allowlist" and "upstream returned 500" into one number, and the row now says which.
+- **Two ways to compute one thing, so something asserts they agree.** `Mirror::observed()` reads
+  atomics the request path bumps; `Observed::from_transcript` counts rows. The first cannot leave
+  the island, which is why the second exists, and a test drives real traffic through a mirror and
+  asserts both produce the same `Observed`. That test is the point — without it this is the
+  project's most reliable bug shape reintroduced deliberately.
+
+One thing it does *not* fix, stated because a control must not claim more than it checks: this says
+the filter ran and what it removed. It says nothing about whether what it served was right.
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher

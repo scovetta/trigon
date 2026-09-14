@@ -21,12 +21,13 @@ mod server;
 
 pub use error::MirrorError;
 pub use guard::{
-    Checked, EXCHANGE_MARKER, Exchange, Guard, GuardManifest, GuardMatch, TRIP_MARKER, Trip,
+    Checked, EXCHANGE_MARKER, Exchange, Guard, GuardManifest, GuardMatch, REFUSAL_MARKER, Refusal,
+    TRIP_MARKER, Trip,
 };
 pub use moment::{Filter, Platform, normalize, published_by, url_for};
 pub use npm::filter_packument;
 pub use pypi::{filter_simple, render_html};
 pub use server::{
-    ARTIFACT_HOSTS, Mirror, MirrorHandle, Observed, TOOLCHAIN_HOSTS, artifact_host_allowed,
+    ARTIFACT_HOSTS, Mirror, MirrorHandle, Observed, Seen, TOOLCHAIN_HOSTS, artifact_host_allowed,
     toolchain_host_allowed,
 };

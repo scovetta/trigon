@@ -617,13 +617,7 @@ impl BuildHandle for PodmanBuild {
             seen = Some(read?);
         }
 
-        let (guard_trips, from_mirror) = match seen {
-            Some(s) => (s.trips, Some(s.transcript)),
-            None => (Vec::new(), None),
-        };
-        let mut outcome = self.outcome(code, artifact, timings, failed_in, log, from_mirror);
-        outcome.guard_trips = guard_trips;
-        Ok(outcome)
+        Ok(self.outcome(code, artifact, timings, failed_in, log, seen))
     }
 }
 
@@ -693,6 +687,11 @@ impl PodmanBuild {
         complete_account(self.plan.egress, from_mirror)
     }
 
+    /// Everything one read of the mirror's log produced, as an outcome.
+    ///
+    /// The whole `MirrorLog` rather than its three fields separately, because they *are* one read:
+    /// a transcript from one `podman logs` beside a trip list from another is two accounts of one
+    /// run, and the pin evidence is derived from the transcript in the same breath.
     fn outcome(
         &self,
         exit_code: i32,
@@ -700,8 +699,13 @@ impl PodmanBuild {
         timings: Vec<(Phase, Option<Duration>)>,
         failed_in: Option<Phase>,
         log_tail: String,
-        from_mirror: Option<Vec<trigon_mirror::Exchange>>,
+        seen: Option<crate::network::MirrorLog>,
     ) -> BuildOutcome {
+        let pin = seen.as_ref().map(|s| s.observed());
+        let (guard_trips, from_mirror) = match seen {
+            Some(s) => (s.trips, Some(s.transcript)),
+            None => (Vec::new(), None),
+        };
         let transcript = self.transcript(from_mirror);
         BuildOutcome {
             signature: self.named.lock().ok().and_then(|n| n.clone()),
@@ -715,8 +719,9 @@ impl PodmanBuild {
             // build", which is true when a complete account exists and false otherwise.
             attestable: transcript.is_some(),
             log_tail,
-            guard_trips: Vec::new(),
+            guard_trips,
             transcript,
+            pin,
         }
     }
 }
@@ -955,6 +960,7 @@ mod account_tests {
             sha256: "aa".repeat(32),
             bytes: 10,
             checked: trigon_mirror::Checked::Opened,
+            withheld: None,
         }]
     }
 

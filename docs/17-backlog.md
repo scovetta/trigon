@@ -151,24 +151,24 @@ far the guard got for everything crossing the mirror, and `attestable` is now de
 complete account exists rather than being the literal `false` it was in two places. See
 [`08`](08-execution.md) §7.2 and §7.3.
 
-## B7b. The pin evidence is blank on the tier that needs it most
+## B7b. ~~The pin evidence is blank on the tier that needs it most~~ — closed
 
-`PinEvidence` — index requests served, versions withheld — is the counter that exposed the
-`PIP_TRUSTED_HOST` finding ([`16`](16-findings.md) §1), and it reads `null` on every `mirror-only`
-run. The counters live on the `Mirror` object, the mirror under an enforced tier runs *inside the
-build's network island*, and the host has no route to it. So the one control that says "the pin
-actually bound something" is present at `open`, where it is least needed, and absent at
+Closed, and recorded in [`16`](16-findings.md) §3.17. `PinEvidence` is the counter that exposed the
+`PIP_TRUSTED_HOST` finding ([`16`](16-findings.md) §1), and it read `null` on every `mirror-only`
+run: the counters live on the `Mirror` object, an enforced tier puts that object inside the build's
+network island, and the host has no route to it. The one control that says "the pin actually bound
+something" was present at `open`, where a build can ignore the mirror entirely, and absent at
 `mirror-only`, where it is the claim.
 
-The network transcript now makes it derivable without a new channel: an entry with
-`route: "index"` **is** an index request served through the time filter, and the build's own
-resolution came out of those documents. Sixty-nine of them appear in the `left-pad` run above.
-What it cannot derive is `versions_withheld`, which is a fact about the filtering rather than about
-the response, and would still have to come out of the container.
+It is derived from the transcript now, which does get out. `versions_withheld` moved onto the index
+row itself — it was always a per-response fact — and refusals get their own marker line, because a
+refusal serves no body and does not belong in a list whose every other row has a digest. Both of
+those had previously been countable only from inside.
 
-**Done when:** `environment.pin` is populated at `mirror-only`, from the transcript where that
-suffices and from the mirror's own counters where it does not — and a run where neither is available
-says so rather than reading as a run that resolved nothing.
+**Its residue, which is a different claim:** none of this says the *values* the filter served were
+correct, only that it ran and what it removed. And `Seen` retains at most 10,000 rows, so a mirror
+serving a very long build reports `truncated > 0` and its rows become a sample — the counters stay
+exact, which is why `observed()` still reads them.
 
 ## B8. The three ecosystems after npm and PyPI
 

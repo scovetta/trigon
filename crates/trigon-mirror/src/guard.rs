@@ -320,6 +320,74 @@ pub struct Exchange {
     /// How far the guard got with it. Without this, "opened and clean" and "never opened" read
     /// identically, and they are the difference between a check and the appearance of one.
     pub checked: Checked,
+    /// Versions the time filter removed from this index document before serving it.
+    ///
+    /// `None` on anything that is not a filtered index, which is not the same as `Some(0)`: an
+    /// index document that withheld nothing is evidence the pin applied and found nothing to
+    /// remove, and a dependency tarball is not evidence about the pin at all.
+    ///
+    /// Here rather than only in a counter because a counter cannot leave the island. Under an
+    /// enforced tier the mirror runs inside the build's network namespace and the host has no route
+    /// to it, so [`Observed`](crate::Observed) — the control that caught the `PIP_TRUSTED_HOST`
+    /// finding — read `null` on exactly the tier where it is the claim. It is a per-response fact
+    /// anyway, which is why it belongs here rather than in a counter that has to be shipped out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<u64>,
+}
+
+/// The prefix on every line recording a request the mirror turned away.
+///
+/// A refusal serves no body, so it is not an [`Exchange`] and has no business in a list whose every
+/// other row carries a digest and a byte count. It is still evidence: somebody asked and was
+/// refused, which is a different thing to investigate than silence — most often a client that
+/// dropped the credentials carrying the pinned moment, which is how a build comes to resolve
+/// against today's index while every log line says it was pinned.
+pub const REFUSAL_MARKER: &str = "NET-REFUSED";
+
+/// One request the mirror declined to serve.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    /// The path as asked for. Not an upstream URL: there is no upstream request to name, because
+    /// this one never got that far.
+    pub path: String,
+    pub status: u16,
+    /// What the mirror said. A reader can then tell "no filter" from "host not on the allowlist"
+    /// from "upstream returned 500" — three refusals with three different fixes, which the single
+    /// `rejected` counter collapsed into one number.
+    pub reason: String,
+}
+
+impl Refusal {
+    /// The exact line [`emit`](Self::emit) writes. Split out for the reason [`Exchange::line`] is.
+    pub fn line(&self) -> String {
+        match serde_json::to_string(self) {
+            Ok(json) => format!("{REFUSAL_MARKER} {json}"),
+            Err(e) => format!("{REFUSAL_MARKER} {{\"unserializable\":\"{e}\"}}"),
+        }
+    }
+
+    pub fn emit(&self) {
+        println!("{}", self.line());
+    }
+
+    /// Read refusals back out of a container log. Strict, for the reason [`Exchange::parse_log`] is.
+    pub fn parse_log(logs: &str) -> Result<Vec<Refusal>, String> {
+        let mut out = Vec::new();
+        for line in logs
+            .lines()
+            .filter_map(|l| l.split_once(REFUSAL_MARKER).map(|(_, r)| r))
+        {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Refusal>(line) {
+                Ok(r) => out.push(r),
+                Err(e) => return Err(format!("unreadable refusal line `{line}`: {e}")),
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// How far the artifact guard got with one body.
@@ -357,7 +425,14 @@ impl Exchange {
             sha256,
             bytes,
             checked,
+            withheld: None,
         }
+    }
+
+    /// Record how many versions the time filter removed from this index document before serving it.
+    pub fn withholding(mut self, versions: u64) -> Self {
+        self.withheld = Some(versions);
+        self
     }
 
     /// The exact line [`emit`](Self::emit) writes.

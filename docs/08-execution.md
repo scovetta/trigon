@@ -305,6 +305,19 @@ One line per response body served, behind the fixed prefix `NET-EXCHANGE`:
   manifest on this run). Without this field, "opened and clean" and "never opened" read identically,
   and they are the difference between a check and the appearance of one.
 
+Index rows carry one field more: **`withheld`**, the number of versions the time filter removed from
+that document before serving it. `None` on anything that is not a filtered index, which is not the
+same as `Some(0)` — zero withheld is evidence the pin applied and found nothing to remove, while a
+dependency tarball is not evidence about the pin at all. A second marker, `NET-REFUSED`, records
+requests the mirror turned away, with the path, the status and the reason: a refusal serves no body,
+so it has no digest and no place in the transcript, but "somebody asked and was refused" is a
+different thing to investigate than silence.
+
+Between them those two carry the whole of `PinEvidence` out of the island, which is what closes
+[`17-backlog.md`](17-backlog.md) B7b. `Observed::from_transcript` counts the rows; the counters on
+the `Mirror` object cannot leave, so a test drives real traffic through a mirror and asserts the two
+produce the same answer.
+
 **The channel out is the container log**, the same one guard trips use. The mirror sits inside the
 build's network island and the host has no route to it — that is the point of the island — so the
 host reads both streams with `podman logs` and filters on the marker. Two properties make this safe

@@ -1048,6 +1048,14 @@ mod build {
         /// The complete account of what crossed into the build, or `None` when none exists. An
         /// empty `Some` means nothing crossed and must never be flattened into `None`.
         pub transcript: Option<Vec<trigon_mirror::Exchange>>,
+        /// What the mirror inside the island served and refused, as the registry-pin counters.
+        ///
+        /// `None` where no mirror ran. This is the whole of `docs/17-backlog.md` B7b: the counters
+        /// live on the `Mirror` object, which under an enforced tier sits inside the build's
+        /// network island where the host cannot reach it — so the check that caught the
+        /// `PIP_TRUSTED_HOST` finding was blank on exactly the tier that recommends itself, and
+        /// present at `open`, where a build can ignore the mirror entirely.
+        pub pin: Option<trigon_mirror::Observed>,
         /// Where the runner collected the rebuilt artifact, when it collected exactly one.
         ///
         /// The runner knows this — it mounted the directory the build wrote into — and the caller
@@ -1343,6 +1351,7 @@ mod build {
             Ok(Built {
                 attestable: outcome.attestable,
                 transcript: outcome.transcript,
+                pin: outcome.pin,
                 artifact: outcome.artifact,
             })
         })
@@ -2638,13 +2647,24 @@ mod rebuild {
             trigon_registry::Derivation::ModelAssisted.to_string()
         };
 
-        if let Some(m) = mirror {
-            // A claim of a pinned dependency graph has to be able to show the pin did something,
-            // and until this check existed it could not. `PIP_INDEX_URL` without `PIP_TRUSTED_HOST`
-            // makes pip warn once and then resolve against the live index, so every PyPI run
-            // recorded a moment it did not have — for weeks, with this counter sitting at zero the
-            // whole time and reading exactly like a build that needed nothing.
-            let observed = m.observed();
+        // A claim of a pinned dependency graph has to be able to show the pin did something, and
+        // until this check existed it could not. `PIP_INDEX_URL` without `PIP_TRUSTED_HOST` makes
+        // pip warn once and then resolve against the live index, so every PyPI run recorded a
+        // moment it did not have — for weeks, with this counter sitting at zero the whole time and
+        // reading exactly like a build that needed nothing.
+        //
+        // **Two places the answer can come from, and for a while only one of them could answer.**
+        // A mirror on this host is asked directly. A mirror inside the build's network island
+        // cannot be: that is what the island is for, and the counters live on an object the host
+        // has no route to — so the control was blank at `mirror-only`, the tier that recommends
+        // itself, and present at `open`, where a build can ignore the mirror entirely. The island's
+        // answer is now derived from the transcript, which does get out. See `docs/17-backlog.md`
+        // B7b.
+        let observed = match &mirror {
+            Some(m) => Some(m.observed()),
+            None => built.as_ref().ok().and_then(|b| b.pin),
+        };
+        if let Some(observed) = observed {
             pin = Some(observed);
             report.pin = Some(observed);
             if verbose {
@@ -2684,6 +2704,9 @@ mod rebuild {
                      today's index."
                 );
             }
+        }
+
+        if let Some(m) = mirror {
             let trips = m.trips();
             rt.block_on(m.shutdown());
             if let Some(t) = trips.first() {

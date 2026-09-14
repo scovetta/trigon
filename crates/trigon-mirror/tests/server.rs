@@ -582,6 +582,7 @@ fn a_transcript_line_survives_the_trip_out_through_a_container_log() {
         sha256: "e1".repeat(32),
         bytes: 2361,
         checked: trigon_mirror::Checked::Opened,
+        withheld: None,
     };
     let log = format!(
         "2026-09-13T10:00:00Z  INFO trigon_mirror: listening\n{}\nsomething else entirely\n",
@@ -743,4 +744,184 @@ fn the_stored_form_and_the_log_form_are_read_by_different_readers() {
         trigon_mirror::Exchange::parse_jsonl("").unwrap(),
         Vec::<trigon_mirror::Exchange>::new()
     );
+}
+
+// --- The registry-pin evidence, and the two ways to compute it ------------------------------
+//
+// `docs/17-backlog.md` B7b. The counters live on the `Mirror` object; under `--egress mirror-only`
+// that object runs inside the build's network island and the host has no route to it. So the one
+// control that says "the pin actually bound something" — the counter that eventually exposed the
+// `PIP_TRUSTED_HOST` finding — read `null` on exactly the tier where it is the claim, and read fine
+// at `open`, where a build can ignore the mirror entirely.
+//
+// The fix derives the same counters from the transcript, which does get out. That is a second way
+// to compute one thing, which is this project's most reliable bug shape, so these bind them.
+
+#[test]
+fn the_pin_evidence_counts_rows_rather_than_carrying_a_number_out() {
+    use trigon_mirror::{Checked, Exchange, Observed};
+
+    let row = |route: &str, withheld: Option<u64>| {
+        let e = Exchange::new(route, "https://x/y", "aa".repeat(32), 10, Checked::Hashed);
+        match withheld {
+            Some(n) => e.withholding(n),
+            None => e,
+        }
+    };
+    let rows = vec![
+        row("index", Some(40)),
+        // Zero withheld is not the same as absent: the filter ran and found nothing to remove,
+        // which is evidence the pin applied. Summing `Option` rather than a defaulted field is
+        // what keeps that from collapsing into "no index documents were filtered".
+        row("index", Some(0)),
+        row("artifact", None),
+        row("artifact", None),
+        // An index host serving something no filter applied to. It is the build fetching a file,
+        // not resolving against an index, which is the distinction `artifact_requests` draws.
+        row("passthrough", None),
+        row("toolchain", None),
+    ];
+
+    let o = Observed::from_transcript(&rows, 3);
+    assert_eq!(o.index_requests, 2);
+    assert_eq!(o.versions_withheld, 40);
+    assert_eq!(o.artifact_requests, 3, "passthrough counts as a fetch");
+    assert_eq!(o.toolchain_requests, 1);
+    assert_eq!(o.rejected, 3);
+    assert!(o.pin_bound());
+    assert!(o.contacted());
+
+    // And the empty case, which is the one that must not read like the populated one.
+    let none = Observed::from_transcript(&[], 0);
+    assert!(!none.pin_bound(), "nothing served is not a bound pin");
+    assert!(!none.contacted());
+}
+
+#[tokio::test]
+async fn a_refusal_reaches_the_counters_and_the_transcript_alike() {
+    // Offline on purpose: every request here is refused before the mirror reaches upstream, so this
+    // runs everywhere and still exercises the path that had no way out of the island at all. A
+    // refusal serves no body, so it is not an `Exchange` — and a `rejected` count that stayed at
+    // zero under an enforced tier would read exactly like a build nobody turned away.
+    let m = Mirror::new().unwrap().serve(0).await.unwrap();
+    let host = m.host();
+
+    // No filter at all: the credentials that carry the pinned moment never arrived.
+    assert_eq!(
+        reqwest::get(format!("http://{host}/left-pad"))
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    // A host nobody allowlisted, on each of the two routes that take one.
+    for path in [
+        "/-toolchain/evil.example/node.tar.gz",
+        "/-artifact/npm/2024-01-01T00:00:00/evil.example/x.tgz",
+    ] {
+        let status = reqwest::get(format!("http://{host}{path}"))
+            .await
+            .unwrap()
+            .status();
+        assert!(
+            status.is_client_error() || status.is_server_error(),
+            "{path}: {status}"
+        );
+    }
+
+    let counted = m.observed();
+    assert_eq!(counted.rejected, 3);
+    assert!(!counted.pin_bound());
+
+    // The rows the mirror wrote, read back the way the host reads them out of a container log.
+    let refusals = m.seen().refusals();
+    assert_eq!(refusals.len(), 3, "{refusals:?}");
+    assert!(
+        refusals.iter().any(|r| r.path == "/left-pad"),
+        "a refusal names what was asked for: {refusals:?}"
+    );
+    assert!(
+        refusals.iter().any(|r| r.reason.contains("evil.example")),
+        "and why, so `no filter` and `host not allowed` are not one number: {refusals:?}"
+    );
+
+    // The seam: the counters and the rows must agree about the same traffic.
+    assert_eq!(
+        trigon_mirror::Observed::from_transcript(&m.seen().exchanges(), refusals.len() as u64),
+        counted,
+        "the counters and the transcript disagree about what this mirror did"
+    );
+    m.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_counters_and_the_transcript_agree_on_real_traffic() {
+    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRIGON_LIVE=1");
+        return;
+    }
+    // The same assertion as above, over traffic that actually reaches upstream — an index document
+    // that withholds versions, a dependency tarball, a toolchain download and a refusal. Offline
+    // the derivation is exercised with every count at zero but `rejected`, and a derivation that is
+    // only ever checked against zeros is not checked.
+    let m = Mirror::new().unwrap().serve(0).await.unwrap();
+    let host = m.host();
+    let moment = "2018-04-09T01:10:45";
+
+    let index = reqwest::Client::new()
+        .get(format!("http://{host}/left-pad"))
+        .basic_auth("npm", Some(moment))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(index.status(), 200);
+
+    for path in [
+        format!("/-artifact/npm/{moment}/registry.npmjs.org/ms/-/ms-2.1.3.tgz"),
+        "/-toolchain/nodejs.org/dist/v20.11.0/SHASUMS256.txt".to_string(),
+    ] {
+        assert_eq!(
+            reqwest::get(format!("http://{host}{path}"))
+                .await
+                .unwrap()
+                .status(),
+            200,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        reqwest::get(format!("http://{host}/ms"))
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+
+    let counted = m.observed();
+    let rows = m.seen().exchanges();
+    assert_eq!(
+        m.seen().truncated(),
+        0,
+        "the rows are a sample, not a record"
+    );
+    assert_eq!(
+        trigon_mirror::Observed::from_transcript(&rows, m.seen().refusals().len() as u64),
+        counted,
+        "counters {counted:?} disagree with {} transcript rows",
+        rows.len()
+    );
+    assert!(
+        counted.pin_bound(),
+        "an index document was served: {counted:?}"
+    );
+    assert_eq!(counted.toolchain_requests, 1);
+    assert_eq!(counted.rejected, 1);
+    // left-pad published its last version in 2018, so a filter at its own publish moment withholds
+    // nothing — and `Some(0)` is the value that says so, rather than the field being absent.
+    assert!(
+        rows.iter()
+            .any(|e| e.route == "index" && e.withheld.is_some()),
+        "an index row carries a withheld count even when it is zero: {rows:?}"
+    );
+    m.shutdown().await;
 }
