@@ -476,6 +476,14 @@ pub struct RunReport {
     /// so leaving it out lost the fact entirely.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused_artifact: Vec<String>,
+    /// Guarded members that arrived over the network and are **not** in the rebuilt artifact.
+    ///
+    /// **Not a void**: the bytes came in and did not come out, which is not what the guard exists
+    /// to catch — a build that installs the neighbouring version of the package under test gets
+    /// files that are byte-identical to the target's and ships none of them. Kept because a
+    /// control whose near-misses are invisible cannot be told from one that never fires.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guard_notes: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_digest: Option<String>,

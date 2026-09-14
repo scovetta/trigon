@@ -55,6 +55,25 @@ pub struct GuardManifest {
     /// How many members the filters dropped, so the narrowing is visible.
     #[serde(default)]
     pub filtered_out: usize,
+    /// The version the index must not offer, because it is the one under test.
+    ///
+    /// Paired with `refuse_url` rather than replacing it. The refusal is the control: the target's
+    /// bytes never cross, whatever route is tried. This is what makes the refusal survivable — a
+    /// resolver that is never offered the version picks another one, where a resolver that is
+    /// offered it and then denied the file fails outright. See [`crate::npm::withhold_version`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withhold: Option<Withheld>,
+}
+
+/// One package version an index must not offer.
+///
+/// The project is carried beside the version because a mirror serves every index a build asks for,
+/// and dropping `1.2.0` from whatever packument happened to arrive would quietly remove an
+/// unrelated package's release.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Withheld {
+    pub project: String,
+    pub version: String,
 }
 
 impl GuardManifest {
@@ -122,6 +141,7 @@ impl GuardManifest {
             refuse_url: url,
             members,
             filtered_out,
+            withhold: None,
         }
     }
 
@@ -131,7 +151,19 @@ impl GuardManifest {
     /// refusal URL was simultaneously "empty" and "armed" depending on which question was asked —
     /// and the two are asked by different callers deciding whether the guard is doing anything.
     pub fn is_empty(&self) -> bool {
-        self.artifact.is_none() && self.members.is_empty() && self.refuse_url.is_none()
+        self.artifact.is_none()
+            && self.members.is_empty()
+            && self.refuse_url.is_none()
+            && self.withhold.is_none()
+    }
+
+    /// Also withhold this version from the index, so a resolver routes around it.
+    pub fn withholding(mut self, project: &str, version: &str) -> Self {
+        self.withhold = Some(Withheld {
+            project: project.to_string(),
+            version: version.to_string(),
+        });
+        self
     }
 }
 
@@ -236,11 +268,182 @@ fn digest_tree(root: &std::path::Path) -> BTreeSet<Digest> {
     out
 }
 
-/// Why a run is `Void`.
+/// The records a marker prefixes, read out of a container log.
+///
+/// **A record is the marker, a space, and a JSON object.** Text after the marker that is not an
+/// object is not a truncated record, it is a different kind of line — which is exactly what a
+/// `tracing` message mentioning the marker in its prose turned out to be. That happened, and it
+/// made every run carrying a trip report "we could not tell whether the artifact arrived": the
+/// strictness below is deliberate and it fired on the right thing for the wrong reason.
+///
+/// Everything from `{` onwards is still strict. A line that begins an object and does not finish
+/// one is a record that was written and cannot be read, and skipping it would make a truncated log
+/// indistinguishable from a clean run — the difference this whole reader exists to keep.
+fn records<T: serde::de::DeserializeOwned>(
+    logs: &str,
+    marker: &str,
+    what: &str,
+) -> Result<Vec<T>, String> {
+    let mut out = Vec::new();
+    for line in logs
+        .lines()
+        .filter_map(|l| l.split_once(marker).map(|(_, rest)| rest.trim()))
+    {
+        if !line.starts_with('{') {
+            continue;
+        }
+        match serde_json::from_str::<T>(line) {
+            Ok(v) => out.push(v),
+            Err(e) => return Err(format!("unreadable {what} line `{line}`: {e}")),
+        }
+    }
+    Ok(out)
+}
+
+/// Something the guard caught. Whether it *voids* the run is decided later — see [`voiding`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trip {
     pub url: String,
     pub matched: GuardMatch,
+}
+
+impl Trip {
+    /// The marker line, JSON after the marker.
+    ///
+    /// It used to be the marker and the URL, which was enough while every trip meant the same
+    /// thing. It no longer is: a member trip carries the digest that matched, and the void decision
+    /// is made against the artifact the build produced rather than at the moment the bytes arrive.
+    /// A line that drops the digest makes that decision unmakeable outside the island.
+    pub fn line(&self) -> String {
+        match serde_json::to_string(self) {
+            Ok(json) => format!("{TRIP_MARKER} {json}"),
+            // Never an empty line. A trip that could not be written must still be *present* and
+            // unreadable, so the reader refuses it — "we could not tell whether the artifact
+            // arrived" is the honest answer, and a blank record would have read as a clean run.
+            Err(e) => format!("{TRIP_MARKER} {{\"unserializable\":\"{e}\"}}"),
+        }
+    }
+
+    pub fn emit(&self) {
+        println!("{}", self.line());
+    }
+
+    /// Read trips back out of a container log.
+    ///
+    /// An unreadable line is an error rather than a skip, for the reason every other reader here
+    /// gives: "we could not tell" and "nothing tripped" are different answers and only one of them
+    /// means the run is evidence of anything.
+    pub fn parse_log(logs: &str) -> Result<Vec<Trip>, String> {
+        records(logs, TRIP_MARKER, "trip")
+    }
+
+    /// One line a person can read, used wherever a trip is reported.
+    pub fn describe(&self) -> String {
+        match &self.matched {
+            GuardMatch::WholeArtifact => {
+                format!("the artifact under test arrived from {}", self.url)
+            }
+            GuardMatch::Member { digest } => format!(
+                "a member of the artifact under test (sha256 {}) arrived from {}",
+                &digest[..digest.len().min(16)],
+                self.url
+            ),
+            GuardMatch::RefusedUrl => {
+                format!("the build asked for its own artifact at {}", self.url)
+            }
+        }
+    }
+
+    /// The member digest this trip matched, where it matched one.
+    pub fn member(&self) -> Option<&str> {
+        match &self.matched {
+            GuardMatch::Member { digest } => Some(digest),
+            _ => None,
+        }
+    }
+}
+
+/// Which of the trips that arrived actually void the run.
+///
+/// **The decision moved here, and it moved on purpose.** It used to be made at the moment the bytes
+/// crossed the mirror: any guarded digest arriving voided the run. That is right for the whole
+/// artifact and wrong for a member, and wrong in the direction that matters — it fires on honest
+/// builds. `packaging` needs `packaging` to build, so the resolver installs the neighbouring
+/// version, and a file unchanged between the two is byte-identical to a member of the target. The
+/// most important control in the system was voiding a run for a dependency doing nothing unusual,
+/// and a control that fires on honest runs is one people turn off.
+///
+/// The harm was never a member *arriving*. It is a member arriving **and coming back out in the
+/// rebuilt artifact**, which is the whole shape of the attack in `docs/12-security.md` §1.1: bytes
+/// fetched rather than built, re-emitted as though they had been. So that is the question asked,
+/// and it can only be asked once the build has produced something.
+///
+/// Three consequences, each an improvement rather than a cost:
+///
+/// - The decision is a pure function of two digest sets, so a third party can re-derive it from the
+///   attestation instead of taking a network proxy's word for it.
+/// - `rebuilt: None` — a build that produced no artifact — voids nothing. Nothing was smuggled out
+///   of a build with no output, and the run is already `BuildFailed`.
+/// - `WholeArtifact` is unconditional. There is no honest reason for the published artifact to
+///   arrive whole, and the check costs nothing.
+pub fn voiding(trips: &[Trip], rebuilt: Option<&BTreeSet<Digest>>) -> Vec<Trip> {
+    trips
+        .iter()
+        .filter(|t| match &t.matched {
+            GuardMatch::WholeArtifact => true,
+            GuardMatch::RefusedUrl => false,
+            GuardMatch::Member { digest } => {
+                rebuilt.is_some_and(|out| out.iter().any(|d| d.to_hex() == *digest))
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// [`member_digests`] for an artifact on disk, naming its format from the file name.
+///
+/// `None` where the file cannot be read or its name does not identify an archive format — both of
+/// which mean we could not look inside, which voids no member trip. The alternative, guessing a
+/// format, would compare one archive's members against another format's parse and answer a
+/// security question with a coincidence.
+///
+/// One function rather than one per caller: the host mirror and the island mirror both decide a
+/// void this way, and two implementations of "what is in the rebuilt artifact" are two things that
+/// have to agree with nothing asserting that they do.
+pub fn member_digests_at(path: &std::path::Path) -> Option<BTreeSet<Digest>> {
+    let name = path.file_name()?.to_str()?;
+    let format = Format::from_file_name(name)?;
+    let bytes = std::fs::read(path).ok()?;
+    Some(member_digests(&bytes, format))
+}
+
+/// Every member digest in an archive, unfiltered.
+///
+/// Deliberately not [`GuardManifest`]'s filtered set. The manifest decides which of the *published*
+/// artifact's files are worth watching for; this answers "is this digest in what the build made",
+/// where filtering could only hide an answer.
+///
+/// Computed over `stabilized_bytes`, the same form the manifest uses, so the two sets are
+/// comparable at all. Bytes that will not parse as an archive give an empty set, which voids no
+/// member trip — the same direction as `None`, and for the same reason: we could not look inside,
+/// so we do not claim to have found something.
+pub fn member_digests(bytes: &[u8], format: Format) -> BTreeSet<Digest> {
+    let mut out = BTreeSet::new();
+    let mut notes = Vec::new();
+    let Ok(parsed) = trigon_archive::parse(
+        bytes.to_vec(),
+        format,
+        &trigon_archive::Limits::default(),
+        &mut notes,
+    ) else {
+        return out;
+    };
+    for e in &parsed.archive.entries {
+        if let Ok(body) = e.stabilized_bytes() {
+            out.insert(Digest::from_bytes(Sha256::digest(&body).into()));
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,21 +594,7 @@ impl Refusal {
 
     /// Read refusals back out of a container log. Strict, for the reason [`Exchange::parse_log`] is.
     pub fn parse_log(logs: &str) -> Result<Vec<Refusal>, String> {
-        let mut out = Vec::new();
-        for line in logs
-            .lines()
-            .filter_map(|l| l.split_once(REFUSAL_MARKER).map(|(_, r)| r))
-        {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<Refusal>(line) {
-                Ok(r) => out.push(r),
-                Err(e) => return Err(format!("unreadable refusal line `{line}`: {e}")),
-            }
-        }
-        Ok(out)
+        records(logs, REFUSAL_MARKER, "refusal")
     }
 }
 
@@ -488,10 +677,7 @@ impl Exchange {
     /// transcript and a corrupted one look identical to a caller, and only one of them leaves the
     /// run attestable.
     pub fn parse_log(logs: &str) -> Result<Vec<Exchange>, String> {
-        Self::read(
-            logs.lines()
-                .filter_map(|l| l.split_once(EXCHANGE_MARKER).map(|(_, r)| r)),
-        )
+        records(logs, EXCHANGE_MARKER, "transcript")
     }
 
     /// Read a transcript back out of its **stored** form: one JSON object per line, no marker.
@@ -551,6 +737,11 @@ impl Guard {
             .refuse_url
             .as_deref()
             .is_some_and(|r| same_artifact(r, url))
+    }
+
+    /// The version this run's index responses must not offer, if any.
+    pub fn withheld(&self) -> Option<&Withheld> {
+        self.manifest.withhold.as_ref()
     }
 
     pub fn record_refusal(&self, url: &str) {
@@ -658,12 +849,18 @@ impl Guard {
                 );
             }
             _ => {
-                println!("{TRIP_MARKER} {}", trip.url);
+                trip.emit();
+                // **The marker is not in this message.** It used to be, and the reader added in
+                // this change splits the container log on the marker — so the log line and the
+                // record line both matched, the prose failed to parse as JSON, and the whole run
+                // came back "we could not tell whether the artifact arrived". Caught by the
+                // parser refusing an unreadable line rather than skipping it, which is the reason
+                // it refuses.
                 tracing::error!(
                     url = %trip.url,
                     matched = ?trip.matched,
-                    "{TRIP_MARKER}: the artifact under test reached the build over the network, so \
-                     this run is evidence of nothing"
+                    "the artifact under test reached the build over the network. Whether that \
+                     voids the run is decided against what the build produced."
                 );
             }
         }
@@ -672,8 +869,12 @@ impl Guard {
         }
     }
 
-    /// Trips that make the run `Void`: the artifact, or a guarded member of it, actually arrived.
-    pub fn voiding(&self) -> Vec<Trip> {
+    /// Trips where something actually arrived: the artifact, or a guarded member of it.
+    ///
+    /// **Not the same as voiding.** Whether a member arriving voids the run depends on whether it
+    /// came back out in the rebuilt artifact, which is not known here — see [`voiding`], which
+    /// takes these and the build's output and answers that.
+    pub fn arrived(&self) -> Vec<Trip> {
         self.trips()
             .into_iter()
             .filter(|t| t.matched != GuardMatch::RefusedUrl)
@@ -779,6 +980,125 @@ mod tests {
             e.finish().unwrap();
         }
         out
+    }
+
+    fn trip(matched: GuardMatch) -> Trip {
+        Trip {
+            url: "https://files.example/x".into(),
+            matched,
+        }
+    }
+
+    #[test]
+    fn a_member_that_did_not_come_back_out_does_not_void() {
+        // The bug this closes, and it is the control firing on an honest build. `packaging` needs
+        // `packaging` to build, so the resolver installs the neighbouring version and a file
+        // unchanged between the two is byte-identical to a member of the target. Nothing was
+        // smuggled: the bytes went into the build environment and the rebuilt artifact does not
+        // contain them.
+        let arrived = Digest::from_bytes([3; 32]);
+        let t = trip(GuardMatch::Member {
+            digest: arrived.to_hex(),
+        });
+        let output = BTreeSet::from([Digest::from_bytes([9; 32])]);
+        assert!(voiding(std::slice::from_ref(&t), Some(&output)).is_empty());
+
+        // And the attack is untouched: the same member, present in what the build emitted, is
+        // bytes fetched rather than built and re-emitted as though they had been.
+        let output = BTreeSet::from([arrived]);
+        assert_eq!(voiding(&[t], Some(&output)).len(), 1);
+    }
+
+    #[test]
+    fn the_whole_artifact_voids_whatever_the_build_produced() {
+        // Unconditional on purpose. There is no honest reason for the published artifact to arrive
+        // whole, so this half asks nothing about the output — including when there is none.
+        let t = trip(GuardMatch::WholeArtifact);
+        assert_eq!(voiding(std::slice::from_ref(&t), None).len(), 1);
+        assert_eq!(voiding(&[t], Some(&BTreeSet::new())).len(), 1);
+    }
+
+    #[test]
+    fn a_build_that_produced_nothing_voids_no_member() {
+        // Nothing was smuggled out of a build with no output, and the run is already
+        // `BuildFailed`. Voiding it as well would report a security event for a compile error.
+        let t = trip(GuardMatch::Member {
+            digest: Digest::from_bytes([3; 32]).to_hex(),
+        });
+        assert!(voiding(&[t], None).is_empty());
+    }
+
+    #[test]
+    fn a_refusal_never_voids() {
+        assert!(voiding(&[trip(GuardMatch::RefusedUrl)], None).is_empty());
+        let out = BTreeSet::from([Digest::from_bytes([3; 32])]);
+        assert!(voiding(&[trip(GuardMatch::RefusedUrl)], Some(&out)).is_empty());
+    }
+
+    #[test]
+    fn member_digests_sees_what_the_manifest_guards() {
+        // The two sides of the void decision have to be computed the same way or they can never
+        // match. The manifest filters — small files, stock text — and this does not, but for a
+        // member both agree on, the digests are equal.
+        let big = vec![b'z'; 8192];
+        let bytes = tgz(&[("pkg/lib.js", &big)]);
+        let m = GuardManifest::for_artifact(&bytes, Format::TarGz, None);
+        let all = member_digests(&bytes, Format::TarGz);
+        assert_eq!(m.members.len(), 1);
+        assert!(
+            m.members.iter().all(|d| all.contains(d)),
+            "every guarded member is findable in the same archive's unfiltered set"
+        );
+    }
+
+    #[test]
+    fn member_digests_of_unopenable_bytes_is_empty() {
+        // Which voids no member trip: we could not look inside, so we do not claim to have found
+        // something. Same direction as no artifact at all.
+        assert!(member_digests(b"not an archive", Format::TarGz).is_empty());
+    }
+
+    #[test]
+    fn a_trip_survives_the_container_log() {
+        // The line is the only way a trip leaves the island, and the void decision is now made
+        // outside it — so a line that drops the digest makes that decision unmakeable. Round-trip
+        // rather than eyeballing the format.
+        let t = trip(GuardMatch::Member {
+            digest: Digest::from_bytes([5; 32]).to_hex(),
+        });
+        let logs = format!("noise\n{}\nmore noise\n", t.line());
+        assert_eq!(Trip::parse_log(&logs).unwrap(), vec![t]);
+    }
+
+    #[test]
+    fn an_unreadable_trip_line_is_an_error_not_a_skip() {
+        // "We could not tell" and "nothing tripped" are different answers, and only one of them
+        // means the run is evidence of anything.
+        let logs = format!("{TRIP_MARKER} {{not json\n");
+        assert!(Trip::parse_log(&logs).is_err());
+    }
+
+    #[test]
+    fn prose_that_mentions_the_marker_is_not_a_record() {
+        // This happened. The `tracing` line beside the record carried the marker in its message,
+        // so the reader saw two lines per trip: the record, and a sentence. The sentence would not
+        // parse, and every run carrying a trip came back "we could not tell whether the artifact
+        // under test reached the build" — which is the strictest possible answer, produced by a
+        // log line rather than by anything about the run.
+        //
+        // A record is the marker, a space and a JSON object. Prose is a different kind of line,
+        // not a damaged record, and the rest of the container's log is full of it.
+        let t = trip(GuardMatch::WholeArtifact);
+        let logs = format!(
+            "2026-09-14T21:00:00Z ERROR {TRIP_MARKER}: the artifact under test reached the build \
+             url=https://x matched=WholeArtifact\n{}\n",
+            t.line()
+        );
+        assert_eq!(
+            Trip::parse_log(&logs).unwrap(),
+            vec![t],
+            "the record is read and the sentence about it is not mistaken for one"
+        );
     }
 
     #[test]

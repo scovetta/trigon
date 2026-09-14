@@ -47,21 +47,91 @@ pub fn filter_packument(doc: &mut Value, moment: &str) -> usize {
 
     if let Some(times) = obj.get_mut("time").and_then(Value::as_object_mut) {
         times.retain(|k, _| k == "created" || k == "modified" || keep.iter().any(|kept| kept == k));
-        if let Some((_, t)) = &latest {
-            // `modified` should describe the index as the client sees it, not as it is today.
+    }
+
+    recompute_latest(obj);
+
+    removed
+}
+
+/// Drop the one version this run is rebuilding, whatever its date.
+///
+/// Returns how many versions were removed — at most one, and zero whenever this packument is for
+/// some other package.
+///
+/// **Why the index and not the download.** The guard refuses the target's own artifact URL, which
+/// is the control that defeats the forged-attestation attack. But a resolver that has been told a
+/// version exists and is then denied the file does not look for another one: it fails, and the
+/// build dies. That is what happened to every package that is part of the machinery that builds
+/// packages — npm's own installer needs `object-assign` and `strip-ansi`, so rebuilding either
+/// made the install ask for the target and hit the wall.
+///
+/// A version that was never offered is a different thing entirely. `object-assign@4.1.1` simply is
+/// not in the index, so npm resolves the range to `4.1.0` and installs it. The target's bytes still
+/// never cross — nothing about the refusal changes — but the resolver routes around the hole
+/// instead of dying in it.
+///
+/// Counted separately from the moment filter on purpose. `versions_withheld` is the evidence that
+/// the registry pin applied, and folding a policy removal into it would make a packument where
+/// only the target was dropped report `withheld=1` and read as the pin doing work it did not do.
+pub fn withhold_version(doc: &mut Value, w: &crate::Withheld) -> usize {
+    let Some(obj) = doc.as_object_mut() else {
+        return 0;
+    };
+    let named = obj
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|n| n == w.project);
+    if !named {
+        return 0;
+    }
+
+    let removed = match obj.get_mut("versions").and_then(Value::as_object_mut) {
+        Some(versions) => usize::from(versions.remove(&w.version).is_some()),
+        None => 0,
+    };
+    if let Some(times) = obj.get_mut("time").and_then(Value::as_object_mut) {
+        times.remove(&w.version);
+    }
+    // After the removal, never before: `latest` is read off the `time` map, and leaving it naming
+    // the version we just withheld reintroduces exactly the failure this function exists to avoid.
+    recompute_latest(obj);
+    removed
+}
+
+/// Rewrite `dist-tags` so `latest` names the newest version still in the document.
+///
+/// The part that matters. A resolver reads `latest` to resolve a floating range, and a tag naming
+/// a version that is no longer in the document makes every install fail. Newest by *publish time*,
+/// which is what npm itself means by `latest`; a version sort would name a prerelease.
+///
+/// Every other tag is dropped rather than repaired: a tag pointing into the removed set has no
+/// honest value to take, and inventing one would answer a question about the registry with a guess.
+fn recompute_latest(obj: &mut Map<String, Value>) {
+    let mut latest: Option<(String, String)> = None;
+    if let Some(times) = obj.get("time").and_then(Value::as_object) {
+        for (version, ts) in times {
+            if version == "created" || version == "modified" {
+                continue;
+            }
+            let Some(ts) = ts.as_str() else { continue };
+            if latest.as_ref().is_none_or(|(_, t)| ts > t.as_str()) {
+                latest = Some((version.clone(), ts.to_string()));
+            }
+        }
+    }
+    let mut tags = Map::new();
+    if let Some((v, t)) = &latest {
+        tags.insert("latest".into(), Value::String(v.clone()));
+        // `modified` should describe the index as the client sees it, not as it is today — and it
+        // is derived here rather than by the caller so that a version removed *after* the moment
+        // filter cannot leave it naming something the document no longer holds. Same hazard as the
+        // dangling `latest` above, reached a different way.
+        if let Some(times) = obj.get_mut("time").and_then(Value::as_object_mut) {
             times.insert("modified".into(), Value::String(t.clone()));
         }
     }
-
-    // The part that matters. A resolver reads `latest` to resolve a floating range, and a tag
-    // naming a version that is no longer in the document makes every install fail.
-    let mut tags = Map::new();
-    if let Some((v, _)) = &latest {
-        tags.insert("latest".into(), Value::String(v.clone()));
-    }
     obj.insert("dist-tags".into(), Value::Object(tags));
-
-    removed
 }
 
 #[cfg(test)]
@@ -118,6 +188,80 @@ mod tests {
         // what npm itself means by it, and a version sort would name a prerelease.
         let mut d = packument();
         filter_packument(&mut d, "2019-12-15T00:00:00");
+        assert_eq!(d["dist-tags"]["latest"], "3.0.0-beta");
+    }
+
+    fn withheld(version: &str) -> crate::Withheld {
+        crate::Withheld {
+            project: "demo".into(),
+            version: version.into(),
+        }
+    }
+
+    #[test]
+    fn the_version_under_test_is_never_offered() {
+        // The bug this closes. `object-assign` is a dependency of npm's own installer, so
+        // rebuilding it made the install ask for the target, and the guard refused the download.
+        // A resolver denied a file it was told exists does not pick another one — it fails.
+        let mut d = packument();
+        assert_eq!(withhold_version(&mut d, &withheld("1.5.0")), 1);
+        let versions = d["versions"].as_object().unwrap();
+        assert!(!versions.contains_key("1.5.0"));
+        assert!(versions.contains_key("1.0.0"), "the others are untouched");
+        assert!(!d["time"].as_object().unwrap().contains_key("1.5.0"));
+    }
+
+    #[test]
+    fn withholding_repoints_latest() {
+        // Same hazard as the moment filter's, reached a different way: `latest` naming the version
+        // we just removed makes every floating range fail on a version that is not there.
+        let mut d = packument();
+        withhold_version(&mut d, &withheld("2.0.0"));
+        assert_eq!(d["dist-tags"]["latest"], "3.0.0-beta");
+    }
+
+    #[test]
+    fn withholding_repoints_modified_too() {
+        // Same hazard as `latest` and reached the same way: `modified` is derived from the version
+        // set, and a removal after the moment filter would otherwise leave it dating a version the
+        // document no longer holds.
+        let mut d = packument();
+        filter_packument(&mut d, "2020-06-01T00:00:00");
+        assert_eq!(d["time"]["modified"], "2020-01-01T00:00:00.000Z");
+        withhold_version(&mut d, &withheld("2.0.0"));
+        assert_eq!(d["time"]["modified"], "2019-12-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn another_packument_is_left_alone() {
+        // The mirror serves every index the build asks for. Dropping `1.5.0` from whichever
+        // packument happened to arrive would quietly remove an unrelated package's release.
+        let mut d = packument();
+        let other = crate::Withheld {
+            project: "elsewhere".into(),
+            version: "1.5.0".into(),
+        };
+        assert_eq!(withhold_version(&mut d, &other), 0);
+        assert!(d["versions"].as_object().unwrap().contains_key("1.5.0"));
+    }
+
+    #[test]
+    fn withholding_a_version_that_is_not_there_removes_nothing() {
+        let mut d = packument();
+        assert_eq!(withhold_version(&mut d, &withheld("9.9.9")), 0);
+        assert_eq!(d["versions"].as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn the_moment_filter_and_the_withholding_compose() {
+        // Both run on every index response, in that order, and the count each reports is its own:
+        // `versions_withheld` is evidence the pin applied, and a policy removal folded into it
+        // would read as the pin doing work it did not do.
+        let mut d = packument();
+        assert_eq!(filter_packument(&mut d, "2019-12-15T00:00:00"), 1);
+        assert_eq!(withhold_version(&mut d, &withheld("1.5.0")), 1);
+        let versions = d["versions"].as_object().unwrap();
+        assert_eq!(versions.len(), 2);
         assert_eq!(d["dist-tags"]["latest"], "3.0.0-beta");
     }
 

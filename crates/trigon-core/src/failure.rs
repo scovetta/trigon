@@ -332,6 +332,29 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // The registry names a commit the forge will not serve. npm records `gitHead` at publish
+        // time and nothing keeps it reachable afterwards: a force-push, a rebased or deleted
+        // branch, a commit that only ever existed in a fork. GitHub answers `upload-pack: not our
+        // ref` and there is no fetch that recovers it — the commit is not reachable from any ref
+        // in that repository today.
+        //
+        // **Ours to name, not ours to repair.** It clustered as `net/unreachable` for every corpus
+        // run, because the host checkout failed silently and the build then died on the DNS the
+        // enforced tier denies it — the same code as a genuine hidden network dependency in
+        // somebody's build, which is the opposite reading. `pad-left@2.1.0` is the corpus member.
+        //
+        // What would fix the target is source discovery, not a strategy: the version's tag names a
+        // commit the forge does serve, and falling back to it is a different claim about what was
+        // verified — `SourceDiscovery::ExactTag` rather than `RegistryCommit`. That is a decision
+        // about what we assert, so it is a backlog item rather than a repair the loop can attempt.
+        code: "src/commit-not-on-the-forge",
+        needles: &["not our ref"],
+        fault: Fault::Upstream,
+        retryable: false,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
         code: "net/unreachable",
         needles: &["Temporary failure in name resolution"],
         fault: Fault::Policy,
@@ -717,6 +740,28 @@ fn clip(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_commit_the_forge_will_not_serve_is_not_a_network_problem() {
+        // These two used to be the same cluster, and they are opposite readings. `not our ref` is
+        // the registry naming a commit that is not reachable from anything in the repository —
+        // bad metadata, nothing to do with us or with the tier. `Could not resolve host` under an
+        // enforced tier is the boundary working: a build reaching for the internet and being
+        // stopped. Filing them together made `pad-left`'s metadata problem look like a finding
+        // about somebody's build, and vice versa.
+        let s = super::classify(
+            "git fetch failed: fatal: remote error: upload-pack: not our ref 89347534a8",
+        );
+        assert_eq!(s.code, "src/commit-not-on-the-forge");
+        assert_eq!(s.fault, crate::Fault::Upstream);
+        // No recipe recovers a commit the forge does not have.
+        assert!(!s.repairable);
+
+        assert_eq!(
+            super::classify("fatal: unable to access: Could not resolve host: github.com").code,
+            "net/unreachable"
+        );
+    }
+
     #[test]
     fn a_build_that_needs_the_package_under_test_is_named_as_ours() {
         // Some packages are part of the machinery that builds packages, so rebuilding one makes

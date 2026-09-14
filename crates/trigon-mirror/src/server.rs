@@ -293,9 +293,12 @@ impl MirrorHandle {
         self.guard.trips()
     }
 
-    /// The trips that make a run `Void`: the artifact, or a member of it, actually arrived.
-    pub fn voiding(&self) -> Vec<crate::Trip> {
-        self.guard.voiding()
+    /// The trips where something arrived: the artifact, or a guarded member of it.
+    ///
+    /// Whether they void the run is decided against what the build produced — see
+    /// [`crate::voiding`].
+    pub fn arrived(&self) -> Vec<crate::Trip> {
+        self.guard.arrived()
     }
 
     /// Times the build asked for its own artifact and was turned away. Not a void — nothing
@@ -497,6 +500,10 @@ async fn npm_request(
     let resp = fetch(mirror, &url, filter, &[]).await?;
     let mut doc: serde_json::Value = resp.json().await?;
     let removed = crate::npm::filter_packument(&mut doc, &filter.moment);
+    let withheld = match mirror.guard.withheld() {
+        Some(w) => crate::npm::withhold_version(&mut doc, w),
+        None => 0,
+    };
     rewrite_npm_tarballs(&mut doc, &authority(filter, host));
 
     mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
@@ -508,8 +515,16 @@ async fn npm_request(
         path,
         moment = filter.moment,
         removed,
+        withheld,
         "filtered a packument"
     );
+    if withheld > 0 {
+        tracing::info!(
+            path,
+            "the version under test was withheld from this index, so a resolver picks another \
+             rather than being offered one it will then be refused"
+        );
+    }
 
     Ok(json_response(
         &mirror.seen,
@@ -554,6 +569,10 @@ async fn pypi_request(
     .await?;
     let mut doc: serde_json::Value = resp.json().await?;
     let removed = crate::pypi::filter_simple(&mut doc, &filter.moment);
+    let withheld = match mirror.guard.withheld() {
+        Some(w) => crate::pypi::withhold_version(&mut doc, w),
+        None => 0,
+    };
     rewrite_pypi_files(&mut doc, &authority(filter, host));
 
     mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
@@ -565,8 +584,16 @@ async fn pypi_request(
         path,
         moment = filter.moment,
         removed,
+        withheld,
         "filtered a simple index"
     );
+    if withheld > 0 {
+        tracing::info!(
+            path,
+            "the version under test was withheld from this index, so a resolver picks another \
+             rather than being offered one it will then be refused"
+        );
+    }
 
     if accept.contains("json") {
         return Ok(json_response(

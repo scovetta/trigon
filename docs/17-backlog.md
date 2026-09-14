@@ -335,3 +335,55 @@ job that also declared a container escaped the out-of-scope rule ADR-0009 requir
 **Done when:** every item above has a test that fails without the fix, both verification angles come
 back `sound`, and only then does `ladder()` in `crates/trigon/src/main.rs` call it — between the
 heuristic and the model, per [`01`](01-architecture.md) §3.
+
+## B13. A commit the forge will not serve needs the tag as a fallback
+
+npm records `gitHead` at publish time and nothing keeps it reachable afterwards. `pad-left@2.1.0`
+names `89347534…`, GitHub answers `upload-pack: not our ref`, and no fetch recovers it: the commit
+is not reachable from any ref in that repository today. The same repository *does* have a `2.1.0`
+tag, pointing at `817d93e8…`.
+
+Closed already: the failure is now named. It used to cluster as `net/unreachable` — the host
+checkout failed at `debug` level, the in-container clone then died on the DNS an enforced tier
+denies it, and the run was filed beside genuine hidden-network-dependency findings. It is now
+`src/commit-not-on-the-forge`, `Fault::Upstream`, raised before the build starts rather than a
+minute later somewhere else.
+
+**What is left is a decision, not a repair.** Falling back to the version's tag would verify the
+target — but against a *different commit* than the one the registry recorded, which is a different
+claim. The type system already carries it: `SourceDiscovery::ExactTag` is `Confidence::Strong` where
+`RegistryCommit` is `Certain`. So the mechanism is cheap and the question is whether a rebuild
+against the tag, clearly labelled as such, is worth publishing.
+
+Worth noting what the fallback would *not* be allowed to do: silently replace the commit and report
+`RegistryCommit`. The whole value of the rung is that a reader can tell which one they are looking
+at.
+
+**Done when:** either the fallback exists, records `ExactTag`, and a test asserts the discovery
+field is not the registry's; or this is written down as declined with the reason.
+
+
+## B14. Build the guard manifest after the strategy, so the source filter applies
+
+`GuardManifest::for_artifact_with_source` drops members byte-identical to a file in the source tree
+— "a file the artifact ships and the repository also contains is not evidence of anything: the build
+is entitled to fetch it." It is used only when an operator passes `--source`. Every other run builds
+the manifest with `for_artifact`, unfiltered.
+
+That costs the two bootstrap targets. `packaging@26.3` and `pyproject-hooks@1.2.0` build at the
+enforced tier and then void: pip installs the adjacent release, a file unchanged between the two
+releases is byte-identical in both, and the build produces that same file honestly from the
+checkout — so the digest that arrived is also in the output, which is exactly what
+[`16`](16-findings.md) §3.23's void rule asks about. Every member that trips is a source file.
+
+**Why it is not a two-line change.** The manifest is built from the published bytes before a
+strategy is chosen, and the source tree is a function of the strategy's location. The filter cannot
+move to the decision instead, where the tree *is* in hand, because it carries an exemption that
+needs the member's path: an executable the repository also contains is the case most worth guarding,
+since a build fetching a prebuilt binary is [`12`](12-security.md) §1.1. And the manifest cannot
+simply be built later without moving the host mirror, which is armed with it before the strategy is
+chosen because `ladder()` needs the mirror's port.
+
+**Done when:** the manifest is built from the same checkout the build uses, both mirror paths are
+armed with the same manifest, the executable exemption still holds with a test that would catch its
+loss, and `packaging` and `pyproject-hooks` reach a comparison.

@@ -51,22 +51,31 @@ build's only route out is a time-filtered mirror that writes down everything it 
 
 | | reproduce | reach a comparison | of which `exact` |
 |---|---|---|---|
-| npm, enforced | **14 of 15 (93%)** | 15 of 20 | 6 |
+| npm, enforced | **16 of 18 (89%)** | 18 of 20 | 6 |
 | PyPI, enforced | **12 of 14 (86%)** | 14 of 17 | 3 |
 
-npm matches its `open` rate exactly and PyPI beats it, and nine of those reproductions are `exact`
-rather than normalized — byte-for-byte identical to what the registry published, built in a sandbox
-with no other route out. The `open` runs report no `exact` at all, because at `open` the build
-installs its own toolchain unpinned and picks up whatever the registry holds today.
+Both beat their `open` rate on count — 16 npm reproductions against 14, 12 PyPI against 12 from a
+smaller denominator — and nine are `exact` rather than normalized: byte-for-byte identical to what
+the registry published, built in a sandbox with no other route out. The `open` runs report no
+`exact` at all, because at `open` the build installs its own toolchain unpinned and picks up
+whatever the registry holds today.
 
-Three targets still reach no comparison, and each is named rather than silently lost. One is a
-package whose build backend fetches over HTTPS during `get_requires_for_build_wheel`, so the tier
-blocks it — a finding about that package rather than about Trigon, and recorded as
-`net/build-fetches-directly`. The other two are packages that are *part of the machinery that builds
-packages*: their builds now complete, and the artifact guard voids them because the adjacent release
-it resolved shares byte-identical files with the version under test, which the guard cannot tell
-from the real thing. [`16-findings.md`](docs/16-findings.md) §3.22 says what closing that would
-take.
+npm's percentage is *lower* than it was at 93%, and that is the change working rather than a
+regression: three packages that previously could not build at all now reach a comparison, two
+reproduce and one diverges, so the denominator grew from 15 to 18 and the numerator from 14 to 16.
+A rate over targets we could not build is not a rate.
+
+Five targets still reach no comparison, and every one is named rather than silently lost.
+
+| | why |
+|---|---|
+| `zipp` | its build backend calls `urlopen` during `get_requires_for_build_wheel`, so the tier blocks it — a finding about the package, `net/build-fetches-directly` |
+| `pad-left` | npm's recorded `gitHead` names a commit GitHub will not serve, `src/commit-not-on-the-forge` |
+| `has-flag` | npm reads a body the mirror served byte-correct as corrupt, `trigon/mirror-corrupted-artifact` — ours, unexplained |
+| `packaging`, `pyproject-hooks` | *part of the machinery that builds packages*: they build, and the guard voids them because the adjacent release the resolver took shares byte-identical files with the version under test |
+
+The last two are the only ones with a known fix waiting:
+[`17-backlog.md`](docs/17-backlog.md) B14.
 
 PyPI was 5 of 15 that morning. The lift came from three deterministic fixes and no model at all;
 [`docs/16-findings.md`](docs/16-findings.md) §2 has the arithmetic.

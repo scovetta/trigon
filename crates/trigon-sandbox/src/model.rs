@@ -278,9 +278,15 @@ pub struct BuildOutcome {
     /// so the same failure keying two ways means the flywheel never recognises what it has already
     /// solved. Prefer this over re-deriving from `log_tail`.
     pub signature: Option<trigon_core::FailureSignature>,
-    /// What the artifact guard caught. Non-empty means the run is `Void`: the artifact under test
-    /// reached the build over the network, so whatever it produced says nothing about the source.
-    pub guard_trips: Vec<String>,
+    /// What the artifact guard caught: the artifact under test, or a guarded member of it,
+    /// **arrived** over the network.
+    ///
+    /// **Facts, not a verdict.** A member arriving is only harmful if it comes back out in the
+    /// rebuilt artifact, and the caller is what resolves that artifact — `collect` finds the single
+    /// file at the output path, and a caller also walks for builds whose output lands in a
+    /// subdirectory. So the runner reports and `trigon_mirror::voiding` decides, once, where both
+    /// halves of the question are in hand.
+    pub guard_arrived: Vec<trigon_mirror::Trip>,
     /// Times the build asked for its own published artifact and was refused.
     ///
     /// Deliberately not in `guard_trips`: nothing arrived, so the run is not void. Kept because it

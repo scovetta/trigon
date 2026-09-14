@@ -710,12 +710,18 @@ impl PodmanBuild {
         seen: Option<crate::network::MirrorLog>,
     ) -> BuildOutcome {
         let pin = seen.as_ref().map(|s| s.observed());
-        let (guard_trips, refused_artifact, from_mirror) = match seen {
+        let (arrived, refused_artifact, from_mirror) = match seen {
             Some(s) => (s.trips, s.refused_artifact, Some(s.transcript)),
             None => (Vec::new(), Vec::new(), None),
         };
+        // **Reported, not decided.** Whether a trip voids the run depends on whether the bytes came
+        // back out in the rebuilt artifact, and the caller resolves that artifact — the runner's
+        // `collect` finds the single file at the output path, the caller also walks for builds
+        // whose output lands in a subdirectory. Deciding here as well would be a second answer to
+        // one question, with nothing asserting the two agreed.
         let transcript = self.transcript(from_mirror);
         BuildOutcome {
+            guard_arrived: arrived,
             signature: self.named.lock().ok().and_then(|n| n.clone()),
             exit_code,
             artifact,
@@ -727,7 +733,6 @@ impl PodmanBuild {
             // build", which is true when a complete account exists and false otherwise.
             attestable: transcript.is_some(),
             log_tail,
-            guard_trips,
             refused_artifact,
             transcript,
             pin,

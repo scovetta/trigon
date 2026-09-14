@@ -49,9 +49,12 @@ pub struct Island {
 /// What one run's mirror recorded.
 #[derive(Clone, Debug, Default)]
 pub struct MirrorLog {
-    /// Marker lines from the artifact guard. Non-empty means the run is `Void`: the artifact under
-    /// test, or a guarded member of it, **arrived**.
-    pub trips: Vec<String>,
+    /// What the artifact guard caught: the artifact under test, or a guarded member of it,
+    /// **arrived**.
+    ///
+    /// Not yet a void. A member arriving is only harmful if it comes back out in the rebuilt
+    /// artifact, and that is decided against the build's output — `trigon_mirror::voiding`.
+    pub trips: Vec<trigon_mirror::Trip>,
     /// Times the build asked the mirror for its own published artifact and was refused.
     ///
     /// **Not a void.** Nothing arrived, so the thing a void exists to describe did not happen. Some
@@ -261,11 +264,15 @@ impl Island {
         };
         let logs = run_both(&self.binary, &["logs", container]).await?;
         Ok(MirrorLog {
-            trips: logs
-                .lines()
-                .filter(|l| l.contains(trigon_mirror::TRIP_MARKER))
-                .map(str::to_owned)
-                .collect(),
+            trips: trigon_mirror::Trip::parse_log(&logs).map_err(|detail| {
+                SandboxError::Failed {
+                    phase: "build".into(),
+                    detail: format!(
+                        "the mirror wrote a guard line this build cannot read, so whether the \
+                         artifact under test reached the build is unknown rather than no: {detail}"
+                    ),
+                }
+            })?,
             transcript: trigon_mirror::Exchange::parse_log(&logs).map_err(|detail| {
                 SandboxError::Failed {
                     phase: "build".into(),

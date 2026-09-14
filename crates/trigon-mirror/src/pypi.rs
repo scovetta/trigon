@@ -30,6 +30,108 @@ pub fn filter_simple(doc: &mut Value, moment: &str) -> usize {
     before - files.len()
 }
 
+/// Drop every file belonging to the one version this run is rebuilding.
+///
+/// Returns how many files were removed, and zero whenever this index is for another project.
+///
+/// **Why the index and not the download.** The guard refuses the target's own artifact URL, which
+/// is the control that defeats the forged-attestation attack. But a resolver that has been told a
+/// version exists and is then denied the file does not look for another one: it fails, and the
+/// build dies. That is what happened to every package that is part of the machinery that builds
+/// packages — `python -m build` needs `packaging` and `pyproject-hooks`, so rebuilding either made
+/// pip ask for the target and hit the wall.
+///
+/// A version that was never offered is a different thing entirely. `packaging>=24.0` resolves to
+/// `24.2` and installs, because `25.0` is simply not in the index. The target's bytes still never
+/// cross — nothing about the refusal changes — but the resolver routes around the hole instead of
+/// dying in it.
+///
+/// Counted separately from the moment filter on purpose. `versions_withheld` is the evidence that
+/// the registry pin applied, and folding a policy removal into it would make an index where only
+/// the target was dropped report `withheld=1` and read as the pin doing work it did not do.
+pub fn withhold_version(doc: &mut Value, w: &crate::Withheld) -> usize {
+    // Only this project's index. The `name` field is the simple API's own statement of what it is
+    // about; an index without one is left alone rather than filtered on a filename guess.
+    let named = doc
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|n| normalized(n) == normalized(&w.project));
+    if !named {
+        return 0;
+    }
+
+    // Both places a version can appear. `files` is what a resolver installs from; `versions` is the
+    // 1.1 listing, and leaving the target in it offers a version with no files behind it.
+    if let Some(versions) = doc.get_mut("versions").and_then(Value::as_array_mut) {
+        versions.retain(|v| v.as_str() != Some(w.version.as_str()));
+    }
+    let Some(files) = doc.get_mut("files").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let before = files.len();
+    files.retain(|f| match f.get("filename").and_then(Value::as_str) {
+        Some(name) => !is_version_of(name, &w.project, &w.version),
+        None => true,
+    });
+    before - files.len()
+}
+
+/// Whether a distribution filename names this project at this version.
+///
+/// Two shapes, because sdists and wheels spell the same thing differently. A wheel is
+/// `{name}-{version}-{python}-{abi}-{platform}.whl` with the version always second, so it is read
+/// positionally. An sdist is `{name}-{version}.tar.gz` and the name may itself contain a `-`, so
+/// the version is matched as a *suffix* and whatever precedes it has to normalize to the project.
+/// Matching the known version rather than parsing the name out sidesteps the boundary entirely.
+///
+/// Conservative where it is unsure: a filename that does not clearly name this version is kept.
+/// The cost of keeping one is that the build asks for the artifact and the guard refuses it, which
+/// is the behaviour that already exists; the cost of dropping one wrongly is a version silently
+/// missing from an index we claim reflects the registry.
+fn is_version_of(filename: &str, project: &str, version: &str) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".zip", ".whl", ".egg",
+    ];
+    let wheel = filename.ends_with(".whl") || filename.ends_with(".egg");
+    let Some(stem) = EXTENSIONS.iter().find_map(|e| filename.strip_suffix(e)) else {
+        return false;
+    };
+
+    if wheel {
+        let mut parts = stem.split('-');
+        return match (parts.next(), parts.next()) {
+            (Some(n), Some(v)) => normalized(n) == normalized(project) && v == version,
+            _ => false,
+        };
+    }
+    match stem.strip_suffix(&format!("-{version}")) {
+        Some(name) => normalized(name) == normalized(project),
+        None => false,
+    }
+}
+
+/// A project name in PEP 503 normalized form: runs of `-`, `_` and `.` become one `-`, lowercased.
+///
+/// Both sides of every comparison go through this, because a project is spelled one way in a purl,
+/// another in its own index, and a third in the filenames it publishes — `pyproject-hooks`,
+/// `pyproject_hooks`.
+fn normalized(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_was_separator = false;
+    for c in name.chars() {
+        if matches!(c, '-' | '_' | '.') {
+            if !last_was_separator {
+                out.push('-');
+            }
+            last_was_separator = true;
+        } else {
+            out.extend(c.to_lowercase());
+            last_was_separator = false;
+        }
+    }
+    out
+}
+
 /// Render a filtered simple-API document as PEP 503 HTML.
 ///
 /// For clients that asked for HTML. Only the anchor list matters to a resolver: the filename is
@@ -94,6 +196,100 @@ mod tests {
             ],
             "meta": {"api-version": "1.0"}
         })
+    }
+
+    /// A real project whose name, index and filenames each spell it differently.
+    fn hooks() -> Value {
+        serde_json::json!({
+            "name": "pyproject_hooks",
+            "versions": ["1.1.0", "1.2.0"],
+            "files": [
+                {"filename": "pyproject_hooks-1.1.0.tar.gz", "upload-time": "2024-04-01T00:00:00Z"},
+                {"filename": "pyproject_hooks-1.1.0-py3-none-any.whl", "upload-time": "2024-04-01T00:00:00Z"},
+                {"filename": "pyproject_hooks-1.2.0.tar.gz", "upload-time": "2024-10-01T00:00:00Z"},
+                {"filename": "pyproject_hooks-1.2.0-py3-none-any.whl", "upload-time": "2024-10-01T00:00:00Z"}
+            ]
+        })
+    }
+
+    #[test]
+    fn every_file_of_the_version_under_test_is_withheld() {
+        // The bug this closes. `python -m build` needs `pyproject-hooks`, so rebuilding it made pip
+        // ask for the target and the guard refused the download. A resolver denied a file it was
+        // told exists does not pick another one — it fails.
+        let mut d = hooks();
+        let w = crate::Withheld {
+            project: "pyproject-hooks".into(),
+            version: "1.2.0".into(),
+        };
+        assert_eq!(withhold_version(&mut d, &w), 2, "the sdist and the wheel");
+        let files = d["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(
+            files
+                .iter()
+                .all(|f| f["filename"].as_str().unwrap().contains("1.1.0"))
+        );
+        assert_eq!(
+            d["versions"].as_array().unwrap(),
+            &vec![Value::String("1.1.0".into())],
+            "the 1.1 listing too, or the index offers a version with no files behind it"
+        );
+    }
+
+    #[test]
+    fn the_project_name_is_matched_in_normalized_form() {
+        // `pyproject-hooks` in a purl, `pyproject_hooks` in its own index and in every filename it
+        // publishes. Three spellings of one project, and a literal comparison matches none of them.
+        assert!(is_version_of(
+            "pyproject_hooks-1.2.0.tar.gz",
+            "pyproject-hooks",
+            "1.2.0"
+        ));
+        assert!(is_version_of(
+            "zope.interface-5.4.0-cp39-cp39-linux_x86_64.whl",
+            "zope-interface",
+            "5.4.0"
+        ));
+    }
+
+    #[test]
+    fn a_name_that_contains_the_version_string_is_not_a_match() {
+        // The version is matched as a suffix of the stem, not anywhere in the filename, so a
+        // project whose name happens to contain the digits is unaffected.
+        assert!(!is_version_of("demo-1.0.1.tar.gz", "demo", "1.0"));
+        assert!(!is_version_of("demo-1.0-extra.tar.gz", "demo", "1.0"));
+    }
+
+    #[test]
+    fn a_neighbouring_version_survives() {
+        // The whole point: `packaging>=24.0` has to resolve to something. Withholding 25.0 leaves
+        // 24.2 in the index, so pip installs that instead of failing.
+        assert!(!is_version_of(
+            "packaging-24.2-py3-none-any.whl",
+            "packaging",
+            "25.0"
+        ));
+    }
+
+    #[test]
+    fn another_projects_index_is_left_alone() {
+        let mut d = hooks();
+        let w = crate::Withheld {
+            project: "elsewhere".into(),
+            version: "1.2.0".into(),
+        };
+        assert_eq!(withhold_version(&mut d, &w), 0);
+        assert_eq!(d["files"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn an_unrecognised_filename_is_kept() {
+        // Conservative in the direction that matters. Keeping one costs a refused download, which
+        // is the behaviour that already exists; dropping one wrongly silently removes a release
+        // from an index we claim reflects the registry.
+        assert!(!is_version_of("demo-1.0.exe", "demo", "1.0"));
+        assert!(!is_version_of("demo", "demo", "1.0"));
     }
 
     #[test]

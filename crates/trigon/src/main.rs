@@ -532,6 +532,86 @@ include!("mirror_source.rs");
 #[cfg(feature = "build")]
 mod inferrer;
 
+/// Where a strategy should be told the mirror is, as `host:port`.
+///
+/// The name is stable so the port stays out of the strategy digest; the port is whatever this run's
+/// mirror is actually listening on.
+///
+/// **`enforced` alone, not `enforced && --timewarp`.** At an enforced tier the island mirror exists
+/// whether or not a registry moment was asked for — it is the build's only route out, so every URL
+/// a strategy renders has to reach it. This used to require `--timewarp` as well, and without it
+/// the host fell through to `run_with`'s bare `timewarp` default: every toolchain download at
+/// `mirror-only` died on `Connection refused`, because the mirror was there, listening on 8129, and
+/// the rendered URL said port 80. Two ways to know where the mirror is, disagreeing, with nothing
+/// asserting they agreed.
+#[cfg(feature = "build")]
+fn timewarp_host_for(
+    enforced: bool,
+    mirror_port: Option<u16>,
+    requested: Option<&str>,
+) -> Option<String> {
+    if enforced {
+        // Fixed, because it is inside the island and collides with nothing there. Matches
+        // `RunOpts::mirror_port`.
+        return Some("timewarp:8129".to_string());
+    }
+    mirror_port
+        .map(|p| format!("timewarp:{p}"))
+        .or_else(|| requested.filter(|t| *t != "auto").map(str::to_string))
+}
+
+#[cfg(all(test, feature = "build"))]
+mod timewarp_host_tests {
+    #[test]
+    fn an_enforced_tier_always_names_the_islands_port() {
+        // The bug: this used to require `--timewarp` as well, so a plain `--egress mirror-only`
+        // rendered `http://timewarp/-toolchain/...` — port 80, against a mirror on 8129 — and
+        // every build that downloads a toolchain died on `Connection refused` after the image was
+        // already built.
+        for requested in [None, Some("auto"), Some("elsewhere:9000")] {
+            assert_eq!(
+                super::timewarp_host_for(true, None, requested).as_deref(),
+                Some("timewarp:8129"),
+                "requested={requested:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unenforced_tier_names_the_host_mirrors_actual_port() {
+        // Whatever was free on this machine, so it cannot be a constant — and the name stays
+        // stable so the port never reaches the strategy digest.
+        assert_eq!(
+            super::timewarp_host_for(false, Some(41234), Some("auto")).as_deref(),
+            Some("timewarp:41234")
+        );
+    }
+
+    #[test]
+    fn with_no_mirror_at_all_only_an_explicit_host_is_used() {
+        assert_eq!(super::timewarp_host_for(false, None, None), None);
+        assert_eq!(super::timewarp_host_for(false, None, Some("auto")), None);
+        assert_eq!(
+            super::timewarp_host_for(false, None, Some("elsewhere:9000")).as_deref(),
+            Some("elsewhere:9000")
+        );
+    }
+}
+
+/// The guard trips that void this run, given what the build produced.
+///
+/// The host-mirror counterpart of the same decision the island makes in `trigon-sandbox`, and it
+/// calls the same two functions to make it: a member that arrived and is not in the rebuilt
+/// artifact came in without coming out, which is not the harm the guard exists to catch.
+#[cfg(feature = "build")]
+fn voiding_trips(
+    mirror: &trigon_mirror::MirrorHandle,
+    produced: Option<&Path>,
+) -> Vec<trigon_mirror::Trip> {
+    let rebuilt = produced.and_then(trigon_mirror::member_digests_at);
+    trigon_mirror::voiding(&mirror.arrived(), rebuilt.as_ref())
+}
+
 /// The current instant, as RFC 3339 UTC.
 ///
 /// Hand-rolled rather than pulling in a date library for one format. UTC only, and seconds
@@ -1065,6 +1145,12 @@ mod build {
         /// nothing arrived — but usually the explanation for whatever failed next, and a sweep
         /// without `--store` has only `run.json` to find it in.
         pub refused_artifact: Vec<String>,
+        /// Guarded members that arrived over the network and are **not** in the rebuilt artifact.
+        ///
+        /// The bytes came in and did not come out, which is not the harm the guard exists to catch
+        /// — so the run stands. Carried anyway, and for the same reason as `refused_artifact`: a
+        /// control whose near-misses are invisible cannot be told from one that never fires.
+        pub guard_notes: Vec<String>,
         /// Where the runner collected the rebuilt artifact, when it collected exactly one.
         ///
         /// The runner knows this — it mounted the directory the build wrote into — and the caller
@@ -1112,45 +1198,70 @@ mod build {
         // At `open`, nothing: no host clone, no copy, and the in-container `git clone` runs exactly
         // as it always has. That matters because `open` is what `rebuild` and `sweep` default to,
         // so every published rate keeps coming from a code path this does not touch.
+        // Why the host checkout failed, kept so the *build's* failure can be attributed to it.
+        // Only read when the build dies in the source phase, which is the only phase it explains.
+        let mut checkout_failure: Option<trigon_core::FailureSignature> = None;
         let source_tree = match (egress, source) {
             (trigon_sandbox::EgressTier::Open, _) => None,
             // An operator-named checkout is used as it stands. It is now a build input rather than
             // only a hint that narrows the guard, which is a change in what `--source` means.
             (_, Some(p)) => Some(p.to_path_buf()),
-            // Best effort, and deliberately so. A strategy whose source phase generates its own
-            // tree — or clones nothing at all — has nothing to fetch, and a mandatory fetch would
-            // refuse it for a repository it never intended to use. Failing here costs nothing the
-            // boundary depends on: the image build still has no network, so a source phase that
-            // does need to clone fails there instead, with the network error that says so.
-            (_, None) => match crate::strategy_location(file, import).and_then(|(_, loc)| {
-                let cache = trigon_registry::SourceCache::new(
-                    source_cache
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(trigon_registry::SourceCache::default_root),
-                );
-                let checkout = cache.checkout(&loc.repo, &loc.git_ref)?;
-                // Said out loud, because the alternative is a divergence about how we cloned.
-                // `hatch-vcs`, `setuptools-scm` and their siblings take the package version from
-                // `git describe`, so a commit no tag names builds as `0.1.dev1+g<sha>` — a wheel
-                // whose every `dist-info` member is named wrong while its code is byte-identical.
-                // Most commits are not releases, so this is a note rather than a refusal; what it
-                // must not be is silent.
-                if checkout.tags.is_empty() {
-                    tracing::warn!(
-                        commit = %loc.git_ref,
-                        "no tag names this commit, so a build that derives its version from \
-                         `git describe` will produce a development version rather than the \
-                         release. Every difference that follows is about the checkout rather than \
-                         about the package."
-                    );
-                }
-                Ok(checkout.path)
-            }) {
-                Ok(p) => Some(p),
+            // **Still best effort, and the reason is kept.** A strategy whose source phase
+            // generates its own tree — or clones nothing at all — has nothing to fetch, and
+            // failing here would refuse it for a repository it never intended to use. The e2e
+            // strategy in `tests/cli.rs` is exactly that shape and caught a version of this that
+            // did fail.
+            //
+            // What was wrong was not the fallback, it was the silence. When the source phase
+            // *does* need the clone, the fallback is the in-container `git clone`, which at an
+            // enforced tier has no route to a forge — so the run dies a minute later on a DNS
+            // error about a host it was never going to reach, and files under `net/unreachable`
+            // beside genuine hidden-network-dependency findings. `pad-left`'s real cause is that
+            // npm's recorded `gitHead` names a commit GitHub refuses to serve, and that sentence
+            // existed only at `debug`. So the reason is carried to the failure instead.
+            (_, None) => match crate::strategy_location(file, import) {
                 Err(e) => {
-                    tracing::debug!("no host checkout, so the source phase runs as written: {e:#}");
+                    tracing::debug!("the strategy names no source location: {e:#}");
                     None
                 }
+                Ok((_, loc)) => match (|| {
+                    let cache = trigon_registry::SourceCache::new(
+                        source_cache
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(trigon_registry::SourceCache::default_root),
+                    );
+                    let checkout = cache.checkout(&loc.repo, &loc.git_ref)?;
+                    // Said out loud, because the alternative is a divergence about how we cloned.
+                    // `hatch-vcs`, `setuptools-scm` and their siblings take the package version from
+                    // `git describe`, so a commit no tag names builds as `0.1.dev1+g<sha>` — a wheel
+                    // whose every `dist-info` member is named wrong while its code is byte-identical.
+                    // Most commits are not releases, so this is a note rather than a refusal; what it
+                    // must not be is silent.
+                    if checkout.tags.is_empty() {
+                        tracing::warn!(
+                            commit = %loc.git_ref,
+                            "no tag names this commit, so a build that derives its version from \
+                             `git describe` will produce a development version rather than the \
+                             release. Every difference that follows is about the checkout rather than \
+                             about the package."
+                        );
+                    }
+                    Ok::<_, trigon_registry::RegistryError>(checkout.path)
+                })() {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        let detail = format!("{e:#}");
+                        tracing::warn!(
+                            repo = %loc.repo,
+                            commit = %loc.git_ref,
+                            "no host checkout. If the source phase clones, it will fail at this \
+                             egress tier with a network error about a host it was never going to \
+                             reach — this is the reason underneath it: {detail}"
+                        );
+                        checkout_failure = Some(trigon_core::classify(&detail));
+                        None
+                    }
+                },
             },
         };
 
@@ -1349,10 +1460,40 @@ mod build {
                      have it will have failed for that reason."
                 );
             }
-            if let Some(t) = outcome.guard_trips.first() {
-                // Before the exit status is even considered: the artifact *arrived*, so the run
-                // cannot be used whether the build succeeded or failed.
-                bail!("void: {t}");
+            // Asked again here, against the artifact *this* function can find. The runner decided
+            // with the single file at the output path; where it found none, the walk below reaches
+            // builds whose output lands in a subdirectory — and a member trip left unjudged on
+            // exactly those runs is a control declining to answer on the runs it was armed for.
+            //
+            // Cheap, because a match on the runner's own artifact costs one parse and the two
+            // agree on every ordinary build.
+            let produced = outcome.artifact.clone().or_else(|| crate::rebuild::newest_file(out));
+            let rebuilt = produced
+                .as_deref()
+                .and_then(trigon_mirror::member_digests_at);
+            let voiding = trigon_mirror::voiding(&outcome.guard_arrived, rebuilt.as_ref());
+            // The guard fired and the run still stands, because the bytes did not come back out in
+            // what the build produced. Said out loud: a control whose near-misses are invisible
+            // cannot be told from one that never fires.
+            let guard_notes: Vec<String> = outcome
+                .guard_arrived
+                .iter()
+                .filter(|t| !voiding.contains(t))
+                .map(|t| {
+                    format!(
+                        "{} — it is not in the rebuilt artifact, so the bytes came in and did not \
+                         come out, and the run stands",
+                        t.describe()
+                    )
+                })
+                .collect();
+            for n in &guard_notes {
+                tracing::warn!("{n}");
+            }
+            if let Some(t) = voiding.first() {
+                // Before the exit status is even considered: the artifact *arrived* and came back
+                // out, so the run cannot be used whether the build succeeded or failed.
+                bail!("void: {}", t.describe());
             }
             // The log, always, whether the build worked or not. A successful build's log is what
             // tells you *how* it succeeded, and until `trigon-store` exists this file is the whole
@@ -1379,6 +1520,22 @@ mod build {
                     .signature
                     .clone()
                     .unwrap_or_else(|| trigon_core::classify(&outcome.log_tail));
+                let phase = outcome
+                    .failed_in
+                    .map(|p| format!("{p:?}").to_lowercase())
+                    .unwrap_or_else(|| "build".into());
+                // A source phase that died having been denied its checkout is explained by the
+                // checkout, not by the DNS the tier refuses it. Only in `source`, and only when
+                // there is actually a reason: everywhere else the build's own account is the better
+                // one, and replacing it would hide a real failure behind a stale note.
+                //
+                // **Before the verbose block, not after.** It was after, so the terminal printed
+                // `failure net/unreachable` and then returned `src/commit-not-on-the-forge` two
+                // lines later — two answers to one question, the wrong one first.
+                let signature = match (phase.as_str(), checkout_failure) {
+                    ("source", Some(why)) => why,
+                    _ => signature,
+                };
                 if verbose {
                     // The compressed form, not the raw tail. A hundred kilobytes of dependency
                     // chatter in a terminal buries the four lines that say what happened, and the
@@ -1392,10 +1549,7 @@ mod build {
                     println!("  log       {}", log_path.display());
                 }
                 return Err(BuildFailure {
-                    phase: outcome
-                        .failed_in
-                        .map(|p| format!("{p:?}").to_lowercase())
-                        .unwrap_or_else(|| "build".into()),
+                    phase,
                     exit_code: outcome.exit_code,
                     signature,
                 }
@@ -1406,6 +1560,7 @@ mod build {
                 transcript: outcome.transcript,
                 pin: outcome.pin,
                 refused_artifact: outcome.refused_artifact,
+                guard_notes,
                 artifact: outcome.artifact,
             })
         })
@@ -2271,12 +2426,22 @@ mod rebuild {
             Ok(bytes) => {
                 let format = crate::resolve_format(&upstream_path, None)?;
                 let url = Some(meta.url.clone());
-                match args.source.as_deref() {
+                let m = match args.source.as_deref() {
                     Some(dir) => trigon_mirror::GuardManifest::for_artifact_with_source(
                         &bytes, format, url, dir,
                     ),
                     None => trigon_mirror::GuardManifest::for_artifact(&bytes, format, url),
-                }
+                };
+                // And withhold this version from the index the build resolves against. The
+                // refusal above is the control; this is what makes it survivable. A resolver that
+                // is offered a version and then denied the file fails outright, which is how every
+                // package that is part of the machinery that builds packages died at an enforced
+                // tier — `python -m build` needs `packaging`, npm's installer needs
+                // `object-assign`. A version that was never listed is routed around instead.
+                //
+                // `registry_name`, not `name`: an npm scope is part of what the registry calls the
+                // package, and `core` is a different package from `@babel/core`.
+                m.withholding(&target.registry_name(), &target.version)
             }
             Err(_) => trigon_mirror::GuardManifest::default(),
         };
@@ -2313,16 +2478,11 @@ mod rebuild {
             }
             _ => None,
         };
-        // The name the strategy uses, and the port the container has to reach. The name is stable
-        // so the port stays out of the strategy digest.
-        let timewarp_host = if enforced && args.timewarp.is_some() {
-            Some("timewarp:8129".to_string())
-        } else {
-            mirror
-                .as_ref()
-                .map(|m| format!("timewarp:{}", m.addr.port()))
-                .or_else(|| args.timewarp.clone().filter(|t| t != "auto"))
-        };
+        let timewarp_host = crate::timewarp_host_for(
+            enforced,
+            mirror.as_ref().map(|m| m.addr.port()),
+            args.timewarp.as_deref(),
+        );
 
         // Taken before the ladder consumes `args`, so the record can be written at the end without
         // keeping the whole argument struct alive.
@@ -2432,6 +2592,11 @@ mod rebuild {
         // early return would leave it running.
         let mut judged: Option<(PathBuf, trigon_compare::Comparison)> = None;
         let mut compare_error: Option<Outcome> = None;
+        // What the last attempt built, carried out of the loop because the guard is read again
+        // after it and asks a question only this file can answer. Uninitialized on purpose: every
+        // path out of the loop runs the assignment below first, and saying so here means a future
+        // early `break` fails to compile rather than silently voiding against a stale `None`.
+        let mut produced: Option<PathBuf>;
         let (built, strategy_digest) = loop {
             // A fresh directory every attempt, including the first. Without clearing it before
             // the first, a `--work` directory reused across targets hands the *previous run's*
@@ -2485,12 +2650,28 @@ mod rebuild {
                 args.source_cache.as_deref(),
             );
 
+            // What the build produced, taken before the guard is consulted rather than after.
+            // Whether a guarded member arriving voids the run depends on whether it came back out
+            // in this file, and that question cannot be asked without it.
+            //
+            // What the runner collected, and only then a walk of the directory. The walk is for
+            // builds whose output lands in a subdirectory, which `collect` deliberately does not
+            // reach; it is not a second opinion about the common case.
+            produced = built
+                .as_ref()
+                .ok()
+                .and_then(|b| b.artifact.clone())
+                .or_else(|| newest_file(&out));
+
             // A tripped guard ends the loop whatever else happened, and before another attempt can
             // spend anything: the artifact under test reached the build, so nothing this run
             // produces is evidence about the source. The block below turns it into a `Void`.
-            // `voiding`, not every trip: a refusal is the mirror turning the build away, which
-            // means nothing arrived and the run is still evidence about the package.
-            if mirror.as_ref().is_some_and(|m| !m.voiding().is_empty()) {
+            // `voiding`, not every trip: a refusal is the mirror turning the build away, and a
+            // member that arrived and is not in the output came in without coming out.
+            if mirror
+                .as_ref()
+                .is_some_and(|m| !voiding_trips(m, produced.as_deref()).is_empty())
+            {
                 break (built, strategy_digest);
             }
 
@@ -2498,15 +2679,7 @@ mod rebuild {
                 // A build that ran is not yet an answer. The comparison happens here, inside the
                 // loop, because a divergence is the repair case that matters most: the recipe
                 // works and builds something that is not what was published.
-                // What the runner collected, and only then a walk of the directory. The walk is
-                // for builds whose output lands in a subdirectory, which `collect` deliberately
-                // does not reach; it is not a second opinion about the common case.
-                let collected = built
-                    .as_ref()
-                    .ok()
-                    .and_then(|b| b.artifact.clone())
-                    .or_else(|| newest_file(&out));
-                let Some(rebuilt) = collected else {
+                let Some(rebuilt) = produced.clone() else {
                     break (built, strategy_digest);
                 };
                 let comparison = match judge(&upstream_path, &rebuilt) {
@@ -2689,6 +2862,10 @@ mod rebuild {
             report.timings = t.clone();
         }
         report.egress = Some(args.egress.clone());
+        report.guard_notes = built
+            .as_ref()
+            .map(|b| b.guard_notes.clone())
+            .unwrap_or_default();
         report.refused_artifact = built
             .as_ref()
             .map(|b| b.refused_artifact.clone())
@@ -2791,12 +2968,19 @@ mod rebuild {
                      arrived, so this is not a void"
                 );
             }
-            let trips = m.voiding();
+            let trips = voiding_trips(&m, produced.as_deref());
+            for t in m.arrived().iter().filter(|t| !trips.contains(t)) {
+                tracing::warn!(
+                    "{} — it is not in the rebuilt artifact, so the bytes came in and did not \
+                     come out, and the run stands",
+                    t.describe()
+                );
+            }
             rt.block_on(m.shutdown());
             if let Some(t) = trips.first() {
                 // Checked before the build's exit status is even considered. A tripped guard means
                 // the run cannot be used, whether the build succeeded or failed.
-                let reason = format!("{:?} arrived from {}", t.matched, t.url);
+                let reason = t.describe();
                 report.void_reason = Some(reason.clone());
                 return Ok(Ran {
                     outcome: Outcome::Void { reason },
@@ -3364,7 +3548,7 @@ mod rebuild {
     /// package knows. `ln -s ../../evil-1.2.3.tgz /out/zzz.tgz` would otherwise make the published
     /// bytes the "rebuild", compare them against themselves, and sign `Exact`. That is
     /// `docs/12-security.md` §1.1 with no network needed at all.
-    fn newest_file(dir: &Path) -> Option<PathBuf> {
+    pub(crate) fn newest_file(dir: &Path) -> Option<PathBuf> {
         let mut found: Vec<PathBuf> = Vec::new();
         let mut stack = vec![dir.to_path_buf()];
         while let Some(d) = stack.pop() {

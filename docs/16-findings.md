@@ -964,12 +964,160 @@ bytes and cannot tell a file of 26.3 from a byte-identical file of 26.2. Closing
 that a member arriving inside a *different version of the same package* is not a catch — a
 bootstrapping policy rather than a code change, and not one to make by loosening a control.
 
+[§3.23](#323-the-bootstrap-wall-and-a-control-asking-the-wrong-question) closes the first half and
+narrows the second, without loosening anything: the version under test is withheld from the index so
+the resolver never asks for it, and the void decision moves to where the rebuilt artifact is in hand.
+`packaging` and `pyproject-hooks` then build — and still void, because for a package that rebuilds
+itself the member genuinely does come back out. What is left is named there.
+
 **Two more defects the sweep surfaced, both tier-independent:** `tomli`'s source discovery produced
 `https://github.com/hukkin/tomli/blob/master/CHANGELOG.md/` as a repository URL, because
 `canonicalize_repo` does not strip a `/blob/…` file path off what PyPI's metadata supplies; and
 `zipp` reached the mirror for its index and then failed on something else that has not been run
 down yet. `certifi` is `no-strategy` because no tag matches `2026.7.22`, which is the resolver
 declining to guess and is correct.
+
+### 3.23 The bootstrap wall, and a control asking the wrong question
+
+Five of the eight targets that reached no comparison at the enforced tier were one bug, and §3.22
+left it open deliberately: rebuilding a package that is part of the machinery that builds packages
+makes the build ask for the package under test. `python -m build` needs `packaging` and
+`pyproject-hooks`; npm's own installer needs `object-assign`, `strip-ansi` and `repeat-string`.
+
+It closes in two pieces, and neither of them loosens a control.
+
+**Refuse in the index, not at the download.** The guard knows the target's artifact URL and refuses
+it. That is right and it stays. What was wrong is what the *index* said first: the mirror listed the
+version, so pip resolved `packaging>=24.0` to the target, asked for the file, and was denied. A
+resolver that has been told a version exists and is then refused the file does not look for another
+one — it fails.
+
+A version that was never offered is a different thing. `packaging 26.3` is simply not in the index,
+so pip takes `26.2`. The target's bytes still never cross, by exactly the control that stopped them
+before; the resolver routes around the hole instead of dying in it.
+
+Both filters already had the shape. `filter_packument` and `filter_simple` drop versions by publish
+time, and the npm one already recomputed `dist-tags.latest` afterwards — written because a tag naming
+a removed version makes every install fail on a version that is not there. Withholding the target
+reaches that hazard the same way, so the recompute moved into a function both call, and `modified`
+went with it for the same reason.
+
+The counts stay apart. `versions_withheld` is the evidence that the registry pin applied, and folding
+a policy removal into it would make an index where only the target was dropped report `withheld=1`
+and read as the pin doing work it did not do.
+
+**PyPI already had a version of this and npm did not**, which is the argument for doing it here. The
+`pypi/deps-basic` recipe takes an `exclude_self` parameter and writes `name!=version` into a pip
+constraints file, for exactly this reason and in almost these words. It works, and it is per-recipe:
+every strategy that could hit the wall has to remember to ask for it, in every ecosystem, and the
+npm recipes did not. Withholding the version from the index is the same rule one layer down, where
+it applies to every run, every ecosystem and every recipe including the ones nobody has written yet.
+So the PyPI corpus does not move — the constraint was already carrying it — and the npm corpus is
+where the measurement shows up.
+
+**Then ask the guard the question it can answer.** With the build running, the second half of §3.22
+lands: pip installs the adjacent release, and adjacent releases of one package share byte-identical
+files, so a guarded member of the version under test arrives inside a version that is not it. The run
+voids. The most important control in the design, firing on a dependency doing nothing unusual.
+
+The fix is not an exemption. It is that **the question was being asked in the wrong place**. A member
+*arriving* was never the harm; the harm is a member arriving and **coming back out in the rebuilt
+artifact** — bytes fetched rather than built, re-emitted as though they had been, which is
+[`12`](12-security.md) §1.1 exactly. That question needs the build's output, which the mirror does
+not have and the judgement half does.
+
+So the mirror reports what arrived and the decision moves after the build:
+
+| trip | voids when |
+|---|---|
+| `WholeArtifact` | always — there is no honest reason for the published artifact to arrive whole |
+| `Member` | the digest that arrived is also in the rebuilt artifact |
+| `RefusedUrl` | never — nothing arrived (§3.22) |
+
+Three things follow, each an improvement rather than a cost. The decision is a pure function of two
+digest sets, so a third party can re-derive it from the attestation instead of taking a network
+proxy's word for it. A build that produced no artifact voids nothing — nothing was smuggled out of a
+build with no output, and the run is already `BuildFailed`. And the near-misses are kept and shown:
+a control whose near-misses are invisible cannot be told from one that never fires.
+
+The runner no longer decides either. It reports `guard_arrived` and the caller calls
+`trigon_mirror::voiding` once, because the caller is what resolves the rebuilt artifact — `collect`
+finds the single file at the output path, and the caller also walks for builds whose output lands in
+a subdirectory. Two answers to that question, with nothing asserting they agreed, is the shape of
+bug this project keeps finding.
+
+**Three more defects found on the way, none of them the one being fixed.**
+
+*The marker in the prose.* Carrying the decision out of the island meant the trip line had to carry
+the digest, so `GUARD-TRIPPED` became JSON like the two markers beside it, and its reader refuses an
+unreadable line rather than skipping it. It then refused immediately — because the `tracing` message
+*next to* the record also contained the marker, so the reader saw a sentence where it expected an
+object and reported that whether the artifact reached the build was unknown. The strictest possible
+answer, produced by a log line. A record is now the marker, a space and a JSON object; prose that
+mentions the marker is a different kind of line, not a damaged record. Everything from `{` onwards
+stays strict, because a record that was written and cannot be read is the thing the strictness is
+for.
+
+*The port that only existed with `--timewarp`.* At an enforced tier the island mirror is the build's
+only route out, so `toolchain_url` rewrites every toolchain download through it. The host it wrote
+carried the mirror's port only when `--timewarp` had also been passed; without it the name fell
+through to a bare `timewarp` and every toolchain download died on `Connection refused` — the mirror
+listening on 8129, the rendered URL saying port 80. Two ways to know where the mirror is,
+disagreeing. It is now one function with three tests, and the enforced tier names the port whatever
+else was asked for.
+
+**Measured, both corpora at `mirror-only`.**
+
+| | before | after |
+|---|---|---|
+| npm, reach a comparison | 15 of 20 | **18 of 20** |
+| npm, reproduce | 14 of 15 (93%) | **16 of 18 (89%)** |
+| PyPI, reach a comparison | 14 of 17 | 14 of 17 |
+| PyPI, reproduce | 12 of 14 (86%) | 12 of 14 (86%) |
+
+The npm *percentage* fell and that is the change working. `object-assign` and `strip-ansi` now
+reproduce `normalized` with every member identical, and `repeat-string` reaches a comparison and
+diverges on two of four members — three packages that previously could not build at all. The
+denominator grew from 15 to 18 and the numerator from 14 to 16. A rate computed over the targets we
+managed to build is not a rate; it is a statement about which targets we excluded.
+
+Both npm failures that remain are now named with nothing to repair, where before one of them was a
+DNS error about the wrong thing: `src/commit-not-on-the-forge` and
+`trigon/mirror-corrupted-artifact`.
+
+**What this does not close, and what would.** `packaging@26.3` and `pyproject-hooks@1.2.0` now build
+— and still void. The member that arrived inside the adjacent release *is* in the rebuilt artifact,
+because a file unchanged between two releases of one package is byte-identical in both and the build
+produces it honestly from the checkout. The guard is answering its question correctly; the question
+is not sufficient on its own for a package that rebuilds itself.
+
+The rule that finishes it is already written and already stated:
+`GuardManifest::for_artifact_with_source` drops members byte-identical to a file in the source tree,
+because "a file the artifact ships and the repository also contains is not evidence of anything: the
+build is entitled to fetch it". Every member that trips here is such a file. It is not applied
+because the manifest is built from the published bytes *before* a strategy is chosen, and the source
+tree is a function of the strategy's location.
+
+It cannot simply move to the decision either, where the source tree is in hand: the filter carries a
+deliberate exemption — an executable the repository also contains is exactly the case worth guarding,
+since a build fetching a prebuilt binary is §1.1 — and that exemption keys on the artifact member's
+*path*, which only the manifest has. So the manifest has to be built later, after the strategy,
+which in turn is what a non-enforced run's host mirror is armed with before the strategy is chosen,
+for its port. Untangling that is a change to the order of the most security-sensitive path in the
+system and belongs in its own commit, not the tail of this one. Written down as B14 in [`17`](17-backlog.md).
+
+*A commit the forge will not serve.* `pad-left@2.1.0` filed as `net/unreachable` on every corpus run,
+beside genuine hidden-network-dependency findings. The real cause is that npm's recorded `gitHead`
+names `89347534…`, which GitHub answers with `upload-pack: not our ref` — the commit is not
+reachable from any ref in that repository today. The host checkout failed at `debug` level, the
+in-container clone then died on the DNS an enforced tier denies it, and the *symptom* got the name.
+It is now `src/commit-not-on-the-forge`, `Fault::Upstream`, and the reason is carried onto the
+build's own failure rather than logged and dropped.
+
+Carried, not raised: the first version of this refused the run outright when the checkout failed,
+which broke a strategy whose source phase generates its own tree and needs no clone at all. The
+end-to-end test in `crates/trigon/tests/cli.rs` is exactly that shape and caught it. The fallback was
+never the problem — the silence was.
 
 ## 4. A stabilizer the reference does not have
 
@@ -1037,9 +1185,19 @@ cannot be confirmed from bytes alone.
 **`trigon/mirror-corrupted-artifact`.** Intermittent; npm retries and then fails with
 `Z_DATA_ERROR`. Ruled out so far: transparent gzip decompression (fixed, and a serial fetch through
 the mirror is byte-identical to the registry's); concurrency (twelve parallel fetches, all
-identical); packument integrity mismatch (the declared sha512 matches the served bytes exactly). It
-is correctly classified as ours with nothing to repair, so it does not contaminate any reproduction
-rate, but it is unexplained.
+identical); packument integrity mismatch (the declared sha512 matches the served bytes exactly); and
+a mislabelled transfer encoding — `registry.npmjs.org` sends no `Content-Encoding` on a tarball with
+or without `Accept-Encoding: gzip`, so the header the proxy forwards cannot be it. Re-measured on
+`has-flag@5.0.1`: the transcript records `typescript-4.3.5.tgz` at 10,627,908 bytes and sha256
+`c7be550da858…`, which is what the registry serves, and both fetches recorded `Checked::Hashed`
+rather than `Partial` — so the body was read whole and the client consumed it whole. It is correctly
+classified as ours with nothing to repair, so it does not contaminate any reproduction rate, but it
+is unexplained.
+
+The next measurement is the one nothing has taken: the bytes on the **outgoing** side. Everything
+ruled out so far is about what the mirror *obtained*; capturing what the container receives and
+diffing it against the transcript digest is what separates "the streaming response is at fault" from
+"npm is rejecting a body that is exactly what was published".
 
 **Two clean re-runs before publishing a divergence.** [`10.3`](00-overview.md) requires it and
 nothing implements it yet.

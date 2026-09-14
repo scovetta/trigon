@@ -2121,6 +2121,28 @@ fn report_panel(dir: &Path) -> String {
     if let Some(v) = &r.void_reason {
         row("void", format!("<span class=\"void\">{}</span>", esc(v)));
     }
+    // The guard fired and the run still stands, because the bytes did not come back out. Shown as
+    // a note rather than a void, and shown at all because a control whose near-misses are invisible
+    // cannot be told from one that never fires.
+    if !r.guard_notes.is_empty() {
+        row(
+            "guard",
+            format!(
+                "<span class=\"note\">{}</span>",
+                esc(&r.guard_notes.join("; "))
+            ),
+        );
+    }
+    if !r.refused_artifact.is_empty() {
+        row(
+            "refused",
+            format!(
+                "<span class=\"note\">the build asked for its own published artifact {} time(s) \
+                 and was refused; nothing arrived</span>",
+                r.refused_artifact.len()
+            ),
+        );
+    }
     if let Some(m) = &r.model {
         row("model", format!("{} · {} call(s)", esc(m), r.model_calls));
     }

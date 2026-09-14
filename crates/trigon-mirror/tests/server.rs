@@ -1066,7 +1066,7 @@ async fn refusing_the_runs_own_artifact_is_not_the_artifact_arriving() {
     g.record_refusal("https://files.pythonhosted.org/a/packaging-26.3.whl");
     assert_eq!(g.trips().len(), 1, "the refusal is recorded");
     assert!(
-        g.voiding().is_empty(),
+        g.arrived().is_empty(),
         "a refusal must not void the run: nothing arrived"
     );
     assert_eq!(g.refused().len(), 1);
@@ -1077,9 +1077,9 @@ async fn refusing_the_runs_own_artifact_is_not_the_artifact_arriving() {
     // because every body is hashed whatever route it came by.
     g.observe("https://cdn.evil.example/anything.bin", artifact, None);
     assert_eq!(
-        g.voiding().len(),
+        g.arrived().len(),
         1,
         "the artifact arriving by another name is still a void"
     );
-    assert_eq!(g.voiding()[0].matched, GuardMatch::WholeArtifact);
+    assert_eq!(g.arrived()[0].matched, GuardMatch::WholeArtifact);
 }
