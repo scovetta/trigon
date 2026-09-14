@@ -317,13 +317,27 @@ async fn a_pin_travels_to_the_build_phase_as_a_constraint() {
             .map(String::as_str),
         Some(format!("{}/constraints.txt", trigon_strategy::VENV).as_str())
     );
+    // **Always pointed at, pinned backend or not.** The file used to exist only where a backend had
+    // been read, and it now also carries the exclusion of the artifact under test — which is what
+    // lets a package that is part of the machinery that builds packages resolve its frontend to the
+    // release before itself instead of asking the mirror for the very thing under test.
     let (unpinned, _) = pypi_strategy(None).await;
     assert_eq!(
         tool_params(&unpinned, "build")
             .get("constraints")
             .map(String::as_str),
-        Some(""),
-        "no pin means no constraint file to point at"
+        Some(format!("{}/constraints.txt", trigon_strategy::VENV).as_str()),
+        "the constraints file is written on every PyPI build, because it carries the \
+         self-exclusion even where no backend was pinned"
+    );
+
+    // And the exclusion itself reaches the deps step, naming the exact version under test.
+    assert_eq!(
+        tool_params(&unpinned, "deps")
+            .get("exclude_self")
+            .map(String::as_str),
+        Some("sniffio!=1.3.1"),
+        "a build must not resolve to the artifact it is reproducing"
     );
 }
 

@@ -249,13 +249,51 @@ pub(crate) fn canonicalize_repo(raw: &str) -> String {
         return format!("https://github.com/{rest}");
     }
     if s.starts_with("http://") || s.starts_with("https://") {
-        return s.replace("http://", "https://");
+        return trim_to_repo(&s.replace("http://", "https://"));
     }
     // A bare `owner/repo`, which npm accepts and means GitHub by convention.
     if s.split('/').count() == 2 && !s.contains(' ') && !s.contains(':') {
         return format!("https://github.com/{s}");
     }
     s.to_string()
+}
+
+/// Cut a forge URL back to the repository it names.
+///
+/// Registry metadata routinely carries a link to a *file* where a repository is asked for —
+/// `tomli`'s PyPI entry gives `https://github.com/hukkin/tomli/blob/master/CHANGELOG.md`, because
+/// the project listed its changelog under a key we read as the source. Cloning that fails with
+/// `fatal: unable to access …`, which reads as a network problem and cost a target on every corpus
+/// run.
+///
+/// Cut at the first path segment no repository has. The segments are forge routes rather than a
+/// guess about names: everything before `/blob/`, `/tree/`, `/raw/`, `/blame/`, `/commit/`,
+/// `/releases/`, `/issues/`, `/wiki/` or `/-/` is the repository and everything after is a view of
+/// it. GitLab's `/-/` covers its whole family in one.
+///
+/// Conservative in the direction that matters: a URL with none of these is returned untouched, so
+/// an unfamiliar forge is left alone rather than truncated to something that does not exist.
+fn trim_to_repo(url: &str) -> String {
+    const VIEWS: &[&str] = &[
+        "/blob/",
+        "/tree/",
+        "/raw/",
+        "/blame/",
+        "/commit/",
+        "/commits/",
+        "/releases/",
+        "/issues/",
+        "/pull/",
+        "/wiki/",
+        "/-/",
+    ];
+    let mut cut = url.len();
+    for v in VIEWS {
+        if let Some(i) = url.find(v) {
+            cut = cut.min(i);
+        }
+    }
+    url[..cut].trim_end_matches('/').to_string()
 }
 
 /// A sha256 out of npm's subresource-integrity string, when it happens to be one.
@@ -459,5 +497,41 @@ mod tests {
         // Present but empty, or not a string: absent, not a claim about an empty command.
         assert_eq!(doc(serde_json::json!({ "scripts": { "build": "" } })), None);
         assert_eq!(doc(serde_json::json!({ "scripts": { "build": 7 } })), None);
+    }
+
+    #[test]
+    fn a_link_to_a_file_in_a_repository_is_cut_back_to_the_repository() {
+        // Registry metadata routinely gives a link to a *file* where a repository is asked for.
+        // `tomli`'s PyPI entry is `https://github.com/hukkin/tomli/blob/master/CHANGELOG.md`, and
+        // cloning that fails with `fatal: unable to access …` — which reads as a network problem,
+        // clustered with one, and cost a target on every corpus run.
+        let c = super::canonicalize_repo;
+        assert_eq!(
+            c("https://github.com/hukkin/tomli/blob/master/CHANGELOG.md"),
+            "https://github.com/hukkin/tomli"
+        );
+        assert_eq!(
+            c("https://github.com/certifi/python-certifi/tree/master/certifi"),
+            "https://github.com/certifi/python-certifi"
+        );
+        // GitLab routes every view through `/-/`, so one entry covers the family.
+        assert_eq!(
+            c("https://gitlab.com/a/b/-/blob/main/README.md"),
+            "https://gitlab.com/a/b"
+        );
+
+        // Untouched where there is nothing to cut, including a forge nobody taught it about: an
+        // unfamiliar URL is left alone rather than truncated to something that does not exist.
+        assert_eq!(
+            c("https://github.com/hukkin/tomli"),
+            "https://github.com/hukkin/tomli"
+        );
+        assert_eq!(
+            c("https://codeberg.org/owner/repo"),
+            "https://codeberg.org/owner/repo"
+        );
+        // And the shorthands still work, since they never reach the trimmer.
+        assert_eq!(c("github:a/b"), "https://github.com/a/b");
+        assert_eq!(c("git@github.com:a/b.git"), "https://github.com/a/b");
     }
 }

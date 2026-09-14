@@ -310,6 +310,28 @@ const RULES: &[Rule] = &[
     },
     // ---- the network, and what a denied egress tier looks like from inside ---------------------
     Rule {
+        // A *build backend* reaching the internet directly, rather than a package manager asking
+        // the index. `zipp` builds through `coherent.licensed`, which calls `urlopen` from
+        // `get_requires_for_build_wheel` to fetch its licence text — so it never sees
+        // `/etc/pip.conf`, never goes through the mirror, and hits the boundary.
+        //
+        // This is the tier working, and naming it says so. It clustered with `net/unreachable`,
+        // where the other member was our own malformed repository URL: one is a bug of ours and the
+        // other is a hidden remote dependency in somebody's build, which is exactly what
+        // `docs/08-execution.md` §7.1 says the transcript exists to surface. Same code, opposite
+        // readings, so they are not the same code any more.
+        //
+        // Not repairable: no strategy change makes a build stop calling `urlopen`. The choices are
+        // to widen the allowlist, which is what the allowlist exists to prevent, or to record that
+        // this package cannot be built at an enforced tier.
+        code: "net/build-fetches-directly",
+        needles: &["urlopen error", "Network is unreachable"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
         code: "net/unreachable",
         needles: &["Temporary failure in name resolution"],
         fault: Fault::Policy,

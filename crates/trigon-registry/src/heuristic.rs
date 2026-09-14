@@ -339,6 +339,20 @@ impl StrategyInferrer for PyPiInferrer {
         // mounted over it (which `docs/12-security.md` §5 wants) would empty it between the image
         // build and the run without anything saying so.
         let mut deps = BTreeMap::from([("venv".to_string(), VENV.to_string())]);
+        // A build must not consume the artifact it is reproducing. Ordinarily nothing tries — but
+        // a package that is part of the machinery that builds packages does, because the frontend
+        // needs it: rebuilding `packaging` or `pyproject-hooks` makes pip ask for the very version
+        // under test, the mirror refuses it, and the build dies. Excluding that one version lets
+        // the resolver take the release before it, which is the right thing for a build tool to
+        // build itself with.
+        deps.insert(
+            "exclude_self".into(),
+            format!(
+                "{}!={}",
+                target.reference.registry_name(),
+                target.reference.version
+            ),
+        );
         match (&target.intrinsics.publish_time, &self.mirror) {
             (Some(t), Some(_)) => {
                 deps.insert("registry_time".into(), t.clone());
@@ -386,13 +400,10 @@ impl StrategyInferrer for PyPiInferrer {
                     // phase creates and the one the build phase looks in cannot come apart. They
                     // were three literals agreeing by eye.
                     ("locator".to_string(), format!("{VENV}/bin/")),
-                    (
-                        "constraints".to_string(),
-                        backend
-                            .as_ref()
-                            .map(|_| format!("{VENV}/constraints.txt"))
-                            .unwrap_or_default(),
-                    ),
+                    // Always set now, not only where a backend was read: the constraints file
+                    // also carries the exclusion of the artifact under test, so it is written on
+                    // every PyPI build and the build phase has to be pointed at it either way.
+                    ("constraints".to_string(), format!("{VENV}/constraints.txt")),
                     // Isolation stays on. `-n` makes the frontend *check* for each declared build
                     // requirement rather than install it, so anything the project needs beyond the
                     // backend goes missing — `attrs` wants `hatch-vcs` and `hatch-fancy-pypi-readme`

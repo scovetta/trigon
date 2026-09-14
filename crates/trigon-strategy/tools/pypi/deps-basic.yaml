@@ -24,6 +24,15 @@ params:
     required: false
     default: /trigon/deps/constraints.txt
     doc: Where the pin is written for the build phase to pick up.
+  exclude_self:
+    required: false
+    doc: >-
+      The package under test, as `name!=version`, so the build cannot resolve to the artifact it is
+      reproducing. Some packages are part of the machinery that builds packages — `python -m build`
+      needs `packaging` and `pyproject-hooks` — so rebuilding one makes pip ask the mirror for the
+      very artifact under test. The mirror refuses it, correctly, and the build dies. Excluding that
+      one version lets the resolver take the release before it, which is what a rebuild of a
+      build-tool should use: a build must not consume the thing it is reproducing.
 steps:
   - uses: pypi/setup-venv
     with:
@@ -39,15 +48,28 @@ steps:
   - uses: pypi/setup-registry
     with:
       registry_time: "{{ with.registry_time }}"
-  - runs: "{{ with.venv }}/bin/pip install build"
   # A constraint file rather than an install, because the environment that matters is not this one.
   # The frontend builds an isolated environment and installs the project's declared build
   # requirements into it; pre-installing the backend here does nothing for that environment, and
   # disabling isolation to make it count means the *other* declared requirements go missing —
   # `attrs` needs `hatch-vcs` and `hatch-fancy-pypi-readme` and fails with "Unmet dependencies".
   # A constraint pins the version without taking over the resolution.
-  - runs: "echo '{{ with.build_backend }}' > {{ with.constraints }}"
+  #
+  # **Written before anything installs, and applied to that install too.** The frontend is installed
+  # with pip, and pip resolves against the time-filtered index — so for a package that is part of
+  # the machinery that builds packages, `pip install build` asks for the very artifact under test.
+  # The mirror refuses it and the build dies before it starts. The exclusion has to be in force for
+  # that first install and not only for the isolated environment the frontend builds later, which is
+  # what `PIP_CONSTRAINT` in the build phase covers.
+  #
+  # Truncated first and appended to, so the file exists whichever of the two lines apply and nothing
+  # downstream points at a file that is not there.
+  - runs: ": > {{ with.constraints }}"
+  - runs: "echo '{{ with.build_backend }}' >> {{ with.constraints }}"
     if: "{{ with.build_backend }}"
+  - runs: "echo '{{ with.exclude_self }}' >> {{ with.constraints }}"
+    if: "{{ with.exclude_self }}"
+  - runs: "PIP_CONSTRAINT={{ with.constraints }} {{ with.venv }}/bin/pip install build"
   - uses: pypi/install-deps
     with:
       requirements: "{{ with.requirements }}"
