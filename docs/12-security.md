@@ -44,6 +44,24 @@ mirror is the only reachable host, so a build that asks for its own published ar
 That closes the case where the attacker points at the registry. It does nothing about a fetch from
 `cdn.evil.example`, which is what 2.2 is for.
 
+**A refusal is not a `Void`.** It used to be, and that was the wrong verdict: the mirror turning the
+request away means the artifact *did not arrive*, so the thing a void describes did not happen. The
+control worked, and the run was recorded as evidence of nothing for it.
+
+It matters more than it sounds, because some packages are part of the machinery that builds
+packages. `python -m build` needs `packaging` and `pyproject-hooks`, so rebuilding either one makes
+the build ask for itself. On the M1 PyPI smoke corpus at `mirror-only` that voided three of
+seventeen targets and not one was a real catch — and voiding there means `setuptools`, `wheel`,
+`tomli`, `flit-core` and `hatchling` can never be verified at an enforced tier, which is the set
+everything else depends on.
+
+Separating the two is safe precisely because this control is the cheap one rather than the real one.
+It knows a single URL. §2.2 hashes **every** response by every route, so a build that is refused and
+then fetches the same bytes from somewhere else trips `WholeArtifact` there instead. A build that is
+refused and still produces a matching artifact built it from source, which is what the tool exists to
+reward. The refusal is now recorded on the run and in `buildobservation/v1` under
+`refusedOwnArtifact` — separate from `violations` — and the run's real outcome stands.
+
 ### 2.2 Hash what crosses the proxy, against a filtered member set
 
 **Hash every response body that crosses the proxy into the sandbox. When the target artifact, or a

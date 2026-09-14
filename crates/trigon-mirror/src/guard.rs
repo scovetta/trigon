@@ -344,6 +344,25 @@ pub struct Exchange {
 /// against today's index while every log line says it was pinned.
 pub const REFUSAL_MARKER: &str = "NET-REFUSED";
 
+/// The prefix on a line saying the build asked for its own published artifact and was **refused**.
+///
+/// Separate from [`TRIP_MARKER`], and the separation is the whole point. A trip means the artifact
+/// *arrived*: the run is evidence of nothing, because a build that downloads its own published
+/// output reproduces it perfectly. A refusal means it did **not** arrive — the control worked — and
+/// recording a successful defence as a failed run is the wrong verdict.
+///
+/// It matters because some packages are part of the machinery that builds packages: `python -m
+/// build` needs `packaging` and `pyproject-hooks`, so rebuilding either one makes the build ask for
+/// it. On the M1 PyPI smoke corpus at `mirror-only` that voided three of seventeen targets and not
+/// one was a real catch. Voiding there would mean `setuptools`, `wheel`, `tomli`, `flit-core` and
+/// `hatchling` can never be verified at an enforced tier — the packages everything else depends on.
+///
+/// What still catches an actual attempt is the whole-body hash, which runs on every response by
+/// every route: this refusal knows one URL, and a build fetching the same bytes from anywhere else
+/// trips [`GuardMatch::WholeArtifact`] instead. The refusal is a convenience; the hash is the
+/// control.
+pub const REFUSED_ARTIFACT_MARKER: &str = "GUARD-REFUSED";
+
 /// One request the mirror declined to serve.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refusal {
@@ -625,15 +644,49 @@ impl Guard {
     }
 
     fn record(&self, trip: Trip) {
-        tracing::error!(
-            url = %trip.url,
-            matched = ?trip.matched,
-            "{TRIP_MARKER}: the artifact under test reached the build over the network, so this \
-             run is evidence of nothing"
-        );
+        // Two markers, because the host has to tell the two apart without reading prose and they
+        // mean opposite things. `RefusedUrl` is the build *asking* and being turned away; the other
+        // two are the artifact getting in.
+        match trip.matched {
+            GuardMatch::RefusedUrl => {
+                println!("{REFUSED_ARTIFACT_MARKER} {}", trip.url);
+                tracing::warn!(
+                    url = %trip.url,
+                    "the build asked the mirror for its own published artifact and was refused. \
+                     Nothing arrived, so this is not a void: some packages are part of the \
+                     machinery that builds packages, and rebuilding one makes the build ask for it."
+                );
+            }
+            _ => {
+                println!("{TRIP_MARKER} {}", trip.url);
+                tracing::error!(
+                    url = %trip.url,
+                    matched = ?trip.matched,
+                    "{TRIP_MARKER}: the artifact under test reached the build over the network, so \
+                     this run is evidence of nothing"
+                );
+            }
+        }
         if let Ok(mut t) = self.trips.lock() {
             t.push(trip);
         }
+    }
+
+    /// Trips that make the run `Void`: the artifact, or a guarded member of it, actually arrived.
+    pub fn voiding(&self) -> Vec<Trip> {
+        self.trips()
+            .into_iter()
+            .filter(|t| t.matched != GuardMatch::RefusedUrl)
+            .collect()
+    }
+
+    /// Times the build asked for its own artifact and was turned away. Not a void; see
+    /// [`REFUSED_ARTIFACT_MARKER`].
+    pub fn refused(&self) -> Vec<Trip> {
+        self.trips()
+            .into_iter()
+            .filter(|t| t.matched == GuardMatch::RefusedUrl)
+            .collect()
     }
 }
 

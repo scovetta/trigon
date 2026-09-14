@@ -60,6 +60,11 @@ fn every_field_populated() -> RunRecord {
         // Not `Done`: a state that is nobody's default, so a dropped field cannot masquerade.
         state: RunState::Judging,
         outcome: Some("normalized_with_caveats".into()),
+        // A refusal and a trip in the same record, because they mean opposite things and only one of
+        // them makes the run void. `is_evidence` keys on `guard_trips` alone.
+        refused_artifact: vec![
+            "GUARD-REFUSED https://files.pythonhosted.org/packages/aa/packaging-26.3.whl".into(),
+        ],
         guard_trips: vec![
             "the artifact under test arrived from registry.npmjs.org".into(),
             "and again from a mirror".into(),
@@ -280,6 +285,7 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "build_log",
         "timings",
         "failure",
+        "refused_artifact",
         "transcript",
         "network_transcript",
         "costs",
@@ -387,6 +393,7 @@ async fn a_record_with_nothing_optional_in_it_reads_back_as_nothing_rather_than_
     for absent in [
         "outcome",
         "guard_trips",
+        "refused_artifact",
         "finished",
         "strategy",
         "strategy_digest",
@@ -397,6 +404,7 @@ async fn a_record_with_nothing_optional_in_it_reads_back_as_nothing_rather_than_
         "build_log",
         "timings",
         "failure",
+        "refused_artifact",
         "transcript",
         "network_transcript",
         "costs",

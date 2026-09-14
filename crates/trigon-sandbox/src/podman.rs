@@ -710,9 +710,9 @@ impl PodmanBuild {
         seen: Option<crate::network::MirrorLog>,
     ) -> BuildOutcome {
         let pin = seen.as_ref().map(|s| s.observed());
-        let (guard_trips, from_mirror) = match seen {
-            Some(s) => (s.trips, Some(s.transcript)),
-            None => (Vec::new(), None),
+        let (guard_trips, refused_artifact, from_mirror) = match seen {
+            Some(s) => (s.trips, s.refused_artifact, Some(s.transcript)),
+            None => (Vec::new(), Vec::new(), None),
         };
         let transcript = self.transcript(from_mirror);
         BuildOutcome {
@@ -728,6 +728,7 @@ impl PodmanBuild {
             attestable: transcript.is_some(),
             log_tail,
             guard_trips,
+            refused_artifact,
             transcript,
             pin,
         }

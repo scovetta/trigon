@@ -1331,9 +1331,23 @@ mod build {
                     (None, false) => {}
                 }
             }
+            // Said whatever else happened, because it usually explains the failure below it.
+            // **Not a void**: the mirror turned the request away, so the artifact never arrived and
+            // the thing a void describes did not happen. Some packages are part of the machinery
+            // that builds packages — `python -m build` needs `packaging` and `pyproject-hooks` —
+            // so rebuilding one makes the build ask for it.
+            for r in &outcome.refused_artifact {
+                let url = r.rsplit(' ').next().unwrap_or(r);
+                tracing::warn!(
+                    url = %url,
+                    "the build asked for its own published artifact and was refused. Nothing \
+                     arrived, so this run is not void — but a build that needed it and could not \
+                     have it will have failed for that reason."
+                );
+            }
             if let Some(t) = outcome.guard_trips.first() {
-                // Before the exit status is even considered: a tripped guard means the run cannot
-                // be used, whether the build succeeded or failed.
+                // Before the exit status is even considered: the artifact *arrived*, so the run
+                // cannot be used whether the build succeeded or failed.
                 bail!("void: {t}");
             }
             // The log, always, whether the build worked or not. A successful build's log is what
@@ -2469,7 +2483,9 @@ mod rebuild {
             // A tripped guard ends the loop whatever else happened, and before another attempt can
             // spend anything: the artifact under test reached the build, so nothing this run
             // produces is evidence about the source. The block below turns it into a `Void`.
-            if mirror.as_ref().is_some_and(|m| !m.trips().is_empty()) {
+            // `voiding`, not every trip: a refusal is the mirror turning the build away, which
+            // means nothing arrived and the run is still evidence about the package.
+            if mirror.as_ref().is_some_and(|m| !m.voiding().is_empty()) {
                 break (built, strategy_digest);
             }
 
@@ -2759,7 +2775,14 @@ mod rebuild {
         }
 
         if let Some(m) = mirror {
-            let trips = m.trips();
+            for t in m.refused() {
+                tracing::warn!(
+                    url = %t.url,
+                    "the build asked for its own published artifact and was refused; nothing \
+                     arrived, so this is not a void"
+                );
+            }
+            let trips = m.voiding();
             rt.block_on(m.shutdown());
             if let Some(t) = trips.first() {
                 // Checked before the build's exit status is even considered. A tripped guard means
@@ -4930,6 +4953,7 @@ mod attestor {
             trigon_version: env!("CARGO_PKG_VERSION"),
             stabilizer_set: None,
             guard_trips: &r.guard_trips,
+            refused_artifact: &r.refused_artifact,
             guard_manifest: None,
             guarded_members: None,
         }

@@ -190,6 +190,26 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // The build could not install a package because the mirror refused to serve it — and the
+        // reason it refused is that the package is the one under test. That happens whenever a
+        // package is part of the machinery that builds packages: `python -m build` needs
+        // `packaging` and `pyproject-hooks`, so rebuilding either makes the build ask for itself.
+        //
+        // Ours, not the package's: the refusal is a control we chose to arm. Not repairable either,
+        // because no strategy change gets a build its own artifact — what it needs is a way to
+        // satisfy the toolchain from somewhere that is not the target, which is a design question
+        // rather than a recipe.
+        //
+        // Named because it clustered as `unknown` across three of seventeen targets on the M1 PyPI
+        // corpus, and it is the signature of a class of package rather than an accident.
+        code: "env/needs-the-package-under-test",
+        needles: &["Could not install requirement"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: false,
+        capture: Capture::WordAfter("Could not install requirement"),
+    },
+    Rule {
         // **Our own message, and it keyed as `unknown`.** The setup phase at an enforced tier
         // checks the base image for the packages the strategy needs and prints this when they are
         // absent, along with the exact `trigon base-image` line that fixes it. Nothing claimed the
@@ -675,6 +695,23 @@ fn clip(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_build_that_needs_the_package_under_test_is_named_as_ours() {
+        // Some packages are part of the machinery that builds packages, so rebuilding one makes
+        // the build ask for itself — and the mirror refuses, correctly, because serving it would
+        // let a build hand back its own published output. `packaging`, `toml` and
+        // `pyproject-hooks` all hit it on the M1 PyPI corpus and all three keyed `unknown`.
+        let s = super::classify(
+            "ERROR: Could not install requirement packaging>=24.0 from http://timewarp:8129/x",
+        );
+        assert_eq!(s.code, "env/needs-the-package-under-test");
+        // Ours: the refusal is a control we armed, not a fault in the package.
+        assert_eq!(s.fault, crate::Fault::Bug);
+        // And no recipe fixes it. What it needs is a way to satisfy the toolchain from somewhere
+        // that is not the target, which is a design decision rather than a strategy change.
+        assert!(!s.repairable);
+    }
+
     #[test]
     fn a_path_the_sandbox_cannot_write_is_ours_and_is_named() {
         // A Debian image's root directory is mode 0555 and the sandbox drops `CAP_DAC_OVERRIDE`, so

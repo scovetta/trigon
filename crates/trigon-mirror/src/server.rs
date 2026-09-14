@@ -293,6 +293,17 @@ impl MirrorHandle {
         self.guard.trips()
     }
 
+    /// The trips that make a run `Void`: the artifact, or a member of it, actually arrived.
+    pub fn voiding(&self) -> Vec<crate::Trip> {
+        self.guard.voiding()
+    }
+
+    /// Times the build asked for its own artifact and was turned away. Not a void — nothing
+    /// arrived. See `REFUSED_ARTIFACT_MARKER`.
+    pub fn refused(&self) -> Vec<crate::Trip> {
+        self.guard.refused()
+    }
+
     /// Stop serving and wait for in-flight requests.
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(());

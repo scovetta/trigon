@@ -184,6 +184,15 @@ pub struct RunRecord {
     /// the network, which makes whatever it produced evidence of nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guard_trips: Vec<String>,
+    /// Times the build asked for its own published artifact and the mirror refused it.
+    ///
+    /// **Deliberately not `guard_trips`.** Nothing arrived, so the run is not `Void` and stays
+    /// evidence about the package — `is_evidence` keys on `guard_trips` and must keep doing so.
+    /// Recorded because it is worth knowing the build asked, and because it usually explains
+    /// whatever failed next: a package that is part of the machinery that builds packages makes
+    /// the build ask for itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_artifact: Vec<String>,
 
     pub started: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -277,6 +286,7 @@ impl RunRecord {
             state: RunState::Building,
             outcome: None,
             guard_trips: Vec::new(),
+            refused_artifact: Vec::new(),
             started: started.into(),
             finished: None,
             environment,

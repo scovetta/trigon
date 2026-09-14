@@ -281,6 +281,11 @@ pub struct BuildOutcome {
     /// What the artifact guard caught. Non-empty means the run is `Void`: the artifact under test
     /// reached the build over the network, so whatever it produced says nothing about the source.
     pub guard_trips: Vec<String>,
+    /// Times the build asked for its own published artifact and was refused.
+    ///
+    /// Deliberately not in `guard_trips`: nothing arrived, so the run is not void. Kept because it
+    /// is usually the explanation for whatever failed next.
+    pub refused_artifact: Vec<String>,
     /// Everything that crossed the network into this build — Tier 1 observability of
     /// `docs/08-execution.md` §7, and what makes `attestable` a computed value rather than the
     /// constant `false` it used to be.

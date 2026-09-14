@@ -1041,3 +1041,45 @@ async fn a_body_the_client_abandons_is_still_accounted_for() {
     );
     m.shutdown().await;
 }
+
+#[tokio::test]
+async fn refusing_the_runs_own_artifact_is_not_the_artifact_arriving() {
+    use trigon_core::Digest;
+    use trigon_mirror::{Guard, GuardManifest, GuardMatch};
+
+    // The guard trips three ways and they are not equally serious. Two mean the artifact *arrived*,
+    // and the run is evidence of nothing: a build that downloads its own published output
+    // reproduces it perfectly. The third means the build *asked* and was turned away — nothing
+    // arrived, so the thing a void describes did not happen.
+    //
+    // Folding them cost three of seventeen targets on the M1 PyPI corpus at `mirror-only`, none of
+    // them a real catch. `python -m build` needs `packaging` and `pyproject-hooks`, so rebuilding
+    // either makes the build ask for it; voiding there means `setuptools`, `wheel`, `tomli`,
+    // `flit-core` and `hatchling` can never be verified at an enforced tier.
+    let artifact = Digest::from_bytes([7; 32]);
+    let g = Guard::new(GuardManifest {
+        artifact: Some(artifact),
+        refuse_url: Some("https://files.pythonhosted.org/a/packaging-26.3.whl".into()),
+        ..Default::default()
+    });
+
+    g.record_refusal("https://files.pythonhosted.org/a/packaging-26.3.whl");
+    assert_eq!(g.trips().len(), 1, "the refusal is recorded");
+    assert!(
+        g.voiding().is_empty(),
+        "a refusal must not void the run: nothing arrived"
+    );
+    assert_eq!(g.refused().len(), 1);
+    assert_eq!(g.refused()[0].matched, GuardMatch::RefusedUrl);
+
+    // And the control that actually catches an attempt is untouched. A build fetching the same
+    // bytes from some other URL — which is what an attacker would do once refused — still trips,
+    // because every body is hashed whatever route it came by.
+    g.observe("https://cdn.evil.example/anything.bin", artifact, None);
+    assert_eq!(
+        g.voiding().len(),
+        1,
+        "the artifact arriving by another name is still a void"
+    );
+    assert_eq!(g.voiding()[0].matched, GuardMatch::WholeArtifact);
+}

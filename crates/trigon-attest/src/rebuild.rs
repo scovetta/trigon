@@ -56,6 +56,10 @@ pub struct RunFacts<'a> {
     pub stabilizer_set: Option<(&'a str, &'a str)>,
     /// What the artifact guard refused or caught.
     pub guard_trips: &'a [String],
+    /// Times the build asked for its own artifact and was refused. Distinct from a trip: nothing
+    /// arrived, so this is the control working rather than the run being void. In the statement
+    /// because a consumer who cannot see it would read a build failure as unexplained.
+    pub refused_artifact: &'a [String],
     pub guard_manifest: Option<&'a str>,
     pub guarded_members: Option<u64>,
 }
@@ -190,6 +194,9 @@ impl Statement {
                 "trips": f.guard_trips,
             },
             "violations": f.guard_trips,
+            // Separate from `violations`, and the separation is the claim: the mirror turned the
+            // request away, so the artifact did not enter the sandbox.
+            "refusedOwnArtifact": f.refused_artifact,
             // The numbers, not just the verdict, so a reader can tell "the build asked for nothing"
             // from "the build asked somewhere else" without re-running anything.
             "registryPin": f.pin_observed.map(|(index_requests, withheld)| json!({
@@ -237,6 +244,7 @@ mod tests {
             trigon_version: "0.0.0",
             stabilizer_set: Some(("npm-tarball", "2b7c4f")),
             guard_trips: &[],
+            refused_artifact: &[],
             guard_manifest: Some("bb00"),
             guarded_members: Some(34),
         }

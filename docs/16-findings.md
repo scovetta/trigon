@@ -892,6 +892,60 @@ it was written for. It backfills now.
 With tags, `chardet 7.4.3` reproduces **`exact`**: identical raw digests, thirty-five of thirty-five
 members identical, at `mirror-only` with a complete network transcript behind it.
 
+### 3.22 The PyPI corpus at the enforced tier, and a control reporting a win as a loss
+
+The venv fix and the tag fix were each found by one package, so the obvious question was whether
+there were more. Running the seventeen-target M1 PyPI smoke corpus at `mirror-only` — the first time
+it had been run at an enforced tier at all — says no, and finds something else.
+
+| | reproduce | reached a comparison |
+|---|---|---|
+| `mirror-only` | **9 of 11 (82%)** | 11 of 17 |
+| `open` (prior baseline) | 12 of 15 (80%) | 15 of 17 |
+
+**The rate holds at the enforced tier**, and three of the nine are now `exact` rather than
+normalized: `chardet`, `filelock`, `platformdirs`. The six `normalized_with_caveats` are not a
+weaker result — `wheel-record` is `RiskTier::Content` and the provenance cap fires above
+`Metadata`, so every wheel that is not bit-identical caps there by construction.
+
+What dropped is the denominator, and the largest cause is a control returning the wrong verdict.
+
+**Three targets voided, and not one was a real catch.** `packaging`, `toml` and `pyproject-hooks`,
+all `GuardMatch::RefusedUrl` — the build asked the mirror for its own published artifact and the
+mirror refused it. Every one of those packages is part of the machinery that builds packages:
+`python -m build` needs `packaging` and `pyproject-hooks`, so rebuilding one makes the build ask for
+it, the mirror says no, the build dies, and the run is voided.
+
+The guard trips three ways and they are not equally serious:
+
+| trip | what happened | evidence of nothing? |
+|---|---|---|
+| `WholeArtifact` | the artifact arrived | **yes** — it could have been copied to the output |
+| `Member` | a guarded file of it arrived | **yes** |
+| `RefusedUrl` | the build asked and was **refused** | **no** — nothing arrived |
+
+All three produced the same `Void`. The third is the control *working*, recorded as a failed run.
+
+It is also safe to separate, because `refuse_url` is not what catches an attempt. It knows exactly
+one URL; the whole-body hash runs on every response by every route, so a build fetching the same
+bytes from anywhere else trips `WholeArtifact` instead. The refusal is a convenience and the hash is
+the control. A build that is refused and *still* produces a matching artifact built it from source,
+which is the thing we are trying to reward.
+
+So a refusal no longer voids. It is recorded — on the run, in the record, and in
+`buildobservation/v1` under `refusedOwnArtifact` rather than `violations` — and the run's real
+outcome stands, which for a build that needed the package it was refused is a build failure that now
+has an explanation attached. Voiding there would have meant `setuptools`, `wheel`, `tomli`,
+`flit-core` and `hatchling` could never be verified at an enforced tier: the packages everything
+else depends on.
+
+**Two more defects the sweep surfaced, both tier-independent:** `tomli`'s source discovery produced
+`https://github.com/hukkin/tomli/blob/master/CHANGELOG.md/` as a repository URL, because
+`canonicalize_repo` does not strip a `/blob/…` file path off what PyPI's metadata supplies; and
+`zipp` reached the mirror for its index and then failed on something else that has not been run
+down yet. `certifi` is `no-strategy` because no tag matches `2026.7.22`, which is the resolver
+declining to guess and is correct.
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher

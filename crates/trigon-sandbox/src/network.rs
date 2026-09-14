@@ -49,8 +49,17 @@ pub struct Island {
 /// What one run's mirror recorded.
 #[derive(Clone, Debug, Default)]
 pub struct MirrorLog {
-    /// Marker lines from the artifact guard. Non-empty means the run is `Void`.
+    /// Marker lines from the artifact guard. Non-empty means the run is `Void`: the artifact under
+    /// test, or a guarded member of it, **arrived**.
     pub trips: Vec<String>,
+    /// Times the build asked the mirror for its own published artifact and was refused.
+    ///
+    /// **Not a void.** Nothing arrived, so the thing a void exists to describe did not happen. Some
+    /// packages are part of the machinery that builds packages — `python -m build` needs
+    /// `packaging` and `pyproject-hooks` — so rebuilding one makes the build ask for it, and
+    /// voiding there means those packages can never be verified at an enforced tier. Worth
+    /// recording loudly, because it usually explains a build failure further down.
+    pub refused_artifact: Vec<String>,
     /// Every response body the mirror served into the build, in the order it finished serving
     /// them. Empty means the build downloaded nothing — a read that failed is an error, not this.
     pub transcript: Vec<trigon_mirror::Exchange>,
@@ -265,6 +274,11 @@ impl Island {
                     ),
                 }
             })?,
+            refused_artifact: logs
+                .lines()
+                .filter(|l| l.contains(trigon_mirror::REFUSED_ARTIFACT_MARKER))
+                .map(str::to_owned)
+                .collect(),
             refusals: trigon_mirror::Refusal::parse_log(&logs).map_err(|detail| {
                 SandboxError::Failed {
                     phase: "build".into(),
