@@ -301,9 +301,18 @@ One line per response body served, behind the fixed prefix `NET-EXCHANGE`:
   can therefore check the guard's verdict rather than take it.
 - **`checked`** says how far the guard got: `opened` (every member compared against the manifest),
   `hashed` (whole-body digest only — too large to open, not an archive, or a manifest with no
-  members), `generated` (a body the mirror composed itself, so no guard applies), or `unarmed` (no
-  manifest on this run). Without this field, "opened and clean" and "never opened" read identically,
-  and they are the difference between a check and the appearance of one.
+  members), `generated` (a body the mirror composed itself, so no guard applies), `unarmed` (no
+  manifest on this run), or `partial` (the body never finished). Without this field, "opened and
+  clean" and "never opened" read identically, and they are the difference between a check and the
+  appearance of one.
+
+A `partial` row is the one worth explaining. A row is written when a body finishes, so a client that
+hangs up mid-response used to produce **no row at all** — and bytes crossed into the build with
+nothing saying they had. A build that aborted every download at ninety-nine per cent would have
+pulled gigabytes and left an empty, `attestable: true` account behind it. The row is now written
+when the stream is dropped, carrying the bytes that actually crossed and the digest of *that prefix*
+rather than of the resource, because a partial body recorded as a whole one is the single most
+misleading line a transcript could carry.
 
 Index rows carry one field more: **`withheld`**, the number of versions the time filter removed from
 that document before serving it. `None` on anything that is not a filtered index, which is not the

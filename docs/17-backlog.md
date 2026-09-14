@@ -57,15 +57,32 @@ install, verify one package, read the verdict, understand what the verdict does 
 yet built, and a person who has never seen this repository can verify a package from the README
 alone.
 
-## B4. Test coverage worth the name
+## B4. ~~Test coverage worth the name~~ — measured, with two findings
 
-Coverage measured rather than asserted. The suite is large and grew by accretion; what matters is
-whether the parts that would be expensive to get wrong are covered — the writers, the guard, the
-provenance cap, the egress boundary, the attestation round-trip — and whether the corpora still
-exercise what they claim to.
+Measured, per crate, with the judgement half at a stated bar and the deliberate gaps named. Written
+up in [`16`](16-findings.md) §3.19.
 
-**Done when:** a coverage number exists per crate, the judgement half is at a stated bar, and every
-gap that is deliberate is named as deliberate.
+```
+cargo llvm-cov --workspace --no-fail-fast --summary-only \
+  --ignore-filename-regex '(/tests?/|/xtask/)'
+```
+
+The leading `/` matters: `'tests?/'` without it silently excludes all of `trigon-attest`, because
+`attest/` contains `test/`.
+
+| | lines |
+|---|---|
+| **Judgement half** — `core`, `archive`, `stabilize`, `compare`, `attest` | **89%** |
+| Workspace | 70% |
+
+Measuring it found two things that were not about coverage: the regex above, and that
+`trigon-stabilize-wasm`'s parity test — a milestone criterion — had never run in this workspace and
+reported `ok. 0 passed` while not running. It passes. CI now builds the wasm target and asserts the
+two tests actually ran.
+
+**What is left, and it is the harder half:** coverage says which lines ran, not whether the corpora
+still exercise what they claim to. That is a different measurement and it belongs with
+[`15`](15-corpora.md) §2.
 
 ## B9. Talk to Copilot through its SDK rather than its CLI
 

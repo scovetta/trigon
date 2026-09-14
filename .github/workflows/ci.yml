@@ -29,6 +29,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  # The archived stabilizer set and the compiled one must produce the same bytes. `docs/13-roadmap.md`
+  # makes that equality a milestone criterion, and until this job existed nothing checked it: the
+  # parity test is `#![cfg(feature = "host")]`, which compiles the whole file to nothing, and needs a
+  # `wasm32-unknown-unknown` module on disk that nothing built. So `cargo test -p
+  # trigon-stabilize-wasm` reported `ok. 0 passed` — a green tick standing in for an unchecked claim,
+  # which is what that file's own doc comment says a skipped parity test must never be.
+  #
+  # It passes. It had just never run here.
+  wasm-parity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add wasm32-unknown-unknown
+      - run: cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
+      - name: the archived set agrees with the compiled one
+        run: |
+          out=$(cargo test -p trigon-stabilize-wasm --features host 2>&1)
+          echo "$out"
+          # A parity run that finds no module skips every case and still exits 0. Assert the two
+          # tests that matter actually ran, rather than trusting the exit code.
+          for t in the_archived_set_and_the_compiled_one_agree_byte_for_byte \
+                   the_module_reports_the_set_digest_the_native_build_computes; do
+            echo "$out" | grep -q "test $t \.\.\. ok" || {
+              echo "::error::$t did not run — the wasm module is missing and the skip was silent"
+              exit 1
+            }
+          done
+
   # The judgement half cannot reach a runtime, a network client, or the AI crate.
   # See docs/01-architecture.md §2.2. This is an M0 exit criterion, so it gets its own job.
   policy:

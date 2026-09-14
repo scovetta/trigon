@@ -756,6 +756,55 @@ reader looking for three of them. It now has a §7.2 saying which half is real.
 edits once the two allowlist additions are subtracted. Narrow rather than broken — every edit is
 additive and most are three lines — but not "one `Registry` impl plus some YAML".
 
+### 3.19 A coverage number, and the two things measuring it found
+
+B4 asks for a coverage number per crate, the judgement half at a stated bar, and every deliberate
+gap named as deliberate. Measuring it turned up two things that were not about coverage.
+
+**The first was mine.** The obvious invocation —
+`cargo llvm-cov --ignore-filename-regex '(tests?/|xtask/)'` — silently excludes the whole of
+`trigon-attest`, because `at**test/**` contains `test/`. The crate that builds and signs every
+attestation was absent from the report and nothing said so; the total looked slightly better for it.
+The regex needs path boundaries: `'(/tests?/|/xtask/)'`. Exactly the bug class this file is full of,
+committed while writing the section about it.
+
+**The second was a green tick standing in for an unchecked claim.** `trigon-stabilize-wasm` measured
+0%, and the reason is not neglect: its only test file is `#![cfg(feature = "host")]`, the feature is
+off by default, and the parity test inside needs a `wasm32-unknown-unknown` module that nothing in
+the workspace builds. So `cargo test -p trigon-stabilize-wasm` printed `test result: ok. 0 passed`
+— which is what that file's own doc comment says a skipped parity test must never be:
+
+> Skipping loudly rather than silently: a parity test that quietly passes when it did not run is
+> worse than no parity test, because it is a green tick standing in for an unchecked claim.
+
+The claim it guards is that an archived stabilizer set produces the same bytes as the compiled one,
+which `docs/13-roadmap.md` makes a milestone criterion — it is the whole reason an archived set is
+worth anything. Built and run by hand, **it passes**. It had simply never run here. CI now builds
+the target and greps for the two test names, so a run that finds no module fails rather than exiting
+zero.
+
+**The numbers**, from `cargo llvm-cov --workspace --no-fail-fast` with `TRIGON_LIVE=1`, lines:
+
+| | |
+|---|---|
+| **Judgement half** (`core`, `archive`, `stabilize`, `compare`, `attest`) | **89%** |
+| Workspace | 70% |
+
+The judgement half is the half that matters: it is what the verifier binary contains, what a third
+party re-derives a verdict with, and the only part whose bugs are silent — a divergence is
+self-consistent, so both sides get the same wrong treatment and the failure surfaces as a false
+negative rather than a crash.
+
+The deliberate gaps, named:
+
+- **`trigon/src/watch.rs` and most of `main.rs`** are the CLI and the embedded web UI. Their logic
+  is unit-tested; the uncovered remainder is argument plumbing and HTML string-building whose
+  failure mode is visible rather than silent.
+- **`trigon-stabilize-wasm/src/host.rs`** does not appear in the report at all, being behind the
+  same `host` feature. Its coverage is real but measured only in the run CI now performs.
+- **The `TRIGON_LIVE=1` delta** is the honest measure of "needs the network" versus "untested", and
+  it is why the number above is quoted with the flag set rather than without.
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher

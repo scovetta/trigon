@@ -880,14 +880,13 @@ async fn the_counters_and_the_transcript_agree_on_real_traffic() {
         format!("/-artifact/npm/{moment}/registry.npmjs.org/ms/-/ms-2.1.3.tgz"),
         "/-toolchain/nodejs.org/dist/v20.11.0/SHASUMS256.txt".to_string(),
     ] {
-        assert_eq!(
-            reqwest::get(format!("http://{host}{path}"))
-                .await
-                .unwrap()
-                .status(),
-            200,
-            "{path}"
-        );
+        let r = reqwest::get(format!("http://{host}{path}")).await.unwrap();
+        assert_eq!(r.status(), 200, "{path}");
+        // **Read the body.** A row is written when the body finishes, so a test that checks the
+        // status and drops the response can record a *partial* row instead — which is the correct
+        // product behaviour and the wrong thing to assert here. Finding that out is what this test
+        // did; see `a_body_the_client_abandons_is_still_accounted_for`.
+        assert!(!r.bytes().await.unwrap().is_empty(), "{path}");
     }
     assert_eq!(
         reqwest::get(format!("http://{host}/ms"))
@@ -984,5 +983,61 @@ async fn an_off_list_host_is_refused_on_the_route_that_names_it() {
             "{path}"
         );
     }
+    m.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_body_the_client_abandons_is_still_accounted_for() {
+    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRIGON_LIVE=1");
+        return;
+    }
+    // The transcript's whole claim is that it lists everything that crossed into the build, and
+    // `attestable` is derived from that claim being complete. A row is written when the body
+    // finishes — so a client that hangs up mid-body produced **no row at all**, and bytes crossed
+    // with nothing saying they did. A build aborting every download at ninety-nine per cent would
+    // have pulled gigabytes and left an empty, `attestable: true` account behind it.
+    //
+    // Found by the agreement test above, which checked a status and dropped the response: the
+    // counters reported an artifact request and a toolchain request, and the transcript had
+    // neither.
+    //
+    // A *large* body, deliberately. A small one is written into the socket buffer in one go and the
+    // server-side stream completes whether the client reads it or not, so it would test nothing.
+    let m = Mirror::new().unwrap().serve(0).await.unwrap();
+    let url = format!(
+        "http://{}/-toolchain/nodejs.org/dist/v20.11.0/node-v20.11.0-linux-x64.tar.gz",
+        m.host()
+    );
+
+    let r = reqwest::get(&url).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let mut stream = r.bytes_stream();
+    // One chunk, then hang up in the middle of seventeen megabytes.
+    let first = futures::StreamExt::next(&mut stream).await;
+    assert!(first.is_some(), "the body never started");
+    drop(stream);
+    // The row is written when the server-side stream is dropped, on its own task.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let rows = m.seen().exchanges();
+    let row = rows
+        .iter()
+        .find(|e| e.url.contains("node-v20.11.0"))
+        .unwrap_or_else(|| panic!("an abandoned body left no trace at all: {rows:?}"));
+    assert_eq!(
+        row.checked,
+        trigon_mirror::Checked::Partial,
+        "a truncated body must not be recorded as a checked one: {row:?}"
+    );
+    assert!(
+        row.bytes > 0 && row.bytes < 17_000_000,
+        "the row records what actually crossed, not what was asked for: {row:?}"
+    );
+    // And the counters agree, because both count the request either way.
+    assert_eq!(
+        trigon_mirror::Observed::from_transcript(&rows, 0).toolchain_requests,
+        m.observed().toolchain_requests
+    );
     m.shutdown().await;
 }

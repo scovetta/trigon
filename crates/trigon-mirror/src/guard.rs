@@ -406,6 +406,16 @@ pub enum Checked {
     Generated,
     /// No guard manifest was loaded, so nothing was compared against anything.
     Unarmed,
+    /// The response never finished — the client hung up, or the connection broke — so the guard
+    /// could not run on it at all.
+    ///
+    /// The row is still written, and that is the point. `bytes` is what actually crossed and
+    /// `sha256` is the digest of *that prefix*, not of the resource: a partial body recorded as a
+    /// whole one is the single most misleading line a transcript could carry. But recording nothing
+    /// is worse, because the transcript's claim is that it lists everything that crossed — and a
+    /// build that aborts every download at ninety-nine per cent would otherwise pull gigabytes and
+    /// leave an empty, `attestable: true` account behind it.
+    Partial,
 }
 
 impl Exchange {

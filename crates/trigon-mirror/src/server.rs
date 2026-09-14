@@ -865,6 +865,36 @@ where
         seen: Arc<Seen>,
         url: String,
         route: &'static str,
+        /// Set once the body has been read to the end and its row written.
+        ///
+        /// Without it a client that hangs up mid-response produced **no row at all**: the stream is
+        /// dropped, the `None` arm never runs, and bytes cross into the build with nothing saying
+        /// they did. That breaks the transcript's one claim — that it lists everything that crossed
+        /// — and it breaks it in the direction that flatters us.
+        finished: bool,
+    }
+
+    /// The row for a response that never finished.
+    ///
+    /// A partial body cannot be checked and must not be recorded as a whole one, so it is written
+    /// with [`Checked::Partial`](crate::Checked) and the digest of the prefix that arrived. The
+    /// guard is deliberately not consulted: a truncated archive does not open, and a prefix digest
+    /// matching the artifact is not a thing that happens.
+    impl<S> Drop for State<S> {
+        fn drop(&mut self) {
+            if self.finished {
+                return;
+            }
+            let digest =
+                trigon_core::Digest::from_bytes(std::mem::take(&mut self.hasher).finalize().into());
+            self.seen.exchange(crate::Exchange::new(
+                self.route,
+                &self.url,
+                digest.to_hex(),
+                self.bytes,
+                crate::Checked::Partial,
+            ));
+        }
     }
     // Keeping the bytes only when something will look at them.
     let keep_body = guard.wants_body();
@@ -878,6 +908,7 @@ where
         seen,
         url,
         route,
+        finished: false,
     };
     futures::stream::unfold(Some(state), move |s| async move {
         let mut s = s?;
@@ -901,7 +932,11 @@ where
             // and digest is the one line a reader must never be handed.
             Some(Err(e)) => Some((Err(e), None)),
             None => {
-                let digest = trigon_core::Digest::from_bytes(s.hasher.finalize().into());
+                // `take`, not a move: `State` implements `Drop` now, so it cannot be
+                // destructured. The `finished` flag below is what stops `Drop` writing a second row.
+                let digest = trigon_core::Digest::from_bytes(
+                    std::mem::take(&mut s.hasher).finalize().into(),
+                );
                 let checked = if s.oversized {
                     s.guard.observe_oversized(&s.url, digest)
                 } else {
@@ -914,6 +949,9 @@ where
                     s.bytes,
                     checked,
                 ));
+                // Before the state is dropped, so `Drop` does not write a second, partial row for
+                // a body that finished perfectly well.
+                s.finished = true;
                 None
             }
         }

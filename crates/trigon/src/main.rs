@@ -1263,6 +1263,20 @@ mod build {
                             t.len(),
                             if t.len() == 1 { "" } else { "s" },
                         );
+                        // Said out loud, because it is the one row a reader should not have to go
+                        // looking for: a body the build hung up on is bytes that crossed and could
+                        // not be checked, and a build that does it repeatedly is doing something
+                        // worth asking about.
+                        let partial = t
+                            .iter()
+                            .filter(|e| e.checked == trigon_mirror::Checked::Partial)
+                            .count();
+                        if partial > 0 {
+                            println!(
+                                "            {partial} of them were abandoned part-way, so their \
+                                 bytes crossed unchecked"
+                            );
+                        }
                         if let Some(p) = &transcript_path {
                             println!("            {}", p.display());
                         }
