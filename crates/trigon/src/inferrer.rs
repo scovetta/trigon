@@ -617,9 +617,23 @@ fn key(var: &str) -> Result<String> {
 /// Which ecosystems this rung will speak about.
 ///
 /// Not a capability of the model, a capability of the strategy vocabulary: a proposed recipe is
-/// only useful where there are tools for it to name.
+/// only useful where there are tools for it to name. So this must be widened in the same commit
+/// that adds `tools/<ecosystem>/` and registers them in `BUILTIN_TOOLS`, and not before — a model
+/// asked to propose a recipe from a vocabulary that does not exist produces a strategy that fails
+/// tool validation, which costs tokens to learn nothing.
+///
+/// Exhaustive rather than a `matches!`, so adding an `Ecosystem` variant fails to compile here
+/// instead of silently answering `false`. The silent answer is worse than it sounds: it turns off
+/// the model rung with no line anywhere saying it did.
 pub fn supported(e: Ecosystem) -> bool {
-    matches!(e, Ecosystem::Npm | Ecosystem::PyPI)
+    match e {
+        Ecosystem::Npm | Ecosystem::PyPI => true,
+        Ecosystem::CratesIo
+        | Ecosystem::RubyGems
+        | Ecosystem::NuGet
+        | Ecosystem::Maven
+        | Ecosystem::GitHub => false,
+    }
 }
 
 #[cfg(test)]

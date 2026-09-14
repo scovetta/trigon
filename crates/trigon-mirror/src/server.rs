@@ -61,6 +61,30 @@ pub const ARTIFACT_HOSTS: &[&str] = &["registry.npmjs.org", "pypi.org", "files.p
 ///
 /// Exact match, for the same reason the toolchain list is: a suffix rule written the obvious way
 /// accepts `registry.npmjs.org.evil.example`.
+/// How many `Location` hops a proxied response may take.
+///
+/// Bounded because an unbounded chain is a free denial of service against a worker, and because a
+/// legitimate one is short: `crates.io/.../download` is a single hop to `static.crates.io`.
+const MAX_REDIRECTS: usize = 5;
+
+/// Which allowlist applies on a given route.
+///
+/// One function, so the check that runs on the first URL and the check that runs on every redirect
+/// after it are the same check. They were not: the routes checked their own host inline and the
+/// redirect path checked nothing, which made the allowlist a statement about where a build asked to
+/// go rather than about where its bytes came from.
+fn host_allowed(route: &str, host: &str) -> bool {
+    match route {
+        "toolchain" => toolchain_host_allowed(host),
+        // `artifact` is a dependency under its own name; `passthrough` is an index host serving
+        // something no filter applied to. Both fetch bytes from a registry, so both take the
+        // artifact list. An unknown route is refused rather than waved through: a route added
+        // without a rule here must fail closed.
+        "artifact" | "passthrough" => artifact_host_allowed(host),
+        _ => false,
+    }
+}
+
 pub fn artifact_host_allowed(host: &str) -> bool {
     ARTIFACT_HOSTS.contains(&host)
 }
@@ -287,7 +311,18 @@ impl Mirror {
                 .build()?,
             passthrough: reqwest::Client::builder()
                 .user_agent(concat!("trigon-mirror/", env!("CARGO_PKG_VERSION")))
-                .redirect(reqwest::redirect::Policy::limited(5))
+                // **No automatic redirects.** This used to be `limited(5)`, which meant reqwest
+                // followed a `Location` to any host on the internet without asking, and a second
+                // hand-rolled hop in `proxy` did the same. The host allowlist — the entire content
+                // of `mirror-only` on this route — was therefore checked on the first URL and on
+                // nothing after it. An allowlisted host that answers `302 cdn.evil.example` puts
+                // arbitrary bytes into a build that is supposed to have no route out.
+                //
+                // Redirects still have to work: `crates.io/api/v1/crates/{n}/{v}/download` is a
+                // 302 to `static.crates.io`, so the first crates.io request exercises this. They
+                // are followed in `proxy`, one hop at a time, with the allowlist re-checked on
+                // every one.
+                .redirect(reqwest::redirect::Policy::none())
                 .no_gzip()
                 .build()?,
             stats: Arc::new(Stats::default()),
@@ -714,23 +749,43 @@ async fn proxy(
         });
     }
     let resp = mirror.passthrough.get(url).send().await?;
-    // Redirects are followed here rather than handed back: the client may have no route to where
-    // they point, which is the whole reason this proxies instead of redirecting.
-    let resp = if resp.status().is_redirection() {
-        match resp
+    // Redirects are followed here rather than passed on, because a client behind an enforced egress
+    // boundary cannot follow one itself: the destination is exactly the host it has no route to.
+    //
+    // **Every hop is re-checked against the allowlist.** The first URL was checked by the route
+    // that built it; nothing checked the second, and reqwest was quietly following five more on
+    // its own. That made the allowlist a check on where a build *asked* to go rather than on where
+    // its bytes *came from*, which is the opposite of what it is for.
+    let mut resp = resp;
+    for _ in 0..MAX_REDIRECTS {
+        if !resp.status().is_redirection() {
+            break;
+        }
+        let Some(next) = resp
             .headers()
             .get(header::LOCATION)
             .and_then(|v| v.to_str().ok())
-        {
-            Some(next) => {
-                let next = next.to_string();
-                mirror.passthrough.get(&next).send().await?
-            }
-            None => resp,
+            .map(str::to_string)
+        else {
+            break;
+        };
+        // Relative `Location` headers are resolved against the URL that produced them, so a
+        // redirect within an allowlisted host keeps working without naming itself again.
+        let next = match reqwest::Url::parse(&next) {
+            Ok(u) => u,
+            Err(_) => resp
+                .url()
+                .join(&next)
+                .map_err(|_| MirrorError::BadRedirect {
+                    found: next.clone(),
+                })?,
+        };
+        let host = next.host_str().unwrap_or_default().to_string();
+        if !host_allowed(route, &host) {
+            return Err(MirrorError::HostNotAllowed { host, route });
         }
-    } else {
-        resp
-    };
+        resp = mirror.passthrough.get(next).send().await?;
+    }
     if !resp.status().is_success() {
         return Err(MirrorError::Upstream {
             platform: filter.platform.as_str().into(),
@@ -906,4 +961,37 @@ fn json_response(
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     (StatusCode::OK, headers, Body::from(body)).into_response()
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::*;
+
+    #[test]
+    fn every_route_is_checked_against_its_own_list_and_an_unknown_route_fails_closed() {
+        // This function exists because the check that ran on the URL a build asked for and the
+        // check that ran on the `Location` it was redirected to were not the same check — the
+        // second did not exist, and reqwest was following up to five hops on its own. The
+        // allowlist is the entire content of `mirror-only` on these routes, so it was a statement
+        // about where a build *asked* to go rather than about where its bytes *came from*.
+        assert!(host_allowed("artifact", "registry.npmjs.org"));
+        assert!(host_allowed("passthrough", "pypi.org"));
+        assert!(host_allowed("toolchain", "nodejs.org"));
+
+        // The lists do not bleed into each other: a toolchain host is not somewhere the artifact
+        // route may fetch from, and vice versa. That separation is the reason there are two lists.
+        assert!(!host_allowed("artifact", "nodejs.org"));
+        assert!(!host_allowed("toolchain", "registry.npmjs.org"));
+
+        // Nothing is allowed anywhere.
+        assert!(!host_allowed("artifact", "cdn.evil.example"));
+        assert!(!host_allowed("toolchain", "cdn.evil.example"));
+        assert!(!host_allowed("artifact", ""));
+
+        // And a route nobody taught it about is refused rather than waved through. A route added
+        // without a rule here must fail closed: the alternative is a new route that proxies
+        // anything, discovered later.
+        assert!(!host_allowed("index", "registry.npmjs.org"));
+        assert!(!host_allowed("something-new", "registry.npmjs.org"));
+    }
 }

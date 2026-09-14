@@ -153,7 +153,7 @@ Everything above the line stays synchronous, with no tokio, no reqwest, and zero
 
 | Crate | Contents | Async? |
 |---|---|---|
-| `trigon-core` | PURL, `Target`, `Verdict`, `Match`, `Fault`, `Provenance`, `RiskTier`, the `Evidence` and `Claim` algebra, `EcosystemSpec` | no |
+| `trigon-core` | PURL, `Target`, `Verdict`, `Match`, `Fault`, `Provenance`, `RiskTier`, the `Evidence` and `Claim` algebra | no |
 | `trigon-archive` | mutable recursive archive model; hand-written tar/zip/gzip writers | no |
 | `trigon-stabilize` | stabilizer registry, profiles, set digests | no |
 | `trigon-compare` | one-pass multi-digest comparison, structural diff, diff report model | no |
@@ -274,6 +274,9 @@ invariant would die at the first trait we wrote. So we split it into three trait
 
 ```rust
 // trigon-core. Pure, sync, dyn-safe, depended on by everyone.
+// NOT BUILT. See `docs/03-ecosystems.md` §7.2: no such trait exists. The dependency severance it
+// describes is real and is achieved by `resolve_profile` naming a profile **id**; this shape was
+// never written, and two source comments still cite it as though it had been.
 pub trait EcosystemSpec: Send + Sync + 'static {
     fn id(&self) -> EcosystemId;
     fn artifact_kinds(&self) -> &'static [ArtifactKind];

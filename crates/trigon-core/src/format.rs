@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// The container format of an artifact.
 ///
 /// Recorded in the equivalence attestation, because a verifier holding an attestation and two
-/// artifacts has no `EcosystemSpec` to ask. A verifier that guesses reads a `.gem` as a plain tar
+/// artifacts has no ecosystem to ask — there is no per-ecosystem spec to consult, only the bytes
+/// and the name (`docs/03-ecosystems.md` §7.2). A verifier that guesses reads a `.gem` as a plain tar
 /// and produces a different digest for a correct artifact. See `docs/09-attestations.md` §2.2.
 /// **The serde name is the `Display` name.** `rename_all = "kebab-case"` gave `TarGz` the wire
 /// spelling `tar-gz` while `Display` wrote `tar+gzip`, so one type had two names and three

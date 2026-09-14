@@ -331,6 +331,14 @@ We ship four implementations: Cargo semver, PEP 440, node-semver, and hand-rolle
 [`04-strategies.md`](04-strategies.md) **dispatches by ecosystem**. Write it as one function and the
 bug surfaces on the packages you care about least.
 
+> **As built: none of this exists.** There is no `VersionOrd` trait and no `cmp_version` filter, in
+> code or in the definitions. The workspace holds exactly one version comparator — a private
+> dot-separated `Vec<u64>` parse in `trigon-core/src/evidence.rs`, used only by `resolve_toolchain`
+> — because nothing outside that function compares versions at all. The per-ecosystem dispatch
+> above is a design claim about RubyGems and NuGet, and the first ecosystem that needs it is the
+> first one that will write it. Recorded rather than deleted: the reasoning still holds, and a
+> reader should not have to grep to find out which half is real.
+
 ## 7. Runs, phases, timings, costs
 
 ```rust

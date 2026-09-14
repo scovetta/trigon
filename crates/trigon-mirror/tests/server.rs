@@ -925,3 +925,64 @@ async fn the_counters_and_the_transcript_agree_on_real_traffic() {
     );
     m.shutdown().await;
 }
+
+// --- The allowlist, on every hop -------------------------------------------------------------
+
+#[test]
+fn an_artifact_url_that_names_no_file_is_compared_one_segment_deeper() {
+    // `same_artifact` is what `Guard::refuses` uses to spot the run's own artifact being asked for
+    // by a different route. Comparing the last path segment works for npm and PyPI, whose artifact
+    // URLs end in a filename. A crates.io download URL ends in the literal word `download` for
+    // every crate ever published — so under that rule the first dependency a crates.io build
+    // fetched would match the run's own `refuse_url`, be refused 403, and be recorded as a trip.
+    // Every crates.io run `Void`, every time, from a control firing on traffic it never meant.
+    use trigon_mirror::{Guard, GuardManifest};
+    let g = Guard::new(GuardManifest {
+        refuse_url: Some("https://static.crates.io/crates/serde/1.0.197/download".into()),
+        ..Default::default()
+    });
+
+    assert!(
+        g.refuses("https://static.crates.io/crates/serde/1.0.197/download"),
+        "the run's own artifact is still refused"
+    );
+    assert!(
+        !g.refuses("https://static.crates.io/crates/itoa/1.0.11/download"),
+        "an unrelated crate must not be mistaken for it"
+    );
+    assert!(
+        !g.refuses("https://static.crates.io/crates/serde/1.0.196/download"),
+        "nor must a different version of the same crate"
+    );
+
+    // And the npm/PyPI shape is unchanged: those end in a filename, so one segment is enough.
+    let g = Guard::new(GuardManifest {
+        refuse_url: Some("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".into()),
+        ..Default::default()
+    });
+    assert!(
+        g.refuses("http://mirror/-artifact/npm/x/registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz")
+    );
+    assert!(!g.refuses("https://registry.npmjs.org/ms/-/ms-2.1.3.tgz"));
+}
+
+#[tokio::test]
+async fn an_off_list_host_is_refused_on_the_route_that_names_it() {
+    // The first hop, which always worked. The hop that did not is covered by the unit test on
+    // `host_allowed` in server.rs, which is where the redirect loop now calls it.
+    let m = Mirror::new().unwrap().serve(0).await.unwrap();
+    for path in [
+        "/-toolchain/cdn.evil.example/payload.tgz",
+        "/-artifact/npm/2024-01-01T00:00:00/cdn.evil.example/payload.tgz",
+    ] {
+        assert_eq!(
+            reqwest::get(format!("http://{}{path}", m.host()))
+                .await
+                .unwrap()
+                .status(),
+            403,
+            "{path}"
+        );
+    }
+    m.shutdown().await;
+}

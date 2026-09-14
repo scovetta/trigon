@@ -2042,7 +2042,24 @@ mod rebuild {
             trigon_core::Ecosystem::PyPI => {
                 rungs.push(Box::new(PyPiInferrer::new(client).with_mirror(mirror)))
             }
-            _ => {}
+            // **Named, not silent.** This was `_ => {}`, and it is the seam leak
+            // `docs/17-backlog.md` B8 exists to find: adding an ecosystem needs an arm here, and
+            // until one is written a target of that ecosystem gets a ladder with no heuristic rung
+            // and no model rung, resolves and fetches perfectly, and reports `NoStrategy` — which
+            // is what a package we genuinely could not infer a recipe for also reports. "We have
+            // no rung for this ecosystem" and "we tried every rung and none fitted" are different
+            // answers, and only one of them is about the package.
+            //
+            // `for_ecosystem` in `trigon-registry` gets this right for the same situation: it
+            // refuses by name and lists what is served. It also runs first, so today this arm is
+            // unreachable for any ecosystem with no registry client — which is exactly why it must
+            // say something rather than nothing when that stops being true.
+            other => tracing::warn!(
+                ecosystem = %other.purl_type(),
+                "no heuristic rung is implemented for this ecosystem, so this run has only the \
+                 definitions rung and whatever a model can propose. A `no-strategy` verdict here \
+                 is a statement about Trigon, not about the package."
+            ),
         }
         if let Some(m) = model
             && crate::inferrer::supported(*target)

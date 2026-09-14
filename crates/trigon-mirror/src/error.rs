@@ -40,6 +40,13 @@ pub enum MirrorError {
     )]
     HostNotAllowed { host: String, route: &'static str },
 
+    #[error(
+        "upstream redirected to `{found}`, which is not a URL this mirror can resolve or check. A \
+         destination we cannot name is a destination we cannot put on an allowlist, so it is \
+         refused rather than followed."
+    )]
+    BadRedirect { found: String },
+
     #[error("could not listen on port {port}: {detail}")]
     Bind { port: u16, detail: String },
 
@@ -56,7 +63,7 @@ impl MirrorError {
             | MirrorError::BadMoment { .. } => 400,
             MirrorError::HostNotAllowed { .. } => 403,
             MirrorError::Upstream { status, .. } => *status,
-            MirrorError::Unfilterable { .. } => 502,
+            MirrorError::Unfilterable { .. } | MirrorError::BadRedirect { .. } => 502,
             MirrorError::Bind { .. } => 500,
             MirrorError::Refused { .. } => 403,
             MirrorError::Transport(_) => 502,
@@ -74,6 +81,7 @@ impl Classify for MirrorError {
             | MirrorError::HostNotAllowed { .. } => Fault::Policy,
             MirrorError::Upstream { .. }
             | MirrorError::Unfilterable { .. }
+            | MirrorError::BadRedirect { .. }
             | MirrorError::Transport(_) => Fault::Upstream,
             MirrorError::Bind { .. } => Fault::Infra,
             // A policy this run is enforcing, not a broken package and not broken infrastructure.

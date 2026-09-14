@@ -704,6 +704,58 @@ Three things came out of fixing it:
 One thing it does *not* fix, stated because a control must not claim more than it checks: this says
 the filter ran and what it removed. It says nothing about whether what it served was right.
 
+### 3.18 A census of the extension seam, before extending it
+
+B8 says adding an ecosystem "should be a `Registry` implementation plus some YAML tools, with no
+change to the engine — and if any of them needs a special case in the ladder, the seam is wrong and
+that is the finding." Before writing the crates.io client, six agents read the six subsystems a new
+ecosystem has to touch and a second pass tried to refute each report. The finding is that the seam
+holds where it was hardest to build and leaks where it was cheapest — and that one of the leaks was
+silent.
+
+**It holds completely in the judgement half.** For crates.io the stabilizer and archive diff is
+*empty*. `.crate` sniffs to `tar+gzip`, the filename selects the `crate` profile, `cargo-vcs-hash`
+is implemented and tested, and nineteen `pkg:cargo/` targets already run through the golden
+differential corpus against the reference implementation. Nothing below the judgement line needs
+touching, which is the half a wrong answer would have been most expensive in.
+
+**It leaks in the acquisition half, and the ladder leaked silently.** `ladder()` matched `Npm`,
+`PyPI`, and `_ => {}`. A crates.io target would have resolved, fetched, built a ladder with no
+heuristic rung and no model rung — `inferrer::supported` was a `matches!` that also answered `false`
+without saying so — and reported `no-strategy`, which is exactly what a package whose recipe we
+genuinely could not infer reports. A statement about Trigon rendered as a statement about the
+package. `for_ecosystem` gets the identical situation right two hundred lines earlier: it refuses by
+name and lists what it serves. Both catch-alls now do too, and `supported` is exhaustive so the next
+variant fails to compile rather than answering `false`.
+
+**Two live bugs it turned up that have nothing to do with crates.io:**
+
+- **The mirror's host allowlist was checked on the first hop only.** The passthrough client was
+  built with `redirect::Policy::limited(5)`, so reqwest followed up to five `Location` headers to
+  any host on the internet, and a hand-rolled sixth hop checked nothing either. At `mirror-only` the
+  allowlist is the entire content of the tier — every host reachable through the proxy is a host the
+  build can be told to fetch from — so this made it a statement about where a build *asked* to go
+  rather than about where its bytes *came from*. An allowlisted host answering
+  `302 cdn.evil.example` put arbitrary bytes into a sandbox with no other route out. Redirects are
+  now followed one hop at a time with the same check on every one, through a single `host_allowed`
+  that both the routes and the loop call.
+- **`same_artifact` compared the last path segment.** That works for npm and PyPI, whose artifact
+  URLs end in a filename. A crates.io download URL ends in the literal word `download` for every
+  crate ever published, so the first dependency a crates.io build fetched would have matched the
+  run's own `refuse_url`, been refused, and recorded as a trip — every crates.io run `Void`, every
+  time, from a control firing on traffic it was never meant to see. A segment that names nothing now
+  falls back to comparing one deeper.
+
+**Three types the docs describe were never written**: `EcosystemSpec`, cited as live in two source
+comments and printed as a full trait block in `01-architecture.md`; `VersionOrd` and its
+ecosystem-dispatching `cmp_version` filter; and the crates `trigon-images` and `trigon-engine`. The
+checklist in `03-ecosystems.md` §7 — "which doubles as the test of whether the seam holds" — sent a
+reader looking for three of them. It now has a §7.2 saying which half is real.
+
+**And the honest count**: adding crates.io is 14 work items, 10 in engine files, 8 of those genuine
+edits once the two allowlist additions are subtracted. Narrow rather than broken — every edit is
+additive and most are three lines — but not "one `Registry` impl plus some YAML".
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher

@@ -367,7 +367,7 @@ Variable. Release assets built inside a pinned container reproduce well. Assets 
 
 ## 7. Adding a seventh ecosystem
 
-The checklist, which doubles as the test of whether the seam holds:
+### 7.1 The checklist as designed
 
 1. Implement `EcosystemSpec` in `trigon-core`: identity, artifact kinds, archive format, and the
    stabilizer profile **id**. About 40 lines, no I/O.
@@ -375,10 +375,55 @@ The checklist, which doubles as the test of whether the seam holds:
    knowledge lives here.
 3. Add a stabilizer profile in `trigon-stabilize`, usually a composition of the tar, zip and gzip
    sets plus two or three format-specific stabilizers.
-4. Add flow templates in the definitions repo under `_tools/{ecosystem}/`. **No Rust changes.**
-5. Add a base image to `trigon-images`, pinned by digest.
+4. Add flow templates under `_tools/{ecosystem}/`. **No Rust changes.**
+5. Add a base image, pinned by digest.
 6. Add a benchmark corpus and label it by required capability.
 7. Add a chapter here.
 
 Steps 1 through 3 are code. Steps 4 through 7 are data and content. A new ecosystem that requires
-touching `trigon-engine` has found a bug in the architecture rather than an awkward ecosystem.
+touching the engine has found a bug in the architecture rather than an awkward ecosystem.
+
+### 7.2 The checklist as built
+
+The list above was written before any of it existed, and a census of the code against it
+(`docs/16-findings.md` §3.18) found **three of its seven steps name things that were never
+written**. Recorded here rather than quietly corrected, because a checklist that sends a reader
+looking for a type that does not exist is worse than no checklist.
+
+- **`EcosystemSpec` does not exist.** No trait, no impl, nothing. It is cited as live in
+  `trigon-core/src/format.rs:8`, `trigon-stabilize/src/profiles.rs:3` and in
+  [`01-architecture.md`](01-architecture.md), which prints a full `pub trait` block for it. The real
+  selector is `resolve_profile` in `crates/trigon/src/main.rs` — a filename-extension chain in the
+  CLI binary, not a trait in core. The *dependency severance* those comments describe is real; the
+  mechanism named for it is not.
+- **There is no `trigon-images` crate and no `trigon-engine` crate.** Base images come from
+  `trigon base-image`; the engine is the `rebuild` module of the binary.
+- **"No Rust changes" for step 4 is false.** `BUILTIN_TOOLS` in `trigon-strategy/src/tool.rs` is a
+  compiled-in `include_str!` array, and `ToolRegistry::add` — the public method whose doc comment
+  describes a definitions repo overriding a builtin — has no callers anywhere. A YAML file dropped
+  into `tools/` is invisible until that array is edited. A source-text seam test does at least make
+  the omission fail rather than ship.
+
+What adding crates.io actually costs, counted: **14 work items, 10 touching engine files, 8 of them
+genuine edits** once the two pure allowlist additions are subtracted. The seam is narrow rather than
+broken — every one of those edits is additive and most are three lines — but it is not the "one
+`Registry` impl plus some YAML" the roadmap claims.
+
+### 7.3 Where the seam holds, and where it leaks
+
+**It holds completely in the judgement half.** For crates.io the stabilizer and archive diff is
+*empty*: `.crate` sniffs to `tar+gzip`, the filename selects the `crate` profile, `cargo-vcs-hash`
+is implemented and tested, and nineteen `pkg:cargo/` targets already run through the golden
+differential corpus. Nothing below the judgement line needs touching to add crates.io — which is
+the half that was hardest to get right and the half a wrong answer would be most expensive in.
+
+**It leaks in the acquisition half**, and one of those leaks was silent. `ladder()` matched `Npm`,
+`PyPI` and `_ => {}`, so an ecosystem with no rung produced a `no-strategy` verdict indistinguishable
+from a package whose recipe genuinely could not be inferred — a statement about Trigon rendered as a
+statement about the package. `for_ecosystem` gets the same situation right: it refuses by name and
+lists what it serves. The ladder now says so too.
+
+**The compiler is a real seam guard in exactly one subsystem.** Every `match Platform` in the mirror
+is exhaustive, so adding a platform cannot compile until its upstream URL, display name and request
+handler are all written. `Ecosystem` gets the weakest treatment of the three: `purl_type` is
+exhaustive, but the decisions that gate whether a rebuild happens at all used catch-alls.

@@ -1,8 +1,13 @@
 //! Named stabilizer profiles, one per artifact shape.
 //!
-//! `EcosystemSpec::stabilizer_profile` returns one of these ids rather than a set of stabilizers.
-//! That one indirection is what severs the dependency from `trigon-core` to this crate and keeps the
+//! A profile is chosen by **id** rather than by handing around a set of stabilizers, and that one
+//! indirection is what severs the dependency from `trigon-core` to this crate and keeps the
 //! judgement half free of anything that can perform I/O. See `docs/01-architecture.md` §3.1.
+//!
+//! The id is picked by `resolve_profile` in the binary, from the artifact's filename. This comment
+//! used to name an `EcosystemSpec::stabilizer_profile` as the chooser; `docs/03-ecosystems.md` §7.2
+//! records that no such trait was ever written. The severance is real, the mechanism named for it
+//! was not.
 
 use std::sync::Arc;
 

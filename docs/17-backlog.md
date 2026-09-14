@@ -192,9 +192,51 @@ Each is a different kind of interesting, and they are not equally hard:
 - **NuGet** has trusted publishing and essentially no reproducibility infrastructure, so we would be
   partly inventing the ecosystem's story. Sequenced last, and honestly caveated when published.
 
-Two things they share that the current code does not have: a version algebra each (`semver` is
-Cargo-flavoured; RubyGems and NuGet have no usable Rust crate, so both are hand-rolled), and a
-stabilizer profile each.
+They share one thing the current code does not have: a version algebra each (`semver` is
+Cargo-flavoured; RubyGems and NuGet have no usable Rust crate, so both are hand-rolled). The
+`VersionOrd` trait that was supposed to hold them was never written — see
+[`02`](02-domain-model.md) §6.
+
+**The stabilizer half is already done for two of the three.** `crate` (tar+gzip + `cargo-vcs-hash`)
+and `gem` (tar+gzip + five gem passes) both exist, are listed in `all_profiles()`, have dedicated
+tests, and — for cargo — nineteen targets already run through the golden differential corpus. Only
+NuGet has no profile, and `main.rs` records that a `.nupkg` arm was deliberately *removed* because
+it named one that did not exist. So the judgement half needs nothing for crates.io.
+
+### What the census found
+
+A six-subsystem read of the code against this item's own claim, with an adversarial verify pass over
+each report, is written up in [`16`](16-findings.md) §3.18. In short: **the seam holds where it was
+hardest to build and leaks where it was cheapest.** Adding crates.io is 14 work items, 10 in engine
+files, 8 genuine edits. The ladder leak — `_ => {}`, a `no-strategy` verdict indistinguishable from
+a package we could not infer — is closed, along with two live bugs the census turned up on the way
+(the mirror's allowlist skipped every redirect hop; `same_artifact` would have voided every
+crates.io run).
+
+### What is left for crates.io, in order
+
+1. `CratesIoRegistry` in `trigon-registry`, plus the `for_ecosystem` arm and its `supported:` string
+   (a source-text seam test asserts those two agree). `ArtifactMeta.id` must be synthesized as
+   `{name}-{version}.crate` — the npm trick of taking the URL's last segment yields the literal
+   `download`, and the id selects the stabilizer profile, the definitions path and the store key.
+2. `CargoInferrer` beside `NpmInferrer`/`PyPiInferrer`, and the `ladder()` arm.
+3. `tools/cargo/*.yaml` plus their `BUILTIN_TOOLS` lines, and widening `inferrer::supported` in the
+   same commit — a model asked to propose from a vocabulary that does not exist spends tokens to
+   learn nothing.
+4. The mirror: `Platform::Cargo`, a sparse-index filter, `static.crates.io` and `index.crates.io` on
+   `ARTIFACT_HOSTS`, `static.rust-lang.org` on `TOOLCHAIN_HOSTS`. This is the genuinely novel piece
+   and the one blocking `mirror-only`: a sparse-index line carries **no publication timestamp**, and
+   `published_by` fails closed, so a naive port of the npm filter would withhold every version of
+   every crate. The index commit, not a date, is the moment — and `Filter.moment` is a `String`
+   validated to exactly 19 characters of `YYYY-MM-DDTHH:MM:SS`, so a 40-hex oid is a 400 today.
+5. Only then the toolchain-window fingerprint, which is the interesting part and needs `toml_edit`.
+
+**Two things to know before starting (4):** `resolve_toolchain` — the intersection function the
+whole evidence design is built around — already exists, is generic, and its tests are written
+entirely in Cargo's vocabulary; its only callers are inside the unwired CI rung. And every crates.io
+verdict will cap at `normalized_with_caveats`, because `cargo-vcs-hash` is `RiskTier::Content` and
+the provenance cap fires on anything above `Metadata`. That is correct behaviour and it will need
+explaining beside any published rate, or the pass needs a different tier.
 
 **Done when:** each has a `Registry`, a stabilizer profile, a labelled smoke corpus, and a published
 rate — and the engine diff for the second and third is empty.

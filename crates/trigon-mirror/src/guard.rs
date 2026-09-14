@@ -647,21 +647,43 @@ fn redact_userinfo(url: &str) -> String {
 
 /// Whether two URLs name the same artifact.
 ///
-/// Compared on the path's last segment rather than the whole string, because the mirror rewrites
+/// Compared on the tail of the path rather than on the whole string, because the mirror rewrites
 /// artifact URLs through itself and the build never sees the upstream form it was given.
+///
+/// **The tail is the last segment, unless that segment identifies nothing.** It used to be the last
+/// segment always, which works for npm and PyPI because their artifact URLs end in a filename. A
+/// crates.io download URL is `.../crates/{name}/{version}/download` — the last segment is the
+/// literal word `download` for every crate ever published. Under the old rule the first dependency
+/// a crates.io build fetched would have matched the run's own `refuse_url`, been refused 403, and
+/// recorded as a `RefusedUrl` trip: every crates.io run `Void`, every time, for a control firing on
+/// traffic it was never meant to see.
+///
+/// So a segment that names no particular file falls back to the segment before it, which for that
+/// shape is the version — and `{name}/{version}/download` compared two-deep is as specific as a
+/// filename. A control this cheap to fool is not a control.
 fn same_artifact(a: &str, b: &str) -> bool {
-    let file = |u: &str| {
-        u.split('?')
-            .next()
-            .unwrap_or(u)
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .to_string()
+    let tail = |u: &str| {
+        let path = u.split(['?', '#']).next().unwrap_or(u);
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let take = match segments.last() {
+            Some(last) if NAMES_NOTHING.contains(&last.to_ascii_lowercase().as_str()) => 2,
+            _ => 1,
+        };
+        let n = segments.len();
+        segments[n.saturating_sub(take)..].join("/")
     };
-    let (a, b) = (file(a), file(b));
+    let (a, b) = (tail(a), tail(b));
     !a.is_empty() && a == b
 }
+
+/// Last path segments that identify a route rather than a file.
+///
+/// Deliberately tiny and hand-maintained. Every entry is a segment a registry appends to an
+/// otherwise-identifying path, so matching on it alone would equate unrelated artifacts. Getting
+/// this wrong in the other direction is harmless — a missed entry means the guard compares one
+/// segment where it could have compared two — which is why it is a short list rather than a
+/// heuristic about what "looks like a filename".
+const NAMES_NOTHING: &[&str] = &["download", "file", "artifact"];
 
 /// The container format a response body appears to be.
 fn sniff(body: &[u8]) -> Option<Format> {
