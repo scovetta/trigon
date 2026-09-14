@@ -1439,13 +1439,15 @@ fn compare_panel(dir: &Path, index: usize) -> String {
         Ok((m, _)) => {
             let differs = m
                 .iter()
-                .filter(|d| !d.only_one_side() && d.stabilized_differs())
+                .filter(|d| !d.only_one_side() && d.content_differs())
                 .count();
+            let meta_only = m.iter().filter(|d| d.metadata_only()).count();
             let removed = m.iter().filter(|d| d.removed_by_stabilization()).count();
             format!(
-                "<h2>What differs</h2><p>{} member(s): <strong>{differs}</strong> still differ \
-                 after stabilization, <strong>{removed}</strong> differed as published and were \
-                 stabilized out. <a href=\"/run/{index}/compare\">Member by member →</a></p>",
+                "<h2>What differs</h2><p>{} member(s): <strong>{differs}</strong> differ in \
+                 content, <strong>{meta_only}</strong> are byte-identical and packed differently, \
+                 <strong>{removed}</strong> were stabilized out. \
+                 <a href=\"/run/{index}/compare\">Member by member →</a></p>",
                 m.len()
             )
         }
@@ -1517,15 +1519,17 @@ fn ladder_svg(m: &[MemberDiff]) -> String {
     let one_side = m.iter().filter(|d| d.only_one_side()).count();
     let differs = m
         .iter()
-        .filter(|d| !d.only_one_side() && d.stabilized_differs())
+        .filter(|d| !d.only_one_side() && d.content_differs())
         .count();
+    let meta_only = m.iter().filter(|d| d.metadata_only()).count();
     let removed = m.iter().filter(|d| d.removed_by_stabilization()).count();
-    let identical = m.len() - one_side - differs - removed;
+    let identical = m.len() - one_side - differs - meta_only - removed;
 
     // `(count, label, fill)`. The colours are the verdict palette the rest of the page uses, so a
     // red band here and a red tag above it mean the same thing.
     let bands = [
-        (differs, "still differ", "#b3261e"),
+        (differs, "content differs", "#b3261e"),
+        (meta_only, "same bytes, packed differently", "#8a6d1f"),
         (removed, "stabilized out", "#b26a00"),
         (identical, "identical as published", "#137333"),
         (one_side, "on one side only", "#6b4fbb"),
@@ -1554,13 +1558,16 @@ fn ladder_svg(m: &[MemberDiff]) -> String {
     format!(
         "<h2>What differs</h2>\
          <svg viewBox=\"0 0 {w} 26\" width=\"100%\" height=\"26\" role=\"img\" \
-          aria-label=\"{} members: {differs} still differ, {removed} stabilized out, {identical} \
-          identical, {one_side} on one side only\" preserveAspectRatio=\"none\">{rects}</svg>\
+          aria-label=\"{} members: {differs} differ in content, {meta_only} same bytes packed \
+          differently, {removed} stabilized out, {identical} identical, {one_side} on one side \
+          only\" preserveAspectRatio=\"none\">{rects}</svg>\
          <p class=\"legend\">{legend}</p>\
          <p class=\"note\">{} member(s) in total. <strong>Stabilized out</strong> is the band the \
          verdict turns on: those members' published and rebuilt bytes are not the same, and every \
-         way in which they differ was removed by a named pass below. A run with an empty red band \
-         reproduces.</p>",
+         way in which they differ was removed by a named pass below. <strong>Same bytes, packed \
+         differently</strong> is the one worth reading twice — the file is byte-for-byte what was \
+         published and its archive entry is not, so the divergence is about how it was packed and \
+         not about what anybody wrote.</p>",
         m.len(),
         m.len()
     )
@@ -1624,8 +1631,9 @@ fn member_table(m: &[MemberDiff]) -> String {
     let mut rows: Vec<&MemberDiff> = m.iter().collect();
     rows.sort_by_key(|d| {
         (
-            !d.stabilized_differs(),
+            !d.content_differs(),
             !d.only_one_side(),
+            !d.metadata_only(),
             !d.removed_by_stabilization(),
             d.path.clone(),
         )
@@ -1645,10 +1653,15 @@ fn member_table(m: &[MemberDiff]) -> String {
                 format!("<span class=\"ours\">only in {which}</span>"),
                 "<span class=\"ours\">—</span>".to_string(),
             )
-        } else if d.stabilized_differs() {
+        } else if d.content_differs() {
             (
                 "<span class=\"fail\">differs</span>".to_string(),
-                "<span class=\"fail\">still differs</span>".to_string(),
+                "<span class=\"fail\">content still differs</span>".to_string(),
+            )
+        } else if d.metadata_only() {
+            (
+                "<span class=\"diff\">differs</span>".to_string(),
+                "<span class=\"diff\">same bytes, packed differently</span>".to_string(),
             )
         } else if d.removed_by_stabilization() {
             (
@@ -1726,7 +1739,9 @@ fn artifact_pair(dir: &Path) -> Option<(PathBuf, PathBuf)> {
 /// fingerprint, size)`. The occurrence is in the key because a duplicate member path is legal and
 /// would otherwise be unmatchable — the rule `diff.rs` keys on.
 type MemberKey = (Vec<u8>, usize);
-type SideMembers = std::collections::BTreeMap<MemberKey, (String, String, u64)>;
+/// `(raw content, raw metadata, stabilized content, stabilized metadata, size)`.
+type Fingerprints = (String, String, String, String, u64);
+type SideMembers = std::collections::BTreeMap<MemberKey, Fingerprints>;
 
 /// One member of the artifact, before and after stabilization, on both sides.
 struct MemberDiff {
@@ -1734,6 +1749,15 @@ struct MemberDiff {
     /// `None` where the member is on one side only.
     raw: (Option<String>, Option<String>),
     stabilized: (Option<String>, Option<String>),
+    /// The member's **content** after stabilization, ignoring every header field.
+    ///
+    /// Separate from `stabilized` because the two answer different questions and a reader needs
+    /// both. `py-cpuinfo` has six members whose bytes are identical and whose zip modes are not:
+    /// the archive digests differ, so the verdict is `divergent` and correctly so, but reporting
+    /// those six as "still differs" reads as "the code changed" — which it did not. Overstating a
+    /// divergence is the expensive direction, because a published one is a public claim about
+    /// somebody else's package.
+    content: (Option<String>, Option<String>),
     bytes: (Option<u64>, Option<u64>),
 }
 
@@ -1743,6 +1767,14 @@ impl MemberDiff {
     }
     fn stabilized_differs(&self) -> bool {
         self.stabilized.0 != self.stabilized.1
+    }
+    fn content_differs(&self) -> bool {
+        self.content.0 != self.content.1
+    }
+    /// Byte-for-byte the same file, in an archive entry that is not. The diagnosis a maintainer
+    /// wants: nothing you wrote changed, and something about how it was packed did.
+    fn metadata_only(&self) -> bool {
+        self.stabilized_differs() && !self.content_differs() && !self.only_one_side()
     }
     /// The interesting case, and the one the whole tool exists for: the bytes differ and the
     /// stabilized forms do not. This member is why the verdict is `normalized` rather than `exact`.
@@ -1788,13 +1820,14 @@ fn member_diffs(
         let mut archive = parsed.archive;
 
         let mut seen: std::collections::BTreeMap<Vec<u8>, usize> = Default::default();
-        let mut raw: Vec<(MemberKey, (String, u64))> = Vec::new();
+        let mut raw: Vec<(MemberKey, (String, String, u64))> = Vec::new();
         for e in &archive.entries {
             let path = e.path.as_bytes().to_vec();
             let n = seen.entry(path.clone()).or_default();
             let key = (path, *n);
             *n += 1;
-            raw.push((key, (member_fingerprint(e)?, e.meta.size)));
+            let (c, m) = member_fingerprint(e)?;
+            raw.push((key, (c, m, e.meta.size)));
         }
 
         let applied = trigon_stabilize::apply(&set, &mut archive);
@@ -1806,17 +1839,17 @@ fn member_diffs(
             let n = seen.entry(path.clone()).or_default();
             let key = (path, *n);
             *n += 1;
-            let after = member_fingerprint(e)?;
+            let (after_c, after_m) = member_fingerprint(e)?;
             // Stabilizers may reorder, so the raw entry for this key is looked up rather than
             // taken positionally. A member that a pass *removed* has a raw row and no stabilized
             // one, which the join below renders rather than dropping.
-            let (rd, rb) = raw
+            let (raw_c, raw_m, size) = raw
                 .iter()
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| (after.clone(), e.meta.size));
+                .unwrap_or_else(|| (after_c.clone(), after_m.clone(), e.meta.size));
             let _ = i;
-            out.insert(key, (rd, after, rb));
+            out.insert(key, (raw_c, raw_m, after_c, after_m, size));
         }
         Ok((out, applied))
     };
@@ -1833,9 +1866,16 @@ fn member_diffs(
         let b = r.get(&k);
         out.push(MemberDiff {
             path: String::from_utf8_lossy(&k.0).into_owned(),
-            raw: (a.map(|v| v.0.clone()), b.map(|v| v.0.clone())),
-            stabilized: (a.map(|v| v.1.clone()), b.map(|v| v.1.clone())),
-            bytes: (a.map(|v| v.2), b.map(|v| v.2)),
+            raw: (
+                a.map(|v| format!("{}{}", v.0, v.1)),
+                b.map(|v| format!("{}{}", v.0, v.1)),
+            ),
+            stabilized: (
+                a.map(|v| format!("{}{}", v.2, v.3)),
+                b.map(|v| format!("{}{}", v.2, v.3)),
+            ),
+            content: (a.map(|v| v.2.clone()), b.map(|v| v.2.clone())),
+            bytes: (a.map(|v| v.4), b.map(|v| v.4)),
         });
     }
     let mut applied = ua;
@@ -1850,14 +1890,23 @@ fn member_diffs(
 /// whose every difference was an mtime, a mode or a member order. What differs between a tarball
 /// published in 2018 and one built this morning is exactly the fields this hashes.
 ///
-/// `ordinal` is in, because member order is a difference `tar-entry-order` exists to remove and a
-/// reader should see it counted. `size` is not, being a function of the body.
-fn member_fingerprint(e: &trigon_archive::Entry) -> Result<String, String> {
+/// **`ordinal` is deliberately out.** It is the member's position *as parsed*, kept as a sort
+/// tiebreaker and never rewritten — so it survives the very reordering `tar-entry-order` and
+/// `zip-entry-order` exist to normalize. Including it made every member of a reordered archive
+/// differ forever: `py-cpuinfo` read as nine of nine still differing where the comparison that
+/// decides the verdict says three. Overstating a divergence is the expensive direction, because a
+/// published divergence is a public claim about somebody's package. Member order is a property of
+/// the archive rather than of a member, and it is already visible in the applied-stabilizer list.
+///
+/// `size` is out too, being a function of the body.
+fn member_fingerprint(e: &trigon_archive::Entry) -> Result<(String, String), String> {
     use sha2::Digest as _;
+    let body = e.stabilized_bytes().map_err(|e| e.to_string())?;
+    let content = format!("{:x}", sha2::Sha256::digest(&body));
+
     let mut h = sha2::Sha256::new();
     h.update(e.path.as_bytes());
     h.update([0]);
-    h.update(e.ordinal.to_le_bytes());
     h.update(e.meta.mode.to_le_bytes());
     // `None` is its own value rather than a zero: a format that carries no mtime and one that
     // carries the epoch are different things, and collapsing them would hide `tar-time`'s work.
@@ -1872,9 +1921,7 @@ fn member_fingerprint(e: &trigon_archive::Entry) -> Result<String, String> {
     // The format-specific header — owners, typeflag, zip method and flags — in its `Debug` form.
     // Structural rather than pretty, and it is only ever compared against itself.
     h.update(format!("{:?}", e.raw).as_bytes());
-    let b = e.stabilized_bytes().map_err(|e| e.to_string())?;
-    h.update(&b);
-    Ok(format!("{:x}", h.finalize()))
+    Ok((content, format!("{:x}", h.finalize())))
 }
 
 #[allow(dead_code)]

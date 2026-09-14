@@ -690,3 +690,58 @@ fn a_comparison_with_no_artifacts_says_so_rather_than_showing_no_differences() {
         );
     }
 }
+
+#[test]
+fn a_member_packed_differently_is_not_a_member_whose_content_changed() {
+    // The compare view fingerprints each member twice: its bytes, and its bytes plus the archive
+    // metadata a stabilizer can touch. Folding the two made `py-cpuinfo` read as nine of nine
+    // members still differing where the comparison that decides the verdict says three — six had
+    // byte-identical content and different zip modes, which no pass normalizes.
+    //
+    // Both readings are true and they answer different questions, so the page shows both.
+    // Overstating is the expensive direction: a published divergence is a public claim about
+    // somebody else's package, and "the code changed" is not what six identical files mean.
+    //
+    // Driven through the real binary against real artifacts, because the claim is about what the
+    // page renders and not about a helper.
+    let d = work("packed-differently");
+    write(
+        &d.join("run.json"),
+        r#"{"purl":"pkg:pypi/a@1","started":"2026-01-01T00:00:00Z","outcome":"divergent"}"#,
+    );
+    // Two zips holding the same file at two different modes. `zip` is not available everywhere, so
+    // this skips loudly rather than passing without having run.
+    let make = |path: &std::path::Path, mode: &str| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let stage = d.join(format!("stage{mode}"));
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("f.txt"), "same bytes on both sides\n").unwrap();
+        let _ = Command::new("chmod")
+            .arg(mode)
+            .arg(stage.join("f.txt"))
+            .status();
+        Command::new("zip")
+            .args(["-X", "-q", path.to_str().unwrap(), "f.txt"])
+            .current_dir(&stage)
+            .status()
+    };
+    let up = d.join("a-1.zip");
+    let rb = d.join("rebuild").join("run").join("a-1.zip");
+    match (make(&up, "644"), make(&rb, "755")) {
+        (Ok(a), Ok(b)) if a.success() && b.success() => {}
+        _ => {
+            eprintln!("skipped: `zip` is not available to build the fixture");
+            return;
+        }
+    }
+
+    let p = Watch::on(&d).get("/run/0/compare");
+    assert!(
+        p.contains("same bytes, packed differently"),
+        "identical content in a differing entry must say so:\n{p}"
+    );
+    assert!(
+        !p.contains("content still differs"),
+        "nothing here changed content, and saying it did is an accusation:\n{p}"
+    );
+}
