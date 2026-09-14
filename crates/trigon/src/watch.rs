@@ -243,25 +243,58 @@ struct Found {
     millis: u128,
 }
 
-async fn find_record(store: &Path, purl: &str) -> Option<Found> {
+/// What looking a target up in a store produced.
+///
+/// **Four outcomes, not one `None`.** They used to collapse: a `--store` naming a directory that
+/// does not exist rendered the identical sentence to a run that is genuinely not in the store — and
+/// that sentence explains the absence as "no statement may be written about a run that is evidence
+/// of nothing". So a mistyped path told the reader their run was evidence of nothing. Our own
+/// configuration error, reported as a finding about their package.
+enum Lookup {
+    /// The store could not be opened. A path that is not there, or not a store.
+    Unusable(String),
+    /// Opened, and its index could not be listed.
+    Unreadable(String),
+    /// Opened and searched, and no record names this target.
+    Absent {
+        read: usize,
+        millis: u128,
+    },
+    Found(Box<Found>),
+}
+
+async fn find_record(store: &Path, purl: &str) -> Lookup {
     let started = std::time::Instant::now();
-    let store = trigon_store::Store::local(store).ok()?;
-    let ids = store.list_runs().await.ok()?;
-    for (n, id) in ids.into_iter().enumerate() {
-        let read = n + 1;
+    // `existing`, not `local`: this page is read-only and `local` creates the directory it is
+    // given. A mistyped `--store` was making an empty store and then explaining, at length, why the
+    // run was not in it.
+    let opened = match trigon_store::Store::existing(store) {
+        Ok(s) => s,
+        Err(e) => return Lookup::Unusable(e.to_string()),
+    };
+    let ids = match opened.list_runs().await {
+        Ok(i) => i,
+        Err(e) => return Lookup::Unreadable(e.to_string()),
+    };
+    let mut read = 0;
+    for id in ids {
+        read += 1;
         // `get_run` re-hashes the blob it reads, which is the check the store exists to provide;
         // reading `blobs/` directly would skip it.
-        if let Ok(r) = store.get_run(&id).await
+        if let Ok(r) = opened.get_run(&id).await
             && r.target == purl
         {
-            return Some(Found {
+            return Lookup::Found(Box::new(Found {
                 record: r,
                 read,
                 millis: started.elapsed().as_millis(),
-            });
+            }));
         }
     }
-    None
+    Lookup::Absent {
+        read,
+        millis: started.elapsed().as_millis(),
+    }
 }
 
 /// Which shape of work directory this is.
@@ -482,6 +515,10 @@ a{color:inherit}
 /* A transcript URL is the longest string on any of these pages and the least useful to read in
    full, so it wraps rather than pushing the columns that matter off the side. */
 .url{word-break:break-all;max-width:38em;font-size:.9em}
+.legend{display:flex;gap:1.2rem;flex-wrap:wrap;margin:.4rem 0 0;font-size:.85rem}
+.key{display:inline-flex;align-items:center;gap:.35rem}
+.key i{width:.7rem;height:.7rem;border-radius:2px;display:inline-block}
+svg{display:block;border-radius:3px}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th{text-align:left;font-weight:600;color:var(--dim);font-size:.8rem;padding:.3rem .5rem;border-bottom:1px solid var(--line)}
 td{padding:.3rem .5rem;border-bottom:1px solid var(--line)}
@@ -1385,6 +1422,467 @@ fn checked_cell(c: trigon_mirror::Checked) -> &'static str {
     }
 }
 
+/// The one-line version, on the run page.
+fn compare_panel(dir: &Path, index: usize) -> String {
+    let Some((upstream, rebuild)) = artifact_pair(dir) else {
+        return "<h2>What differs</h2><p class=\"note\">both artifacts are not on disk here, so \
+                nothing can be re-derived. The verdict still stands — it was computed when they \
+                were.</p>"
+            .into();
+    };
+    match member_diffs(&upstream, &rebuild) {
+        Err(detail) => format!(
+            "<h2>What differs</h2><p class=\"void\">the artifacts could not both be re-derived: \
+             {}</p>",
+            esc(&detail)
+        ),
+        Ok((m, _)) => {
+            let differs = m
+                .iter()
+                .filter(|d| !d.only_one_side() && d.stabilized_differs())
+                .count();
+            let removed = m.iter().filter(|d| d.removed_by_stabilization()).count();
+            format!(
+                "<h2>What differs</h2><p>{} member(s): <strong>{differs}</strong> still differ \
+                 after stabilization, <strong>{removed}</strong> differed as published and were \
+                 stabilized out. <a href=\"/run/{index}/compare\">Member by member →</a></p>",
+                m.len()
+            )
+        }
+    }
+}
+
+/// What the two artifacts differ in, and what stopped it mattering.
+///
+/// The page the whole tool is an argument for. A verdict of `normalized` says the published bytes
+/// and the rebuilt bytes are not the same and that every way in which they differ was removed by a
+/// named, versioned pass — and until this existed, nothing showed *which* bytes those were.
+async fn compare(
+    State(sweep): State<std::sync::Arc<Sweep>>,
+    UrlPath(index): UrlPath<usize>,
+) -> Response {
+    let v = sweep.read();
+    let dir = sweep.target_dir(&v, index);
+    let title = v
+        .rows
+        .iter()
+        .find(|r| sweep.dir_of(&v, &r.purl).map(|(i, _)| i) == Some(index))
+        .map(|r| esc(r.purl.strip_prefix("pkg:").unwrap_or(&r.purl)))
+        .unwrap_or_else(|| format!("target {index:03}"));
+
+    let mut body =
+        format!("<h1>{title} · what differs</h1><p><a href=\"/run/{index}\">← the run</a></p>");
+
+    let Some((upstream, rebuild)) = artifact_pair(&dir) else {
+        body.push_str(
+            "<p class=\"note\">both artifacts are not on disk here, so there is nothing to \
+             re-derive. A run keeps the published artifact at the work root and the rebuilt one \
+             under <code>rebuild/&lt;run id&gt;/</code>; a build that produced nothing, or a work \
+             directory that has been cleaned, leaves this page with no inputs. The verdict in the \
+             run record still stands — it was computed when both were there.</p>",
+        );
+        return page(&format!("{title} · compare"), false, &body, &sweep.bind).into_response();
+    };
+
+    body.push_str(&format!(
+        "<p class=\"dim\">recomputed now from <code>{}</code> and <code>{}</code>, not read from a \
+         record. This is the judgement half — pure, model-free, no network — so the page can redo \
+         it, and you are looking at the bytes it was computed from.</p>",
+        esc(&file_name_of(&upstream)),
+        esc(&file_name_of(&rebuild)),
+    ));
+
+    match member_diffs(&upstream, &rebuild) {
+        Err(detail) => body.push_str(&format!(
+            "<p class=\"void\">the two artifacts could not both be re-derived, so this page has \
+             nothing to show rather than nothing to report: {}</p>",
+            esc(&detail)
+        )),
+        Ok((members, applied)) => {
+            body.push_str(&ladder_svg(&members));
+            body.push_str(&stabilizer_svg(&applied));
+            body.push_str(&member_table(&members));
+        }
+    }
+    page(&format!("{title} · compare"), false, &body, &sweep.bind).into_response()
+}
+
+/// The census, as a picture: what the two archives hold, and where the difference went.
+///
+/// One bar, four bands, in the order a reader needs them — the members that differ *after*
+/// stabilization first, because those are the finding, then the ones stabilization accounted for,
+/// then the ones that were identical all along, then the ones present on one side only.
+fn ladder_svg(m: &[MemberDiff]) -> String {
+    let total = m.len().max(1) as f64;
+    let one_side = m.iter().filter(|d| d.only_one_side()).count();
+    let differs = m
+        .iter()
+        .filter(|d| !d.only_one_side() && d.stabilized_differs())
+        .count();
+    let removed = m.iter().filter(|d| d.removed_by_stabilization()).count();
+    let identical = m.len() - one_side - differs - removed;
+
+    // `(count, label, fill)`. The colours are the verdict palette the rest of the page uses, so a
+    // red band here and a red tag above it mean the same thing.
+    let bands = [
+        (differs, "still differ", "#b3261e"),
+        (removed, "stabilized out", "#b26a00"),
+        (identical, "identical as published", "#137333"),
+        (one_side, "on one side only", "#6b4fbb"),
+    ];
+
+    let w = 720.0;
+    let mut x = 0.0;
+    let mut rects = String::new();
+    let mut legend = String::new();
+    for (n, label, fill) in bands {
+        if n == 0 {
+            // A band of zero width is not drawn, and it is not listed either — a legend entry
+            // pointing at nothing invites the reader to look for it.
+            continue;
+        }
+        let bw = w * (n as f64 / total);
+        rects.push_str(&format!(
+            "<rect x=\"{x:.1}\" y=\"0\" width=\"{bw:.1}\" height=\"26\" fill=\"{fill}\"/>"
+        ));
+        legend.push_str(&format!(
+            "<span class=\"key\"><i style=\"background:{fill}\"></i>{n} {label}</span>"
+        ));
+        x += bw;
+    }
+
+    format!(
+        "<h2>What differs</h2>\
+         <svg viewBox=\"0 0 {w} 26\" width=\"100%\" height=\"26\" role=\"img\" \
+          aria-label=\"{} members: {differs} still differ, {removed} stabilized out, {identical} \
+          identical, {one_side} on one side only\" preserveAspectRatio=\"none\">{rects}</svg>\
+         <p class=\"legend\">{legend}</p>\
+         <p class=\"note\">{} member(s) in total. <strong>Stabilized out</strong> is the band the \
+         verdict turns on: those members' published and rebuilt bytes are not the same, and every \
+         way in which they differ was removed by a named pass below. A run with an empty red band \
+         reproduces.</p>",
+        m.len(),
+        m.len()
+    )
+}
+
+/// Which passes did the work, and how much.
+///
+/// Bar length is `entries_touched`, which `docs/08` calls the triage number: "wheel-record touched
+/// 412 entries" is a diagnosis. The risk tier is the colour, because a `Content`-risk pass caps the
+/// verdict below `normalized` and a reader should see that without reading a table.
+fn stabilizer_svg(applied: &[trigon_stabilize::Applied]) -> String {
+    if applied.is_empty() {
+        return "<h2>What the stabilizers removed</h2><p class=\"note\">no pass changed anything on \
+                either side, so the two artifacts are compared exactly as published</p>"
+            .into();
+    }
+    // Both sides fire the same set, so the same id appears twice. Summed rather than listed twice:
+    // a reader wants "tar-time touched 20 entries across the pair", not two rows of 10.
+    let mut by_id: std::collections::BTreeMap<String, (u32, u64, trigon_core::RiskTier)> =
+        Default::default();
+    for a in applied {
+        let e = by_id.entry(a.id.to_string()).or_insert((0, 0, a.risk));
+        e.0 += a.entries_touched;
+        e.1 += a.bytes_changed;
+    }
+    let max = by_id.values().map(|v| v.0).max().unwrap_or(1).max(1) as f64;
+    let mut rows = String::new();
+    for (id, (touched, bytes, risk)) in &by_id {
+        let w = 420.0 * (*touched as f64 / max);
+        let fill = match risk {
+            trigon_core::RiskTier::Structural => "#6b6b66",
+            trigon_core::RiskTier::Metadata => "#137333",
+            trigon_core::RiskTier::Content => "#b26a00",
+            trigon_core::RiskTier::Lossy => "#b3261e",
+        };
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td class=\"n\">{touched}</td>\
+             <td style=\"width:100%\"><svg viewBox=\"0 0 420 12\" width=\"{:.0}\" height=\"12\" \
+             preserveAspectRatio=\"none\" role=\"img\" aria-label=\"{touched} entries\">\
+             <rect x=\"0\" y=\"0\" width=\"420\" height=\"12\" fill=\"{fill}\"/></svg></td>\
+             <td class=\"dim\">{:?}</td><td class=\"n dim\">{}</td></tr>",
+            esc(id),
+            w.max(2.0),
+            risk,
+            human_bytes(*bytes),
+        ));
+    }
+    format!(
+        "<h2>What the stabilizers removed</h2>\
+         <table><tr><th>pass</th><th class=\"n\">entries</th><th></th><th>risk</th>\
+         <th class=\"n\">bytes</th></tr>{rows}</table>\
+         <p class=\"note\">Summed across both sides, which fire the same set. Risk is why a \
+         verdict can be capped: anything above <code>Metadata</code> holds the outcome at \
+         <code>normalized_with_caveats</code> however well the digests agree.</p>"
+    )
+}
+
+/// Every member, with the two comparisons side by side.
+fn member_table(m: &[MemberDiff]) -> String {
+    // Most interesting first: a hundred identical members must not bury the four that differ.
+    let mut rows: Vec<&MemberDiff> = m.iter().collect();
+    rows.sort_by_key(|d| {
+        (
+            !d.stabilized_differs(),
+            !d.only_one_side(),
+            !d.removed_by_stabilization(),
+            d.path.clone(),
+        )
+    });
+    let mut out = String::from(
+        "<h2>Every member</h2><table><tr><th>member</th><th>as published</th>\
+         <th>stabilized</th><th class=\"n\">upstream</th><th class=\"n\">rebuild</th></tr>",
+    );
+    for d in rows {
+        let (raw_cell, stab_cell) = if d.only_one_side() {
+            let which = if d.raw.0.is_some() {
+                "upstream"
+            } else {
+                "rebuild"
+            };
+            (
+                format!("<span class=\"ours\">only in {which}</span>"),
+                "<span class=\"ours\">—</span>".to_string(),
+            )
+        } else if d.stabilized_differs() {
+            (
+                "<span class=\"fail\">differs</span>".to_string(),
+                "<span class=\"fail\">still differs</span>".to_string(),
+            )
+        } else if d.removed_by_stabilization() {
+            (
+                "<span class=\"diff\">differs</span>".to_string(),
+                "<span class=\"ok\">equal — stabilized out</span>".to_string(),
+            )
+        } else {
+            (
+                "<span class=\"ok\">identical</span>".to_string(),
+                "<span class=\"ok\">identical</span>".to_string(),
+            )
+        };
+        let b = |v: Option<u64>| match v {
+            Some(n) => human_bytes(n),
+            // Absent, not zero: the member is not on that side at all.
+            None => "—".to_string(),
+        };
+        out.push_str(&format!(
+            "<tr><td class=\"url\"><code>{}</code></td><td>{raw_cell}</td><td>{stab_cell}</td>\
+             <td class=\"n dim\">{}</td><td class=\"n dim\">{}</td></tr>",
+            esc(&d.path),
+            b(d.bytes.0),
+            b(d.bytes.1),
+        ));
+    }
+    out.push_str("</table>");
+    out
+}
+
+fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The two artifacts a run compared, where both are still on disk.
+///
+/// The published one keeps the registry's filename at the work root; the rebuilt one sits under
+/// `rebuild/<run id>/`. Either can be absent — a pruned store keeps only digests on a match, and a
+/// failed build produced nothing — and absent is said rather than rendered as an empty comparison.
+fn artifact_pair(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let is_artifact = |p: &Path| {
+        p.is_file()
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| !crate::build::OURS.contains(&n))
+                .unwrap_or(false)
+    };
+    let upstream = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            is_artifact(p)
+                && trigon_core::Format::from_file_name(
+                    &p.file_name().unwrap_or_default().to_string_lossy(),
+                )
+                .is_some()
+        })?;
+    // The build writes into `rebuild/<run id>/`, one level below where the log and the transcript
+    // sit, which is why `collect` finds exactly one file there and this walk does too.
+    let rebuild = std::fs::read_dir(dir.join("rebuild"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+        .map(|e| e.path())
+        .find(|p| is_artifact(p))?;
+    Some((upstream, rebuild))
+}
+
+/// One side's members, keyed by `(path, occurrence)`, each as `(raw fingerprint, stabilized
+/// fingerprint, size)`. The occurrence is in the key because a duplicate member path is legal and
+/// would otherwise be unmatchable — the rule `diff.rs` keys on.
+type MemberKey = (Vec<u8>, usize);
+type SideMembers = std::collections::BTreeMap<MemberKey, (String, String, u64)>;
+
+/// One member of the artifact, before and after stabilization, on both sides.
+struct MemberDiff {
+    path: String,
+    /// `None` where the member is on one side only.
+    raw: (Option<String>, Option<String>),
+    stabilized: (Option<String>, Option<String>),
+    bytes: (Option<u64>, Option<u64>),
+}
+
+impl MemberDiff {
+    fn raw_differs(&self) -> bool {
+        self.raw.0 != self.raw.1
+    }
+    fn stabilized_differs(&self) -> bool {
+        self.stabilized.0 != self.stabilized.1
+    }
+    /// The interesting case, and the one the whole tool exists for: the bytes differ and the
+    /// stabilized forms do not. This member is why the verdict is `normalized` rather than `exact`.
+    fn removed_by_stabilization(&self) -> bool {
+        self.raw_differs() && !self.stabilized_differs()
+    }
+    fn only_one_side(&self) -> bool {
+        self.raw.0.is_none() || self.raw.1.is_none()
+    }
+}
+
+/// Diff both artifacts member by member, **twice**: as published, then as stabilized.
+///
+/// `DiffReport` walks the stabilized archives, which is the right input for a verdict and the wrong
+/// one for the question a reader actually has — *what was different, and what stopped it
+/// mattering?* A member that differs raw and agrees stabilized is the whole argument of the tool,
+/// and nothing anywhere showed one.
+///
+/// Recomputed here from the two files rather than read from a record. That is affordable because
+/// this is the judgement half: pure, model-free, no network. It is also the honest way round — the
+/// reader is looking at the bytes it was computed from.
+fn member_diffs(
+    upstream: &Path,
+    rebuild: &Path,
+) -> Result<(Vec<MemberDiff>, Vec<trigon_stabilize::Applied>), String> {
+    let format = trigon_core::Format::from_file_name(
+        &upstream.file_name().unwrap_or_default().to_string_lossy(),
+    )
+    .ok_or_else(|| {
+        "the upstream artifact's name names no format this build can parse".to_string()
+    })?;
+    let set = trigon_stabilize::default_for(format);
+    let limits = trigon_archive::Limits::default();
+
+    // `BTreeMap<(path, occurrence), digest>` on each side, at each of the two moments. Keyed on the
+    // occurrence as well as the path because a duplicate member path is legal and would otherwise
+    // be unmatchable — the same rule `diff.rs` keys on.
+    let side = |p: &Path| -> Result<(SideMembers, Vec<trigon_stabilize::Applied>), String> {
+        let bytes = std::fs::read(p).map_err(|e| format!("reading {}: {e}", p.display()))?;
+        let mut notes = Vec::new();
+        let parsed = trigon_archive::parse(bytes, format, &limits, &mut notes)
+            .map_err(|e| format!("parsing {}: {e}", p.display()))?;
+        let mut archive = parsed.archive;
+
+        let mut seen: std::collections::BTreeMap<Vec<u8>, usize> = Default::default();
+        let mut raw: Vec<(MemberKey, (String, u64))> = Vec::new();
+        for e in &archive.entries {
+            let path = e.path.as_bytes().to_vec();
+            let n = seen.entry(path.clone()).or_default();
+            let key = (path, *n);
+            *n += 1;
+            raw.push((key, (member_fingerprint(e)?, e.meta.size)));
+        }
+
+        let applied = trigon_stabilize::apply(&set, &mut archive);
+
+        let mut seen: std::collections::BTreeMap<Vec<u8>, usize> = Default::default();
+        let mut out = std::collections::BTreeMap::new();
+        for (i, e) in archive.entries.iter().enumerate() {
+            let path = e.path.as_bytes().to_vec();
+            let n = seen.entry(path.clone()).or_default();
+            let key = (path, *n);
+            *n += 1;
+            let after = member_fingerprint(e)?;
+            // Stabilizers may reorder, so the raw entry for this key is looked up rather than
+            // taken positionally. A member that a pass *removed* has a raw row and no stabilized
+            // one, which the join below renders rather than dropping.
+            let (rd, rb) = raw
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| (after.clone(), e.meta.size));
+            let _ = i;
+            out.insert(key, (rd, after, rb));
+        }
+        Ok((out, applied))
+    };
+
+    let (u, ua) = side(upstream)?;
+    let (r, ra) = side(rebuild)?;
+
+    let mut keys: Vec<_> = u.keys().chain(r.keys()).cloned().collect();
+    keys.sort();
+    keys.dedup();
+    let mut out = Vec::new();
+    for k in keys {
+        let a = u.get(&k);
+        let b = r.get(&k);
+        out.push(MemberDiff {
+            path: String::from_utf8_lossy(&k.0).into_owned(),
+            raw: (a.map(|v| v.0.clone()), b.map(|v| v.0.clone())),
+            stabilized: (a.map(|v| v.1.clone()), b.map(|v| v.1.clone())),
+            bytes: (a.map(|v| v.2), b.map(|v| v.2)),
+        });
+    }
+    let mut applied = ua;
+    applied.extend(ra);
+    Ok((out, applied))
+}
+
+/// One member's identity: its content **and** the metadata a stabilizer can change.
+///
+/// Body bytes alone are the wrong fingerprint, and being wrong the wrong way round: for npm they
+/// are almost always identical, so the page reported "0 stabilized out" on a `normalized` verdict
+/// whose every difference was an mtime, a mode or a member order. What differs between a tarball
+/// published in 2018 and one built this morning is exactly the fields this hashes.
+///
+/// `ordinal` is in, because member order is a difference `tar-entry-order` exists to remove and a
+/// reader should see it counted. `size` is not, being a function of the body.
+fn member_fingerprint(e: &trigon_archive::Entry) -> Result<String, String> {
+    use sha2::Digest as _;
+    let mut h = sha2::Sha256::new();
+    h.update(e.path.as_bytes());
+    h.update([0]);
+    h.update(e.ordinal.to_le_bytes());
+    h.update(e.meta.mode.to_le_bytes());
+    // `None` is its own value rather than a zero: a format that carries no mtime and one that
+    // carries the epoch are different things, and collapsing them would hide `tar-time`'s work.
+    match e.meta.mtime {
+        Some(t) => {
+            h.update([1]);
+            h.update(t.to_le_bytes());
+        }
+        None => h.update([0]),
+    }
+    h.update(format!("{:?}", e.kind).as_bytes());
+    // The format-specific header — owners, typeflag, zip method and flags — in its `Debug` form.
+    // Structural rather than pretty, and it is only ever compared against itself.
+    h.update(format!("{:?}", e.raw).as_bytes());
+    let b = e.stabilized_bytes().map_err(|e| e.to_string())?;
+    h.update(&b);
+    Ok(format!("{:x}", h.finalize()))
+}
+
+#[allow(dead_code)]
+fn digest_hex(b: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(b))
+}
+
 fn read_log(dir: &Path) -> Option<String> {
     // `<target dir>/rebuild/build.log`, which is where `run_one` writes it: the collect directory
     // is `args.work.join("rebuild")` and the log goes beside the artifacts in it. The target
@@ -1460,6 +1958,7 @@ async fn run(
         }
     }
 
+    body.push_str(&compare_panel(&dir, index));
     body.push_str(&network_panel(&dir, index));
 
     body.push_str("<h2>Build log</h2>");
@@ -1695,12 +2194,45 @@ fn report_panel(dir: &Path) -> String {
 /// Said out loud rather than rendered as an empty pane: a missing record here means the run was a
 /// void, a build failure or an error of ours, not that the store lost it.
 async fn store_panel(store: &Path, purl: &str) -> String {
-    let Some(found) = find_record(store, purl).await else {
-        return "<h2>Run record</h2><p class=\"note\">no record in the store for this target. The \
-                store keeps only runs that reached a comparison — a void, a build failure and an \
-                error of ours all write nothing there, by design: no statement may be written about \
-                a run that is evidence of nothing</p>"
-            .into();
+    let found = match find_record(store, purl).await {
+        Lookup::Found(f) => *f,
+        // Ours, and said as ours. The reader's next move is to check the path, not to wonder what
+        // their package did.
+        Lookup::Unusable(detail) => {
+            return format!(
+                "<h2>Run record</h2><p class=\"void\">the store at <code>{}</code> could not be \
+                 opened, so nothing was looked up: {}</p><p class=\"note\">This is a problem with \
+                 <code>--store</code>, not with the run. A relative path is resolved against the \
+                 directory <code>trigon watch</code> was started in.</p>",
+                esc(&store.display().to_string()),
+                esc(&detail)
+            );
+        }
+        Lookup::Unreadable(detail) => {
+            return format!(
+                "<h2>Run record</h2><p class=\"void\">the store at <code>{}</code> opened and its \
+                 runs could not be listed, so whether this target is in it is unknown rather than \
+                 no: {}</p>",
+                esc(&store.display().to_string()),
+                esc(&detail)
+            );
+        }
+        Lookup::Absent { read, millis } => {
+            return format!(
+                "<h2>Run record</h2><p class=\"note\">the store at <code>{}</code> holds {read} \
+                 run(s) and none of them is this target{}. The store keeps only runs that reached a \
+                 comparison — a void, a build failure and an error of ours all write nothing there, \
+                 by design: no statement may be written about a run that is evidence of nothing. A \
+                 run that did compare is missing here only if it was given no <code>--store</code>, \
+                 or a different one.</p>",
+                esc(&store.display().to_string()),
+                if read == 0 {
+                    ", because it holds none at all".to_string()
+                } else {
+                    format!(" (read in {millis}ms)")
+                }
+            );
+        }
     };
     let r = &found.record;
     let mut out = format!(
@@ -1867,6 +2399,7 @@ pub fn serve(
         .route("/cluster", axum::routing::get(cluster))
         .route("/run/{index}", axum::routing::get(run))
         .route("/run/{index}/network", axum::routing::get(network))
+        .route("/run/{index}/compare", axum::routing::get(compare))
         .route("/api/state", axum::routing::get(api_state))
         .with_state(sweep);
 

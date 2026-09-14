@@ -145,6 +145,24 @@ pub struct Store {
 
 impl Store {
     /// A store rooted at a local directory. The single-binary case.
+    /// Open a store that already exists, creating nothing.
+    ///
+    /// For readers. `local` creates the directory it is pointed at, which is right for a run that
+    /// is about to write to it and wrong for anything that only looks: `trigon watch` documents
+    /// itself as read-only and was silently creating whatever `--store` named. The cost was not the
+    /// stray directory — it was that a mistyped path then presented as a real, empty store, so the
+    /// page reported "no record for this target, by design" about a store that had never existed.
+    pub fn existing(root: &Path) -> Result<Self, StoreError> {
+        if !root.is_dir() {
+            return Err(StoreError::Malformed(format!(
+                "{} is not a directory, so there is no store here to read. A relative path is \
+                 resolved against the working directory of the process that was given it.",
+                root.display()
+            )));
+        }
+        Self::local(root)
+    }
+
     pub fn local(root: &Path) -> Result<Self, StoreError> {
         std::fs::create_dir_all(root)?;
         let fs = object_store::local::LocalFileSystem::new_with_prefix(root)?;

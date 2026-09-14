@@ -666,3 +666,27 @@ fn the_page_says_what_it_does_not_observe_even_on_a_clean_run() {
         );
     }
 }
+
+#[test]
+fn a_comparison_with_no_artifacts_says_so_rather_than_showing_no_differences() {
+    // The compare view re-derives from the two files, so a work directory that has been cleaned —
+    // or a build that produced nothing — leaves it with no inputs. "0 members differ" would be the
+    // same sentence a perfect reproduction prints, from a page that compared nothing at all.
+    let d = work("compare-no-artifacts");
+    write(
+        &d.join("run.json"),
+        r#"{"purl":"pkg:npm/a@1","started":"2026-01-01T00:00:00Z","outcome":"normalized"}"#,
+    );
+
+    for route in ["/run/0", "/run/0/compare"] {
+        let p = Watch::on(&d).get(route);
+        assert!(
+            p.contains("not on disk"),
+            "`{route}` must say it had nothing to compare:\n{p}"
+        );
+        assert!(
+            !p.contains("0 member(s)") && !p.contains("<strong>0</strong> still differ"),
+            "`{route}` renders a comparison it did not make:\n{p}"
+        );
+    }
+}
