@@ -1124,7 +1124,23 @@ mod build {
                         .map(Path::to_path_buf)
                         .unwrap_or_else(trigon_registry::SourceCache::default_root),
                 );
-                Ok(cache.checkout(&loc.repo, &loc.git_ref)?.path)
+                let checkout = cache.checkout(&loc.repo, &loc.git_ref)?;
+                // Said out loud, because the alternative is a divergence about how we cloned.
+                // `hatch-vcs`, `setuptools-scm` and their siblings take the package version from
+                // `git describe`, so a commit no tag names builds as `0.1.dev1+g<sha>` — a wheel
+                // whose every `dist-info` member is named wrong while its code is byte-identical.
+                // Most commits are not releases, so this is a note rather than a refusal; what it
+                // must not be is silent.
+                if checkout.tags.is_empty() {
+                    tracing::warn!(
+                        commit = %loc.git_ref,
+                        "no tag names this commit, so a build that derives its version from \
+                         `git describe` will produce a development version rather than the \
+                         release. Every difference that follows is about the checkout rather than \
+                         about the package."
+                    );
+                }
+                Ok(checkout.path)
             }) {
                 Ok(p) => Some(p),
                 Err(e) => {

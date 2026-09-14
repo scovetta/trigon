@@ -863,6 +863,35 @@ Three more in the same fifteen lines:
   one file that `build.rs` and the binary both `include!`, because two copies would either never
   match — warning on every run — or match by luck and never warn.
 
+### 3.21 The same tier asymmetry twice in one day
+
+`chardet 7.4.3` at `mirror-only` produced a wheel whose every `dist-info` member was named
+`chardet-0.1.dev1+g8f404a5a9`. Twenty-nine of its thirty-five members were byte-identical; the
+verdict was `divergent`. A public accusation about a package whose only fault was how we cloned it.
+
+`hatch-vcs` takes the package version from `git describe`. The host checkout is
+`git fetch --depth 1 origin <commit>`, which carries no tags, so `describe` had nothing to describe
+from.
+
+**And it was tier-dependent, which is why nobody saw it.** At `--egress open` the source phase runs
+`git clone` inside the container, and a clone fetches every tag, so the version came out right. Only
+an enforced tier — where the host fetches instead and copies the tree in — was wrong. Same recipe,
+same commit, two artifacts. That is the second such asymmetry found in a day: the venv path in §3.20
+was the first, and both were invisible for the same reason, which is that the corpus runs at `open`.
+
+The fix asks the remote which tags name the commit rather than fetching all of them: `ls-remote
+--tags` is a single round trip that transfers no objects, chardet has seventy-three tags, and one of
+them is the answer. Annotated tags list twice — once as the tag object, once as the commit under
+`^{}` — and it is the second line that matches.
+
+**The fix did not work the first time, and the reason is worth keeping.** A cached checkout is
+reused, and one made before tags were fetched has none; reading them on the cache hit was not
+enough, so the fix applied only to repositories nobody had built yet — which did not include the one
+it was written for. It backfills now.
+
+With tags, `chardet 7.4.3` reproduces **`exact`**: identical raw digests, thirty-five of thirty-five
+members identical, at `mirror-only` with a complete network transcript behind it.
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher

@@ -34,6 +34,13 @@ pub struct Checkout {
     pub repo: String,
     pub commit: String,
     pub path: PathBuf,
+    /// Tags that point at this exact commit, as fetched.
+    ///
+    /// Empty means no tag names this commit — or that the remote could not be asked. Either way a
+    /// build whose version comes from `git describe` will produce a development version rather than
+    /// the release, which is a divergence about how we cloned rather than about the package. The
+    /// caller is owed the difference; see [`SourceCache::checkout`].
+    pub tags: Vec<String>,
 }
 
 impl SourceCache {
@@ -80,7 +87,19 @@ impl SourceCache {
         // `.git` rather than the directory: an interrupted fetch leaves a directory behind, and
         // reusing it would serve a half-checkout that looks exactly like a repository missing files.
         if path.join(".git").join("HEAD").is_file() && marker(&path).is_file() {
-            return Ok(Checkout { repo, commit, path });
+            // A cached checkout is reused, and one made before tags were fetched has none — so
+            // reading them is not enough, or the fix would apply only to repositories nobody had
+            // built yet. Backfilled once and then found by the read on every later hit.
+            let mut tags = tags_present(&path, &repo, self.local);
+            if tags.is_empty() {
+                tags = fetch_tags_for(&path, &repo, &commit, self.local);
+            }
+            return Ok(Checkout {
+                repo,
+                commit,
+                path,
+                tags,
+            });
         }
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).map_err(|e| RegistryError::Source {
@@ -108,6 +127,24 @@ impl SourceCache {
             self.local,
         )?;
 
+        // **The tags that name this commit, and only those.**
+        //
+        // A `--depth 1` fetch of one commit carries no tags, so `git describe` has nothing to
+        // describe from — and `hatch-vcs`, `setuptools-scm` and every sibling derive the package
+        // version from exactly that. `chardet 7.4.3` rebuilt as `chardet-0.1.dev1+g8f404a5a9`:
+        // twenty-nine of thirty-five members byte-identical, and a `divergent` verdict published
+        // about a package whose only fault was how we cloned it.
+        //
+        // It is also the second tier-dependent divergence found in a day. At `--egress open` the
+        // source phase runs `git clone` inside the container, which fetches every tag, so the
+        // version came out right; at an enforced tier the host does this shallow fetch instead and
+        // it did not. Same recipe, same commit, two artifacts.
+        //
+        // Only the matching tags, rather than `--tags`: chardet has seventy-three and one of them
+        // is the answer. `ls-remote` is a single round trip that transfers no objects, so asking
+        // which costs less than fetching the rest.
+        let tags = fetch_tags_for(&path, &repo, &commit, self.local);
+
         // Written last, so it is only ever present on a checkout that completed.
         std::fs::write(marker(&path), format!("{repo}\n{commit}\n")).map_err(|e| {
             RegistryError::Source {
@@ -115,8 +152,75 @@ impl SourceCache {
                 detail: format!("writing the completion marker: {e}"),
             }
         })?;
-        Ok(Checkout { repo, commit, path })
+        Ok(Checkout {
+            repo,
+            commit,
+            path,
+            tags,
+        })
     }
+}
+
+/// Tag refs already in a cached checkout that point at its commit.
+fn tags_present(path: &Path, repo: &str, local: bool) -> Vec<String> {
+    git_output(path, &["tag", "--points-at", "HEAD"], repo, local)
+        .ok()
+        .map(|out| {
+            String::from_utf8_lossy(&out)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Ask the remote which tags name this commit, then fetch just those.
+///
+/// Best effort by design. A commit that no tag names is ordinary — most commits are not releases —
+/// and a remote that will not answer is a network problem, not a reason to fail a checkout that has
+/// already succeeded. What must not happen is either being silent: the empty list travels on
+/// [`Checkout::tags`] so the caller can say which it was.
+fn fetch_tags_for(path: &Path, repo: &str, commit: &str, local: bool) -> Vec<String> {
+    let Ok(listing) = git_output(path, &["ls-remote", "--tags", "origin"], repo, local) else {
+        return Vec::new();
+    };
+    let listing = String::from_utf8_lossy(&listing);
+    let mut wanted: Vec<String> = Vec::new();
+    for line in listing.lines() {
+        let Some((sha, name)) = line.split_once('\t') else {
+            continue;
+        };
+        if sha.trim() != commit {
+            continue;
+        }
+        // An annotated tag lists twice: the tag object under its own name, and the commit it points
+        // at under `^{}`. The commit line is the one that matches here, and the ref to fetch is its
+        // name without the suffix.
+        let name = name.trim().trim_end_matches("^{}");
+        if name.starts_with("refs/tags/") && !wanted.iter().any(|w| w == name) {
+            wanted.push(name.to_string());
+        }
+    }
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let mut args: Vec<String> = ["fetch", "--quiet", "--depth", "1", "origin"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for w in &wanted {
+        args.push(format!("{w}:{w}"));
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    if git(path, &argv, repo, local).is_err() {
+        return Vec::new();
+    }
+    wanted
+        .iter()
+        .map(|w| w.trim_start_matches("refs/tags/").to_string())
+        .collect()
 }
 
 impl Checkout {

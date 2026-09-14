@@ -160,3 +160,85 @@ fn the_reader_lists_tracked_files_and_reads_the_manifests_it_knows() {
             .is_empty()
     );
 }
+
+#[test]
+fn a_checkout_carries_the_tag_that_names_its_commit() {
+    // `hatch-vcs`, `setuptools-scm` and every sibling take the package version from `git describe`.
+    // A `--depth 1` fetch of one commit carries no tags, so `describe` had nothing to describe from
+    // and `chardet 7.4.3` rebuilt as `chardet-0.1.dev1+g8f404a5a9` — twenty-nine of thirty-five
+    // members byte-identical, and a `divergent` verdict published about a package whose only fault
+    // was how we cloned it.
+    //
+    // It was also tier-dependent, which is what made it invisible: at `--egress open` the source
+    // phase runs `git clone` inside the container and gets every tag, so the version came out
+    // right. Only an enforced tier, where the host does this shallow fetch instead, was wrong.
+    let root = tmpdir("tagged");
+    let (repo, first) = fixture(&root);
+    // An *annotated* tag, which is what a release usually is and which lists twice in `ls-remote`:
+    // once as the tag object and once as the commit it dereferences to. Matching the wrong line
+    // fetches nothing.
+    git(&repo, &["tag", "-a", "v1.0.0", "-m", "release", &first]);
+    // And a second tag on the other commit, which must not be fetched: a repository with seventy
+    // tags should cost one.
+    git(&repo, &["tag", "-a", "v2.0.0", "-m", "later", "HEAD"]);
+
+    let cache = SourceCache::new(root.join("cache")).trusting_local_paths();
+    let out = cache.checkout(repo.to_str().unwrap(), &first).unwrap();
+    assert_eq!(
+        out.tags,
+        vec!["v1.0.0".to_string()],
+        "only the matching tag"
+    );
+
+    let described = Command::new("git")
+        .current_dir(&out.path)
+        .args(["describe", "--tags"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&described.stdout).trim(),
+        "v1.0.0",
+        "the version a VCS-derived build would compute"
+    );
+}
+
+#[test]
+fn a_checkout_cached_before_tags_were_fetched_gets_them_on_the_next_hit() {
+    // The fix would otherwise apply only to repositories nobody had built yet: a cached checkout is
+    // reused, and one made before this existed has no tags and would never acquire any. Found by
+    // the fix not working on the package it was written for.
+    let root = tmpdir("tag-backfill");
+    let (repo, first) = fixture(&root);
+    let cache = SourceCache::new(root.join("cache")).trusting_local_paths();
+
+    // The first checkout happens before the tag exists, so it legitimately has none.
+    let cold = cache.checkout(repo.to_str().unwrap(), &first).unwrap();
+    assert!(cold.tags.is_empty());
+
+    git(&repo, &["tag", "-a", "v1.0.0", "-m", "release", &first]);
+    let warm = cache.checkout(repo.to_str().unwrap(), &first).unwrap();
+    assert_eq!(warm.path, cold.path, "the same cached checkout, reused");
+    assert_eq!(warm.tags, vec!["v1.0.0".to_string()], "and backfilled");
+}
+
+#[test]
+fn a_commit_no_tag_names_reports_no_tags_rather_than_failing() {
+    // Most commits are not releases. An untagged one is ordinary, so this is a note the caller can
+    // act on and not a refusal — but it must be reported, because a VCS-versioned build will
+    // silently produce a development version from it.
+    let root = tmpdir("untagged");
+    let (repo, first) = fixture(&root);
+    git(&repo, &["tag", "-a", "v2.0.0", "-m", "later", "HEAD"]);
+
+    let cache = SourceCache::new(root.join("cache")).trusting_local_paths();
+    let out = cache.checkout(repo.to_str().unwrap(), &first).unwrap();
+    assert!(
+        out.tags.is_empty(),
+        "no tag names this commit: {:?}",
+        out.tags
+    );
+    assert!(
+        out.path.join(".git").is_dir(),
+        "and the checkout still works"
+    );
+}
