@@ -46,6 +46,20 @@ Measured on the M1 smoke corpora, at `--egress open`:
 | npm | 14 of 15 (93%) | 15 of 20 |
 | PyPI | 12 of 15 (80%) | 15 of 17 |
 
+And PyPI measured again at **`--egress mirror-only`** — the tier this README recommends, where the
+build's only route out is a time-filtered mirror that writes down everything it serves:
+
+| | reproduce | reach a comparison |
+|---|---|---|
+| PyPI, enforced | **9 of 11 (82%)** | 11 of 17 |
+
+The rate holds at the enforced tier, and three of the nine are `exact` rather than normalized —
+byte-for-byte identical to what PyPI published. What drops is the denominator: of the six that reach
+no comparison, three are packages that are *part of the machinery that builds packages*, so the
+build asks the mirror for the very package under test and is refused. Those are a standing problem
+with a name (`env/needs-the-package-under-test`) rather than a silent loss, and
+[`16-findings.md`](docs/16-findings.md) §3.22 says what closing them would take.
+
 PyPI was 5 of 15 that morning. The lift came from three deterministic fixes and no model at all;
 [`docs/16-findings.md`](docs/16-findings.md) §2 has the arithmetic.
 

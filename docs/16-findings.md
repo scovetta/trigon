@@ -939,6 +939,12 @@ has an explanation attached. Voiding there would have meant `setuptools`, `wheel
 `flit-core` and `hatchling` could never be verified at an enforced tier: the packages everything
 else depends on.
 
+**Re-run after the change**, the same seventeen targets: every outcome identical except the three,
+which moved from `void` to `build-failed:deps` and now carry a named cluster each —
+`env/needs-the-package-under-test:packaging>=24.0`, `:pyproject_hooks`, `:toml`, each marked
+"nothing to repair". The rate is unchanged at 9 of 11 (82%), which is the right result: the change
+was to a verdict, not to a build, and it moved exactly the runs it should have and nothing else.
+
 **Two more defects the sweep surfaced, both tier-independent:** `tomli`'s source discovery produced
 `https://github.com/hukkin/tomli/blob/master/CHANGELOG.md/` as a repository URL, because
 `canonicalize_repo` does not strip a `/blob/…` file path off what PyPI's metadata supplies; and
