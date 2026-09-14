@@ -10,6 +10,12 @@ trust us.
 Registries distribute artifacts. People audit source. Almost nothing checks that the two correspond,
 and that gap is where build-time supply-chain attacks live.
 
+**Today it rebuilds npm and PyPI packages.** crates.io, RubyGems, NuGet and GitHub releases are
+designed for and sequenced next; a target in one of those is refused by name rather than attempted.
+Comparing two artifacts you already have — the judgement half, below — needs no network and has no
+prerequisites at all. Tarballs, wheels, gems and crates each get their own normalization; a `.nupkg`
+gets the generic zip set until someone writes NuGet's.
+
 **Using it?** [`docs/using-trigon.md`](docs/using-trigon.md) is the task-oriented guide: install,
 compare two artifacts, rebuild a package, read a verdict, and — the section worth reading first —
 what a verdict does *not* tell you.
@@ -27,6 +33,12 @@ records where building it proved the design wrong.
 | **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime` |
 | **M3** the search half | begun | the deterministic parts first — failure signatures, log compression, the repair-loop policy, the Builder |
 
+Tier-1 observability landed early, out of milestone order: every run at an enforced egress tier now
+records a **network transcript** of everything that crossed into the build, and `attestable` is
+derived from whether that account is complete rather than being a constant. The mirror had been
+computing all of it — it hashes every body as it streams past, which is how the artifact guard works
+— and throwing it away unless the hash matched.
+
 Measured on the M1 smoke corpora, at `--egress open`:
 
 | | reproduce | reach a comparison |
@@ -40,30 +52,36 @@ PyPI was 5 of 15 that morning. The lift came from three deterministic fixes and 
 ## What it does
 
 ```
-$ trigon verify upstream.tgz rebuild.tgz
+$ trigon verify left-pad-1.3.0.tgz rebuilt/left-pad-1.3.0.tgz
 ✔ normalized
 
   format         tar+gzip
-  stabilizer set npm-tarball (562ce45ae605…)
+  stabilizer set tar-gzip (4598411b636d…)
 
                upstream           rebuild
-  raw          950a7c15ff8f…      b1934117b05e…      ≠
-  container    bddb6178d296…      ef8d6b3d2ff6…      ≠
-  stabilized   23065039367b…      23065039367b…      =
+  raw          870c0fe10962…      55b10c02dc3c…      ≠
+  container    2bc27360d33b…      39d388af65d0…      ≠
+  stabilized   f0a01941419d…      f0a01941419d…      =
+
+  containers differ as well as the framing
 
   applied
     gzip-meta                metadata        1 entries
-    tar-entry-order          structural      3 entries
-    tar-mode                 metadata        3 entries
-    tar-owners               metadata        3 entries
-    tar-time                 metadata        3 entries
+    tar-entry-order          structural     10 entries
+    tar-mode                 metadata       10 entries
+    tar-time                 metadata       10 entries
 
-  members  3 identical, 0 differ, 0 upstream-only, 0 rebuild-only
+  members  10 identical, 0 differ, 0 upstream-only, 0 rebuild-only
 ```
 
-Those two tarballs were built eight years apart, by different users, with different umasks, in a
-different member order, at different gzip levels. They stabilize to the same digest. Change one byte
-of `index.js` and the verdict is `divergent`, the member is named, and the exit code is 1.
+npm published that tarball in 2018; the rebuild is from this morning. They differ in gzip framing,
+in member order, and in file modes — and the `applied` list is exactly which stabilizer removed
+which, with how many entries it touched. In nothing else do they differ, which is what the shared
+`stabilized` digest says. Change one byte of `index.js` and the verdict is `divergent`, the member
+is named, and the exit code is 1.
+
+Three digests per side, not one, because "the same tar in different gzip framing" and "a different
+tar" are different findings and a single digest cannot tell you which you have.
 
 ## Verify a package end to end
 
@@ -100,6 +118,11 @@ $ trigon rebuild pkg:npm/left-pad@1.3.0 \
 
 `normalized` rather than `exact`: the two tarballs differ in mtimes, file modes and member order,
 all of which the stabilizers remove, and in nothing else.
+
+Note the `rebuild` raw digest is not the one in the first example. That was a different run at a
+different egress tier, and a fresh `npm pack` does not produce the same bytes twice. The
+**stabilized** digest is `f0a01941419d…` in both, which is the entire point: the verdict is a
+property of the package, not of the afternoon it was rebuilt on.
 
 The `mirror` line is the evidence that the dependency index really was pinned to the publish date.
 The count is across all 69 packuments the build fetched, not left-pad's own — left-pad has published
@@ -203,10 +226,47 @@ network whose only route out is the time-filtered mirror, and needs that mirror'
 $ trigon mirror-image          # compiles trigon in a container; several minutes
 $ trigon base-image --from <a pinned image>     # the packages an enforced tier cannot install
 $ trigon rebuild pkg:npm/left-pad@1.3.0 --image <the base image's id> --work ./work \
-      --egress mirror-only --timewarp auto
-…
+      --egress mirror-only --timewarp auto --store ./store --verbose
+
+  network   141 responses crossed into the build, 0 opened and checked
+            ./work/rebuild/network.jsonl
+
+  mirror     69 index request(s), 1044 version(s) withheld across them
+             1 toolchain download(s) through the allowlist
+
 ✔ normalized
+…
+  cost       21.2s building, 21.4 MB fetched, 66.1 KB stored
 ```
+
+**That `network` line is what `attestable: true` means, and it is the whole of the difference.** The
+mirror is the build's only route out, and it writes down every response body it serves: the route,
+the URL, the SHA-256 of the bytes as served, the byte count, and how far the artifact guard got with
+each one. `network.jsonl` is that list, one JSON object per line, and the signed
+`buildobservation/v1` names it by hash — so a reader fetches those bytes, checks them against the
+hash, and reads what the build downloaded, rather than taking our word that we looked.
+
+```json
+{"route":"toolchain","url":"https://nodejs.org/dist/v9.2.1/node-v9.2.1-linux-x64.tar.gz",
+ "sha256":"b8507b17277b1582…","bytes":17823914,"checked":"hashed"}
+{"route":"index","url":"https://registry.npmjs.org/benchmark",
+ "sha256":"6d08de7ac3190fb9…","bytes":46606,"checked":"generated","withheld":0}
+```
+
+`checked` is the field that keeps the guard honest: `opened` means every member was compared against
+the run's manifest, `hashed` means only the whole body was, `partial` means the build hung up before
+the body finished. Without it, "opened and clean" and "never opened" read identically — and they are
+the difference between a check and the appearance of one.
+
+`deny-all` is attestable too, and its account is complete and *empty*: with `--network none` on both
+the image build and the run there is no interface, so "nothing crossed" is enforced by the kernel
+rather than observed by a proxy. Present-and-empty and absent are kept apart the whole way down — an
+empty blob, no blob, and `attestable` derived from which — because collapsing them would turn "we
+never looked" into "we looked and it was clean".
+
+What it does *not* assert: that the sandbox class, the base image or the strategy are good enough to
+sign. Those are separate claims. Reading `attestable` as "full trust" is how a control starts
+reporting success it has not earned.
 
 Both images are built from this workspace, so the mirror goes stale when the mirror code changes.
 `rebuild` compares the two and says so before the build starts rather than after it fails inside the
@@ -303,7 +363,7 @@ problem.** Search is where a model helps. Equivalence is where it must never be 
       trigon-compare                            |
               \____________ _______ ___________/
    ================= JUDGEMENT / SEARCH LINE =================
-    trigon-registry   trigon-ai   trigon-sandbox   trigon-store
+   trigon-registry  trigon-ai  trigon-sandbox  trigon-store  trigon-mirror
                              |
                         trigon (bin)
 ```
@@ -342,20 +402,28 @@ scripts/                  the cross-machine verification check
 ## Build and check
 
 ```
-cargo test --workspace                      # 653 pass, 4 fail on purpose (see below)
+cargo test --workspace                      # 680 pass, 0 fail
 cargo run -p xtask -- policy                # the dependency policy
 cargo run -p xtask -- differential          # against the reference implementation
 scripts/cross-machine-verify.sh             # the claim a third party can check
 
-# Four tests are committed red. Each one documents a confirmed bug nobody has fixed
-# yet — two in the store, two in how errors report the fault they already know — and
-# each names the defect in its own failure message. Deleting them to reach a green
-# suite is how a bug becomes invisible again, so they stay until the bug goes.
+# Coverage. The leading slash matters: `tests?/` without it silently excludes the
+# whole of trigon-attest, because `attest/` contains `test/`.
+cargo llvm-cov --workspace --no-fail-fast --summary-only \
+  --ignore-filename-regex '(/tests?/|/xtask/)'
 
-# The archived stabilizer set, which needs a second target and is not in the default run:
+# The archived stabilizer set, which needs a second target and is not in the default
+# run. Without the module the parity tests skip and the run still exits 0, so CI
+# greps for the two test names rather than trusting the exit code.
 cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
 cargo test  -p trigon-stabilize-wasm --features host
 ```
+
+The judgement half — `core`, `archive`, `stabilize`, `compare`, `attest` — is at **89% of lines**;
+the workspace is at 70%. That split is deliberate: the judgement half is what the verifier binary
+contains, what a third party re-derives a verdict with, and the only part whose bugs are silent. A
+divergence is self-consistent, so both sides get the same wrong treatment and the failure surfaces
+as a wrong verdict rather than a crash.
 
 Rust 1.85 or later, edition 2024. Rebuilds additionally need `podman`; nothing else has
 prerequisites, and `trigon verify` has none at all.

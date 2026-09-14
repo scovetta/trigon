@@ -6,9 +6,16 @@ Trigon takes a published package artifact, finds the source it claims to come fr
 controlled environment, and decides whether the rebuild and the published artifact are the same
 thing. It signs an attestation either way.
 
-It supports npm, PyPI, crates.io, RubyGems, NuGet, and arbitrary GitHub projects behind a single
-extension seam. It runs as one binary on a laptop or as a fleet on any cloud. It uses LLMs hard for
-the parts that are a search problem, and not at all for the parts that are a correctness problem.
+It is designed for npm, PyPI, crates.io, RubyGems, NuGet, and arbitrary GitHub projects behind a
+single extension seam. It runs as one binary on a laptop or as a fleet on any cloud. It uses LLMs
+hard for the parts that are a search problem, and not at all for the parts that are a correctness
+problem.
+
+**These documents are the design, written before the code.** Where the two disagree the code wins,
+and [`16-findings.md`](16-findings.md) records which. Two things to carry into every chapter here:
+**npm and PyPI are the only ecosystems with a registry client** — the rest are refused by name, and
+[`03-ecosystems.md`](03-ecosystems.md) §7.2 has the honest count of what adding one costs — and
+several types these documents describe were never written, each now marked where it is named.
 
 ---
 
