@@ -443,28 +443,44 @@ arbitrary JavaScript with `exec`, and that list was prefix-matched so anyone nam
 an inert one inherited its silence; and `container:` overrode `runs-on`, so a Windows or self-hosted
 job that also declared a container escaped the out-of-scope rule ADR-0009 requires.
 
-**Outstanding, each with a probe that demonstrates it:**
+**All eight fixed, each with a test that fails without the fix.** What each was, and what it is
+now:
 
-- `twine check` matches as a publish marker, so on the standard check-then-upload shape the wrong
-  step becomes "the publish step".
-- `actions/download-artifact` in the *build* job is grouped with cache and publish markers as
-  "provably does not matter" — but a build whose inputs are bytes fetched from an earlier job is
-  the forged-attestation shape of [`12`](12-security.md) §1.1, not an irrelevance.
-- `download-artifact`'s `pattern:` is compared as a literal name, so every publish job that fans in
-  wheels with a glob loses its build edge.
-- `sed` is in `cmd::INCIDENTAL`, so `sed -i` rewriting the tree immediately before the build
-  disappears and the candidate comes out `Strong`.
-- Two decline messages assert things that are not true of the run that produced them
-  (`NoQualifyingJob` where a job qualified but its build edge could not be followed;
-  `NoToolForBuildCommand` where a build *was* recognised).
-- **Confidence inverts around `ubuntu-latest`**: failing to resolve which release the label meant
-  yields a *more* confident candidate than resolving it. Not knowing should never raise confidence.
-- Workflow- and job-level `env:` is parsed and never read, with no note that it was dropped.
-- The publish job's own `uses:` steps are never classified when it is not the build job.
+- `twine check` matched as a publish marker, so on the standard check-then-upload shape the *check*
+  became the publish step — which put the real upload's token in `secrets_in_build` (a decline on a
+  readable workflow) and put `twine upload` itself into the recipe's steps, so a rebuild lowered
+  from it would publish to PyPI. Only `upload` publishes now.
+- `actions/download-artifact` in the *build* job was grouped with cache markers as "provably does
+  not matter". True of the publish job; in the build job it means the build's inputs are bytes this
+  rebuild will not produce, which is the forged-attestation shape of [`12`](12-security.md) §1.1.
+  `Decline::BuildConsumesAnotherJobsOutput`.
+- `download-artifact`'s `pattern:` was compared as a literal name, so every publish job fanning
+  wheels in with a glob lost its build edge. It is a glob now (`*` and `?` only; anything else
+  matches nothing rather than something approximate), and the edge records the artifact that was
+  *uploaded*.
+- `sed` was in `cmd::INCIDENTAL`, so `sed -i` rewriting the tree before the build disappeared and
+  the candidate came out `Strong`. `Cmd::MutatesTree` now, separate from `Unknown` because the two
+  claim different things; `git`'s tree-writing subcommands moved with it.
+- Two decline messages asserted things untrue of the run that produced them. `NoQualifyingJob`
+  became `BuildJobUnreachable` where a job qualified and the edge did not resolve;
+  `NoToolForBuildCommand` became `RecipeIncomplete` where a build *was* recognised and lowered.
+- Confidence inverted around `ubuntu-latest`: failing to resolve the label produced no
+  approximation, nothing to lower against, and a `Strong` candidate — the run that knew less was
+  the more confident one. A label with no approximation is now at least as uncertain as one with a
+  weak approximation.
+- Workflow- and job-level `env:` was parsed and read by nothing, so a workflow setting
+  `SOURCE_DATE_EPOCH` in its header looked identical to one that did not. It gets the note a
+  `GITHUB_ENV` export already got, plus an assumption, because a note lives in a report and an
+  assumption reaches the attestation.
+- The publish job's own steps were never classified when it was not the build job, so anything it
+  did to the artifact between download and upload was invisible.
+  `Decline::ArtifactChangedAfterTheBuild`.
 
-**Done when:** every item above has a test that fails without the fix, both verification angles come
-back `sound`, and only then does `ladder()` in `crates/trigon/src/main.rs` call it — between the
-heuristic and the model, per [`01`](01-architecture.md) §3.
+**Still not wired, and the remaining condition is the reason.** Both verification angles have to
+come back `sound` against the fixed rung before `ladder()` in `crates/trigon/src/main.rs` calls it —
+between the heuristic and the model, per [`01`](01-architecture.md) §3. The eight above were found
+by exactly that exercise, which is the argument for running it again rather than for trusting that
+the list is now empty.
 
 ## B13. A commit the forge will not serve needs the tag as a fallback
 

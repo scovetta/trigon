@@ -2274,7 +2274,16 @@ mod rebuild {
                 ))
             }
             trigon_core::Ecosystem::PyPI => {
-                rungs.push(Box::new(PyPiInferrer::new().with_mirror(mirror)))
+                // The same cache the npm rung and the model rung use: a target whose repository
+                // more than one of them wants is fetched once.
+                let sources = std::sync::Arc::new(trigon_registry::SourceCache::new(
+                    sources.unwrap_or_else(trigon_registry::SourceCache::default_root),
+                ));
+                rungs.push(Box::new(
+                    PyPiInferrer::new()
+                        .with_mirror(mirror)
+                        .with_sources(Some(sources)),
+                ))
             }
             // **Named, not silent.** This was `_ => {}`, and it is the seam leak
             // `docs/17-backlog.md` B8 exists to find: adding an ecosystem needs an arm here, and

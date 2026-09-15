@@ -314,6 +314,7 @@ impl StrategyInferrer for NpmInferrer {
 #[derive(Default)]
 pub struct PyPiInferrer {
     mirror: Option<String>,
+    sources: Option<std::sync::Arc<crate::SourceCache>>,
 }
 
 impl PyPiInferrer {
@@ -325,6 +326,68 @@ impl PyPiInferrer {
     pub fn with_mirror(mut self, mirror: Option<String>) -> Self {
         self.mirror = mirror;
         self
+    }
+
+    /// Let the rung read the repository, to find out where in it the project lives.
+    ///
+    /// npm declares this: `repository.directory` is a field, and a PyPI `tree/<ref>/<path>` link
+    /// carries it in passing. Neither exists for a project that simply is not at the root of its
+    /// repository — `stub42/pytz` keeps its `setup.py` under `src/`, so a checkout at the tag it
+    /// released from has no Python project where the recipe looked, and the build failed with
+    /// "Source /src does not appear to be a Python project". Nothing in any metadata says where it
+    /// is; the repository does.
+    pub fn with_sources(mut self, sources: Option<std::sync::Arc<crate::SourceCache>>) -> Self {
+        self.sources = sources;
+        self
+    }
+}
+
+/// Where the Python project is in a repository, given everything the repository contains.
+///
+/// `None` means the root, which is the answer for almost every package and costs nothing to say.
+/// Otherwise the one directory holding a `pyproject.toml` or a `setup.py`, or — where several do —
+/// the one named after the package.
+///
+/// Depth 1 only. A project two directories down exists, and finding it would mean ranking
+/// candidates from a whole monorepo; the shapes this is for are `src/`, `python/`, and a
+/// repository holding two or three siblings.
+///
+/// Several candidates and no name match yields `None` rather than a guess: building at the root
+/// fails with a message that names the problem, and building in the wrong sibling produces a
+/// divergence that says nothing about the package.
+pub(crate) fn project_root(files: &[String], package: &str) -> Option<String> {
+    const MANIFESTS: [&str; 2] = ["pyproject.toml", "setup.py"];
+    if files.iter().any(|f| MANIFESTS.contains(&f.as_str())) {
+        return None;
+    }
+    let mut dirs: Vec<&str> = Vec::new();
+    for f in files {
+        let Some((dir, base)) = f.rsplit_once('/') else {
+            continue;
+        };
+        if dir.contains('/') || !MANIFESTS.contains(&base) {
+            continue;
+        }
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    match dirs.as_slice() {
+        [] => None,
+        [one] => Some((*one).to_string()),
+        several => {
+            let squash = |s: &str| -> String {
+                s.chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .map(|c| c.to_ascii_lowercase())
+                    .collect()
+            };
+            let wanted = squash(package);
+            several
+                .iter()
+                .find(|d| squash(d) == wanted)
+                .map(|d| (*d).to_string())
+        }
     }
 }
 
@@ -375,6 +438,42 @@ impl StrategyInferrer for PyPiInferrer {
         } else {
             (source.commit.clone(), source.how)
         };
+
+        // Where in the repository the project is. A declared subdirectory wins — npm has a field
+        // for it and a PyPI `tree/<ref>/<path>` link says it in passing — and where nothing
+        // declares one, the repository is asked. `stub42/pytz` keeps its `setup.py` under `src/`,
+        // and the build failed with "Source /src does not appear to be a Python project", which
+        // reads as a broken checkout rather than as a layout.
+        let mut subdir = source.subdir.clone();
+        if subdir.is_none()
+            && let Some(sources) = self.sources.clone()
+        {
+            let (repo, at) = (source.repo_url.clone(), commit.clone());
+            // On a blocking thread: the checkout shells out to git, and a rung runs inside the
+            // runtime that drives a sweep.
+            let listed = tokio::task::spawn_blocking(move || {
+                sources.checkout(&repo, &at).and_then(|c| c.files(20_000))
+            })
+            .await;
+            match listed {
+                Ok(Ok(files)) => {
+                    if let Some(found) = project_root(&files, &target.reference.registry_name()) {
+                        assumptions.push(format!(
+                            "the repository has no Python project at its root; `{found}/` is the \
+                             one directory that does, and the build runs there"
+                        ));
+                        subdir = Some(found);
+                    }
+                }
+                // Not fatal. The recipe built at the root is what this rung produced before this
+                // check existed, and a failure to read the repository must not turn a target that
+                // resolves into one that does not.
+                Ok(Err(e)) => {
+                    tracing::debug!(repo = source.repo_url, "could not list the repository: {e}");
+                }
+                Err(e) => tracing::debug!(repo = source.repo_url, "listing panicked: {e}"),
+            }
+        }
 
         // See `VENV`: the path is a constant because four places have to agree on it.
         // `/trigon/deps`, not `/deps`. The root directory of a Debian image is mode 0555, and root
@@ -441,7 +540,7 @@ impl StrategyInferrer for PyPiInferrer {
             location: Location {
                 repo: source.repo_url.clone(),
                 git_ref: commit,
-                subdir: source.subdir.clone(),
+                subdir: subdir.clone(),
             },
             src: vec![uses("git-checkout", BTreeMap::new())],
             deps: vec![uses("pypi/deps/basic", deps)],
@@ -478,7 +577,7 @@ impl StrategyInferrer for PyPiInferrer {
                     ("no_isolation".to_string(), "false".to_string()),
                 ]),
             )],
-            output_dir: Some(match &source.subdir {
+            output_dir: Some(match &subdir {
                 Some(d) => format!("{}/dist", d.trim_end_matches('/')),
                 None => "dist".into(),
             }),
@@ -527,4 +626,77 @@ fn evidence_value(target: &ResolvedTarget, source: &str) -> Option<String> {
             }
             _ => None,
         })
+}
+
+#[cfg(test)]
+mod project_root_tests {
+    use super::project_root;
+
+    /// What `git ls-files` returns for `stub42/pytz` at the tag it released 2026.1 from, trimmed.
+    const PYTZ: &[&str] = &[
+        "LICENSE.txt",
+        "Makefile",
+        "README.md",
+        "conf.py",
+        "gen_tzinfo.py",
+        "src/pytz/__init__.py",
+        "src/setup.py",
+        "test_zdump.py",
+        "tz/africa",
+    ];
+
+    fn owned(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn a_project_that_is_not_at_the_root_of_its_repository_is_found() {
+        // Nothing in any metadata says where it is: npm's `repository.directory` and a PyPI
+        // `tree/<ref>/<path>` link both cover a project that *declares* a subdirectory, and this
+        // one simply is not at the root. The build failed with "Source /src does not appear to be
+        // a Python project", which reads as a broken checkout.
+        assert_eq!(project_root(&owned(PYTZ), "pytz").as_deref(), Some("src"));
+    }
+
+    #[test]
+    fn the_ordinary_layout_costs_nothing_to_say() {
+        // Almost every package. `None` means the root, and the rung behaves exactly as before.
+        let flat = owned(&["pyproject.toml", "src/thing/__init__.py", "tests/test.py"]);
+        assert_eq!(project_root(&flat, "thing"), None);
+        // A root `setup.py` beside a subdirectory that also has one: the root wins, because the
+        // root is where the project is and the subdirectory is something it vendors.
+        let both = owned(&["setup.py", "vendor/setup.py"]);
+        assert_eq!(project_root(&both, "thing"), None);
+    }
+
+    #[test]
+    fn several_candidates_are_decided_by_the_package_name_or_not_at_all() {
+        let siblings = owned(&[
+            "google-auth/pyproject.toml",
+            "google-cloud-storage/pyproject.toml",
+            "README.md",
+        ]);
+        assert_eq!(
+            project_root(&siblings, "google-auth").as_deref(),
+            Some("google-auth")
+        );
+        // Normalized, so `google_auth` in the tree matches `google-auth` on the index.
+        let underscored = owned(&["google_auth/setup.py", "other/setup.py"]);
+        assert_eq!(
+            project_root(&underscored, "google-auth").as_deref(),
+            Some("google_auth")
+        );
+        // And where the name decides nothing, neither does this. Building at the root fails with
+        // a message that names the problem; building in the wrong sibling produces a divergence
+        // that says nothing about the package.
+        assert_eq!(project_root(&siblings, "unrelated"), None);
+    }
+
+    #[test]
+    fn depth_one_only() {
+        // A project two directories down exists, and finding it would mean ranking candidates from
+        // a whole monorepo. Stated as a limit rather than discovered as a silent miss.
+        let deep = owned(&["packages/python/google-auth/pyproject.toml"]);
+        assert_eq!(project_root(&deep, "google-auth"), None);
+    }
 }

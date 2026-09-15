@@ -97,8 +97,41 @@ fetched from the Integrity API.
 2. `info.project_urls`, keys normalized to lowercase-without-spaces, in preference order:
    `source`, `sourcecode`, `repository`, `project`, `github`.
 3. `info.home_page`, if it points at a known forge.
-4. Repository URLs scraped from the long description.
-5. Tag ladder, manifest history over `pyproject.toml` / `setup.py`, tree-hash scoring.
+4. The **package-level** record, where the release's own names no forge. A release's metadata is a
+   snapshot of what the project declared on the day it was published, and what projects declare
+   improves over time: `pytz` 2026.1 names a `Download` link and a docs `Homepage`, and `pytz`
+   today names `Source: https://github.com/stub42/pytz`. We verify old versions, so we keep meeting
+   the record that says least. Recorded under its own evidence source, because it is a guess about
+   continuity rather than a contemporary statement.
+5. Repository URLs scraped from the long description.
+6. Tag ladder, manifest history over `pyproject.toml` / `setup.py`, tree-hash scoring.
+
+**Every one of these is a URL a human typed**, and a large minority of them point at a *view* of a
+repository rather than at the repository: `…/python-engineio/issues`, `…/msal/releases`,
+`…/lark/tarball/master`. Trimming a view off the end is not cosmetic — on a 50-target sample it
+was the difference between ten targets resolving and ten reporting `no-strategy`.
+
+The same URLs are also the only place PyPI can say what npm says in `repository.directory`. A
+`…/google-cloud-python/tree/main/packages/google-auth` link carries the subdirectory in passing,
+and reading the repository out of it while discarding the path is how a monorepo member comes to
+build at the wrong root. `blob/` links are excluded: they name a file, not a directory.
+
+**And where nothing declares a subdirectory, the repository is asked.** A project that simply is
+not at the root of its repository — `stub42/pytz` keeps its `setup.py` under `src/` — has no field
+anywhere to say so. One directory at depth 1 holding a `pyproject.toml` or `setup.py` is the
+answer; several, and the package name decides; neither, and we build at the root and fail with a
+message that names the problem, which beats building in the wrong sibling and reporting a
+divergence that says nothing about the package.
+
+### The tag ladder
+An exact tag, then `v`-prefixed, then the same two with a calendar version zero-padded back
+(PEP 440 normalizes the zero out of `2026.07.22`), then a tag whose *prefix* strips to leave the
+version exactly: `python-ecdsa-0.19.2`, `RELEASE_3.2.9`, `azure-storage-blob_12.28.0`. Prefix
+only — stripping a suffix too would make `1.2.3-rc1` match `1.2.3`, a different release. Where
+several tags match, the package name breaks the tie and nothing else does; where it does not, the
+rung yields no commit, because a wrong commit is worse than none.
+
+All of it is answered from one `git ls-remote`, so the whole ladder costs one request.
 
 ### Toolchain evidence, where npm has none and PyPI has plenty
 Open the **upstream wheel** and read `*.dist-info/WHEEL` and `METADATA`:
