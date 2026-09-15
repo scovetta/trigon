@@ -115,7 +115,19 @@ impl Registry for PyPiRegistry {
             });
         }
 
-        let (repo, subdir) = source_and_subdir(&doc);
+        // Ask the package what it says now only when the release itself said nothing: one extra
+        // request, never on the common path. See [`believe`] for why it is worth making.
+        let mut believed = believe(&doc, None);
+        if believed.repo.is_none() {
+            let latest = self.latest_doc(&name).await;
+            believed = believe(&doc, latest.as_ref());
+        }
+        let Believed {
+            repo,
+            subdir,
+            source,
+        } = believed;
+
         let mut evidence = Vec::new();
         if let Some(r) = &repo {
             evidence.push(Evidence::new(
@@ -124,7 +136,7 @@ impl Registry for PyPiRegistry {
                 // metadata, not something the publishing tool recorded, and it is routinely a
                 // documentation site or an organization page.
                 Confidence::Weak,
-                "pypi:project_urls",
+                source,
             ));
         }
         if let Some(t) = &publish_time {
@@ -171,6 +183,23 @@ impl Registry for PyPiRegistry {
 }
 
 impl PyPiRegistry {
+    /// What the package says about itself now, for a release that said nothing.
+    ///
+    /// Best-effort by construction: this runs only when the version's own record named no
+    /// repository, so a failure here leaves the resolver exactly where it already was. Returning
+    /// `None` rather than an error keeps a rate limit or a transient 503 from turning a resolvable
+    /// target into a failed one.
+    async fn latest_doc(&self, name: &str) -> Option<Value> {
+        let url = format!("{}/pypi/{}/json", self.base, name);
+        match self.client.get(&url, ECO).await {
+            Ok(r) => r.json().await.ok(),
+            Err(e) => {
+                tracing::debug!(%name, error = %e, "no package-level metadata to fall back on");
+                None
+            }
+        }
+    }
+
     async fn not_found(&self, target: &TargetRef) -> RegistryError {
         let name = target.registry_name();
         let url = format!("{}/pypi/{}/json", self.base, name);
@@ -198,6 +227,51 @@ impl PyPiRegistry {
             version: target.version.clone(),
             available,
         }
+    }
+}
+
+/// What a resolve believes about where the source is, and on whose word.
+struct Believed {
+    repo: Option<String>,
+    subdir: Option<String>,
+    /// The evidence source string, which differs by which record was believed.
+    source: &'static str,
+}
+
+/// Which record to believe about the repository: the release's own, or the package's as it stands.
+///
+/// The repository is a per-package fact, and the metadata around it improves over time, so the
+/// version under test is routinely the one that says least. `pytz` 2026.1 declares a `Download`
+/// link and a docs `Homepage` and nothing else; `pytz` today declares
+/// `Source: https://github.com/stub42/pytz.git`, and the repository has not moved in between.
+///
+/// The release's own record always wins where it names anything, because it is contemporary with
+/// the artifact. The fallback is a guess about continuity — a package that changed hands would
+/// send us to the wrong repository — so it is recorded under its own evidence source and the
+/// caller is not told the two are the same kind of claim.
+///
+/// The subdirectory comes from whichever record won. Reading the repository out of one document
+/// and the subdirectory out of another is how a monorepo member comes to build at the wrong root.
+fn believe(version: &Value, latest: Option<&Value>) -> Believed {
+    let (repo, subdir) = source_and_subdir(version);
+    if repo.is_some() {
+        return Believed {
+            repo,
+            subdir,
+            source: "pypi:project_urls",
+        };
+    }
+    match latest.map(source_and_subdir) {
+        Some((repo @ Some(_), subdir)) => Believed {
+            repo,
+            subdir,
+            source: "pypi:project_urls@latest",
+        },
+        _ => Believed {
+            repo: None,
+            subdir: None,
+            source: "pypi:project_urls",
+        },
     }
 }
 
@@ -296,6 +370,58 @@ mod tests {
     fn a_forge_url_under_an_unconventional_key_is_still_found() {
         let d = doc(r#"{"info":{"project_urls":{"Tracker":"https://github.com/a/b/issues"}}}"#);
         assert!(source_and_subdir(&d).0.unwrap().contains("github.com/a/b"));
+    }
+
+    /// The two records `pytz` 2026.1 actually has: the release names no forge, the package does.
+    const PYTZ_RELEASE: &str = r#"{"info":{"project_urls":{
+            "Download":"https://pypi.org/project/pytz/",
+            "Homepage":"http://pythonhosted.org/pytz"}}}"#;
+    const PYTZ_PACKAGE: &str = r#"{"info":{"project_urls":{
+            "Homepage":"http://pythonhosted.org/pytz",
+            "Issues":"https://github.com/stub42/pytz/issues",
+            "Source":"https://github.com/stub42/pytz.git"}}}"#;
+
+    #[test]
+    fn a_release_that_names_no_forge_falls_back_to_what_the_package_says_now() {
+        let b = believe(&doc(PYTZ_RELEASE), Some(&doc(PYTZ_PACKAGE)));
+        assert_eq!(b.repo.as_deref(), Some("https://github.com/stub42/pytz"));
+        // Not the same claim as a contemporary one, and it does not get to say it is.
+        assert_eq!(b.source, "pypi:project_urls@latest");
+    }
+
+    #[test]
+    fn the_release_is_believed_over_the_package_wherever_it_says_anything() {
+        // Contemporary with the artifact, so it wins even though the package names another repo.
+        let release = doc(r#"{"info":{"project_urls":{"Source":"https://github.com/a/old"}}}"#);
+        let package = doc(r#"{"info":{"project_urls":{"Source":"https://github.com/a/new"}}}"#);
+        let b = believe(&release, Some(&package));
+        assert_eq!(b.repo.as_deref(), Some("https://github.com/a/old"));
+        assert_eq!(b.source, "pypi:project_urls");
+    }
+
+    #[test]
+    fn the_subdirectory_comes_from_whichever_record_was_believed() {
+        // Taking the repository from one document and the subdirectory from another is how a
+        // monorepo member comes to build at the wrong root.
+        let release = doc(r#"{"info":{"project_urls":{"Homepage":"https://example.com"}}}"#);
+        let package = doc(r#"{"info":{"project_urls":{
+                "Source":"https://github.com/Azure/azure-sdk-for-python/tree/main/sdk/storage/azure-storage-blob"}}}"#);
+        let b = believe(&release, Some(&package));
+        assert_eq!(
+            b.repo.as_deref(),
+            Some("https://github.com/Azure/azure-sdk-for-python")
+        );
+        assert_eq!(b.subdir.as_deref(), Some("sdk/storage/azure-storage-blob"));
+    }
+
+    #[test]
+    fn neither_record_naming_a_forge_is_not_an_answer() {
+        let b = believe(&doc(PYTZ_RELEASE), Some(&doc(PYTZ_RELEASE)));
+        assert_eq!(b.repo, None);
+        assert_eq!(b.subdir, None);
+        // And a resolve with no package-level record to fall back on is the same answer, not a
+        // different one: the fetch is best-effort and its failure changes nothing.
+        assert_eq!(believe(&doc(PYTZ_RELEASE), None).repo, None);
     }
 
     #[test]
