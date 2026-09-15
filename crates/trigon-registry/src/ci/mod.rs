@@ -209,7 +209,13 @@ impl CiInferrer {
         let (commit, how) = if !source.commit.is_empty() {
             (source.commit.clone(), source.how)
         } else {
-            match tags::resolve_version_tag(&source.repo_url, &target.reference.version).await {
+            match tags::resolve_version_tag(
+                &source.repo_url,
+                &target.reference.version,
+                &target.reference.name,
+            )
+            .await
+            {
                 Some((sha, _tag, how)) => (sha, how),
                 None => return Ok(declined(Decline::NoPinnedCommit)),
             }

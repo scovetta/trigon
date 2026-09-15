@@ -134,7 +134,13 @@ impl StrategyInferrer for NpmInferrer {
         // The tag is the same cheap rung PyPI has always used, and it costs one `ls-remote` now
         // that it no longer goes through the GitHub API.
         let (commit, how) = if source.commit.is_empty() {
-            match tags::resolve_version_tag(&source.repo_url, &target.reference.version).await {
+            match tags::resolve_version_tag(
+                &source.repo_url,
+                &target.reference.version,
+                &target.reference.name,
+            )
+            .await
+            {
                 Some((sha, tag, how)) => {
                     assumptions.push(format!(
                         "the commit comes from tag `{tag}` rather than from the registry, and a \
@@ -338,7 +344,13 @@ impl StrategyInferrer for PyPiInferrer {
         // PyPI records no commit, so one has to be found. A tag is the cheap rung and it is right
         // for most projects that tag releases at all.
         let (commit, how) = if source.commit.is_empty() {
-            match tags::resolve_version_tag(&source.repo_url, &target.reference.version).await {
+            match tags::resolve_version_tag(
+                &source.repo_url,
+                &target.reference.version,
+                &target.reference.name,
+            )
+            .await
+            {
                 Some((sha, tag, how)) => {
                     // Named as mutable, not merely as "from a tag". A tag can be moved or deleted
                     // after a release — `pad-left 2.1.0` in the corpus is a package whose recorded

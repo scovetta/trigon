@@ -1018,6 +1018,7 @@ mod registry {
             Some(s) if s.commit.is_empty() => rt.block_on(trigon_registry::resolve_version_tag(
                 &s.repo_url,
                 &target.version,
+                &target.name,
             )),
             _ => None,
         };
