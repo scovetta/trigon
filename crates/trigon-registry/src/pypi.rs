@@ -115,7 +115,7 @@ impl Registry for PyPiRegistry {
             });
         }
 
-        let repo = source_url(&doc);
+        let (repo, subdir) = source_and_subdir(&doc);
         let mut evidence = Vec::new();
         if let Some(r) = &repo {
             evidence.push(Evidence::new(
@@ -152,7 +152,9 @@ impl Registry for PyPiRegistry {
                 repo_url,
                 commit: String::new(),
                 ref_name: None,
-                subdir: None,
+                // From the same URL the repository came from: PyPI has no field for this, and a
+                // `tree/<ref>/<path>` link says it in passing.
+                subdir,
                 how: SourceDiscovery::RegistryMetadata,
             }),
             about: None,
@@ -199,13 +201,26 @@ impl PyPiRegistry {
     }
 }
 
-/// The repository, out of the several places a project might have declared one.
+/// The repository a project declares, and the subdirectory its URL points into.
+///
+/// Returned together because they come from the same string: PyPI has no `repository.directory`,
+/// and a monorepo member's `project_urls` often says where it lives in passing —
+/// `…/google-cloud-python/tree/main/packages/google-auth`. Reading the repository and discarding
+/// the path was how `google-auth` came to check out a monorepo and build at its root.
+fn source_and_subdir(doc: &Value) -> (Option<String>, Option<String>) {
+    let raw = raw_source_url(doc);
+    let subdir = raw.as_deref().and_then(crate::npm::subdir_from_view);
+    (raw.map(|u| crate::npm::canonicalize_repo(&u)), subdir)
+}
+
+/// The declared URL, out of the several places a project might have declared one, before it is
+/// trimmed to a repository.
 ///
 /// Ordered by how likely each is to be a repository rather than a documentation site. `Source` and
 /// `Repository` are the conventional keys; `home_page` is checked last and only when it looks like
 /// a forge, because for most projects it is a docs URL and following it would send the resolver
 /// somewhere with no source in it at all.
-fn source_url(doc: &Value) -> Option<String> {
+fn raw_source_url(doc: &Value) -> Option<String> {
     let info = doc.get("info")?;
     if let Some(urls) = info.get("project_urls").and_then(Value::as_object) {
         for key in [
@@ -220,20 +235,20 @@ fn source_url(doc: &Value) -> Option<String> {
             if let Some(u) = urls.get(key).and_then(Value::as_str)
                 && looks_like_a_forge(u)
             {
-                return Some(crate::npm::canonicalize_repo(u));
+                return Some(u.to_string());
             }
         }
         // Any project URL that is a forge, before falling back to home_page.
         for u in urls.values().filter_map(Value::as_str) {
             if looks_like_a_forge(u) {
-                return Some(crate::npm::canonicalize_repo(u));
+                return Some(u.to_string());
             }
         }
     }
     info.get("home_page")
         .and_then(Value::as_str)
         .filter(|u| looks_like_a_forge(u))
-        .map(crate::npm::canonicalize_repo)
+        .map(str::to_string)
 }
 
 fn looks_like_a_forge(url: &str) -> bool {
@@ -261,7 +276,10 @@ mod tests {
         let d = doc(r#"{"info":{"project_urls":{
                 "Documentation":"https://docs.example.com",
                 "Source":"https://github.com/a/b"}}}"#);
-        assert_eq!(source_url(&d).as_deref(), Some("https://github.com/a/b"));
+        assert_eq!(
+            source_and_subdir(&d).0.as_deref(),
+            Some("https://github.com/a/b")
+        );
     }
 
     #[test]
@@ -271,18 +289,21 @@ mod tests {
             r#"{"info":{"project_urls":{"Documentation":"https://docs.example.com"},
                         "home_page":"https://example.com"}}"#,
         );
-        assert_eq!(source_url(&d), None);
+        assert_eq!(source_and_subdir(&d).0, None);
     }
 
     #[test]
     fn a_forge_url_under_an_unconventional_key_is_still_found() {
         let d = doc(r#"{"info":{"project_urls":{"Tracker":"https://github.com/a/b/issues"}}}"#);
-        assert!(source_url(&d).unwrap().contains("github.com/a/b"));
+        assert!(source_and_subdir(&d).0.unwrap().contains("github.com/a/b"));
     }
 
     #[test]
     fn home_page_is_used_only_when_it_is_a_forge() {
         let d = doc(r#"{"info":{"home_page":"https://github.com/a/b"}}"#);
-        assert_eq!(source_url(&d).as_deref(), Some("https://github.com/a/b"));
+        assert_eq!(
+            source_and_subdir(&d).0.as_deref(),
+            Some("https://github.com/a/b")
+        );
     }
 }

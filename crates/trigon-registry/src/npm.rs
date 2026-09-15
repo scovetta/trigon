@@ -319,26 +319,75 @@ pub(crate) fn canonicalize_repo(raw: &str) -> String {
 /// Conservative in the direction that matters: a URL with none of these is returned untouched, so
 /// an unfamiliar forge is left alone rather than truncated to something that does not exist.
 fn trim_to_repo(url: &str) -> String {
+    // The segment names a view of a repository rather than part of its path. Written without
+    // slashes and matched as whole segments, because the first version wrote them as `"/issues/"`
+    // and so only matched a view with something *after* it: `…/python-engineio/issues` — which is
+    // what PyPI's `project_urls` actually contains — went untrimmed and was cloned as a repository.
+    // Fifteen of fifty targets came back `no-strategy` and this was most of them.
     const VIEWS: &[&str] = &[
-        "/blob/",
-        "/tree/",
-        "/raw/",
-        "/blame/",
-        "/commit/",
-        "/commits/",
-        "/releases/",
-        "/issues/",
-        "/pull/",
-        "/wiki/",
-        "/-/",
+        "blob",
+        "tree",
+        "raw",
+        "blame",
+        "commit",
+        "commits",
+        "releases",
+        "release",
+        "issues",
+        "pull",
+        "pulls",
+        "wiki",
+        "tags",
+        "compare",
+        "archive",
+        "tarball",
+        "zipball",
+        "discussions",
+        "actions",
+        "-",
     ];
-    let mut cut = url.len();
-    for v in VIEWS {
-        if let Some(i) = url.find(v) {
-            cut = cut.min(i);
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.trim_end_matches('/').to_string();
+    };
+    let mut kept: Vec<&str> = Vec::new();
+    for (i, seg) in rest.split('/').filter(|s| !s.is_empty()).enumerate() {
+        // The first three segments are host, owner and repository: a view can only appear after
+        // them, and `github.com/tree/x` is a repository called `x` owned by someone called `tree`.
+        if i >= 3 && VIEWS.contains(&seg) {
+            break;
         }
+        kept.push(seg);
     }
-    url[..cut].trim_end_matches('/').to_string()
+    format!("{scheme}://{}", kept.join("/"))
+}
+
+/// The subdirectory a forge URL points into, when it points into one.
+///
+/// **PyPI has no `repository.directory`**, so a monorepo member has nowhere to declare where it
+/// lives — except that its own `project_urls` often say it in passing:
+/// `github.com/googleapis/google-cloud-python/tree/main/packages/google-auth` names the branch and
+/// the path. Everything after `tree/<ref>/` is that path.
+///
+/// Refused on the same terms as npm's `repository.directory`: this reaches a shell command line, so
+/// `..`, a leading dash and empty segments are not trusted.
+pub(crate) fn subdir_from_view(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    // host / owner / repo / tree / ref / path…
+    //
+    // `tree` only. A `blob` link names a *file*, and reading `…/tomli/blob/master/CHANGELOG.md`
+    // as a subdirectory would send the build into a changelog.
+    let at = segs.iter().skip(3).position(|s| *s == "tree")? + 3;
+    let path: Vec<&str> = segs.get(at + 2..)?.to_vec();
+    if path.is_empty() {
+        return None;
+    }
+    let joined = path.join("/");
+    let safe = !joined.starts_with('-')
+        && path
+            .iter()
+            .all(|s| *s != "." && *s != ".." && !s.contains(char::is_whitespace));
+    safe.then_some(joined)
 }
 
 /// A sha256 out of npm's subresource-integrity string, when it happens to be one.
@@ -635,5 +684,86 @@ mod subdir_tests {
         ] {
             assert_eq!(repo_subdir(&with(bad.clone())), None, "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod view_trimming_tests {
+    use super::{subdir_from_view, trim_to_repo};
+
+    /// Every URL here is what a real PyPI project declares, taken from the M1 corpus run where
+    /// fifteen of fifty targets came back `no-strategy`.
+    #[test]
+    fn a_view_at_the_end_of_a_url_is_still_a_view() {
+        // The bug: these were written as `"/issues/"` and matched only a view with something after
+        // it, so a URL *ending* in the view went untrimmed and was cloned as a repository.
+        for (url, want) in [
+            (
+                "https://github.com/miguelgrinberg/python-engineio/issues",
+                "https://github.com/miguelgrinberg/python-engineio",
+            ),
+            (
+                "https://github.com/AzureAD/microsoft-authentication-library-for-python/releases",
+                "https://github.com/AzureAD/microsoft-authentication-library-for-python",
+            ),
+            (
+                "https://github.com/lark-parser/lark/tarball/master",
+                "https://github.com/lark-parser/lark",
+            ),
+            (
+                "https://github.com/googleapis/google-cloud-python/tree/main/packages/google-auth",
+                "https://github.com/googleapis/google-cloud-python",
+            ),
+            (
+                "https://github.com/hukkin/tomli/blob/master/CHANGELOG.md",
+                "https://github.com/hukkin/tomli",
+            ),
+        ] {
+            assert_eq!(trim_to_repo(url), want, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_repository_is_left_alone_and_so_is_an_owner_named_like_a_view() {
+        assert_eq!(
+            trim_to_repo("https://github.com/asweigart/pyperclip"),
+            "https://github.com/asweigart/pyperclip"
+        );
+        // The first three segments are host, owner and repository. A project owned by someone
+        // called `tree` is not a view of anything.
+        assert_eq!(
+            trim_to_repo("https://github.com/tree/releases"),
+            "https://github.com/tree/releases"
+        );
+    }
+
+    #[test]
+    fn a_tree_url_carries_the_subdirectory_pypi_has_no_field_for() {
+        // npm says `repository.directory`; PyPI has nowhere to put it, and says it in passing.
+        assert_eq!(
+            subdir_from_view(
+                "https://github.com/googleapis/google-cloud-python/tree/main/packages/google-auth"
+            )
+            .as_deref(),
+            Some("packages/google-auth")
+        );
+        // A plain repository points into nothing, and a tree of the root is not a subdirectory.
+        assert_eq!(subdir_from_view("https://github.com/a/b"), None);
+        assert_eq!(subdir_from_view("https://github.com/a/b/tree/main"), None);
+        // A `blob` link names a file. `tomli` declares one, and its subdirectory is not
+        // `CHANGELOG.md`; the repository still has to be trimmed out of it.
+        assert_eq!(
+            subdir_from_view("https://github.com/hukkin/tomli/blob/master/CHANGELOG.md"),
+            None
+        );
+        // Publisher-controlled, and it reaches a shell command line.
+        assert_eq!(
+            subdir_from_view("https://github.com/a/b/tree/main/../etc"),
+            None
+        );
+        assert_eq!(
+            subdir_from_view("https://github.com/a/b/tree/main/-rf"),
+            None
+        );
     }
 }
