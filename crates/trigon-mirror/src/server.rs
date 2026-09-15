@@ -225,6 +225,18 @@ pub struct Mirror {
 /// Passing the cap drops rows and is visible as `truncated`, never as a smaller count.
 #[derive(Debug, Default)]
 pub struct Seen {
+    /// Tarball paths this mirror offered in a **filtered** packument, as npm would compose them.
+    ///
+    /// The bare-tarball route serves only these. Without it that route would proxy any npm tarball
+    /// on request — including a version published long after the moment the run is pinned to — and
+    /// `seam_controls_fail_closed.rs` says in as many words that a tarball "which needs no
+    /// filtering, is refused rather than proxied unfiltered". That test is the specification, and a
+    /// route that made it fail would have been a control being edited to match the code that broke
+    /// it.
+    ///
+    /// With it, the filter still decides: a build can fetch exactly what the index it was served
+    /// offered, and nothing else. A package never indexed in this run is refused as before.
+    offered: std::sync::Mutex<std::collections::BTreeSet<String>>,
     exchanges: std::sync::Mutex<Vec<crate::Exchange>>,
     refusals: std::sync::Mutex<Vec<crate::Refusal>>,
     truncated: AtomicU64,
@@ -272,6 +284,21 @@ impl Seen {
     /// `Observed::from_transcript` over it would undercount — which the counters would not.
     pub fn truncated(&self) -> u64 {
         self.truncated.load(Ordering::Relaxed)
+    }
+
+    /// Record a tarball path the filtered index just offered.
+    fn offer(&self, path: &str) {
+        if let Ok(mut o) = self.offered.lock() {
+            o.insert(path.to_string());
+        }
+    }
+
+    /// Whether a bare tarball request asks for something the filtered index offered.
+    fn was_offered(&self, path: &str) -> bool {
+        self.offered
+            .lock()
+            .map(|o| o.contains(path))
+            .unwrap_or(false)
     }
 }
 
@@ -460,6 +487,42 @@ async fn serve_one(mirror: &Mirror, req: Request) -> Result<Response, MirrorErro
         return artifact(mirror, rest, &query_now).await;
     }
 
+    // **A bare npm tarball, unfiltered, because npm composes this URL itself.** The `-artifact`
+    // route above exists for the `dist.tarball` values this mirror rewrites, and npm 11 does not
+    // use them: it takes the path off the upstream tarball URL and re-bases it onto the configured
+    // registry, producing `http://timewarp:8129/yocto-queue/-/yocto-queue-0.1.0.tgz` — and drops
+    // the credentials on the way, because modern npm does not forward URL userinfo to a tarball
+    // request it built itself.
+    //
+    // `moment.rs` states the assumption this breaks: "Credentials in a URL are the one component
+    // every client already forwards." That was true when it was written and is no longer true of
+    // npm. The M1 corpus is what found it — 34 of 197 targets, every one reported as the package
+    // failing when the mirror was refusing our own request.
+    //
+    // **Only what the filtered index already offered.** The first version of this served any npm
+    // tarball on request, which reversed a deliberate decision: `seam_controls_fail_closed.rs` says
+    // a tarball "which needs no filtering, is refused rather than proxied unfiltered", and it fails
+    // when that stops being true. Editing the test to match would have been the control eroding to
+    // fit the code that broke it — so instead the route serves exactly the paths
+    // `rewrite_npm_tarballs` handed out for this run's moment, and refuses everything else. A
+    // version published after the pin is still unreachable, which is the property the filter exists
+    // for.
+    //
+    // The upstream is **hardcoded** to the npm registry rather than read from the path, so this
+    // route reaches exactly one host, and the guard still hashes every byte.
+    if is_npm_tarball(&path_now) && mirror.seen.was_offered(&path_now) {
+        mirror
+            .stats
+            .passthrough_requests
+            .fetch_add(1, Ordering::Relaxed);
+        let url = format!("{}{path_now}{query_now}", Platform::Npm.upstream());
+        let filter = Filter {
+            platform: Platform::Npm,
+            moment: String::new(),
+        };
+        return proxy(mirror, &url, &filter, "artifact").await;
+    }
+
     // Toolchains, likewise before the auth check and for a stronger reason: there is nothing to
     // filter by date. A pinned toolchain URL names its own version, so the bytes are a function of
     // the URL. Without this route a build at `mirror-only` egress cannot install the toolchain that
@@ -531,7 +594,7 @@ async fn npm_request(
         Some(w) => crate::npm::withhold_version(&mut doc, w),
         None => 0,
     };
-    rewrite_npm_tarballs(&mut doc, &authority(filter, host));
+    rewrite_npm_tarballs(&mut doc, &authority(filter, host), &mirror.seen);
 
     mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
     mirror
@@ -739,6 +802,16 @@ async fn toolchain(mirror: &Mirror, rest: &str, query: &str) -> Result<Response,
 /// A package manager sends its index credentials to the index host and not always beyond it, and a
 /// URL that arrives here without the filter cannot be served: this mirror refuses an unfiltered
 /// request rather than answering with the index as it is today.
+/// Whether a path is npm's tarball shape: `/{name}/-/{file}.tgz`, scoped or not.
+///
+/// `/-/` is npm's own separator between a package name and its tarballs and appears in no other
+/// route here — a packument is `/{name}` or `/@scope%2fname`, neither of which contains it. Both the
+/// separator and the extension are required, so a package that merely has `-` in its name does not
+/// match.
+fn is_npm_tarball(path: &str) -> bool {
+    path.contains("/-/") && path.ends_with(".tgz")
+}
+
 fn authority(filter: &Filter, host: &str) -> String {
     format!(
         "{host}/-artifact/{}/{}",
@@ -753,7 +826,7 @@ fn authority(filter: &Filter, host: &str) -> String {
 /// cannot fetch it: the packument's `dist.tarball` is an absolute upstream URL, and upstream is
 /// exactly what the boundary forbids. The path is preserved so the rewritten URL comes back here
 /// and is proxied to the same place.
-fn rewrite_npm_tarballs(doc: &mut serde_json::Value, host: &str) {
+fn rewrite_npm_tarballs(doc: &mut serde_json::Value, host: &str, seen: &Seen) {
     if host.is_empty() {
         return;
     }
@@ -771,6 +844,12 @@ fn rewrite_npm_tarballs(doc: &mut serde_json::Value, host: &str) {
         // The upstream host rides in the path, so the mirror knows where to fetch from without
         // assuming an artifact lives on the index's own domain.
         if let Some((_, rest)) = tarball.split_once("://") {
+            // What npm will ask for if it re-bases this onto the registry root instead of using the
+            // URL below — everything after the upstream host. Remembered so the bare-tarball route
+            // can serve exactly what this filtered document offered and refuse anything else.
+            if let Some(slash) = rest.find('/') {
+                seen.offer(&rest[slash..]);
+            }
             version["dist"]["tarball"] = serde_json::Value::String(format!("http://{host}/{rest}"));
         }
     }
@@ -1096,5 +1175,47 @@ mod allowlist_tests {
         // anything, discovered later.
         assert!(!host_allowed("index", "registry.npmjs.org"));
         assert!(!host_allowed("something-new", "registry.npmjs.org"));
+    }
+}
+
+#[cfg(test)]
+mod npm_tarball_route_tests {
+    use super::is_npm_tarball;
+
+    #[test]
+    fn the_shape_npm_actually_asks_for_is_recognised() {
+        // The exact URL from the M1 corpus run, minus the host.
+        assert!(is_npm_tarball("/yocto-queue/-/yocto-queue-0.1.0.tgz"));
+        assert!(is_npm_tarball("/@babel/core/-/core-7.28.5.tgz"));
+    }
+
+    #[test]
+    fn the_shape_alone_does_not_open_the_route() {
+        // The shape test says what *could* be served; `Seen::was_offered` says what *is*. Both are
+        // required, and this is the half that keeps the pin meaningful: a tarball nobody was
+        // offered — a version published after the moment, say — matches the shape and is still
+        // refused.
+        let seen = super::Seen::default();
+        assert!(!seen.was_offered("/left-pad/-/left-pad-1.3.0.tgz"));
+        seen.offer("/left-pad/-/left-pad-1.3.0.tgz");
+        assert!(seen.was_offered("/left-pad/-/left-pad-1.3.0.tgz"));
+        assert!(
+            !seen.was_offered("/left-pad/-/left-pad-99.0.0.tgz"),
+            "a different version of an offered package is still not offered"
+        );
+    }
+
+    #[test]
+    fn a_packument_is_not_a_tarball() {
+        // The routes must not overlap: a packument has to keep reaching the filtered path, or the
+        // registry pin stops applying and every floating range resolves against today.
+        assert!(!is_npm_tarball("/yocto-queue"));
+        assert!(!is_npm_tarball("/@babel%2fcore"));
+        assert!(!is_npm_tarball("/simple/packaging/"));
+        // A name containing the separator's characters is not the separator.
+        assert!(!is_npm_tarball("/some-package-name"));
+        // Both halves are required.
+        assert!(!is_npm_tarball("/yocto-queue/-/yocto-queue-0.1.0.tar.gz"));
+        assert!(!is_npm_tarball("/yocto-queue-0.1.0.tgz"));
     }
 }

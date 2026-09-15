@@ -569,6 +569,89 @@ const RULES: &[Rule] = &[
     },
     // ---- ours ---------------------------------------------------------------------------------------
     Rule {
+        // A package published from a monorepo, rebuilt outside the monorepo. Its `package.json`
+        // names siblings with `workspace:^`, a protocol only the workspace's own package manager
+        // resolves, and npm run against the member alone cannot.
+        //
+        // **A finding about our strategy, not about the package.** The tarball was produced by a
+        // build that had the whole repository; ours checks out the repository and builds in the
+        // subdirectory, which is not the same thing. Named so the monorepo stratum reports what it
+        // is rather than sitting in `unknown` — four of the M1 npm corpus's twenty-three.
+        //
+        // Repairable in principle: install from the workspace root and pack the member. Nothing
+        // does that yet, so it is repairable rather than done.
+        code: "npm/workspace-protocol",
+        needles: &["Unsupported URL Type \"workspace:\""],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        capture: Capture::None,
+    },
+    Rule {
+        // A dependency that is not a registry package at all: a `github:` or tarball specifier that
+        // sends the installer to a forge. At an enforced tier the mirror is the only route out and
+        // the forge is not on the artifact allowlist, so it is refused.
+        //
+        // **The tier working, and a finding about the package**: a build that fetches code from a
+        // forge at install time is a supply-chain fact worth reporting, which is what
+        // `docs/08-execution.md` §7.1 says the transcript exists to surface. Not repairable by a
+        // recipe — the dependency is in the package's own manifest.
+        code: "net/dependency-from-a-forge",
+        needles: &["npm error request to https://codeload.github.com"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        // A package whose install script refuses to run under npm — a `preinstall` guard that
+        // insists on yarn or pnpm. Our recipes drive npm, so the build stops on purpose.
+        //
+        // Named rather than left unknown because it is a property of the package that no recipe
+        // change alters while we drive npm, and because it reads as a mysterious script failure.
+        code: "npm/refuses-npm",
+        needles: &["disallow-npm"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: true,
+        capture: Capture::None,
+    },
+    Rule {
+        // A native dependency downloading a prebuilt binary at install time, blocked by the tier.
+        // `sharp` is the common one and it names itself.
+        //
+        // Worth separating from a generic network refusal: a build that fetches a *binary* it did
+        // not compile is the shape `docs/12-security.md` §1.1 is about, and the fact that the tier
+        // stopped it is the control working rather than an inconvenience.
+        code: "net/prebuilt-binary-download",
+        needles: &["Installation error: connect ENETUNREACH"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        // **Our own mirror, refusing our own request.** A 400 from the mirror means a request
+        // arrived without the time filter, and for a tarball that is npm composing the URL itself
+        // from the registry root and dropping the credentials on the way. The build reports
+        // `E400`, the run reports the package failing, and the cluster reports `unknown`.
+        //
+        // Named because 34 of 197 targets on the M1 npm corpus were this, all of them inside the
+        // 50-strong `unknown` cluster — the largest single cause of a lost target, and ours.
+        //
+        // Not repairable by a strategy: no recipe changes which URL npm builds. What fixes it is
+        // the mirror serving that shape, which it now does.
+        code: "trigon/mirror-refused-unfiltered",
+        // One line, because every needle has to match the *same* line — a rule whose needles are
+        // spread across two lines matches nothing, which is how this one failed its first test.
+        // npm prints the method, the status and the URL together, and the host is ours.
+        needles: &["400 Bad Request - GET http://timewarp"],
+        fault: Fault::Bug,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
         // Our mirror handed the build a body it could not read. Named as ours, loudly, because the
         // symptom — a corrupt tarball — reads exactly like a broken package and would otherwise be
         // counted against one. Found when the mirror was transparently gunzipping artifacts.
@@ -740,6 +823,47 @@ fn clip(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_npm_corpus_unknowns_are_named_from_their_real_log_lines() {
+        // Every string here is copied from a build log in the M1 npm corpus run, where all four
+        // sat in one twenty-three-strong `unknown` cluster — which reads as "twenty-three packages
+        // failed for reasons nobody looked into" and was four causes wearing one label.
+        for (log, code) in [
+            (
+                "npm error Unsupported URL Type \"workspace:\": workspace:^",
+                "npm/workspace-protocol",
+            ),
+            (
+                "npm error request to https://codeload.github.com/uNetworking/uWebSockets.js/tar.gz/v20 failed",
+                "net/dependency-from-a-forge",
+            ),
+            (
+                "npm ERR! command sh -c node scripts/disallow-npm.js",
+                "npm/refuses-npm",
+            ),
+            (
+                "npm error sharp: Installation error: connect ENETUNREACH 140.82.114.3:443",
+                "net/prebuilt-binary-download",
+            ),
+        ] {
+            assert_eq!(super::classify(log).code, code, "{log}");
+        }
+    }
+
+    #[test]
+    fn the_mirror_refusing_our_own_request_is_named_as_ours() {
+        // It was `unknown` — the bucket that means "a gap in this table" — for 34 of 197 targets on
+        // the first M1 npm corpus run, which read as thirty-four packages failing for reasons
+        // nobody had looked into. The answer was one defect of ours.
+        let s = super::classify(
+            "npm error code E400\nnpm error 400 Bad Request - GET \
+             http://timewarp:8129/yocto-queue/-/yocto-queue-0.1.0.tgz",
+        );
+        assert_eq!(s.code, "trigon/mirror-refused-unfiltered");
+        assert_eq!(s.fault, crate::Fault::Bug, "ours, not the package's");
+        assert!(!s.repairable, "no recipe changes which URL npm builds");
+    }
+
     #[test]
     fn a_commit_the_forge_will_not_serve_is_not_a_network_problem() {
         // These two used to be the same cluster, and they are opposite readings. `not our ref` is

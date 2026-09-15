@@ -4375,9 +4375,16 @@ mod sweep {
         const WALL: u32 = 10;
         const REAP_EVERY: usize = 20;
         const FLOOR: u64 = 20 * 1_000_000_000;
+        // Each lane holds a build container and a mirror container. Below this there is not room
+        // for the one in flight, let alone the next.
+        const MEMORY_FLOOR: u64 = 3 * 1_000_000_000;
         let mut consecutive: u32 = 0;
         let mut repeated: Option<String> = None;
 
+        // **Set when the collector gives up, and read by every lane.** Without it `break` stopped
+        // the *reporting* and not the *building*: a worker ignores a failed send and takes the next
+        // target, so a breaker meant to save seven hours saved none of them.
+        let stop = std::sync::atomic::AtomicBool::new(false);
         let next = std::sync::atomic::AtomicUsize::new(0);
         let (tx, rx) = std::sync::mpsc::channel::<(usize, String, Outcome, f64, u32)>();
         let total = purls.len();
@@ -4385,10 +4392,13 @@ mod sweep {
 
         std::thread::scope(|scope| -> Result<()> {
             for _ in 0..lanes {
-                let (tx, next, todo, args, progress, done) =
-                    (tx.clone(), &next, &todo, &args, &progress, &done);
+                let (tx, next, todo, args, progress, done, stop) =
+                    (tx.clone(), &next, &todo, &args, &progress, &done, &stop);
                 scope.spawn(move || {
                     loop {
+                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
                         let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(&(i, purl)) = todo.get(at) else {
                             break;
@@ -4406,8 +4416,9 @@ mod sweep {
 
             use std::io::Write as _;
             for (_, purl, outcome, secs, calls) in rx {
-                // Flushed per row. Buffered output is lost with the process, which is the failure
-                // this exists to prevent.
+                // **Flushed per row, in completion order, and that is deliberate — see below.**
+                // Buffered output is lost with the process, which is the failure this exists to
+                // prevent, and a row cannot wait for its neighbours without giving that up.
                 writeln!(
                     sink,
                     "{purl}\t{}\t{secs:.1}\t{}\t{}",
@@ -4427,16 +4438,23 @@ mod sweep {
                 // Deliberately blunt. It stops rather than pausing, because every row is already
                 // flushed and `completed()` resumes them: stopping costs nothing but the targets
                 // that would have failed anyway, and the operator gets the cluster that explains it.
-                match (outcome.is_evidence(), outcome.cluster()) {
-                    (false, Some(key)) if Some(&key) == repeated.as_ref() => consecutive += 1,
-                    (false, Some(key)) => {
-                        repeated = Some(key);
-                        consecutive = 1;
-                    }
-                    _ => {
-                        repeated = None;
-                        consecutive = 0;
-                    }
+                // **Keyed on the cluster where there is one, and the label where there is not.**
+                // Keying on the cluster alone made the breaker blind to exactly the wall it was
+                // built for: `Outcome::NoStrategy` has no cluster, so every one of them took the
+                // reset arm — and the M1 PyPI run produced 37 in a row. The largest single failure
+                // mode in that run was the one shape this could not see.
+                let key = match outcome.cluster() {
+                    Some(c) => c,
+                    None => outcome.label(),
+                };
+                if outcome.is_evidence() {
+                    repeated = None;
+                    consecutive = 0;
+                } else if Some(&key) == repeated.as_ref() {
+                    consecutive += 1;
+                } else {
+                    repeated = Some(key);
+                    consecutive = 1;
                 }
                 rows.push((purl, outcome, secs));
 
@@ -4450,6 +4468,7 @@ mod sweep {
                          night proving it. Every row so far is written; re-run the same command to \
                          resume once the cause is fixed."
                     );
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
 
@@ -4459,6 +4478,27 @@ mod sweep {
                 // `store_lock` deliberately lets grow.
                 if rows.len() % REAP_EVERY == 0 {
                     trigon_sandbox::reap_deferred("podman");
+                    // **Memory, which is what actually stopped the first attempt.** Disk and rate
+                    // limits were instrumented and neither was the constraint: four lanes each hold
+                    // a build container and a mirror container, and the machine ran out of RAM 29
+                    // targets in. The OOM killer takes whichever process is largest, which is a
+                    // build, and that arrives looking like the package's failure — the same shape
+                    // as every other infrastructure fault this sweep now refuses to report as one.
+                    if let Some(free) = available_bytes()
+                        && free < MEMORY_FLOOR
+                    {
+                        tracing::error!(
+                            available_gb = free as f64 / 1e9,
+                            lanes,
+                            "less than {:.0} GB of memory available after {} targets; stopping \
+                             rather than letting the OOM killer take a build and report it as the \
+                             package's failure. Re-run with fewer lanes to resume.",
+                            MEMORY_FLOOR as f64 / 1e9,
+                            rows.len()
+                        );
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
                     if let Some(free) = free_bytes(&args.work)
                         && free < FLOOR
                     {
@@ -4469,6 +4509,7 @@ mod sweep {
                             FLOOR as f64 / 1e9,
                             rows.len()
                         );
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
                         break;
                     }
                 }
@@ -4476,11 +4517,28 @@ mod sweep {
             Ok(())
         })?;
 
-        // Back into target order. The pool finishes them in whatever order they take, and a results
-        // file whose order depends on how many lanes were free is not comparable with another.
+        // Back into target order — in memory *and* on disk. The pool finishes them in whatever
+        // order it likes, and a results file whose order depends on how many lanes were free is not
+        // comparable with another: a reader lining it up against the corpus reads the wrong target.
+        //
+        // That happened. Diagnosing a cluster meant reading row N's work directory, which is
+        // indexed by *corpus* position, and the two had silently diverged — so the investigation
+        // was of a different package than the one that failed. Only the in-memory rows were being
+        // sorted, which is the half nobody reads afterwards.
+        //
+        // Rewritten at the end rather than buffered during, because a row must reach disk the
+        // moment it exists: a sweep that is killed keeps every row it finished, and resume depends
+        // on it. This is the one moment both properties can hold at once.
         let position: BTreeMap<&str, usize> =
             purls.iter().enumerate().map(|(i, p)| (*p, i)).collect();
         rows.sort_by_key(|(purl, _, _)| position.get(purl.as_str()).copied().unwrap_or(usize::MAX));
+        if let Err(e) = rewrite_in_order(&results, &rows, &already) {
+            tracing::warn!(
+                "the results file is in completion order rather than target order: {e}. It resumes \
+                 correctly either way — `completed()` reads it by package URL — but lining it up \
+                 against the corpus by position would read the wrong target."
+            );
+        }
 
         // Every lane is done, so nothing holds the image store: this is the one moment in a sweep
         // when the images that finishing runs could not remove can actually go. Without it a long
@@ -4568,6 +4626,22 @@ mod sweep {
         (outcome, secs, calls)
     }
 
+    /// Memory available to start another build, from `MemAvailable`.
+    ///
+    /// `MemAvailable` rather than `MemFree`: the kernel's own estimate of what can be had without
+    /// swapping, which counts reclaimable page cache. `MemFree` on a machine that has been building
+    /// containers reads near zero and would stop every sweep.
+    fn available_bytes() -> Option<u64> {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                return Some(kb * 1024);
+            }
+        }
+        None
+    }
+
     /// Free bytes on the filesystem holding a path, or `None` where it cannot be asked.
     ///
     /// `statvfs` through `libc` rather than parsing `df`: the output of `df` is a human format that
@@ -4588,6 +4662,38 @@ mod sweep {
             return None;
         }
         Some(st.f_bavail as u64 * st.f_frsize as u64)
+    }
+
+    /// Rewrite the results file with the rows in target order.
+    ///
+    /// The per-row flush during the sweep is what survives a kill; this is what makes the finished
+    /// file comparable with another run of the same corpus. Both matter, and they want opposite
+    /// things during the run, so the ordering is imposed once at the end.
+    fn rewrite_in_order(
+        path: &Path,
+        rows: &[(String, Outcome, f64)],
+        already: &BTreeMap<String, (String, f64, Option<String>, u32)>,
+    ) -> Result<()> {
+        use std::io::Write as _;
+        let mut out = String::new();
+        for (purl, outcome, secs) in rows {
+            // A resumed row's model-call count lives in the file it was read from, not on the
+            // outcome; taking it from there keeps a resumed sweep's totals equal to a fresh one's.
+            let calls = already
+                .get(purl)
+                .map(|(_, _, _, c)| *c)
+                .unwrap_or_else(|| outcome.model_calls());
+            out.push_str(&format!(
+                "{purl}\t{}\t{secs:.1}\t{}\t{}\n",
+                outcome.label(),
+                outcome.cluster().unwrap_or_default(),
+                calls,
+            ));
+        }
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(out.as_bytes())?;
+        f.sync_all()?;
+        Ok(())
     }
 
     /// Targets already recorded in a previous run of this sweep.

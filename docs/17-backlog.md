@@ -195,10 +195,16 @@ correct — a removal must never block a build — but a sweep holds the lock al
 `prune_images` runs once per process and only for pids that are gone, so nothing was collected until
 the sweep ended: seventeen build images at ~240 MB each after one four-lane run, and 400 targets
 would be near a hundred gigabytes. That would have failed the M1 corpus on the machine rather than
-in the verdicts. Deferred tags are now remembered and taken whenever the store is next quiet — every
-run that does get the lock clears the backlog, and a sweep reaps explicitly at the end when no lane
-is left holding anything. Measured on a four-target sweep: 3 deferred, 3 reaped, leftover build
-images 17 to 2.
+in the verdicts. Deferred tags are now remembered and taken whenever the store is next quiet — a
+run that does get the lock drains the backlog inline, and a sweep reaps explicitly at the end when
+no lane is left holding anything. Measured on a four-target sweep: 3 deferred, 3 reaped, leftover
+build images 17 to 2.
+
+That first sentence was false when it was written, and the measurement above did not catch it. The
+drain was a call to `reap_deferred` from inside `Leftovers::drop`, which already held the lock —
+and `flock` treats two opens in one process as two holders, so the inner `try_exclusive` always
+lost and returned. Only the end-of-sweep reap ever ran, which is what "17 to 2" actually measured.
+Found by the test audit, not by the test.
 
 **Measured**, the seventeen-target PyPI corpus at `mirror-only`:
 

@@ -1184,6 +1184,67 @@ compile, and reporting success. A control checking something adjacent to the thi
 check — the same shape as the `GUARD-TRIPPED` marker in §3.23 and the `tests?/` regex in §3.19,
 three times in one codebase.
 
+### 3.25 The corpus, and what one stratum was hiding
+
+The M1 common-path corpus ran for the first time: 197 npm and 200 PyPI, stratified by build system.
+Every rate published before it came from the 37-target smoke corpora, which are almost entirely one
+stratum — the easiest — and it shows.
+
+| | smoke | common-path |
+|---|---|---|
+| npm, reach a comparison | 18 of 20 (90%) | **115 of 197 (58%)** |
+| npm, reproduce | 16 of 18 (89%) | **84 of 115 (73%)** |
+| PyPI, reach a comparison | 16 of 17 (94%) | **136 of 200 (68%)** |
+| PyPI, reproduce | 14 of 16 (88%) | **119 of 136 (88%)** |
+
+The reproduction rates held; **reaching a comparison did not**, and that is the number the smoke
+corpora were flattering. PyPI reproduces at 88% on both, which is a real result. npm falls from 89%
+to 73% because the denominator grew by targets that are harder.
+
+Then the tail of each corpus was run alone — the strata added last and never measured before:
+
+| tail 40 | reach a comparison | reproduce |
+|---|---|---|
+| npm, TypeScript + monorepo | 15 of 40 | **3 of 15 (20%)** |
+| PyPI, poetry + native | 17 of 40 | 16 of 17 (94%) |
+
+[`15-corpora.md`](15-corpora.md) §3 argued for stratification with a hypothetical: "an aggregate
+that hides a 20% rate on native extensions is not a number anyone can act on." It is not
+hypothetical. npm's monorepo and TypeScript strata reproduce at **20%**, and an aggregate over the
+whole corpus reports 73%.
+
+**The first run measured a defect of ours rather than the packages.** 34 of 197 npm targets failed
+`E400`, which is this mirror refusing a request for want of the time filter. npm 11 does not use the
+`dist.tarball` we rewrite: it takes the path off the upstream URL, re-bases it onto the configured
+registry, and **drops the credentials doing it**. `moment.rs` states the assumption that breaks —
+"Credentials in a URL are the one component every client already forwards" — which was true when it
+was written and is no longer true of npm.
+
+The mirror now serves that shape unfiltered, which costs nothing the filter was protecting: an
+artifact's bytes are immutable, so there is no moment to filter them by. Re-running the corpus moved
+reaching a comparison from 94 to 115 and the `unknown` cluster from 50 to 23.
+
+**What the remaining unknowns were.** Not one mystery, four causes, each now named from its own log
+line: `npm/workspace-protocol` (4), `net/dependency-from-a-forge` (4), `npm/refuses-npm` (2),
+`net/prebuilt-binary-download` (1). The first is a finding about *us* — the tarball was built with
+the whole monorepo and we build the member alone — and it is the same root cause as the PyPI pilot's
+largest cluster, ten targets failing on our own message, `Source /src does not appear to be a Python
+project`. `SourceProvenance::subdir` is plumbed through the resolvers, the strategy context and the
+output paths, and both registries hardcode it to `None`; npm's packument has carried the answer all
+along in `repository.directory`.
+
+**Three bugs of ours the corpus surfaced by being debugged**, none of which 728 tests caught:
+
+- The sweep wrote `results.tsv` in *completion* order while sorting only the in-memory rows, so the
+  file's order depended on how many lanes were free. Lining a row up against its work directory —
+  which is indexed by corpus position — read a different package, and the first analysis of the
+  `unknown` cluster was of the wrong targets.
+- The infrastructure breaker keyed on `Outcome::cluster()`, and `NoStrategy` has none, so every one
+  took the reset arm. The PyPI run produced 37 consecutive `no-strategy`; the breaker was blind to
+  that run's largest failure mode.
+- `break` in the collector stopped the reporting and not the lanes: workers ignore a failed send and
+  take the next target. A breaker built to save seven hours would have saved none of them.
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher

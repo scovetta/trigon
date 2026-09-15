@@ -51,7 +51,12 @@ async fn usable(r: &PodmanRunner) -> bool {
 
 fn opts(run_id: &str) -> RunOpts {
     RunOpts {
-        run_id: run_id.into(),
+        // **Unique per process, or podman answers with a cached build.** The image is tagged from
+        // the run id, so a fixed one lets a previous run's layers satisfy this one: the phase
+        // scripts never execute and a probe asserting "the build could not reach the internet"
+        // is handed silence it did not earn. The egress test catches that and says so, which is
+        // how this was found — it started failing once images began surviving longer.
+        run_id: format!("{run_id}-{}", std::process::id()),
         limits: Limits {
             wall_clock: std::time::Duration::from_secs(180),
             ..Default::default()
@@ -461,13 +466,15 @@ async fn a_retained_build_keeps_its_image() {
         extra_hosts: Default::default(),
         source_tree: None,
     });
-    let run_id = "retained";
-    let mut o = opts(run_id);
+    let mut o = opts("retained");
     o.retain = true;
     let h = r.start(&plan, &o).await.unwrap();
     assert!(h.wait().await.unwrap().succeeded());
 
-    let tag = format!("trigon-build:{run_id}");
+    // From the run id the runner was actually given, not from the string handed to `opts` — those
+    // stopped being the same thing when run ids became unique per process, and a test that rebuilds
+    // a tag by its own arithmetic is a second implementation of the runner's naming.
+    let tag = format!("trigon-build:{}", o.run_id);
     assert!(image_exists(&tag), "retain must keep the image");
     let _ = std::process::Command::new("podman")
         .args(["rmi", "--force", &tag])

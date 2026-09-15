@@ -861,8 +861,18 @@ impl Drop for Leftovers {
                 defer(tag.clone());
                 return;
             };
-            // A run that *did* get the lock clears whatever earlier runs could not.
-            reap_deferred(&self.binary);
+            // A run that *did* get the lock clears whatever earlier runs could not — inline,
+            // because `reap_deferred` would take the lock again and `flock` treats two opens in one
+            // process as two holders. Calling it here was dead code: the inner `try_exclusive`
+            // always lost to the guard above it and returned, so the backlog only ever drained at
+            // the end of a sweep. The measurement that "proved" this worked was measuring that.
+            for tag in std::mem::take(&mut *DEFERRED.lock().unwrap_or_else(|e| e.into_inner())) {
+                let _ = std::process::Command::new(&self.binary)
+                    .args(["rmi", &tag])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
             let _ = std::process::Command::new(&self.binary)
                 .args(["rmi", tag])
                 .stdout(Stdio::null())

@@ -39,51 +39,28 @@ derived from whether that account is complete rather than being a constant. The 
 computing all of it — it hashes every body as it streams past, which is how the artifact guard works
 — and throwing it away unless the hash matched.
 
-Measured on the M1 smoke corpora, at `--egress open`:
+Measured on the **M1 common-path corpus** — 197 npm and 200 PyPI targets, stratified by build
+system rather than by popularity — at `--egress mirror-only`, the tier this README recommends, where
+the build's only route out is a time-filtered mirror that writes down everything it serves:
 
 | | reproduce | reach a comparison |
 |---|---|---|
-| npm | 14 of 15 (93%) | 15 of 20 |
-| PyPI | 12 of 15 (80%) | 15 of 17 |
+| npm | **84 of 115 (73%)** | 115 of 197 |
+| PyPI | **119 of 136 (88%)** | 136 of 200 |
 
-And both measured again at **`--egress mirror-only`** — the tier this README recommends, where the
-build's only route out is a time-filtered mirror that writes down everything it serves:
+**These are lower than the numbers this README used to carry, and they are the first ones worth
+quoting.** Every earlier figure came from the 37-target smoke corpora, which are almost entirely one
+stratum — small utility packages with no build step. On those, npm reproduces at 89% and PyPI at
+88%. The common-path corpus adds TypeScript builds, monorepo members, poetry projects and native
+extensions, and reaching a comparison at all falls from ~90% to 58% and 68%.
 
-| | reproduce | reach a comparison | of which `exact` |
-|---|---|---|---|
-| npm, enforced | **16 of 18 (89%)** | 18 of 20 | 6 |
-| PyPI, enforced | **14 of 16 (88%)** | 16 of 17 | 3 |
+Run the hardest strata alone and the point of stratifying is plain: npm's TypeScript and monorepo
+targets reproduce at **20%**, not 73%. An aggregate hides that;
+[`15-corpora.md`](docs/15-corpora.md) §3 says why it must not.
 
-Both beat their `open` rate outright — 16 npm reproductions against 14, 14 PyPI against 12 — and
-nine are `exact` rather than normalized: byte-for-byte identical to what the registry published,
-built in a sandbox with no other route out. The `open` runs report no `exact` at all, because at
-`open` the build installs its own toolchain unpinned and picks up whatever the registry holds today.
-
-The enforced tier is now the *better* measurement as well as the stricter one: 34 of 37 targets
-reach a comparison against 30 of 37 at `open`, and 30 of those 34 reproduce.
-
-npm's percentage is *lower* than it was at 93%, and that is the change working rather than a
-regression: three packages that previously could not build at all now reach a comparison, two
-reproduce and one diverges, so the denominator grew from 15 to 18 and the numerator from 14 to 16.
-A rate over targets we could not build is not a rate.
-
-**No run is `void`.** A void is not a pass and not a failure — it says the artifact under test
-reached the build, so whatever came out is evidence of nothing — and two PyPI targets used to land
-there for an honest reason: a package that is part of the machinery that builds packages installs
-the release next to itself, and adjacent releases share byte-identical files. The guard now exempts
-what the repository also contains, which it always knew how to do and never reached on an ordinary
-run ([`16-findings.md`](docs/16-findings.md) §3.24).
-
-Three targets still reach no comparison, and every one is named rather than silently lost.
-
-| | why |
-|---|---|
-| `zipp` | its build backend calls `urlopen` during `get_requires_for_build_wheel`, so the tier blocks it — a finding about the package, `net/build-fetches-directly` |
-| `pad-left` | npm's recorded `gitHead` names a commit GitHub will not serve, `src/commit-not-on-the-forge` |
-| `has-flag` | npm reads a body the mirror served byte-correct as corrupt, `trigon/mirror-corrupted-artifact` — ours, unexplained |
-
-Two of the three are findings about the ecosystem rather than about Trigon. The third is ours and
-open: [`16-findings.md`](docs/16-findings.md) §5.
+What stops a target reaching a comparison is mostly named rather than mysterious — a base image
+missing a tool, a package whose install fetches from a forge, a monorepo member we build outside its
+workspace. [`16-findings.md`](docs/16-findings.md) §3.25 has the breakdown and what each one costs.
 
 PyPI was 5 of 15 that morning. The lift came from three deterministic fixes and no model at all;
 [`docs/16-findings.md`](docs/16-findings.md) §2 has the arithmetic.
