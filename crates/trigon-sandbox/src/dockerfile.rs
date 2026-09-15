@@ -154,6 +154,24 @@ fn expand(dep: &str, family: Family) -> Vec<String> {
         // Debian names this after the soname, Alpine after the library. A strategy should not have
         // to know which distribution it will land on.
         ("libatomic", Family::Debian) => vec!["libatomic1".into()],
+
+        // A C and C++ toolchain, under one neutral name for the same reason. Every distribution
+        // ships this as a bundle and every one calls it something else; a strategy asking for
+        // `gcc` on Alpine gets a compiler with no `make` and fails at the second step.
+        ("cc", Family::Debian) => vec!["build-essential".into()],
+        ("cc", Family::Alpine) => vec!["build-base".into()],
+        ("cc", Family::Fedora) => vec!["gcc".into(), "gcc-c++".into(), "make".into()],
+
+        // `Python.h`. Without it a C extension fails on a missing header rather than on a missing
+        // package, which reads as the package being broken.
+        ("python3-dev", Family::Fedora) => vec!["python3-devel".into()],
+
+        ("pkg-config", Family::Alpine) => vec!["pkgconf".into()],
+        ("pkg-config", Family::Fedora) => vec!["pkgconf-pkg-config".into()],
+
+        ("ssh", Family::Debian | Family::Alpine) => vec!["openssh-client".into()],
+        ("ssh", Family::Fedora) => vec!["openssh-clients".into()],
+
         _ => vec![dep.to_string()],
     }
 }
@@ -242,5 +260,55 @@ pub fn render(plan: &OciPlan, defer_deps: bool) -> BuildContext {
     BuildContext {
         dockerfile: f,
         files,
+    }
+}
+
+#[cfg(test)]
+mod toolchain_expansion_tests {
+    use super::install_command;
+
+    /// The M1 corpus's most expensive cluster, as a package list.
+    ///
+    /// Five targets failed `command 'x86_64-linux-gnu-gcc' failed: No such file or directory`, one
+    /// on `g++`, eight on `ssh: not found`. At an enforced tier the image build has no network, so
+    /// none of them could be installed at the time they were wanted: the base image carries them or
+    /// the target is unbuildable, and the failure reads as the package's fault either way.
+    #[test]
+    fn a_neutral_name_becomes_the_right_package_on_each_distribution() {
+        let deps = [
+            "cc".to_string(),
+            "ssh".to_string(),
+            "pkg-config".to_string(),
+        ];
+
+        let debian = install_command("docker.io/library/debian@sha256:abc", &deps);
+        assert!(debian.contains("build-essential"), "{debian}");
+        assert!(debian.contains("openssh-client"), "{debian}");
+        assert!(debian.contains("apt-get"), "{debian}");
+
+        let alpine = install_command("docker.io/library/alpine@sha256:abc", &deps);
+        assert!(alpine.contains("build-base"), "{alpine}");
+        assert!(alpine.contains("pkgconf"), "{alpine}");
+        assert!(alpine.contains("apk add"), "{alpine}");
+
+        let fedora = install_command("quay.io/fedora/fedora@sha256:abc", &deps);
+        assert!(fedora.contains("gcc-c++"), "{fedora}");
+        assert!(fedora.contains("openssh-clients"), "{fedora}");
+        assert!(fedora.contains("dnf install"), "{fedora}");
+    }
+
+    #[test]
+    fn a_c_toolchain_brings_make_with_it() {
+        // `gcc` alone is the trap: a compiler with no `make` fails at the second step of every
+        // extension build, which is why this is one neutral name and not three.
+        for (img, want) in [
+            ("docker.io/library/debian@sha256:a", "build-essential"),
+            ("docker.io/library/alpine@sha256:a", "build-base"),
+        ] {
+            let cmd = install_command(img, &["cc".to_string()]);
+            assert!(cmd.contains(want), "{img}: {cmd}");
+        }
+        let fedora = install_command("quay.io/fedora/fedora@sha256:a", &["cc".to_string()]);
+        assert!(fedora.contains("make"), "{fedora}");
     }
 }

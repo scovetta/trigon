@@ -1353,6 +1353,11 @@ mod build {
                 mirror_port: 8129,
                 guard: guard.map(Path::to_path_buf),
                 on_event,
+                // Read from the environment rather than given a flag, because the caller that needs
+                // it is not a person: it is the clean-re-run path of `docs/09-attestations.md` §5,
+                // which does not exist yet, and the test that proves two builds normalize. A flag
+                // nobody is meant to type is a flag that gets typed.
+                no_cache: std::env::var_os("TRIGON_NO_BUILD_CACHE").is_some(),
             };
             let handle = runner.start(&plan, &opts).await?;
             let outcome = handle.wait().await?;
@@ -3918,13 +3923,44 @@ mod mirror {
 
     /// Every system package a builtin tool asks for.
     ///
-    /// The union rather than a per-ecosystem split, because it is seven packages and a wrong split
-    /// is a build that fails at the boundary for a reason that reads as the package's fault. `npm`
-    /// is deliberately absent: Debian's `npm` pulls its own Node and a system-wide `NODE_PATH` that
-    /// puts modules for it ahead of the pinned toolchain, which is `env/toolchain-crashed` on the
-    /// M1 corpus and not a vintage problem. A strategy that truly needs the distribution's npm has
-    /// to say so in its own image.
-    const DEFAULT_PACKAGES: &[&str] = &["ca-certificates", "git", "libatomic", "python3", "wget"];
+    /// The union rather than a per-ecosystem split, because a wrong split is a build that fails at
+    /// the boundary for a reason that reads as the package's fault. `npm` is deliberately absent:
+    /// Debian's `npm` pulls its own Node and a system-wide `NODE_PATH` that puts modules for it
+    /// ahead of the pinned toolchain, which is `env/toolchain-crashed` on the M1 corpus and not a
+    /// vintage problem. A strategy that truly needs the distribution's npm has to say so in its own
+    /// image.
+    ///
+    /// **What is still absent, and why**, so the next person does not have to re-derive it from a
+    /// corpus run: a Rust toolchain (one target) and `meson` with `ninja` (one target). Both are
+    /// real gaps and neither is a package name — Debian's `rustc` trails the ecosystem far enough
+    /// that a crate needing a newer one fails differently rather than building, so pinning a Rust
+    /// toolchain is the same decision the Node one already is, and belongs with it rather than in
+    /// this list. `yarn` and `just` are absent for the same reason as `npm`: a package whose build
+    /// requires another package manager is a finding about that package, and installing every one
+    /// of them makes the image the union of every ecosystem's opinions.
+    const DEFAULT_PACKAGES: &[&str] = &[
+        "ca-certificates",
+        "git",
+        "libatomic",
+        "python3",
+        "wget",
+        // **The toolchains the M1 corpus showed missing**, which nothing could install at an
+        // enforced tier because the image build has no network — so a target that needs one fails
+        // at the boundary and reads as the package's fault.
+        //
+        // A C compiler and the Python headers: five of the corpus's ten unnamed PyPI failures were
+        // `command 'x86_64-linux-gnu-gcc' failed: No such file or directory` and one was `g++`.
+        // Every native extension needs these, and the native stratum exists to measure them.
+        "cc",
+        "python3-dev",
+        // Asked for by most extension builds to locate system libraries; absent, the build guesses
+        // and fails further in, where the error is about a header rather than about pkg-config.
+        "pkg-config",
+        // `git+ssh://` dependencies, which npm resolves by running ssh. Eight npm targets on the
+        // full corpus failed `ssh: not found`, all of them in the strata with real dependency
+        // trees.
+        "ssh",
+    ];
 
     /// Build a base image that carries what an enforced tier cannot install.
     pub fn base_image(from: &str, packages: &[String], tag: &str, print: bool) -> Result<()> {

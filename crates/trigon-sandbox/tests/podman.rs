@@ -51,11 +51,9 @@ async fn usable(r: &PodmanRunner) -> bool {
 
 fn opts(run_id: &str) -> RunOpts {
     RunOpts {
-        // **Unique per process, or podman answers with a cached build.** The image is tagged from
-        // the run id, so a fixed one lets a previous run's layers satisfy this one: the phase
-        // scripts never execute and a probe asserting "the build could not reach the internet"
-        // is handed silence it did not earn. The egress test catches that and says so, which is
-        // how this was found — it started failing once images began surviving longer.
+        // Unique per process so two runs of the suite do not share an image tag — `no_cache`
+        // below is what actually forces the phases to execute, and this keeps their *names* from
+        // colliding while they do.
         run_id: format!("{run_id}-{}", std::process::id()),
         limits: Limits {
             wall_clock: std::time::Duration::from_secs(180),
@@ -65,6 +63,14 @@ fn opts(run_id: &str) -> RunOpts {
         mirror_port: 8129,
         guard: None,
         on_event: None,
+        // **Every test in this file asserts about what a build did**, and a cached layer means it
+        // did nothing: the probe that proves a phase could not reach the internet is satisfied by a
+        // phase that never ran, and its silence proves nothing. The egress test says exactly that
+        // and fails rather than passing on it.
+        //
+        // A unique run id was the first attempt and fixed the wrong layer — the tag differs, and
+        // podman caches by content regardless. Only this actually rebuilds.
+        no_cache: true,
     }
 }
 

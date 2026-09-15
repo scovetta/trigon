@@ -339,6 +339,14 @@ output_dir: dist
         let status = Command::new(bin())
             .arg("build")
             .arg(&s)
+            // **Independent builds, or this test proves nothing.** Podman caches build layers by
+            // content, so the second build of an identical strategy reuses the first one's — file
+            // timestamps included — and the two artifacts come out byte-identical. The assertion
+            // below says exactly that: two builds must differ, or normalization was never
+            // exercised. It began failing once deferred image removal let those layers survive
+            // between runs, which is the same reason a clean re-run needs this
+            // (`docs/09-attestations.md` §5).
+            .env("TRIGON_NO_BUILD_CACHE", "1")
             .args([
                 "--image",
                 ALPINE,

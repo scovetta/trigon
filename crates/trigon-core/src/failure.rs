@@ -152,6 +152,44 @@ const RULES: &[Rule] = &[
         capture: Capture::WordBefore(": not found"),
     },
     Rule {
+        // setuptools saying a compiler is absent, in its own words. It names the toolchain by its
+        // Debian triplet — `command 'x86_64-linux-gnu-gcc' failed: No such file or directory` — so
+        // neither of the shell rules above sees it, and six of the M1 PyPI corpus's ten unnamed
+        // failures were this one message.
+        //
+        // **Ours, not the package's.** Every C extension needs a compiler, the base image did not
+        // carry one, and at an enforced tier nothing can install it at the moment it is wanted. The
+        // package is doing the ordinary thing.
+        code: "env/missing-tool",
+        needles: &["failed: No such file or directory", "command '"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        capture: Capture::Between("command '", "'"),
+    },
+    Rule {
+        // A Rust extension with no Rust toolchain. Distinct from the C case because the answer is
+        // different: Debian's `rustc` trails the ecosystem far enough that shipping it would turn
+        // this into a version failure rather than fix it, so this names a gap that is still open
+        // rather than one the base image closed.
+        code: "env/missing-tool",
+        needles: &["can't find Rust compiler"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        capture: Capture::None,
+    },
+    Rule {
+        // `meson-python: error: Could not find the specified meson`. Same class, named separately
+        // because the message shares no wording with the others.
+        code: "env/missing-tool",
+        needles: &["Could not find the specified meson"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        capture: Capture::None,
+    },
+    Rule {
         code: "env/node-too-old",
         needles: &["Cannot find module 'node:"],
         fault: Fault::Bug,
@@ -823,6 +861,41 @@ fn clip(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_build_toolchain_is_named_however_the_backend_words_it() {
+        // Every line here is copied from a build log in the M1 PyPI pilot, where eight of ten
+        // unnamed failures were a missing compiler and the cluster read as "no idea". Three
+        // backends, three vocabularies, one cause — and the shell rules catch none of them,
+        // because none of these messages is a shell saying `not found`.
+        let gcc = super::classify(
+            "error: command 'x86_64-linux-gnu-gcc' failed: No such file or directory",
+        );
+        assert_eq!(gcc.code, "env/missing-tool");
+        assert_eq!(
+            gcc.subject.as_deref(),
+            Some("x86_64-linux-gnu-gcc"),
+            "the subject keys the cluster, so it has to name the tool"
+        );
+        assert_eq!(gcc.fault, crate::Fault::Bug, "ours: the image lacked it");
+
+        assert_eq!(
+            super::classify(
+                "error: command 'x86_64-linux-gnu-g++' failed: No such file or directory"
+            )
+            .subject
+            .as_deref(),
+            Some("x86_64-linux-gnu-g++")
+        );
+        assert_eq!(
+            super::classify("  = note: error: can't find Rust compiler").code,
+            "env/missing-tool"
+        );
+        assert_eq!(
+            super::classify("meson-python: error: Could not find the specified meson: \"x\"").code,
+            "env/missing-tool"
+        );
+    }
+
     #[test]
     fn the_npm_corpus_unknowns_are_named_from_their_real_log_lines() {
         // Every string here is copied from a build log in the M1 npm corpus run, where all four

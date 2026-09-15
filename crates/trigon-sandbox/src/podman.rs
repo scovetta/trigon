@@ -437,14 +437,17 @@ impl BuildHandle for PodmanBuild {
             "building the image: setup, source and deps run here"
         );
         let started = Instant::now();
-        let mut build_args = vec![
-            "build".to_string(),
+        let mut build_args = vec!["build".to_string()];
+        if self.opts.no_cache {
+            build_args.push("--no-cache".into());
+        }
+        build_args.extend([
             "--tag".to_string(),
             self.tag(),
             "--file".to_string(),
             ctx.join("Dockerfile").display().to_string(),
             ctx.display().to_string(),
-        ];
+        ]);
         // The image build had no network flag at all, so every phase rendered as a layer — setup,
         // source, and deps unless deferred — ran with ordinary rootless networking whatever tier
         // was asked for. At `deny-all` that meant a tier whose entire content is "reaches nothing"

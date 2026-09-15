@@ -56,6 +56,17 @@ impl tracing::Subscriber for PanicOnEvent {
     fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
         true
     }
+    /// **Says out loud that it wants everything**, because `enabled` is not consulted otherwise.
+    ///
+    /// `tracing` checks a process-wide maximum level before it builds an event at all, and a
+    /// subscriber that offers no hint does not raise it. A sibling test in this binary runs threads
+    /// concurrently, so the maximum could be whatever they left it at: this test then saw no event,
+    /// concluded the guard had stopped logging its trip, and failed — under `-j 4` only, passing
+    /// every time it ran alone. The premise is that the log call happens; without this the premise
+    /// depends on what another test is doing.
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
+    }
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         tracing::span::Id::from_u64(1)
     }

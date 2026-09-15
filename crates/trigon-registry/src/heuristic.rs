@@ -120,12 +120,40 @@ impl StrategyInferrer for NpmInferrer {
         let Some(source) = &target.source else {
             return Ok(Vec::new());
         };
-        if source.commit.is_empty() {
-            return Ok(Vec::new());
-        }
         let _ = &self.client;
 
         let mut assumptions = Vec::new();
+
+        // **npm usually records a commit, and a monorepo usually does not.** `gitHead` is written
+        // by the publishing client, and the tools that publish workspaces — lerna, changesets,
+        // `pnpm publish` — mostly do not write it: `@babel/core` and `@vue/reactivity` both carry
+        // `repository.directory` and no `gitHead` at all. This rung used to decline outright, so
+        // every such package came back `no-strategy` in a second, which reads as "we cannot infer a
+        // recipe" when the truth is "the registry did not record which commit".
+        //
+        // The tag is the same cheap rung PyPI has always used, and it costs one `ls-remote` now
+        // that it no longer goes through the GitHub API.
+        let (commit, how) = if source.commit.is_empty() {
+            match tags::resolve_version_tag(&source.repo_url, &target.reference.version).await {
+                Some((sha, tag, how)) => {
+                    assumptions.push(format!(
+                        "the commit comes from tag `{tag}` rather than from the registry, and a \
+                         tag is mutable: this is where it points today, not necessarily what was \
+                         published"
+                    ));
+                    (sha, how)
+                }
+                None => {
+                    tracing::debug!(
+                        repo = source.repo_url,
+                        "npm recorded no gitHead and no tag matches this version"
+                    );
+                    return Ok(Vec::new());
+                }
+            }
+        } else {
+            (source.commit.clone(), source.how)
+        };
 
         // `_nodeVersion` and `_npmVersion` are what the publishing client reported, so this is not
         // an inference at all: it is the toolchain that produced the artifact, recorded by the
@@ -186,7 +214,7 @@ impl StrategyInferrer for NpmInferrer {
             && bare_program(&command)
             && let Some(sources) = self.sources.clone()
         {
-            let (repo, commit) = (source.repo_url.clone(), source.commit.clone());
+            let (repo, commit) = (source.repo_url.clone(), commit.clone());
             // On a blocking thread: the checkout shells out to git, and a rung runs inside the
             // runtime that drives a sweep.
             let read = tokio::task::spawn_blocking(move || {
@@ -239,7 +267,10 @@ impl StrategyInferrer for NpmInferrer {
         let strategy = Strategy::Flow(FlowStrategy {
             location: Location {
                 repo: source.repo_url.clone(),
-                git_ref: source.commit.clone(),
+                // The resolved commit, which is the registry's where it recorded one and the
+                // version's tag where it did not. Using `source.commit` here would put an empty
+                // ref in the strategy for exactly the packages this fallback exists for.
+                git_ref: commit.clone(),
                 subdir: source.subdir.clone(),
             },
             src: vec![uses("git-checkout", BTreeMap::new())],
@@ -258,8 +289,11 @@ impl StrategyInferrer for NpmInferrer {
         Ok(vec![Candidate {
             strategy,
             derivation: Derivation::Heuristic,
-            confidence: confidence_of(source.how),
-            discovery: source.how,
+            // How the commit was *actually* found, not how the registry would have found one. A
+            // tag is `Confidence::Strong` where a recorded commit is `Certain`, and a reader has to
+            // be able to tell which they are looking at.
+            confidence: confidence_of(how),
+            discovery: how,
             assumptions,
         }])
     }

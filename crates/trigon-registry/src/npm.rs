@@ -101,15 +101,26 @@ impl Registry for NpmRegistry {
                 Confidence::Strong,
                 "npm:package.json:repository",
             ));
-            if let Some(commit) = doc.get("gitHead").and_then(Value::as_str) {
-                source = Some(SourceProvenance {
-                    repo_url: repo,
-                    commit: commit.to_string(),
-                    ref_name: None,
-                    subdir: None,
-                    how: SourceDiscovery::RegistryCommit,
-                });
-            }
+            // **A repository with no commit is still a source location.** `gitHead` is written by
+            // the publishing client and the tools that publish monorepos mostly do not write it —
+            // `@babel/core` and `@vue/reactivity` carry `repository.directory` and no `gitHead`.
+            // Returning `None` here made the inferrer decline in a second and the target report
+            // `no-strategy`, which says we could not infer a recipe when what happened is that the
+            // registry did not record a commit. The rung resolves the version's tag instead.
+            let commit = doc.get("gitHead").and_then(Value::as_str);
+            source = Some(SourceProvenance {
+                repo_url: repo,
+                commit: commit.unwrap_or_default().to_string(),
+                ref_name: None,
+                subdir: repo_subdir(&doc),
+                how: match commit {
+                    Some(_) => SourceDiscovery::RegistryCommit,
+                    // The registry told us the repository and not the commit. Overwritten by
+                    // whatever the tag rung finds, so this is never the discovery a verdict
+                    // carries — it says only where the *repository* came from.
+                    None => SourceDiscovery::RegistryMetadata,
+                },
+            });
         }
         if let Some(t) = &publish_time {
             evidence.push(Evidence::new(
@@ -225,6 +236,39 @@ fn repo_url(doc: &Value) -> Option<String> {
         .as_str()
         .or_else(|| repo.get("url").and_then(Value::as_str))?;
     Some(canonicalize_repo(raw))
+}
+
+/// Where in the repository this package lives, from `repository.directory`.
+///
+/// **npm's own answer to the monorepo question, and we were ignoring it.** `@babel/core` says
+/// `packages/babel-core`; `@typescript-eslint/parser` says `packages/parser`. Without it a rebuild
+/// checks out the repository and builds at the root, which for a monorepo member is a different
+/// package — it fails on `Unsupported URL Type "workspace:"` when npm meets a sibling dependency,
+/// or it packs the wrong thing. Four of the M1 npm corpus's twenty-three unnamed failures were
+/// this, and the monorepo stratum exists to surface it.
+///
+/// `SourceProvenance::subdir` has been plumbed to the strategy's `Location` and its `output_path`
+/// the whole time ([`crate::heuristic`]); nothing ever set it. A field that is threaded through
+/// three layers and always `None` is the dead configuration `docs/16-findings.md` §3.15 is about.
+///
+/// Refused rather than trusted where it is not a plain relative path: this value reaches a shell
+/// command line through the rendered strategy, and `..` or a leading `/` in it is a package's
+/// metadata choosing a directory outside the checkout.
+fn repo_subdir(doc: &Value) -> Option<String> {
+    let raw = doc
+        .get("repository")?
+        .get("directory")
+        .and_then(Value::as_str)?
+        .trim()
+        .trim_matches('/');
+    let safe = !raw.is_empty()
+        && !raw.starts_with('-')
+        && raw
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+        && !raw.contains(char::is_whitespace)
+        && !raw.contains('\0');
+    safe.then(|| raw.to_string())
 }
 
 /// Normalize the many spellings of a GitHub URL into one clonable HTTPS form.
@@ -533,5 +577,62 @@ mod tests {
         // And the shorthands still work, since they never reach the trimmer.
         assert_eq!(c("github:a/b"), "https://github.com/a/b");
         assert_eq!(c("git@github.com:a/b.git"), "https://github.com/a/b");
+    }
+}
+
+#[cfg(test)]
+mod subdir_tests {
+    use super::repo_subdir;
+    use serde_json::json;
+
+    fn with(directory: serde_json::Value) -> serde_json::Value {
+        json!({"repository": {"type": "git", "url": "git+https://github.com/babel/babel.git",
+                              "directory": directory}})
+    }
+
+    #[test]
+    fn npms_own_answer_to_the_monorepo_question_is_read() {
+        // Both taken from the live registry: without them a rebuild of a monorepo member checks out
+        // the repository and builds at the root, which is a different package.
+        assert_eq!(
+            repo_subdir(&with(json!("packages/babel-core"))).as_deref(),
+            Some("packages/babel-core")
+        );
+        assert_eq!(
+            repo_subdir(&with(json!("packages/parser"))).as_deref(),
+            Some("packages/parser")
+        );
+        // Surrounding slashes are noise, not structure.
+        assert_eq!(
+            repo_subdir(&with(json!("/packages/parser/"))).as_deref(),
+            Some("packages/parser")
+        );
+    }
+
+    #[test]
+    fn a_package_at_the_root_says_nothing_and_that_is_not_an_error() {
+        assert_eq!(repo_subdir(&json!({"repository": {"url": "x"}})), None);
+        assert_eq!(repo_subdir(&json!({})), None);
+        assert_eq!(repo_subdir(&with(json!(""))), None);
+        assert_eq!(repo_subdir(&with(json!(42))), None);
+    }
+
+    #[test]
+    fn a_directory_that_leaves_the_checkout_is_refused() {
+        // This value is attacker-controlled — it is whatever the publisher put in package.json —
+        // and it reaches a shell command line through the rendered strategy and an output-path
+        // glob. `..` climbs out of the checkout; a leading dash is the argument-injection case the
+        // repository URL check already refuses.
+        for bad in [
+            json!("../../etc"),
+            json!("packages/../../.."),
+            json!(".."),
+            json!("."),
+            json!("-rf"),
+            json!("packages/ core"),
+            json!("packages//core"),
+        ] {
+            assert_eq!(repo_subdir(&with(bad.clone())), None, "{bad}");
+        }
     }
 }

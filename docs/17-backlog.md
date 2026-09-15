@@ -273,6 +273,25 @@ commit from a release whose tag we failed to fetch. `Checkout::tags` carries the
 package. Turning that warning into a refusal needs a way to know a project is VCS-versioned before
 building it, which is a `pyproject.toml` read the inferrer does not do yet.
 
+## B15. A clean re-run must not be a cache hit
+
+[`09-attestations.md`](09-attestations.md) §5 requires two independent re-runs before a divergence
+is published, on the reasoning that one re-run cannot tell a deterministic recipe from a lucky one.
+Podman caches build layers by content, so a second build of the same strategy reuses the first one's
+— including the file timestamps baked into them — and produces a byte-identical artifact. That is
+not a second opinion; it is the first one replayed.
+
+Found by the end-to-end test that exists to prove two builds differ and still normalize. It began
+failing when B6's deferred image removal let those layers survive between runs, which means the
+hazard was always there and was previously masked by images being deleted promptly.
+
+`RunOpts::no_cache` exists and is wired (`TRIGON_NO_BUILD_CACHE`), defaulting to off because the
+caching is worth having — the deps layer is shared across sibling versions of a package.
+
+**Done when:** the re-run path sets it, and a test asserts that two re-runs of one target produce
+artifacts with different raw digests and the same stabilized one. Until then, nothing in this system
+performs a clean re-run at all, so the requirement is unmet for a reason older than this entry.
+
 ## B8. The three ecosystems after npm and PyPI
 
 `nuget.org`, `crates.io` and `rubygems.org`. [`03`](03-ecosystems.md) has a chapter on each and

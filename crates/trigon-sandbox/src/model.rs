@@ -193,6 +193,20 @@ pub struct RunOpts {
     pub guard: Option<std::path::PathBuf>,
     /// Called as each event is recorded. `None` is the ordinary case: nothing is watching.
     pub on_event: Option<EventSink>,
+    /// Build without reusing any cached layer.
+    ///
+    /// **What "an independent re-run" costs.** Podman caches build layers by content, so a second
+    /// build of the same strategy reuses the first one's — and reuses the file timestamps baked
+    /// into them, which makes the two artifacts byte-identical. That is a fine optimisation for a
+    /// first build and the wrong answer for a re-run: [`docs/09-attestations.md`] §5 requires two
+    /// clean re-runs before a divergence is published, and a re-run that is a cache hit is the
+    /// first run's output replayed rather than a second opinion.
+    ///
+    /// Default `false`, because the caching is worth having and the deps layer in particular is
+    /// shared across sibling versions. The re-run path sets it, and so does the end-to-end test
+    /// that exists to prove two builds differ and still normalize — which began failing, correctly,
+    /// once deferred image removal let those layers survive between runs.
+    pub no_cache: bool,
 }
 
 impl std::fmt::Debug for RunOpts {
@@ -217,6 +231,7 @@ impl Default for RunOpts {
             mirror_port: 8129,
             guard: None,
             on_event: None,
+            no_cache: false,
         }
     }
 }
