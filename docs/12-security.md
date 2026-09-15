@@ -359,6 +359,17 @@ anybody noticing, which is why it runs on every pull request.
 - **Defending a compromised control plane.** Compromise the scheduler and the attestor and the
   signed output means nothing. `--rerun-comparison` limits the damage, because an independent party
   re-derives the equivalence claim without trusting us.
+- **Pinning the system libraries a build links against.** A rebuild pins the registry index to the
+  package's publish moment and the toolchain by version, and then links against whatever `libssl`
+  or `libffi` the base image happened to carry on the day it was built. Every other input is a
+  function of the target; this one is a function of our own housekeeping. The base image digest is
+  in the attestation, so the claim is *checkable* — a third party can see which image was used and
+  reproduce with it — but it is not a claim that the libraries were the ones the publisher had. No
+  divergence in the corpus has yet been traced to one. `snapshot.debian.org` serves a Debian
+  archive as of a timestamp, which is the mechanism
+  [`trigon-mirror`](../crates/trigon-mirror/src/moment.rs) already applies to a registry index, so
+  the shape of the answer is known; it is recorded in
+  [`17-backlog.md`](17-backlog.md) B16 rather than built.
 
 ## 12. Redistribution
 

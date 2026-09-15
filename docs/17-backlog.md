@@ -316,9 +316,32 @@ repeating tail to pay for themselves. `trigon base-image --packages` already let
 the image for their own corpus, and the piece that was genuinely missing was the diagnosis telling
 them what to add, which `cc/missing-header:<h>` and `env/missing-tool` now do.
 
-That conclusion rests on a 40-target sample. **Done when:** the full 200-target PyPI corpus is run
-and either the tail repeats — in which case build the table — or it does not, in which case record
-that and close this as declined.
+**Declined, with the measurement it asked for.** The condition was: run the full 200-target PyPI
+corpus and either the tail repeats, in which case build the table, or it does not, in which case
+record that and close. All 200 have now been run. Across every PyPI target run — 217 distinct,
+including the 17 outside the corpus — the entire tail is four targets:
+
+| target | wanted |
+|---|---|
+| `pkg:pypi/cffi@2.0.0` | `ffi.h` |
+| `pkg:pypi/msgpack@1.1.2` | `_cmsgpack.c` |
+| `pkg:pypi/bcrypt@5.0.0` | a Rust toolchain |
+| `pkg:pypi/numpy@2.4.6` | `meson` |
+
+Four targets, four different subjects, no subject appearing twice. The 50 targets added last —
+none of which had been run before — contributed none. The 40-target sample was not too small; it
+was the whole of it. A header-to-package table and a repair loop both need a repeating tail to
+pay for themselves, and there is no repetition to amortize against.
+
+What stays: `trigon base-image --packages` for an operator extending the image to their own
+corpus, and the diagnosis that tells them what to add. Of the two, the diagnosis was the piece
+genuinely missing, and `cc/missing-header:<h>` and `env/missing-tool:<t>` name the subject
+exactly — `ffi.h`, not "the build failed".
+
+What is *not* declined is the paragraph above about `snapshot.debian.org`: pinning system
+libraries is a different question from installing them, this entry's title is about the former,
+and it remains unanswered. It is recorded in [`12-security.md`](12-security.md) as a limit of the
+claim rather than as work.
 
 ## B8. The three ecosystems after npm and PyPI
 
