@@ -41,6 +41,10 @@ pub struct Selection {
     pub recipes: Vec<CiRecipe>,
     pub notes: Vec<String>,
     pub jobs_seen: usize,
+    /// A job that carried a publish marker and whose build we could not reach, with what it asked
+    /// for. Set so a decline can say that rather than "no job carries a publish marker", which is
+    /// false of the run that produced it and sends a reader to the wrong part of the file.
+    pub unlinked: Option<(String, String)>,
 }
 
 /// A publish step we matched, before it becomes a `PublishStep`.
@@ -105,6 +109,9 @@ pub fn select(workflows: &[Workflow], ctx: &SelectionCtx<'_>) -> Selection {
                             pub_job.id,
                             wf.title()
                         ));
+                        out.unlinked.get_or_insert_with(|| {
+                            (pub_job.id.clone(), wanted_artifact(pub_job, &ectx))
+                        });
                         continue;
                     }
                 };
@@ -313,26 +320,30 @@ fn find_build<'a>(
             return Some((job, BuildPublishLink::ArtifactId { producer }));
         }
 
-        // Otherwise match the artifact name against an upload in a job we depend on.
-        let Some(raw) = step
-            .with
-            .get("name")
-            .or_else(|| step.with.get("pattern"))
-            .and_then(|s| s.text())
-        else {
-            continue;
+        // Otherwise match the artifact name against an upload in a job we depend on. `name:` is a
+        // literal and `pattern:` is a glob, and conflating them was how every matrix release lost
+        // its edge: a job collecting `dist-*` was looked up as an upload literally called `dist-*`.
+        let (raw, glob) = match step.with.get("name").and_then(|s| s.text()) {
+            Some(n) => (n, false),
+            None => match step.with.get("pattern").and_then(|s| s.text()) {
+                Some(p) => (p, true),
+                None => continue,
+            },
         };
-        let Ok(name) = resolve(&raw, ectx) else {
+        let Ok(wanted) = resolve(&raw, ectx) else {
             continue;
         };
         for job in &wf.jobs {
             if !reachable.contains(&job.id) {
                 continue;
             }
-            if uploads_artifact(wf, job, &name) {
+            // The *uploaded* name, not the glob that asked for it: `dist-*` is what the publish
+            // job typed, and `dist-ubuntu-22.04` is the artifact the edge is actually about.
+            if let Some(name) = uploads_artifact(wf, job, &wanted, glob) {
                 return Some((job, BuildPublishLink::Artifact { name }));
             }
         }
+        let name = wanted;
 
         // No `actions/upload-artifact` matched, and that is not always a broken workflow: an
         // unallowlisted action can upload too. `python-attrs/attrs` uploads through
@@ -353,13 +364,84 @@ fn find_build<'a>(
     None
 }
 
+/// Steps in the publish job that could have changed the artifact before it was uploaded.
+///
+/// Everything before the publish step that is not a step we can account for. What is accounted
+/// for is narrow on purpose: the artifact actions (which carry the edge), the checkout, caching,
+/// toolchain setup, an inert action, and a `run:` whose every fragment is incidental. Anything
+/// else had the bytes and our reach to them ends here.
+fn touches_the_artifact(pub_job: &Job, publish_step: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for step in pub_job.steps.iter().take(publish_step) {
+        if let Some((action, _)) = step.action() {
+            let accounted = matches!(
+                actions::classify(&action),
+                Some(
+                    Known::Checkout
+                        | Known::Cache
+                        | Known::UploadArtifact
+                        | Known::DownloadArtifact
+                        | Known::SetupPython
+                        | Known::SetupNode
+                        | Known::SetupUv
+                        | Known::OtherToolchain(_)
+                )
+            ) || actions::is_inert(&action);
+            if !accounted {
+                out.push(action);
+            }
+            continue;
+        }
+        if let Some(run) = step.run.as_deref() {
+            // The publish job's scripts are read with the same classifier as the build's, and the
+            // same rule: a fragment we cannot read is one we cannot call harmless.
+            for c in cmd::classify_script(run) {
+                match c {
+                    // Installing the publish tooling cannot rewrite what is already in `dist/`,
+                    // and a release job that pins `twine` before uploading is the common shape.
+                    Cmd::Incidental | Cmd::Publish(_) | Cmd::PyDeps(_) | Cmd::SystemDeps(_) => {}
+                    other => {
+                        out.push(format!("{}: {other:?}", step.label()));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What a publish job's `download-artifact` steps asked for, for a decline to name.
+///
+/// The first `name:` or `pattern:` it carries, unresolved expressions and all — this is a message
+/// for a person, and `${{ env.dists }}` is more use to them than an empty string.
+fn wanted_artifact(job: &Job, ectx: &ExprCtx<'_>) -> String {
+    for step in &job.steps {
+        let Some((action, _)) = step.action() else {
+            continue;
+        };
+        if actions::classify(&action) != Some(Known::DownloadArtifact) {
+            continue;
+        }
+        if let Some(raw) = step
+            .with
+            .get("name")
+            .or_else(|| step.with.get("pattern"))
+            .and_then(|s| s.text())
+        {
+            return resolve(&raw, ectx).unwrap_or(raw);
+        }
+    }
+    "(unnamed)".into()
+}
+
 /// Whether this job uploads an artifact under this name, resolved in the producing job's own scope.
 ///
 /// The producer's scope matters: `platformdirs` writes the name once as a workflow-level `env`
 /// entry and refers to it as `${{ env.dists-artifact-name }}` from both jobs, so resolving the
 /// upload's name in the *consumer's* scope would work by accident there and fail wherever the two
 /// jobs differ.
-fn uploads_artifact(wf: &Workflow, job: &Job, name: &str) -> bool {
+fn uploads_artifact(wf: &Workflow, job: &Job, wanted: &str, glob: bool) -> Option<String> {
     let env = merged_env(&wf.env, &job.env);
     for cell in &job.cells {
         let ectx = ExprCtx {
@@ -381,12 +463,40 @@ fn uploads_artifact(wf: &Workflow, job: &Job, name: &str) -> bool {
                 // An `upload-artifact` with no `name:` uploads as `artifact`, which is the default
                 // a consumer downloading by that name is relying on.
                 .unwrap_or_else(|| "artifact".into());
-            if resolve(&raw, &ectx).as_deref() == Ok(name) {
-                return true;
+            let Ok(name) = resolve(&raw, &ectx) else {
+                continue;
+            };
+            let hit = match glob {
+                true => glob_matches(wanted, &name),
+                false => name == wanted,
+            };
+            if hit {
+                return Some(name);
             }
         }
     }
-    false
+    None
+}
+
+/// `actions/download-artifact`'s `pattern:`, which is minimatch, reduced to the part workflows use.
+///
+/// `*` matches any run of characters and `?` matches one. Nothing else: minimatch also has brace
+/// expansion and character classes, and a pattern using them matches nothing here rather than
+/// matching something approximate. A wrong build job is worse than an unresolved edge.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    fn go(p: &[u8], n: &[u8]) -> bool {
+        match p.first() {
+            None => n.is_empty(),
+            Some(b'*') => (0..=n.len()).any(|i| go(&p[1..], &n[i..])),
+            Some(b'?') => !n.is_empty() && go(&p[1..], &n[1..]),
+            Some(c) => n.first() == Some(c) && go(&p[1..], &n[1..]),
+        }
+    }
+    // Anything minimatch can do that this cannot, it must not pretend to do.
+    if pattern.contains(['{', '[', '!', '+', '(']) {
+        return false;
+    }
+    go(pattern.as_bytes(), name.as_bytes())
 }
 
 /// Every job this one depends on, transitively, including itself.
@@ -476,6 +586,7 @@ fn assemble(
     };
 
     let mut toolchains = Vec::new();
+    let mut consumed = Vec::new();
     let mut unmodelled = Vec::new();
     let mut steps = Vec::new();
     let mut checkout = CheckoutSpec::default();
@@ -483,6 +594,17 @@ fn assemble(
     let mut working_directory = build_job.defaults_working_directory.clone();
 
     let same_job_publish = std::ptr::eq(pub_job, build_job);
+    // **What the publish job does to the artifact, when it is not the build job.** The loop below
+    // walks the *build* job, so in the two-job shape the publish job's own steps were never
+    // classified at all — and everything it does between downloading the build's output and
+    // uploading it happens to the bytes that reached the registry. A step that repacks, signs or
+    // strips `dist/` makes the published artifact different from the built one, and the recipe
+    // would have said the build explained it. That is not a confidence question: the published
+    // artifact is what a verdict is about.
+    let touched_after_build = match same_job_publish {
+        true => Vec::new(),
+        false => touches_the_artifact(pub_job, publish_step),
+    };
     // Where the publish step lands in `recipe.steps`, which is not where it sat in the job: a step
     // with neither `uses:` nor `run:` is dropped on the way, and an index that addressed the job's
     // list would then point at the wrong step. Downstream uses this to tell "a token in the publish
@@ -559,13 +681,29 @@ fn assemble(
                         phase,
                     });
                 }
-                // Caching cannot change output, and the artifact actions carry the edge rather than
-                // building anything. Neither is unmodelled: recording them would depress a
-                // candidate's confidence for steps that provably do not matter.
+                // **A download into the build job is an input to the build.** This sat with
+                // `actions/cache` on the list of steps that provably do not matter, on the
+                // reasoning that the artifact actions carry the edge between jobs rather than
+                // building anything. That is true of the *publish* job, and this loop walks the
+                // *build* job: bytes another job produced are reaching the tree before the build
+                // reads it, and a recipe that drops the step describes a build from source alone.
+                // It is the shape `docs/12-security.md` §1.1 is about — a rebuild that matches
+                // because it was handed the answer.
+                Some(Known::DownloadArtifact) => {
+                    consumed.push(
+                        with.get("name")
+                            .or_else(|| with.get("pattern"))
+                            .cloned()
+                            .unwrap_or_else(|| "artifact".into()),
+                    );
+                }
+                // Caching cannot change output, and the remaining artifact and publish actions
+                // carry the edge rather than building anything. Neither is unmodelled: recording
+                // them would depress a candidate's confidence for steps that provably do not
+                // matter.
                 Some(
                     Known::Cache
                     | Known::UploadArtifact
-                    | Known::DownloadArtifact
                     | Known::PyPiPublish
                     | Known::NpmPublish
                     | Known::GithubRelease,
@@ -658,6 +796,8 @@ fn assemble(
         steps,
         unmodelled,
         secrets_in_build: secrets_in_build.into_iter().collect(),
+        consumed_artifacts: consumed,
+        touched_after_build,
         rank,
     };
     (recipe, notes)

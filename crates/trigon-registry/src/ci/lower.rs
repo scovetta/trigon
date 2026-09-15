@@ -111,6 +111,17 @@ pub fn lower(recipe: &CiRecipe, ctx: &LowerCtx<'_>) -> Lowering {
              carries it"
         ));
     }
+    // The same fact arriving by a different route. `CiRecipe::env` — workflow `env` under job
+    // `env`, merged — was assembled and read by nothing, so a workflow that set
+    // `SOURCE_DATE_EPOCH` in its header looked identical to one that did not. That is the single
+    // most consequential variable in Python packaging reproducibility, and a build that ran with
+    // it set is not the build a rebuild without it performs.
+    for (name, value) in &recipe.env {
+        out.notes.push(format!(
+            "`{name}={value}` was set for every step of the build job, and nothing in \
+             `FlowStrategy` carries it"
+        ));
+    }
 
     // ---- The refusals. -----------------------------------------------------------------------
     if let Some(reason) = refuse(recipe, &build, ctx) {
@@ -122,6 +133,19 @@ pub fn lower(recipe: &CiRecipe, ctx: &LowerCtx<'_>) -> Lowering {
     let mut assumptions = Vec::new();
     if let Some(approx) = recipe.runner.approximation() {
         assumptions.push(approx.why.clone());
+    }
+    // A note goes in a report; an assumption goes in the attestation, which is where someone
+    // deciding whether to believe this verdict will look.
+    if !recipe.env.is_empty() {
+        let names: Vec<&str> = recipe.env.keys().map(String::as_str).collect();
+        assumptions.push(format!(
+            "the build job ran with {} set ({}), and this recipe sets none of them",
+            match names.len() {
+                1 => "one environment variable".to_string(),
+                n => format!("{n} environment variables"),
+            },
+            names.join(", ")
+        ));
     }
     if let RunnerSpec::Container { image, digest } = &recipe.runner {
         assumptions.push(match digest {
@@ -302,6 +326,14 @@ fn refuse(recipe: &CiRecipe, build: &BuildAnalysis, ctx: &LowerCtx<'_>) -> Optio
         return Some(Decline::SecretInBuild {
             names: recipe.secrets_in_build.clone(),
         });
+    }
+    if let Some(artifact) = recipe.consumed_artifacts.first() {
+        return Some(Decline::BuildConsumesAnotherJobsOutput {
+            artifact: artifact.clone(),
+        });
+    }
+    if let Some(step) = recipe.touched_after_build.first() {
+        return Some(Decline::ArtifactChangedAfterTheBuild { step: step.clone() });
     }
     // Before the unknown-fragment checks below, because it is the more specific statement: we read
     // the command and know what it did, rather than failing to read it.
@@ -606,11 +638,21 @@ fn confidence(recipe: &CiRecipe, ctx: &LowerCtx<'_>) -> Confidence {
     if !recipe.unmodelled.is_empty() {
         c = c.max(Confidence::Weak);
     }
-    if recipe
-        .runner
-        .approximation()
-        .is_some_and(|a| a.confidence == Confidence::Weak)
-    {
+    // **Not knowing must never raise confidence.** Resolving `ubuntu-latest` to a release yields a
+    // `Weak` approximation and lowers the candidate to match; failing to resolve it — a publish
+    // inside a rollout window, where the label genuinely was two releases — used to yield *no*
+    // approximation, nothing to lower against, and a `Strong` candidate. The run that knew less was
+    // the more confident one. A label with no approximation is at least as uncertain as one with a
+    // weak approximation, so both arms lower.
+    let runner_is_a_guess = match &recipe.runner {
+        RunnerSpec::LinuxLabel { approx, .. } => approx
+            .as_ref()
+            .is_none_or(|a| a.confidence == Confidence::Weak),
+        // A digest-pinned container is not an approximation at all, and an out-of-scope runner
+        // never reaches a lowering.
+        RunnerSpec::Container { .. } | RunnerSpec::OutOfScope(_) => false,
+    };
+    if runner_is_a_guess {
         c = c.max(Confidence::Weak);
     }
     c

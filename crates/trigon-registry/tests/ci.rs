@@ -1100,3 +1100,303 @@ async fn a_decline_does_not_assert_what_is_not_true_of_its_own_run() {
         "a build was recognised, and the decline says there was none: {said}"
     );
 }
+
+/// A matrix build fanning wheels out under per-platform names, collected with a glob.
+const FAN_IN_WITH_A_GLOB: &str = r#"
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  sdist:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo nothing to see here
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: NOTES
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-ubuntu-22.04
+          path: dist/
+  publish:
+    needs: [build, sdist]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn a_publish_job_that_fans_in_with_a_glob_keeps_its_build_edge() {
+    // `pattern:` is a minimatch glob and was compared as a literal artifact name, so a publish job
+    // collecting `dist-*` matched an upload named `dist-*` and nothing else. Every matrix release —
+    // which is most of the ones that publish wheels — lost the edge to the job that built them and
+    // the rung declined for a reason that was not true of the file.
+    let r = read_pypi(
+        "fanned",
+        &[Wf::Inline("release.yml", FAN_IN_WITH_A_GLOB)],
+        &[("pyproject.toml", "[project]\nname = \"fanned\"\n")],
+    )
+    .await;
+    let best = r.ranked.first().unwrap_or_else(|| {
+        panic!("no recipe, declined: {:?}", r.declined);
+    });
+    assert_eq!(best.publish_job, "publish");
+    assert_eq!(
+        best.build_job, "build",
+        "the glob has to reach the job that uploaded a name it matches, and not the other job \
+         this one also depends on"
+    );
+    assert_eq!(
+        best.link,
+        BuildPublishLink::Artifact {
+            name: "dist-ubuntu-22.04".into()
+        },
+        "the edge records the artifact that was uploaded, not the glob that asked for it"
+    );
+}
+
+/// A build that starts by downloading bytes another job produced.
+const BUILD_CONSUMES_AN_ARTIFACT: &str = r#"
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  compile:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make libthing.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native
+          path: libthing.so
+  build:
+    needs: [compile]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: native
+          path: src/consumer/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn a_build_fed_by_another_jobs_bytes_is_not_reproducible_from_source() {
+    // `actions/download-artifact` sat with `actions/cache` on the list of steps that "provably do
+    // not matter", on the reasoning that the artifact actions carry the edge between jobs rather
+    // than building anything. That is true of the *publish* job. In the *build* job it is the
+    // opposite: the build's inputs include bytes this rebuild will never produce, and a recipe that
+    // drops the step describes a build from source alone. That is the shape `docs/12-security.md`
+    // §1.1 is about — a rebuild that matches because it was handed the answer.
+    let r = read_pypi(
+        "fed",
+        &[Wf::Inline("release.yml", BUILD_CONSUMES_AN_ARTIFACT)],
+        &[("pyproject.toml", "[project]\nname = \"fed\"\n")],
+    )
+    .await;
+    let said = r
+        .declined
+        .as_ref()
+        .unwrap_or_else(|| {
+            panic!(
+                "lowered a recipe that drops the download: {:?}",
+                r.candidate
+            )
+        })
+        .to_string();
+    assert!(
+        said.contains("native"),
+        "the decline has to name the artifact the build consumed: {said}"
+    );
+}
+
+#[tokio::test]
+async fn failing_to_resolve_a_label_does_not_make_the_candidate_more_confident() {
+    // The inversion. Resolving `ubuntu-latest` to a release produces a `Weak` approximation, and
+    // `confidence()` lowers the candidate to match. Failing to resolve it produced *no*
+    // approximation, nothing to lower against, and a `Strong` candidate — so the run that knew
+    // less was the more confident one.
+    //
+    // Both of these are the same file and the same commit. The only difference is a publish time
+    // inside GitHub's 24.04 rollout window, where the label genuinely was both releases.
+    let (root, url, commit) = repo("inversion", &[Wf::Fixture("six-publish")], &[]);
+
+    let mut settled = target(Ecosystem::PyPI, "six", "1.17.0", &url, &commit);
+    settled.intrinsics.publish_time = Some("2024-03-01T00:00:00Z".into());
+    let resolved = rung(&root).read(&settled).await.unwrap();
+
+    let mut mid = target(Ecosystem::PyPI, "six", "1.17.0", &url, &commit);
+    mid.intrinsics.publish_time = Some("2024-12-20T00:00:00Z".into());
+    let unresolved = rung(&root).read(&mid).await.unwrap();
+
+    let known = resolved.candidate.as_ref().expect("a candidate").confidence;
+    let unknown = unresolved
+        .candidate
+        .as_ref()
+        .expect("a candidate")
+        .confidence;
+    // `Confidence` orders Certain < Strong < Weak, so "no better than" is `>=`.
+    assert!(
+        unknown >= known,
+        "not knowing which release the label meant produced the more confident candidate: \
+         resolved={known:?} unresolved={unknown:?}"
+    );
+}
+
+/// A release whose reproducibility lever is set where the rung parsed it and then forgot it.
+const ENV_AT_THE_TOP: &str = r#"
+name: release
+on:
+  push:
+    tags: ["v*"]
+env:
+  SOURCE_DATE_EPOCH: "1700000000"
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    env:
+      SETUPTOOLS_SCM_PRETEND_VERSION: "1.2.3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn environment_the_workflow_set_and_the_recipe_drops_is_said_out_loud() {
+    // `CiRecipe::env` was assembled — workflow `env` under job `env`, merged, literals only — and
+    // then read by nothing. A build that ran with `SOURCE_DATE_EPOCH` set and a rebuild that runs
+    // without it are two different builds, and the single most consequential variable in Python
+    // packaging reproducibility disappeared between the parse and the recipe with nothing said.
+    //
+    // A `GITHUB_ENV` export already gets a note saying `FlowStrategy` has nowhere to carry it.
+    // A declared `env:` is the same fact arriving by a different route and gets the same note.
+    let r = read_pypi(
+        "enved",
+        &[Wf::Inline("release.yml", ENV_AT_THE_TOP)],
+        &[("pyproject.toml", "[project]\nname = \"enved\"\n")],
+    )
+    .await;
+    let said = r.notes.join("\n");
+    for name in ["SOURCE_DATE_EPOCH", "SETUPTOOLS_SCM_PRETEND_VERSION"] {
+        assert!(
+            said.contains(name),
+            "`{name}` was parsed and dropped in silence:\n{said}"
+        );
+    }
+
+    // And it reaches the candidate, because a note lives in a report and an assumption is what a
+    // reader of the attestation gets.
+    let c = r.candidate.as_ref().unwrap_or_else(|| {
+        panic!("declined: {:?}", r.declined);
+    });
+    assert!(
+        c.assumptions
+            .iter()
+            .any(|a| a.contains("SOURCE_DATE_EPOCH")),
+        "the assumption list does not mention it: {:?}",
+        c.assumptions
+    );
+}
+
+/// A publish job that does something to the artifact between downloading it and uploading it.
+const SIGNED_BETWEEN_BUILD_AND_PUBLISH: &str = r#"
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dists
+          path: dist/
+  publish:
+    needs: [build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dists
+          path: dist/
+      - uses: example/rewrap-wheels@v2
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn what_the_publish_job_does_to_the_artifact_is_not_invisible() {
+    // The recipe is assembled by walking the *build* job's steps, so when the publish job is a
+    // different job its own steps were never classified at all. Everything between the download
+    // and the upload happened to the bytes that were published, and the rung saw none of it: a
+    // step that repacks, signs, strips or otherwise rewrites `dist/` left the artifact on the
+    // registry different from the one the build produced, and the recipe said the build explained
+    // it.
+    //
+    // The published artifact is what a verdict is *about*, so this is not a confidence question.
+    let r = read_pypi(
+        "rewrapped",
+        &[Wf::Inline("release.yml", SIGNED_BETWEEN_BUILD_AND_PUBLISH)],
+        &[("pyproject.toml", "[project]\nname = \"rewrapped\"\n")],
+    )
+    .await;
+    let said = r
+        .declined
+        .as_ref()
+        .unwrap_or_else(|| {
+            panic!(
+                "lowered a recipe blind to the publish job: {:?}",
+                r.candidate
+            )
+        })
+        .to_string();
+    assert!(
+        said.contains("example/rewrap-wheels"),
+        "the decline has to name the step that touched the artifact: {said}"
+    );
+}
+
+#[tokio::test]
+async fn an_ordinary_publish_job_is_not_made_suspicious_by_this() {
+    // The counterpart, and the reason the rule is about steps *between* the download and the
+    // publish rather than about the publish job having steps at all. `certifi` is the shape every
+    // trusted-publishing release has: download, publish, nothing else.
+    let r = read_pypi("certifi-still", &[Wf::Fixture("certifi-release")], &[]).await;
+    assert!(
+        r.candidate.is_some(),
+        "an ordinary publish job now declines: {:?}",
+        r.declined
+    );
+}

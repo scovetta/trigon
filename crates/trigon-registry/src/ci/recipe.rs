@@ -377,6 +377,11 @@ pub struct CiRecipe {
     pub unmodelled: Vec<UnmodelledStep>,
     /// `secrets.*` referenced by a step in the build job that is not the publish step.
     pub secrets_in_build: Vec<String>,
+    /// Artifacts the *build* job downloaded from another job. Bytes a rebuild will not produce.
+    pub consumed_artifacts: Vec<String>,
+    /// Steps in the publish job, before the publish step, that we cannot account for. Empty when
+    /// the publish job is the build job, where the same steps are already in `steps`.
+    pub touched_after_build: Vec<String>,
     pub rank: JobRank,
 }
 
@@ -458,6 +463,17 @@ pub enum Decline {
     /// know whether it changes the output.
     SecretInBuild {
         names: Vec<String>,
+    },
+    /// The build job downloaded an artifact another job produced, so its inputs are bytes rather
+    /// than source. A rebuild from the checkout alone is a different build, and one that matched
+    /// anyway would be matching for the wrong reason.
+    BuildConsumesAnotherJobsOutput {
+        artifact: String,
+    },
+    /// Something happened to the artifact in the publish job, between the download and the upload.
+    /// Whatever the build produced, that is not what reached the registry.
+    ArtifactChangedAfterTheBuild {
+        step: String,
     },
     /// The published version is computed at publish time rather than read from the tree.
     /// `vercel/ms` derives a nightly version from `date`, so the version it published exists
@@ -549,6 +565,17 @@ impl std::fmt::Display for Decline {
                     .map(|n| format!("`secrets.{n}`"))
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            Decline::BuildConsumesAnotherJobsOutput { artifact } => write!(
+                f,
+                "the build job downloads `{artifact}` from another job, so its inputs are bytes \
+                 this rebuild does not produce and a recipe built from the checkout alone is \
+                 about a different build"
+            ),
+            Decline::ArtifactChangedAfterTheBuild { step } => write!(
+                f,
+                "`{step}` runs in the publish job between the build's output and the upload, so \
+                 what reached the registry is not what the build produced"
             ),
             Decline::VersionComputedAtPublishTime { step } => write!(
                 f,

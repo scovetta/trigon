@@ -278,14 +278,15 @@ impl CiInferrer {
             },
         );
 
+        // Taken before `notes` moves into the reading below, because this is the answer to "why is
+        // there no recipe" and that question is asked in two places, either side of the move.
+        let no_recipe = no_recipe(&selection);
         let mut reading = CiReading {
             notes: selection.notes,
             ..CiReading::default()
         };
         let Some(best) = selection.recipes.first() else {
-            reading.declined = Some(Decline::NoQualifyingJob {
-                jobs_seen: selection.jobs_seen,
-            });
+            reading.declined = Some(no_recipe);
             reading.ranked = selection.recipes;
             return Ok(reading);
         };
@@ -336,13 +337,10 @@ impl CiInferrer {
         // `resolve_toolchain` a `Contradiction`, whose documented meaning is "escalate to a model".
         // That would spend budget on our own ranking rather than on the package. The losing
         // recipes stay in `ranked` where a report can show them.
-        reading.ranked = selection.recipes;
-
         if reading.candidate.is_none() && reading.declined.is_none() {
-            reading.declined = Some(Decline::NoQualifyingJob {
-                jobs_seen: selection.jobs_seen,
-            });
+            reading.declined = Some(no_recipe);
         }
+        reading.ranked = selection.recipes;
         Ok(reading)
     }
 }
@@ -405,4 +403,23 @@ fn memo_key(target: &ResolvedTarget) -> String {
         target.reference.registry_name(),
         target.reference.version
     )
+}
+
+/// Why a selection produced no recipe, said accurately about the run that produced it.
+///
+/// `NoQualifyingJob` — "none of the N jobs carries a publish marker for this ecosystem" — was
+/// returned for both of the two ways this happens, and it is false about the second. A matrix
+/// release whose publish job fans wheels in with a glob *does* carry a marker; what failed was
+/// following the edge back to the job that built them, and a reader told no job publishes goes
+/// looking in the wrong half of the file.
+fn no_recipe(selection: &select::Selection) -> Decline {
+    match &selection.unlinked {
+        Some((publish_job, artifact)) => Decline::BuildJobUnreachable {
+            publish_job: publish_job.clone(),
+            artifact: artifact.clone(),
+        },
+        None => Decline::NoQualifyingJob {
+            jobs_seen: selection.jobs_seen,
+        },
+    }
 }
