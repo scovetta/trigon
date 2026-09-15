@@ -30,5 +30,5 @@ pub use npm::filter_packument;
 pub use pypi::{filter_simple, render_html};
 pub use server::{
     ARTIFACT_HOSTS, Mirror, MirrorHandle, Observed, Seen, TOOLCHAIN_HOSTS, artifact_host_allowed,
-    toolchain_host_allowed,
+    reserve, toolchain_host_allowed,
 };

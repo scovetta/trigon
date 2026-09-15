@@ -404,6 +404,12 @@ fn hashmap_uses(crate_name: &str) -> Result<Vec<String>> {
 fn verifier_builds() -> Result<()> {
     let out = std::process::Command::new(env!("CARGO"))
         .current_dir(workspace_root())
+        // **The flags CI uses, or this check agrees with a build nobody runs.** Without
+        // `-D warnings` this passed for weeks while the CI job failed on two dead functions the
+        // verifier does not use: the gate that exists to catch exactly this was checking a
+        // different build from the one that has to compile. Two things that had to agree, with
+        // nothing asserting they did.
+        .env("RUSTFLAGS", "-D warnings")
         .args(["check", "-q", "-p", "trigon", "--no-default-features"])
         .output()
         .context("running cargo check on the verifier build")?;

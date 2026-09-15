@@ -367,6 +367,13 @@ enum Cmd {
         /// Ask a model where nothing deterministic answers, for every target or none.
         #[arg(long)]
         model: Option<String>,
+        /// Targets to build at once. Defaults to 1, which is what a sweep did before this existed.
+        ///
+        /// Bounded by memory, not by cores: every target in flight holds a build container and a
+        /// mirror container, and running out means the OOM killer takes a build — which reads as a
+        /// broken package rather than as a machine that was too small.
+        #[arg(long, default_value_t = 1)]
+        concurrency: usize,
         #[arg(long)]
         source_cache: Option<PathBuf>,
     },
@@ -616,6 +623,12 @@ fn voiding_trips(
 ///
 /// Hand-rolled rather than pulling in a date library for one format. UTC only, and seconds
 /// precision, which is all a run record needs.
+///
+/// Gated because every caller is: a run record is written by `rebuild` and by `sweep`, and the
+/// verifier build has neither. Without the gate the verifier compiles it and CI fails on
+/// `-D warnings` — which it was doing, silently, because the dependency-policy check builds the
+/// verifier without `RUSTFLAGS` and so agreed the build was fine.
+#[cfg(feature = "build")]
 fn now_rfc3339() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -879,6 +892,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             timewarp,
             store,
             model,
+            concurrency,
             source_cache,
         } => sweep::run(sweep::Args {
             targets,
@@ -892,6 +906,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             timewarp,
             model,
             source_cache,
+            concurrency,
         }),
         #[cfg(feature = "build")]
         Cmd::Attest {
@@ -1467,7 +1482,10 @@ mod build {
             //
             // Cheap, because a match on the runner's own artifact costs one parse and the two
             // agree on every ordinary build.
-            let produced = outcome.artifact.clone().or_else(|| crate::rebuild::newest_file(out));
+            let produced = outcome
+                .artifact
+                .clone()
+                .or_else(|| crate::rebuild::newest_file(out));
             let rebuilt = produced
                 .as_deref()
                 .and_then(trigon_mirror::member_digests_at);
@@ -1915,6 +1933,7 @@ fn stabilizers(prof: &str) -> Result<()> {
 ///
 /// Read separately because the source has to be fetched *before* the render: the render needs to
 /// know whether a checkout is in hand, and that is only knowable once it has been fetched.
+#[cfg(feature = "build")]
 fn strategy_location(file: &Path, import: bool) -> Result<(String, trigon_strategy::Location)> {
     let src =
         std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
@@ -2419,68 +2438,36 @@ mod rebuild {
             resolved.intrinsics.evidence.extend(found);
         }
 
-        // The guard manifest, from the bytes we just fetched. This is the control that defeats the
-        // attack the whole design is shaped around: a strategy that downloads the published
-        // artifact reproduces it byte for byte, passes every clean re-run, and is worth nothing.
-        let guard = match std::fs::read(&upstream_path) {
-            Ok(bytes) => {
-                let format = crate::resolve_format(&upstream_path, None)?;
-                let url = Some(meta.url.clone());
-                let m = match args.source.as_deref() {
-                    Some(dir) => trigon_mirror::GuardManifest::for_artifact_with_source(
-                        &bytes, format, url, dir,
-                    ),
-                    None => trigon_mirror::GuardManifest::for_artifact(&bytes, format, url),
-                };
-                // And withhold this version from the index the build resolves against. The
-                // refusal above is the control; this is what makes it survivable. A resolver that
-                // is offered a version and then denied the file fails outright, which is how every
-                // package that is part of the machinery that builds packages died at an enforced
-                // tier — `python -m build` needs `packaging`, npm's installer needs
-                // `object-assign`. A version that was never listed is routed around instead.
-                //
-                // `registry_name`, not `name`: an npm scope is part of what the registry calls the
-                // package, and `core` is a different package from `@babel/core`.
-                m.withholding(&target.registry_name(), &target.version)
-            }
-            Err(_) => trigon_mirror::GuardManifest::default(),
-        };
-        if verbose {
-            println!(
-                "  guarding   the artifact and {} of its members ({} too small or too common)",
-                guard.members.len(),
-                guard.filtered_out
-            );
-        }
-
         mark("strategy");
         // 3. A strategy, from the first rung that has one.
-        // Under `mirror-only` the mirror runs inside the build's network island rather than here:
-        // a container on an internal network cannot reach the host, which is the whole point of
-        // the tier. The port is fixed because it is inside that island and collides with nothing.
+        //
+        // **The mirror's address is claimed here and the mirror is started further down**, because
+        // the guard manifest is narrowed by the source tree, the source tree is a function of the
+        // strategy's location, and a strategy has to be told where the mirror will be before it can
+        // be chosen. Arming a mirror before the manifest is final would have it serving under a
+        // wider guard than the run settled on. The inferrers only need to *know* a mirror will
+        // exist — they read it to decide whether to pin a registry moment, and make no request
+        // through it — so the reservation is enough to run the ladder.
+        //
+        // Under `mirror-only` there is nothing to claim: the mirror runs inside the build's network
+        // island, on a port that is fixed because it collides with nothing in there.
         let enforced = args.egress == "mirror-only";
-        let mirror = match args.timewarp.as_deref() {
+        let reserved = match args.timewarp.as_deref() {
             Some("auto") if enforced => {
                 println!(
                     "  mirror     inside the build's network island, which is its only route out"
                 );
                 None
             }
-            Some("auto") => {
-                let g = guard.clone();
-                let handle = rt.block_on(async {
-                    trigon_mirror::Mirror::new()?.with_guard(g).serve(0).await
-                })?;
-                if verbose {
-                    println!("  mirror     serving the index as of the publish date");
-                }
-                Some(handle)
-            }
+            Some("auto") => Some(rt.block_on(trigon_mirror::reserve(0))?),
             _ => None,
         };
         let timewarp_host = crate::timewarp_host_for(
             enforced,
-            mirror.as_ref().map(|m| m.addr.port()),
+            reserved
+                .as_ref()
+                .and_then(|l| l.local_addr().ok())
+                .map(|a| a.port()),
             args.timewarp.as_deref(),
         );
 
@@ -2556,7 +2543,56 @@ mod rebuild {
             }
         }
 
-        // 4. Build it, and repair it where a model is configured to try.
+        // The checkout the build will use, taken here so the guard manifest can be narrowed by it.
+        //
+        // The checkout the build will use, and the guard manifest narrowed by it.
+        //
+        // **One function, because the ordering is the invariant.** A file the artifact ships and
+        // the repository also contains is not evidence of anything — the build is entitled to
+        // produce it — and the manifest has always known how to drop those. It could not, because
+        // it was built from the published bytes *before* a strategy existed and the tree is a
+        // function of the strategy's location. So `packaging` and `pyproject-hooks` voided on their
+        // own source files arriving inside the adjacent release, and the filter that would have
+        // stopped it was tested while the ordering that reaches it was asserted by nothing.
+        //
+        // Returning both together is what stops that coming back: there is no longer a point in
+        // this function where a manifest exists and the checkout does not.
+        let (checkout, guard) = checkout_and_guard(
+            &upstream_path,
+            &meta.url,
+            &loc,
+            args.source.as_deref(),
+            args.source_cache.as_deref(),
+            &target,
+        )?;
+        if verbose {
+            println!(
+                "  guarding   the artifact and {} of its members ({} too small, too common, or \
+                 also in the source)",
+                guard.members.len(),
+                guard.filtered_out
+            );
+        }
+
+        // Armed now, on the address claimed before the ladder ran. Nothing has been served from it
+        // yet: the reservation held the port and the manifest it serves under is the final one.
+        let mirror = match reserved {
+            Some(listener) => {
+                let g = guard.clone();
+                let handle = rt.block_on(async {
+                    trigon_mirror::Mirror::new()?
+                        .with_guard(g)
+                        .serve_on(listener)
+                        .await
+                })?;
+                if verbose {
+                    println!("  mirror     serving the index as of the publish date");
+                }
+                Some(handle)
+            }
+            None => None,
+        };
+
         let strategy_file = args.work.join("strategy.yaml");
         let out = args.work.join("rebuild");
         // Written next to the run, and mounted read-only into the island's mirror when there is
@@ -2625,7 +2661,11 @@ mod rebuild {
                 Some(args.mirror_image.as_str()),
                 verbose,
                 enforced.then_some(guard_file.as_path()),
-                args.source.as_deref(),
+                // The checkout the guard was narrowed by, not a second one resolved inside the
+                // build. Two fetches of one commit would agree today and be two things that have
+                // to keep agreeing; and the tree the guard exempted files from has to be the tree
+                // the build compiled, or the exemption is about a different set of bytes.
+                checkout.as_deref(),
                 // Phase marks from inside the sandbox, forwarded to whatever is watching, and the
                 // timings on the way past. The build already recorded both and threw them away;
                 // only the sink was missing.
@@ -3540,6 +3580,215 @@ mod rebuild {
         }
     }
 
+    /// The checkout the build will use, and the guard manifest narrowed by it.
+    ///
+    /// **Both or neither, deliberately.** The manifest exempts members byte-identical to a file in
+    /// the source tree — "a file the artifact ships and the repository also contains is not
+    /// evidence of anything: the build is entitled to fetch it" — and for a long time nothing
+    /// reached that filter on an ordinary run, because the manifest was built before a strategy
+    /// named a location. Handing them back as a pair means a later edit cannot separate them
+    /// without changing this signature.
+    ///
+    /// The checkout is also the build's input, not just the guard's: the tree the guard exempted
+    /// files from has to be the tree the build compiled, or the exemption is about a different set
+    /// of bytes.
+    ///
+    /// Best effort, in the direction it has always been. A strategy whose source phase generates
+    /// its own tree has nothing to fetch, and failing here would refuse it for a repository it
+    /// never intended to use. Without a tree the manifest stays wide, which errs toward voiding an
+    /// honest run rather than missing a forged one.
+    fn checkout_and_guard(
+        upstream: &Path,
+        url: &str,
+        loc: &trigon_strategy::Location,
+        named: Option<&Path>,
+        cache_root: Option<&Path>,
+        target: &trigon_core::TargetRef,
+    ) -> Result<(Option<PathBuf>, trigon_mirror::GuardManifest)> {
+        let checkout = match named {
+            Some(p) => Some(p.to_path_buf()),
+            None if loc.repo.is_empty() => None,
+            None => {
+                let cache = trigon_registry::SourceCache::new(
+                    cache_root
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(trigon_registry::SourceCache::default_root),
+                );
+                match cache.checkout(&loc.repo, &loc.git_ref) {
+                    Ok(c) => Some(c.path),
+                    Err(e) => {
+                        // Said out loud rather than at `debug`: the guard is about to watch files
+                        // the build is entitled to produce, and a run that voids for that reason
+                        // should be readable as this rather than as a catch.
+                        tracing::warn!(
+                            repo = %loc.repo,
+                            "no host checkout, so the guard is wider than designed: a member the \
+                             repository also contains cannot be exempted. {e:#}"
+                        );
+                        None
+                    }
+                }
+            }
+        };
+
+        // This is the control that defeats the attack the whole design is shaped around: a strategy
+        // that downloads the published artifact reproduces it byte for byte, passes every clean
+        // re-run, and is worth nothing.
+        let guard = match std::fs::read(upstream) {
+            Ok(bytes) => {
+                let format = crate::resolve_format(upstream, None)?;
+                let u = Some(url.to_string());
+                let m = match checkout.as_deref() {
+                    Some(dir) => trigon_mirror::GuardManifest::for_artifact_with_source(
+                        &bytes, format, u, dir,
+                    ),
+                    None => trigon_mirror::GuardManifest::for_artifact(&bytes, format, u),
+                };
+                // And withhold this version from the index the build resolves against. The refusal
+                // is the control; this is what makes it survivable. A resolver that is offered a
+                // version and then denied the file fails outright, which is how every package that
+                // is part of the machinery that builds packages died at an enforced tier —
+                // `python -m build` needs `packaging`, npm's installer needs `object-assign`. A
+                // version that was never listed is routed around instead.
+                //
+                // `registry_name`, not `name`: an npm scope is part of what the registry calls the
+                // package, and `core` is a different package from `@babel/core`.
+                m.withholding(&target.registry_name(), &target.version)
+            }
+            Err(_) => trigon_mirror::GuardManifest::default(),
+        };
+        Ok((checkout, guard))
+    }
+
+    #[cfg(test)]
+    mod guard_ordering_tests {
+        use super::*;
+
+        fn tgz(members: &[(&str, &[u8])]) -> Vec<u8> {
+            let mut b = ::tar::Builder::new(Vec::new());
+            for (name, body) in members {
+                let mut h = ::tar::Header::new_ustar();
+                h.set_size(body.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                b.append_data(&mut h, *name, *body).unwrap();
+            }
+            let tar = b.into_inner().unwrap();
+            let mut out = Vec::new();
+            {
+                use std::io::Write as _;
+                let mut e = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+                e.write_all(&tar).unwrap();
+                e.finish().unwrap();
+            }
+            out
+        }
+
+        fn target() -> trigon_core::TargetRef {
+            trigon_core::TargetRef::new(trigon_core::Ecosystem::Npm, "demo", "1.0.0")
+        }
+
+        /// The one this project had to learn twice: the *filter* was tested and the ordering that
+        /// reaches it was asserted by nothing, so an ordinary run never got there and two packages
+        /// voided on their own source files for weeks.
+        #[test]
+        fn a_run_with_a_checkout_guards_nothing_the_repository_also_holds() {
+            let shared = vec![b'S'; 9000];
+            let only_in_the_artifact = vec![b'A'; 9000];
+            let dir = std::env::temp_dir().join(format!("trigon-b14-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("shared.js"), &shared).unwrap();
+            let art = dir.join("demo-1.0.0.tgz");
+            std::fs::write(
+                &art,
+                tgz(&[
+                    ("package/shared.js", &shared),
+                    ("package/built.js", &only_in_the_artifact),
+                ]),
+            )
+            .unwrap();
+
+            let loc = trigon_strategy::Location::default();
+            let (checkout, guard) = checkout_and_guard(
+                &art,
+                "https://registry.npmjs.org/demo/-/demo-1.0.0.tgz",
+                &loc,
+                Some(dir.as_path()),
+                None,
+                &target(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                guard.members.len(),
+                1,
+                "the file the repository also holds is exempt; the one only the artifact has is not"
+            );
+            assert_eq!(guard.filtered_out, 1);
+            // **The tree the build gets is the tree the guard exempted from.** Handing back a
+            // different one would make the exemption a statement about other bytes, and nothing
+            // downstream could tell.
+            assert_eq!(checkout.as_deref(), Some(dir.as_path()));
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// And with no tree the guard stays wide, which is the safe direction: it errs toward
+        /// voiding an honest run rather than missing a forged one.
+        #[test]
+        fn a_run_with_no_checkout_guards_everything() {
+            let shared = vec![b'S'; 9000];
+            let dir = std::env::temp_dir().join(format!("trigon-b14-none-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let art = dir.join("demo-1.0.0.tgz");
+            std::fs::write(&art, tgz(&[("package/shared.js", &shared)])).unwrap();
+
+            let (checkout, guard) = checkout_and_guard(
+                &art,
+                "https://registry.npmjs.org/demo/-/demo-1.0.0.tgz",
+                // No location, so there is nothing to check out and nothing to narrow with.
+                &trigon_strategy::Location::default(),
+                None,
+                None,
+                &target(),
+            )
+            .unwrap();
+            assert!(checkout.is_none());
+            assert_eq!(guard.members.len(), 1);
+            assert_eq!(guard.filtered_out, 0);
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// The withholding rides on the same manifest, so it cannot be lost by a reordering of the
+        /// two halves either.
+        #[test]
+        fn the_manifest_carries_the_version_to_withhold() {
+            let dir = std::env::temp_dir().join(format!("trigon-b14-w-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let art = dir.join("demo-1.0.0.tgz");
+            std::fs::write(&art, tgz(&[("package/x.js", &vec![b'x'; 9000])])).unwrap();
+
+            let (_, guard) = checkout_and_guard(
+                &art,
+                "https://registry.npmjs.org/demo/-/demo-1.0.0.tgz",
+                &trigon_strategy::Location::default(),
+                None,
+                None,
+                &target(),
+            )
+            .unwrap();
+            let w = guard.withhold.expect("the version under test is withheld");
+            assert_eq!(w.project, "demo");
+            assert_eq!(w.version, "1.0.0");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     /// The artifact the build left behind.
     ///
     /// **Regular files only, and the type is taken without following the link.** The build writes
@@ -3964,6 +4213,19 @@ mod sweep {
         /// rate measured over a mixture of the two is not a rate of anything.
         pub model: Option<String>,
         pub source_cache: Option<PathBuf>,
+        /// Targets built at once.
+        ///
+        /// **Defaults to 1, which is what a sweep did before this existed.** Raising it is the
+        /// difference between a 400-target corpus being an overnight job and something you can
+        /// re-run after a fix, and the M1 corpus is not a measurement anyone iterates on at eight
+        /// hours a pass.
+        ///
+        /// Bounded by memory rather than by cores: every target in flight holds a build container
+        /// and a mirror container, and the failure mode when that runs out is the OOM killer taking
+        /// a build, which reads as a broken package. Podman's own image store is shared across
+        /// processes and [`docs/17-backlog.md`] B6's cross-process window is still open, so this
+        /// parallelises *within* one sweep and says nothing about two sweeps at once.
+        pub concurrency: usize,
     }
 
     pub fn run(args: Args) -> Result<()> {
@@ -4030,96 +4292,192 @@ mod sweep {
             },
         ));
 
+        // Resumed rows first, in target order and without touching a container. Separated from the
+        // work below because a resumed row is not a run: it spends nothing, it cannot fail, and
+        // mixing it into the pool would have the pool's bound describe a queue that is mostly
+        // already answered.
         let mut rows: Vec<(String, Outcome, f64)> = Vec::new();
+        let mut todo: Vec<(usize, &str)> = Vec::new();
         for (i, purl) in purls.iter().enumerate() {
-            if let Some((label, secs, cluster, calls)) = already.get(*purl) {
-                println!(
-                    "  {:<28} {:<20} {:>6.0}s   [{}/{}] (done)",
-                    short(purl),
-                    label,
-                    secs,
-                    i + 1,
-                    purls.len()
-                );
-                rows.push((
-                    purl.to_string(),
-                    Outcome::Recorded(label.clone(), cluster.clone(), *calls),
-                    *secs,
-                ));
-                continue;
-            }
-            progress.target(i, purl, rows.len());
-            let started = Instant::now();
-            // A per-target directory, or one run's artifacts are collected as another's.
-            let work = args.work.join(format!("{i:03}"));
-            let _ = std::fs::remove_dir_all(&work);
-
-            let ran = crate::rebuild::run_one(
-                crate::rebuild::Args {
-                    purl: purl.to_string(),
-                    artifact: None,
-                    image: args.image.clone(),
-                    work,
-                    egress: args.egress.clone(),
-                    timeout: args.timeout,
-                    definitions: args.definitions.clone(),
-                    mirror_image: args.mirror_image.clone(),
-                    timewarp: args.timewarp.clone(),
-                    // A sweep has no checkout per target: the source cache that would supply one
-                    // is fleet work. The guard is wider than designed without it, which errs
-                    // toward voiding an honest run rather than missing a forged one.
-                    source: None,
-                    // A sweep writes no statements. Its product is a rate, and 20 bundles nobody
-                    // asked for is 20 files to explain.
-                    attest: None,
-                    key: None,
-                    store: args.store.clone(),
-                    model: args.model.clone(),
-                    source_cache: args.source_cache.clone(),
-                    phases: Some(progress.clone()),
-                },
-                false,
-            )
-            // A target that cannot even be parsed is that target's problem, not the sweep's.
-            .unwrap_or_else(|e| {
-                Outcome::Failed {
-                    fault: trigon_core::Fault::Policy,
-                    detail: e.to_string(),
+            match already.get(*purl) {
+                Some((label, secs, cluster, calls)) => {
+                    println!(
+                        "  {:<28} {:<20} {:>6.0}s   [{}/{}] (done)",
+                        short(purl),
+                        label,
+                        secs,
+                        i + 1,
+                        purls.len()
+                    );
+                    rows.push((
+                        purl.to_string(),
+                        Outcome::Recorded(label.clone(), cluster.clone(), *calls),
+                        *secs,
+                    ));
                 }
-                .into()
-            });
-            let (outcome, model_calls) = (ran.outcome, ran.model_calls);
-
-            let secs = started.elapsed().as_secs_f64();
-            println!(
-                "  {:<28} {:<20} {:>6.0}s   [{}/{}]",
-                short(purl),
-                outcome.label(),
-                secs,
-                i + 1,
-                purls.len()
-            );
-            // Flushed per row. Buffered output is lost with the process, which is the failure this
-            // exists to prevent.
-            use std::io::Write as _;
-            writeln!(
-                sink,
-                "{purl}\t{}\t{secs:.1}\t{}\t{}",
-                outcome.label(),
-                outcome.cluster().unwrap_or_default(),
-                // What this run actually spent, not what the outcome remembers: a fresh row knows
-                // its own count and only a resumed one has to read it back out of the file.
-                model_calls.max(outcome.model_calls()),
-            )?;
-            sink.flush()?;
-            rows.push((purl.to_string(), outcome, secs));
+                None => todo.push((i, purl)),
+            }
         }
+
+        // **Bounded, and the bound is memory.** Every target in flight holds a build container and
+        // a mirror container; the failure when that runs out is the OOM killer taking a build,
+        // which arrives looking like a broken package. One at a time is the default and is exactly
+        // what this loop did before.
+        //
+        // Threads rather than tasks: `run_one` is synchronous and builds its own tokio runtime, and
+        // wrapping that in an async pool would nest runtimes for no gain. The channel carries
+        // finished rows back; the terminal line is printed by the worker as it finishes, so the
+        // order on screen is completion order and the `[i/n]` on each line says which target it is.
+        // **Refused above one until B6 closes.** The pool works; the container store underneath it
+        // does not. Three lanes over the seventeen-target PyPI corpus lost two targets to
+        // infrastructure — `getting top layer info: layer not known`, which is B6's error verbatim,
+        // and a mirror container read after another lane's sweep removed it. Both arrive labelled
+        // as the package's failure, which is the one outcome a rate must never contain.
+        //
+        // The reasoning that said this was safe — distinct run ids mean distinct image tags, so
+        // lanes cannot collide — was wrong, and one run of the corpus said so. Kept behind the flag
+        // rather than deleted, because the pool is not what is broken and B6 names the mechanism
+        // that fixes it: a store lock, per-run storage, or not removing images from the build path.
+        let lanes = args.concurrency.max(1).min(todo.len().max(1));
+        if lanes > 1 && std::env::var_os("TRIGON_UNSAFE_CONCURRENCY").is_none() {
+            bail!(
+                "--concurrency {lanes} is not safe yet: podman's image store is shared, and a \
+                 finishing lane removes an image another is still reading (docs/17-backlog.md B6). \
+                 Measured cost on the PyPI smoke corpus: two of seventeen targets lost to \
+                 infrastructure faults reported as package failures. Set \
+                 TRIGON_UNSAFE_CONCURRENCY=1 to run it anyway and discard the rate."
+            );
+        }
+        if lanes > 1 {
+            println!("  {lanes} targets at a time\n");
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, String, Outcome, f64, u32)>();
+        let total = purls.len();
+        let done = std::sync::Mutex::new(rows.len());
+
+        std::thread::scope(|scope| -> Result<()> {
+            for _ in 0..lanes {
+                let (tx, next, todo, args, progress, done) =
+                    (tx.clone(), &next, &todo, &args, &progress, &done);
+                scope.spawn(move || {
+                    loop {
+                        let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(i, purl)) = todo.get(at) else {
+                            break;
+                        };
+                        let (outcome, secs, calls) = one(i, purl, args, progress, total, done);
+                        // A send that fails means the collector is gone, which means the sweep is
+                        // already unwinding. Nothing useful to do with the row.
+                        let _ = tx.send((i, purl.to_string(), outcome, secs, calls));
+                    }
+                });
+            }
+            // The senders the workers hold are clones; this one has to go or the receive below
+            // never ends.
+            drop(tx);
+
+            use std::io::Write as _;
+            for (_, purl, outcome, secs, calls) in rx {
+                // Flushed per row. Buffered output is lost with the process, which is the failure
+                // this exists to prevent.
+                writeln!(
+                    sink,
+                    "{purl}\t{}\t{secs:.1}\t{}\t{}",
+                    outcome.label(),
+                    outcome.cluster().unwrap_or_default(),
+                    calls,
+                )?;
+                sink.flush()?;
+                rows.push((purl, outcome, secs));
+            }
+            Ok(())
+        })?;
+
+        // Back into target order. The pool finishes them in whatever order they take, and a results
+        // file whose order depends on how many lanes were free is not comparable with another.
+        let position: BTreeMap<&str, usize> =
+            purls.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+        rows.sort_by_key(|(purl, _, _)| position.get(purl.as_str()).copied().unwrap_or(usize::MAX));
 
         // Before the summary, so a reader watching the page sees `finished` at the same moment the
         // terminal does.
         progress.finish(rows.len());
         summarize(&rows);
         Ok(())
+    }
+
+    /// Run one target and report it, returning what it produced and how long it took.
+    fn one(
+        i: usize,
+        purl: &str,
+        args: &Args,
+        progress: &std::sync::Arc<crate::progress::Progress>,
+        total: usize,
+        done: &std::sync::Mutex<usize>,
+    ) -> (Outcome, f64, u32) {
+        {
+            let n = done.lock().map(|g| *g).unwrap_or(0);
+            progress.target(i, purl, n);
+        }
+        let started = Instant::now();
+        // A per-target directory, or one run's artifacts are collected as another's.
+        let work = args.work.join(format!("{i:03}"));
+        let _ = std::fs::remove_dir_all(&work);
+
+        let ran = crate::rebuild::run_one(
+            crate::rebuild::Args {
+                purl: purl.to_string(),
+                artifact: None,
+                image: args.image.clone(),
+                work,
+                egress: args.egress.clone(),
+                timeout: args.timeout,
+                definitions: args.definitions.clone(),
+                mirror_image: args.mirror_image.clone(),
+                timewarp: args.timewarp.clone(),
+                // No *operator-named* checkout. The run fetches its own from the source cache
+                // once a strategy names a location, and narrows the guard with it — which is
+                // what B14 closed. This used to say a sweep had no checkout at all, and the
+                // guard was wider than designed on every target because of it.
+                source: None,
+                // A sweep writes no statements. Its product is a rate, and 20 bundles nobody
+                // asked for is 20 files to explain.
+                attest: None,
+                key: None,
+                store: args.store.clone(),
+                model: args.model.clone(),
+                source_cache: args.source_cache.clone(),
+                phases: Some(progress.clone()),
+            },
+            false,
+        )
+        // A target that cannot even be parsed is that target's problem, not the sweep's.
+        .unwrap_or_else(|e| {
+            Outcome::Failed {
+                fault: trigon_core::Fault::Policy,
+                detail: e.to_string(),
+            }
+            .into()
+        });
+        // What this run actually spent, not what the outcome remembers: a fresh row knows its own
+        // count and only a resumed one has to read it back out of the file.
+        let calls = ran.model_calls.max(ran.outcome.model_calls());
+        let outcome = ran.outcome;
+
+        let secs = started.elapsed().as_secs_f64();
+        if let Ok(mut n) = done.lock() {
+            *n += 1;
+        }
+        println!(
+            "  {:<28} {:<20} {:>6.0}s   [{}/{}]",
+            short(purl),
+            outcome.label(),
+            secs,
+            i + 1,
+            total
+        );
+        (outcome, secs, calls)
     }
 
     /// Targets already recorded in a previous run of this sweep.

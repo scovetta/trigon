@@ -172,6 +172,25 @@ impl Observed {
     }
 }
 
+/// Claim the address a mirror will serve on, before the mirror exists.
+///
+/// The guard manifest is narrowed by the source tree, the source tree is a function of the
+/// strategy's location, and a strategy has to be told where the mirror *will be* before it can be
+/// chosen. Reserving the address breaks that cycle without starting a mirror whose manifest is not
+/// final — a mirror serving with a wider guard than the run settled on is a control reporting one
+/// posture while holding another.
+///
+/// A held listener rather than a remembered port number: releasing a port and re-binding it later
+/// is a race, and the losing side of that race is a run that cannot start its mirror at all.
+pub async fn reserve(port: u16) -> Result<tokio::net::TcpListener, MirrorError> {
+    tokio::net::TcpListener::bind(("0.0.0.0", port))
+        .await
+        .map_err(|e| MirrorError::Bind {
+            port,
+            detail: e.to_string(),
+        })
+}
+
 pub struct Mirror {
     /// For index documents, which we parse. Transparent decompression is wanted here.
     client: reqwest::Client,
@@ -356,6 +375,17 @@ impl Mirror {
     /// Binds to all interfaces rather than loopback, because the thing that needs to reach it is a
     /// container on another network namespace.
     pub async fn serve(self, port: u16) -> Result<MirrorHandle, MirrorError> {
+        let listener = reserve(port).await?;
+        self.serve_on(listener).await
+    }
+
+    /// Serve on an address that was reserved before the mirror was armed.
+    ///
+    /// See [`reserve`] for why the two are separable.
+    pub async fn serve_on(
+        self,
+        listener: tokio::net::TcpListener,
+    ) -> Result<MirrorHandle, MirrorError> {
         let stats = self.stats.clone();
         let guard = self.guard.clone();
         let seen = self.seen.clone();
@@ -363,13 +393,10 @@ impl Mirror {
             .fallback(handle)
             .with_state(Arc::new(self));
 
-        let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
-            .await
-            .map_err(|e| MirrorError::Bind {
-                port,
-                detail: e.to_string(),
-            })?;
-        let addr = listener.local_addr().unwrap();
+        let addr = listener.local_addr().map_err(|e| MirrorError::Bind {
+            port: 0,
+            detail: e.to_string(),
+        })?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let joined = tokio::spawn(async move {
             let _ = axum::serve(listener, app)

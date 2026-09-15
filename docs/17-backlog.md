@@ -154,9 +154,22 @@ with fleet concurrency.
 
 The tests no longer race because they serialize on a lock; that is not a fix for the product.
 
+**Now measured, and it is not only cross-process.** `trigon sweep --concurrency 3` over the
+seventeen-target PyPI corpus lost two targets inside a *single* process: one to
+`checking if cached image exists from a previous build: getting top layer info: layer not known`,
+which is the error above verbatim, and one to `reading the mirror's log: no container with name or
+ID found`. The argument that said intra-process lanes were safe — distinct run ids give distinct
+image tags, so no lane removes another's top layer — is wrong, and one run of the corpus said so.
+
+That makes this a prerequisite rather than a nice-to-have. Both faults arrive labelled as the
+package's failure, and a reproduction rate that contains infrastructure faults is not a rate. The
+sweep therefore refuses `--concurrency` above 1 until this closes, with the reason and the measured
+cost in the refusal.
+
 **Done when:** two concurrent runs on one machine cannot fail each other, by a mechanism that does
 not depend on timing — a store lock, per-run storage, or not removing images from the build path at
-all.
+all — and `--concurrency 4` over the PyPI smoke corpus produces the same outcome for every target as
+`--concurrency 1`.
 
 ## B7. ~~The image build is outside the egress boundary at `mirror-only`~~ — closed
 
@@ -363,7 +376,7 @@ at.
 field is not the registry's; or this is written down as declined with the reason.
 
 
-## B14. Build the guard manifest after the strategy, so the source filter applies
+## B14. ~~Build the guard manifest after the strategy, so the source filter applies~~ — closed
 
 `GuardManifest::for_artifact_with_source` drops members byte-identical to a file in the source tree
 — "a file the artifact ships and the repository also contains is not evidence of anything: the build
@@ -384,6 +397,16 @@ since a build fetching a prebuilt binary is [`12`](12-security.md) §1.1. And th
 simply be built later without moving the host mirror, which is armed with it before the strategy is
 chosen because `ladder()` needs the mirror's port.
 
-**Done when:** the manifest is built from the same checkout the build uses, both mirror paths are
-armed with the same manifest, the executable exemption still holds with a test that would catch its
-loss, and `packaging` and `pyproject-hooks` reach a comparison.
+**Closed.** The cycle was broken by separating *reserving* the mirror's address from arming and
+serving it: `trigon_mirror::reserve` returns a held listener, the ladder runs against an address that
+exists but serves nothing, the checkout happens, the manifest is built narrow, and only then does the
+mirror serve on that listener. A held listener rather than a remembered port, because releasing and
+re-binding is a race. The inferrers made it possible — they read the mirror only to decide whether to
+pin a registry moment and make no request through it, so a reservation is enough to run the ladder.
+
+`checkout_and_guard` returns both together, so there is no longer a point in the run where a manifest
+exists and the checkout does not: the ordering is the invariant and the signature carries it.
+
+Measured: `packaging@26.3` guards **0 of 29 members** — every one is a file the repository also
+contains — and reproduces `normalized_with_caveats`, 29 identical, 0 differing. `pyproject-hooks@1.2.0`
+likewise. Both were `void`.
