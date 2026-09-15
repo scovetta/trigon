@@ -1085,8 +1085,10 @@ Both npm failures that remain are now named with nothing to repair, where before
 DNS error about the wrong thing: `src/commit-not-on-the-forge` and
 `trigon/mirror-corrupted-artifact`.
 
-**What this does not close, and what would.** `packaging@26.3` and `pyproject-hooks@1.2.0` now build
-— and still void. The member that arrived inside the adjacent release *is* in the rebuilt artifact,
+**What this did not close, and what did.** (Closed in
+[§3.24](#324-the-filter-was-tested-the-ordering-that-reaches-it-was-not); left here as it stood,
+because the reasoning that follows is what pointed at the fix.) `packaging@26.3` and
+`pyproject-hooks@1.2.0` now build — and still void. The member that arrived inside the adjacent release *is* in the rebuilt artifact,
 because a file unchanged between two releases of one package is byte-identical in both and the build
 produces it honestly from the checkout. The guard is answering its question correctly; the question
 is not sufficient on its own for a package that rebuilds itself.
@@ -1118,6 +1120,69 @@ Carried, not raised: the first version of this refused the run outright when the
 which broke a strategy whose source phase generates its own tree and needs no clone at all. The
 end-to-end test in `crates/trigon/tests/cli.rs` is exactly that shape and caught it. The fallback was
 never the problem — the silence was.
+
+### 3.24 The filter was tested; the ordering that reaches it was not
+
+[§3.23](#323-the-bootstrap-wall-and-a-control-asking-the-wrong-question) left `packaging` and
+`pyproject-hooks` building and still voiding, and named the rule that would finish it. The rule was
+already written, already tested, and unreachable.
+
+`GuardManifest::for_artifact_with_source` drops members byte-identical to a file in the source tree,
+because "a file the artifact ships and the repository also contains is not evidence of anything: the
+build is entitled to fetch it". A unit test covers it. Nothing covered whether an ordinary run ever
+got there — and it did not, because the manifest was built from the published bytes before a
+strategy existed, and the tree is a function of the strategy's location. The filter had a test; the
+path to the filter had none. That is this project's signature defect, found again in its own
+security control.
+
+**The cycle was the mirror.** The manifest needs the strategy; the strategy has to be told where the
+mirror will be before it can be chosen; the mirror is armed with the manifest. Reserving the address
+breaks it: `trigon_mirror::reserve` hands back a *held* listener, the ladder runs against an address
+that exists and serves nothing, the checkout happens, the manifest is built narrow, and only then
+does the mirror serve on that listener. A held listener rather than a remembered port number,
+because releasing a port and re-binding it later is a race whose loser cannot start its mirror at
+all.
+
+What made it legal is a property of the inferrers worth writing down: they read the mirror only to
+decide whether to pin a registry moment, and make **no request through it**. A reservation is
+therefore enough to run the ladder, and nothing is served under a manifest that is not final.
+
+`checkout_and_guard` returns the tree and the manifest together, so there is no longer a point in a
+run where a manifest exists and the checkout does not — the ordering lives in a signature rather
+than in line order. Its third test is the one that matters: the tree handed to the build is the tree
+the guard exempted from. A different one would make the exemption a statement about other bytes,
+with nothing downstream able to tell.
+
+| PyPI, `mirror-only` | before | after |
+|---|---|---|
+| reach a comparison | 14 of 17 | **16 of 17** |
+| reproduce | 12 of 14 (86%) | **14 of 16 (88%)** |
+| `void` | 2 | **0** |
+
+`packaging@26.3` guards **0 of 29 members** — every one is a file the repository also contains — and
+reproduces with 29 identical and 0 differing. The only PyPI target left short is `zipp`, whose build
+opens a socket, which is a finding about the package.
+
+**Two things found while fixing it, neither of them the fix.**
+
+*A sweep that lied about why a target failed.* A 400-target corpus is eight hours of strictly serial
+sweeping, so the loop became a bounded thread pool with `--concurrency`. Its first real run over the
+seventeen PyPI targets lost two of them to `getting top layer info: layer not known` — B6's error
+verbatim — and to a mirror container read after another lane removed it. The argument that said
+intra-process lanes were safe (distinct run ids give distinct image tags, so no lane removes
+another's top layer) was wrong, and one run of the corpus said so. Both faults arrive labelled as
+the *package's* failure, which is the one thing a reproduction rate must never contain, so the flag
+refuses above one lane and states what it measured. B6 stopped being a background item and became
+the gate in front of the M1 corpus.
+
+*A red pipeline nobody could see.* `RUSTFLAGS: -D warnings` plus `cargo build -p trigon
+--no-default-features` fails on two dead functions, and had been failing since before this work —
+which falsifies an M0 exit criterion recorded as met. The fix is two `#[cfg]` attributes; the
+finding is why it hid. `verifier_builds()`, the dependency-policy check whose entire purpose is to
+catch this, ran **without** `RUSTFLAGS`. It was checking a different build from the one that has to
+compile, and reporting success. A control checking something adjacent to the thing it claims to
+check — the same shape as the `GUARD-TRIPPED` marker in §3.23 and the `tests?/` regex in §3.19,
+three times in one codebase.
 
 ## 4. A stabilizer the reference does not have
 
