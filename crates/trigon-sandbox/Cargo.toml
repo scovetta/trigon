@@ -17,6 +17,7 @@ thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+libc = "0.2"
 async-trait.workspace = true
 futures.workspace = true
 

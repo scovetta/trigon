@@ -4328,26 +4328,19 @@ mod sweep {
         // wrapping that in an async pool would nest runtimes for no gain. The channel carries
         // finished rows back; the terminal line is printed by the worker as it finishes, so the
         // order on screen is completion order and the `[i/n]` on each line says which target it is.
-        // **Refused above one until B6 closes.** The pool works; the container store underneath it
-        // does not. Three lanes over the seventeen-target PyPI corpus lost two targets to
-        // infrastructure — `getting top layer info: layer not known`, which is B6's error verbatim,
-        // and a mirror container read after another lane's sweep removed it. Both arrive labelled
-        // as the package's failure, which is the one outcome a rate must never contain.
+        // **Bounded, and the bound is memory.** Every target in flight holds a build container
+        // and a mirror container; the failure when that runs out is the OOM killer taking a build,
+        // which arrives looking like a broken package. One at a time is the default.
         //
-        // The reasoning that said this was safe — distinct run ids mean distinct image tags, so
-        // lanes cannot collide — was wrong, and one run of the corpus said so. Kept behind the flag
-        // rather than deleted, because the pool is not what is broken and B6 names the mechanism
-        // that fixes it: a store lock, per-run storage, or not removing images from the build path.
+        // This refused above one lane until B6 closed, and the refusal was right: the first run at
+        // three lanes lost two of seventeen targets to podman's shared image store — a finishing
+        // lane removing an image another was reading, and an orphan sweep force-removing a mirror
+        // container that had been created but had not finished starting. Both arrived labelled as
+        // the package's failure, which is the one thing a reproduction rate must never contain.
+        // What makes it safe now is a mechanism rather than an argument about timing: builds hold
+        // the image store shared, removals take it exclusively or skip themselves, and the orphan
+        // sweep asks who owns a container instead of whether it is running yet.
         let lanes = args.concurrency.max(1).min(todo.len().max(1));
-        if lanes > 1 && std::env::var_os("TRIGON_UNSAFE_CONCURRENCY").is_none() {
-            bail!(
-                "--concurrency {lanes} is not safe yet: podman's image store is shared, and a \
-                 finishing lane removes an image another is still reading (docs/17-backlog.md B6). \
-                 Measured cost on the PyPI smoke corpus: two of seventeen targets lost to \
-                 infrastructure faults reported as package failures. Set \
-                 TRIGON_UNSAFE_CONCURRENCY=1 to run it anyway and discard the rate."
-            );
-        }
         if lanes > 1 {
             println!("  {lanes} targets at a time\n");
         }

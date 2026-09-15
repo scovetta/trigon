@@ -449,16 +449,29 @@ async fn prune_orphans(binary: &str) {
         // The sibling sweeper for build contexts and images had the missing half all along: a run
         // id ends in the pid of the process that made it, so ownership is a question with an
         // answer. Two sweepers for one class of leak, and only one of them asked.
-        let running = run_ok(
-            binary,
-            &["inspect", "--format", "{{.State.Status}}", &container],
-        )
-        .await
-        .map(|s| s == "running")
-        .unwrap_or(false);
-        if running && !owner_is_gone(name) {
+        // **Ownership decides, and nothing else does.** This used to skip only a container that
+        // was `running` *and* owned, which meant a container whose owner is alive but which has not
+        // finished starting yet was force-removed — by a sibling lane in the same process, sharing
+        // the same pid, moments after it was created. That is one of the two faults the first
+        // concurrent sweep produced: `reading the mirror's log: no container with name or ID
+        // found`, on an island nobody had abandoned.
+        //
+        // A container whose owner is alive is not an orphan whatever state it is in, and its owner
+        // removes it in `destroy`. The `running` check answered a question this sweep was not
+        // asking.
+        if !owner_is_gone(name) {
             continue;
         }
+        // Serialized against builds for the same reason every other removal is: `rm --force` and
+        // `network rm --force` mutate the shared store. A sweep that cannot have the lock leaves
+        // the orphan for the next run rather than blocking a build behind it.
+        let Some(_store) = crate::store_lock::StoreLock::try_exclusive() else {
+            tracing::debug!(
+                network = name,
+                "a build holds the image store; leaving the orphan"
+            );
+            continue;
+        };
         let _ = run_ok(binary, &["rm", "--force", &container]).await;
         if run_ok(binary, &["network", "rm", "--force", name])
             .await

@@ -502,6 +502,20 @@ impl BuildHandle for PodmanBuild {
             build_args.push("--add-host".into());
             build_args.push(format!("{name}:{addr}"));
         }
+        // **Held across the image build and the container run.** Podman's cache lookup walks the
+        // layer store before the first instruction, and a removal running beside it fails *this*
+        // process with `getting top layer info: layer not known` — not the one doing the removing.
+        // Shared, so lanes do not exclude each other; removals wait, and a removal that will not
+        // wait skips itself.
+        //
+        // `None` is not fatal. A machine where the lock file cannot be made is one where the old
+        // behaviour applies, and refusing to build because a lock could not be taken trades a rare
+        // race for a certain failure.
+        let store = crate::store_lock::StoreLock::shared();
+        if store.is_none() {
+            tracing::debug!("no image-store lock; a concurrent removal could fail this build");
+        }
+
         let code = self.run(&build_args, Phase::Deps, &mut log).await?;
         // Which script the span belongs to, not just "the image build". Setup, source and deps are
         // all image-build-time layers, and calling every one of them a dependency phase is the
@@ -571,6 +585,10 @@ impl BuildHandle for PodmanBuild {
         run_args.push(self.tag());
 
         let code = self.run(&run_args, Phase::Build, &mut log).await?;
+        // The container has run; nothing else reads the image store for this target. Released here
+        // rather than at the end of the function so a finishing lane stops holding removals off
+        // while it collects its artifact and reads the mirror's log.
+        drop(store);
         timings.push((Phase::Build, Some(started.elapsed())));
         push_to(
             self.opts.on_event.as_ref(),
@@ -825,6 +843,19 @@ impl Drop for Leftovers {
             // being broken rather than as one run deleting another's cache. Without it podman
             // declines while anything still depends on the image, and the stale-leftover sweep
             // collects it on a later run.
+            //
+            // **And no removal at all while a build is reading the store.** Declining to force was
+            // not enough: podman's own cache lookup walks the layer store, and a removal running
+            // beside it fails the *build* rather than the removal. The lock is what makes that a
+            // mechanism rather than an argument about timing. Taken with `try`, so a run that
+            // finishes mid-build leaves its image for the sweep instead of waiting minutes to exit.
+            let Some(_store) = crate::store_lock::StoreLock::try_exclusive() else {
+                tracing::debug!(
+                    image = tag,
+                    "a build holds the image store; leaving the image"
+                );
+                return;
+            };
             let _ = std::process::Command::new(&self.binary)
                 .args(["rmi", tag])
                 .stdout(Stdio::null())
@@ -902,6 +933,12 @@ fn prune_stale_leftovers(binary: &str) {
 
 /// The half that reaches into the shared image store. See [`prune_stale_leftovers`].
 fn prune_images(binary: &str, min_age: std::time::Duration) {
+    // Nothing is removed while any build on this machine is reading the store. Best effort, like
+    // everything else here: a sweep that cannot have the lock runs on the next process.
+    let Some(_store) = crate::store_lock::StoreLock::try_exclusive() else {
+        tracing::debug!("a build holds the image store; skipping the stale-image sweep");
+        return;
+    };
     let dead = |run_id: &str| -> bool {
         let Some(pid) = run_id
             .rsplit('-')

@@ -12,6 +12,7 @@ mod model;
 mod network;
 mod podman;
 mod runner;
+mod store_lock;
 
 pub use dockerfile::install_command;
 pub use dockerfile::{BuildContext, render as render_context};

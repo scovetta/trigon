@@ -137,7 +137,7 @@ defect it no longer has**.
 **Done when:** every confirmed bug is fixed or filed with a failing test, and the sweep's negative
 result is recorded so the next one starts from here rather than from nothing.
 
-## B6. Two Trigon runs on one machine can disturb each other's container store
+## B6. ~~Two Trigon runs on one machine can disturb each other's container store~~ — closed
 
 Found by an intermittent sandbox test that passed in isolation. Podman's local image store is
 machine-global, and this system reaches into it in two places: `Leftovers::drop` removes a run's own
@@ -166,10 +166,41 @@ package's failure, and a reproduction rate that contains infrastructure faults i
 sweep therefore refuses `--concurrency` above 1 until this closes, with the reason and the measured
 cost in the refusal.
 
-**Done when:** two concurrent runs on one machine cannot fail each other, by a mechanism that does
-not depend on timing — a store lock, per-run storage, or not removing images from the build path at
-all — and `--concurrency 4` over the PyPI smoke corpus produces the same outcome for every target as
-`--concurrency 1`.
+**Closed by a lock, and by a sweep that was asking the wrong question.**
+
+`crates/trigon-sandbox/src/store_lock.rs` holds `flock` on a per-uid file: a build takes it
+**shared**, every removal takes it **exclusive with `try`**. A removal that cannot have it skips
+itself, because a stale image costs disk and a blocked one costs the run, and the sweeps were always
+best effort. It is a file lock rather than a process mutex, so it covers two Trigon processes as
+well as lanes inside one — the half nothing in-process could reach — and it lives on a descriptor,
+so `kill -9` releases it and no stale lock survives. Per-run storage was the alternative and is
+worse: it gives up layer sharing and re-pulls a base image per target, which at 400 targets is tens
+of gigabytes to avoid a lock.
+
+The second fault was not podman's. `prune_orphans` spared a container only when it was `running`
+**and** owned, so a container whose owner was alive and which had not finished starting yet was
+force-removed — by a sibling lane in the same process, sharing its pid, moments after it was
+created. Ownership is the whole question; a container whose owner is alive is not an orphan whatever
+state it is in, and its owner removes it in `destroy`.
+
+**The first version of the lock was a worse bug than the race**, and its own tests found it:
+`shared()` blocked, so a removal that hung would have stopped every build on the machine for ever
+with no diagnostic. Three test binaries wedged against each other and it read as a hang. It now
+waits five seconds and builds anyway — a `podman rmi` finishes in well under a second, so a longer
+wait means the holder is stuck rather than busy, and giving up restores the pre-lock behaviour where
+waiting restores nothing.
+
+**Measured**, the seventeen-target PyPI corpus at `mirror-only`:
+
+| | 1 lane | 4 lanes |
+|---|---|---|
+| outcome, every target | — | **identical** |
+| reproduce | 14 of 16 (88%) | 14 of 16 (88%) |
+| wall clock | 711s | **291s** |
+
+2.4× rather than 4×, because per-target time rises 42s to 55s under contention — the lanes compete
+for CPU and IO, not for the lock. The comparison is per target and not only in aggregate: two
+different sets of failures can sum to the same table.
 
 ## B7. ~~The image build is outside the egress boundary at `mirror-only`~~ — closed
 
