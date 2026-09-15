@@ -1014,13 +1014,13 @@ mod registry {
         // The registry did not record a commit, which is every PyPI project. A tag named for the
         // version usually exists and is what a rebuild will use, so `resolve` asks the same
         // question rather than reporting a dead end the next command silently answers.
-        let tag =
-            match &resolved.source {
-                Some(s) if s.commit.is_empty() => rt.block_on(
-                    trigon_registry::resolve_version_tag(&client, &s.repo_url, &target.version),
-                ),
-                _ => None,
-            };
+        let tag = match &resolved.source {
+            Some(s) if s.commit.is_empty() => rt.block_on(trigon_registry::resolve_version_tag(
+                &s.repo_url,
+                &target.version,
+            )),
+            _ => None,
+        };
 
         match output {
             OutputFormat::Json => {
@@ -2268,7 +2268,7 @@ mod rebuild {
                 ))
             }
             trigon_core::Ecosystem::PyPI => {
-                rungs.push(Box::new(PyPiInferrer::new(client).with_mirror(mirror)))
+                rungs.push(Box::new(PyPiInferrer::new().with_mirror(mirror)))
             }
             // **Named, not silent.** This was `_ => {}`, and it is the seam leak
             // `docs/17-backlog.md` B8 exists to find: adding an ecosystem needs an arm here, and
@@ -4344,6 +4344,40 @@ mod sweep {
         if lanes > 1 {
             println!("  {lanes} targets at a time\n");
         }
+        // **Before anything builds.** A build image is ~240 MB and a sweep keeps one per target
+        // until the store is quiet enough to reap them, so a large corpus needs real headroom —
+        // and a machine that fills up mid-sweep fails the remaining targets with errors that read
+        // like the packages' fault, which is the one thing a rate must not contain. Checked, said,
+        // and not enforced: the estimate is a rule of thumb, and refusing to start on a guess would
+        // be worse than a warning somebody can act on.
+        if let Some(free) = free_bytes(&args.work) {
+            const PER_TARGET: u64 = 300 * 1024 * 1024;
+            let need = PER_TARGET * todo.len() as u64;
+            let gb = |b: u64| b as f64 / 1e9;
+            println!(
+                "  disk       {:.1} GB free, about {:.1} GB wanted for {} target(s)",
+                gb(free),
+                gb(need),
+                todo.len()
+            );
+            if free < need {
+                tracing::warn!(
+                    "this sweep may want more disk than is free. A build image is around 240 MB \
+                     and one is kept per target until the image store is quiet enough to reap it; \
+                     a machine that fills mid-sweep fails the rest with errors that read as the \
+                     packages' fault."
+                );
+            }
+        }
+
+        // How many identical consecutive failures mean a wall rather than a set of findings, how
+        // often to check the disk, and how little free space is too little to keep going.
+        const WALL: u32 = 10;
+        const REAP_EVERY: usize = 20;
+        const FLOOR: u64 = 20 * 1_000_000_000;
+        let mut consecutive: u32 = 0;
+        let mut repeated: Option<String> = None;
+
         let next = std::sync::atomic::AtomicUsize::new(0);
         let (tx, rx) = std::sync::mpsc::channel::<(usize, String, Outcome, f64, u32)>();
         let total = purls.len();
@@ -4382,7 +4416,62 @@ mod sweep {
                     calls,
                 )?;
                 sink.flush()?;
+
+                // **A breaker, because this runs unattended for hours.** When throttling or a full
+                // disk starts, every remaining target fails the same way: an eight-hour sweep
+                // spends seven of them proving one fact, and reports a denominator built from our
+                // own infrastructure. The signature is repetition — genuine package failures are
+                // diverse, a wall is not — so the rule is the same cluster, over and over, with
+                // nothing succeeding in between.
+                //
+                // Deliberately blunt. It stops rather than pausing, because every row is already
+                // flushed and `completed()` resumes them: stopping costs nothing but the targets
+                // that would have failed anyway, and the operator gets the cluster that explains it.
+                match (outcome.is_evidence(), outcome.cluster()) {
+                    (false, Some(key)) if Some(&key) == repeated.as_ref() => consecutive += 1,
+                    (false, Some(key)) => {
+                        repeated = Some(key);
+                        consecutive = 1;
+                    }
+                    _ => {
+                        repeated = None;
+                        consecutive = 0;
+                    }
+                }
                 rows.push((purl, outcome, secs));
+
+                if consecutive >= WALL {
+                    let key = repeated.clone().unwrap_or_default();
+                    tracing::error!(
+                        cluster = %key,
+                        "{WALL} targets in a row failed the same way and none succeeded between \
+                         them. That is a wall rather than {WALL} findings — throttling, a full \
+                         disk, a stopped daemon — so the sweep is stopping instead of spending the \
+                         night proving it. Every row so far is written; re-run the same command to \
+                         resume once the cause is fixed."
+                    );
+                    break;
+                }
+
+                // Disk, periodically rather than only at the start: a sweep that fills the
+                // filesystem fails the rest with errors that read as the packages' fault, and the
+                // deferred images are what fills it. Reaping here bounds the backlog that
+                // `store_lock` deliberately lets grow.
+                if rows.len() % REAP_EVERY == 0 {
+                    trigon_sandbox::reap_deferred("podman");
+                    if let Some(free) = free_bytes(&args.work)
+                        && free < FLOOR
+                    {
+                        tracing::error!(
+                            free_gb = free as f64 / 1e9,
+                            "less than {:.0} GB free after {} targets; stopping rather than \
+                             failing the rest on a full disk. Every row so far is written.",
+                            FLOOR as f64 / 1e9,
+                            rows.len()
+                        );
+                        break;
+                    }
+                }
             }
             Ok(())
         })?;
@@ -4477,6 +4566,28 @@ mod sweep {
             total
         );
         (outcome, secs, calls)
+    }
+
+    /// Free bytes on the filesystem holding a path, or `None` where it cannot be asked.
+    ///
+    /// `statvfs` through `libc` rather than parsing `df`: the output of `df` is a human format that
+    /// has changed, and a wrong number here is worse than no number — it would either refuse a
+    /// sweep that would have fitted or reassure one that will not.
+    fn free_bytes(path: &Path) -> Option<u64> {
+        // The directory may not exist yet; ask about the nearest ancestor that does.
+        let mut at = path.to_path_buf();
+        while !at.exists() {
+            if !at.pop() {
+                return None;
+            }
+        }
+        let c = std::ffi::CString::new(at.as_os_str().as_encoded_bytes()).ok()?;
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `c` is a valid NUL-terminated path and `st` is owned here.
+        if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+            return None;
+        }
+        Some(st.f_bavail as u64 * st.f_frsize as u64)
     }
 
     /// Targets already recorded in a previous run of this sweep.
@@ -4585,6 +4696,39 @@ mod sweep {
                     .is_some_and(|m| m != trigon_core::Match::Divergent)
             })
             .count();
+
+        // **What we asked of the registries, beside what we concluded from them.** Upstream
+        // reputation is what breaks first at scale (`docs/10-scale.md` §3), and until this existed
+        // nothing counted a request: a sweep that exhausted GitHub's 60-an-hour allowance kept
+        // going, every later target came back `no-strategy`, and the run reported that Trigon
+        // cannot infer strategies for most of PyPI. That is a statement about our request budget
+        // wearing the costume of a finding about packages.
+        let traffic = trigon_registry::traffic();
+        let throttled: u64 = traffic.values().map(|t| t.throttled).sum();
+        if !traffic.is_empty() {
+            println!("\n  upstream");
+            for (host, t) in &traffic {
+                let note = match (t.throttled, t.failed) {
+                    (0, 0) => String::new(),
+                    (0, f) => format!("   {f} failed"),
+                    (r, 0) => format!("   {r} throttled"),
+                    (r, f) => format!("   {r} throttled, {f} failed"),
+                };
+                println!("    {host:<28} {:>5} request(s){note}", t.requests);
+            }
+            if throttled > 0 && trigon_registry::github_token_present() {
+                println!(
+                    "\n  a host throttled us {throttled} time(s). The rate below is about our \
+                     request budget as much as about the packages."
+                );
+            } else if throttled > 0 {
+                println!(
+                    "\n  a host throttled us {throttled} time(s), and no GITHUB_TOKEN is set — \
+                     unauthenticated GitHub allows 60 requests an hour. Set one and re-run before \
+                     believing the rate below."
+                );
+            }
+        }
 
         println!();
         if evidence.is_empty() {

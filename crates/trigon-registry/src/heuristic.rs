@@ -266,17 +266,19 @@ impl StrategyInferrer for NpmInferrer {
 }
 
 /// PyPI, where the registry knows the repository and nothing else.
+///
+/// **Holds no HTTP client.** It used to, for the GitHub API tag lookup; that now goes over git
+/// protocol, and a field nothing reads is the dead configuration `docs/16-findings.md` §3.15 is
+/// about. The resolver it calls talks to a forge through a subprocess, which is paced by nothing
+/// here — one `ls-remote` per target.
+#[derive(Default)]
 pub struct PyPiInferrer {
-    client: Client,
     mirror: Option<String>,
 }
 
 impl PyPiInferrer {
-    pub fn new(client: Client) -> Self {
-        PyPiInferrer {
-            client,
-            mirror: None,
-        }
+    pub fn new() -> Self {
+        PyPiInferrer::default()
     }
 
     /// See [`NpmInferrer::with_mirror`].
@@ -302,13 +304,7 @@ impl StrategyInferrer for PyPiInferrer {
         // PyPI records no commit, so one has to be found. A tag is the cheap rung and it is right
         // for most projects that tag releases at all.
         let (commit, how) = if source.commit.is_empty() {
-            match tags::resolve_version_tag(
-                &self.client,
-                &source.repo_url,
-                &target.reference.version,
-            )
-            .await
-            {
+            match tags::resolve_version_tag(&source.repo_url, &target.reference.version).await {
                 Some((sha, tag, how)) => {
                     // Named as mutable, not merely as "from a tag". A tag can be moved or deleted
                     // after a release — `pad-left 2.1.0` in the corpus is a package whose recorded

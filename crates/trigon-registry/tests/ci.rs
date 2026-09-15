@@ -21,8 +21,7 @@ use trigon_core::{
 };
 use trigon_registry::ci::recipe::{BuildPublishLink, Decline, OutOfScope};
 use trigon_registry::{
-    ArtifactMeta, CiInferrer, CiReading, Client, ClientConfig, Derivation, ResolvedTarget,
-    StrategyInferrer,
+    ArtifactMeta, CiInferrer, CiReading, Derivation, ResolvedTarget, StrategyInferrer,
 };
 use trigon_strategy::{StepBody, Strategy};
 
@@ -137,7 +136,7 @@ fn target(
 fn rung(root: &Path) -> CiInferrer {
     let sources =
         Arc::new(trigon_registry::SourceCache::new(root.join("cache")).trusting_local_paths());
-    CiInferrer::new(Client::new(ClientConfig::default()).unwrap(), sources)
+    CiInferrer::new(sources)
 }
 
 async fn read_pypi(name: &str, workflows: &[Wf], extra: &[(&str, &str)]) -> Arc<CiReading> {

@@ -31,7 +31,9 @@ mod tags;
 pub mod wheel;
 
 pub use ci::{CiInferrer, CiReading};
-pub use client::{Client, ClientConfig};
+pub use client::{
+    Client, ClientConfig, HostTraffic, github_token_present, note_failure, note_request, traffic,
+};
 pub use definitions::DefinitionsInferrer;
 pub use error::RegistryError;
 pub use heuristic::{NpmInferrer, PyPiInferrer};

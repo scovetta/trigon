@@ -9,13 +9,7 @@
 //! Only GitHub for now, because that is where the M1 corpus lives, and because each forge needs its
 //! own API. A repository somewhere else yields no commit rather than a guess.
 
-use serde_json::Value;
 use trigon_core::SourceDiscovery;
-
-use crate::client::Client;
-use crate::error::RegistryError;
-
-const ECO: &str = "github";
 
 /// Owner and repository from a canonicalized GitHub URL.
 pub fn github_slug(repo_url: &str) -> Option<(String, String)> {
@@ -35,11 +29,14 @@ pub fn github_slug(repo_url: &str) -> Option<(String, String)> {
 /// raises it to 5,000, and a sweep without one will spend most of its time rate-limited rather than
 /// building. Said here because the failure looks like flakiness rather than like a missing token.
 pub async fn resolve_version_tag(
-    client: &Client,
     repo_url: &str,
     version: &str,
 ) -> Option<(String, String, SourceDiscovery)> {
-    let (owner, repo) = github_slug(repo_url)?;
+    // **Still GitHub only, and no longer because it has to be.** `ls-remote` works against any
+    // https git URL, so this gate is now a deliberate restriction on what we claim rather than a
+    // limit of the mechanism — widening it changes which targets resolve, which is a change to
+    // measure on purpose rather than to slip in beside a corpus run.
+    let _ = github_slug(repo_url)?;
 
     let mut tried: Vec<(String, SourceDiscovery)> = vec![
         (version.to_string(), SourceDiscovery::ExactTag),
@@ -57,17 +54,42 @@ pub async fn resolve_version_tag(
         tried.push((format!("v{padded}"), SourceDiscovery::PrefixedTag));
     }
 
-    for (tag, how) in tried {
-        match peel(client, &owner, &repo, &tag).await {
-            Ok(Some(sha)) => return Some((sha, tag, how)),
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::warn!(repo = repo_url, tag, "resolving the tag failed: {e}");
+    // **One `ls-remote`, not one API request per spelling.** The ladder below is unchanged — the
+    // same spellings in the same order, so what resolves is what resolved before — but the question
+    // is asked over git protocol, which is not subject to the API's 60-an-hour unauthenticated
+    // limit. Measured at two API requests per PyPI target, a 200-target corpus needed about 400 and
+    // would have exhausted its budget in minutes, reporting the remainder as `no-strategy`.
+    //
+    // The listing is fetched on a blocking thread because it is a subprocess; the API client's
+    // pacing does not apply to it, and `ls-remote` against one repository is one connection.
+    let url = repo_url.to_string();
+    let tags =
+        match tokio::task::spawn_blocking(move || crate::source::remote_tags(&url, false)).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                tracing::warn!(repo = repo_url, "listing the repository's tags failed: {e}");
                 return None;
             }
+            Err(e) => {
+                tracing::warn!(
+                    repo = repo_url,
+                    "listing the repository's tags panicked: {e}"
+                );
+                return None;
+            }
+        };
+
+    for (tag, how) in tried {
+        if let Some(sha) = tags.get(&tag) {
+            return Some((sha.clone(), tag, how));
         }
     }
-    tracing::debug!(repo = repo_url, version, "no tag matches this version");
+    tracing::debug!(
+        repo = repo_url,
+        version,
+        known = tags.len(),
+        "no tag matches this version"
+    );
     None
 }
 
@@ -100,44 +122,6 @@ fn zero_padded(version: &str) -> Option<String> {
     }
     let joined = out.join(".");
     (joined != version).then_some(joined)
-}
-
-/// The commit a tag ultimately points at.
-///
-/// Annotated tags point at a tag object, not a commit, and using that object's SHA as a commit
-/// gives a checkout that fails with an unhelpful error. So a tag object is dereferenced once.
-async fn peel(
-    client: &Client,
-    owner: &str,
-    repo: &str,
-    tag: &str,
-) -> Result<Option<String>, RegistryError> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/git/ref/tags/{tag}");
-    let doc: Value = match client.get(&url, ECO).await {
-        Ok(r) => r.json().await?,
-        Err(RegistryError::Http { status: 404, .. }) => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let object = doc.get("object");
-    let sha = object
-        .and_then(|o| o.get("sha"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let kind = object.and_then(|o| o.get("type")).and_then(Value::as_str);
-
-    match (sha, kind) {
-        (Some(sha), Some("commit")) => Ok(Some(sha)),
-        (Some(sha), Some("tag")) => {
-            let url = format!("https://api.github.com/repos/{owner}/{repo}/git/tags/{sha}");
-            let doc: Value = client.get(&url, ECO).await?.json().await?;
-            Ok(doc
-                .get("object")
-                .and_then(|o| o.get("sha"))
-                .and_then(Value::as_str)
-                .map(str::to_owned))
-        }
-        _ => Ok(None),
-    }
 }
 
 #[cfg(test)]

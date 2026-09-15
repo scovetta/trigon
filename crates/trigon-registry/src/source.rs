@@ -15,6 +15,7 @@
 //! with the ambient configuration switched off. A repository is still data: nothing in it is
 //! executed, and the checkout is read, never built.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::RegistryError;
@@ -182,6 +183,49 @@ fn tags_present(path: &Path, repo: &str, local: bool) -> Vec<String> {
 /// and a remote that will not answer is a network problem, not a reason to fail a checkout that has
 /// already succeeded. What must not happen is either being silent: the empty list travels on
 /// [`Checkout::tags`] so the caller can say which it was.
+/// Every tag a repository advertises, and the commit each ultimately names.
+///
+/// **Git protocol, not the GitHub API, and that is the point.** Resolving a version to a tag used
+/// to cost one `api.github.com` request per spelling tried — measured at two per PyPI target, so a
+/// 200-target corpus needs about 400 against an unauthenticated allowance of 60 an hour. The run
+/// would exhaust its budget in the first few minutes and report the rest as `no-strategy`, which is
+/// a statement about our request budget wearing the costume of a finding about packages.
+///
+/// `ls-remote` answers the same question in one request, on a transport that is not subject to that
+/// limit, and answers it *better*: it returns every tag, so a spelling nobody thought to try is
+/// still visible rather than costing another round trip.
+///
+/// Annotated tags list twice — the tag object under its own name, and the commit it points at under
+/// `^{}`. The peeled line wins where both are present, because the commit is what a checkout needs.
+pub fn remote_tags(repo: &str, local: bool) -> Result<BTreeMap<String, String>, RegistryError> {
+    let repo = check_repo(repo, local)?;
+    // `ls-remote` needs no local repository; the current directory only has to exist.
+    let here = std::env::temp_dir();
+    let listing = git_output(&here, &["ls-remote", "--tags", &repo], &repo, local)?;
+    let listing = String::from_utf8_lossy(&listing);
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for line in listing.lines() {
+        let Some((sha, name)) = line.split_once('\t') else {
+            continue;
+        };
+        let (sha, name) = (sha.trim(), name.trim());
+        let Some(tag) = name.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        match tag.strip_suffix("^{}") {
+            // The peeled form is authoritative and overwrites whatever the tag object said.
+            Some(bare) => {
+                out.insert(bare.to_string(), sha.to_string());
+            }
+            None => {
+                out.entry(tag.to_string())
+                    .or_insert_with(|| sha.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn fetch_tags_for(path: &Path, repo: &str, commit: &str, local: bool) -> Vec<String> {
     let Ok(listing) = git_output(path, &["ls-remote", "--tags", "origin"], repo, local) else {
         return Vec::new();
@@ -357,6 +401,15 @@ fn command(dir: &Path, local: bool) -> std::process::Command {
 }
 
 fn git(dir: &Path, args: &[&str], repo: &str, local: bool) -> Result<(), RegistryError> {
+    // Only the subcommands that open a connection. `init`, `checkout` and the rest are local and
+    // counting them would report traffic that never left the machine.
+    if let Some(host) = args
+        .first()
+        .filter(|a| matches!(**a, "ls-remote" | "fetch" | "clone"))
+        .and_then(|_| forge_of(repo))
+    {
+        crate::client::note_request(&host);
+    }
     let out = command(dir, local)
         .args(args)
         .output()
@@ -377,12 +430,29 @@ fn git(dir: &Path, args: &[&str], repo: &str, local: bool) -> Result<(), Registr
     Ok(())
 }
 
+/// The host a repository URL names, for the traffic table.
+fn forge_of(repo: &str) -> Option<String> {
+    repo.strip_prefix("https://")
+        .and_then(|r| r.split('/').next())
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+}
+
 fn git_output(
     dir: &Path,
     args: &[&str],
     repo: &str,
     local: bool,
 ) -> Result<Vec<u8>, RegistryError> {
+    // Only the subcommands that open a connection. `init`, `checkout` and the rest are local and
+    // counting them would report traffic that never left the machine.
+    if let Some(host) = args
+        .first()
+        .filter(|a| matches!(**a, "ls-remote" | "fetch" | "clone"))
+        .and_then(|_| forge_of(repo))
+    {
+        crate::client::note_request(&host);
+    }
     let out = command(dir, local)
         .args(args)
         .output()

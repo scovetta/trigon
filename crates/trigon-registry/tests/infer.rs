@@ -276,7 +276,7 @@ fn pypi_target(generator: Option<(&str, &str)>) -> ResolvedTarget {
 }
 
 async fn pypi_strategy(generator: Option<(&str, &str)>) -> (Strategy, Vec<String>) {
-    let c = PyPiInferrer::new(client())
+    let c = PyPiInferrer::new()
         .with_mirror(Some("timewarp:8129".into()))
         .infer(&pypi_target(generator))
         .await

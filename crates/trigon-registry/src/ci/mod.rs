@@ -45,7 +45,6 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use trigon_core::{Ecosystem, Evidence};
 
-use crate::client::Client;
 use crate::error::RegistryError;
 use crate::infer::{Candidate, StrategyInferrer};
 use crate::model::ResolvedTarget;
@@ -150,7 +149,6 @@ impl CiReading {
 /// be resolved from a tag before there is a workflow to read. Without that the rung would decline
 /// on almost every PyPI target, which is most of what `docs/06` is about.
 pub struct CiInferrer {
-    client: Client,
     sources: Arc<SourceCache>,
     mirror: Option<String>,
     /// One entry, keyed by what was read.
@@ -163,9 +161,8 @@ pub struct CiInferrer {
 }
 
 impl CiInferrer {
-    pub fn new(client: Client, sources: Arc<SourceCache>) -> Self {
+    pub fn new(sources: Arc<SourceCache>) -> Self {
         CiInferrer {
-            client,
             sources,
             mirror: None,
             memo: Mutex::new(None),
@@ -212,13 +209,7 @@ impl CiInferrer {
         let (commit, how) = if !source.commit.is_empty() {
             (source.commit.clone(), source.how)
         } else {
-            match tags::resolve_version_tag(
-                &self.client,
-                &source.repo_url,
-                &target.reference.version,
-            )
-            .await
-            {
+            match tags::resolve_version_tag(&source.repo_url, &target.reference.version).await {
                 Some((sha, _tag, how)) => (sha, how),
                 None => return Ok(declined(Decline::NoPinnedCommit)),
             }
