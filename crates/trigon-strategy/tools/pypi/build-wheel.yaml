@@ -1,4 +1,4 @@
-# Build a wheel.
+# Build a wheel, or an sdist — whichever the run will be compared against.
 #
 # Isolation is a parameter because the right answer depends on who is asking. A definition that
 # pinned its build requirements exactly wants `-n`: the deps phase already installed them, and
@@ -22,6 +22,17 @@ params:
       A pip constraint file to apply to the frontend's isolated build environment. `PIP_CONSTRAINT`
       is inherited by the pip that `build` runs to populate that environment, which is the only way
       to pin a backend version without also taking over which requirements get installed.
+  kind:
+    required: false
+    default: wheel
+    doc: >-
+      `wheel` or `sdist` — which distribution to build. **It has to match the artifact the run is
+      comparing against.** A PyPI release commonly publishes an sdist and a dozen platform wheels,
+      and `ResolvedTarget::preferred` picks the sdist when no pure wheel exists, because a platform
+      wheel is built on one machine and does not reproduce on another. This tool always built a
+      wheel, so those runs compared a wheel against an sdist and the comparator reported the
+      upstream file as malformed gzip — which reads as a corrupt download rather than as two
+      different kinds of file.
   no_isolation:
     required: false
     default: "true"
@@ -34,4 +45,4 @@ steps:
       {%- if with.constraints %}
       export PIP_CONSTRAINT={{ with.constraints }}
       {%- endif %}
-      {{ with.locator }}python3 -m build --wheel{% if with.no_isolation == 'true' %} -n{% endif %}{% if with.dir and with.dir != '.' %} {{ with.dir }}{% endif %}
+      {{ with.locator }}python3 -m build --{{ with.kind }}{% if with.no_isolation == 'true' %} -n{% endif %}{% if with.dir and with.dir != '.' %} {{ with.dir }}{% endif %}

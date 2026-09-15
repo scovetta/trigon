@@ -31,6 +31,19 @@ pub struct ResolvedTarget {
     /// costs one request we were making anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceProvenance>,
+    /// The artifact this run is about, once a caller has chosen one.
+    ///
+    /// **A recipe has to build the same kind of thing it will be compared against.** Selection and
+    /// inference were decoupled: the caller picked an artifact and then asked for a strategy
+    /// without saying which, so the PyPI rung always built a wheel. For a native package
+    /// `preferred()` picks the *sdist* — correctly, because platform wheels are built on a dozen
+    /// machines and do not reproduce alike — and the run then compared a wheel against an sdist.
+    /// The comparator took its format from the upstream name and reported `malformed gzip: not a
+    /// gzip member`, which reads as a corrupt download rather than as two different kinds of file.
+    ///
+    /// `None` where nothing has chosen yet, which is every path that only resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<ArtifactId>,
 }
 
 impl ResolvedTarget {

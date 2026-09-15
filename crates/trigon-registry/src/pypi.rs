@@ -155,6 +155,7 @@ impl Registry for PyPiRegistry {
                 subdir: None,
                 how: SourceDiscovery::RegistryMetadata,
             }),
+            about: None,
         })
     }
 

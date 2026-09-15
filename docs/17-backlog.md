@@ -292,6 +292,34 @@ caching is worth having — the deps layer is shared across sibling versions of 
 artifacts with different raw digests and the same stabilized one. Until then, nothing in this system
 performs a clean re-run at all, so the requirement is unmet for a reason older than this entry.
 
+## B16. System libraries are the one input a rebuild does not pin
+
+A rebuild pins the registry index to the package's publish moment, pins the toolchain by version,
+and then links against whatever `libssl` or `libffi` the base image happened to carry on the day
+somebody last built it. Every other input is a function of the target; this one is a function of our
+own housekeeping.
+
+`snapshot.debian.org` serves a Debian archive as of a timestamp, which is the same mechanism
+[`trigon-mirror`](../crates/trigon-mirror/src/moment.rs) already applies to a registry index — so
+the shape of the answer is known and it is the one this project already uses twice.
+
+**Not urgent, and worth writing down rather than losing.** Nothing today claims system-library
+reproducibility, and the corpus has not shown a divergence traced to one. What makes it worth
+keeping is that the claim gets *stronger* elsewhere over time, and this is where the honesty runs
+out first.
+
+**What it is not.** A design pass over four independent proposals landed on host-side base-image
+repair from a header-to-package table, and the measurement it recommended taking first — a histogram
+of what the failing targets actually need — said do neither. Four targets, four different packages,
+no repetition: `ffi.h`, `yaml.h`, a Rust toolchain, `meson`. A table and a repair loop both need a
+repeating tail to pay for themselves. `trigon base-image --packages` already lets an operator extend
+the image for their own corpus, and the piece that was genuinely missing was the diagnosis telling
+them what to add, which `cc/missing-header:<h>` and `env/missing-tool` now do.
+
+That conclusion rests on a 40-target sample. **Done when:** the full 200-target PyPI corpus is run
+and either the tail repeats — in which case build the table — or it does not, in which case record
+that and close this as declined.
+
 ## B8. The three ecosystems after npm and PyPI
 
 `nuget.org`, `crates.io` and `rubygems.org`. [`03`](03-ecosystems.md) has a chapter on each and

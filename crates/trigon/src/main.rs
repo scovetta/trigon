@@ -2411,6 +2411,12 @@ mod rebuild {
             Ok(m) => m.clone(),
             Err(e) => return Ok(classify(&e).into()),
         };
+        // Told to the ladder, so a recipe builds the same *kind* of thing it will be compared
+        // against. Without this the PyPI rung always built a wheel, and for a native package —
+        // where `preferred()` correctly picks the sdist, because platform wheels do not reproduce
+        // across machines — the run compared a wheel against an sdist and reported the upstream
+        // file as malformed.
+        resolved.about = Some(meta.id.clone());
         if verbose {
             println!("{}", resolved.reference);
             println!("  artifact   {}", meta.id);
@@ -3437,6 +3443,26 @@ mod rebuild {
     fn judge(upstream: &Path, rebuilt: &Path) -> Result<trigon_compare::Comparison, Outcome> {
         let read = || -> Result<trigon_compare::Comparison> {
             let format = crate::resolve_format(upstream, None)?;
+            // **Both files, before either is parsed.** The format comes from the upstream name and
+            // is then applied to both, so a rebuild of a different kind is fed to the wrong parser
+            // and reports the *upstream* artifact as malformed — `not a gzip member` against a
+            // perfectly good sdist, because the thing beside it was a wheel. Three PyPI targets
+            // came back that way the first time a C toolchain let them build at all.
+            //
+            // Named here rather than left to the parser: "we built the wrong kind of file" is a
+            // statement about our recipe and has a fix, where "the archive is malformed" sends
+            // somebody to look at the registry.
+            let rebuilt_format = crate::resolve_format(rebuilt, None).ok();
+            if let Some(rf) = rebuilt_format
+                && rf != format
+            {
+                anyhow::bail!(
+                    "the build produced a {rf:?} and the artifact under test is a {format:?}, so \
+                     there is nothing to compare. The recipe built the wrong kind of \
+                     distribution — a release publishes an sdist and platform wheels, and a run \
+                     is about one of them."
+                );
+            }
             let set = crate::resolve_profile(upstream, None, format)?;
             let a = std::fs::read(upstream)?;
             let b = std::fs::read(rebuilt)?;

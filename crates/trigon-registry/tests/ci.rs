@@ -129,6 +129,7 @@ fn target(
             subdir: None,
             how: SourceDiscovery::RegistryCommit,
         }),
+        about: None,
     }
 }
 

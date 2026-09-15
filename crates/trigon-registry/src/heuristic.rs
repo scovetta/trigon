@@ -436,6 +436,19 @@ impl StrategyInferrer for PyPiInferrer {
             build: vec![uses(
                 "pypi/build/wheel",
                 BTreeMap::from([
+                    // **Build what will be compared, not what is usual.** `preferred()` picks the
+                    // sdist for a package whose only wheels are platform-specific — correctly,
+                    // because such a wheel is built on one machine and does not reproduce on
+                    // another — and a wheel built here would then be compared against it. The
+                    // comparator took its format from the upstream name and called the sdist a
+                    // malformed gzip.
+                    (
+                        "kind".to_string(),
+                        match target.about.as_ref().map(|a| a.kind()) {
+                            Some(trigon_core::ArtifactKind::Sdist) => "sdist".to_string(),
+                            _ => "wheel".to_string(),
+                        },
+                    ),
                     // Both derived from `VENV` rather than written out, so the venv the deps
                     // phase creates and the one the build phase looks in cannot come apart. They
                     // were three literals agreeing by eye.

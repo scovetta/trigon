@@ -669,6 +669,17 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // The recipe built a different kind of distribution from the one under test. Ours, and
+        // fixable: a release publishes an sdist and a dozen platform wheels, and the run is about
+        // one of them.
+        code: "trigon/wrong-artifact-kind",
+        needles: &["so there is nothing to compare"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        capture: Capture::None,
+    },
+    Rule {
         // **Our own mirror, refusing our own request.** A 400 from the mirror means a request
         // arrived without the time filter, and for a tarball that is npm composing the URL itself
         // from the registry root and dropping the credentials on the way. The build reports

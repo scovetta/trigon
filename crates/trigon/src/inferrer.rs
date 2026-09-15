@@ -728,6 +728,7 @@ mod tests {
                 subdir: None,
                 how: SourceDiscovery::RegistryCommit,
             }),
+            about: None,
         }
     }
 

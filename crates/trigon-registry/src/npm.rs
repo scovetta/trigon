@@ -175,6 +175,7 @@ impl Registry for NpmRegistry {
                 evidence,
             },
             source,
+            about: None,
         })
     }
 

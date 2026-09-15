@@ -60,6 +60,7 @@ fn npm_target(with_toolchain: bool) -> ResolvedTarget {
             subdir: None,
             how: SourceDiscovery::RegistryCommit,
         }),
+        about: None,
     }
 }
 
@@ -272,6 +273,7 @@ fn pypi_target(generator: Option<(&str, &str)>) -> ResolvedTarget {
             subdir: None,
             how: SourceDiscovery::ExactTag,
         }),
+        about: None,
     }
 }
 
