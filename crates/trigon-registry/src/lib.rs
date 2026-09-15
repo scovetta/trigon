@@ -37,7 +37,7 @@ pub use client::{
 pub use definitions::DefinitionsInferrer;
 pub use error::RegistryError;
 pub use heuristic::{NpmInferrer, PyPiInferrer};
-pub use infer::{Candidate, Derivation, StrategyInferrer, infer};
+pub use infer::{Candidate, Climb, Derivation, StrategyInferrer, climb, infer};
 pub use model::{ArtifactMeta, BlobSink, ResolvedTarget};
 pub use npm::NpmRegistry;
 pub use promised::{promised, shortfall};

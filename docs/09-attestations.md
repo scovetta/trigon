@@ -86,8 +86,14 @@ existing SLSA tooling consumes our output without knowing anything about Trigon.
         }
       },
       "resolvedDependencies": [
-        { "uri": "git+https://github.com/stringandstring/left-pad",
-          "digest": { "sha1": "ea6b26bb8b3f01a1b3f6b0b2d3a7…" } },
+        { "uri": "https://github.com/stringandstring/left-pad",
+          "digest": { "gitCommit": "ea6b26bb8b3f01a1b3f6b0b2d3a7…" },
+          "annotations": {
+            "discovery": "fuzzy_tag",
+            "ref": "left-pad-1.3.0",
+            "subdirectory": "packages/left-pad",
+            "declaredUri": "git+ssh://git@github.com/stringandstring/left-pad.git"
+          } },
         { "uri": "trigon/base-node", "digest": { "sha256": "5f2b…" } },
         { "name": "definitions", "uri": "git+https://github.com/trigon-dev/trigon-definitions",
           "digest": { "sha1": "77c1b0…" } }
@@ -127,6 +133,33 @@ Note `derivation`. When a model was involved it reads:
 
 **Method records provenance rather than trust.** A consumer who wants to filter on "no model
 touched this" can, and offering that capability costs one field.
+
+**And `resolvedDependencies` records the other half of the verdict.** This section described it from
+the beginning and the implementation emitted an empty array for months: the statement said which
+recipe by digest, which image and which egress tier, and not what source the artifact was built
+from. A reader holding it could not answer the question the npm chapter of
+[`03-ecosystems.md`](03-ecosystems.md) says *is* the npm product — whether the published tarball
+corresponds to the claimed source.
+
+Three details of the source entry are load-bearing:
+
+- **`gitCommit`, not `sha1`.** SLSA's digest set names the algorithm, and "sha1" does not say what
+  was hashed. A generic SLSA consumer reads `gitCommit` without knowing anything about Trigon.
+- **`annotations.discovery`** names the rung that found the commit: `registry_commit`, `exact_tag`,
+  `fuzzy_tag`, `tree_hash_match`, and so on. A commit npm recorded in `gitHead` and a commit found
+  by stripping `python-ecdsa-` off a tag name support very different verdicts, and a consumer that
+  cannot tell them apart will read every verdict as the stronger one. `SourceDiscovery`'s own
+  definition says it "predicts a false result better than anything else available"; until it was
+  put here it was recorded nowhere a reader could see, only on a `--verbose` terminal line.
+- **`annotations.declaredUri`** is what the registry actually said, present only when it differs
+  from `uri`. Canonicalizing is lossy and the canonical form is what every other field shows:
+  `git+ssh://…`, `github:a/b`, `http://` and a `…/issues` view URL all collapse to the same
+  `https://github.com/a/b`, and a record holding only the result cannot be checked against the
+  package. `ecdsa` declares `http://github.com/tlsfuzzer/python-ecdsa` and we build from `https://`;
+  that is almost certainly fine and it is not ours to assert silently.
+
+The strategy is also listed among `byproducts`, not only hashed in `internalParameters`: a digest of
+a blob the statement does not offer is not something a reader can check.
 
 ### 2.2 `equivalence/v1`
 

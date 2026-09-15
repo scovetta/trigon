@@ -95,7 +95,7 @@ impl Registry for NpmRegistry {
         let mut evidence = Vec::new();
         let mut source = None;
 
-        if let Some(repo) = repo_url(&doc) {
+        if let Some((repo, declared)) = repo_url(&doc) {
             evidence.push(Evidence::new(
                 Claim::RepoIs { url: repo.clone() },
                 Confidence::Strong,
@@ -109,6 +109,7 @@ impl Registry for NpmRegistry {
             // registry did not record a commit. The rung resolves the version's tag instead.
             let commit = doc.get("gitHead").and_then(Value::as_str);
             source = Some(SourceProvenance {
+                declared_url: (declared != repo).then(|| declared.clone()),
                 repo_url: repo,
                 commit: commit.unwrap_or_default().to_string(),
                 ref_name: None,
@@ -170,7 +171,7 @@ impl Registry for NpmRegistry {
             artifacts: vec![artifact],
             intrinsics: Intrinsics {
                 publish_time: publish_time.clone(),
-                declared_repo: repo_url(&doc),
+                declared_repo: repo_url(&doc).map(|(canonical, _)| canonical),
                 registry_moment: publish_time.map(|rfc3339| RegistryMoment::Timestamp { rfc3339 }),
                 evidence,
             },
@@ -231,12 +232,18 @@ impl NpmRegistry {
     }
 }
 
-fn repo_url(doc: &Value) -> Option<String> {
+/// The repository, and the string the package actually declared.
+///
+/// Both, because canonicalizing is lossy and the canonical form is what everything downstream sees.
+/// `git+ssh://git@github.com/a/b.git`, `github:a/b` and a `tree/` URL all collapse to the same
+/// `https://github.com/a/b`, and a record holding only the result cannot be checked against what
+/// the package said. See [`SourceProvenance::declared_url`].
+fn repo_url(doc: &Value) -> Option<(String, String)> {
     let repo = doc.get("repository")?;
     let raw = repo
         .as_str()
         .or_else(|| repo.get("url").and_then(Value::as_str))?;
-    Some(canonicalize_repo(raw))
+    Some((canonicalize_repo(raw), raw.to_string()))
 }
 
 /// Where in the repository this package lives, from `repository.directory`.

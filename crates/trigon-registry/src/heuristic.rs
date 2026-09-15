@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 use std::collections::BTreeMap;
-use trigon_core::Confidence;
+use trigon_core::{Confidence, SourceDiscovery};
 use trigon_strategy::{FlowStrategy, Location, Step, StepBody, Strategy, VENV};
 
 use crate::client::Client;
@@ -69,6 +69,52 @@ fn uses(tool: &str, with: BTreeMap<String, String>) -> Step {
         needs: Vec::new(),
         when: None,
     }
+}
+
+/// The commit to build, or one sentence saying why there is none.
+///
+/// **One function for the decision and the explanation**, because they are the same question asked
+/// twice: `infer` needs the commit and `why_not` needs the reason, and two implementations of
+/// "why did this decline" drift the moment one of them is edited. The reason is the `Err`.
+///
+/// Costs one `ls-remote` on the decline path, which by definition is a target nothing is about to
+/// build.
+async fn commit_for(
+    target: &ResolvedTarget,
+    registry_recorded_it: bool,
+) -> Result<(String, SourceDiscovery, Option<String>), String> {
+    let Some(source) = &target.source else {
+        return Err("the registry declared no repository for this package".into());
+    };
+    if !source.commit.is_empty() {
+        return Ok((source.commit.clone(), source.how, None));
+    }
+    match tags::resolve_version_tag(
+        &source.repo_url,
+        &target.reference.version,
+        &target.reference.name,
+    )
+    .await
+    {
+        Some((sha, tag, how)) => Ok((sha, how, Some(tag))),
+        None => Err(format!(
+            "{} declares `{}` and no tag there matches version {}",
+            match registry_recorded_it {
+                true => "npm recorded no `gitHead`; the package",
+                false => "the package",
+            },
+            source.repo_url,
+            target.reference.version
+        )),
+    }
+}
+
+/// The sentence a mutable tag deserves beside a verdict built on it.
+fn from_a_tag(tag: &str) -> String {
+    format!(
+        "the commit comes from tag `{tag}` rather than from the registry, and a tag is mutable: \
+         this is where it points today, not necessarily what was published"
+    )
 }
 
 /// npm, where the registry already knows almost everything.
@@ -133,33 +179,13 @@ impl StrategyInferrer for NpmInferrer {
         //
         // The tag is the same cheap rung PyPI has always used, and it costs one `ls-remote` now
         // that it no longer goes through the GitHub API.
-        let (commit, how) = if source.commit.is_empty() {
-            match tags::resolve_version_tag(
-                &source.repo_url,
-                &target.reference.version,
-                &target.reference.name,
-            )
-            .await
-            {
-                Some((sha, tag, how)) => {
-                    assumptions.push(format!(
-                        "the commit comes from tag `{tag}` rather than from the registry, and a \
-                         tag is mutable: this is where it points today, not necessarily what was \
-                         published"
-                    ));
-                    (sha, how)
-                }
-                None => {
-                    tracing::debug!(
-                        repo = source.repo_url,
-                        "npm recorded no gitHead and no tag matches this version"
-                    );
-                    return Ok(Vec::new());
-                }
-            }
-        } else {
-            (source.commit.clone(), source.how)
+        let Ok((commit, how, tag)) = commit_for(target, true).await else {
+            // The reason is `why_not`'s, which asks the same function.
+            return Ok(Vec::new());
         };
+        if let Some(tag) = tag {
+            assumptions.push(from_a_tag(&tag));
+        }
 
         // `_nodeVersion` and `_npmVersion` are what the publishing client reported, so this is not
         // an inference at all: it is the toolchain that produced the artifact, recorded by the
@@ -303,6 +329,24 @@ impl StrategyInferrer for NpmInferrer {
             assumptions,
         }])
     }
+
+    /// Why this rung said nothing. Asks [`commit_for`], which is what `infer` asked.
+    ///
+    /// The commit is the only thing this rung declines over that a reader cannot see for
+    /// themselves; a missing `_nodeVersion` is named too, because "npm did not record the
+    /// toolchain" and "we could not find the commit" send a reader to different places.
+    async fn why_not(&self, target: &ResolvedTarget) -> Option<String> {
+        if let Err(why) = commit_for(target, true).await {
+            return Some(why);
+        }
+        let toolchain = evidence_value(target, "npm:_nodeVersion")
+            .zip(evidence_value(target, "npm:_npmVersion"));
+        toolchain.is_none().then(|| {
+            "the registry recorded no `_nodeVersion`/`_npmVersion`, and a modern npm packs a \
+             tarball a 2018 npm would not have"
+                .to_string()
+        })
+    }
 }
 
 /// PyPI, where the registry knows the repository and nothing else.
@@ -406,38 +450,16 @@ impl StrategyInferrer for PyPiInferrer {
 
         // PyPI records no commit, so one has to be found. A tag is the cheap rung and it is right
         // for most projects that tag releases at all.
-        let (commit, how) = if source.commit.is_empty() {
-            match tags::resolve_version_tag(
-                &source.repo_url,
-                &target.reference.version,
-                &target.reference.name,
-            )
-            .await
-            {
-                Some((sha, tag, how)) => {
-                    // Named as mutable, not merely as "from a tag". A tag can be moved or deleted
-                    // after a release — `pad-left 2.1.0` in the corpus is a package whose recorded
-                    // commit was force-pushed away — so this is the commit the tag points at
-                    // today, which is a good approximation and not the same claim as a commit the
-                    // registry recorded at publish time.
-                    assumptions.push(format!(
-                        "the commit comes from tag `{tag}` rather than from the registry, and a \
-                         tag is mutable: this is where it points today, not necessarily what was \
-                         published"
-                    ));
-                    (sha, how)
-                }
-                None => {
-                    tracing::debug!(
-                        repo = source.repo_url,
-                        "no tag matches this version; a stronger rung is needed"
-                    );
-                    return Ok(Vec::new());
-                }
-            }
-        } else {
-            (source.commit.clone(), source.how)
+        // Named as mutable, not merely as "from a tag". A tag can be moved or deleted after a
+        // release — `pad-left 2.1.0` in the corpus is a package whose recorded commit was
+        // force-pushed away — so this is the commit the tag points at today, which is a good
+        // approximation and not the same claim as a commit the registry recorded at publish time.
+        let Ok((commit, how, tag)) = commit_for(target, false).await else {
+            return Ok(Vec::new());
         };
+        if let Some(tag) = tag {
+            assumptions.push(from_a_tag(&tag));
+        }
 
         // Where in the repository the project is. A declared subdirectory wins — npm has a field
         // for it and a PyPI `tree/<ref>/<path>` link says it in passing — and where nothing
@@ -593,6 +615,11 @@ impl StrategyInferrer for PyPiInferrer {
             discovery: how,
             assumptions,
         }])
+    }
+
+    /// Why this rung said nothing. Asks [`commit_for`], which is what `infer` asked.
+    async fn why_not(&self, target: &ResolvedTarget) -> Option<String> {
+        commit_for(target, false).await.err()
     }
 }
 

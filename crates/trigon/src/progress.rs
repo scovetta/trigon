@@ -485,6 +485,27 @@ pub struct RunReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guard_notes: Vec<String>,
 
+    /// What was built, and how we came to believe that is what was built.
+    ///
+    /// **The one thing a reader has to have and did not.** A verdict is a statement about a
+    /// published artifact *and a source*, and the source half reached a `--verbose` terminal line
+    /// and nothing else: `strategy.yaml` carries the repository and commit, and even that does not
+    /// say whether the commit came from the registry or from stripping a prefix off a tag name.
+    /// `SourceDiscovery`'s own doc comment says it "predicts a false result better than anything
+    /// else available"; it was recorded nowhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<trigon_core::SourceProvenance>,
+
+    /// One line per rung that was asked and declined: the rung's name and its reason.
+    ///
+    /// `no-strategy` is the most common non-answer a sweep produces and it carried no explanation
+    /// at all — the CI rung computes a careful `Decline` naming the job it picked and what stopped
+    /// it, and every one of those ended at a `debug!` nothing wrote down. Re-deriving them by hand
+    /// from the registry days later is reading a record that did not record the thing that
+    /// mattered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declines: Vec<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -74,6 +74,22 @@ pub trait StrategyInferrer: Send + Sync {
     /// An empty vector means "this rung has nothing to say", which is not an error: most rungs are
     /// silent for most targets, and that is how the ladder is supposed to work.
     async fn infer(&self, target: &ResolvedTarget) -> Result<Vec<Candidate>, RegistryError>;
+
+    /// Why this rung said nothing, in one sentence, when it knows.
+    ///
+    /// **The channel a decline had no way out through.** `infer` returns a vector, so a rung that
+    /// declines for a careful reason and a rung that has nothing to do with this ecosystem are the
+    /// same empty vector. The CI rung computes a whole `Decline` type explaining which job it
+    /// picked and what stopped it, and every one of those reasons ended at
+    /// `tracing::debug!("nothing to say")` — off by default, and not written to any file. A target
+    /// reporting `no-strategy` recorded no reason at all.
+    ///
+    /// Asked only after `infer` came back empty, so a rung that produced a candidate pays nothing.
+    /// `None` is a rung that genuinely has nothing to add, which is the honest answer for a
+    /// heuristic asked about an ecosystem it does not handle.
+    async fn why_not(&self, _target: &ResolvedTarget) -> Option<String> {
+        None
+    }
 }
 
 /// Run the ladder and return the first candidate anything produced.
@@ -81,6 +97,26 @@ pub async fn infer(
     rungs: &[Box<dyn StrategyInferrer>],
     target: &ResolvedTarget,
 ) -> Result<Option<Candidate>, RegistryError> {
+    Ok(climb(rungs, target).await.candidate)
+}
+
+/// What a climb of the ladder produced, and what every rung that produced nothing had to say.
+#[derive(Debug, Default)]
+pub struct Climb {
+    pub candidate: Option<Candidate>,
+    /// One line per rung that was asked and declined, in the order they were asked: the rung's
+    /// name and its reason. Empty when the first rung answered.
+    ///
+    /// Kept because `no-strategy` is otherwise a verdict with no explanation attached, and it is
+    /// the most common non-answer a sweep produces. A reader who has to re-derive why fifteen
+    /// targets declined — by hand, from the registry, days later — is reading a record that did
+    /// not record the thing that mattered.
+    pub declines: Vec<(&'static str, String)>,
+}
+
+/// Ask each rung in turn, and keep what the ones that said nothing said about why.
+pub async fn climb(rungs: &[Box<dyn StrategyInferrer>], target: &ResolvedTarget) -> Climb {
+    let mut out = Climb::default();
     for rung in rungs {
         match rung.infer(target).await {
             Ok(candidates) if !candidates.is_empty() => {
@@ -89,15 +125,27 @@ pub async fn infer(
                     derivation = ?candidates[0].derivation,
                     "inferred a strategy"
                 );
-                return Ok(candidates.into_iter().next());
+                out.candidate = candidates.into_iter().next();
+                return out;
             }
-            Ok(_) => tracing::debug!(rung = rung.name(), "nothing to say"),
+            Ok(_) => {
+                let why = rung.why_not(target).await;
+                tracing::debug!(rung = rung.name(), why = why.as_deref(), "nothing to say");
+                if let Some(why) = why {
+                    out.declines.push((rung.name(), why));
+                }
+            }
             // A rung that fails is not fatal: the next one may still know. The engine only fails
-            // when every rung has been asked and none produced anything.
-            Err(e) => tracing::warn!(rung = rung.name(), "{e}"),
+            // when every rung has been asked and none produced anything. Recorded as a decline
+            // with its error as the reason, because "this rung broke" is exactly the thing a
+            // `no-strategy` must not hide.
+            Err(e) => {
+                tracing::warn!(rung = rung.name(), "{e}");
+                out.declines.push((rung.name(), format!("failed: {e}")));
+            }
         }
     }
-    Ok(None)
+    out
 }
 
 /// How a `SourceDiscovery` rung should be believed.

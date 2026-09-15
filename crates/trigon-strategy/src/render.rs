@@ -36,6 +36,26 @@ pub fn render(
     cx: &Context,
     tools: &ToolRegistry,
 ) -> Result<Instructions, StrategyError> {
+    // **The strategy's location is the authority, and the context's copy of it was a second one.**
+    // A template reads `{{ location.subdir }}` from the context; the checkout and the output path
+    // come from the strategy. Two values that had to agree with nothing asserting they did — and
+    // they came apart the first time a PyPI project was not at its repository root: the strategy
+    // said `subdir: src`, the caller's context said nothing, and the build ran in the wrong
+    // directory while the output was collected from the right one.
+    //
+    // Overwritten rather than compared, because there is no case where the caller knows better.
+    let cx = &match s.location() {
+        Some(l) => Context {
+            location: crate::LocationCtx {
+                repo: l.repo.clone(),
+                git_ref: l.git_ref.clone(),
+                // Empty means the root. See `LocationCtx::subdir` for why it is not an `Option`.
+                subdir: l.subdir.clone().unwrap_or_default(),
+            },
+            ..cx.clone()
+        },
+        None => cx.clone(),
+    };
     match s {
         Strategy::Flow(f) => render_flow(f, cx, tools),
         Strategy::Manual(m) => Ok(render_manual(m, cx)),

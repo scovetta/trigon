@@ -55,6 +55,7 @@ fn npm_target(with_toolchain: bool) -> ResolvedTarget {
         },
         source: Some(SourceProvenance {
             repo_url: "https://github.com/stevemao/left-pad".into(),
+            declared_url: None,
             commit: "ff8e7ba8b4122829cf66125ca8445cac7f073bce".into(),
             ref_name: None,
             subdir: None,
@@ -268,6 +269,7 @@ fn pypi_target(generator: Option<(&str, &str)>) -> ResolvedTarget {
         },
         source: Some(SourceProvenance {
             repo_url: "https://github.com/python-trio/sniffio".into(),
+            declared_url: None,
             commit: "ae020e13b98d276a6558ffc25e82509fd4c288f0".into(),
             ref_name: Some("v1.3.1".into()),
             subdir: None,
@@ -422,5 +424,67 @@ async fn a_declared_build_changes_nothing_without_a_repository_to_check_it_again
         !got[0].assumptions.iter().any(|a| a.contains("npm run")),
         "nothing was assumed, because nothing was done: {:?}",
         got[0].assumptions
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Why a rung said nothing
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_rung_that_declines_says_why_and_the_reason_reaches_the_record() {
+    // `no-strategy` is the most common non-answer a sweep produces and it carried no explanation at
+    // all: `StrategyInferrer::infer` returns a vector, so a rung that declines for a careful reason
+    // and a rung with nothing to do with this ecosystem were the same empty vector, and the reason
+    // ended at a `debug!` nothing wrote down. Fifteen PyPI targets came back `no-strategy` in one
+    // corpus run and every reason had to be re-derived by hand from the registry days later.
+    let rung = PyPiInferrer::new();
+
+    // No repository anywhere in the metadata, which is `protobuf`, `ply` and `xlrd`.
+    let mut bare = npm_target(false);
+    bare.reference = TargetRef::new(Ecosystem::PyPI, "protobuf", "6.33.6");
+    bare.source = None;
+    assert!(rung.infer(&bare).await.unwrap().is_empty());
+    let why = rung.why_not(&bare).await.expect("a reason");
+    assert!(
+        why.contains("no repository"),
+        "the reason has to name what was missing: {why}"
+    );
+
+    // A repository, and no tag for this version — `pyperclip` has no tags at all, and `pysocks`
+    // 1.7.1 was published untagged. A local path resolves no tags either, which is what makes this
+    // testable without a forge.
+    let mut untagged = npm_target(false);
+    untagged.reference = TargetRef::new(Ecosystem::PyPI, "pyperclip", "1.11.0");
+    untagged.source = Some(SourceProvenance {
+        repo_url: "https://github.com/asweigart/pyperclip".into(),
+        declared_url: None,
+        commit: String::new(),
+        ref_name: None,
+        subdir: None,
+        how: SourceDiscovery::RegistryMetadata,
+    });
+    let why = rung.why_not(&untagged).await.expect("a reason");
+    assert!(
+        why.contains("1.11.0") && why.contains("asweigart/pyperclip"),
+        "the reason has to name the version looked for and where: {why}"
+    );
+}
+
+#[tokio::test]
+async fn the_reason_and_the_decision_come_from_one_place() {
+    // Two implementations of "why did this decline" drift the moment one of them is edited, so the
+    // rung and its explanation ask the same function. A rung that produces a candidate has no
+    // reason to give, and saying one anyway would be inventing a decline that did not happen.
+    let rung = NpmInferrer::new(client());
+    let t = npm_target(true);
+    assert!(
+        !rung.infer(&t).await.unwrap().is_empty(),
+        "this fixture is supposed to produce a candidate"
+    );
+    assert_eq!(
+        rung.why_not(&t).await,
+        None,
+        "a rung that answered has nothing to decline over"
     );
 }

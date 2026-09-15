@@ -250,6 +250,16 @@ fn version_string(v: &[u64]) -> String {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SourceProvenance {
     pub repo_url: String,
+    /// What the registry actually declared, when it is not `repo_url`.
+    ///
+    /// A declared URL is routinely a *view* of a repository rather than the repository —
+    /// `…/python-engineio/issues`, `…/lark/tarball/master`, `…/google-cloud-python/tree/main/…` —
+    /// and trimming it is how those targets resolve at all. Trimming is also lossy, and the trimmed
+    /// value is the one everything downstream sees: a record naming a repository the package never
+    /// declared is indistinguishable from a correct one unless the original is kept. It is kept
+    /// here, and only where it differs, so the common case costs nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_url: Option<String>,
     /// Always a resolved commit, never a ref name. A tag moves.
     pub commit: String,
     /// The tag or branch it came from, for humans.
@@ -285,6 +295,26 @@ pub enum SourceDiscovery {
 }
 
 impl SourceDiscovery {
+    /// The stable name, identical to the serialized form.
+    ///
+    /// A method rather than `format!("{self:?}")` at each call site, because this string reaches a
+    /// signed attestation: `Debug` is `FuzzyTag` and the wire format is `fuzzy_tag`, and a document
+    /// carrying one while the schema says the other is a document nobody can validate.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SourceDiscovery::RegistryCommit => "registry_commit",
+            SourceDiscovery::PublishedProvenance => "published_provenance",
+            SourceDiscovery::RegistryMetadata => "registry_metadata",
+            SourceDiscovery::ExactTag => "exact_tag",
+            SourceDiscovery::PrefixedTag => "prefixed_tag",
+            SourceDiscovery::FuzzyTag => "fuzzy_tag",
+            SourceDiscovery::ManifestHistory => "manifest_history",
+            SourceDiscovery::TreeHashMatch => "tree_hash_match",
+            SourceDiscovery::Definition => "definition",
+            SourceDiscovery::ModelAssisted => "model_assisted",
+        }
+    }
+
     /// Whether this rung identifies a commit on its own, rather than needing one resolved.
     pub const fn is_exact(self) -> bool {
         matches!(
@@ -293,5 +323,35 @@ impl SourceDiscovery {
                 | SourceDiscovery::PublishedProvenance
                 | SourceDiscovery::Definition
         )
+    }
+}
+
+#[cfg(test)]
+mod discovery_name_tests {
+    use super::SourceDiscovery::{self, *};
+
+    #[test]
+    fn the_stable_name_is_the_serialized_name() {
+        // Two spellings of the same string, one of which ends up inside a signed document. They
+        // are checked against each other rather than kept in step by hand.
+        let all: [SourceDiscovery; 10] = [
+            RegistryCommit,
+            PublishedProvenance,
+            RegistryMetadata,
+            ExactTag,
+            PrefixedTag,
+            FuzzyTag,
+            ManifestHistory,
+            TreeHashMatch,
+            Definition,
+            ModelAssisted,
+        ];
+        for v in all {
+            assert_eq!(
+                serde_json::to_value(v).unwrap().as_str().unwrap(),
+                v.as_str(),
+                "{v:?}"
+            );
+        }
     }
 }

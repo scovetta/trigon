@@ -15,7 +15,14 @@ params:
     required: false
   dir:
     required: false
-    doc: Project directory, when it is not the working tree root.
+    doc: >-
+      Project directory, when it is not the working tree root. **Defaults to `location.subdir`**,
+      which is where the answer already is for every caller that has one. It did not, and the npm
+      tools have read `location.subdir` the whole time: `stub42/pytz` keeps its `setup.py` under
+      `src/`, the PyPI rung correctly set `subdir: src` and `output_dir: src/dist`, and this step
+      still ran `python -m build` at the tree root and stopped with "Source /src does not appear to
+      be a Python project". A field plumbed through one ecosystem and not the other, discovered by
+      the first target that needed it.
   constraints:
     required: false
     doc: >-
@@ -45,4 +52,5 @@ steps:
       {%- if with.constraints %}
       export PIP_CONSTRAINT={{ with.constraints }}
       {%- endif %}
-      {{ with.locator }}python3 -m build --{{ with.kind }}{% if with.no_isolation == 'true' %} -n{% endif %}{% if with.dir and with.dir != '.' %} {{ with.dir }}{% endif %}
+      {%- set project = with.dir if with.dir else location.subdir %}
+      {{ with.locator }}python3 -m build --{{ with.kind }}{% if with.no_isolation == 'true' %} -n{% endif %}{% if project and project != '.' %} {{ project }}{% endif %}

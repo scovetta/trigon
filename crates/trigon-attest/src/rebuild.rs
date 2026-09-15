@@ -47,6 +47,16 @@ pub struct RunFacts<'a> {
     /// to prevent.
     pub pin_observed: Option<(u64, u64)>,
     pub strategy_digest: Option<&'a str>,
+    /// The source the artifact was rebuilt from: repository, commit, subdirectory, and which rung
+    /// found the commit.
+    ///
+    /// **A statement that does not say what it built from is not checkable.** `docs/09` §3 rule 1
+    /// requires every noun in "recipe R, executed in environment E, produced artifact A" to be
+    /// deterministic and readable, and the recipe was named only by digest — a hash of a blob the
+    /// statement does not offer. For npm that is the whole product: `docs/03` says the npm question
+    /// is whether the published tarball corresponds to the *claimed source*, and a reader holding
+    /// this statement could not tell which source was claimed.
+    pub source: Option<SourceFacts<'a>>,
     /// `definition`, `heuristic`, `ci_derived`, `model_assisted`.
     pub derivation: Option<&'a str>,
     /// Digest of the rendered instructions, which is what actually ran.
@@ -62,6 +72,28 @@ pub struct RunFacts<'a> {
     pub refused_artifact: &'a [String],
     pub guard_manifest: Option<&'a str>,
     pub guarded_members: Option<u64>,
+}
+
+/// Where a rebuild's source came from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SourceFacts<'a> {
+    pub repo: &'a str,
+    /// A resolved commit, never a ref name.
+    pub commit: &'a str,
+    pub subdir: Option<&'a str>,
+    /// The tag or branch the commit came from, where one did.
+    pub ref_name: Option<&'a str>,
+    /// What the registry declared, where trimming changed it. Kept because the trim is lossy and
+    /// the trimmed value is what everything else sees: a reader cannot otherwise check that the
+    /// repository we built from is the one the package pointed at.
+    pub declared: Option<&'a str>,
+    /// Which rung found the commit, as its serialized name — `registry_commit`, `exact_tag`,
+    /// `fuzzy_tag`, `tree_hash_match`, and so on.
+    ///
+    /// **Not decoration.** A commit the registry recorded and a commit found by stripping a prefix
+    /// off a tag name support very different verdicts, and a consumer who cannot tell them apart
+    /// will read every verdict as the stronger one.
+    pub how: &'a str,
 }
 
 /// A network transcript, summarised beside its hash.
@@ -97,9 +129,38 @@ impl Statement {
         if let Some(d) = f.instructions {
             byproducts.push(json!({ "name": "instructions", "digest": { "sha256": d } }));
         }
+        // The strategy itself, not only its digest in `internalParameters`. A hash of a blob the
+        // statement does not offer is not something a reader can check.
+        if let Some(d) = f.strategy_digest {
+            byproducts.push(json!({ "name": "strategy.json", "digest": { "sha256": d } }));
+        }
         if let Some(t) = f.network_transcript {
             byproducts.push(json!({ "name": "network.jsonl", "digest": { "sha256": t.digest } }));
         }
+
+        // SLSA shape: a URI naming the thing, a digest identifying the revision, and our own
+        // annotations for what SLSA has no field for. `gitCommit` is the standard digest key, so a
+        // generic SLSA consumer reads the commit without knowing anything about Trigon.
+        let source = match &f.source {
+            Some(s) => {
+                let mut annotations = json!({ "discovery": s.how });
+                for (key, value) in [
+                    ("subdirectory", s.subdir),
+                    ("ref", s.ref_name),
+                    ("declaredUri", s.declared),
+                ] {
+                    if let Some(v) = value {
+                        annotations[key] = json!(v);
+                    }
+                }
+                json!([{
+                    "uri": s.repo,
+                    "digest": { "gitCommit": s.commit },
+                    "annotations": annotations,
+                }])
+            }
+            None => json!([]),
+        };
 
         let mut predicate = json!({
             "buildDefinition": {
@@ -117,6 +178,9 @@ impl Statement {
                     // wrong; it makes the pin unproven, and those are different claims.
                     "registryPinBound": f.pin_observed.map(|(i, _)| i > 0),
                 },
+                // SLSA's own home for "what went in", and it was empty. The source is the other
+                // half of every verdict this project produces.
+                "resolvedDependencies": source,
             },
             "runDetails": {
                 "builder": {
@@ -238,6 +302,14 @@ mod tests {
             registry_moment: Some("2018-04-09T01:10:45Z"),
             pin_observed: Some((153, 903)),
             strategy_digest: Some("be7ffd47303e29ca"),
+            source: Some(SourceFacts {
+                repo: "https://github.com/stevemao/left-pad",
+                commit: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+                subdir: None,
+                ref_name: Some("v1.3.0"),
+                declared: None,
+                how: "registry_commit",
+            }),
             derivation: Some("heuristic"),
             instructions: None,
             build_log: Some("aa".repeat(32).leak()),
@@ -422,5 +494,95 @@ mod tests {
         // one.
         assert_eq!(s.predicate["networkTranscript"]["requests"], 214);
         assert_eq!(s.predicate["networkTranscript"]["bytes"], 18_244_912);
+    }
+}
+
+#[cfg(test)]
+mod source_facts_tests {
+    use super::*;
+    use crate::statement::Statement;
+    use trigon_core::Digest;
+
+    fn facts_with_source() -> RunFacts<'static> {
+        RunFacts {
+            run_id: "r1",
+            started: "2026-01-01T00:00:00Z",
+            base_image: "sha256:abc",
+            egress: "mirror-only",
+            isolation: "podman",
+            attestable: true,
+            strategy_digest: Some("deadbeef"),
+            source: Some(SourceFacts {
+                repo: "https://github.com/tlsfuzzer/python-ecdsa",
+                commit: "bd66899550d7185939bf27b75713a2ac9325a9d3",
+                subdir: None,
+                ref_name: Some("python-ecdsa-0.19.2"),
+                declared: Some("https://github.com/tlsfuzzer/python-ecdsa/issues"),
+                how: "fuzzy_tag",
+            }),
+            ..RunFacts::default()
+        }
+    }
+
+    #[test]
+    fn a_statement_says_what_it_built_from() {
+        // `docs/09` §3 rule 1: every noun in "recipe R, executed in environment E, produced
+        // artifact A" has to be deterministic and readable by someone who has never heard of us.
+        // The recipe was named only by a digest of a blob the statement did not offer, and the
+        // source — the other half of every verdict this project makes — was not in it at all.
+        let s = Statement::rebuild("x.whl", &Digest::from_bytes([1; 32]), &facts_with_source());
+        let dep = &s.predicate["buildDefinition"]["resolvedDependencies"][0];
+        assert_eq!(dep["uri"], "https://github.com/tlsfuzzer/python-ecdsa");
+        // `gitCommit` is SLSA's own key, so a consumer that knows nothing about Trigon still reads
+        // the commit.
+        assert_eq!(
+            dep["digest"]["gitCommit"],
+            "bd66899550d7185939bf27b75713a2ac9325a9d3"
+        );
+    }
+
+    #[test]
+    fn how_the_commit_was_found_is_part_of_the_claim() {
+        // A commit the registry recorded and a commit found by stripping a prefix off a tag name
+        // support very different verdicts. A consumer who cannot tell them apart reads every
+        // verdict as the stronger one.
+        let s = Statement::rebuild("x.whl", &Digest::from_bytes([1; 32]), &facts_with_source());
+        let a = &s.predicate["buildDefinition"]["resolvedDependencies"][0]["annotations"];
+        assert_eq!(a["discovery"], "fuzzy_tag");
+        assert_eq!(a["ref"], "python-ecdsa-0.19.2");
+        // And what the package actually declared, since trimming it is lossy and the trimmed form
+        // is what every other field shows.
+        assert_eq!(
+            a["declaredUri"],
+            "https://github.com/tlsfuzzer/python-ecdsa/issues"
+        );
+    }
+
+    #[test]
+    fn the_strategy_is_offered_and_not_merely_hashed() {
+        // A digest of a blob the statement does not list is not something a reader can check.
+        let s = Statement::rebuild("x.whl", &Digest::from_bytes([1; 32]), &facts_with_source());
+        let names: Vec<&str> = s.predicate["runDetails"]["byproducts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"strategy.json"), "{names:?}");
+    }
+
+    #[test]
+    fn a_run_with_no_source_says_so_rather_than_inventing_one() {
+        let bare = RunFacts {
+            source: None,
+            ..facts_with_source()
+        };
+        let s = Statement::rebuild("x.whl", &Digest::from_bytes([1; 32]), &bare);
+        assert_eq!(
+            s.predicate["buildDefinition"]["resolvedDependencies"]
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
     }
 }

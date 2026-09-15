@@ -323,3 +323,105 @@ fn a_toolchain_download_goes_through_the_mirror_when_there_is_one() {
         plain.deps
     );
 }
+
+/// A project that is not at the root of its repository, which is what `stub42/pytz` is.
+const IN_A_SUBDIRECTORY: &str = r#"
+kind: flow
+location:
+  repo: https://github.com/stub42/pytz
+  ref: 95fe75d8f15cfc3d5b70e1e71258ddebf0776436
+  subdir: src
+src:
+  - uses: git-checkout
+deps:
+  - uses: pypi/deps/basic
+    with:
+      venv: /deps
+build:
+  - uses: pypi/build/wheel
+    with:
+      locator: /deps/bin/
+output_dir: src/dist
+"#;
+
+#[test]
+fn a_pypi_build_runs_where_the_project_is() {
+    // `location.subdir` reached `git-checkout` and `output_dir` and not the build command, so the
+    // frontend ran at the tree root and stopped with "Source /src does not appear to be a Python
+    // project". The npm tools have read `location.subdir` the whole time; the PyPI one never did,
+    // and nothing noticed until the first target whose project was not at the root.
+    let s = from_yaml(IN_A_SUBDIRECTORY).unwrap();
+    let tools = ToolRegistry::builtin().unwrap();
+    let i = render(&s, &cx(), &tools).unwrap();
+    assert!(
+        i.build.contains("-m build --wheel") && i.build.trim_end().ends_with("src"),
+        "the build has to run where the project is: {}",
+        i.build
+    );
+}
+
+#[test]
+fn an_explicit_directory_still_wins_over_the_location() {
+    // `dir` is what a definition writes when the project directory and the checkout subdirectory
+    // are not the same thing. The default must not take that away.
+    let s = from_yaml(&IN_A_SUBDIRECTORY.replace(
+        "      locator: /deps/bin/",
+        "      locator: /deps/bin/\n      dir: elsewhere",
+    ))
+    .unwrap();
+    let tools = ToolRegistry::builtin().unwrap();
+    let i = render(&s, &cx(), &tools).unwrap();
+    assert!(
+        i.build.trim_end().ends_with("elsewhere"),
+        "an explicit dir was overridden: {}",
+        i.build
+    );
+}
+
+#[test]
+fn the_ordinary_layout_adds_no_directory_argument() {
+    let s = from_yaml(TOOLBELT).unwrap();
+    let tools = ToolRegistry::builtin().unwrap();
+    let i = render(&s, &cx(), &tools).unwrap();
+    let line = i
+        .build
+        .lines()
+        .find(|l| l.contains("-m build"))
+        .expect("a build line");
+    assert!(
+        line.trim_end().ends_with("-n") || line.trim_end().ends_with("--wheel"),
+        "a project at the root got a directory argument: {line}"
+    );
+}
+
+#[test]
+fn the_strategys_location_wins_over_the_contexts() {
+    // Two copies of one fact, and nothing asserted they agreed. `{{ location.subdir }}` in a tool
+    // reads the *context*; the checkout and the output path come from the *strategy*. They came
+    // apart the first time a PyPI project was not at its repository root — the build ran at the
+    // tree root while the output was collected from `src/dist` — and the caller that built the
+    // context is the only thing that had been keeping them in step.
+    let s = from_yaml(IN_A_SUBDIRECTORY).unwrap();
+    let tools = ToolRegistry::builtin().unwrap();
+    // A context that disagrees about every field of the location, as a caller that forgot to
+    // derive it would produce.
+    let stale = Context {
+        location: LocationCtx {
+            repo: "https://example.invalid/wrong".into(),
+            git_ref: "0000000000000000000000000000000000000000".into(),
+            subdir: String::new(),
+        },
+        ..cx()
+    };
+    let i = render(&s, &stale, &tools).unwrap();
+    assert!(
+        i.source.contains("https://github.com/stub42/pytz"),
+        "the checkout followed the context rather than the strategy: {}",
+        i.source
+    );
+    assert!(
+        i.build.trim_end().ends_with("src"),
+        "the build followed the context rather than the strategy: {}",
+        i.build
+    );
+}

@@ -2509,6 +2509,7 @@ mod rebuild {
                 .filter(|_| args.timewarp.is_some()),
             strategy_digest: None,
             derivation: None,
+            source: None,
             pin: None,
             // Filled where the run reaches a comparison, from the recorder wrapped around the
             // provider. `None` here means nothing has been asked yet, not that nothing was.
@@ -2541,7 +2542,19 @@ mod rebuild {
             model.as_ref(),
             args.source_cache.clone(),
         );
-        let Some(candidate) = rt.block_on(trigon_registry::infer(&rungs, &resolved))? else {
+        // `climb` rather than `infer`: the same ladder, and it keeps what the rungs that said
+        // nothing said about why. Written to the report before the early return, because a
+        // `no-strategy` is exactly the run whose reasons nobody could otherwise see.
+        let climb = rt.block_on(trigon_registry::climb(&rungs, &resolved));
+        report.declines = climb
+            .declines
+            .iter()
+            .map(|(rung, why)| format!("{rung}: {why}"))
+            .collect();
+        let Some(candidate) = climb.candidate else {
+            for d in &report.declines {
+                tracing::info!("{d}");
+            }
             return Ok(Ran {
                 outcome: Outcome::NoStrategy,
                 model_calls: calls(&model),
@@ -2551,6 +2564,20 @@ mod rebuild {
         report.confidence = Some(format!("{:?}", candidate.confidence).to_lowercase());
         report.assumptions = candidate.assumptions.clone();
         let loc = candidate.strategy.location().cloned().unwrap_or_default();
+        // The source half of the verdict, assembled from the two places that know different parts
+        // of it: the strategy has the repository, commit and subdirectory the build will use, and
+        // the candidate has the rung that found the commit. Neither reached a file before this.
+        report.source = Some(trigon_core::SourceProvenance {
+            repo_url: loc.repo.clone(),
+            declared_url: resolved
+                .source
+                .as_ref()
+                .and_then(|s| s.declared_url.clone()),
+            commit: loc.git_ref.clone(),
+            ref_name: resolved.source.as_ref().and_then(|s| s.ref_name.clone()),
+            subdir: loc.subdir.clone(),
+            how: candidate.discovery,
+        });
         if verbose {
             println!("  source     {} @ {}", loc.repo, loc.git_ref);
             println!(
@@ -3114,6 +3141,7 @@ mod rebuild {
             let inputs = RecordInputs {
                 strategy_digest: strategy_digest.clone(),
                 derivation: Some(derivation.clone()),
+                source: report.source.clone(),
                 pin,
                 // From the run itself. This used to build a *fresh* `PodmanRunner` — with no
                 // mirror image, so not the runner that ran anything — and read its advertised
@@ -3210,6 +3238,8 @@ mod rebuild {
         timewarp: Option<String>,
         strategy_digest: Option<String>,
         derivation: Option<String>,
+        /// What was built, and which rung found it. See `RunReport::source`.
+        source: Option<trigon_core::SourceProvenance>,
         pin: Option<trigon_mirror::Observed>,
         /// What the runner reported about its own enforcement, never what the flag asked for.
         attestable: bool,
@@ -3346,6 +3376,7 @@ mod rebuild {
             record.state = RunState::Done;
             record.strategy_digest = args.strategy_digest.clone();
             record.derivation = args.derivation.clone();
+            record.source = args.source.clone();
             record.outcome = Some(c.outcome.to_string());
             record.rebuild = Some(ArtifactRef {
                 name: crate::file_name(rebuilt),
@@ -5819,6 +5850,17 @@ mod attestor {
                 .pin
                 .map(|p| (p.index_requests, p.versions_withheld)),
             strategy_digest: r.strategy_digest.as_deref(),
+            source: r.source.as_ref().map(|s| trigon_attest::SourceFacts {
+                repo: &s.repo_url,
+                commit: &s.commit,
+                subdir: s.subdir.as_deref(),
+                ref_name: s.ref_name.as_deref(),
+                declared: s.declared_url.as_deref(),
+                // The stable name, which a test holds equal to the serialized one: this string
+                // goes into a signed document, and `Debug` would put `FuzzyTag` where the schema
+                // says `fuzzy_tag`.
+                how: s.how.as_str(),
+            }),
             derivation: r.derivation.as_deref(),
             instructions: hex.instructions.as_deref(),
             build_log: hex.build_log.as_deref(),

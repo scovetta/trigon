@@ -60,6 +60,19 @@ fn every_field_populated() -> RunRecord {
         // Not `Done`: a state that is nobody's default, so a dropped field cannot masquerade.
         state: RunState::Judging,
         outcome: Some("normalized_with_caveats".into()),
+        // The source half of the verdict. Every field set, `declared_url` included: it is the one
+        // that says what the package pointed at before we trimmed it, and a record that drops it
+        // cannot be checked against the registry.
+        source: Some(trigon_core::SourceProvenance {
+            repo_url: "https://github.com/babel/babel".into(),
+            declared_url: Some(
+                "https://github.com/babel/babel/tree/main/packages/babel-core".into(),
+            ),
+            commit: "a0e1d9a6f4f2d52a9e3c8b7a6d5e4f3c2b1a0987".into(),
+            ref_name: Some("v7.24.0".into()),
+            subdir: Some("packages/babel-core".into()),
+            how: trigon_core::SourceDiscovery::FuzzyTag,
+        }),
         // A refusal and a trip in the same record, because they mean opposite things and only one of
         // them makes the run void. `is_evidence` keys on `guard_trips` alone.
         refused_artifact: vec![
@@ -278,6 +291,7 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "strategy",
         "strategy_digest",
         "derivation",
+        "source",
         "instructions",
         "upstream",
         "rebuild",

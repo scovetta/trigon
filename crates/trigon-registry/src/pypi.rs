@@ -124,6 +124,7 @@ impl Registry for PyPiRegistry {
         }
         let Believed {
             repo,
+            declared,
             subdir,
             source,
         } = believed;
@@ -162,6 +163,7 @@ impl Registry for PyPiRegistry {
             // it is: something still has to find which commit this release was built from.
             source: repo.map(|repo_url| SourceProvenance {
                 repo_url,
+                declared_url: declared,
                 commit: String::new(),
                 ref_name: None,
                 // From the same URL the repository came from: PyPI has no field for this, and a
@@ -233,6 +235,9 @@ impl PyPiRegistry {
 /// What a resolve believes about where the source is, and on whose word.
 struct Believed {
     repo: Option<String>,
+    /// The URL exactly as the record gave it, when trimming changed it. See
+    /// [`SourceProvenance::declared_url`].
+    declared: Option<String>,
     subdir: Option<String>,
     /// The evidence source string, which differs by which record was believed.
     source: &'static str,
@@ -253,38 +258,34 @@ struct Believed {
 /// The subdirectory comes from whichever record won. Reading the repository out of one document
 /// and the subdirectory out of another is how a monorepo member comes to build at the wrong root.
 fn believe(version: &Value, latest: Option<&Value>) -> Believed {
-    let (repo, subdir) = source_and_subdir(version);
-    if repo.is_some() {
-        return Believed {
+    let believed = |doc: &Value, source| {
+        let raw = raw_source_url(doc);
+        let repo = raw.as_deref().map(crate::npm::canonicalize_repo);
+        Believed {
+            declared: match (&raw, &repo) {
+                // Only where trimming changed it, so the common case costs nothing.
+                (Some(r), Some(c)) if r != c => Some(r.clone()),
+                _ => None,
+            },
+            subdir: raw.as_deref().and_then(crate::npm::subdir_from_view),
             repo,
-            subdir,
-            source: "pypi:project_urls",
-        };
+            source,
+        }
+    };
+    let own = believed(version, "pypi:project_urls");
+    if own.repo.is_some() {
+        return own;
     }
-    match latest.map(source_and_subdir) {
-        Some((repo @ Some(_), subdir)) => Believed {
-            repo,
-            subdir,
-            source: "pypi:project_urls@latest",
-        },
-        _ => Believed {
-            repo: None,
-            subdir: None,
-            source: "pypi:project_urls",
-        },
+    match latest {
+        Some(doc) => {
+            let fallback = believed(doc, "pypi:project_urls@latest");
+            match fallback.repo.is_some() {
+                true => fallback,
+                false => own,
+            }
+        }
+        None => own,
     }
-}
-
-/// The repository a project declares, and the subdirectory its URL points into.
-///
-/// Returned together because they come from the same string: PyPI has no `repository.directory`,
-/// and a monorepo member's `project_urls` often says where it lives in passing —
-/// `…/google-cloud-python/tree/main/packages/google-auth`. Reading the repository and discarding
-/// the path was how `google-auth` came to check out a monorepo and build at its root.
-fn source_and_subdir(doc: &Value) -> (Option<String>, Option<String>) {
-    let raw = raw_source_url(doc);
-    let subdir = raw.as_deref().and_then(crate::npm::subdir_from_view);
-    (raw.map(|u| crate::npm::canonicalize_repo(&u)), subdir)
 }
 
 /// The declared URL, out of the several places a project might have declared one, before it is
@@ -351,7 +352,7 @@ mod tests {
                 "Documentation":"https://docs.example.com",
                 "Source":"https://github.com/a/b"}}}"#);
         assert_eq!(
-            source_and_subdir(&d).0.as_deref(),
+            believe(&d, None).repo.as_deref(),
             Some("https://github.com/a/b")
         );
     }
@@ -363,13 +364,13 @@ mod tests {
             r#"{"info":{"project_urls":{"Documentation":"https://docs.example.com"},
                         "home_page":"https://example.com"}}"#,
         );
-        assert_eq!(source_and_subdir(&d).0, None);
+        assert_eq!(believe(&d, None).repo, None);
     }
 
     #[test]
     fn a_forge_url_under_an_unconventional_key_is_still_found() {
         let d = doc(r#"{"info":{"project_urls":{"Tracker":"https://github.com/a/b/issues"}}}"#);
-        assert!(source_and_subdir(&d).0.unwrap().contains("github.com/a/b"));
+        assert!(believe(&d, None).repo.unwrap().contains("github.com/a/b"));
     }
 
     /// The two records `pytz` 2026.1 actually has: the release names no forge, the package does.
@@ -428,7 +429,7 @@ mod tests {
     fn home_page_is_used_only_when_it_is_a_forge() {
         let d = doc(r#"{"info":{"home_page":"https://github.com/a/b"}}"#);
         assert_eq!(
-            source_and_subdir(&d).0.as_deref(),
+            believe(&d, None).repo.as_deref(),
             Some("https://github.com/a/b")
         );
     }

@@ -16,7 +16,7 @@ mod verify;
 
 pub use dsse::{Envelope, PAYLOAD_TYPE, Signature, pae};
 pub use error::AttestError;
-pub use rebuild::{BUILD_OBSERVATION, REBUILD, RunFacts, TranscriptRef};
+pub use rebuild::{BUILD_OBSERVATION, REBUILD, RunFacts, SourceFacts, TranscriptRef};
 pub use signer::{LocalKey, Signer, Unsigned, verify as verify_signature};
 pub use statement::{DIVERGENCE, EQUIVALENCE, STATEMENT_TYPE, Statement, Subject};
 pub use verify::{

@@ -288,6 +288,40 @@ producing the rebuild yourself.
 
 ---
 
+## What a run leaves behind
+
+Every terminal outcome writes `<work>/NNN/run.json`, whether the run reproduced, diverged, failed to
+build, or never found a recipe. Beside it: `strategy.yaml` (the recipe as rendered),
+`guard.json` (the manifest the artifact guard checked against), `rebuild/build.log` (the container's
+own output) and `rebuild/network.jsonl` (every response that crossed into the build, one per line).
+
+`run.json` is the one to read first, and these are the fields that answer "why should I believe
+this":
+
+| Field | What it settles |
+|---|---|
+| `source` | The repository, commit and subdirectory the artifact was rebuilt from — plus `how`, the rung that found the commit, and `declared_url`, what the registry actually said before we canonicalized it |
+| `derivation`, `confidence`, `assumptions` | Which rung produced the recipe, how much to believe it, and every guess it had to make |
+| `declines` | One line per rung that was asked and said no, with its reason. A `no-strategy` is otherwise a verdict with no explanation |
+| `attestable`, `egress`, `network_exchanges`, `network_bytes` | Whether the build's egress is fully accounted for, and what crossed |
+| `pin` | What the time-filtering mirror was actually asked for and what it withheld — evidence the moment *bound*, not just that it was configured |
+| `guard_trips`, `refused_artifact`, `guard_notes` | The artifact guard tripping (the run is void), the build asking for its own artifact and being refused (the control working), and near-misses |
+| `failure`, `timings` | The classified failure and where the time went. A `None` timing means no data, never zero |
+
+**`source.how` is the field people skip and shouldn't.** `registry_commit` is npm's own `gitHead`.
+`exact_tag` is a tag named exactly for the version. `fuzzy_tag` means we matched
+`python-ecdsa-0.19.2` to version `0.19.2` by stripping a prefix — reasonable, and a materially
+weaker claim than the first two. A verdict built on one should not be read like a verdict built on
+the other.
+
+The same facts reach the signed statement: `rebuild/v1`'s `resolvedDependencies` carries the
+repository, the `gitCommit` digest, and annotations for `discovery`, `ref`, `subdirectory` and
+`declaredUri`. See [`09-attestations.md`](09-attestations.md) §2.1.
+
+**What is not written to a file:** our own `tracing` output, which goes to stderr at `warn` by
+default (`-v` for info, `-vv` for debug, or `RUST_LOG`). The structured records above are the audit
+trail; the log is for watching a run happen.
+
 ## What a verdict does not tell you
 
 Sourced from [`threat-model.md`](threat-model.md), which states the contract precisely.

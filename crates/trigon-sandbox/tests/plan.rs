@@ -384,3 +384,41 @@ fn an_island_whose_process_is_gone_is_collectable_even_while_its_mirror_runs() {
         assert!(!owner_is_gone(odd), "`{odd}` should be left alone");
     }
 }
+
+#[test]
+fn the_deferred_build_marks_where_deps_ended() {
+    // With deps deferred both phases run in one container and one log, and the attribution asked
+    // whether the deps script had been *invoked* — true of every run that got that far. So at an
+    // enforced tier every failure was reported as a deps failure: `stub42/pytz` installed its build
+    // frontend successfully, failed in `python -m build`, and the record said `build-failed:deps`.
+    //
+    // The marker is printed between the two under `set -e`, which is what makes its absence mean
+    // "deps exited non-zero" rather than "we did not look".
+    let BuildPlan::Oci(p) = plan(EgressTier::MirrorOnly);
+    let c = render_context(&p, true);
+    let build = c.files.get("build.sh").expect("a build script");
+    let deps_at = build
+        .find("/trigon/deps.sh")
+        .expect("the deferred deps invocation");
+    let marker_at = build
+        .find(trigon_sandbox::DEPS_DONE)
+        .expect("the phase marker");
+    assert!(
+        deps_at < marker_at,
+        "the marker has to come after the deps script, or it says nothing: {build}"
+    );
+    assert!(
+        build.starts_with("set -eux"),
+        "without `set -e` the marker is printed whether deps succeeded or not: {build}"
+    );
+}
+
+#[test]
+fn a_build_that_runs_its_deps_as_a_layer_needs_no_marker() {
+    // Not deferred: the deps phase is an image layer and its failure is a build-image failure, so
+    // there is nothing for the run's log to disambiguate.
+    let BuildPlan::Oci(p) = plan(EgressTier::DenyAll);
+    let c = render_context(&p, false);
+    let build = c.files.get("build.sh").expect("a build script");
+    assert!(!build.contains(trigon_sandbox::DEPS_DONE), "{build}");
+}

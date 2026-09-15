@@ -124,6 +124,7 @@ fn target(
         },
         source: Some(SourceProvenance {
             repo_url: url.into(),
+            declared_url: None,
             commit: commit.into(),
             ref_name: None,
             subdir: None,

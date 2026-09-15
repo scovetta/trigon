@@ -15,7 +15,7 @@ mod runner;
 mod store_lock;
 
 pub use dockerfile::install_command;
-pub use dockerfile::{BuildContext, render as render_context};
+pub use dockerfile::{BuildContext, DEPS_DONE, render as render_context};
 pub use error::SandboxError;
 pub use model::{
     BuildEvent, BuildOutcome, BuildPlan, EgressTier, EventSink, IsolationClass, Limits,

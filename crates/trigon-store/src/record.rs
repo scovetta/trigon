@@ -209,6 +209,16 @@ pub struct RunRecord {
     /// A provenance fact beside the claim, never inside it (`docs/09` §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derivation: Option<String>,
+    /// The repository, commit and subdirectory the artifact was rebuilt from, and which rung found
+    /// the commit.
+    ///
+    /// A verdict is a statement about a published artifact **and a source**, and only the first
+    /// half was recorded: the source lived inside the strategy blob, which the attestation does not
+    /// even list among its byproducts, and how the commit was found lived on a terminal line.
+    /// `SourceDiscovery::FuzzyTag` and `SourceDiscovery::RegistryCommit` are very different claims
+    /// and were indistinguishable in every stored record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<trigon_core::SourceProvenance>,
     /// The rendered scripts the executor actually ran. Rendering happens once, at resolution time,
     /// so what ran is a stored artifact rather than something to be re-derived from a template and
     /// a context that may no longer exist.
@@ -293,6 +303,7 @@ impl RunRecord {
             strategy: None,
             strategy_digest: None,
             derivation: None,
+            source: None,
             instructions: None,
             upstream,
             rebuild: None,

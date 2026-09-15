@@ -187,6 +187,11 @@ fn expand(dep: &str, family: Family) -> Vec<String> {
 /// The cost is real and worth stating: deps stops being a cached layer, so sibling versions of a
 /// package no longer share one. That is the trade for an enforceable egress boundary on a laptop,
 /// and it goes away wherever the builder can join a network, which is every fleet runner.
+/// Printed after the deferred deps script and before the build, so a failure in one container can
+/// be attributed to the phase it happened in. See where it is written for why `set -e` makes it a
+/// fact rather than a guess.
+pub const DEPS_DONE: &str = "trigon-deps-ok";
+
 pub fn render(plan: &OciPlan, defer_deps: bool) -> BuildContext {
     let mut files = BTreeMap::new();
     let mut f = String::new();
@@ -246,6 +251,18 @@ pub fn render(plan: &OciPlan, defer_deps: bool) -> BuildContext {
     let mut build = String::from("set -eux\n");
     if defer_deps && !plan.deps.trim().is_empty() {
         build.push_str("/bin/sh /trigon/deps.sh\n");
+        // **The phase boundary, as a fact rather than an inference.** With deps deferred both
+        // phases run in one container and one log, and the attribution asked whether the deps
+        // script had been *invoked* — true of every run that got that far — so every failure in
+        // that container was reported as a deps failure. `stub42/pytz` installed its build frontend
+        // successfully and then failed in `python -m build`, and the record said
+        // `build-failed:deps`.
+        //
+        // `set -e` is what makes this a fact: the line below is unreachable if the deps script
+        // exits non-zero. A phase label rather than a security control — a package that printed
+        // this string during its own deps phase would relabel its failure as a build failure, and
+        // the direction of that is harmless.
+        build.push_str(&format!("echo {DEPS_DONE}\n"));
     }
     build.push_str(plan.build.trim());
     build.push('\n');

@@ -362,6 +362,18 @@ impl StrategyInferrer for CiInferrer {
         }
         Ok(reading.candidate.clone().into_iter().collect())
     }
+
+    /// The `Decline` this rung already computed, which used to end at a `debug!` line.
+    ///
+    /// Free: `read` memoizes per target and `infer` has just called it, so this is a map lookup.
+    async fn why_not(&self, target: &ResolvedTarget) -> Option<String> {
+        self.read(target)
+            .await
+            .ok()?
+            .declined
+            .as_ref()
+            .map(Decline::to_string)
+    }
 }
 
 fn declined(d: Decline) -> CiReading {

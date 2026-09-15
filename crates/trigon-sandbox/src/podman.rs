@@ -610,13 +610,23 @@ impl BuildHandle for PodmanBuild {
         // A failed build can still have produced an artifact, and its logs are worth keeping either
         // way. Collect before deciding anything.
         let artifact = collect(&out_dir);
-        // With deps deferred, a failure in the run could be either phase. The log says which, and
-        // guessing "build" would attribute a dependency-resolution failure to the package.
-        let failed_in = (code != 0).then_some(if defer_deps && log.contains("/trigon/deps.sh") {
-            Phase::Deps
-        } else {
-            Phase::Build
-        });
+        // With deps deferred, a failure in the run could be either phase, and the log says which.
+        //
+        // It used to ask whether the deps script had been *invoked*, which is true of every run
+        // that reached the container at all — so at an enforced tier every failure was reported as
+        // a deps failure. `stub42/pytz` installed its build frontend and then failed in
+        // `python -m build`; the record said `build-failed:deps`, which sends a reader to the
+        // wrong half of the log. The comment above described the intent and the code tested
+        // something weaker.
+        //
+        // `DEPS_DONE` is printed between the two under `set -e`, so its absence after a deps
+        // invocation is the deps script having exited non-zero.
+        let deps_ran = defer_deps && log.contains("/trigon/deps.sh");
+        let failed_in =
+            (code != 0).then_some(match deps_ran && !log.contains(dockerfile::DEPS_DONE) {
+                true => Phase::Deps,
+                false => Phase::Build,
+            });
         match (&artifact, code) {
             (Some(p), 0) => tracing::info!(
                 run_id = %self.opts.run_id,

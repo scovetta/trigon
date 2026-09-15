@@ -723,6 +723,7 @@ mod tests {
             },
             source: Some(SourceProvenance {
                 repo_url: repo.to_string_lossy().into_owned(),
+                declared_url: None,
                 commit: commit.to_string(),
                 ref_name: None,
                 subdir: None,

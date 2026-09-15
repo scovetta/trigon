@@ -908,9 +908,12 @@ fn every_persisted_core_value_survives_a_json_round_trip() {
             "SourceProvenance",
             &SourceProvenance {
                 repo_url: "https://github.com/python-trio/sniffio".into(),
+                // What the package said, before the trim that produced `repo_url`. A round trip
+                // that never carried it would not notice it going missing.
+                declared_url: Some("https://github.com/python-trio/sniffio/issues".into()),
                 commit: "ae020e13b98d276a6558ffc25e82509fd4c288f0".into(),
                 ref_name: Some("v1.3.1".into()),
-                subdir: None,
+                subdir: Some("packages/sniffio".into()),
                 how: s,
             },
         );
