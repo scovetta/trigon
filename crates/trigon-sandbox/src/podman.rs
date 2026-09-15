@@ -44,6 +44,19 @@ pub struct PodmanRunner {
 }
 
 impl PodmanRunner {
+    /// Whether the local image store holds this reference.
+    ///
+    /// Best effort in one direction only: a probe that cannot run answers `true`, so a podman that is
+    /// broken in some other way fails later with its own message rather than being reported here as a
+    /// missing image.
+    async fn image_exists(&self, image: &str) -> bool {
+        Command::new(&self.binary)
+            .args(["image", "exists", image])
+            .status()
+            .await
+            .map_or(true, |s| s.success())
+    }
+
     pub fn new(workdir: impl Into<PathBuf>) -> Self {
         PodmanRunner {
             binary: std::env::var("TRIGON_PODMAN").unwrap_or_else(|_| "podman".into()),
@@ -151,6 +164,18 @@ impl BuildRunner for PodmanRunner {
         // and the attestation a claim about nothing in particular.
         if !is_pinned(&p.base_image) {
             return Err(SandboxError::ImageNotPinned(p.base_image.clone()));
+        }
+        // **And a pinned reference that names nothing is not a pinned image.** `is_pinned` checks
+        // the *shape* of the string, so `localhost/base@sha256:<anything>` passed it and the run
+        // went on to spend six seconds discovering that podman cannot reach a registry called
+        // `localhost`. Only the references that can *only* be local are checked here — a bare
+        // `sha256:` id, and anything under `localhost/`, which no registry will ever serve — so a
+        // legitimate remote image that has not been pulled yet is still pulled rather than refused.
+        let local_only = p.base_image.starts_with("localhost/")
+            || p.base_image.starts_with("sha256:")
+            || !p.base_image.contains('/');
+        if local_only && !self.image_exists(&p.base_image).await {
+            return Err(SandboxError::ImageNotInStore(p.base_image.clone()));
         }
 
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -527,16 +552,43 @@ impl BuildHandle for PodmanBuild {
         // Read once and used for both the timing and `failed_in`. It used to be read only for
         // `failed_in`, after the timing row had already been pushed as `Deps`, so a build that died
         // in setup reported `phase=Setup` on one line and `Deps 1.9s` two lines below it.
-        let reached = failing_phase(&log).unwrap_or(Phase::Deps);
-        timings.push((reached, Some(started.elapsed())));
-        push_to(
-            self.opts.on_event.as_ref(),
-            &self.events,
-            BuildEvent::PhaseEnd {
-                phase: reached,
-                duration: Some(started.elapsed()),
-            },
-        );
+        //
+        // **`None` is an answer, and it used to be `unwrap_or(Phase::Deps)`.** `failing_phase`
+        // returns nothing when the log holds no `/trigon/<script>.sh` line, which is exactly the
+        // case where podman died before executing any instruction: `STEP 1/11: FROM <image>`, an
+        // image that is not in the local store, a registry it cannot reach. Defaulting that to
+        // `Deps` invented a phase, a timing row for it, and a `build-failed:deps` verdict — and at
+        // `mirror-only` the invention names the one phase that provably cannot have run, because
+        // `defer_deps` keeps the deps script out of the image entirely.
+        //
+        // `Phase` is ordered and the repair loop measures progress against it, so a run that
+        // executed nothing recorded as having reached *further* than one that genuinely failed in
+        // setup.
+        let reached = failing_phase(&log);
+        if let Some(phase) = reached {
+            timings.push((phase, Some(started.elapsed())));
+            push_to(
+                self.opts.on_event.as_ref(),
+                &self.events,
+                BuildEvent::PhaseEnd {
+                    phase,
+                    duration: Some(started.elapsed()),
+                },
+            );
+        }
+        if code != 0 && reached.is_none() {
+            // Nothing of ours ran, so there is nothing here about the package. An error rather
+            // than an outcome: `docs/03` reserves `Error` for our faults and says a verdict must
+            // never carry one, and `main.rs`'s own comment records a regression where our mirror
+            // failing "read, in the sweep summary, as five packages that do not build".
+            if let Some(i) = island {
+                i.destroy().await;
+            }
+            return Err(SandboxError::RuntimeRefused {
+                code,
+                detail: runtime_complaint(&log),
+            });
+        }
         if code != 0 {
             // Read before the island goes, even here. The image build has no network at any
             // enforced tier, so the honest answer is an *empty* account rather than no account —
@@ -548,7 +600,7 @@ impl BuildHandle for PodmanBuild {
                 i.destroy().await;
                 seen = Some(read?);
             }
-            let phase = reached;
+            let phase = reached.expect("checked above");
             push_to(
                 self.opts.on_event.as_ref(),
                 &self.events,
@@ -790,6 +842,30 @@ fn is_pinned(image: &str) -> bool {
 ///
 /// Read from the last `RUN /bin/sh /trigon/<phase>.sh` the builder announced, because that is the
 /// one it was executing when it stopped.
+/// What the runtime said, out of a log that is mostly its own progress chatter.
+///
+/// podman's diagnosis is one or two lines among the `STEP n/m` announcements, and the whole of it
+/// used to be discarded into `failure unknown` — so an operator was told nothing about a message
+/// that named the cause exactly ("pinging container registry localhost: connection refused").
+///
+/// The tail, minus the step announcements and the retry warnings that repeat it.
+fn runtime_complaint(log: &str) -> String {
+    let lines: Vec<&str> = log
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("STEP ")
+                && !l.contains("level=warning msg=\"Failed, retrying")
+        })
+        .collect();
+    let tail = lines.len().saturating_sub(4);
+    match lines[tail..].join("\n") {
+        s if s.is_empty() => "the runtime printed nothing".into(),
+        s => s,
+    }
+}
+
 pub fn failing_phase(log: &str) -> Option<Phase> {
     let mut last = None;
     for line in log.lines() {

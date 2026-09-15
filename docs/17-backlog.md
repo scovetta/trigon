@@ -273,6 +273,38 @@ commit from a release whose tag we failed to fetch. `Checkout::tags` carries the
 package. Turning that warning into a refusal needs a way to know a project is VCS-versioned before
 building it, which is a `pyproject.toml` read the inferrer does not do yet.
 
+## B17. What an unnamed failure should cost a package
+
+`FailureSignature::unknown` is `Fault::Build`, so a failure no rule in the table claims lands in the
+numerator of the published reproduction rate. `crates/trigon-core/tests/seam_fault_classification.rs`
+pins that deliberately and calls it "a tripwire on a known asymmetry rather than a statement that it
+is fine".
+
+The reading it rests on is that `classify` only ever runs on a build log, so a build did run and did
+fail. That was **false** while the container runtime's own output reached it: an image absent from
+the local store produced a registry error, matched no rule, and charged the package — which is how
+`--image localhost/trigon-base@sha256:<stale>` came to report `the build failed in deps: unknown`.
+
+Two changes have narrowed it since. A runtime refusal before any of our scripts run now returns
+`SandboxError::RuntimeRefused` and never reaches `classify`; and the table has rules for the runtime
+failures that *do* produce a log — `env/image-unavailable`, `env/runtime-refused`, and the lowercase
+spellings of no-space, out-of-memory and permission-denied that only the container forms emit.
+
+**Still open, and a question about what the published rate means rather than a defect.** The residue
+is empirically mostly ours — the tripwire's own comment lists a mirror answering 400 to a toolchain
+fetch, a missing `npx` under dash, and three npm-corpus failures that were all ours — and every one
+of those cost a package until somebody noticed the cluster and wrote a rule. Against that: a genuine
+package failure with no rule would stop counting against the package, and `Fault` has no variant
+meaning "we do not know", so either answer overstates something.
+
+**Decide when:** the corpus is large enough to measure what fraction of the residue turns out to be
+ours once rules are written for it. Flipping it silently would move every number this project has
+published.
+
+Related: `SandboxError::Timeout` is `Fault::Build`, which is right for a build that ran too long and
+wrong for a wall clock that expired while the runtime was still pulling an image. Telling the two
+apart needs the log rather than the type.
+
 ## B15. A clean re-run must not be a cache hit
 
 [`09-attestations.md`](09-attestations.md) §5 requires two independent re-runs before a divergence

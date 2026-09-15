@@ -4,9 +4,10 @@
 
 use std::collections::BTreeSet;
 
+use trigon_core::{Classify, Fault};
 use trigon_sandbox::{
     BuildPlan, BuildRunner, EgressTier, ObservabilityTier, OciPlan, PodmanRunner, RunOpts,
-    render_context, route,
+    SandboxError, render_context, route,
 };
 
 const PINNED: &str = "docker.io/library/python@sha256:aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999";
@@ -421,4 +422,64 @@ fn a_build_that_runs_its_deps_as_a_layer_needs_no_marker() {
     let c = render_context(&p, false);
     let build = c.files.get("build.sh").expect("a build script");
     assert!(!build.contains(trigon_sandbox::DEPS_DONE), "{build}");
+}
+
+#[tokio::test]
+async fn a_reference_that_can_only_be_local_and_is_not_there_is_refused_before_the_build() {
+    // `is_pinned` checks the *shape* of the string, so `localhost/base@sha256:<stale>` cleared it
+    // and podman then spent six seconds discovering it cannot reach a registry called `localhost`.
+    // Reported, after all that, as the package failing its dependency phase.
+    let r = PodmanRunner::new(std::env::temp_dir());
+    let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
+    p.base_image =
+        "localhost/trigon-base@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            .into();
+    let err = r
+        .start(&BuildPlan::Oci(p), &RunOpts::default())
+        .await
+        .err()
+        .expect("a reference naming nothing is not a pinned image");
+    assert!(
+        matches!(err, SandboxError::ImageNotInStore(_)),
+        "got {err:?}"
+    );
+    // Ours or the operator's, never the package's.
+    assert_eq!(err.fault(), Fault::Policy);
+}
+
+#[test]
+fn a_build_that_died_before_any_phase_ran_reports_no_phase() {
+    // `failing_phase(&log).unwrap_or(Phase::Deps)` invented a phase, a timing row for it, and a
+    // `build-failed:deps` verdict for a run where podman never got past `STEP 1/11: FROM`. At
+    // `mirror-only` the invention names the one phase that provably cannot have run there, because
+    // `defer_deps` keeps the deps script out of the image entirely.
+    let died_at_from = "STEP 1/11: FROM localhost/trigon-base@sha256:7cddd\n\
+         Error: creating build container: initializing source docker://localhost/trigon-base: \
+         pinging container registry localhost: connection refused";
+    assert_eq!(
+        trigon_sandbox::failing_phase_for_test(died_at_from),
+        None,
+        "nothing of ours ran, and `None` is the answer rather than a default"
+    );
+}
+
+#[test]
+fn our_own_steps_are_not_the_packages_fault() {
+    // Every site that constructs `Failed` is infrastructure — copying the checkout into the build
+    // context, resolving the mirror's address on the island, setting up the network namespace —
+    // and its `phase` field names one of *our* steps, not one of the package's. It was classified
+    // `Fault::Build`, which is what `docs/03` says `Fault` exists to prevent.
+    let ours = SandboxError::Failed {
+        phase: "setup".into(),
+        detail: "the mirror container has no address on the build's network".into(),
+    };
+    assert_eq!(ours.fault(), Fault::Infra);
+
+    let refused = SandboxError::RuntimeRefused {
+        code: 125,
+        detail: "pinging container registry localhost: connection refused".into(),
+    };
+    assert_eq!(refused.fault(), Fault::Infra);
+    // And it says what the runtime said, rather than "unknown".
+    assert!(refused.to_string().contains("pinging container registry"));
 }

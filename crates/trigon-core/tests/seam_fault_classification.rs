@@ -707,6 +707,17 @@ fn a_failure_we_have_no_rule_for_is_charged_to_the_package_and_says_so() {
     // So this test is a tripwire on a known asymmetry rather than a statement that it is fine: if
     // somebody changes what an unnamed failure costs a package, they change it here, on purpose, with
     // this comment in front of them.
+    //
+    // **Two things have changed under it since, both narrowing what lands here.** The container
+    // runtime's own refusals — an image absent from the store, a registry it cannot reach — used to
+    // arrive as a build log and match no rule; they now return `SandboxError::RuntimeRefused` and
+    // never reach `classify` at all. And the table has rules for the runtime failures that *do*
+    // produce a log (`env/image-unavailable`, `env/runtime-refused`, and the lowercase spellings of
+    // out-of-memory, no-space and permission-denied that only the container forms emit).
+    //
+    // So the premise above — a build ran and did fail — is truer than it was. It is still not
+    // certain, and the question of whether the residue should cost a package anything stays open in
+    // `docs/17-backlog.md`. The next person to stand here has better information than the last.
     let s = classify("error: the frobnicator declined, code 7");
     assert!(s.is_unknown());
     assert_eq!(
@@ -735,4 +746,56 @@ fn a_failure_we_have_no_rule_for_is_charged_to_the_package_and_says_so() {
         !named.fault.is_about_the_package(),
         "a rule exists for this one, and it says the corruption was our mirror's"
     );
+}
+
+#[test]
+fn the_container_runtimes_own_refusals_are_named_rather_than_charged_to_the_package() {
+    // The rule table had no rule for any container-runtime, registry or image failure, so every one
+    // of them fell to the residue bucket above and was counted against a package. An operator who
+    // passed `--image` a digest that was not in the local store was told "the build failed in deps:
+    // unknown" — the wrong phase, the wrong fault, and none of podman's own message, which had
+    // named the cause exactly.
+    for log in [
+        "Error: creating build container: initializing source docker://localhost/trigon-base@sha256:7cddd: \
+         pinging container registry localhost: Get \"https://localhost/v2/\": dial tcp [::1]:443: \
+         connect: connection refused",
+        "Error: 7cdddce4868e731b4e441d8d5f836b97f1e653e8f3cae212a24bb305cf2deec2: image not known",
+        "Error: error creating container storage: the container name is already in use",
+    ] {
+        let s = classify(log);
+        assert!(!s.is_unknown(), "no rule claimed: {log}");
+        assert!(
+            !s.fault.is_about_the_package(),
+            "the runtime declining to start is not the package failing to build: {log} -> {:?}",
+            s.fault
+        );
+        assert!(
+            !s.repairable,
+            "nothing a model writes into a strategy reaches an unreachable registry: {log}"
+        );
+    }
+}
+
+#[test]
+fn the_container_forms_of_the_environment_failures_match_too() {
+    // The table matched the C library's capitalised spellings and not the lowercase ones the
+    // runtime and Go tooling emit, so a build the kernel killed inside podman, or one that filled
+    // the disk, matched no rule and was charged to the package.
+    for (log, code) in [
+        ("write /out/wheel: no space left on device", "env/no-space"),
+        ("OCI runtime error: signal: killed", "env/out-of-memory"),
+        ("runtime: cannot allocate memory", "env/out-of-memory"),
+    ] {
+        let s = classify(log);
+        assert_eq!(s.code, code, "{log}");
+        assert!(!s.fault.is_about_the_package(), "{log}");
+    }
+
+    // And the two spellings of one failure key into one cluster rather than two. The cluster id is
+    // also the repair-cache key and the admission prior, so a failure keying two ways means the
+    // flywheel never recognises what it has already solved.
+    let upper = classify("IOError: [Errno 13] Permission denied: '/deps'");
+    let lower = classify("open /deps/bin/python: permission denied");
+    assert_eq!(upper.code, lower.code);
+    assert_eq!(upper.fault, lower.fault);
 }

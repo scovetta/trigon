@@ -73,6 +73,15 @@ impl FailureSignature {
     /// Deliberately one bucket rather than a per-message hash. An unrecognised failure is a gap in
     /// the rule table, and it should show up as one large cluster somebody fixes, not as five
     /// hundred singleton clusters that look like five hundred unrelated problems.
+    ///
+    /// **`Fault::Build`, and the tripwire in `seam_fault_classification.rs` is why it still is.**
+    /// The reading it rests on — `classify` only runs on a build log, so a build ran and failed —
+    /// was false while the container runtime's own output reached here: an image that was not in
+    /// the store produced a registry error, matched no rule, and charged the package. That case now
+    /// returns `SandboxError::RuntimeRefused` and never reaches this function, and the table has
+    /// rules for the runtime failures that do produce a log. Whether the residue should still cost
+    /// a package anything is a question about what the published rate means, and it is recorded in
+    /// `docs/17-backlog.md` rather than answered here.
     pub fn unknown(evidence: impl Into<String>) -> Self {
         FailureSignature {
             code: Cow::Borrowed("unknown"),
@@ -307,6 +316,95 @@ const RULES: &[Rule] = &[
         retryable: false,
         repairable: true,
         capture: Capture::None,
+    },
+    // ---- The container runtime's own refusals. -----------------------------------------------
+    //
+    // **The table had no rule for any of them**, so every one fell through to `unknown`, which
+    // charges the package (`Fault::Build`) and asks the repair loop to edit a strategy in response
+    // to podman being unable to reach a registry. An operator pointing `--image` at a digest that
+    // is not in the store was told "the build failed in deps: unknown".
+    Rule {
+        code: "env/image-unavailable",
+        needles: &["pinging container registry"],
+        fault: Fault::Infra,
+        retryable: true,
+        // Nothing a model can write into a strategy fixes an unreachable registry.
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "env/image-unavailable",
+        needles: &["initializing source docker://"],
+        fault: Fault::Infra,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "env/image-unavailable",
+        needles: &["image not known"],
+        fault: Fault::Infra,
+        retryable: false,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "env/runtime-refused",
+        needles: &["creating build container"],
+        fault: Fault::Infra,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "env/runtime-refused",
+        needles: &["error creating container storage"],
+        fault: Fault::Infra,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "env/out-of-memory",
+        // The runtime's own form. `Killed` below is the *shell* reporting a killed child, which a
+        // container OOM never produces — so a build the kernel killed inside podman matched no
+        // rule at all and was charged to the package. One needle, because every needle in a rule
+        // has to match the *same line* and these two never share one.
+        needles: &["signal: killed"],
+        fault: Fault::Infra,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "env/out-of-memory",
+        needles: &["cannot allocate memory"],
+        fault: Fault::Infra,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "env/no-space",
+        // Lowercase, which is what the runtime and Go tooling print. The capitalised form below is
+        // the C library's, and matching only that missed every containerised instance.
+        needles: &["no space left on device"],
+        fault: Fault::Infra,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "env/cannot-write-path",
+        // Lowercase, as Go tooling emits it. **Identical to the capitalised rule in every other
+        // field**, because two spellings of one failure that key into two clusters is the defect
+        // this table exists to avoid — the repair cache, the admission prior and the cluster id are
+        // all the same string.
+        needles: &["permission denied"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        capture: Capture::Between("'", "'"),
     },
     Rule {
         code: "env/out-of-memory",
