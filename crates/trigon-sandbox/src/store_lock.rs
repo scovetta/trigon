@@ -44,26 +44,24 @@ pub struct StoreLock {
 /// stores and must not wait on each other. In the temp directory rather than beside the store
 /// itself, so that a store on a read-only or unusual mount still gets a lock.
 ///
-/// `TRIGON_STORE_LOCK` overrides it. That exists for the tests — two `cargo test` processes share a
-/// machine and would otherwise contend on the real lock, which is the mechanism working and reads
-/// as a hang — and for an operator whose temp directory is not shared between the processes that
-/// need to agree.
+/// There is deliberately no override. One existed briefly, justified as "for the tests", and the
+/// justification was false the moment the tests took a path parameter instead — a knob nothing
+/// exercises is the dead configuration `docs/16-findings.md` §3.15 is already about. Two processes
+/// that must agree on this lock agree because they compute the same path, not because somebody
+/// remembered to set the same variable in both.
 fn path() -> PathBuf {
-    if let Some(p) = std::env::var_os("TRIGON_STORE_LOCK") {
-        return PathBuf::from(p);
-    }
     // SAFETY: `getuid` is always safe; it reads a process property and cannot fail.
     let uid = unsafe { libc::getuid() };
     std::env::temp_dir().join(format!("trigon-image-store-{uid}.lock"))
 }
 
-fn open() -> Option<File> {
+fn open_at(at: &std::path::Path) -> Option<File> {
     OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(path())
+        .open(at)
         .ok()
 }
 
@@ -93,7 +91,17 @@ impl StoreLock {
     /// the previous behaviour applies, and refusing to build because a lock could not be taken
     /// trades a rare race for a certain failure. It is logged where it is taken.
     pub fn shared() -> Option<Self> {
-        let file = open()?;
+        Self::shared_at(&path())
+    }
+
+    /// [`Self::shared`] on a named lock file.
+    ///
+    /// Exists because the tests must not contend with *each other*: the lock is real and
+    /// process-wide, so two tests sharing one file deadlock or fail depending on thread order.
+    /// A process-global override could not fix that — both tests are in the same process — which
+    /// is why this is a parameter and not an environment variable.
+    fn shared_at(at: &std::path::Path) -> Option<Self> {
+        let file = open_at(at)?;
         let deadline = std::time::Instant::now() + Self::PATIENCE;
         loop {
             // SAFETY: the descriptor is owned by `file` and outlives the call.
@@ -115,7 +123,12 @@ impl StoreLock {
     ///
     /// Never waits. A removal that cannot have the lock is skipped by its caller.
     pub fn try_exclusive() -> Option<Self> {
-        lock(open()?, libc::LOCK_EX | libc::LOCK_NB)
+        Self::try_exclusive_at(&path())
+    }
+
+    /// [`Self::try_exclusive`] on a named lock file. See [`Self::shared_at`].
+    fn try_exclusive_at(at: &std::path::Path) -> Option<Self> {
+        lock(open_at(at)?, libc::LOCK_EX | libc::LOCK_NB)
     }
 }
 
@@ -123,47 +136,43 @@ impl StoreLock {
 mod tests {
     use super::*;
 
-    /// One test, not three, because they would contend with *each other*: the lock is real, it is
-    /// per-machine, and `cargo test` runs its threads in one process. Splitting them made the
-    /// second fail on the first's reader, which is the mechanism working and reads as a flake.
-    /// Its own lock file, so two `cargo test` processes on one machine do not contend on the real
-    /// one. They did, and three test binaries wedged — which is the mechanism working and is
-    /// indistinguishable from a hang.
-    fn isolate() {
-        let p = std::env::temp_dir().join(format!("trigon-lock-test-{}", std::process::id()));
-        // SAFETY: single-threaded at this point in the test, and no other test in this crate reads
-        // the environment.
-        unsafe { std::env::set_var("TRIGON_STORE_LOCK", p) };
+    /// A lock file of this test's own.
+    ///
+    /// **Not a process-global override**, which was the first attempt and could not work: both
+    /// tests live in one process, so they contended through it and the failure depended on thread
+    /// order. It passed under `--test-threads=1` and failed in the real suite — verifying with the
+    /// flag that suppresses the defect, which is the habit this file exists to break.
+    fn mine(name: &str) -> PathBuf {
+        let p =
+            std::env::temp_dir().join(format!("trigon-lock-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
     }
 
     #[test]
     fn readers_share_and_a_removal_waits_for_all_of_them() {
-        isolate();
+        let at = mine("share");
         // Two readers coexist — concurrent builds must — and a removal cannot proceed while either
         // holds it, which is the property that stops `podman rmi` taking layers out from under
         // `podman build`.
-        let a = StoreLock::shared().expect("a reader can take the lock");
-        let b = StoreLock::shared().expect("readers do not exclude each other");
+        let a = StoreLock::shared_at(&at).expect("a reader can take the lock");
+        let b = StoreLock::shared_at(&at).expect("readers do not exclude each other");
         assert!(
-            StoreLock::try_exclusive().is_none(),
+            StoreLock::try_exclusive_at(&at).is_none(),
             "a removal must not proceed while a build holds the store"
         );
         drop(a);
         assert!(
-            StoreLock::try_exclusive().is_none(),
+            StoreLock::try_exclusive_at(&at).is_none(),
             "nor while the second build still holds it"
         );
         drop(b);
 
         // And a removal excludes everything, including another removal.
-        let held = StoreLock::try_exclusive().expect("it proceeds once the last reader is gone");
-        assert!(StoreLock::try_exclusive().is_none());
-        assert!(
-            StoreLock::shared().is_none(),
-            "a build must wait for a removal in flight rather than read a half-removed store"
-        );
+        let held = StoreLock::try_exclusive_at(&at).expect("it proceeds once the readers are gone");
+        assert!(StoreLock::try_exclusive_at(&at).is_none());
         drop(held);
-        assert!(StoreLock::shared().is_some());
+        assert!(StoreLock::try_exclusive_at(&at).is_some());
     }
 
     #[test]
@@ -172,11 +181,11 @@ mod tests {
         // removal that never released stopped every build on the machine with no diagnostic. A
         // build that cannot have the lock proceeds without it, which is the behaviour that existed
         // before the lock — a rare race rather than a certain stall.
-        isolate();
-        let _held = StoreLock::try_exclusive().expect("hold it as a removal would");
+        let at = mine("stuck");
+        let _held = StoreLock::try_exclusive_at(&at).expect("hold it as a removal would");
         let started = std::time::Instant::now();
         assert!(
-            StoreLock::shared().is_none(),
+            StoreLock::shared_at(&at).is_none(),
             "a build must give up, not wait"
         );
         assert!(

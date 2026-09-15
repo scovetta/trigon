@@ -190,6 +190,16 @@ waits five seconds and builds anyway — a `podman rmi` finishes in well under a
 wait means the holder is stuck rather than busy, and giving up restores the pre-lock behaviour where
 waiting restores nothing.
 
+**A skipped removal is deferred, not dropped**, which the first version got wrong. Skipping is
+correct — a removal must never block a build — but a sweep holds the lock almost continuously and
+`prune_images` runs once per process and only for pids that are gone, so nothing was collected until
+the sweep ended: seventeen build images at ~240 MB each after one four-lane run, and 400 targets
+would be near a hundred gigabytes. That would have failed the M1 corpus on the machine rather than
+in the verdicts. Deferred tags are now remembered and taken whenever the store is next quiet — every
+run that does get the lock clears the backlog, and a sweep reaps explicitly at the end when no lane
+is left holding anything. Measured on a four-target sweep: 3 deferred, 3 reaped, leftover build
+images 17 to 2.
+
 **Measured**, the seventeen-target PyPI corpus at `mirror-only`:
 
 | | 1 lane | 4 lanes |

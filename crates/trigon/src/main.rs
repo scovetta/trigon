@@ -4393,6 +4393,12 @@ mod sweep {
             purls.iter().enumerate().map(|(i, p)| (*p, i)).collect();
         rows.sort_by_key(|(purl, _, _)| position.get(purl.as_str()).copied().unwrap_or(usize::MAX));
 
+        // Every lane is done, so nothing holds the image store: this is the one moment in a sweep
+        // when the images that finishing runs could not remove can actually go. Without it a long
+        // sweep grows the store by one build image per target — ~240 MB each, measured — because a
+        // removal always loses the lock to some other lane still building.
+        trigon_sandbox::reap_deferred("podman");
+
         // Before the summary, so a reader watching the page sees `finished` at the same moment the
         // terminal does.
         progress.finish(rows.len());

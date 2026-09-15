@@ -850,18 +850,70 @@ impl Drop for Leftovers {
             // mechanism rather than an argument about timing. Taken with `try`, so a run that
             // finishes mid-build leaves its image for the sweep instead of waiting minutes to exit.
             let Some(_store) = crate::store_lock::StoreLock::try_exclusive() else {
-                tracing::debug!(
-                    image = tag,
-                    "a build holds the image store; leaving the image"
-                );
+                // **Deferred, not dropped.** Skipping was the whole point — a removal must never
+                // block a build — but skipping and *forgetting* grows the store without limit: a
+                // sweep holds the lock almost continuously, and `prune_images` runs once per
+                // process and only for pids that are gone, so nothing is collected until the sweep
+                // ends. Measured at four lanes: seventeen build images at ~240 MB each left behind,
+                // and 400 targets would be near a hundred gigabytes. The image is remembered, and
+                // `reap_deferred` takes it when the store is next quiet.
+                tracing::debug!(image = %tag, "a build holds the image store; deferring the image");
+                defer(tag.clone());
                 return;
             };
+            // A run that *did* get the lock clears whatever earlier runs could not.
+            reap_deferred(&self.binary);
             let _ = std::process::Command::new(&self.binary)
                 .args(["rmi", tag])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
         }
+    }
+}
+
+/// Images this process could not remove when it wanted to, because a build held the store.
+///
+/// Per process and in memory: a tag here belongs to a run that has already finished, so losing the
+/// list to a crash costs a stale image that `prune_stale_leftovers` collects on a later run. It is
+/// not a durable queue and must not become one.
+static DEFERRED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn defer(tag: String) {
+    if let Ok(mut d) = DEFERRED.lock() {
+        d.push(tag);
+    }
+}
+
+/// Remove what earlier runs deferred, if the store is quiet.
+///
+/// Called where a removal was already going to happen — a finishing run that *did* get the lock
+/// clears the backlog at the same time — and once more when a sweep ends and no build is left to
+/// hold anything. Never blocks: a backlog that cannot be drained now is drained by whichever of
+/// those comes next, and failing that by the stale-leftover sweep in a later process.
+pub fn reap_deferred(binary: &str) {
+    let Some(_store) = crate::store_lock::StoreLock::try_exclusive() else {
+        return;
+    };
+    let tags: Vec<String> = match DEFERRED.lock() {
+        Ok(mut d) => std::mem::take(&mut *d),
+        Err(_) => return,
+    };
+    if tags.is_empty() {
+        return;
+    }
+    tracing::debug!(
+        count = tags.len(),
+        "removing images deferred while builds held the store"
+    );
+    for tag in tags {
+        // Still no `--force`, for the reason the per-run removal gives: podman declines while
+        // anything depends on the image, and the stale sweep collects it later.
+        let _ = std::process::Command::new(binary)
+            .args(["rmi", &tag])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
