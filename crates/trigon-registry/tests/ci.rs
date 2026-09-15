@@ -974,3 +974,129 @@ async fn the_reading_is_parsed_once_per_target() {
     );
     assert_eq!(rung.infer(&t).await.unwrap().len(), 1);
 }
+
+// ---------------------------------------------------------------------------------------------
+// B11: the eight defects two verification passes named, each with the shape that demonstrates it
+// ---------------------------------------------------------------------------------------------
+
+/// The check-then-upload shape, which is what the packaging guide tells people to write.
+const CHECK_THEN_UPLOAD: &str = r#"
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m build
+      - run: twine check dist/*
+      - run: twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+"#;
+
+#[tokio::test]
+async fn twine_check_is_not_the_publish_step() {
+    // `twine` was classified as a publish whatever its subcommand, so on the shape above the
+    // *check* became "the publish step". Two things follow, and the second is the serious one.
+    //
+    // The recipe's steps are everything in the job that is not the publish step, so `twine upload`
+    // — the real one — lands among them. A rebuild lowered from that recipe uploads to PyPI.
+    // The first is that `TWINE_PASSWORD` is then a secret read by a *build* step, which is a
+    // decline, so the rung refuses a workflow it can read perfectly well.
+    let r = read_pypi(
+        "checked",
+        &[Wf::Inline("release.yml", CHECK_THEN_UPLOAD)],
+        &[("pyproject.toml", "[project]\nname = \"checked\"\n")],
+    )
+    .await;
+    let best = r.ranked.first().expect("a recipe: {r:?}");
+    assert!(
+        best.secrets_in_build.is_empty(),
+        "the upload step's token was attributed to the build: {:?}",
+        best.secrets_in_build
+    );
+
+    let c = r.candidate.as_ref().unwrap_or_else(|| {
+        panic!("declined a readable workflow: {:?}", r.declined);
+    });
+    let Strategy::Flow(f) = &c.strategy else {
+        panic!("expected a flow strategy")
+    };
+    let rendered = format!("{:?}", f.build);
+    assert!(
+        !rendered.contains("twine upload"),
+        "the rebuild would publish to PyPI: {rendered}"
+    );
+}
+
+/// A build preceded by an in-place rewrite of the tree it is about to build.
+const SED_THEN_BUILD: &str = r#"
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: sed -i "s/0.0.0/${GITHUB_REF_NAME#v}/" src/checked/__init__.py
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn an_in_place_rewrite_of_the_tree_is_not_incidental() {
+    // `sed` sat in `cmd::INCIDENTAL` — the list of commands that provably do not affect build
+    // output — and `sed -i` is the one invocation for which that is false. The recipe came out
+    // describing a build of the tree as checked out, which is not the tree that was built, and
+    // nothing said so.
+    //
+    // The rung has no way to *model* the rewrite, so this is a decline rather than a lowering.
+    // What it must not be is silence.
+    let r = read_pypi(
+        "sedded",
+        &[Wf::Inline("release.yml", SED_THEN_BUILD)],
+        &[("pyproject.toml", "[project]\nname = \"sedded\"\n")],
+    )
+    .await;
+    let d = r.declined.as_ref().unwrap_or_else(|| {
+        panic!("lowered a recipe that omits the rewrite: {:?}", r.candidate);
+    });
+    let said = d.to_string();
+    assert!(
+        said.contains("sed -i"),
+        "the decline has to name the command a reader would go looking for: {said}"
+    );
+}
+
+#[tokio::test]
+async fn a_decline_does_not_assert_what_is_not_true_of_its_own_run() {
+    // Two messages said things the run contradicted, and a decline that misdescribes itself sends
+    // whoever reads it to the wrong part of the workflow.
+    //
+    // Here a build *was* recognised — `python -m build` is right there — so
+    // "`…` is the build, and no tool in the registry lowers it" is false about this run. The
+    // recipe is incomplete, which is a different statement and the true one.
+    let r = read_pypi(
+        "sedded2",
+        &[Wf::Inline("release.yml", SED_THEN_BUILD)],
+        &[("pyproject.toml", "[project]\nname = \"sedded2\"\n")],
+    )
+    .await;
+    let said = r.declined.as_ref().expect("a decline").to_string();
+    assert!(
+        !said.contains("is the build, and no tool"),
+        "a build was recognised, and the decline says there was none: {said}"
+    );
+}

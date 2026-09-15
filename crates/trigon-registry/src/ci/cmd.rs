@@ -54,6 +54,13 @@ pub enum Cmd {
     },
     /// A fetch from somewhere. Feeds `Claim::RequiresNetwork` and the egress tier.
     Network(String),
+    /// Rewrites the working tree in place, before or between the modelled build steps.
+    ///
+    /// Separate from `Unknown` because the two say different things. `Unknown` is "we could not
+    /// read this fragment"; this is "we read it, and it edited the source the build is about". A
+    /// recipe that omits it describes a build of the tree as checked out, which is not the tree
+    /// that was built.
+    MutatesTree(String),
     /// Cannot change what ends up in the artifact.
     Incidental,
     /// Everything else. The input to `Decline::NoToolForBuildCommand`.
@@ -151,9 +158,9 @@ fn argv(fragment: &str) -> Vec<String> {
 const INCIDENTAL: &[&str] = &[
     "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac", "exit",
     "true", "false", ":", "[", "[[", "test", "echo", "printf", "export", "unset", "set", "shopt",
-    "source", ".", "cd", "pwd", "ls", "cat", "head", "tail", "sort", "tee", "grep", "sed", "awk",
-    "tr", "wc", "mkdir", "rmdir", "touch", "chmod", "find", "sleep", "env", "git", "gh", "which",
-    "type", "id", "umask", "df", "free", "uname",
+    "source", ".", "cd", "pwd", "ls", "cat", "head", "tail", "sort", "tee", "grep", "awk", "tr",
+    "wc", "mkdir", "rmdir", "touch", "chmod", "find", "sleep", "env", "gh", "which", "type", "id",
+    "umask", "df", "free", "uname",
 ];
 
 fn classify(fragment: &str) -> Cmd {
@@ -205,15 +212,87 @@ fn classify(fragment: &str) -> Cmd {
             outdir: opt(&rest, "--outdir").or_else(|| opt(&rest, "-o")),
             dir: positional(&rest),
         },
-        "twine" => Cmd::Publish(fragment.to_string()),
+        "twine" => twine(&rest, fragment),
         "uv" => uv(&rest, fragment),
         "npm" => npm(&rest, fragment),
         "pnpm" => Cmd::PackageManager("pnpm"),
         "yarn" => Cmd::PackageManager("yarn"),
         "bun" => Cmd::PackageManager("bun"),
+        "sed" | "perl" => match in_place(&rest) {
+            true => Cmd::MutatesTree(fragment.to_string()),
+            false => Cmd::Incidental,
+        },
+        "patch" => Cmd::MutatesTree(fragment.to_string()),
+        "git" => git(&rest, fragment),
         "curl" | "wget" => Cmd::Network(fragment.to_string()),
         "apt-get" | "apt" | "sudo" => system_deps(args),
         h if INCIDENTAL.contains(&h) => Cmd::Incidental,
+        _ => Cmd::Unknown(fragment.to_string()),
+    }
+}
+
+/// Whether `sed`/`perl` was told to edit files rather than write to stdout.
+///
+/// `-i`, `--in-place`, and the bundled short forms `-Ei`, `-i.bak`, `-ni`. A long option taking a
+/// value (`--expression=…`) is not scanned for an `i`.
+fn in_place(rest: &[&str]) -> bool {
+    rest.iter().any(|a| {
+        if let Some(long) = a.strip_prefix("--") {
+            return long == "in-place" || long.starts_with("in-place=");
+        }
+        match a.strip_prefix('-') {
+            // `-` alone is stdin, and `--` alone ends the options.
+            Some(short) if !short.is_empty() && !short.starts_with('-') => {
+                short.split('=').next().unwrap_or(short).contains('i')
+            }
+            _ => false,
+        }
+    })
+}
+
+/// `git`, which is incidental when it reports and a tree rewrite when it writes.
+///
+/// The prior art's definitions directory has
+/// `git checkout 'da0306d^' -- requests_toolbelt/adapters/appengine.py` as a *build instruction*,
+/// with a comment explaining that the published wheel was built from a working tree still holding
+/// a file deleted two commits earlier. That is exactly the shape that must not read as incidental.
+fn git(rest: &[&str], fragment: &str) -> Cmd {
+    const WRITES: &[&str] = &[
+        "checkout",
+        "apply",
+        "am",
+        "cherry-pick",
+        "revert",
+        "reset",
+        "restore",
+        "merge",
+        "rebase",
+        "stash",
+        "clean",
+        "submodule",
+        "switch",
+    ];
+    match rest.iter().find(|a| !a.starts_with('-')) {
+        Some(sub) if WRITES.contains(sub) => Cmd::MutatesTree(fragment.to_string()),
+        _ => Cmd::Incidental,
+    }
+}
+
+/// `twine`, which is a publisher only when it is uploading.
+///
+/// The subcommand is the whole of it. `twine check dist/*` validates the long description renders
+/// and touches no index, and the packaging guide tells people to write it immediately before the
+/// upload — so classifying every `twine` as a publish made the *check* the first publish marker in
+/// the job. The real upload then fell on the build side of that boundary, which put its token in
+/// `secrets_in_build` (a decline) and, worse, put `twine upload` itself into the recipe's steps:
+/// a rebuild lowered from it would publish to PyPI.
+///
+/// Anything else stays `Unknown` rather than becoming `Incidental`. `twine register` contacts the
+/// index, and a subcommand we have not seen is not one we can call harmless.
+fn twine(rest: &[&str], fragment: &str) -> Cmd {
+    match rest.iter().find(|a| !a.starts_with('-')) {
+        Some(&"upload") => Cmd::Publish(fragment.to_string()),
+        Some(&"check") => Cmd::Incidental,
         _ => Cmd::Unknown(fragment.to_string()),
     }
 }
@@ -228,7 +307,7 @@ fn python(rest: &[&str], fragment: &str) -> Cmd {
         },
         ["-m", "pip", "install", ..] => Cmd::PyDeps(fragment.to_string()),
         ["-m", "pip", ..] => Cmd::Incidental,
-        ["-m", "twine", ..] => Cmd::Publish(fragment.to_string()),
+        ["-m", "twine", tail @ ..] => twine(tail, fragment),
         ["-m", "venv", ..] => Cmd::Incidental,
         // Checks rather than builds. A test suite that writes into the source tree would slip
         // through here; that is a narrower hazard than declining every release workflow that lints

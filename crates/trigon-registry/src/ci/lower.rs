@@ -219,6 +219,8 @@ struct BuildAnalysis {
     builds: Vec<Cmd>,
     /// Fragments with no lowering. The input to `Decline::NoToolForBuildCommand`.
     unknown: Vec<String>,
+    /// Commands that rewrote the working tree before the build read it.
+    mutations: Vec<String>,
     system_deps: Vec<String>,
     network: Vec<String>,
     github_env: Vec<(String, String)>,
@@ -232,6 +234,7 @@ fn analyse(recipe: &CiRecipe) -> BuildAnalysis {
     let mut a = BuildAnalysis {
         builds: Vec::new(),
         unknown: Vec::new(),
+        mutations: Vec::new(),
         system_deps: Vec::new(),
         network: Vec::new(),
         github_env: Vec::new(),
@@ -268,6 +271,7 @@ fn analyse(recipe: &CiRecipe) -> BuildAnalysis {
                 Cmd::GithubEnv { name, value } => a.github_env.push((name, value)),
                 Cmd::PackageManager(m) => a.package_manager = Some(m),
                 Cmd::Unknown(f) => a.unknown.push(f),
+                Cmd::MutatesTree(f) => a.mutations.push(f),
                 Cmd::PyDeps(_) | Cmd::Publish(_) | Cmd::Incidental => {}
                 // Already collected by the `is_build` arm above; listed rather than wildcarded so
                 // a new `Cmd` variant is a compile error here instead of a silent omission.
@@ -297,6 +301,13 @@ fn refuse(recipe: &CiRecipe, build: &BuildAnalysis, ctx: &LowerCtx<'_>) -> Optio
     if !recipe.secrets_in_build.is_empty() {
         return Some(Decline::SecretInBuild {
             names: recipe.secrets_in_build.clone(),
+        });
+    }
+    // Before the unknown-fragment checks below, because it is the more specific statement: we read
+    // the command and know what it did, rather than failing to read it.
+    if let Some(command) = build.mutations.first() {
+        return Some(Decline::BuildRewritesTheTree {
+            command: command.clone(),
         });
     }
     if !build.unknown.is_empty() && build.builds.is_empty() {
@@ -329,9 +340,11 @@ fn refuse(recipe: &CiRecipe, build: &BuildAnalysis, ctx: &LowerCtx<'_>) -> Optio
         }
     }
     // A recognised build *and* fragments we could not read means the recipe is incomplete rather
-    // than wrong, and an incomplete build is a rebuild that silently skips a step.
+    // than wrong, and an incomplete build is a rebuild that silently skips a step. Its own decline
+    // rather than `NoToolForBuildCommand`, whose message — "`…` is the build, and no tool in the
+    // registry lowers it" — is false about a run that found the build and lowered it.
     if !build.unknown.is_empty() {
-        return Some(Decline::NoToolForBuildCommand {
+        return Some(Decline::RecipeIncomplete {
             command: build.unknown.last().cloned().unwrap_or_default(),
         });
     }

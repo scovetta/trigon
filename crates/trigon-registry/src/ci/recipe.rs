@@ -470,6 +470,17 @@ pub enum Decline {
     NoToolForBuildCommand {
         command: String,
     },
+    /// The build was recognised and lowered, and the job also does something this rung cannot
+    /// read. Distinct from [`Decline::NoToolForBuildCommand`], which says there was no build to
+    /// lower: saying that about a run that found one sends a reader to the wrong step.
+    RecipeIncomplete {
+        command: String,
+    },
+    /// A command rewrote the working tree between the checkout and the build. The recipe would
+    /// describe a build of the tree as checked out, which is not the tree that was built.
+    BuildRewritesTheTree {
+        command: String,
+    },
     /// `trigon-strategy` ships no pnpm or yarn tool, and `npm/build/pack` is not the same recipe.
     PackageManagerUnsupported {
         manager: String,
@@ -547,6 +558,16 @@ impl std::fmt::Display for Decline {
             Decline::NoToolForBuildCommand { command } => write!(
                 f,
                 "`{command}` is the build, and no tool in the registry lowers it"
+            ),
+            Decline::RecipeIncomplete { command } => write!(
+                f,
+                "the build was read and lowered, and `{command}` alongside it was not, so the \
+                 recipe describes part of this job rather than all of it"
+            ),
+            Decline::BuildRewritesTheTree { command } => write!(
+                f,
+                "`{command}` rewrites the working tree before the build reads it, so a recipe \
+                 built from the checkout alone is about a different tree"
             ),
             Decline::PackageManagerUnsupported { manager } => write!(
                 f,
