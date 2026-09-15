@@ -105,6 +105,54 @@ jobs:
       - run: cargo run -p xtask -- corpus fetch --manifest corpora/m0.toml
       - run: cargo run -p xtask -- golden --manifest corpora/m0.toml
 
+  # The egress tiers, the artifact guard and the phase attribution — the controls `docs/12-security.md`
+  # is about — are tested by thirteen container tests, and every one of them skipped on every pull
+  # request for the life of the repository. Their gate is `podman image exists` on a pinned Alpine
+  # that the `test` job never pulls, and a gate like that reports `ok` when it declines to run: the
+  # suite was green and the security controls were unexercised.
+  #
+  # `TRIGON_TESTS_MUST_RUN=1` is this job asserting it did its own setup. Under it a skip for a
+  # missing image or a missing podman is a panic, so the day someone drops a setup step below, this
+  # job goes red instead of quietly going back to testing nothing.
+  sandbox:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: podman version
+      # The digest the tests pin. Pulling by tag would make the test's own pin meaningless.
+      - run: podman pull docker.io/library/alpine@sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e
+      - run: cargo build -p trigon
+      - run: ./target/debug/trigon mirror-image
+      - run: cargo test -p trigon-sandbox --test podman
+        env:
+          TRIGON_TESTS_MUST_RUN: "1"
+
+  # The mirror against the registries it actually mirrors. Nightly rather than per-pull-request:
+  # these are ten requests to npm, PyPI and nodejs.org, and `docs/10-scale.md` is explicit that
+  # upstream reputation is the first thing that breaks. They are also the only tests that prove the
+  # timewarp filter agrees with what the registries really served.
+  live:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p trigon
+      # The guard-narrowing test needs a published artifact and a checkout of the repository it
+      # came from; it has no way to fetch them itself and skips without them.
+      - name: the guard fixture
+        run: |
+          F="$RUNNER_TEMP/guard-fixture"
+          mkdir -p "$F"
+          ./target/debug/trigon fetch pkg:npm/semver@7.6.3 --out "$F/pkg.tgz"
+          git clone --depth 1 -b v7.6.3 https://github.com/npm/node-semver "$F/src"
+          echo "TRIGON_GUARD_FIXTURE=$F" >> "$GITHUB_ENV"
+      - run: cargo test -p trigon-mirror --test server
+        env:
+          TRIGON_LIVE: "1"
+          TRIGON_TESTS_MUST_RUN: "1"
+
   # "Here is a binary with no network client and no model code that reproduces our verdict."
   verifier:
     runs-on: ubuntu-24.04

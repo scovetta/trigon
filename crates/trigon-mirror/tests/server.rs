@@ -2,6 +2,34 @@
 
 use trigon_mirror::{Filter, Mirror, Platform, normalize, published_by, url_for};
 
+/// A skip the caller was supposed to have prevented.
+///
+/// Every gate below is a thing *the environment* controls — podman is installed or it is not, the
+/// image was pulled or it was not, `TRIGON_LIVE` was set or it was not. A gate like that reports
+/// `ok` when it declines to run, so a CI job that forgets one of them is green and says nothing,
+/// which is how thirteen container tests came to skip on every pull request for the life of the
+/// repository.
+///
+/// `TRIGON_TESTS_MUST_RUN=1` is the job asserting it did its setup: under it a gate of this kind
+/// is a failure, not a skip. Conditions the job does *not* control — an upstream host being
+/// unreachable — stay skips, and say so where they are written.
+#[track_caller]
+fn refuse_to_skip(why: &str) {
+    if std::env::var("TRIGON_TESTS_MUST_RUN").as_deref() == Ok("1") {
+        panic!("TRIGON_TESTS_MUST_RUN=1 but this test skipped: {why}");
+    }
+    eprintln!("skipped: {why}");
+}
+
+/// Whether a test that talks to a real registry should run.
+fn live() -> bool {
+    if std::env::var("TRIGON_LIVE").as_deref() == Ok("1") {
+        return true;
+    }
+    refuse_to_skip("set TRIGON_LIVE=1");
+    false
+}
+
 #[test]
 fn the_filter_rides_in_the_credentials() {
     // The one configuration channel every package manager forwards on every request, which is why
@@ -179,8 +207,7 @@ async fn an_artifact_host_outside_the_allowlist_is_refused() {
 
 #[tokio::test]
 async fn a_toolchain_download_comes_back_through_the_mirror() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     let m = Mirror::new().unwrap().serve(0).await.unwrap();
@@ -208,8 +235,7 @@ async fn a_toolchain_download_comes_back_through_the_mirror() {
 
 #[tokio::test]
 async fn npm_sees_the_index_as_it_was() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     let m = Mirror::new().unwrap().serve(0).await.unwrap();
@@ -243,8 +269,7 @@ async fn npm_sees_the_index_as_it_was() {
 
 #[tokio::test]
 async fn pypi_sees_the_index_as_it_was() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     let m = Mirror::new().unwrap().serve(0).await.unwrap();
@@ -300,8 +325,7 @@ fn base64(s: &str) -> String {
 
 #[tokio::test]
 async fn artifact_urls_point_back_at_the_mirror() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     // Without this a build behind an enforced egress boundary resolves a version and then cannot
@@ -343,8 +367,7 @@ async fn artifact_urls_point_back_at_the_mirror() {
 
 #[tokio::test]
 async fn pypi_file_urls_point_back_at_the_mirror() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     // PyPI serves files from a separate CDN host, so the upstream host rides in the rewritten path:
@@ -394,8 +417,7 @@ async fn pypi_file_urls_point_back_at_the_mirror() {
 
 #[tokio::test]
 async fn the_mirror_refuses_the_runs_own_artifact() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     // The cheapest control there is. At mirror-only egress this is the only reachable host, so a
@@ -436,8 +458,7 @@ async fn the_mirror_refuses_the_runs_own_artifact() {
 
 #[tokio::test]
 async fn the_artifact_arriving_from_anywhere_trips_the_guard() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     // The case the URL refusal does not cover: the same bytes under a different name. This is what
@@ -480,8 +501,7 @@ async fn the_artifact_arriving_from_anywhere_trips_the_guard() {
 
 #[tokio::test]
 async fn an_ordinary_dependency_does_not_trip_the_guard() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     // Without this the control is worthless: a guard that fires on every build is one people turn
@@ -524,12 +544,12 @@ fn the_source_filter_narrows_a_real_package() {
     //     trigon fetch pkg:npm/semver@7.6.3 --out $F/pkg.tgz
     //     git clone --depth 1 -b v7.6.3 https://github.com/npm/node-semver $F/src
     let Ok(fixture) = std::env::var("TRIGON_GUARD_FIXTURE") else {
-        eprintln!("skipped: set TRIGON_GUARD_FIXTURE to a directory with pkg.tgz and src/");
+        refuse_to_skip("set TRIGON_GUARD_FIXTURE to a directory with pkg.tgz and src/");
         return;
     };
     let dir = std::path::Path::new(&fixture);
     if !dir.join("pkg.tgz").is_file() || !dir.join("src").is_dir() {
-        eprintln!("skipped: {fixture} has no pkg.tgz and src/");
+        refuse_to_skip(&format!("{fixture} has no pkg.tgz and src/"));
         return;
     }
     let bytes = std::fs::read(dir.join("pkg.tgz")).unwrap();
@@ -856,8 +876,7 @@ async fn a_refusal_reaches_the_counters_and_the_transcript_alike() {
 
 #[tokio::test]
 async fn the_counters_and_the_transcript_agree_on_real_traffic() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     // The same assertion as above, over traffic that actually reaches upstream — an index document
@@ -988,8 +1007,7 @@ async fn an_off_list_host_is_refused_on_the_route_that_names_it() {
 
 #[tokio::test]
 async fn a_body_the_client_abandons_is_still_accounted_for() {
-    if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TRIGON_LIVE=1");
+    if !live() {
         return;
     }
     // The transcript's whole claim is that it lists everything that crossed into the build, and

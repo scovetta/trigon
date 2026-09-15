@@ -32,9 +32,28 @@ async fn store() -> tokio::sync::MutexGuard<'static, ()> {
         .await
 }
 
+/// A skip the caller was supposed to have prevented.
+///
+/// Every gate below is a thing *the environment* controls — podman is installed or it is not, the
+/// image was pulled or it was not, `TRIGON_LIVE` was set or it was not. A gate like that reports
+/// `ok` when it declines to run, so a CI job that forgets one of them is green and says nothing,
+/// which is how thirteen container tests came to skip on every pull request for the life of the
+/// repository.
+///
+/// `TRIGON_TESTS_MUST_RUN=1` is the job asserting it did its setup: under it a gate of this kind
+/// is a failure, not a skip. Conditions the job does *not* control — an upstream host being
+/// unreachable — stay skips, and say so where they are written.
+#[track_caller]
+fn refuse_to_skip(why: &str) {
+    if std::env::var("TRIGON_TESTS_MUST_RUN").as_deref() == Ok("1") {
+        panic!("TRIGON_TESTS_MUST_RUN=1 but this test skipped: {why}");
+    }
+    eprintln!("skipped: {why}");
+}
+
 async fn usable(r: &PodmanRunner) -> bool {
     if r.health().await.is_err() {
-        eprintln!("skipped: podman is not available");
+        refuse_to_skip("podman is not available");
         return false;
     }
     let out = std::process::Command::new("podman")
@@ -43,7 +62,7 @@ async fn usable(r: &PodmanRunner) -> bool {
     match out {
         Ok(s) if s.success() => true,
         _ => {
-            eprintln!("skipped: {ALPINE} is not in the local image store");
+            refuse_to_skip(&format!("{ALPINE} is not in the local image store"));
             false
         }
     }
@@ -240,7 +259,7 @@ fn mirror_image_available() -> bool {
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {
-        eprintln!("skipped: build {MIRROR_IMAGE} with `trigon mirror-image`");
+        refuse_to_skip(&format!("build {MIRROR_IMAGE} with `trigon mirror-image`"));
     }
     ok
 }
