@@ -330,24 +330,36 @@ Controls, in layers:
 
 ## 10. Invariants and the tests that enforce them
 
-| # | Invariant | Enforced by |
-|---|---|---|
-| 1 | The judgement half cannot call a model | `xtask` policy test over `cargo metadata --all-features`; `cargo-deny` bans; `require_no_features` on judgement crates ([`01`](01-architecture.md) §2.2) |
-| 2 | `Match::Normalized` implies every applied stabilizer is `Builtin` with `risk <= Metadata` | runtime check, unit test, and proptest over arbitrary stabilizer sets |
-| 3 | Stabilizers are total and never panic | fuzz target over `parse → stabilize → write → parse` |
-| 4 | Stabilization is idempotent | proptest: `stabilize(stabilize(x)) == stabilize(x)` |
-| 5 | Both artifacts receive an identical transform | The type signature. A stabilizer takes no side parameter. |
-| 6 | The build worker cannot reach the upstream artifact | Three integration tests: the mirror refuses its URL, an egress fetch of it voids the run, and a blob-store read from inside the sandbox is denied |
-| 7 | A model-authored strategy cannot raise the egress tier | validation test over generated strategies |
-| 8 | Signing never occurs in a process that executed sandbox output | deployment test asserting the attestor's image contains no runner code |
-| 9 | Identical inputs produce identical verdicts | flake test: three runs of the `smoke` corpus; any flip is a **P0 bug in the deterministic layer** |
-| 10 | A `Void` run is never published as a divergence | unit test over the publication path |
-| 11 | The guard does not fire on stock content | Corpus test: replay 500 known-good builds against the guard and assert zero `Void` |
-| 12 | Two attempts that disagree publish nothing | unit test over the confirmation policy |
+**The third column says what enforces each invariant *today*, not what is meant to.** It used to say
+only the latter, and five of the twelve rows named a test that does not exist — in the document
+whose job is to say which controls are real. A table like that is the same defect as a control that
+fails open and reports success: it reads as assurance and is not.
 
-Invariants 2, 6 and 10 carry the security weight. Invariant 11 is what stops the guard from being
-switched off in frustration six weeks in. Invariant 9 is the one an unrelated change breaks without
-anybody noticing, which is why it runs on every pull request.
+| # | Invariant | Enforced by | |
+|---|---|---|---|
+| 1 | The judgement half cannot call a model | `xtask` policy over `cargo metadata --all-features`, `cargo-deny` bans, `require_no_features` on judgement crates, and the `--no-default-features` verifier build in CI | **yes** |
+| 2 | `Match::Normalized` implies every applied stabilizer is `Builtin` with `risk <= Metadata` | `trigon-compare/tests/seam_provenance_cap.rs`, **exhaustively** over `RiskTier × Provenance × side`, plus three behavioural tests through real archives in `tests/outcomes.rs` | **yes** |
+| 3 | Stabilizers are total and never panic | `fuzz/fuzz_targets/{parse,roundtrip,stabilize}.rs` | **yes** |
+| 4 | Stabilization is idempotent | `trigon-stabilize/tests/properties.rs` — a proptest over generated tars | **yes** |
+| 5 | Both artifacts receive an identical transform | The type signature. A stabilizer takes no side parameter. | **structural** |
+| 6 | The build worker cannot reach the upstream artifact | Three integration tests: the mirror refuses its URL, an egress fetch of it voids the run, a blob-store read from inside the sandbox is denied | **yes** |
+| 7 | A model-authored strategy cannot raise the egress tier | `trigon-strategy/tests/seam_rendering.rs` — a strategy cannot ask for privilege, egress, a base image or a platform | **yes** |
+| 8 | Signing never occurs in a process that executed sandbox output | `trigon attest` is a separate invocation that reads blobs by hash and re-derives before signing. There is **no deployment test**, and no attestor image to test. | **partly** |
+| 9 | Identical inputs produce identical verdicts | **nothing.** No flake test exists, and the `smoke` corpus it would run against is itself an unmet M1 exit criterion. | **no** |
+| 10 | A `Void` run is never published as a divergence | `trigon attest` refuses a run with any guard trip, before anything else. There is **no publication path**, so nothing tests one. | **partly** |
+| 11 | The guard does not fire on stock content | **nothing.** `MIN_GUARDED_BYTES`, the stock-file rule and the also-in-source filter exist and are unit-tested individually; no corpus replay asserts zero `Void` across known-good builds. | **no** |
+| 12 | Two attempts that disagree publish nothing | **nothing.** No confirmation policy exists — nothing in this system performs a clean re-run at all ([`17-backlog.md`](17-backlog.md) B15). | **no** |
+
+Invariants 2, 6 and 10 carry the security weight, and 2 and 6 are the two that hold. Invariant 11 is
+what stops the guard from being switched off in frustration six weeks in, and it is unenforced —
+the individual filters are tested, the aggregate claim is not. Invariant 9 is the one an unrelated
+change breaks without anybody noticing, and it is unenforced too.
+
+**What this costs, stated plainly.** Nothing here claims 9, 11 and 12 hold. They are design
+commitments with no evidence behind them, and a reader deciding how much to trust a Trigon verdict
+should read them as such: verdicts are not checked for stability across identical runs, the guard's
+false-positive rate is unmeasured, and every attestation this system signs is signed off a single
+run.
 
 ## 11. Out of scope
 

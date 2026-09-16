@@ -1220,9 +1220,36 @@ registry, and **drops the credentials doing it**. `moment.rs` states the assumpt
 "Credentials in a URL are the one component every client already forwards" — which was true when it
 was written and is no longer true of npm.
 
-The mirror now serves that shape unfiltered, which costs nothing the filter was protecting: an
-artifact's bytes are immutable, so there is no moment to filter them by. Re-running the corpus moved
-reaching a comparison from 94 to 115 and the `unknown` cluster from 50 to 23.
+The first fix served that shape **unfiltered**, on the reasoning that it "costs nothing the filter
+was protecting: an artifact's bytes are immutable, so there is no moment to filter them by".
+Re-running the corpus moved reaching a comparison from 94 to 115 and the `unknown` cluster from 50
+to 23 — and the reasoning was wrong. The filter is not protecting the *bytes*; it is protecting
+*which versions exist*. A route that serves any tarball on request hands a build a version published
+after the pin, which is the one property the time filter exists for, and it reversed an explicit
+case in `seam_controls_fail_closed.rs` — a tarball "which needs no filtering, is refused rather than
+proxied unfiltered". Editing that test to match would have been the control eroding to fit the code
+that broke it.
+
+**So it was narrowed to what a filtered packument had already offered**, remembered per run. That
+held the property and broke a different build shape: npm resolving from a **lockfile** asks for no
+packument at all. It reads `resolved` out of `package-lock.json`, re-bases the path onto the
+configured registry and fetches, so nothing ever offered the path. 23 of 150 npm targets on the
+300-target corpus, every one reported as the package failing.
+
+**The third version asks rather than remembers.** An unoffered tarball sends the mirror to that
+package's packument, applies the same time filter and the same withhold the index route applies, and
+serves the tarball only if that exact version survives. The property is decided by the same code
+that decides it everywhere else rather than by a second implementation that can drift, and the
+fail-closed control passes unedited.
+
+It needed one piece of state, and the need is itself the finding: **the filter rides in credentials
+and npm drops them on a request it composed itself**, so a bare tarball arrives saying nothing about
+which moment applies. `Seen` now remembers the moment an index request filtered to, refusing to
+change it rather than taking the last one — two moments in one run is a bug worth seeing. A build
+that has fetched no packument at all has no moment, and is refused.
+
+Three versions of one route, and the shape of the mistake was the same each time: a control was
+judged against the build in front of it rather than against the property it holds.
 
 **What the remaining unknowns were.** Not one mystery, four causes, each now named from its own log
 line: `npm/workspace-protocol` (4), `net/dependency-from-a-forge` (4), `npm/refuses-npm` (2),

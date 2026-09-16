@@ -202,9 +202,10 @@ debug_assert!(
 );
 ```
 
-The same condition runs as a hard runtime check, a unit test, and a proptest over arbitrary
-stabilizer sets. It makes a stronger and more legible claim than any dependency graph, and it is what
-the attestation reports.
+It is enforced exhaustively rather than by sampling: `trigon-compare/tests/seam_provenance_cap.rs`
+enumerates every `RiskTier × Provenance × side` point, which is a proof over the domain where a
+proptest would be evidence about the same points and strictly weaker. It makes a stronger and more
+legible claim than any dependency graph, and it is what the attestation reports.
 
 **(2) Ban the runtime rather than the crate.** Forbidding `tokio`, `reqwest` and `hyper` from
 `trigon-stabilize`'s transitive tree cuts sharper than forbidding `trigon-ai`, because you cannot

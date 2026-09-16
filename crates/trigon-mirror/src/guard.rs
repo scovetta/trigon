@@ -392,12 +392,49 @@ pub fn voiding(trips: &[Trip], rebuilt: Option<&BTreeSet<Digest>>) -> Vec<Trip> 
         .filter(|t| match &t.matched {
             GuardMatch::WholeArtifact => true,
             GuardMatch::RefusedUrl => false,
+            // **A member inside the toolchain is not evidence of anything.** npm bundles
+            // `minimatch`, `tar`, `semver` and `glob`, and npm ships inside the Node distribution —
+            // so rebuilding any of those downloads a pinned Node tarball that genuinely contains a
+            // copy of the package's own files. The guard was right that the bytes arrived and wrong
+            // about what it meant: the build is entitled to its toolchain, the URL names its own
+            // version, and the host is one of a fixed few. Voiding there means `minimatch` and
+            // `tar` can never be verified at all, which is the shape of a control that gets switched
+            // off in frustration (`docs/12-security.md` §10, invariant 11).
+            //
+            // The *whole* artifact arriving from a toolchain host still voids. That would mean a
+            // pinned toolchain distribution contains this exact published tarball, which is worth
+            // stopping for whatever the explanation.
             GuardMatch::Member { digest } => {
-                rebuilt.is_some_and(|out| out.iter().any(|d| d.to_hex() == *digest))
+                !from_a_toolchain(&t.url)
+                    && rebuilt.is_some_and(|out| out.iter().any(|d| d.to_hex() == *digest))
             }
         })
         .cloned()
         .collect()
+}
+
+/// Whether this URL is one of the pinned toolchain distributions.
+///
+/// Host-only, and deliberately a small fixed list rather than a pattern: the point is that these are
+/// the hosts the mirror's own toolchain route will reach at all, so a trip from one of them is a
+/// fetch this system arranged rather than one the package asked for.
+fn from_a_toolchain(url: &str) -> bool {
+    const HOSTS: &[&str] = &[
+        "nodejs.org",
+        "registry.npmjs.org/npm",
+        "static.rust-lang.org",
+        "www.python.org",
+    ];
+    let Some(rest) = url.split_once("://").map(|(_, r)| r) else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    HOSTS.iter().any(|h| match h.split_once('/') {
+        Some((n, path)) => host == n && rest[n.len()..].starts_with(&format!("/{path}")),
+        None => host == *h,
+    })
 }
 
 /// [`member_digests`] for an artifact on disk, naming its format from the file name.
@@ -1326,5 +1363,63 @@ mod tests {
             GuardManifest::for_artifact(&artifact, Format::TarGz, Some("https://x/y.tgz".into()));
         let text = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<GuardManifest>(&text).unwrap(), m);
+    }
+}
+
+#[cfg(test)]
+mod toolchain_member_tests {
+    use super::{GuardMatch, Trip, voiding};
+    use std::collections::BTreeSet;
+    use trigon_core::Digest;
+
+    fn member(url: &str, d: &Digest) -> Trip {
+        Trip {
+            url: url.into(),
+            matched: GuardMatch::Member { digest: d.to_hex() },
+        }
+    }
+
+    #[test]
+    fn a_member_inside_the_toolchain_does_not_void() {
+        // npm bundles `minimatch`, `tar`, `semver` and `glob`, and npm ships inside the Node
+        // distribution — so a rebuild of any of them downloads a pinned Node tarball that genuinely
+        // contains a copy of the package's own files, and ships those same files in its output.
+        // Both halves of the member rule fire and the verdict was `void`, which means those
+        // packages could never be verified at all.
+        let d = Digest::from_bytes([7; 32]);
+        let out = BTreeSet::from([d]);
+        let t = member(
+            "https://nodejs.org/dist/v25.8.2/node-v25.8.2-linux-x64.tar.gz",
+            &d,
+        );
+        assert!(voiding(&[t], Some(&out)).is_empty());
+    }
+
+    #[test]
+    fn the_same_member_from_anywhere_else_still_voids() {
+        // The control this must not erode: bytes of the artifact under test arriving from a host
+        // the build chose, and reappearing in the output, is the forged-rebuild shape.
+        let d = Digest::from_bytes([7; 32]);
+        let out = BTreeSet::from([d]);
+        for url in [
+            "https://cdn.evil.example/payload.tgz",
+            "https://registry.npmjs.org/minimatch/-/minimatch-10.2.5.tgz",
+            // A lookalike host, and a path on a real toolchain host that is not the toolchain.
+            "https://nodejs.org.evil.example/dist/node.tar.gz",
+            "https://registry.npmjs.org/minimatch",
+        ] {
+            assert_eq!(voiding(&[member(url, &d)], Some(&out)).len(), 1, "{url}");
+        }
+    }
+
+    #[test]
+    fn the_whole_artifact_from_a_toolchain_host_still_voids() {
+        // A pinned toolchain distribution containing this exact published tarball is worth stopping
+        // for whatever the explanation turns out to be.
+        let t = Trip {
+            url: "https://nodejs.org/dist/v25.8.2/node-v25.8.2-linux-x64.tar.gz".into(),
+            matched: GuardMatch::WholeArtifact,
+        };
+        assert_eq!(voiding(&[t], None).len(), 1);
     }
 }

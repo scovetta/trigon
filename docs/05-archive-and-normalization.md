@@ -492,8 +492,13 @@ impl Comparison {
 ```
 
 That makes [`00-overview.md`](00-overview.md) §3.1 executable: a model-influenced normalization
-cannot present as a clean `Normalized`. It runs as a runtime check, a unit test, and a proptest over
-arbitrary stabilizer sets.
+cannot present as a clean `Normalized`.
+
+It is enforced exhaustively rather than by sampling. `trigon-compare/tests/seam_provenance_cap.rs`
+enumerates every `RiskTier × Provenance × side` point, which is a proof over the domain where a
+proptest would be evidence about the same points and strictly weaker — and its classification helper
+is a `match` with no wildcard arm, so a new `RiskTier` or `Provenance` variant fails to compile
+rather than silently passing.
 
 ## 5. The diff report
 

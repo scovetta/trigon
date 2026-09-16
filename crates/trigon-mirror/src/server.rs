@@ -237,6 +237,15 @@ pub struct Seen {
     /// With it, the filter still decides: a build can fetch exactly what the index it was served
     /// offered, and nothing else. A package never indexed in this run is refused as before.
     offered: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// The moment an index request filtered to, remembered for the requests that carry no
+    /// credentials.
+    ///
+    /// The filter rides in the credentials and npm forwards them for a packument and not for a
+    /// tarball it composed itself, so a bare tarball arrives with no moment at all. One mirror
+    /// serves one build against one moment, so the moment the index used is the moment that
+    /// applies — and `note_moment` refuses to change it rather than quietly taking the last one,
+    /// because two moments in one run is a bug worth seeing.
+    moment: std::sync::Mutex<Option<String>>,
     exchanges: std::sync::Mutex<Vec<crate::Exchange>>,
     refusals: std::sync::Mutex<Vec<crate::Refusal>>,
     truncated: AtomicU64,
@@ -284,6 +293,29 @@ impl Seen {
     /// `Observed::from_transcript` over it would undercount — which the counters would not.
     pub fn truncated(&self) -> u64 {
         self.truncated.load(Ordering::Relaxed)
+    }
+
+    /// Remember the moment the index filtered to, the first time one is seen.
+    fn note_moment(&self, moment: &str) {
+        if moment.is_empty() {
+            return;
+        }
+        if let Ok(mut m) = self.moment.lock() {
+            match m.as_deref() {
+                None => *m = Some(moment.to_string()),
+                Some(first) if first != moment => tracing::warn!(
+                    first,
+                    now = moment,
+                    "two moments in one run; the first is the one a credential-less request uses"
+                ),
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// The moment this run is pinned to, if any index request has said.
+    fn moment(&self) -> Option<String> {
+        self.moment.lock().ok().and_then(|m| m.clone())
     }
 
     /// Record a tarball path the filtered index just offered.
@@ -510,17 +542,33 @@ async fn serve_one(mirror: &Mirror, req: Request) -> Result<Response, MirrorErro
     //
     // The upstream is **hardcoded** to the npm registry rather than read from the path, so this
     // route reaches exactly one host, and the guard still hashes every byte.
-    if is_npm_tarball(&path_now) && mirror.seen.was_offered(&path_now) {
-        mirror
-            .stats
-            .passthrough_requests
-            .fetch_add(1, Ordering::Relaxed);
-        let url = format!("{}{path_now}{query_now}", Platform::Npm.upstream());
-        let filter = Filter {
-            platform: Platform::Npm,
-            moment: String::new(),
-        };
-        return proxy(mirror, &url, &filter, "artifact").await;
+    if is_npm_tarball(&path_now) {
+        // **Offered, or provably offerable.** The offered set covers a build that resolved through
+        // the index: every packument this mirror filtered handed out its surviving tarballs and
+        // remembered them. A build that resolves from a **lockfile** asks for none of those
+        // packuments — npm reads `resolved` straight out of `package-lock.json`, re-bases it onto
+        // the configured registry and fetches — so nothing ever offered the path and every such
+        // build was refused. That was 23 of 150 targets on the npm corpus, all reported as the
+        // package failing.
+        //
+        // Serving any tarball on request is the hole this gate was added to close, so the answer
+        // is to *answer the question the gate was standing in for*: ask the index whether this
+        // exact version survives the filter, and serve it only if it does. Same property, arrived
+        // at by asking rather than by remembering.
+        let offerable =
+            mirror.seen.was_offered(&path_now) || filtered_index_offers(mirror, &path_now).await;
+        if offerable {
+            mirror
+                .stats
+                .passthrough_requests
+                .fetch_add(1, Ordering::Relaxed);
+            let url = format!("{}{path_now}{query_now}", Platform::Npm.upstream());
+            let filter = Filter {
+                platform: Platform::Npm,
+                moment: String::new(),
+            };
+            return proxy(mirror, &url, &filter, "artifact").await;
+        }
     }
 
     // Toolchains, likewise before the auth check and for a stronger reason: there is nothing to
@@ -587,6 +635,7 @@ async fn npm_request(
         return proxy(mirror, &url, filter, "artifact").await;
     }
 
+    mirror.seen.note_moment(&filter.moment);
     let resp = fetch(mirror, &url, filter, &[]).await?;
     let mut doc: serde_json::Value = resp.json().await?;
     let removed = crate::npm::filter_packument(&mut doc, &filter.moment);
@@ -810,6 +859,71 @@ async fn toolchain(mirror: &Mirror, rest: &str, query: &str) -> Result<Response,
 /// match.
 fn is_npm_tarball(path: &str) -> bool {
     path.contains("/-/") && path.ends_with(".tgz")
+}
+
+/// The package and version a bare npm tarball path names.
+///
+/// `/yocto-queue/-/yocto-queue-0.1.0.tgz` is `("yocto-queue", "0.1.0")`, and
+/// `/@babel/core/-/core-7.28.5.tgz` is `("@babel/core", "7.28.5")` — the filename repeats only the
+/// *last* segment of a scoped name, which is why the version cannot be taken by trimming the whole
+/// package name off the front.
+fn npm_tarball_coords(path: &str) -> Option<(String, String)> {
+    let (name, file) = path.trim_start_matches('/').split_once("/-/")?;
+    let stem = file.strip_suffix(".tgz")?;
+    let last = name.rsplit('/').next()?;
+    let version = stem.strip_prefix(last)?.strip_prefix('-')?;
+    (!name.is_empty() && !version.is_empty()).then(|| (name.to_string(), version.to_string()))
+}
+
+/// Whether the filtered index would have offered this exact tarball.
+///
+/// Fetches the packument, applies the same time filter and the same withhold the index route
+/// applies, and asks whether the version is still there. A version published after the pinned
+/// moment is not, and neither is the artifact under test — so the two properties this route must
+/// not lose are decided by the same code that decides them everywhere else, rather than by a second
+/// implementation that can drift.
+///
+/// Answering `false` on any failure to ask: an upstream that will not tell us is not permission.
+async fn filtered_index_offers(mirror: &Mirror, path: &str) -> bool {
+    let Some((name, version)) = npm_tarball_coords(path) else {
+        return false;
+    };
+    // No index request has been filtered yet, so there is no moment to filter against and this
+    // route must not become a way to fetch anything at all.
+    let Some(moment) = mirror.seen.moment() else {
+        tracing::info!(%name, "refused: nothing has pinned a moment in this run yet");
+        return false;
+    };
+    let filter = Filter {
+        platform: Platform::Npm,
+        moment,
+    };
+    let url = format!("{}/{name}", Platform::Npm.upstream());
+    let Ok(resp) = fetch(mirror, &url, &filter, &[]).await else {
+        tracing::debug!(%name, "could not ask the index about a lockfile tarball");
+        return false;
+    };
+    let Ok(mut doc) = resp.json::<serde_json::Value>().await else {
+        return false;
+    };
+    crate::npm::filter_packument(&mut doc, &filter.moment);
+    if let Some(w) = mirror.guard.withheld() {
+        crate::npm::withhold_version(&mut doc, w);
+    }
+    let offers = doc
+        .get("versions")
+        .and_then(|v| v.as_object())
+        .is_some_and(|v| v.contains_key(&version));
+    match offers {
+        // Remembered, so a repeat costs no upstream round trip and the account of what this mirror
+        // offered stays complete.
+        true => mirror.seen.offer(path),
+        false => tracing::info!(
+            %name, %version,
+            "refused: the index at this moment does not offer that version"
+        ),
+    }
+    offers
 }
 
 fn authority(filter: &Filter, host: &str) -> String {
@@ -1217,5 +1331,61 @@ mod npm_tarball_route_tests {
         // Both halves are required.
         assert!(!is_npm_tarball("/yocto-queue/-/yocto-queue-0.1.0.tar.gz"));
         assert!(!is_npm_tarball("/yocto-queue-0.1.0.tgz"));
+    }
+}
+
+#[cfg(test)]
+mod lockfile_tarball_tests {
+    use super::npm_tarball_coords;
+
+    #[test]
+    fn a_bare_tarball_path_names_its_package_and_version() {
+        // The shape npm composes for itself when it resolves from a lockfile: it reads `resolved`
+        // out of `package-lock.json`, re-bases the path onto the configured registry, and drops the
+        // credentials — so nothing about the request says which package or which moment.
+        for (path, name, version) in [
+            (
+                "/yocto-queue/-/yocto-queue-0.1.0.tgz",
+                "yocto-queue",
+                "0.1.0",
+            ),
+            (
+                "/xmlhttprequest-ssl/-/xmlhttprequest-ssl-2.1.1.tgz",
+                "xmlhttprequest-ssl",
+                "2.1.1",
+            ),
+            // A scoped name repeats only its *last* segment in the filename, so the version cannot
+            // be taken by trimming the whole package name off the front.
+            ("/@babel/core/-/core-7.28.5.tgz", "@babel/core", "7.28.5"),
+            // Prereleases and build metadata are part of the version, not separators.
+            ("/pkg/-/pkg-1.0.0-rc.1.tgz", "pkg", "1.0.0-rc.1"),
+            // A name that itself contains a dash, which is most of them.
+            (
+                "/zod-to-json-schema/-/zod-to-json-schema-3.24.5.tgz",
+                "zod-to-json-schema",
+                "3.24.5",
+            ),
+        ] {
+            assert_eq!(
+                npm_tarball_coords(path),
+                Some((name.to_string(), version.to_string())),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_that_is_not_a_tarball_path_names_nothing() {
+        // Refusing to parse is refusing to serve: `filtered_index_offers` answers `false` on `None`
+        // rather than guessing a package name out of an unfamiliar shape.
+        for path in [
+            "/yocto-queue",            // a packument, not a tarball
+            "/-/all",                  // no package name
+            "/pkg/-/pkg-1.0.0.tar.gz", // not a .tgz
+            "/pkg/-/other-1.0.0.tgz",  // the filename does not belong to the package
+            "/pkg/-/pkg.tgz",          // no version
+        ] {
+            assert_eq!(npm_tarball_coords(path), None, "{path}");
+        }
     }
 }

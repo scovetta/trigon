@@ -9,3 +9,6 @@
 /fuzz/Cargo.lock
 /work
 /trigon-store
+
+# Worktrees a forked session creates. They are checkouts of this repository, not content of it.
+.claude/worktrees/
