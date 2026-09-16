@@ -428,3 +428,44 @@ fn the_fix_command_a_failing_build_prints_is_one_this_binary_accepts() {
         }
     }
 }
+
+#[test]
+fn runs_prints_the_id_first_and_the_target_second() {
+    // `scripts/rebuild-and-attest.sh` decides *which run to sign* by reading these two columns:
+    // `$1` to tell the run this invocation made from the ones the store already held, and `$2` to
+    // check it is about the package that was asked for. Both are load-bearing — before that check
+    // existed, asking for a NuGet package that produced no record signed a statement about
+    // whatever ran last. If this output ever grows a column on the left, that script silently goes
+    // back to signing the wrong thing, so the order is pinned here rather than left to notice.
+    let d = dir("runs");
+    let store = d.join("store");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let id = rt.block_on(store_with_a_run(&store));
+
+    let out = Command::new(bin())
+        .args(["runs", "--store"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next().expect("one run");
+    let mut fields = line.split_whitespace();
+    assert_eq!(
+        fields.next(),
+        Some(id.as_str()),
+        "column 1 is the run id: {line}"
+    );
+    assert_eq!(
+        fields.next(),
+        Some("pkg:npm/demo@1.0.0"),
+        "column 2 is the target: {line}"
+    );
+}

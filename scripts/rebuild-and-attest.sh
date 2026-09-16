@@ -120,6 +120,10 @@ fi
 # attestor reads back are written there, and a run without it leaves the attestor nothing.
 # ---------------------------------------------------------------------------------------------
 
+# Which runs the store already held. The run to attest is the one *this* invocation produced, and
+# the only way to know which that is, is to know which were there before.
+RUNS_BEFORE="$("$TRIGON" runs --store "$STORE" 2>/dev/null | awk '$1 != "no" { print $1 }' | sort)"
+
 say "rebuilding $PURL"
 printf '  image   %s\n  egress  %s\n  store   %s\n  work    %s\n' \
     "$IMAGE" "$EGRESS" "$STORE" "$WORK"
@@ -139,14 +143,39 @@ set -e
 # the comparison is unwrapped, so a build failure, a void, a `no-strategy` and an error of ours
 # write no record at all — and a divergence writes one and exits non-zero. The store is what says
 # whether there is anything to attest, so ask it rather than the exit code.
-LATEST="$("$TRIGON" runs --store "$STORE" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+# **The run this invocation made, not the newest run in the store.** Those are the same thing only
+# when the store starts empty, and taking the newest meant that a target which produced no record —
+# a `no-strategy`, a build failure — silently attested and signed whatever ran last. Asked for a
+# NuGet package, this script signed a statement about a left-pad run from an hour earlier. Nothing
+# in the statement was false, which is what made it dangerous: the operator asked about one package
+# and was handed a signed claim about another.
+RUNS_AFTER="$("$TRIGON" runs --store "$STORE" 2>/dev/null | awk '$1 != "no" { print $1 }' | sort)"
+LATEST="$(comm -13 <(printf '%s\n' "$RUNS_BEFORE") <(printf '%s\n' "$RUNS_AFTER") | awk 'NF' | tail -1)"
+
+# And, independently, that it is about the package that was asked for. Two checks rather than one
+# because they fail differently: the first catches a run that produced nothing, the second catches
+# a store being written by something else at the same time.
+if [ -n "$LATEST" ]; then
+    RAN_TARGET="$("$TRIGON" runs --store "$STORE" 2>/dev/null |
+                  awk -v id="$LATEST" '$1 == id { print $2 }')"
+    if [ "$RAN_TARGET" != "$PURL" ]; then
+        say "refusing to attest"
+        printf 'The new run in the store is for `%s`, and this invocation asked for `%s`.\n' \
+               "$RAN_TARGET" "$PURL" >&2
+        printf 'Refusing to sign a statement about a package nobody asked about.\n' >&2
+        exit 1
+    fi
+fi
 
 if [ "$LATEST" = "no" ] || [ -z "$LATEST" ]; then
     say "nothing to attest"
     cat >&2 <<'WHY'
-The run wrote no store record, which means it did not reach a comparison: a build failure, a
+This run wrote no store record, which means it did not reach a comparison: a build failure, a
 `no-strategy`, a void, or an error of ours. Nothing may be signed about a run that is evidence of
 nothing, so this is the system working rather than a missing step.
+
+The store may well hold other runs, including successful ones. None of them is this run, and none
+of them is what you asked about.
 
   <work>/run.json      what happened, and why — `declines` names the rung that said no
   <work>/rebuild/      the container's own log and its network transcript
