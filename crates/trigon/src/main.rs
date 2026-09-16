@@ -2974,6 +2974,12 @@ mod rebuild {
             .and_then(|b| b.transcript.as_ref())
             .map(|t| t.iter().map(|e| e.bytes).sum());
         report.inference_seconds = model.as_ref().and_then(|m| m.inference_seconds());
+        // **Beside the tokens, because they are two facts about one provider.** `model_calls` was
+        // set only at the success return, past every early return a failing run takes — so a repair
+        // that spent 8345 input and 9325 output tokens and then failed recorded `model_calls: 0`.
+        // A counter that reads zero while tokens flow makes `docs/07-ai.md` §8's invocation rate,
+        // which is supposed to trend down, a number about nothing.
+        report.model_calls = calls(&model);
         if calls(&model) > 0 {
             let u = model.as_ref().map(|m| m.spent()).unwrap_or_default();
             report.tokens_in = Some(u.input);

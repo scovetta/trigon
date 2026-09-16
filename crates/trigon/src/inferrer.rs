@@ -213,6 +213,8 @@ impl Inputs {
             failure,
             log,
             divergence: None,
+            // Set only by `ask_until_it_parses`, on the second ask.
+            rejected: None,
         }
     }
 }
@@ -550,12 +552,47 @@ impl Configured {
     ) -> Result<trigon_strategy::Strategy> {
         let mut task = inputs.task(Some(previous), None, None);
         task.divergence = Some(divergence);
-        let proposed = trigon_ai::propose(self.provider.as_ref(), &self.model, &task)
-            .context("asking about a divergence")?;
-        trigon_strategy::from_yaml(&proposed.strategy).with_context(|| {
+        self.ask_until_it_parses(&task, "asking about a divergence")
+    }
+
+    /// Ask, and where the answer will not parse as a strategy, say why and ask once more.
+    ///
+    /// **The message is the whole value here.** `docs/04-strategies.md` §2.2 calls
+    /// `serde_path_to_error` the highest-return dependency in the design because it produces
+    /// `flow.location.path: unknown field `path`, expected one of `repo`, `ref`, `subdir`` rather
+    /// than "data did not match any variant" — and `Candidate::strategy`'s own doc comment says a
+    /// model that emits something unparseable "gets the `serde_path_to_error` path back as its next
+    /// input". It did not. The message was wrapped in a `context` line, logged, and the repair
+    /// ended.
+    ///
+    /// A real one: a model diagnosed `xstate` correctly — the root build script builds every
+    /// workspace, and the published package comes from `packages/core` — and wrote
+    /// `location.path` for what the schema calls `subdir`. One sentence from a usable answer, and
+    /// the whole iteration was thrown away instead of spending it.
+    ///
+    /// Once, not twice. The plan's stop rule is that a repeated failure signature ends the attempt,
+    /// and a model that cannot fix a named field with the error in hand will not on a third try.
+    fn ask_until_it_parses(
+        &self,
+        task: &trigon_ai::Task<'_>,
+        asking: &'static str,
+    ) -> Result<trigon_strategy::Strategy> {
+        let first =
+            trigon_ai::propose(self.provider.as_ref(), &self.model, task).context(asking)?;
+        let why = match trigon_strategy::from_yaml(&first.strategy) {
+            Ok(s) => return Ok(s),
+            Err(e) => e.to_string(),
+        };
+        tracing::debug!("the answer did not parse, asking again with the reason: {why}");
+
+        let mut again = task.clone();
+        again.rejected = Some(&why);
+        let second =
+            trigon_ai::propose(self.provider.as_ref(), &self.model, &again).context(asking)?;
+        trigon_strategy::from_yaml(&second.strategy).with_context(|| {
             format!(
-                "the proposal did not parse as a strategy. The model said: {}",
-                first_line(&proposed.diagnosis)
+                "the proposal did not parse as a strategy, twice. The model said: {}",
+                first_line(&second.diagnosis)
             )
         })
     }
@@ -574,14 +611,7 @@ impl Configured {
         log: &str,
     ) -> Result<trigon_strategy::Strategy> {
         let task = inputs.task(Some(previous), Some(failure), Some(log));
-        let proposed = trigon_ai::propose(self.provider.as_ref(), &self.model, &task)
-            .context("asking for a repair")?;
-        trigon_strategy::from_yaml(&proposed.strategy).with_context(|| {
-            format!(
-                "the repair did not parse as a strategy. The model said: {}",
-                first_line(&proposed.diagnosis)
-            )
-        })
+        self.ask_until_it_parses(&task, "asking for a repair")
     }
 
     pub fn rung(&self) -> ModelInferrer {

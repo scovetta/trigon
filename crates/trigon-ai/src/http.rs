@@ -324,6 +324,20 @@ pub struct Anthropic {
 /// "whatever is current" is not a thing a request can ask for.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// How hard the model should think, where it is asked to.
+///
+/// **`medium`, and the reason is measured.** `output_config.effort` is the depth lever on current
+/// models — a token budget is not, and no longer exists — and adaptive thinking scales what it
+/// spends to the room it is given. At the API's default of `high` a repair spent 16,379 of 16,384
+/// output tokens reasoning and was cut off before writing anything, so raising the ceiling raises
+/// the thinking and does not reach the answer. Lowering the effort is what leaves room.
+///
+/// The task suits it: a strategy document is a bounded answer against a shape stated in the prompt,
+/// and the diagnosis that came back from the truncated call was already correct — the reasoning was
+/// not short of depth, it was short of a stopping point. `docs/07-ai.md` §5 wants the cheaper
+/// setting wherever quality holds, and this is the dial it means.
+const ANTHROPIC_EFFORT: &str = "medium";
+
 /// Hosted, so ten minutes is the right bound: past that it is a fault rather than a slow model.
 const ANTHROPIC_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -366,6 +380,29 @@ impl Anthropic {
             "system": system,
             "messages": [{"role": "user", "content": content}],
         });
+        // **Thinking is stated, never inherited — and its depth is not a token budget.** A model
+        // that reasons by default can exhaust `max_tokens` before writing a word: a real repair
+        // came back as one `thinking` block with `stop_reason: max_tokens`, 4095 of 4096 tokens
+        // spent, and no answer. The comment beside the response parser asserted this could not
+        // happen "unless `thinking` is set on the request, and it is not set here" — true of the
+        // model that code was written against and false of every current one.
+        //
+        // `adaptive`, because `{"type": "enabled", "budget_tokens": N}` is **removed** on these
+        // models and answers 400 — which is how the first attempt at this fix failed, written from
+        // a stale prior rather than from the current API. Depth is `output_config.effort` below;
+        // a pre-4.6 model takes the old budget form and is not supported here, which its own 400
+        // says plainly.
+        body["thinking"] = match req.reasoning {
+            Reasoning::Off => json!({"type": "disabled"}),
+            // `display` defaults to `omitted`, which returns the trace's signature with its text
+            // blank. `docs/07-ai.md` §7 wants the reasoning recorded as the evidence behind a
+            // `derivation: model_assisted`, and an empty string is not evidence. Thinking is
+            // billed the same either way — `display` controls visibility, not work.
+            Reasoning::Default => json!({"type": "adaptive", "display": "summarized"}),
+        };
+        // Merged rather than assigned: the schema below writes into the same object, and whichever
+        // ran second would otherwise drop the other.
+        body["output_config"] = json!({"effort": ANTHROPIC_EFFORT});
         // Sampling parameters are **removed** on the current models and answer 400, so temperature
         // is sent only where something asked for one. Zero, which is every request this system
         // makes, is what those models do anyway.
@@ -373,9 +410,9 @@ impl Anthropic {
             body["temperature"] = json!(req.temperature);
         }
         if let Some(schema) = &req.schema {
-            body["output_config"] = json!({
-                "format": {"type": "json_schema", "schema": schema},
-            });
+            // Into the object, not over it. Assigning here would drop the effort set above, and
+            // the two have nothing to do with each other beyond sharing a field.
+            body["output_config"]["format"] = json!({"type": "json_schema", "schema": schema});
         }
         body
     }
@@ -407,16 +444,6 @@ impl Provider for Anthropic {
             ANTHROPIC_TIMEOUT,
         )?;
 
-        // The first text block. A response may also carry thinking blocks, which are not the
-        // answer and must not be concatenated into it.
-        let text = doc["content"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|b| b["type"] == "text")
-            .and_then(|b| b["text"].as_str())
-            .ok_or_else(|| LlmError::Malformed(format!("no text block in {doc}")))?;
-
         let stop = doc["stop_reason"].as_str().unwrap_or("unknown").to_string();
         // A decline is an outcome with a reason attached, not a malformed answer. Reported as one
         // so a run says "the provider refused" rather than "the provider is broken".
@@ -428,14 +455,61 @@ impl Provider for Anthropic {
                     .to_string(),
             ));
         }
+        // **Before the text is looked for, because it explains the text not being there.** This
+        // check sat *after* the extraction below, so a response that spent its whole budget
+        // thinking failed as `no text block` — with the field naming the cause sitting unread two
+        // lines further down.
+        if stop == "max_tokens" {
+            let thought = doc["usage"]["output_tokens_details"]["thinking_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+            return Err(LlmError::Truncated {
+                limit: req.max_output_tokens,
+                thinking: thought,
+            });
+        }
+
+        // The first text block. A response may also carry thinking blocks, which are not the
+        // answer and must not be concatenated into it.
+        let text = doc["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|b| b["type"] == "text")
+            .and_then(|b| b["text"].as_str())
+            // **The block types, never the document.** This printed the whole response, and a
+            // reasoning trace carries a multi-kilobyte signature — so the one useful fact arrived
+            // wrapped in thirty kilobytes of base64 that pushed it off the screen.
+            .ok_or_else(|| {
+                let kinds: Vec<&str> = doc["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|b| b["type"].as_str())
+                    .collect();
+                LlmError::Malformed(format!(
+                    "no text block: the answer carried [{}] and stopped for `{stop}`",
+                    kinds.join(", ")
+                ))
+            })?;
 
         let usage = &doc["usage"];
         let read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
         Ok(Response {
             text: text.to_string(),
-            // Extended thinking is off unless `thinking` is set on the request, and it is not set
-            // here, so there is no trace to keep rather than one being dropped.
-            reasoning: None,
+            // The trace, where the model produced one. It used to be `None` on the stated grounds
+            // that thinking "is not set here" — which stopped being true the moment a model
+            // reasoned by default, and the trace was being dropped rather than never existing.
+            // `docs/07-ai.md` §7 wants it recorded: a transcript is the evidence behind a
+            // `derivation: model_assisted`, and reasoning is most of what the model did.
+            reasoning: doc["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|b| b["type"] == "thinking")
+                .and_then(|b| b["thinking"].as_str())
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
             usage: Usage {
                 // Anthropic reports the cached and written parts *alongside* the uncached input, so
                 // the total this system records is their sum. Reading `input_tokens` alone
@@ -548,6 +622,71 @@ mod tests {
         OpenAiCompatible::new("http://x/v1", None, flavor)
             .unwrap()
             .body(&probe("operator instructions"))
+    }
+
+    fn anthropic_body(max: u32, reasoning: Reasoning) -> Value {
+        let mut req = probe("operator instructions");
+        req.max_output_tokens = max;
+        req.reasoning = reasoning;
+        Anthropic::new("k".to_string(), Some("http://x".to_string()))
+            .unwrap()
+            .body(&req)
+    }
+
+    #[test]
+    fn thinking_is_adaptive_and_never_a_token_budget() {
+        // Two failures in one test. A model that reasons by default exhausted `max_tokens` before
+        // writing a word — one `thinking` block, `stop_reason: max_tokens`, 4095 of 4096 spent —
+        // and the first fix for *that* sent `{"type": "enabled", "budget_tokens": N}`, which these
+        // models removed and answer 400 to:
+        //
+        //   "thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive"
+        //   and "output_config.effort" to control thinking behavior.
+        let b = anthropic_body(16_384, Reasoning::Default);
+        assert_eq!(b["thinking"]["type"], "adaptive");
+        assert!(
+            b["thinking"]["budget_tokens"].is_null(),
+            "a token budget is the removed form, whatever its value: {}",
+            b["thinking"]
+        );
+        // Depth is `effort`, and it lives *inside* `output_config` rather than at the top level.
+        assert_eq!(b["output_config"]["effort"], ANTHROPIC_EFFORT);
+        // And below the API's default, because adaptive thinking scales to the room it is given:
+        // at `high` a repair spent 16,379 of 16,384 output tokens reasoning and never answered.
+        assert_ne!(
+            ANTHROPIC_EFFORT, "high",
+            "raising the ceiling is not the lever"
+        );
+    }
+
+    #[test]
+    fn a_schema_and_an_effort_share_output_config_rather_than_replacing_it() {
+        // Both write into one object. Assigning rather than merging would silently drop whichever
+        // ran first, and the loss is invisible — the request stays valid and does something else.
+        let b = anthropic_body(16_384, Reasoning::Default);
+        assert_eq!(b["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(b["output_config"]["effort"], ANTHROPIC_EFFORT);
+    }
+
+    #[test]
+    fn the_trace_is_asked_for_in_a_form_that_has_text_in_it() {
+        // `display` defaults to `omitted`, which returns the signature with the text blank — which
+        // is what the failing response carried. A transcript is the evidence behind a
+        // `derivation: model_assisted`, and an empty string is not evidence.
+        assert_eq!(
+            anthropic_body(16_384, Reasoning::Default)["thinking"]["display"],
+            "summarized"
+        );
+    }
+
+    #[test]
+    fn reasoning_off_is_said_rather_than_ignored() {
+        // `req.reasoning` was honoured by the Ollama flavour alone. This client dropped it and
+        // inherited whatever the model does by default, which is how the trace arrived unasked.
+        assert_eq!(
+            anthropic_body(16_384, Reasoning::Off)["thinking"]["type"],
+            "disabled"
+        );
     }
 
     #[test]

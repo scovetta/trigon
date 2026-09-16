@@ -195,6 +195,15 @@ impl Usage {
 pub enum LlmError {
     #[error("no model is configured for the `{0}` role")]
     NoModel(String),
+    /// The answer did not fit. Distinct from `Malformed`, which says the provider is broken: this
+    /// says the budget was too small, which is ours to fix and says exactly how.
+    #[error(
+        "the answer did not fit in {limit} output tokens ({thinking} of them spent on reasoning). \
+         Adaptive thinking scales to the room it is given, so raising `max_output_tokens` raises \
+         the reasoning with it: lower `output_config.effort` instead, or ask the provider for \
+         `Reasoning::Off`."
+    )]
+    Truncated { limit: u32, thinking: u64 },
     #[error("the provider refused: {0}")]
     Refused(String),
     #[error("the provider returned {status}: {body}")]
@@ -213,6 +222,10 @@ impl trigon_core::Classify for LlmError {
             LlmError::Refused(_) => trigon_core::Fault::Policy,
             LlmError::Http { .. } | LlmError::Transport(_) => trigon_core::Fault::Infra,
             LlmError::Malformed(_) => trigon_core::Fault::Upstream,
+            // **Ours, not the provider's.** The model answered exactly as asked; the budget we
+            // gave it was too small for the answer we wanted. Charging this upstream would put a
+            // configuration mistake of ours in a column about somebody else's reliability.
+            LlmError::Truncated { .. } => trigon_core::Fault::Bug,
         }
     }
 
@@ -236,6 +249,10 @@ impl trigon_core::Classify for LlmError {
             // parseable one next time — but the repair loop already owns that decision and has a
             // budget for it, and treating it as transport-level would retry inside the retry.
             LlmError::Malformed(_) => false,
+            // The same budget produces the same truncation. Retrying spends tokens to reach the
+            // identical wall, which is the shape `docs/07-ai.md` §5's "if the failure signature
+            // repeats twice, abort" exists to stop.
+            LlmError::Truncated { .. } => false,
         }
     }
 }

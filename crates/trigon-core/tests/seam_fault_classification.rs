@@ -799,3 +799,37 @@ fn the_container_forms_of_the_environment_failures_match_too() {
     assert_eq!(upper.code, lower.code);
     assert_eq!(upper.fault, lower.fault);
 }
+
+#[test]
+fn a_workspace_member_missing_its_sibling_is_named_rather_than_called_a_peer_conflict() {
+    // `classify` scans backwards for the last line a rule claims. With no rule for this one the
+    // scan ran past it to `npm WARN ERESOLVE` — which npm prints on installs that *succeed* —
+    // thousands of lines earlier. So `xstate`'s workspace link error was reported as
+    // `npm/peer-conflict`, and the repair loop spent a model call fixing a peer conflict that was
+    // never the failure.
+    let log = "npm WARN ERESOLVE overriding peer dependency\n\
+        npm WARN deprecated q@1.5.1: You or someone you depend on is using Q\n\
+        npm ERR! code 1\n\
+        npm ERR! path /src/packages/xstate-analytics\n\
+        npm ERR! > tsc\n\
+        npm ERR! src/index.ts(3,26): error TS2307: Cannot find module 'xstate' or its \
+        corresponding type declarations.";
+    let s = classify(log);
+    assert_eq!(s.code, "npm/workspace-unbuilt-sibling");
+    assert_eq!(
+        s.subject.as_deref(),
+        Some("xstate"),
+        "the sibling that needed building first is what a reader has to know"
+    );
+    // Ours: the published tarball came from a build that had the whole workspace linked, and the
+    // recipe builds a member as though it stood alone.
+    assert!(!s.fault.is_about_the_package());
+}
+
+#[test]
+fn a_real_peer_conflict_is_still_a_peer_conflict() {
+    // The rule above must not swallow the one below it. An ERESOLVE that actually stopped the
+    // install is still what it was.
+    let s = classify("npm ERR! code ERESOLVE\nnpm ERR! ERESOLVE unable to resolve dependency tree");
+    assert_eq!(s.code, "npm/peer-conflict");
+}
