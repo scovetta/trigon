@@ -304,7 +304,7 @@ implementation, or lives behind an async façade in a crate below the line.
 
 | Implementation | Use | Built |
 |---|---|---|
-| **keyed, under a trusted root** — a key we hold, a certificate chaining to a published root, every signature logged to Rekor | The default for public instances ([ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md)) | no |
+| **keyed, under a trusted root** — a key we hold, a certificate chaining to a published root, every signature logged to Rekor | The default for public instances ([ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md)) | partly — the envelope carries a chain and the log entry is real; nothing validates the chain to a root yet ([B21](17-backlog.md#b21-keyed-signing-under-a-trusted-root-and-the-rekor-client)) |
 | **cloud KMS** (AWS, GCP, Azure) holding the intermediate | Where the chain above is issued from in a fleet | no |
 | **local file key** (`ed25519-dalek`) | Development and air-gapped use. Produces an *unchained* statement and says so. | **yes** |
 | **unsigned** | We still emit statements, and they still help locally | **yes** |
@@ -324,7 +324,38 @@ the log is append-only and publicly auditable. Skipping that check silently redu
 to a pinned public key with extra ceremony.
 
 Rekor accepts an entry signed by any key or certificate and does not require Fulcio, which is what
-makes "their log, our CA" a coherent position rather than a hybrid.
+makes "their log, our CA" a coherent position rather than a hybrid. Staging confirmed it for the
+shape we actually emit: an ed25519 key under a self-issued certificate is accepted.
+
+#### What exporting to the log looks like today
+
+`trigon attest --rekor <log-url>` publishes each envelope it signs, and needs `--key` — an unsigned
+statement has nothing for a log to be evidence about, and the flag errors rather than quietly
+logging nothing. The URL is required because there is no default: a default of
+`rekor.sigstore.dev` would make the append-only public log the thing you get by not thinking about
+it, and a malformed entry there is public and permanent. Reach for `https://rekor.sigstage.dev`
+until the entry shape is settled.
+
+The entry is `intoto` **v0.0.1**, not v0.0.2 — the envelope goes in as a serialized JSON *string*
+with the certificate as a sibling `spec.publicKey`. A duplicate submission returns `409` carrying
+the UUID of the existing entry, which we fetch and store, so retrying after a timeout is safe
+rather than a second entry for the same statement.
+
+What comes back is stored on the run as `RunRecord.transparency`: the log's URL, the entry UUID,
+`logIndex`, `integratedTime`, `logID`, the `signedEntryTimestamp`, and `body` verbatim as the log
+returned it. Verbatim matters — the SET covers the log's own serialization, and a re-encoding that
+differs by one byte verifies against nothing.
+
+**Verification of that SET is below the judgement line**, in `trigon-attest::transparency`, so the
+`--no-default-features` verifier checks it without linking a network client: it is ECDSA P-256 over
+RFC 8785 JCS of exactly `{body, integratedTime, logID, logIndex}`, and the log's public key should
+be pinned rather than fetched at verification time — fetching it from the log that produced the
+signature asks the log to vouch for itself.
+
+The gap worth naming: the SET yields a time, and **nothing consumes that time yet**, because
+certificate validity windows arrive with B21 steps 4-5. Until then the log entry is an auditable
+public record of when we said what, which is worth having, but it is not yet the thing that bounds
+a compromise of the signing key.
 
 **We hand-write the attestation layer.** The Rust `in-toto` crate does not work, the `sigstore`
 crate is incomplete and churning, and RFC 8785 JCS canonicalization sits in the signing path, so we

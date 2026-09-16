@@ -19,12 +19,42 @@ pub struct Envelope {
     pub signatures: Vec<Signature>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Signature {
     /// Base64. Empty when the bundle was produced unsigned.
     pub sig: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub keyid: String,
+    /// The certificate chain this signature was made under, PEM, **leaf first**.
+    ///
+    /// Absent for a signature verified against a pinned public key, which is what `LocalKey`
+    /// produces and what every bundle written before [ADR-0011] contains — so an old bundle keeps
+    /// verifying exactly as it did, and a `--root` verification of one fails for the honest reason
+    /// that there is no chain rather than for a parse error.
+    ///
+    /// Leaf first because that is the order every X.509 consumer expects and the order a chain
+    /// builder walks: the leaf carries the public key that made this signature, and each
+    /// certificate after it issued the one before.
+    ///
+    /// [ADR-0011]: ../../../docs/adr/0011-keyed-signing-under-a-trusted-root.md
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<String>,
+}
+
+impl Signature {
+    /// Whether this signature carries a chain to validate rather than a key to pin.
+    ///
+    /// The two verification paths are different claims and a verifier must not silently take the
+    /// weaker one: a chained signature checked against `--public-key` proves the bytes were signed
+    /// by *a* key and says nothing about whose.
+    pub fn is_chained(&self) -> bool {
+        !self.chain.is_empty()
+    }
+
+    /// The leaf, which holds the public key that made this signature.
+    pub fn leaf(&self) -> Option<&str> {
+        self.chain.first().map(String::as_str)
+    }
 }
 
 /// The pre-authentication encoding: `DSSEv1 <len> <type> <len> <payload>`.
@@ -106,6 +136,7 @@ mod tests {
             vec![Signature {
                 sig: String::new(),
                 keyid: "k".into(),
+                ..Default::default()
             }],
         );
         assert!(!e.is_signed());

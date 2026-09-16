@@ -21,6 +21,10 @@ sha2.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
 base64.workspace = true
+# Rekor signs its entry timestamps with ECDSA P-256, so verifying one needs a curve
+# `ed25519-dalek` does not have. Pure crypto and no runtime, which is what keeps it on this side of
+# the judgement line — the verifier must link no network client, not no mathematics.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "std"] }
 
 [dev-dependencies]
 tar = "0.4"

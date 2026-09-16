@@ -32,10 +32,7 @@ impl Signer for Unsigned {
         String::new()
     }
     fn sign(&self, _pae: &[u8]) -> Result<Signature, AttestError> {
-        Ok(Signature {
-            sig: String::new(),
-            keyid: String::new(),
-        })
+        Ok(Signature::default())
     }
 }
 
@@ -79,6 +76,31 @@ impl LocalKey {
     pub fn public_hex(&self) -> String {
         hex(self.key.verifying_key().as_bytes())
     }
+
+    /// The public key as SPKI PEM, which is what a transparency log takes.
+    ///
+    /// Hand-built rather than pulled from a PEM crate, because for ed25519 the SPKI DER is a fixed
+    /// twelve-byte prefix and the thirty-two key bytes — `SEQUENCE { SEQUENCE { OID 1.3.101.112 },
+    /// BIT STRING }`, where every length is known at compile time. RFC 8410 §4. A crate would be
+    /// more code in the judgement half to emit forty-four constant-shaped bytes.
+    pub fn public_pem(&self) -> String {
+        const SPKI_ED25519: [u8; 12] = [
+            0x30, 0x2a, // SEQUENCE, 42 bytes
+            0x30, 0x05, // SEQUENCE, 5 bytes — the algorithm identifier
+            0x06, 0x03, 0x2b, 0x65, 0x70, // OID 1.3.101.112, id-Ed25519
+            0x03, 0x21, 0x00, // BIT STRING, 33 bytes, 0 unused bits
+        ];
+        let mut der = SPKI_ED25519.to_vec();
+        der.extend_from_slice(self.key.verifying_key().as_bytes());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let mut out = String::from("-----BEGIN PUBLIC KEY-----\n");
+        for line in b64.as_bytes().chunks(64) {
+            out.push_str(std::str::from_utf8(line).unwrap_or_default());
+            out.push('\n');
+        }
+        out.push_str("-----END PUBLIC KEY-----\n");
+        out
+    }
 }
 
 impl Signer for LocalKey {
@@ -91,6 +113,10 @@ impl Signer for LocalKey {
         Ok(Signature {
             sig: base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
             keyid: self.key_id.clone(),
+            // A bare key, so there is no chain and the statement says so rather than implying one.
+            // `LocalKey` is the development rung of ADR-0011's ladder and produces an *unchained*
+            // signature by design.
+            chain: Vec::new(),
         })
     }
 }
@@ -137,4 +163,37 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod pem_tests {
+    use base64::Engine as _;
+
+    use super::LocalKey;
+
+    #[test]
+    fn the_public_pem_is_spki_and_round_trips_through_a_real_parser() {
+        // Hand-built DER is exactly the kind of thing that looks right and is off by a byte, so it
+        // is checked against a parser that did not write it: `p256`'s SPKI decoder rejects the key
+        // type, and the error it gives says *which* — which is only possible if the structure
+        // parsed. A malformed prefix fails differently.
+        let key = LocalKey::from_bytes(&[7u8; 32]).unwrap();
+        let pem = key.public_pem();
+        assert!(pem.starts_with("-----BEGIN PUBLIC KEY-----\n"));
+        assert!(pem.trim_end().ends_with("-----END PUBLIC KEY-----"));
+
+        // 12 prefix bytes + 32 key bytes = 44, which is 60 base64 characters on one line.
+        let body: String = pem
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(&body)
+            .expect("the body is base64");
+        assert_eq!(der.len(), 44, "SPKI for ed25519 is 44 bytes");
+        // The OID for id-Ed25519, where RFC 8410 §4 puts it.
+        assert_eq!(&der[4..9], &[0x06, 0x03, 0x2b, 0x65, 0x70]);
+        assert_eq!(&der[12..], key.public_key().as_bytes());
+    }
 }

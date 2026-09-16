@@ -261,6 +261,18 @@ enum Cmd {
         /// Drop the rebuilt artifact's bytes afterwards, keeping its digests.
         #[arg(long)]
         prune: bool,
+        /// Publish each signed statement to a transparency log, and record what the log said.
+        ///
+        /// Takes the log's base URL. **Use `https://rekor.sigstage.dev` for anything you are still
+        /// working out**: a transparency log is append-only, so an entry published to production is
+        /// there permanently, for everyone.
+        ///
+        /// Why it matters rather than being a nicety: signing with a key we hold means a compromise
+        /// is bounded only by the log. The log's signed timestamp says when the entry existed, and
+        /// a verifier checks that against the signing certificate's validity window — so a stolen
+        /// key cannot produce a statement dated before the theft. See ADR-0011.
+        #[arg(long, value_name = "URL")]
+        rekor: Option<String>,
     },
     /// Score a sweep against a labelled corpus.
     ///
@@ -916,11 +928,13 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             run,
             key,
             prune,
+            rekor,
         } => attestor::run(attestor::Args {
             store,
             run,
             key,
             prune,
+            rekor,
         }),
         #[cfg(feature = "build")]
         Cmd::Score {
@@ -5657,6 +5671,226 @@ fn verify_attestation(
 // process that ran the build. If that process were compromised it could record any outcome it
 // liked, and an attestor that signed what it was told would launder that into a signature.
 
+/// Publishing an attestation to a transparency log.
+///
+/// **The POST lives here and the verification does not.** `trigon-attest` holds everything a
+/// verifier needs — the entry type, the canonicalization, the SET check — and links no network
+/// client, because the verifier build's whole claim is that it does not have one. This module is
+/// the other half: it exists only to hand bytes to a log and read back what the log said.
+#[cfg(feature = "build")]
+mod rekor {
+    use anyhow::{Context, Result, bail};
+    use trigon_attest::{Envelope, LogEntry, intoto_entry};
+
+    // No default log constant, deliberately. `--rekor` takes the URL because the right answer
+    // depends on what the operator is doing, and a default of `rekor.sigstore.dev` would make the
+    // append-only public log the thing you get by not thinking about it. The flag's help names both
+    // instances and says which to reach for first.
+
+    /// Publish a DSSE envelope and return what the log recorded.
+    ///
+    /// **Idempotent, and that is measured rather than hoped for.** The log is content-addressed, so
+    /// resubmitting an identical entry returns `409` naming the UUID that already exists — which
+    /// this treats as success and follows, so a retry after a timeout does the right thing instead
+    /// of failing a run that already published.
+    pub async fn publish(
+        base: &str,
+        envelope: &Envelope,
+        public_key_pem: &str,
+    ) -> Result<LogEntry> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
+        let url = format!("{}/api/v1/log/entries", base.trim_end_matches('/'));
+        let body = intoto_entry(envelope, public_key_pem);
+
+        let resp = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("posting to {url}"))?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+
+        if status == reqwest::StatusCode::CONFLICT {
+            // "an equivalent entry already exists in the transparency log with UUID <uuid>".
+            // Published already, by a previous attempt or another worker; fetch it rather than
+            // failing, because the run's claim is that the entry exists and it does.
+            let uuid = text
+                .split("with UUID ")
+                .nth(1)
+                .and_then(|s| s.split(|c: char| !c.is_ascii_hexdigit()).next())
+                .unwrap_or_default()
+                .to_string();
+            if uuid.is_empty() {
+                bail!("the log refused a duplicate without naming it: {text}");
+            }
+            tracing::info!(%uuid, "already in the log; fetching the existing entry");
+            return fetch(base, &uuid).await;
+        }
+        if !status.is_success() {
+            bail!("the log refused the entry ({status}): {text}");
+        }
+        one_entry(base, &text)
+    }
+
+    /// Read an entry back by UUID.
+    pub async fn fetch(base: &str, uuid: &str) -> Result<LogEntry> {
+        let url = format!("{}/api/v1/log/entries/{uuid}", base.trim_end_matches('/'));
+        let text = reqwest::get(&url)
+            .await
+            .with_context(|| format!("fetching {url}"))?
+            .text()
+            .await?;
+        one_entry(base, &text)
+    }
+
+    /// The single entry in a log response, which is a map keyed by UUID.
+    fn one_entry(base: &str, text: &str) -> Result<LogEntry> {
+        let doc: serde_json::Map<String, serde_json::Value> = serde_json::from_str(text)
+            .with_context(|| format!("reading the log's reply: {text}"))?;
+        let (uuid, e) = doc
+            .into_iter()
+            .next()
+            .context("the log returned no entry")?;
+
+        // Every field is required, and a missing one is refused rather than defaulted. A record
+        // with a zero `integratedTime` or an empty `body` is not a weaker record — it is one whose
+        // SET cannot verify, and defaulting here would move that discovery to whoever tries months
+        // from now, as an error that reads like a wrong key.
+        let need_str = |v: &serde_json::Value, k: &str| -> Result<String> {
+            match v.get(k).and_then(|v| v.as_str()) {
+                Some(s) if !s.is_empty() => Ok(s.to_string()),
+                _ => bail!("the log returned an entry with no {k}"),
+            }
+        };
+        let v = e.get("verification").cloned().unwrap_or_default();
+        Ok(LogEntry {
+            log: base.trim_end_matches('/').to_string(),
+            uuid,
+            log_index: e
+                .get("logIndex")
+                .and_then(|v| v.as_u64())
+                .context("the log returned an entry with no logIndex")?,
+            integrated_time: e
+                .get("integratedTime")
+                .and_then(|v| v.as_i64())
+                .filter(|t| *t > 0)
+                .context("the log returned an entry with no integratedTime")?,
+            log_id: need_str(&e, "logID")?,
+            // Without it there is nothing saying *when* the entry existed, which is the only thing
+            // that bounds a compromise of a key we hold.
+            signed_entry_timestamp: need_str(&v, "signedEntryTimestamp")?,
+            body: need_str(&e, "body")?,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        //! Offline. What the log says is trusted only after it is complete — these cover the
+        //! refusals, because a half-parsed entry is the failure that surfaces later as something
+        //! else entirely.
+
+        const OK: &str = r#"{"uuid-a":{"body":"eyJ9","logIndex":7,"integratedTime":1789562059,
+            "logID":"d32f","verification":{"signedEntryTimestamp":"MEUC"}}}"#;
+
+        #[test]
+        fn a_complete_entry_is_read_field_for_field() {
+            let e = super::one_entry("https://rekor.sigstage.dev/", OK).expect("complete");
+            assert_eq!(e.uuid, "uuid-a");
+            assert_eq!(e.log_index, 7);
+            assert_eq!(e.integrated_time, 1_789_562_059);
+            assert_eq!(e.log_id, "d32f");
+            assert_eq!(e.signed_entry_timestamp, "MEUC");
+            assert_eq!(e.body, "eyJ9");
+            assert_eq!(e.log, "https://rekor.sigstage.dev", "the slash is trimmed");
+        }
+
+        #[test]
+        fn every_missing_field_is_a_refusal_and_names_itself() {
+            // Not a defaulted zero, an empty string, or a `None` that reads as "the log did not say
+            // so" — each of these makes the SET unverifiable, and the error has to point at the
+            // field rather than surface later as a signature that will not check.
+            for (drop, named) in [
+                (r#""logIndex":7,"#, "logIndex"),
+                (r#""integratedTime":1789562059,"#, "integratedTime"),
+                (r#""logID":"d32f","#, "logID"),
+                (r#""signedEntryTimestamp":"MEUC""#, "signedEntryTimestamp"),
+                (r#""body":"eyJ9","#, "body"),
+            ] {
+                let maimed = OK.replace(drop, "");
+                assert_ne!(maimed, OK, "the test removed nothing for {named}");
+                let err = super::one_entry("https://x", &maimed)
+                    .expect_err(&format!("an entry with no {named} is not an entry"));
+                assert!(
+                    format!("{err}").contains(named),
+                    "the refusal has to name {named}: {err}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_zero_integrated_time_is_no_time_at_all() {
+            // The one field where a present-but-meaningless value is plausible: a log that returns
+            // 0 has told us nothing about when, which is the only thing bounding a key we hold.
+            let z = OK.replace("1789562059", "0");
+            assert!(super::one_entry("https://x", &z).is_err());
+        }
+
+        #[test]
+        fn an_empty_reply_is_not_an_entry() {
+            let err = super::one_entry("https://x", "{}").expect_err("no entry");
+            assert!(format!("{err}").contains("no entry"), "{err}");
+        }
+    }
+
+    #[cfg(test)]
+    mod live {
+        /// **Staging, never production.** A transparency log is append-only: an entry published to
+        /// `rekor.sigstore.dev` by a test is there permanently, for everyone, forever. Staging
+        /// exists so the first hundred attempts are not.
+        const STAGING: &str = "https://rekor.sigstage.dev";
+
+        /// The entry this test reads back: staging index 56040866, which is also the fixture
+        /// `trigon-attest` verifies offline. Fetching rather than publishing, so running the test
+        /// adds no row to an append-only log however many times it runs.
+        const KNOWN_UUID: &str =
+            "71d46696179fcd5d7ec65bd3a46eb4efc201ce0a2de3f4ab402af27acc1d57279ae94ae5757d721b";
+
+        #[tokio::test]
+        async fn an_entry_comes_back_with_a_timestamp_that_verifies() {
+            if std::env::var("TRIGON_LIVE").as_deref() != Ok("1") {
+                if std::env::var("TRIGON_TESTS_MUST_RUN").as_deref() == Ok("1") {
+                    panic!("TRIGON_TESTS_MUST_RUN=1 but this test skipped: set TRIGON_LIVE=1");
+                }
+                eprintln!("skipped: set TRIGON_LIVE=1");
+                return;
+            }
+            let entry = super::fetch(STAGING, KNOWN_UUID)
+                .await
+                .expect("the staging log has this entry");
+            assert_eq!(entry.log_index, 56_040_866);
+            assert_eq!(entry.log, STAGING);
+
+            // The whole point of fetching it: the log's timestamp has to verify against the log's
+            // own published key, because that is the number a certificate window is checked
+            // against and the only thing bounding a compromise of a key we hold.
+            let key = reqwest::get(format!("{STAGING}/api/v1/log/publicKey"))
+                .await
+                .expect("the log publishes its key")
+                .text()
+                .await
+                .expect("as PEM");
+            let at = entry
+                .verify_set(&key)
+                .expect("the log signed its own entry");
+            assert_eq!(at, entry.integrated_time);
+        }
+    }
+}
+
 #[cfg(feature = "build")]
 mod attestor {
     use anyhow::{Context, Result, bail};
@@ -5669,6 +5903,7 @@ mod attestor {
         pub run: Option<String>,
         pub key: Option<std::path::PathBuf>,
         pub prune: bool,
+        pub rekor: Option<String>,
     }
 
     pub fn run(args: Args) -> Result<()> {
@@ -5708,6 +5943,7 @@ mod attestor {
 
             let mut written = Vec::new();
             let mut published_set: Option<String> = None;
+            let mut logged: Option<trigon_attest::LogEntry> = None;
 
             // 1. The equivalence (or divergence) claim, re-derived from the bytes.
             if let Some(comparison_digest) = record.comparison {
@@ -5773,6 +6009,32 @@ mod attestor {
                 );
 
                 let env = trigon_attest::sign_statement(&statement, signer.as_ref())?;
+
+                // **The log, where one was asked for.** Signing with a key we hold means a
+                // compromise is bounded only by this: the log's timestamp says when the entry
+                // existed, and a verifier checks it against the certificate's validity window.
+                // Published for the equivalence statement alone rather than all four — it is the
+                // claim about somebody else's package, and the others describe how it was produced.
+                if let Some(base) = &args.rekor {
+                    match &args.key {
+                        Some(k) => {
+                            let pem = crate::load_key(k)?.public_pem();
+                            let entry = crate::rekor::publish(base, &env, &pem).await?;
+                            println!(
+                                "logged at {} index {} ({})",
+                                entry.log, entry.log_index, entry.uuid
+                            );
+                            logged = Some(entry);
+                        }
+                        // An unsigned statement in a transparency log records that nobody stands
+                        // behind it, permanently and publicly. Refused rather than published.
+                        None => bail!(
+                            "`--rekor` needs `--key`: a transparency log entry for an unsigned \
+                             statement records that nobody stands behind it, and the log is \
+                             append-only"
+                        ),
+                    }
+                }
                 let target = record.target.parse::<trigon_core::TargetRef>()?;
                 let target = trigon_core::Target::new(
                     target,
@@ -5805,6 +6067,10 @@ mod attestor {
             written.push(put(&store, &record, &obs, signer.as_ref()).await?);
 
             record.attestations = written.clone();
+            // Beside the attestations it is about: the log index, the instant, and the log's own
+            // signature over both. Without it a verifier has the statement and no way to know when
+            // it was signed, which is the number ADR-0011's whole argument turns on.
+            record.transparency = logged;
             store.put_run(&record).await?;
 
             println!();

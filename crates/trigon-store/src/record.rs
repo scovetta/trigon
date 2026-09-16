@@ -279,6 +279,20 @@ pub struct RunRecord {
     /// discard the bytes a signature is about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attestations: Vec<String>,
+
+    /// What a transparency log said about this run's equivalence statement, where one was asked.
+    ///
+    /// The log index, the UUID, the instant, and the log's signature over all three. Kept on the
+    /// record rather than only in the log because it is what a verifier needs in order to check
+    /// *when* the statement was signed — the number a certificate's validity window is tested
+    /// against, and under [ADR-0011] the only thing bounding a compromise of a key we hold.
+    ///
+    /// `None` means no log was asked, which is the common case for a local run and is not the same
+    /// as a log that refused.
+    ///
+    /// [ADR-0011]: ../../../docs/adr/0011-keyed-signing-under-a-trusted-root.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<trigon_attest::LogEntry>,
 }
 
 impl RunRecord {
@@ -315,6 +329,7 @@ impl RunRecord {
             network_transcript: None,
             costs: None,
             attestations: Vec::new(),
+            transparency: None,
         }
     }
 

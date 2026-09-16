@@ -299,19 +299,37 @@ building it, which is a `pyproject.toml` read the inferrer does not do yet.
 
 [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) settles the design and staging has
 confirmed the part that could not be settled on paper: **Rekor accepts an ed25519 key under a
-self-issued certificate**, so "their log, our CA" works. Nothing is built.
+self-issued certificate**, so "their log, our CA" works.
 
-Five pieces, in the order they unblock each other:
+Five pieces, in the order they unblock each other. **1-3 are built**; 4 and 5 are not.
 
-1. **`dsse::Signature` gains a certificate chain.** Today it is `sig` and `keyid` and has nowhere to
-   put a chain, so a chained signature cannot be expressed at all. The envelope is versioned by
+1. ~~**`dsse::Signature` gains a certificate chain.**~~ Built. `Signature.chain` is a `Vec<String>`
+   of PEM, leaf first, and `is_chained()`/`leaf()` read it. The envelope is versioned by
    `payloadType`, so old bundles keep verifying against a pinned key.
-2. **A `Rekor` client**: one POST to `/api/v1/log/entries` with an `intoto` **v0.0.1** entry, storing
-   the returned `logIndex`, UUID, `signedEntryTimestamp` and inclusion proof on the run. Idempotent
-   — a duplicate returns `409` with the existing UUID — so a retry after a timeout is safe.
-3. **SET verification**, against the key at `/api/v1/log/publicKey`. This is the step the whole ADR
-   hinges on: it yields the time that has to fall inside the certificate's validity window, and
-   without it the design is a pinned public key with extra ceremony.
+2. ~~**A `Rekor` client**~~ Built, as `mod rekor` in the binary — above the judgement line, behind
+   `#[cfg(feature = "build")]`, reached by `trigon attest --rekor <URL>`. One POST to
+   `/api/v1/log/entries` with an `intoto` **v0.0.1** entry (not v0.0.2: the envelope goes in as a
+   serialized JSON *string*, with the certificate as a sibling `spec.publicKey`), storing the
+   returned `logIndex`, UUID, `logID` and `signedEntryTimestamp` on the run as
+   `RunRecord.transparency`. A duplicate returns `409` carrying the existing UUID, which we fetch
+   and store, so a retry after a timeout is safe.
+3. ~~**SET verification**~~ Built, in `trigon-attest::transparency` — **below** the judgement line,
+   so the `--no-default-features` verifier can check a SET without linking a network client. The
+   canonicalization is the part that is not guessable: the signature covers RFC 8785 JCS of exactly
+   `{body, integratedTime, logID, logIndex}`, with `body` verbatim as the log returned it.
+
+   Proven against live staging rather than a hand-built fixture.
+   `crates/trigon-attest/tests/transparency_live_entry.rs` checks two real `rekor.sigstage.dev`
+   entries offline, against the log's pinned key: index **56040866**, posted by hand to settle
+   whether Rekor accepts our envelope shape at all, and index **56041854**, which
+   `trigon attest --rekor` produced end to end. The negatives are there too — production's key
+   against a staging entry, and a re-encoded `body` — and the unit tests in `transparency.rs` cover
+   a well-formed-but-wrong signature separately from bytes that are not a signature, because those
+   fail differently and only one of them is interesting.
+
+   What this still does not do is the thing it exists for: nothing yet checks the returned time
+   against a certificate's validity window, because there are no certificates until 4 and 5. The
+   time is verified and stored; it is not yet load-bearing.
 4. **Chain validation to a pinned root** in `verify-attestation`, replacing `--public-key <hex>`
    with `--root <pem>` defaulting to the root compiled into the verifier.
 5. **The CA itself** — an offline root, an intermediate in a KMS, short-lived leaves. Operational
