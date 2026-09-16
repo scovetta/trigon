@@ -1,14 +1,15 @@
 {
   "purl": "pkg:npm/xstate@4.38.3",
-  "started": "2026-09-16T02:56:43Z",
-  "finished": "2026-09-16T03:00:39Z",
-  "outcome": "build-failed:setup",
+  "started": "2026-09-16T03:07:26Z",
+  "finished": "2026-09-16T03:11:46Z",
+  "outcome": "build-failed:deps",
   "failure": {
-    "code": "env/base-image-incomplete",
-    "fault": "policy",
+    "code": "npm/workspace-unbuilt-sibling",
+    "subject": "xstate",
+    "fault": "bug",
     "retryable": false,
-    "repairable": false,
-    "evidence": "this base image is missing: npm"
+    "repairable": true,
+    "evidence": "npm ERR! src/index.ts(3,26): error TS2307: Cannot find module 'xstate' or its corresponding type declarations."
   },
   "source": {
     "repo_url": "https://github.com/statelyai/xstate",
@@ -16,32 +17,27 @@
     "commit": "e87600ea450fa19b71d2051fac3c6c54fb9d486e",
     "how": "registry_commit"
   },
-  "strategy_digest": "0e5521fdce9a2ebce86e4a60eb9305eb69734610fa3a562d4cc3b461d93243d5",
+  "strategy_digest": "ee1d783156929061eb7e0da880fb6945009464105b091d42e160afaf1a7b25dc",
   "derivation": "heuristic",
   "confidence": "certain",
   "timings": [
     [
       "deps",
-      2.420713566
+      2.430838306
     ],
     [
       "build",
-      119.934932664
-    ],
-    [
-      "setup",
-      0.451031269
+      123.141832524
     ]
   ],
   "egress": "mirror-only",
-  "inference_seconds": 105.454439538,
-  "tokens_in": 8345,
-  "tokens_out": 9325,
+  "inference_seconds": 129.579110052,
+  "tokens_in": 8608,
+  "tokens_out": 11489,
   "tokens_cached": 0,
   "repairs": [
-    "attempt 1 on npm/peer-conflict"
+    "attempt 1 on npm/workspace-unbuilt-sibling:xstate"
   ],
-  "repair_stopped": "the failure is not one a different recipe fixes",
   "model": "claude-sonnet-5 (anthropic)",
-  "model_calls": 0
+  "model_calls": 1
 }
