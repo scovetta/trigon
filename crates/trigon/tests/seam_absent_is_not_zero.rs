@@ -127,7 +127,14 @@ impl Watch {
                     Ok(None) => {}
                     Err(e) => panic!("waiting on trigon watch: {e}"),
                 }
-                if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                // A real request, not a bare `connect`. The two are not the same claim: connect
+                // succeeds as soon as the listening socket exists, because the kernel completes
+                // the handshake into the accept backlog on the server's behalf — before anything
+                // has called `accept`, and before the router is built. Treating "the port answers
+                // a TCP handshake" as "the server will answer an HTTP request" made this suite
+                // fail about one run in eight, always as a `ConnectionReset` in a later `get`,
+                // always on a different test.
+                if try_get(port, "/").is_some() {
                     return Watch { child, port };
                 }
                 std::thread::sleep(Duration::from_millis(25));
@@ -143,24 +150,36 @@ impl Watch {
         unreachable!()
     }
 
-    /// The body of one response. HTTP/1.0 with `Connection: close`, so the read ends at EOF and
-    /// this needs no client library the crate does not already have.
+    /// The body of one response.
     fn get(&self, path: &str) -> String {
-        let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-        write!(
-            s,
-            "GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut raw = Vec::new();
-        s.read_to_end(&mut raw).unwrap();
-        let text = String::from_utf8_lossy(&raw).into_owned();
+        let text = try_get(self.port, path)
+            .unwrap_or_else(|| panic!("GET {path} got no response from the watch server"));
         match text.split_once("\r\n\r\n") {
             Some((_, body)) => body.to_string(),
             None => text,
         }
     }
+}
+
+/// One request, or `None` if the server did not answer it.
+///
+/// HTTP/1.0 with `Connection: close`, so the read ends at EOF and this needs no client library the
+/// crate does not already have. Used both to serve requests and to decide the server is up, which
+/// is the point: readiness is defined as "answered a request", because that is what every caller
+/// then goes on to assume.
+fn try_get(port: u16, path: &str) -> Option<String> {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(20))).ok()?;
+    write!(
+        s,
+        "GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut raw = Vec::new();
+    // A reset here is the server not being ready yet, which is a retry rather than a failure.
+    s.read_to_end(&mut raw).ok()?;
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    text.starts_with("HTTP/1").then_some(text)
 }
 
 impl Drop for Watch {
