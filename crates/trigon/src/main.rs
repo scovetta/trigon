@@ -4213,15 +4213,6 @@ mod mirror {
                  must not do. `podman images --no-trunc` prints the id of a local image."
             );
         }
-        // **Pinned is not the same as resolvable**, and the gap between them is one podman prints a
-        // networking error for. Checked before the build rather than discovered eight seconds in.
-        let exists = std::process::Command::new("podman")
-            .args(["image", "exists", from])
-            .status()
-            .map_or(true, |s| s.success());
-        if let Err(why) = trigon_sandbox::resolvable(from, exists) {
-            bail!("{why}");
-        }
         let packages: Vec<String> = if packages.is_empty() {
             DEFAULT_PACKAGES.iter().map(|s| s.to_string()).collect()
         } else {
@@ -4233,9 +4224,25 @@ mod mirror {
             "FROM {from}\nRUN {}\n",
             trigon_sandbox::install_command(from, &packages)
         );
+        // **Before the store check, deliberately.** `--print` renders a Containerfile out of two
+        // strings; it pulls nothing, builds nothing and reads nothing from the local store, so
+        // gating it on what that store happens to hold made the output a function of the machine
+        // rather than of the arguments. It also meant the printed file could not be previewed for
+        // an image not yet pulled, which is one of the times you most want to read it.
         if print {
             print!("{containerfile}");
             return Ok(());
+        }
+
+        // **Pinned is not the same as resolvable**, and the gap between them is one podman prints a
+        // networking error for. Checked before the build rather than discovered eight seconds in —
+        // and only on the path that builds, which is the only one the answer is about.
+        let exists = std::process::Command::new("podman")
+            .args(["image", "exists", from])
+            .status()
+            .map_or(true, |s| s.success());
+        if let Err(why) = trigon_sandbox::resolvable(from, exists) {
+            bail!("{why}");
         }
 
         let dir = std::env::temp_dir().join(format!("trigon-base-{}", std::process::id()));

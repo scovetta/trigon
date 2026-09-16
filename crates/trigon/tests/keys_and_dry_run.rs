@@ -396,8 +396,14 @@ fn the_fix_command_a_failing_build_prints_is_one_this_binary_accepts() {
     // and a stray argument. A suggestion nobody can paste is worse than no suggestion, so the
     // shapes that get printed are pinned here.
     //
-    // `--print` stops before the runtime, so this tests the contract without needing podman.
-    let digest = "sha256:f21d52e1657f28329790932f70bce9d4ddc2617ddfff54af98b02cbcf3d97cf6";
+    // `--print` renders the Containerfile from its arguments and touches neither podman nor the
+    // local image store, so this asserts the argument contract on any machine. It used to name a
+    // digest that happened to be in one developer's store, which passed there and failed in CI
+    // with `no image with id … is in the local store` — a test that was reading the machine rather
+    // than the parser it was written for.
+    //
+    // Synthetic on purpose: well-formed enough for `is_pinned`, and obviously not a real image.
+    let digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
     for packages in [
         // The form `dockerfile.rs` prints: a space-separated list after one flag.
         vec!["python3", "python3-venv"],
