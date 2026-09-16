@@ -1213,6 +1213,28 @@ that hides a 20% rate on native extensions is not a number anyone can act on." I
 hypothetical. npm's monorepo and TypeScript strata reproduce at **20%**, and an aggregate over the
 whole corpus reports 73%.
 
+**Confirmed at four times the sample.** 300 targets — 150 from each corpus, sampled proportionally
+across the strata because they are contiguous in the files and a head-150 contains no TypeScript,
+monorepo, poetry or native target at all:
+
+| npm | compared | reproduced | | PyPI | compared | reproduced | |
+|---|---:|---:|---|---|---:|---:|---|
+| no lifecycle script | 54 of 69 | 46 | 85% | flit / hatchling | 38 of 38 | 38 | **100%** |
+| `prepare`/`prepack` | 19 of 46 | 16 | 84% | setuptools + pyproject | 34 of 45 | 26 | 76% |
+| TypeScript build | 8 of 23 | 1 | **12%** | setuptools + `setup.py` | 23 of 30 | 15 | 65% |
+| monorepo member | 4 of 13 | 1 | **25%** | poetry-core | 20 of 22 | 20 | **100%** |
+| | | | | maturin / C extension | 7 of 15 | 4 | 57% |
+
+The aggregate for npm is 75% and it is a number about almost nothing: two strata at 85% and 84%
+carry it, and the two that do real work sit at 12% and 25%. **The reach is worse than the rate.**
+Only 8 of 23 TypeScript targets and 4 of 13 monorepo members get as far as a comparison, so the
+percentages above are computed over the third of each stratum that survived — the honest reading of
+"TypeScript reproduces at 12%" is "one of the eight we could measure".
+
+PyPI inverts the expectation twice over. The two *modern* build systems are at 100% with every
+target reaching a comparison, and the weakest stratum is `setup.py` at 65% rather than the native
+extensions at 57% — which are themselves better than either npm stratum that builds anything.
+
 **The first run measured a defect of ours rather than the packages.** 34 of 197 npm targets failed
 `E400`, which is this mirror refusing a request for want of the time filter. npm 11 does not use the
 `dist.tarball` we rewrite: it takes the path off the upstream URL, re-bases it onto the configured

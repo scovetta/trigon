@@ -85,9 +85,28 @@ M1 needs **two** corpora, and conflating them was a mistake in an earlier draft.
       Rendering is not executing: there is no sandbox yet, so what this currently validates is the
       schema, the lowering, the tool registry and the template engine. The `custom_stabilizers` on
       four of them are carried and printed, not applied, so those four cannot match until they are.
-- [ ] **The common-path corpus: 400 targets sampled by prevalence**, 200 npm and 200 PyPI, stratified
+- [~] **The common-path corpus: 400 targets sampled by prevalence**, 200 npm and 200 PyPI, stratified
       by build system rather than by popularity alone ([`15-corpora.md`](15-corpora.md) §3). This is
       what a reproduction rate can be quoted from, and it is the number M1 reports.
+      **Both corpora exist and 300 of the 400 have been run** — 150 from each, sampled
+      proportionally across the strata rather than taken from the head, because the strata are
+      contiguous in the files and a head-150 contains no TypeScript, monorepo, poetry or
+      native-extension target at all.
+
+      | | compared | reproduced | |
+      |---|---:|---:|---|
+      | npm | 85 of 150 | 64 | 75% |
+      | PyPI | 122 of 150 | 103 | 84% |
+
+      **Neither is yet the number M1 reports, and the npm one is not a fact about npm.** 48 of
+      npm's 62 failures were ours: 23 `trigon/mirror-refused-unfiltered` (since fixed — a build
+      resolving from a lockfile asked for no packument, so the mirror's offered-set gate refused
+      every tarball), 13 more across `net/unreachable`, `env/missing-tool` and
+      `trigon/mirror-corrupted-artifact`. PyPI is the honest half: 9 failures ours, 8 the packages'.
+
+      What M1 needs before quoting a rate is the remaining 100 targets, a re-run on current code,
+      and the per-stratum breakdown — an aggregate that hides a bad native-extension or monorepo
+      rate is what the stratification exists to prevent.
 - [x] `trigon rebuild pkg:npm/left-pad@1.3.0` works on a laptop with Podman and no cloud account.
       Resolve, infer, fetch, build, compare, in one command. Reported `normalized`, with all ten
       members identical, against what npm published in 2018.

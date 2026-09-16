@@ -57,6 +57,28 @@ install, verify one package, read the verdict, understand what the verdict does 
 yet built, and a person who has never seen this repository can verify a package from the README
 alone.
 
+**One pass done, and what it found is the argument for the rest.** An audit of the claims that today's
+changes touched turned up three corrections, and the worst was not a stale detail:
+
+- **[`12`](12-security.md) §10 listed twelve invariants and the tests that enforce them, and five of
+  those tests did not exist.** Not "were weaker than described" — did not exist. No flake test, no
+  known-good corpus replay against the guard, no confirmation policy, no attestor deployment test.
+  The table now carries a status column and says plainly that verdicts are not checked for stability
+  across identical runs, the guard's false-positive rate is unmeasured, and every attestation is
+  signed off a single run. A table of controls that names imaginary enforcement is the same defect
+  as a control that fails open and reports success.
+- **[`16`](16-findings.md) documented a state that had been reverted**, describing the mirror as
+  serving tarballs unfiltered and calling that free — which was version one of the E400 fix, undone
+  the same session as a security regression.
+- **Three chapters described the provenance cap as "a runtime check, a unit test, and a proptest"**;
+  there is no runtime check, `proptest` is not a dependency of that crate, and the real enforcement
+  is an exhaustive enumeration, which is stronger. The wording undersold it and misdescribed it at
+  the same time.
+
+The pattern is that **the dangerous staleness is in the claims about controls**, not in the
+architecture prose. A reader who believes `04` is misled about a design; a reader who believes `12`
+§10 is misled about what is checked.
+
 ## B4. ~~Test coverage worth the name~~ — measured, with two findings
 
 Measured, per crate, with the judgement half at a stated bar and the deliberate gaps named. Written
@@ -272,6 +294,33 @@ commit from a release whose tag we failed to fetch. `Checkout::tags` carries the
 `rebuild` warns, so the difference that follows is attributed to the checkout rather than to the
 package. Turning that warning into a refusal needs a way to know a project is VCS-versioned before
 building it, which is a `pyproject.toml` read the inferrer does not do yet.
+
+## B18. The npm strata that build anything reproduce at 12% and 25%
+
+The 300-target common-path run, per stratum:
+
+| npm | compared | reproduced | |
+|---|---:|---:|---|
+| no lifecycle script | 54 of 69 | 46 | 85% |
+| `prepare`/`prepack` | 19 of 46 | 16 | 84% |
+| TypeScript build | 8 of 23 | 1 | **12%** |
+| monorepo member | 4 of 13 | 1 | **25%** |
+
+**The reach is the worse half.** Only 8 of 23 TypeScript targets and 4 of 13 monorepo members get as
+far as a comparison at all, so those rates are computed over a third of each stratum. "TypeScript
+reproduces at 12%" honestly reads "one of the eight we could measure".
+
+This is the number [`15-corpora.md`](15-corpora.md) §3 predicted in the abstract — "an aggregate
+that hides a 20% rate on native extensions is not a number anyone can act on" — and the aggregate
+hiding it is npm's 75%.
+
+PyPI is the contrast that makes it a finding about npm rather than about rebuilding: flit/hatchling
+and poetry-core are at 100% with every target reaching a comparison, and even the native-extension
+stratum is at 57%.
+
+**Done when:** the two npm strata reach a comparison at a rate comparable to the other two, and the
+reproduction rate within them is measured rather than estimated from single digits. The first
+question is why two thirds of them never build, which is a cluster analysis and not a guess.
 
 ## B17. What an unnamed failure should cost a package
 
