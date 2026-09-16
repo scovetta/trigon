@@ -26,6 +26,10 @@ usage: rebuild-and-attest.sh <purl> [options]
   --egress <tier>   deny-all | mirror-only | open    (default: mirror-only)
   --image <ref>     base image. Resolved from the local store when omitted.
   --prune           drop the rebuilt bytes after attesting, keeping the digests
+  --rekor <url>     publish the equivalence statement to a transparency log and record what it
+                    said. Needs --key. Use https://rekor.sigstage.dev while working things out:
+                    a log is append-only, so a production entry is there permanently.
+  --dry-run         with --rekor, print the exact entry that would be posted and post nothing
 USAGE
     exit 2
 }
@@ -40,6 +44,8 @@ WORK=""
 EGRESS="mirror-only"
 IMAGE=""
 PRUNE=""
+REKOR=""
+DRYRUN=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -49,10 +55,24 @@ while [ $# -gt 0 ]; do
         --egress) EGRESS="$2"; shift 2 ;;
         --image)  IMAGE="$2";  shift 2 ;;
         --prune)  PRUNE=1;     shift ;;
+        --rekor)  REKOR="$2";  shift 2 ;;
+        --dry-run) DRYRUN=1;   shift ;;
         -h|--help) usage ;;
         *) echo "unknown option: $1" >&2; usage ;;
     esac
 done
+
+# Checked here rather than after the rebuild: the attestor refuses this too, but by then a build has
+# already run, and finding out then costs minutes for a mistake visible now.
+if [ -n "$REKOR" ] && [ -z "$KEY" ]; then
+    echo "--rekor needs --key: a log entry for an unsigned statement records that nobody stands" >&2
+    echo "behind it, and the log is append-only. Make a key with: trigon keygen --out <path>" >&2
+    exit 2
+fi
+if [ -n "$DRYRUN" ] && [ -z "$REKOR" ]; then
+    echo "--dry-run previews the log entry, so it needs --rekor <url>" >&2
+    exit 2
+fi
 
 # Prefer a built binary over whatever is on PATH, so a checkout tests itself.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -148,6 +168,8 @@ say "attesting $LATEST"
 ATTEST_ARGS=(attest "$LATEST" --store "$STORE")
 [ -n "$KEY" ] && ATTEST_ARGS+=(--key "$KEY")
 [ -n "$PRUNE" ] && ATTEST_ARGS+=(--prune)
+[ -n "$REKOR" ] && ATTEST_ARGS+=(--rekor "$REKOR")
+[ -n "$DRYRUN" ] && ATTEST_ARGS+=(--dry-run)
 
 if ! "$TRIGON" "${ATTEST_ARGS[@]}"; then
     cat >&2 <<'WHY'
@@ -168,9 +190,27 @@ if [ -z "$KEY" ]; then
     printf '\n  note: written unsigned. Pass --key for an attributable statement.\n'
 fi
 
+# A dry run wrote nothing, so it must not close with the paths and the verify line a real run ends
+# on: the statements directory does not exist, and this script's own contract is that exit 0 means a
+# statement was written. Say what happened and stop.
+if [ -n "$DRYRUN" ]; then
+    printf '\n\033[1mdry run\033[0m — the entry above was not posted, and no statement was signed\n'
+    printf '  or stored. The rebuild before it is real and its record and blobs are in the store,\n'
+    printf '  which is what makes a later run able to attest without building again.\n\n'
+    printf '  Drop --dry-run to publish. The signature is deterministic, so the entry will be byte\n'
+    printf '  for byte the one you just read.\n'
+    exit 0
+fi
+
 say "done"
 "$TRIGON" runs --store "$STORE" | awk 'NR == 1' 
 printf '\n  statements  %s/attestations/\n' "$STORE"
 printf '  verify      %s verify-attestation \\\n' "$TRIGON"
 printf '                %s/attestations/.../equivalence.intoto.json \\\n' "$STORE"
-printf '                --rerun-comparison --upstream <published> --rebuild <rebuilt>\n'
+printf '                --rerun-comparison --upstream <published> --rebuild <rebuilt>'
+[ -n "$KEY" ] && printf ' \\\n                --public-key $(%s public-key %s)' "$TRIGON" "$KEY"
+# Only where there is an entry to check. Naming the flag after a run that never logged would send
+# someone looking for a file that was never written.
+[ -n "$REKOR" ] && [ -z "$DRYRUN" ] &&
+    printf ' \\\n                --transparency <(jq .transparency %s/runs/%s.json)' "$STORE" "$LATEST"
+printf '\n'

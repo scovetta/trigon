@@ -348,8 +348,14 @@ fn a_dry_run_prints_the_entry_and_writes_nothing() {
     assert_eq!(shown["predicateType"], "https://trigon.dev/equivalence/v1");
 
     assert!(
-        text.contains("Nothing was posted"),
+        text.contains("Nothing was posted") && text.contains("this command wrote nothing"),
         "the preview has to say it did not publish:\n{text}"
+    );
+    // And it must not overclaim: the rebuild that produced this run really did write to the store,
+    // and a flat "nothing was written" would be read as covering that too.
+    assert!(
+        text.contains("wrote its record and blobs earlier"),
+        "the message should scope its claim to this command:\n{text}"
     );
     assert_eq!(
         tree(&store),
@@ -379,4 +385,46 @@ fn tree(root: &Path) -> Vec<String> {
     }
     found.sort();
     found
+}
+
+// --- Commands we tell people to run ------------------------------------------------------------
+
+#[test]
+fn the_fix_command_a_failing_build_prints_is_one_this_binary_accepts() {
+    // Twice now a build has failed with a suggestion that the suggesting program then rejected:
+    // once over `--from sha256:<id>`, and once over `--packages a b`, which clap read as one value
+    // and a stray argument. A suggestion nobody can paste is worse than no suggestion, so the
+    // shapes that get printed are pinned here.
+    //
+    // `--print` stops before the runtime, so this tests the contract without needing podman.
+    let digest = "sha256:f21d52e1657f28329790932f70bce9d4ddc2617ddfff54af98b02cbcf3d97cf6";
+    for packages in [
+        // The form `dockerfile.rs` prints: a space-separated list after one flag.
+        vec!["python3", "python3-venv"],
+        // The form `failure.rs` prints, which is the longer builtin union.
+        vec!["ca-certificates", "git", "libatomic1", "wget"],
+        // And the two ways someone might reasonably type it instead.
+        vec!["python3,python3-venv"],
+        vec!["python3"],
+    ] {
+        let out = Command::new(bin())
+            .args(["base-image", "--from", digest, "--packages"])
+            .args(&packages)
+            .arg("--print")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "`--packages {}` is a form we print but do not accept:\n{}",
+            packages.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let printed = String::from_utf8_lossy(&out.stdout);
+        for p in packages.iter().flat_map(|p| p.split(',')) {
+            assert!(
+                printed.contains(p),
+                "{p} was accepted and then not installed:\n{printed}"
+            );
+        }
+    }
 }

@@ -277,6 +277,19 @@ enum Cmd {
         #[arg(long, value_name = "PATH")]
         public_out: Option<PathBuf>,
     },
+    /// Print the public half of a signing key.
+    ///
+    /// `keygen` prints it once, at the moment the key is made. This is how you get it back — and
+    /// you need it every time anyone checks a signature, so a key whose public half can only be
+    /// recovered by signing something and reading the key id off the output is a key nobody can
+    /// pin. Reads the private key and computes; nothing is written.
+    PublicKey {
+        /// The private key file, as written by `keygen`.
+        key: PathBuf,
+        /// Print SPKI PEM instead of hex — the form a transparency log entry carries.
+        #[arg(long)]
+        pem: bool,
+    },
     /// Sign what a stored run says, after re-deriving it from the bytes.
     ///
     /// A separate process from the one that ran the build, and that is the point: it reads blobs by
@@ -363,7 +376,11 @@ enum Cmd {
         from: String,
         /// Packages to install. Defaults to the union every builtin tool asks for, which is what
         /// the npm and PyPI corpora between them need.
-        #[arg(long)]
+        ///
+        /// Takes a list: `--packages python3 python3-venv`, comma-separated, or the flag repeated.
+        /// All three, because that is the form a failing build prints for you to paste — and a
+        /// suggestion the suggesting program rejects is worse than no suggestion.
+        #[arg(long, num_args = 1.., value_delimiter = ',')]
         packages: Vec<String>,
         #[arg(long, default_value = "localhost/trigon-base:latest")]
         tag: String,
@@ -975,6 +992,18 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             concurrency,
         }),
         Cmd::Keygen { out, public_out } => keygen(&out, public_out.as_deref()),
+        Cmd::PublicKey { key, pem } => {
+            let k = load_key(&key)?;
+            print!(
+                "{}",
+                if pem {
+                    k.public_pem()
+                } else {
+                    k.public_hex() + "\n"
+                }
+            );
+            Ok(())
+        }
         #[cfg(feature = "build")]
         Cmd::Attest {
             store,
@@ -6301,9 +6330,11 @@ mod attestor {
                                     );
                                 }
                                 println!(
-                                    "\nNothing was posted and nothing was written to the store. \
-                                     ed25519 is deterministic, so a real run signs these same \
-                                     bytes."
+                                    "\nNothing was posted, and this command wrote nothing: no \
+                                     statement, no stabilizer set, no change to the run. (The \
+                                     rebuild that produced this run wrote its record and blobs \
+                                     earlier, which is why attesting needs no rebuild.) ed25519 \
+                                     is deterministic, so a real run signs these same bytes."
                                 );
                                 return Ok(());
                             }

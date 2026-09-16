@@ -327,6 +327,42 @@ Rekor accepts an entry signed by any key or certificate and does not require Ful
 makes "their log, our CA" a coherent position rather than a hybrid. Staging confirmed it for the
 shape we actually emit: an ed25519 key under a self-issued certificate is accepted.
 
+#### End to end
+
+```bash
+# 1. A signing key, once. `trigon public-key <file>` prints the public half again later.
+trigon keygen --out ~/.trigon/signing.key
+
+# 2. Rebuild, attest and log, in one script that keeps the two processes separate.
+scripts/rebuild-and-attest.sh pkg:pypi/chardet@7.4.3 \
+    --key ~/.trigon/signing.key --rekor https://rekor.sigstage.dev
+
+# 3. Check it, offline, with nothing trusted: the signature, the claim re-derived from the two
+#    files, and the log entry.
+trigon verify-attestation <store>/attestations/.../equivalence.intoto.json \
+    --public-key "$(trigon public-key ~/.trigon/signing.key)" \
+    --rerun-comparison --upstream <published> --rebuild <rebuilt> \
+    --transparency <(jq .transparency <store>/runs/<run>.json)
+```
+
+Step 3 prints all four results:
+
+```
+logged    rekor.sigstage.dev index 56042318 at 2026-09-16T15:20:26Z (71d46696179fcd5d)
+          the log's timestamp verifies, and the entry is about this bundle
+subject   chardet-7.4.3-py3-none-any.whl (1173b74051570cf0…)
+claims    exact
+signature verified
+rederived exact under wheel@58632c3c627d — the claim holds
+```
+
+Add `--dry-run` to step 2 to see the log entry before it exists anywhere. The rebuild is real and
+its record stays in the store, so a later run attests without building again.
+
+At an enforced egress tier the image build has no network, so the base image must already carry
+what the strategy needs. A build that is missing something says which packages and prints the
+`trigon base-image` command that adds them.
+
 #### Making the key
 
 ```
