@@ -302,16 +302,29 @@ not exist yet. A synchronous trait is callable from an async context by whoever 
 the reverse needs an executor everywhere. A network signer (sigstore, KMS) blocks in its own
 implementation, or lives behind an async façade in a crate below the line.
 
-| Implementation | Use |
-|---|---|
-| **sigstore keyless** (Fulcio and Rekor, **including Rekor v2**) | The default for public instances |
-| **cloud KMS** (AWS, GCP, Azure) | Enterprise deployments with existing key management |
-| **local file key** (`ed25519-dalek`, `p256`) | Development and air-gapped use |
-| **unsigned** | `--no-sign`. We still emit statements, and they still help locally. |
-| **`cosign` subprocess** | An escape hatch, because the Rust sigstore crate is incomplete |
+| Implementation | Use | Built |
+|---|---|---|
+| **keyed, under a trusted root** — a key we hold, a certificate chaining to a published root, every signature logged to Rekor | The default for public instances ([ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md)) | no |
+| **cloud KMS** (AWS, GCP, Azure) holding the intermediate | Where the chain above is issued from in a fleet | no |
+| **local file key** (`ed25519-dalek`) | Development and air-gapped use. Produces an *unchained* statement and says so. | **yes** |
+| **unsigned** | We still emit statements, and they still help locally | **yes** |
 
-Rekor v2 publication takes one HTTPS POST, and it puts us ahead of the prior art, whose
-transparency log is a public object-storage bucket.
+**Sigstore keyless is not the default and is not planned.** ADR-0011 has the reasoning; the short
+version is that a Fulcio certificate's identity is an email address or a CI workflow, and the claim
+an attestation makes is *"the attestor, at this version, re-derived this from these bytes"* — which
+that identity cannot say, and which would put a person's name on a public accusation about somebody
+else's package. We use Rekor and not Fulcio: the log, not the CA.
+
+**The transparency log is required rather than a bonus, and more so with a key we hold.** An
+ephemeral key bounds a compromise by construction; a long-lived one is bounded only by the log.
+Rekor returns a **Signed Entry Timestamp** — its own signature over "this entry existed at time T" —
+and verification checks that T falls inside the certificate's validity window. An attacker holding
+the key from today cannot forge a statement dated last year, because there is no entry for it and
+the log is append-only and publicly auditable. Skipping that check silently reduces the whole design
+to a pinned public key with extra ceremony.
+
+Rekor accepts an entry signed by any key or certificate and does not require Fulcio, which is what
+makes "their log, our CA" a coherent position rather than a hybrid.
 
 **We hand-write the attestation layer.** The Rust `in-toto` crate does not work, the `sigstore`
 crate is incomplete and churning, and RFC 8785 JCS canonicalization sits in the signing path, so we

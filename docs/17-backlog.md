@@ -295,6 +295,33 @@ commit from a release whose tag we failed to fetch. `Checkout::tags` carries the
 package. Turning that warning into a refusal needs a way to know a project is VCS-versioned before
 building it, which is a `pyproject.toml` read the inferrer does not do yet.
 
+## B21. Keyed signing under a trusted root, and the Rekor client
+
+[ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) settles the design and staging has
+confirmed the part that could not be settled on paper: **Rekor accepts an ed25519 key under a
+self-issued certificate**, so "their log, our CA" works. Nothing is built.
+
+Five pieces, in the order they unblock each other:
+
+1. **`dsse::Signature` gains a certificate chain.** Today it is `sig` and `keyid` and has nowhere to
+   put a chain, so a chained signature cannot be expressed at all. The envelope is versioned by
+   `payloadType`, so old bundles keep verifying against a pinned key.
+2. **A `Rekor` client**: one POST to `/api/v1/log/entries` with an `intoto` **v0.0.1** entry, storing
+   the returned `logIndex`, UUID, `signedEntryTimestamp` and inclusion proof on the run. Idempotent
+   — a duplicate returns `409` with the existing UUID — so a retry after a timeout is safe.
+3. **SET verification**, against the key at `/api/v1/log/publicKey`. This is the step the whole ADR
+   hinges on: it yields the time that has to fall inside the certificate's validity window, and
+   without it the design is a pinned public key with extra ceremony.
+4. **Chain validation to a pinned root** in `verify-attestation`, replacing `--public-key <hex>`
+   with `--root <pem>` defaulting to the root compiled into the verifier.
+5. **The CA itself** — an offline root, an intermediate in a KMS, short-lived leaves. Operational
+   work rather than code, and the piece keyless would have avoided entirely.
+
+**Done when:** a statement signed under a real chain verifies in the `--no-default-features`
+verifier, with the Rekor SET checked against the leaf's validity window, and the corresponding
+negative tests fail — a signature outside the window, a chain to the wrong root, a SET that does not
+verify.
+
 ## B19. Cargo needs an index commit, not a timestamp
 
 `pkg:cargo/serde@1.0.219` rebuilds end to end and diverges on exactly one of twenty-eight files:

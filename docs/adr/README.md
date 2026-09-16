@@ -15,3 +15,4 @@ considered, and the reasoning, so the reasoning outlasts the people who did the 
 | [0008](0008-one-implementation-per-seam.md) | Keep the traits, build one implementation of each |
 | [0009](0009-no-gha-emulation.md) | Read GitHub Actions, do not emulate runners |
 | [0010](0010-publish-divergences.md) | Publish divergences automatically, with technical safeguards |
+| [0011](0011-keyed-signing-under-a-trusted-root.md) | Sign with a key under a trusted root, and log to Rekor anyway — not keyless |
