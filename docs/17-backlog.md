@@ -392,9 +392,52 @@ PyPI is the contrast that makes it a finding about npm rather than about rebuild
 and poetry-core are at 100% with every target reaching a comparison, and even the native-extension
 stratum is at 57%.
 
-**Done when:** the two npm strata reach a comparison at a rate comparable to the other two, and the
-reproduction rate within them is measured rather than estimated from single digits. The first
-question is why two thirds of them never build, which is a cluster analysis and not a guess.
+**Measured again, and the first numbers were substantially about us.** 13 of the 35 failures were
+`trigon/mirror-refused-unfiltered`, fixed separately. What remained had one dominant cause and it
+was not the one assumed: 13 of 16 divergences were *"every shared file byte-identical, compiled
+output missing entirely"* — the rung did not know a build existed.
+
+| | as filed | now |
+|---|---:|---:|
+| reached a comparison | 12 of 35 | **22 of 35** |
+| reproduced | 2 | **10** |
+| divergent | 10 | 12 |
+
+Three fixes, each measured:
+
+- **`prepublishOnly` was on the list of hooks `npm pack` runs.** It is not, and never has been —
+  verified against npm 11.16.0 with a package declaring all four hooks, which packs the output of
+  `prepack` and `prepare` and nothing else. The rule was deliberately conservative ("holds under
+  every npm version"), which is right for `prepublish` and backwards for this one.
+- **The rung validated the command body, which never reaches a shell.** `npm run <script>` is what
+  executes, so `&&` in a composite build gated out every package with one — the commonest shape in
+  this ecosystem. The script *name* is validated instead, which is the string that is run.
+- **A member arriving inside another release of the package itself no longer voids.** Running the
+  publisher's build installs devDependencies, and something in that tree routinely depends on an
+  older release of the package being rebuilt. Introduced by the first fix and found by measuring it.
+
+**What is left, and it is the monorepo stratum's own cause.** Of 13 remaining failures, 4 are
+`npm/workspace-protocol` — the published tarball was built with the whole monorepo on disk and we
+build the member alone, so `workspace:*` resolves against nothing. That is B22 rather than more of
+this entry.
+
+**Done when:** B22 lands and the monorepo stratum is re-measured. The TypeScript stratum's cause is
+fixed.
+
+## B22. A monorepo member has to be built from the workspace root
+
+`npm/workspace-protocol`, four targets in the hard strata and the largest remaining cluster in them.
+`repository.directory` tells us which member a package is, and the recipe checks that subdirectory
+out and builds there — but the published tarball was produced by a `npm pack` run with the *whole*
+workspace present, so `workspace:*` dependency specifiers resolved against sibling packages that our
+checkout has and our build cannot see.
+
+The shape of the answer is known and is not the current one: install from the workspace root, then
+pack the member. `npm pack -w <member>` and `pnpm --filter` both express it; which one applies is a
+function of the lockfile the repository carries, which the rung already reads for other reasons.
+
+**Done when:** the four targets build, and the monorepo stratum's reproduction rate is measured
+rather than inferred from one target.
 
 ## B17. What an unnamed failure should cost a package
 

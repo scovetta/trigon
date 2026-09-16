@@ -386,7 +386,11 @@ impl Trip {
 ///   of a build with no output, and the run is already `BuildFailed`.
 /// - `WholeArtifact` is unconditional. There is no honest reason for the published artifact to
 ///   arrive whole, and the check costs nothing.
-pub fn voiding(trips: &[Trip], rebuilt: Option<&BTreeSet<Digest>>) -> Vec<Trip> {
+pub fn voiding(
+    trips: &[Trip],
+    rebuilt: Option<&BTreeSet<Digest>>,
+    under_test: Option<&Withheld>,
+) -> Vec<Trip> {
     trips
         .iter()
         .filter(|t| match &t.matched {
@@ -404,13 +408,56 @@ pub fn voiding(trips: &[Trip], rebuilt: Option<&BTreeSet<Digest>>) -> Vec<Trip> 
             // The *whole* artifact arriving from a toolchain host still voids. That would mean a
             // pinned toolchain distribution contains this exact published tarball, which is worth
             // stopping for whatever the explanation.
+            // **And a member inside another version of the package itself is not either.** A
+            // rebuild that runs the publisher's own build installs its devDependencies, and
+            // something in that tree routinely depends on an older release of the very package
+            // being rebuilt: `fast-glob@3.3.3` pulls `fast-glob@3.3.2`, `tar@7.5.15` pulls
+            // `tar@7.5.11`. The older tarball carries compiled output byte-identical to what we
+            // just compiled, because the source those files come from did not change — and
+            // compiled output is the one thing the also-in-the-source filter cannot drop, since it
+            // is not in the source.
+            //
+            // So the guard sees the artifact's own files arrive and reappear in the output, which
+            // is the forged-rebuild shape exactly. It is not one: the files land in the rebuild
+            // because `tsc` compiled them from `src/`, and matching a neighbouring release is what
+            // *correct* compilation looks like when the source is unchanged. Voiding here means a
+            // package that appears anywhere in its own dependency tree can never be verified.
+            //
+            // The whole artifact still voids, from any source. That is the claim this is about.
             GuardMatch::Member { digest } => {
                 !from_a_toolchain(&t.url)
+                    && !another_release_of(&t.url, under_test)
                     && rebuilt.is_some_and(|out| out.iter().any(|d| d.to_hex() == *digest))
             }
         })
         .cloned()
         .collect()
+}
+
+/// Whether this URL names a *different release of the package under test*.
+///
+/// The filename has to start with the project name, and what follows the separator has to start
+/// with a digit — so `fast-glob-3.3.2.tgz` matches for project `fast-glob` and
+/// `fast-glob-extras-1.0.0.tgz` does not. Without that second condition every package whose name is
+/// a prefix of another's would be exempted along with it.
+///
+/// The *same* version is deliberately not special-cased: it cannot reach here, because the mirror
+/// refuses the artifact under test by URL and a whole-artifact match voids regardless of source.
+fn another_release_of(url: &str, under_test: Option<&Withheld>) -> bool {
+    let Some(w) = under_test else {
+        return false;
+    };
+    let file = url.rsplit('/').next().unwrap_or_default();
+    // npm scopes arrive as `@scope/name`, and the filename carries only the last segment.
+    let stem = w.project.rsplit('/').next().unwrap_or(&w.project);
+    if stem.is_empty() {
+        return false;
+    }
+    let Some(rest) = file.strip_prefix(stem) else {
+        return false;
+    };
+    rest.strip_prefix(['-', '_'])
+        .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// Whether this URL is one of the pinned toolchain distributions.
@@ -1038,12 +1085,12 @@ mod tests {
             digest: arrived.to_hex(),
         });
         let output = BTreeSet::from([Digest::from_bytes([9; 32])]);
-        assert!(voiding(std::slice::from_ref(&t), Some(&output)).is_empty());
+        assert!(voiding(std::slice::from_ref(&t), Some(&output), None).is_empty());
 
         // And the attack is untouched: the same member, present in what the build emitted, is
         // bytes fetched rather than built and re-emitted as though they had been.
         let output = BTreeSet::from([arrived]);
-        assert_eq!(voiding(&[t], Some(&output)).len(), 1);
+        assert_eq!(voiding(&[t], Some(&output), None).len(), 1);
     }
 
     #[test]
@@ -1051,8 +1098,8 @@ mod tests {
         // Unconditional on purpose. There is no honest reason for the published artifact to arrive
         // whole, so this half asks nothing about the output — including when there is none.
         let t = trip(GuardMatch::WholeArtifact);
-        assert_eq!(voiding(std::slice::from_ref(&t), None).len(), 1);
-        assert_eq!(voiding(&[t], Some(&BTreeSet::new())).len(), 1);
+        assert_eq!(voiding(std::slice::from_ref(&t), None, None).len(), 1);
+        assert_eq!(voiding(&[t], Some(&BTreeSet::new()), None).len(), 1);
     }
 
     #[test]
@@ -1062,14 +1109,14 @@ mod tests {
         let t = trip(GuardMatch::Member {
             digest: Digest::from_bytes([3; 32]).to_hex(),
         });
-        assert!(voiding(&[t], None).is_empty());
+        assert!(voiding(&[t], None, None).is_empty());
     }
 
     #[test]
     fn a_refusal_never_voids() {
-        assert!(voiding(&[trip(GuardMatch::RefusedUrl)], None).is_empty());
+        assert!(voiding(&[trip(GuardMatch::RefusedUrl)], None, None).is_empty());
         let out = BTreeSet::from([Digest::from_bytes([3; 32])]);
-        assert!(voiding(&[trip(GuardMatch::RefusedUrl)], Some(&out)).is_empty());
+        assert!(voiding(&[trip(GuardMatch::RefusedUrl)], Some(&out), None).is_empty());
     }
 
     #[test]
@@ -1392,7 +1439,7 @@ mod toolchain_member_tests {
             "https://nodejs.org/dist/v25.8.2/node-v25.8.2-linux-x64.tar.gz",
             &d,
         );
-        assert!(voiding(&[t], Some(&out)).is_empty());
+        assert!(voiding(&[t], Some(&out), None).is_empty());
     }
 
     #[test]
@@ -1408,7 +1455,11 @@ mod toolchain_member_tests {
             "https://nodejs.org.evil.example/dist/node.tar.gz",
             "https://registry.npmjs.org/minimatch",
         ] {
-            assert_eq!(voiding(&[member(url, &d)], Some(&out)).len(), 1, "{url}");
+            assert_eq!(
+                voiding(&[member(url, &d)], Some(&out), None).len(),
+                1,
+                "{url}"
+            );
         }
     }
 
@@ -1420,6 +1471,104 @@ mod toolchain_member_tests {
             url: "https://nodejs.org/dist/v25.8.2/node-v25.8.2-linux-x64.tar.gz".into(),
             matched: GuardMatch::WholeArtifact,
         };
-        assert_eq!(voiding(&[t], None).len(), 1);
+        assert_eq!(voiding(&[t], None, None).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod neighbouring_release_tests {
+    use super::{GuardMatch, Trip, Withheld, voiding};
+    use std::collections::BTreeSet;
+    use trigon_core::Digest;
+
+    fn member(url: &str, d: &Digest) -> Trip {
+        Trip {
+            url: url.into(),
+            matched: GuardMatch::Member { digest: d.to_hex() },
+        }
+    }
+
+    fn under_test(project: &str, version: &str) -> Withheld {
+        Withheld {
+            project: project.into(),
+            version: version.into(),
+        }
+    }
+
+    #[test]
+    fn a_member_inside_another_release_of_the_same_package_does_not_void() {
+        // Running the publisher's own build installs devDependencies, and something in that tree
+        // routinely depends on an older release of the package being rebuilt — `fast-glob@3.3.3`
+        // pulls `fast-glob@3.3.2`, `tar@7.5.15` pulls `tar@7.5.11`. The older tarball carries
+        // compiled output byte-identical to what we just compiled, because the source it came from
+        // did not change, and compiled output is the one thing the also-in-the-source filter cannot
+        // drop. Voiding there means a package appearing anywhere in its own dependency tree can
+        // never be verified.
+        let d = Digest::from_bytes([3; 32]);
+        let out = BTreeSet::from([d]);
+        for (url, project) in [
+            (
+                "https://registry.npmjs.org/fast-glob/-/fast-glob-3.3.2.tgz",
+                "fast-glob",
+            ),
+            ("https://registry.npmjs.org/tar/-/tar-7.5.11.tgz", "tar"),
+            // A scope: the filename carries only the last segment of the name.
+            (
+                "https://registry.npmjs.org/@babel/core/-/core-7.27.0.tgz",
+                "@babel/core",
+            ),
+            // PyPI shape, same rule.
+            (
+                "https://files.pythonhosted.org/packages/aa/chardet-7.4.2-py3-none-any.whl",
+                "chardet",
+            ),
+        ] {
+            let w = under_test(project, "9.9.9");
+            assert!(
+                voiding(&[member(url, &d)], Some(&out), Some(&w)).is_empty(),
+                "{url} for {project}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_package_whose_name_merely_starts_the_same_still_voids() {
+        // The condition that keeps this from exempting half the registry: what follows the
+        // separator has to be a version. `fast-glob-extras` is somebody else's package.
+        let d = Digest::from_bytes([3; 32]);
+        let out = BTreeSet::from([d]);
+        let w = under_test("fast-glob", "3.3.3");
+        for url in [
+            "https://registry.npmjs.org/fast-glob-extras/-/fast-glob-extras-1.0.0.tgz",
+            "https://registry.npmjs.org/fast-globby/-/fast-globby-2.0.0.tgz",
+            "https://cdn.evil.example/fast-glob-payload.tgz",
+        ] {
+            assert_eq!(
+                voiding(&[member(url, &d)], Some(&out), Some(&w)).len(),
+                1,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_whole_artifact_still_voids_from_a_neighbouring_release_url() {
+        // The claim this exemption is not about. A *whole artifact* match means the bytes of the
+        // package under test arrived, whatever the URL says it was.
+        let w = under_test("fast-glob", "3.3.3");
+        let t = Trip {
+            url: "https://registry.npmjs.org/fast-glob/-/fast-glob-3.3.2.tgz".into(),
+            matched: GuardMatch::WholeArtifact,
+        };
+        assert_eq!(voiding(&[t], None, Some(&w)).len(), 1);
+    }
+
+    #[test]
+    fn with_no_package_under_test_nothing_is_exempted() {
+        // `verify` and any path that did not arm a withhold get the unchanged rule.
+        let d = Digest::from_bytes([3; 32]);
+        let out = BTreeSet::from([d]);
+        let url = "https://registry.npmjs.org/fast-glob/-/fast-glob-3.3.2.tgz";
+        assert_eq!(voiding(&[member(url, &d)], Some(&out), None).len(), 1);
     }
 }

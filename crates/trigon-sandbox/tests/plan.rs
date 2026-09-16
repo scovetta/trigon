@@ -483,3 +483,29 @@ fn our_own_steps_are_not_the_packages_fault() {
     // And it says what the runtime said, rather than "unknown".
     assert!(refused.to_string().contains("pinging container registry"));
 }
+
+#[test]
+fn a_bare_image_id_is_pinned_and_a_tag_is_not() {
+    // **Two copies of this rule disagreed, and the disagreement was user-visible.** `base-image`
+    // had its own, requiring `@` — while `env/base-image-incomplete` builds its suggested fix
+    // command out of whatever `--image` the run used, which for a locally built base is a bare
+    // `sha256:<id>`. So Trigon printed a command and then refused to run it.
+    for pinned in [
+        "sha256:de0f04bb2bdd83d6c2a6ab8a72737852df73e3a2a4e85750434a61a88ca5a3c4",
+        // `podman images --no-trunc` prints the hex without the prefix.
+        "de0f04bb2bdd83d6c2a6ab8a72737852df73e3a2a4e85750434a61a88ca5a3c4",
+        "docker.io/library/debian@sha256:160466e67bb85a4099d9d9c2356b4a6a64747b281a22c1",
+    ] {
+        assert!(trigon_sandbox::is_pinned(pinned), "{pinned}");
+    }
+    for moving in [
+        "debian:bookworm-slim",
+        "localhost/trigon-base:latest",
+        "debian",
+        // Hex, and the wrong length for an id — a truncated paste rather than a reference.
+        "sha256:de0f04bb",
+        "",
+    ] {
+        assert!(!trigon_sandbox::is_pinned(moving), "{moving}");
+    }
+}

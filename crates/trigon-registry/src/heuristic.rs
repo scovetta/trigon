@@ -242,8 +242,13 @@ impl StrategyInferrer for NpmInferrer {
             ),
         ]);
         let mut build_tool = "npm/build/pack";
+        // **The script name is what reaches a shell; the command body never does.** The tool runs
+        // `npm run <script>`, so validating the command rejected every composite build — `&&` is
+        // not in the allowlist, and `npm run clean && npm run compile` is the commonest shape in
+        // this ecosystem. The name is still publisher-controlled and still checked, which is the
+        // part that matters.
         if let Some((script, command)) = unrun_build(target)
-            && bare_program(&command)
+            && bare_program(&script)
             && let Some(sources) = self.sources.clone()
         {
             let (repo, commit) = (source.repo_url.clone(), commit.clone());

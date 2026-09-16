@@ -830,7 +830,17 @@ impl PodmanBuild {
 /// unusable without one: with no network in the image build, the packages a strategy needs have to
 /// come from a base image somebody built. An id identifies exactly one set of bytes in the local
 /// store, which is the property the check exists for.
-fn is_pinned(image: &str) -> bool {
+/// Whether this reference names exact bytes rather than a moving tag.
+///
+/// Two forms count. A digest reference (`name@sha256:…`) names the bytes wherever it is served
+/// from; a bare image id (`sha256:<64 hex>`, or the hex alone) names them in the local store, which
+/// is *more* pinned rather than less.
+///
+/// **Public because two copies of this rule disagreed.** `base-image` had its own, requiring `@`,
+/// so it refused a bare id — and `env/base-image-incomplete` builds its suggested fix command out of
+/// whatever `--image` the run used, which for a locally built base is exactly that form. Trigon
+/// printed a command Trigon then rejected. One definition, so they cannot drift again.
+pub fn is_pinned(image: &str) -> bool {
     if image.contains('@') {
         return true;
     }

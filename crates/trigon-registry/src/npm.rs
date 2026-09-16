@@ -12,7 +12,7 @@
 //! the claimed source".
 
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 use trigon_core::{
     ArtifactId, Claim, Confidence, Digest, Ecosystem, Evidence, Intrinsics, RegistryMoment,
@@ -479,22 +479,38 @@ pub(crate) async fn fetch_verified(
 /// 1. A `build` script, and only that name. `compile` and `bundle` are the same semantic class and
 ///    are not conventional enough to assume; a docs build and a deploy answer to those names too.
 ///    Narrow first, and widen on a measurement rather than on an argument.
-/// 2. **No** `prepare`, `prepack`, `prepublish` or `prepublishOnly` declared at all. Not "none that
-///    this npm runs" — none at all. A package that declares one builds at pack time under some npm,
-///    and a separate `build` script alongside it is probably a different job. Requiring all four
-///    absent also means the claim holds under *every* npm version, so there is no lifecycle
-///    boundary to get wrong for a package published in 2017.
+/// 2. **No** `prepare`, `prepack` or `prepublish` declared. Not "none that this npm runs" — none at
+///    all. A package that declares one builds at pack time under some npm, and a separate `build`
+///    script alongside it is probably a different job. `prepublish` stays on this list even though
+///    modern npm runs it on *install* rather than publish, because npm 4 and earlier did run it at
+///    publish time and a package from 2017 is exactly the case this conservatism is for.
+///
+///    **`prepublishOnly` came off it, and that is a correction.** The rule was written to hold
+///    under every npm version, and for this hook that argument runs the other way: the name means
+///    what it says, `npm pack` has never run it, and npm 11.16.0 confirms it — a package declaring
+///    all four hooks packs the output of `prepack` and `prepare` and neither of the other two. So a
+///    package whose build hangs off `prepublishOnly` publishes output no `npm pack` can contain,
+///    which is precisely the claim this function exists to make. It was suppressing the claim
+///    instead. Measured cost: 13 of 16 divergences in the npm TypeScript and monorepo strata, every
+///    one of them "every shared file byte-identical, compiled output missing entirely".
 /// 3. No `install`, `preinstall` or `postinstall`. That is node-gyp, which compiles, and whatever
 ///    it downloads while doing so.
-/// 4. The command's first token is a key of `dependencies` or `devDependencies`. `npm install` has
-///    therefore already put it in `node_modules/.bin`, so nothing that acts on this claim needs a
-///    socket the dependency phase did not already open.
+/// 4. The command reaches a program the dependency phase already installed — its first token is a
+///    key of `dependencies` or `devDependencies`, so `npm install` has put it in
+///    `node_modules/.bin` and nothing acting on this claim needs a socket that phase did not open.
+///
+///    **A package manager counts as available**, and one level of `npm run <script>` is resolved
+///    before the check. The commonest shape in this ecosystem is composite —
+///    `npm run clean && npm run compile && npm run lint` — whose first token is `npm`, which no
+///    package declares as a dependency of itself. Checking that token rejected every such package:
+///    `fast-glob`, `marked`, `@tanstack/react-query` and `@typescript-eslint/parser` in one corpus
+///    sample.
 ///
 /// What it deliberately does not say is whether running the script is a good idea. That is the
 /// question a rung answers with the repository in hand; this is the fact it answers it from.
 fn unrun_build_script(doc: &Value) -> Option<(String, String)> {
     let scripts = doc.get("scripts")?.as_object()?;
-    const PACK_HOOKS: &[&str] = &["prepare", "prepack", "prepublish", "prepublishOnly"];
+    const PACK_HOOKS: &[&str] = &["prepare", "prepack", "prepublish"];
     const INSTALL_HOOKS: &[&str] = &["install", "preinstall", "postinstall"];
     if PACK_HOOKS
         .iter()
@@ -503,17 +519,61 @@ fn unrun_build_script(doc: &Value) -> Option<(String, String)> {
     {
         return None;
     }
-    let command = scripts.get("build")?.as_str()?.trim();
-    let program = command.split_whitespace().next()?;
-    let declared = |field: &str| {
-        doc.get(field)
-            .and_then(Value::as_object)
-            .is_some_and(|d| d.contains_key(program))
-    };
-    if !declared("devDependencies") && !declared("dependencies") {
+    // `prepublishOnly` first, because where both exist it is the one the publisher ran: it wraps
+    // the build and `npm pack` runs neither.
+    let (name, command) = ["prepublishOnly", "build"]
+        .iter()
+        .find_map(|n| Some((*n, scripts.get(*n)?.as_str()?.trim())))?;
+    if command.is_empty() {
         return None;
     }
-    Some(("build".to_string(), command.to_string()))
+    reaches_an_installed_program(doc, scripts, command)
+        .then(|| (name.to_string(), command.to_string()))
+}
+
+/// Whether this command's first real program is one the dependency phase will have installed.
+///
+/// One level of `npm run <script>` is followed, because the first token of a composite command is
+/// the package manager rather than a tool — and the package manager is always there. Only one
+/// level: a script that runs a script that runs a script is a shape worth declining on rather than
+/// chasing, and the recursion would need a cycle check for no measured benefit.
+fn reaches_an_installed_program(doc: &Value, scripts: &Map<String, Value>, command: &str) -> bool {
+    // The runners themselves. `npm pack` will have `npm` and `npx`; `node` is the interpreter the
+    // toolchain phase installed. A package declaring any of these as a *dependency* is unusual and
+    // is still covered by the `declared` check below.
+    const RUNNERS: &[&str] = &["npm", "npx", "yarn", "pnpm", "bun", "node"];
+
+    let first = command.split_whitespace().next().unwrap_or_default();
+    let declared = |program: &str| {
+        ["devDependencies", "dependencies"].iter().any(|field| {
+            doc.get(field)
+                .and_then(Value::as_object)
+                .is_some_and(|d| d.contains_key(program))
+        })
+    };
+    if declared(first) {
+        return true;
+    }
+    if !RUNNERS.contains(&first) {
+        return false;
+    }
+    // `<runner> run <script>` — follow it once, to whatever that script's own first token is.
+    let mut parts = command.split_whitespace();
+    let referenced = match (parts.next(), parts.next(), parts.next()) {
+        (Some(_), Some("run"), Some(script)) => script,
+        // `npm test`, `yarn build` and friends name the script directly.
+        (Some(_), Some(script), _) if scripts.contains_key(script) => script,
+        _ => return true, // a bare runner invocation, which will run
+    };
+    match scripts.get(referenced).and_then(Value::as_str) {
+        Some(inner) => {
+            let program = inner.split_whitespace().next().unwrap_or_default();
+            declared(program) || RUNNERS.contains(&program)
+        }
+        // A script the manifest does not define. `npm run` would fail, so claiming it builds
+        // anything would be worse than saying nothing.
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -545,7 +605,11 @@ mod tests {
     fn a_package_that_builds_at_pack_time_is_not_claimed() {
         // The distinction the claim rests on. This package builds and `npm pack` builds it, so a
         // rebuild is missing nothing.
-        for hook in ["prepare", "prepack", "prepublish", "prepublishOnly"] {
+        //
+        // `prepublish` is here despite modern npm running it on *install* rather than publish:
+        // npm 4 and earlier did run it at publish time, and a package from 2017 is the case this
+        // conservatism exists for.
+        for hook in ["prepare", "prepack", "prepublish"] {
             let got = doc(serde_json::json!({
                 "scripts": { "build": "tsc", hook: "npm run build" },
                 "devDependencies": { "tsc": "2.0.0" },
@@ -555,6 +619,77 @@ mod tests {
                 "a declared `{hook}` means something already builds"
             );
         }
+    }
+
+    #[test]
+    fn prepublish_only_is_the_one_hook_the_packer_does_not_run() {
+        // **Measured, not read.** A package declaring all four hooks, packed with npm 11.16.0,
+        // contains the output of `prepack` and `prepare` and nothing from `prepublish` or
+        // `prepublishOnly`. The name means what it says.
+        //
+        // This test used to assert the opposite, in a loop with the three above, under a comment
+        // that said "`npm pack` builds it". That was true of three of the four, and the fourth cost
+        // 13 of 16 divergences in the npm TypeScript and monorepo strata — every one of them with
+        // every shared file byte-identical and the compiled output missing entirely.
+        let got = doc(serde_json::json!({
+            "scripts": { "build": "tsc", "prepublishOnly": "npm run build" },
+            "devDependencies": { "tsc": "2.0.0" },
+        }));
+        assert_eq!(
+            got,
+            Some(("prepublishOnly".into(), "npm run build".into())),
+            "the hook the publisher ran and the packer will not"
+        );
+
+        // And it is preferred over `build` where both exist, because it is the one that ran.
+        let wrapped = doc(serde_json::json!({
+            "scripts": { "build": "tsc", "prepublishOnly": "npm run build && npm run docs" },
+            "devDependencies": { "tsc": "2.0.0" },
+        }));
+        assert_eq!(wrapped.unwrap().1, "npm run build && npm run docs");
+    }
+
+    #[test]
+    fn a_composite_command_is_followed_to_a_real_program() {
+        // The commonest shape in this ecosystem, and the first token is never a dependency:
+        // `fast-glob`, `marked`, `@tanstack/react-query` and `@typescript-eslint/parser` all look
+        // like this, and all four were rejected for it.
+        let got = doc(serde_json::json!({
+            "scripts": {
+                "build": "npm run clean && npm run compile",
+                "clean": "rimraf out",
+                "compile": "tsc",
+            },
+            "devDependencies": { "tsc": "2.0.0", "rimraf": "5.0.0" },
+        }));
+        assert_eq!(got.unwrap().1, "npm run clean && npm run compile");
+
+        // pnpm and yarn name the script without `run`.
+        let pnpm = doc(serde_json::json!({
+            "scripts": { "build": "pnpm compile", "compile": "tsc" },
+            "devDependencies": { "tsc": "2.0.0" },
+        }));
+        assert!(pnpm.is_some(), "pnpm <script> is the same shape");
+    }
+
+    #[test]
+    fn a_runner_pointing_at_nothing_is_not_a_build() {
+        // `npm run` a script the manifest does not define would fail, so claiming it builds
+        // anything is worse than saying nothing — and following it is how a typo in a manifest
+        // would otherwise become a confident recipe.
+        let got = doc(serde_json::json!({
+            "scripts": { "build": "npm run compile" },
+            "devDependencies": { "tsc": "2.0.0" },
+        }));
+        assert_eq!(got, None);
+
+        // And a program that is neither declared nor a runner stays rejected, which is the check
+        // this widening must not have removed.
+        let unknown = doc(serde_json::json!({
+            "scripts": { "build": "rollup -c" },
+            "devDependencies": { "tsc": "2.0.0" },
+        }));
+        assert_eq!(unknown, None);
     }
 
     #[test]

@@ -616,7 +616,9 @@ fn voiding_trips(
     produced: Option<&Path>,
 ) -> Vec<trigon_mirror::Trip> {
     let rebuilt = produced.and_then(trigon_mirror::member_digests_at);
-    trigon_mirror::voiding(&mirror.arrived(), rebuilt.as_ref())
+    // The package under test, so a member arriving inside one of its *own* other releases can be
+    // told from one arriving inside somebody else's package.
+    trigon_mirror::voiding(&mirror.arrived(), rebuilt.as_ref(), mirror.withheld())
 }
 
 /// The current instant, as RFC 3339 UTC.
@@ -1495,7 +1497,16 @@ mod build {
             let rebuilt = produced
                 .as_deref()
                 .and_then(trigon_mirror::member_digests_at);
-            let voiding = trigon_mirror::voiding(&outcome.guard_arrived, rebuilt.as_ref());
+            // The package under test, read back from the manifest the mirror was armed with —
+            // there is no `MirrorHandle` on this path, because the mirror runs inside the
+            // container. Without it, a member arriving inside one of the package's own other
+            // releases cannot be told from one arriving inside somebody else's.
+            let withheld = guard
+                .and_then(|p| std::fs::read(p).ok())
+                .and_then(|b| serde_json::from_slice::<trigon_mirror::GuardManifest>(&b).ok())
+                .and_then(|m| m.withhold);
+            let voiding =
+                trigon_mirror::voiding(&outcome.guard_arrived, rebuilt.as_ref(), withheld.as_ref());
             // The guard fired and the run still stands, because the bytes did not come back out in
             // what the build produced. Said out loud: a control whose near-misses are invisible
             // cannot be told from one that never fires.
@@ -4081,10 +4092,16 @@ mod mirror {
 
     /// Build a base image that carries what an enforced tier cannot install.
     pub fn base_image(from: &str, packages: &[String], tag: &str, print: bool) -> Result<()> {
-        if !from.contains('@') {
+        // The sandbox's own rule, not a second copy of it. This used to require `@`, which refused
+        // a bare `sha256:<id>` — the form a locally built base image has, and the form
+        // `env/base-image-incomplete` puts into the fix command it prints. Trigon was telling an
+        // operator to run a command Trigon rejected.
+        if !trigon_sandbox::is_pinned(from) {
             bail!(
-                "pin `--from` by digest. A tag resolves to different bytes on different days, \
-                 which is exactly what a base image for a reproducibility tool must not do."
+                "pin `--from` by digest or by image id. A tag resolves to different bytes on \
+                 different days, which is exactly what a base image for a reproducibility tool \
+                 must not do — `name@sha256:…` and a bare `sha256:<id>` both name exact bytes, \
+                 and `podman images --no-trunc` prints the second."
             );
         }
         let packages: Vec<String> = if packages.is_empty() {

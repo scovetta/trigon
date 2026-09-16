@@ -357,6 +357,15 @@ impl MirrorHandle {
         self.addr.to_string()
     }
 
+    /// The package and version this run is about, as the guard was told it.
+    ///
+    /// Exposed so the void decision can tell a member arriving inside one of the package's *own*
+    /// other releases from one arriving inside somebody else's package. See
+    /// [`crate::guard::voiding`].
+    pub fn withheld(&self) -> Option<&crate::guard::Withheld> {
+        self.guard.withheld()
+    }
+
     /// What this mirror served, row by row. See [`Seen`] for why this exists beside the counters.
     pub fn seen(&self) -> &Seen {
         &self.seen
