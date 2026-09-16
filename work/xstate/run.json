@@ -1,15 +1,14 @@
 {
   "purl": "pkg:npm/xstate@4.38.3",
-  "started": "2026-09-16T03:07:26Z",
-  "finished": "2026-09-16T03:11:46Z",
+  "started": "2026-09-16T03:19:34Z",
+  "finished": "2026-09-16T03:27:03Z",
   "outcome": "build-failed:deps",
   "failure": {
-    "code": "npm/workspace-unbuilt-sibling",
-    "subject": "xstate",
-    "fault": "bug",
+    "code": "npm/peer-conflict",
+    "fault": "build",
     "retryable": false,
     "repairable": true,
-    "evidence": "npm ERR! src/index.ts(3,26): error TS2307: Cannot find module 'xstate' or its corresponding type declarations."
+    "evidence": "npm WARN ERESOLVE overriding peer dependency"
   },
   "source": {
     "repo_url": "https://github.com/statelyai/xstate",
@@ -17,27 +16,36 @@
     "commit": "e87600ea450fa19b71d2051fac3c6c54fb9d486e",
     "how": "registry_commit"
   },
-  "strategy_digest": "ee1d783156929061eb7e0da880fb6945009464105b091d42e160afaf1a7b25dc",
+  "strategy_digest": "72567c305636aa18d8dbbc627743fd80a679cebdcd0a050479d82047e24827d0",
   "derivation": "heuristic",
   "confidence": "certain",
   "timings": [
     [
       "deps",
-      2.430838306
+      2.367919747
     ],
     [
       "build",
-      123.141832524
+      114.359602484
+    ],
+    [
+      "deps",
+      2.371833027
+    ],
+    [
+      "build",
+      73.412882346
     ]
   ],
   "egress": "mirror-only",
-  "inference_seconds": 129.579110052,
-  "tokens_in": 8608,
-  "tokens_out": 11489,
+  "inference_seconds": 248.143876388,
+  "tokens_in": 8799,
+  "tokens_out": 566,
   "tokens_cached": 0,
   "repairs": [
-    "attempt 1 on npm/workspace-unbuilt-sibling:xstate"
+    "attempt 1 on npm/workspace-unbuilt-sibling:xstate",
+    "attempt 2 on npm/peer-conflict"
   ],
   "model": "claude-sonnet-5 (anthropic)",
-  "model_calls": 1
+  "model_calls": 2
 }

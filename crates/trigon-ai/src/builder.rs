@@ -201,10 +201,14 @@ pub fn propose(provider: &dyn Provider, model: &str, task: &Task) -> Result<Cand
     let req = Request {
         prompt: prompt(task),
         model: model.to_string(),
-        // The answer is a whole strategy document, and on a provider that reasons out of the same
-        // budget 4096 was never two things: a real repair spent 4095 of it thinking and had one
-        // token left to write with. This is thinking *and* answer, and how deeply the model thinks
-        // inside it is `output_config.effort` rather than a share of this number.
+        // Thinking *and* answer, on a provider that reasons out of one budget — 4096 was never two
+        // things, and a real repair spent 4095 of it thinking with one token left to write with.
+        //
+        // **Raising this is not the lever.** Adaptive thinking scales to the room it is given: at
+        // 16384 the same repair spent 16,379 reasoning and was cut off again. How deeply the model
+        // thinks is `output_config.effort`, and this number only has to leave the *answer* room
+        // once the effort is right. 16k is the reference's own default for a non-streaming request,
+        // which is what this is.
         max_output_tokens: 16_384,
         temperature: 0.0,
         schema: caps.structured_output.then(candidate_schema),

@@ -199,7 +199,9 @@ pub enum LlmError {
     /// says the budget was too small, which is ours to fix and says exactly how.
     #[error(
         "the answer did not fit in {limit} output tokens ({thinking} of them spent on reasoning). \
-         Raise `max_output_tokens`, or ask the provider for `Reasoning::Off`."
+         Adaptive thinking scales to the room it is given, so raising `max_output_tokens` raises \
+         the reasoning with it: lower `output_config.effort` instead, or ask the provider for \
+         `Reasoning::Off`."
     )]
     Truncated { limit: u32, thinking: u64 },
     #[error("the provider refused: {0}")]

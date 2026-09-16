@@ -326,10 +326,17 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// How hard the model should think, where it is asked to.
 ///
-/// `output_config.effort` is the depth lever on current models — a token budget is not, and no
-/// longer exists. `high` is the API's own default, stated here rather than omitted so there is one
-/// place to change it; `docs/07-ai.md` §5 is about spending less, and this is the dial.
-const ANTHROPIC_EFFORT: &str = "high";
+/// **`medium`, and the reason is measured.** `output_config.effort` is the depth lever on current
+/// models — a token budget is not, and no longer exists — and adaptive thinking scales what it
+/// spends to the room it is given. At the API's default of `high` a repair spent 16,379 of 16,384
+/// output tokens reasoning and was cut off before writing anything, so raising the ceiling raises
+/// the thinking and does not reach the answer. Lowering the effort is what leaves room.
+///
+/// The task suits it: a strategy document is a bounded answer against a shape stated in the prompt,
+/// and the diagnosis that came back from the truncated call was already correct — the reasoning was
+/// not short of depth, it was short of a stopping point. `docs/07-ai.md` §5 wants the cheaper
+/// setting wherever quality holds, and this is the dial it means.
+const ANTHROPIC_EFFORT: &str = "medium";
 
 /// Hosted, so ten minutes is the right bound: past that it is a fault rather than a slow model.
 const ANTHROPIC_TIMEOUT: Duration = Duration::from_secs(600);
@@ -644,6 +651,12 @@ mod tests {
         );
         // Depth is `effort`, and it lives *inside* `output_config` rather than at the top level.
         assert_eq!(b["output_config"]["effort"], ANTHROPIC_EFFORT);
+        // And below the API's default, because adaptive thinking scales to the room it is given:
+        // at `high` a repair spent 16,379 of 16,384 output tokens reasoning and never answered.
+        assert_ne!(
+            ANTHROPIC_EFFORT, "high",
+            "raising the ceiling is not the lever"
+        );
     }
 
     #[test]
