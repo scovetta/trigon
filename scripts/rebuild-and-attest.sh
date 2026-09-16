@@ -228,19 +228,50 @@ for candidate in "$WORK"/*; do
     fi
 done
 
+# The equivalence statement's path, from the record the attestor just wrote rather than from a
+# glob over the store: a store accumulates runs, and the bundle this line should name is the one
+# this run produced. Read with sed because the record puts one path per line, so the script keeps
+# working on a machine without jq — the `--transparency` line below is the only part that needs it.
+BUNDLE=""
+INCOMPLETE=""
+if [ -f "$STORE/runs/$LATEST.json" ]; then
+    REL="$(sed -n 's|.*"\(attestations/[^"]*/equivalence\.intoto\.json\)".*|\1|p' \
+           "$STORE/runs/$LATEST.json" | head -1)"
+    [ -n "$REL" ] && [ -f "$STORE/$REL" ] && BUNDLE="$STORE/$REL"
+fi
+
 printf '\n  statements  %s/attestations/\n' "$STORE"
 printf '  verify      %s verify-attestation \\\n' "$TRIGON"
-printf '                %s/attestations/.../equivalence.intoto.json \\\n' "$STORE"
+if [ -n "$BUNDLE" ]; then
+    printf '                "%s" \\\n' "$BUNDLE"
+else
+    printf '                %s/attestations/.../equivalence.intoto.json \\\n' "$STORE"
+    INCOMPLETE=1
+fi
 if [ -n "$UPSTREAM" ] && [ -n "$REBUILT" ]; then
     printf '                --rerun-comparison \\\n'
     printf '                --upstream "%s" \\\n' "$UPSTREAM"
     printf '                --rebuild "%s"' "$REBUILT"
 else
     printf '                --rerun-comparison --upstream <published> --rebuild <rebuilt>'
+    INCOMPLETE=1
 fi
 [ -n "$KEY" ] && printf ' \\\n                --public-key $(%s public-key %s)' "$TRIGON" "$KEY"
 # Only where there is an entry to check. Naming the flag after a run that never logged would send
 # someone looking for a file that was never written.
 [ -n "$REKOR" ] && [ -z "$DRYRUN" ] &&
-    printf ' \\\n                --transparency <(jq .transparency %s/runs/%s.json)' "$STORE" "$LATEST"
+    if command -v jq >/dev/null 2>&1; then
+        printf ' \\\n                --transparency <(jq .transparency %s/runs/%s.json)' "$STORE" "$LATEST"
+    else
+        # Without jq the line would not run, and a command that does not run is not a command.
+        printf ' \\\n                --transparency <entry.json>   # the `transparency` field of'
+        printf '\n                                              # %s/runs/%s.json' "$STORE" "$LATEST"
+    fi
 printf '\n'
+if [ -n "$INCOMPLETE" ]; then
+    # A placeholder in that line is a command nobody can paste, which is the whole reason the rest
+    # is filled in. Say which part could not be resolved rather than let it be found by trying.
+    printf '\n  note: the <angle-bracketed> parts above could not be filled in from this run.\n'
+    printf '        The two artifacts are the file at the top of %s and its\n' "$WORK"
+    printf '        namesake under %s/rebuild/<strategy>/.\n' "$WORK"
+fi

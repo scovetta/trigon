@@ -338,12 +338,18 @@ scripts/rebuild-and-attest.sh pkg:pypi/chardet@7.4.3 \
     --key ~/.trigon/signing.key --rekor https://rekor.sigstage.dev
 
 # 3. Check it, offline, with nothing trusted: the signature, the claim re-derived from the two
-#    files, and the log entry.
+#    files, and the log entry. Step 2 prints this command with every path filled in for the run it
+#    just did — the shape below is what those parts mean, not something to retype.
 trigon verify-attestation <store>/attestations/.../equivalence.intoto.json \
     --public-key "$(trigon public-key ~/.trigon/signing.key)" \
     --rerun-comparison --upstream <published> --rebuild <rebuilt> \
     --transparency <(jq .transparency <store>/runs/<run>.json)
 ```
+
+`<published>` and `<rebuilt>` are the two artifacts the rebuild left behind: the published one at
+the top of the work directory, and the one Trigon built under
+`<work>/rebuild/<strategy>-<pid>/` with the same name. The script resolves that pair itself, and
+says so rather than printing a placeholder if it cannot.
 
 Step 3 prints all four results:
 

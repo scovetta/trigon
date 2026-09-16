@@ -244,6 +244,7 @@ deterministic, so what you read is byte for byte what a real run would publish.
 Checking it needs no network and no faith in the log:
 
 ```
+$ # scripts/rebuild-and-attest.sh prints this line with every path already filled in.
 $ trigon verify-attestation ./store/attestations/.../equivalence.intoto.json \
       --transparency <(jq .transparency ./store/runs/1789572025-1173b740.json)
 
