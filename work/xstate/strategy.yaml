@@ -1,0 +1,19 @@
+schema: 1
+kind: flow
+location:
+  repo: https://github.com/statelyai/xstate
+  ref: e87600ea450fa19b71d2051fac3c6c54fb9d486e
+src:
+- uses: git-checkout
+deps:
+- uses: npm/deps/custom
+  with:
+    node_version: 16.20.2
+    npm_version: 8.19.4
+    registry_time: 2023-10-23T19:31:11.966Z
+build:
+- uses: npm/build/pack
+  with:
+    npm_version: 8.19.4
+    registry_time: 2023-10-23T19:31:11.966Z
+output_path: '*.tgz'

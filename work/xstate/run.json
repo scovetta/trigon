@@ -1,0 +1,42 @@
+{
+  "purl": "pkg:npm/xstate@4.38.3",
+  "started": "2026-09-16T02:48:49Z",
+  "finished": "2026-09-16T02:50:51Z",
+  "outcome": "build-failed:deps",
+  "failure": {
+    "code": "npm/peer-conflict",
+    "fault": "build",
+    "retryable": false,
+    "repairable": true,
+    "evidence": "npm WARN ERESOLVE overriding peer dependency"
+  },
+  "source": {
+    "repo_url": "https://github.com/statelyai/xstate",
+    "declared_url": "git+https://github.com/statelyai/xstate.git",
+    "commit": "e87600ea450fa19b71d2051fac3c6c54fb9d486e",
+    "how": "registry_commit"
+  },
+  "strategy_digest": "ee1d783156929061eb7e0da880fb6945009464105b091d42e160afaf1a7b25dc",
+  "derivation": "heuristic",
+  "confidence": "certain",
+  "timings": [
+    [
+      "deps",
+      2.4466903110000002
+    ],
+    [
+      "build",
+      114.735103054
+    ]
+  ],
+  "egress": "mirror-only",
+  "inference_seconds": 0.463381788,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "tokens_cached": 0,
+  "repairs": [
+    "attempt 1 on npm/peer-conflict"
+  ],
+  "model": "claude-sonnet-5 (anthropic)",
+  "model_calls": 0
+}

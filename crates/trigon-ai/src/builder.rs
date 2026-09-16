@@ -175,8 +175,8 @@ pub fn propose(provider: &dyn Provider, model: &str, task: &Task) -> Result<Cand
         model: model.to_string(),
         // The answer is a whole strategy document, and on a provider that reasons out of the same
         // budget 4096 was never two things: a real repair spent 4095 of it thinking and had one
-        // token left to write with. The Anthropic client reserves `ANSWER_FLOOR` of this that a
-        // reasoning trace cannot touch, so what the caller asks for here is thinking *and* answer.
+        // token left to write with. This is thinking *and* answer, and how deeply the model thinks
+        // inside it is `output_config.effort` rather than a share of this number.
         max_output_tokens: 16_384,
         temperature: 0.0,
         schema: caps.structured_output.then(candidate_schema),
