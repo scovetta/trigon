@@ -20,6 +20,7 @@ usage: rebuild-and-attest.sh <purl> [options]
 
   --key <file>      ed25519 key to sign with. Without one the statements are written unsigned,
                     which is still a checkable document, just not an attributable one.
+                    Make one with: trigon keygen --out ~/.trigon/signing.key
   --store <dir>     where runs and blobs go          (default: ./trigon-store)
   --work <dir>      where this run's artifacts go    (default: ./work/<purl-slug>)
   --egress <tier>   deny-all | mirror-only | open    (default: mirror-only)

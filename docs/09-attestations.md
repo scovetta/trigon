@@ -327,6 +327,36 @@ Rekor accepts an entry signed by any key or certificate and does not require Ful
 makes "their log, our CA" a coherent position rather than a hybrid. Staging confirmed it for the
 shape we actually emit: an ed25519 key under a self-issued certificate is accepted.
 
+#### Making the key
+
+```
+trigon keygen --out ~/.trigon/signing.key [--public-out ~/.trigon/public.pem]
+```
+
+The private key is written `0600` — created at that mode rather than `chmod`ed to it afterwards,
+because a `chmod` leaves a window in which the key is on disk and world-readable. The mode is then
+read back and the file removed if it did not take, since a filesystem that ignores permissions
+accepts the request and hands everyone the key.
+
+It **refuses to overwrite an existing key, and there is no `--force`.** A signing key is not a file
+you can regenerate: the moment the old one is gone, every statement ever signed with it is
+unattributable. Move it aside deliberately if that is what you want.
+
+The command prints the public key as hex, which is what a checker pins:
+
+```
+trigon verify-attestation <bundle> --public-key <hex>
+```
+
+That pinning is the whole point — an unpinned signature is worth exactly the bundle's
+re-derivation and no more. `--public-out` additionally writes SPKI PEM, the form a log entry
+carries.
+
+`keygen` is deliberately available in the `--no-default-features` verifier too, which links no
+runtime and no network client: generating a signing key on a machine that has never had a socket
+open is a reasonable thing to want. What it produces is a **bare** key, signing unchained
+statements; a public instance wants a key under a trusted root instead (B21 steps 4-5).
+
 #### What exporting to the log looks like today
 
 `trigon attest --rekor <log-url>` publishes each envelope it signs, and needs `--key` — an unsigned
@@ -340,6 +370,16 @@ The entry is `intoto` **v0.0.1**, not v0.0.2 — the envelope goes in as a seria
 with the certificate as a sibling `spec.publicKey`. A duplicate submission returns `409` carrying
 the UUID of the existing entry, which we fetch and store, so retrying after a timeout is safe
 rather than a second entry for the same statement.
+
+**`--dry-run` shows the entry before it exists anywhere.** Publication to an append-only log is the
+one write here that cannot be taken back, so `trigon attest --rekor <url> --dry-run` prints the
+exact entry that would be POSTed, posts nothing, and writes nothing — not to the log and not to the
+store. Everything up to the POST really happens: the claim is re-derived from the artifact bytes and
+the envelope is really signed, so what you are shown is the entry rather than a rendering of one.
+ed25519 signatures are deterministic, so a real run afterwards signs the identical bytes, which is
+what makes the preview predictive rather than indicative. The statement inside the envelope is
+printed a second time in readable form, clearly marked as not part of the entry, because it is
+base64 twice over and a preview nobody can read is not a preview.
 
 What comes back is stored on the run as `RunRecord.transparency`: the log's URL, the entry UUID,
 `logIndex`, `integratedTime`, `logID`, the `signedEntryTimestamp`, and `body` verbatim as the log

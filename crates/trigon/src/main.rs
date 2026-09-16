@@ -242,6 +242,25 @@ enum Cmd {
         #[arg(long)]
         store: Option<PathBuf>,
     },
+    /// Create an ed25519 signing key.
+    ///
+    /// Deliberately available in the `--no-default-features` verifier too, which links no runtime
+    /// and no network client. Generating a signing key on a machine that has never had a socket
+    /// open is a reasonable thing to want, and nothing about making one needs the build half.
+    ///
+    /// This produces a **bare** key, which signs unchained statements: they verify against a
+    /// pinned public key and against nothing else. ADR-0011's design is a key under a certificate
+    /// chaining to a published root, and that is what a public instance should use — this is the
+    /// development and air-gapped case, and it says so rather than pretending otherwise.
+    Keygen {
+        /// Where to write the private key. Created `0600`, and refused if it already exists.
+        #[arg(long, default_value = "./signing.key")]
+        out: PathBuf,
+        /// Also write the public key here, as SPKI PEM — the form a transparency log entry
+        /// carries. The hex form is printed either way.
+        #[arg(long, value_name = "PATH")]
+        public_out: Option<PathBuf>,
+    },
     /// Sign what a stored run says, after re-deriving it from the bytes.
     ///
     /// A separate process from the one that ran the build, and that is the point: it reads blobs by
@@ -273,6 +292,15 @@ enum Cmd {
         /// key cannot produce a statement dated before the theft. See ADR-0011.
         #[arg(long, value_name = "URL")]
         rekor: Option<String>,
+        /// Print the exact entry `--rekor` would post, post nothing, and write nothing.
+        ///
+        /// Everything up to the POST really happens — the claim is re-derived from the artifact
+        /// bytes and the envelope is really signed — so what you are shown is the entry, not a
+        /// rendering of one. ed25519 signatures are deterministic, so running this and then
+        /// running for real produces the identical bytes; that is what makes a preview of an
+        /// append-only, irreversible publication worth anything.
+        #[arg(long, requires = "rekor")]
+        dry_run: bool,
     },
     /// Score a sweep against a labelled corpus.
     ///
@@ -922,6 +950,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             source_cache,
             concurrency,
         }),
+        Cmd::Keygen { out, public_out } => keygen(&out, public_out.as_deref()),
         #[cfg(feature = "build")]
         Cmd::Attest {
             store,
@@ -929,12 +958,14 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             key,
             prune,
             rekor,
+            dry_run,
         } => attestor::run(attestor::Args {
             store,
             run,
             key,
             prune,
             rekor,
+            dry_run,
         }),
         #[cfg(feature = "build")]
         Cmd::Score {
@@ -5213,6 +5244,87 @@ fn file_name(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
+/// Write a new ed25519 signing key, and say what was written.
+fn keygen(out: &Path, public_out: Option<&Path>) -> Result<()> {
+    use std::io::Write as _;
+
+    // Refused rather than overwritten, with no `--force`. A signing key is not a file you can
+    // regenerate: every statement ever signed with the old one becomes unattributable the moment
+    // it is gone, and nothing about `trigon keygen` should be able to do that by being run twice.
+    if out.exists() {
+        bail!(
+            "{} already exists. Refusing to overwrite a signing key — everything ever signed with \
+             it becomes unattributable and there is no way back. Move it aside if that is really \
+             what you want.",
+            out.display()
+        );
+    }
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    let key = trigon_attest::LocalKey::generate();
+    let hex: String = key.seed().iter().map(|b| format!("{b:02x}")).collect();
+
+    // Created `0600` rather than chmod'd to it afterwards. A chmod leaves a window in which the
+    // key is on disk and world-readable, and that window is the whole vulnerability.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(out)
+        .with_context(|| format!("creating {}", out.display()))?;
+    writeln!(f, "{hex}").with_context(|| format!("writing {}", out.display()))?;
+    drop(f);
+
+    // And then checked, because a mode that was asked for is not a mode that was applied — a
+    // filesystem that ignores permissions accepts the request and grants everyone the key. Fail
+    // closed: take the file back rather than report success over a key anyone can read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(out)
+            .with_context(|| format!("checking the mode on {}", out.display()))?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode != 0o600 {
+            let _ = std::fs::remove_file(out);
+            bail!(
+                "{} came out mode {mode:04o} rather than 0600, so the key would be readable by \
+                 others. Removed it rather than leave it there; this filesystem cannot hold a \
+                 signing key safely.",
+                out.display()
+            );
+        }
+    }
+
+    if let Some(pub_path) = public_out {
+        std::fs::write(pub_path, key.public_pem())
+            .with_context(|| format!("writing {}", pub_path.display()))?;
+    }
+
+    println!("wrote {} (0600)", out.display());
+    if let Some(pub_path) = public_out {
+        println!("wrote {}", pub_path.display());
+    }
+    println!("\npublic key  {}", key.public_hex());
+    println!(
+        "\nPin that hex in whoever checks these statements:\n  \
+         trigon verify-attestation <bundle> --public-key {}\n\n\
+         It is the only thing that makes a signature mean anything — an unpinned signature is \
+         worth exactly the bundle's re-derivation. This key signs unchained statements; a public \
+         instance wants a key under a trusted root instead (ADR-0011).",
+        key.public_hex()
+    );
+    Ok(())
+}
+
 fn load_key(path: &Path) -> Result<trigon_attest::LocalKey> {
     let raw = std::fs::read(path).with_context(|| format!("reading key {}", path.display()))?;
     // Accept hex as well as raw bytes: a key pasted out of a terminal is hex more often than not.
@@ -5904,6 +6016,7 @@ mod attestor {
         pub key: Option<std::path::PathBuf>,
         pub prune: bool,
         pub rekor: Option<String>,
+        pub dry_run: bool,
     }
 
     pub fn run(args: Args) -> Result<()> {
@@ -5933,6 +6046,18 @@ mod attestor {
                 bail!(
                     "refusing to attest a void run: the artifact under test reached the build over \
                      the network, so a match proves only that the build downloaded it"
+                );
+            }
+
+            // Only the equivalence statement is published, so a run without a comparison has
+            // nothing to preview — and the preview path returns from inside that branch. Left
+            // unchecked, `--dry-run` on such a run would fall straight through and write the other
+            // statements for real, which is the precise shape of a control that fails open.
+            if args.dry_run && record.comparison.is_none() {
+                bail!(
+                    "nothing to preview: this run has no comparison, and the equivalence statement \
+                     is the only one that goes to a log. The other statements describe how the \
+                     rebuild was produced and are never published."
                 );
             }
 
@@ -5986,7 +6111,10 @@ mod attestor {
                 // this, nothing else — a digest that matches nothing they have. It does not let
                 // them run the old set, but it says exactly what the claim was made under.
                 let set_id = comparison.upstream.set.0.as_str();
-                if let Some(set) = trigon_stabilize::profile(set_id) {
+                // Skipped under `--dry-run` along with everything else that writes: "nothing was
+                // written" has to be true without qualification, or the flag is a footnote rather
+                // than a guarantee.
+                if let Some(set) = trigon_stabilize::profile(set_id).filter(|_| !args.dry_run) {
                     match store.put_stabilizer_set(&set.manifest()).await {
                         Ok(p) => published_set = Some(p),
                         Err(e) => tracing::warn!("could not publish the stabilizer set: {e}"),
@@ -6019,6 +6147,43 @@ mod attestor {
                     match &args.key {
                         Some(k) => {
                             let pem = crate::load_key(k)?.public_pem();
+                            if args.dry_run {
+                                // The real entry, built by the same call the POST would make, and
+                                // then not posted. Printing a hand-assembled lookalike here would
+                                // be worse than printing nothing: the entry's exact shape is the
+                                // thing a reviewer is checking, and a preview that is merely
+                                // similar to what goes on an append-only log is a preview of
+                                // nothing.
+                                let entry = trigon_attest::intoto_entry(&env, &pem);
+                                println!(
+                                    "\ndry run — would POST to {}/api/v1/log/entries:\n{}",
+                                    base.trim_end_matches('/'),
+                                    serde_json::to_string_pretty(&entry)?
+                                );
+                                // And the claim itself, decoded. The entry above is what goes on
+                                // the log and is the thing to review byte for byte — but the
+                                // statement inside it is base64 twice over, and a preview nobody
+                                // can read is not a preview. Printed separately and labelled, so
+                                // the two are not confused for one another.
+                                {
+                                    let claim: serde_json::Value = serde_json::from_slice(
+                                        &env.decoded_payload()
+                                            .context("the envelope's payload is not base64")?,
+                                    )
+                                    .context("the payload is not a JSON statement")?;
+                                    println!(
+                                        "\nwhat that says, decoded — the statement inside the \
+                                         envelope, not part of the entry:\n{}",
+                                        serde_json::to_string_pretty(&claim)?
+                                    );
+                                }
+                                println!(
+                                    "\nNothing was posted and nothing was written to the store. \
+                                     ed25519 is deterministic, so a real run signs these same \
+                                     bytes."
+                                );
+                                return Ok(());
+                            }
                             let entry = crate::rekor::publish(base, &env, &pem).await?;
                             println!(
                                 "logged at {} index {} ({})",

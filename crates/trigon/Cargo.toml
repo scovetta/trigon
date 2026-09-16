@@ -62,6 +62,12 @@ wasm = ["dep:trigon-stabilize-wasm", "trigon-stabilize-wasm/host"]
 
 [dev-dependencies]
 tar = "0.4"
+# A store with a real run in it, so the `attest --dry-run` test previews an entry built from
+# artifact bytes rather than from a hand-written record.
+trigon-store.workspace = true
+trigon-compare.workspace = true
+trigon-archive.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
 zip_crate = { package = "zip", version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 base64.workspace = true
