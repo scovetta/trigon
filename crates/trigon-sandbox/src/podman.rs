@@ -830,6 +830,47 @@ impl PodmanBuild {
 /// unusable without one: with no network in the image build, the packages a strategy needs have to
 /// come from a base image somebody built. An id identifies exactly one set of bytes in the local
 /// store, which is the property the check exists for.
+/// Whether podman can actually resolve this reference, and what to say when it cannot.
+///
+/// **`localhost/name@sha256:…` is the trap.** It has the shape of a pinned image and podman reads
+/// `localhost` as a *registry hostname*, so it tries to pull over HTTPS from a registry nobody is
+/// running and fails with `pinging container registry localhost: connection refused` — a message
+/// about networking, for a reference that names an image already on disk. A locally built image is
+/// reachable only by its bare id.
+///
+/// Returns `Err` with the sentence to print. `Ok(())` means podman has some chance of resolving it:
+/// either it is in the local store, or it names a registry that might serve it.
+pub fn resolvable(image: &str, exists_locally: bool) -> Result<(), String> {
+    if exists_locally {
+        return Ok(());
+    }
+    let bare_id = |s: &str| {
+        let id = s.strip_prefix("sha256:").unwrap_or(s);
+        id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit())
+    };
+    if let Some(rest) = image.strip_prefix("localhost/") {
+        let id = rest.rsplit('@').next().unwrap_or_default();
+        let hint = match bare_id(id) {
+            true => format!("Use the id on its own:\n\n    {id}\n"),
+            false => "`podman images --no-trunc` prints the id to use.".into(),
+        };
+        return Err(format!(
+            "`{image}` is not in the local image store, and podman cannot fetch it: it reads \
+             `localhost` as a registry hostname and tries to pull over HTTPS from a registry \
+             nobody is running. A locally built image is reachable only by its bare id.\n\n{hint}"
+        ));
+    }
+    if bare_id(image) {
+        return Err(format!(
+            "no image with id `{image}` is in the local store. `podman images --no-trunc` lists \
+             what is there."
+        ));
+    }
+    // A real registry reference. podman may or may not be able to pull it, and finding out is its
+    // job rather than ours.
+    Ok(())
+}
+
 /// Whether this reference names exact bytes rather than a moving tag.
 ///
 /// Two forms count. A digest reference (`name@sha256:…`) names the bytes wherever it is served

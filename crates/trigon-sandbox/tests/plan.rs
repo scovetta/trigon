@@ -509,3 +509,37 @@ fn a_bare_image_id_is_pinned_and_a_tag_is_not() {
         assert!(!trigon_sandbox::is_pinned(moving), "{moving}");
     }
 }
+
+#[test]
+fn a_localhost_digest_reference_names_something_podman_cannot_fetch() {
+    // **Pinned is not the same as resolvable, and the gap is one podman reports as a network
+    // error.** `localhost/name@sha256:…` has the shape of a pinned image, so it passes `is_pinned`;
+    // podman then reads `localhost` as a registry hostname and tries to pull over HTTPS from a
+    // registry nobody is running. The operator sees `connection refused` about an image sitting on
+    // their own disk, and this is the third time that confusion has cost somebody a round trip.
+    let r = "localhost/trigon-mirror@sha256:efd6eb2cf0ff249f1908363d7952024abecf1526d8585a4789ea2ca8f588bfaa";
+    assert!(trigon_sandbox::is_pinned(r), "it is pinned");
+    let err = trigon_sandbox::resolvable(r, false).expect_err("and unfetchable");
+    assert!(err.contains("registry hostname"), "{err}");
+    // The message has to carry the reference that does work, not just refuse the one that does not.
+    assert!(err.contains("sha256:efd6eb2cf0ff249f"), "{err}");
+
+    // Present locally: nothing to complain about, whatever the shape.
+    assert!(trigon_sandbox::resolvable(r, true).is_ok());
+
+    // A bare id that is not there says so plainly, and does not explain registries at a reference
+    // that names none.
+    let absent = trigon_sandbox::resolvable(&format!("sha256:{}", "a".repeat(64)), false)
+        .expect_err("a bare id we do not have");
+    assert!(absent.contains("is in the local store"), "{absent}");
+    assert!(!absent.contains("registry hostname"), "{absent}");
+
+    // A real registry reference is podman's business to resolve, not ours to pre-judge.
+    assert!(
+        trigon_sandbox::resolvable(
+            "docker.io/library/debian@sha256:160466e67bb85a4099d9d9c2356b4a6a64747b2",
+            false
+        )
+        .is_ok()
+    );
+}

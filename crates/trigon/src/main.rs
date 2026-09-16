@@ -4100,9 +4100,17 @@ mod mirror {
             bail!(
                 "pin `--from` by digest or by image id. A tag resolves to different bytes on \
                  different days, which is exactly what a base image for a reproducibility tool \
-                 must not do — `name@sha256:…` and a bare `sha256:<id>` both name exact bytes, \
-                 and `podman images --no-trunc` prints the second."
+                 must not do. `podman images --no-trunc` prints the id of a local image."
             );
+        }
+        // **Pinned is not the same as resolvable**, and the gap between them is one podman prints a
+        // networking error for. Checked before the build rather than discovered eight seconds in.
+        let exists = std::process::Command::new("podman")
+            .args(["image", "exists", from])
+            .status()
+            .map_or(true, |s| s.success());
+        if let Err(why) = trigon_sandbox::resolvable(from, exists) {
+            bail!("{why}");
         }
         let packages: Vec<String> = if packages.is_empty() {
             DEFAULT_PACKAGES.iter().map(|s| s.to_string()).collect()
