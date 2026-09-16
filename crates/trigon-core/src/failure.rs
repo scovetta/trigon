@@ -724,6 +724,30 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // The other half of the monorepo problem, and the one that had no rule at all. A workspace
+        // member compiles against a sibling that the build has not produced yet: `xstate`'s
+        // `packages/xstate-analytics` imports `xstate`, and `tsc` stops with
+        // `TS2307: Cannot find module 'xstate'`.
+        //
+        // **Ours, like the sibling rule above.** The published tarball came from a build that had
+        // the whole workspace linked; the recipe builds a member as though it stood alone.
+        //
+        // Named because nothing named it. `classify` scans backwards for the last line a rule
+        // claims, and with no rule for this one the scan ran past it to `npm WARN ERESOLVE` —
+        // which npm prints on installs that *succeed*, thousands of lines earlier. So a workspace
+        // link error was reported as `npm/peer-conflict`, and the repair loop spent a model call
+        // fixing a peer conflict that was never the failure.
+        code: "npm/workspace-unbuilt-sibling",
+        needles: &["error TS2307: Cannot find module"],
+        fault: Fault::Bug,
+        retryable: false,
+        // A recipe that builds from the workspace root rather than the member would fix it.
+        repairable: true,
+        // The module it could not find, which is the sibling that needed building first. One
+        // cluster per missing sibling is the right grain: it names what to build.
+        capture: Capture::Between("'", "'"),
+    },
+    Rule {
         // A dependency that is not a registry package at all: a `github:` or tarball specifier that
         // sends the installer to a forge. At an enforced tier the mirror is the only route out and
         // the forge is not on the artifact allowlist, so it is refused.

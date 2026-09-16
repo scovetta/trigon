@@ -3,6 +3,7 @@ kind: flow
 location:
   repo: https://github.com/statelyai/xstate
   ref: e87600ea450fa19b71d2051fac3c6c54fb9d486e
+  subdir: packages/core
 src:
 - uses: git-checkout
 deps:
@@ -15,5 +16,5 @@ build:
 - uses: npm/build/pack
   with:
     npm_version: 8.19.4
-    registry_time: 2023-10-23T19:31:11.966Z
+    version_override: 4.38.3
 output_path: '*.tgz'

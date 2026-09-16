@@ -1,14 +1,14 @@
 {
   "purl": "pkg:npm/xstate@4.38.3",
-  "started": "2026-09-16T02:48:49Z",
-  "finished": "2026-09-16T02:50:51Z",
-  "outcome": "build-failed:deps",
+  "started": "2026-09-16T02:56:43Z",
+  "finished": "2026-09-16T03:00:39Z",
+  "outcome": "build-failed:setup",
   "failure": {
-    "code": "npm/peer-conflict",
-    "fault": "build",
+    "code": "env/base-image-incomplete",
+    "fault": "policy",
     "retryable": false,
-    "repairable": true,
-    "evidence": "npm WARN ERESOLVE overriding peer dependency"
+    "repairable": false,
+    "evidence": "this base image is missing: npm"
   },
   "source": {
     "repo_url": "https://github.com/statelyai/xstate",
@@ -16,27 +16,32 @@
     "commit": "e87600ea450fa19b71d2051fac3c6c54fb9d486e",
     "how": "registry_commit"
   },
-  "strategy_digest": "ee1d783156929061eb7e0da880fb6945009464105b091d42e160afaf1a7b25dc",
+  "strategy_digest": "0e5521fdce9a2ebce86e4a60eb9305eb69734610fa3a562d4cc3b461d93243d5",
   "derivation": "heuristic",
   "confidence": "certain",
   "timings": [
     [
       "deps",
-      2.4466903110000002
+      2.420713566
     ],
     [
       "build",
-      114.735103054
+      119.934932664
+    ],
+    [
+      "setup",
+      0.451031269
     ]
   ],
   "egress": "mirror-only",
-  "inference_seconds": 0.463381788,
-  "tokens_in": 0,
-  "tokens_out": 0,
+  "inference_seconds": 105.454439538,
+  "tokens_in": 8345,
+  "tokens_out": 9325,
   "tokens_cached": 0,
   "repairs": [
     "attempt 1 on npm/peer-conflict"
   ],
+  "repair_stopped": "the failure is not one a different recipe fixes",
   "model": "claude-sonnet-5 (anthropic)",
   "model_calls": 0
 }
