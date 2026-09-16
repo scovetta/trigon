@@ -14,7 +14,7 @@ own `Registry` implementation and stabilizer profile, tells us the seam in
 | **PyPI** | ~12% → ~98% with `SOURCE_DATE_EPOCH` + umask fixes; timestamps are 87.7% of failures | Native-extension wheels | **M1** |
 | **crates.io** | Highly reproducible by design since `trim-paths` became the release default | Toolchain-window inference; build scripts and proc macros | **resolves, builds, compares** |
 | **RubyGems** | 0% → 99.9% since 3.6.7 defaults `SOURCE_DATE_EPOCH` and sorts gemspec metadata. **No independent verification infrastructure exists anywhere.** | Native extensions | M5 |
-| **NuGet** | Trusted publishing since Sept 2025; **almost no reproducibility infrastructure** | We are partly inventing this ecosystem's story | **resolves and fetches; no build side** |
+| **NuGet** | Trusted publishing since Sept 2025; **almost no reproducibility infrastructure** | We are partly inventing this ecosystem's story | **builds and compares at `--egress open`; declined at enforced tiers ([B23](17-backlog.md))** |
 | **GitHub** | Not applicable. The artifact is a release asset or source archive | Everything comes from the release workflow | M5 |
 
 Sources: the reproducible-builds project's per-ecosystem reporting through 2026, PEP 740 and the
@@ -308,6 +308,60 @@ at `NormalizedWithCaveats` or `Divergent` depending on how the working tree diff
 ---
 
 ## 5. NuGet
+
+### 5.0 What is built, and what a `.nupkg` actually differs by
+
+Measured rather than reasoned about: two `dotnet pack` runs over identical source, and
+`newtonsoft.json.11.0.1.nupkg` as the gallery serves it.
+
+**The good news is the payload.** The compiled assembly was byte-identical across two packs minutes
+apart. Roslyn's deterministic compilation is on by default for SDK-style projects, so the part of
+this ecosystem that looked hardest is already solved upstream. What is left is packaging
+bookkeeping, and the `nupkg` stabilizer profile is exactly that list:
+
+| Pass | Risk | What it is for |
+|---|---|---|
+| `nupkg-signature` | structural | `.signature.p7s`, which nuget.org attaches *after* the author packs. Present on every published package and on nothing anyone builds. |
+| `nupkg-packaging-names` | structural | The core-properties part is named after a **fresh GUID every pack**, and `_rels/.rels` carries that name as a `Target` — plus relationship `Id` attributes that are themselves random and differ in case between NuGet 4.5 and 7.0. |
+| `nupkg-packager-version` | metadata | `<lastModifiedBy>`, which for Newtonsoft.Json 11.0.1 reads `NuGet.Build.Tasks.Pack, Version=4.5.0.4, …;Microsoft Windows NT 10.0.16299.0`. It names a Windows machine in 2018. |
+
+With those, two independent packs of one source reconcile to `normalized` with every member
+identical.
+
+### 5.1 The toolchain, which is the open question
+
+**NuGet publishes no compiler version.** The only toolchain evidence in a package is the packer
+named above, and the packer is not the compiler. So unlike crates.io — where the `Cargo.toml`
+rewrite inside a `.crate` is a fingerprint of the Cargo that made it — there is nothing here to
+infer from, and a build uses whatever SDK the base image carries.
+
+That is stated in the run's assumptions, because it changes how a verdict should be read: Roslyn is
+deterministic *given a version*, so a matching SDK reproduces the assembly exactly and a different
+one diverges throughout. A `divergent` NuGet verdict is as likely to be the toolchain as the source
+until that is pinned.
+
+Measured on `Polly@8.2.0` against SDK 8.0.423: the assemblies are **97% byte-identical** and differ
+in length — consistent with a near-miss on compiler version rather than with different code.
+
+### 5.2 Two strata, and only one of them is tractable
+
+- **Plain `dotnet pack` from an SDK-style project** builds and compares. The project is located by
+  reading `<PackageId>` out of the `.csproj` files, falling back to a directory named for the
+  package — in that order, because `Humanizer.Core` really is built from `src/Humanizer/` and only
+  the project file says so.
+- **Hand-written `.nuspec` packed by a build script** does not. Humanizer keeps 40-odd
+  `NuSpecs/*.nuspec` and packs them from a Cake script; nothing `dotnet pack` does reproduces that.
+  Neither does a package targeting `net20`/`net35`/`net40` or a portable profile, which needs
+  .NET Framework reference assemblies that do not exist on Linux.
+
+### 5.3 What a Polly rebuild found
+
+Worth recording because it is the kind of thing this tool exists to surface rather than a defect in
+it: `Polly.nuspec` differs by exactly one line, `<copyright>Copyright (c) 2023` against
+`(c) 2026`. Polly computes its copyright year from the build clock. That is a package-side
+reproducibility defect, and `--timewarp` is the answer to it — once [B23](17-backlog.md) lets a
+NuGet build run with a mirror in front of it at all.
+
 
 NuGet has trusted publishing and almost no reproducibility infrastructure, so parts of this chapter
 are design rather than port. That is why it goes last.

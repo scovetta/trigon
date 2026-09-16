@@ -1,0 +1,69 @@
+# `dotnet pack`, which is what produced the `.nupkg` on the feed.
+#
+# **`ContinuousIntegrationBuild=true` is the load-bearing flag.** Roslyn's deterministic compilation
+# is on by default for SDK projects — measured: two packs of identical source minutes apart produced
+# byte-identical assemblies — but the *paths* embedded in the PDB and in the assembly are the
+# checkout's absolute paths unless this is set. Without it a rebuild under a different directory
+# diverges in every compiled member for a reason that has nothing to do with the code.
+id: nuget/build/pack
+params:
+  dir:
+    required: false
+    doc: The project directory. Defaults to `location.subdir`.
+  configuration:
+    required: false
+    default: Release
+    doc: >-
+      `-c`. Release because that is what a publisher ships; a Debug build differs in IL throughout
+      and would compare as divergent for a reason that is a configuration rather than a defect.
+  version:
+    required: false
+    doc: >-
+      `-p:Version=`. The version the feed served, which is often set at publish time by CI rather
+      than committed in the `.csproj` — so a checkout at the release tag frequently carries a
+      placeholder, and the package would come out named for the wrong version without this.
+  output_dir:
+    required: false
+    default: trigon-pack
+    doc: >-
+      **Relative, and resolved against the working directory rather than the project.** `dotnet
+      pack -o` is relative to where dotnet was invoked, which is the checkout root even when the
+      project is in a subdirectory — so this must match `output_dir` on the strategy, which is also
+      joined onto the root. Setting it to the project directory put the package at `/src/artifacts`
+      while collection looked in `/src/src/Polly/artifacts`.
+
+      Not `artifacts`: .NET 8's artifacts-output layout uses that name, so on a repository that has
+      opted in — Polly has — the pack output lands beside a whole `bin/` tree and collection copies
+      the build directory as well as the package. A name nothing else uses keeps the two apart.
+steps:
+  - runs: |
+      {%- set project = with.dir if with.dir else location.subdir %}
+      # **Not `needs:`.** That names distribution packages and checks them with `dpkg -s`, and the
+      # .NET SDK is not one — Microsoft's images unpack it into /usr/share/dotnet, so the check
+      # failed and setup then tried `apt-get install dotnet`, which does not exist. A runtime that
+      # arrives as a tarball needs a `command -v`, which is exactly what the `needs:` machinery
+      # documents itself as being unable to use for `ca-certificates`. Both are right; they are
+      # different questions.
+      #
+      # The wording matters: `: not found` is what `env/missing-tool` matches on, so this reads as
+      # our base image being incomplete — fault `Bug`, ours — rather than as an unknown failure.
+      command -v dotnet >/dev/null 2>&1 || {
+        echo "dotnet: not found"
+        echo "This ecosystem builds with the .NET SDK, which is not a Debian package and so cannot"
+        echo "be listed in a strategy's needs:. Use a base image that carries it, for example:"
+        echo "    trigon base-image --from <mcr.microsoft.com/dotnet/sdk digest> --packages ca-certificates git wget"
+        exit 127
+      }
+      export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+      export NUGET_PACKAGES=/trigon/nuget/packages
+      # `--no-restore`: the deps phase already did it, and a restore here would open the network in
+      # the phase that is supposed to be observable.
+      set -- pack --no-restore -c {{ with.configuration }} -o {{ with.output_dir }}
+      set -- "$@" -p:ContinuousIntegrationBuild=true
+      {%- if with.version %}
+      set -- "$@" -p:Version={{ with.version }}
+      {%- endif %}
+      {%- if project and project != '.' %}
+      set -- "$@" {{ project }}
+      {%- endif %}
+      dotnet "$@"

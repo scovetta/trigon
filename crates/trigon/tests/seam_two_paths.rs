@@ -343,7 +343,10 @@ fn every_artifact_kind_the_binary_dispatches_on_names_a_profile_this_binary_know
         ("demo-1.0-py3-none-any.whl", "wheel"),
         ("demo-1.0.crate", "crate"),
         ("demo-1.0.gem", "gem"),
-        ("demo.nupkg", "zip"),
+        // Was `zip`, the documented fallback while no `nupkg` profile existed. The profile landed,
+        // and this line is the half the old comment said to change when it did — updating the arm
+        // and leaving this alone would have put the silence back.
+        ("demo.nupkg", "nupkg"),
     ];
     let mut wrong = Vec::new();
     for (name, expected) in cases {

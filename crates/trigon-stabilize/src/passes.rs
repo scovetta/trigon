@@ -455,6 +455,9 @@ pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
         Arc::new(NpmInstallFields),
         Arc::new(GemExcludeChecksums),
         Arc::new(GemExcludeSignatures),
+        Arc::new(NupkgSignature),
+        Arc::new(NupkgPackagingNames),
+        Arc::new(NupkgPackagerVersion),
     ]
 }
 
@@ -822,5 +825,207 @@ entry_pass!(
             }
             Some(out)
         })
+    }
+);
+
+// --- nupkg ---------------------------------------------------------------------------------------
+//
+// A `.nupkg` is an OPC package: a zip carrying a `.nuspec`, the payload under `lib/`, and three
+// pieces of packaging bookkeeping that have nothing to do with what the package contains. All three
+// were measured against a real pair rather than reasoned about — two `dotnet pack` runs over
+// identical source, and `newtonsoft.json.11.0.1.nupkg` as nuget.org serves it.
+//
+// The good news first: the compiled assembly was **byte-identical across packs**. Roslyn's
+// deterministic compilation is on by default for SDK projects, so the hard part of this ecosystem is
+// already solved upstream and what remains is packaging noise.
+
+/// The publisher signature nuget.org attaches, which a rebuilder can never produce.
+///
+/// Added by the gallery *after* the author packed, so it is present on every published package and
+/// on nothing anyone builds. Not a claim about the payload we are rebuilding — it is the gallery's
+/// countersignature over the bytes it received — which is why this sits at `Structural` beside the
+/// gem signature pass rather than at `Lossy` beside `direct_url.json`.
+fn is_nupkg_signature(path: &[u8]) -> bool {
+    path == b".signature.p7s"
+}
+
+archive_pass!(
+    NupkgSignature,
+    "nupkg-signature",
+    RiskTier::Structural,
+    is_zip,
+    |a| {
+        let before = a.entries.len();
+        a.entries.retain(|e| !is_nupkg_signature(e.path.as_bytes()));
+        match before - a.entries.len() {
+            0 => Touched::NONE,
+            n => Touched {
+                entries: n as u32,
+                bytes: 0,
+            },
+        }
+    }
+);
+
+/// The random GUID in the core-properties path, and the `_rels/.rels` entry that points at it.
+///
+/// `dotnet pack` names this file after a fresh GUID on every invocation, so two packs of identical
+/// source differ in a member *name* — and in `_rels/.rels`, which carries that name as a `Target`.
+/// Measured: two packs minutes apart produced
+/// `…/55d4e0b4ecfa412baa282881ce747f48.psmdcp` and `…/4f28fcb5c9304310a279a6ce74f94f55.psmdcp`.
+///
+/// The relationship `Id` attributes are the second random value, and the one easy to miss by fixing
+/// only the path: they varied between those same two packs, and against the published package they
+/// differ in case as well (`R192ff84775f641df` from NuGet 4.5 against `R2BEFEA914E60C8DE` from
+/// NuGet 7.0). Both are rewritten here, because normalizing the name and leaving a random `Id`
+/// beside it would leave the comparison failing on the half nobody looked at.
+///
+/// `Structural`: the renaming is bijective and nothing is dropped. The stabilized form is only ever
+/// compared, never redistributed, so a canonical name costs a consumer nothing.
+const PSMDCP_DIR: &[u8] = b"package/services/metadata/core-properties/";
+const PSMDCP_CANONICAL: &[u8] = b"package/services/metadata/core-properties/core.psmdcp";
+
+fn is_psmdcp(path: &[u8]) -> bool {
+    path.starts_with(PSMDCP_DIR) && path.ends_with(b".psmdcp")
+}
+
+/// Rewrite `Target="/…/<guid>.psmdcp"` and every `Id="…"` in an OPC relationships part.
+///
+/// Byte-level rather than through an XML parser, for the reason `embedded.rs` gives for reading a
+/// `.nuspec` the same way: one element, in the judgement half's neighbourhood, is not worth a
+/// dependency. The cost is that this rewrites the attribute wherever it appears, which for a file
+/// whose entire content is three relationship elements is the intent rather than a hazard.
+fn normalize_rels(body: &mut Vec<u8>) -> bool {
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0;
+    let mut ids = 0usize;
+    let mut changed = false;
+
+    while i < body.len() {
+        // `Target="…psmdcp"` — replace the whole attribute value with the canonical path.
+        if body[i..].starts_with(b"Target=\"") {
+            let start = i + b"Target=\"".len();
+            if let Some(end) = body[start..]
+                .iter()
+                .position(|b| *b == b'"')
+                .map(|p| start + p)
+            {
+                let value = &body[start..end];
+                if value.ends_with(b".psmdcp") {
+                    out.extend_from_slice(b"Target=\"/");
+                    out.extend_from_slice(PSMDCP_CANONICAL);
+                    out.push(b'"');
+                    changed = true;
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        // `Id="R…"` — numbered by position, so the result is stable and the two relationships keep
+        // distinct ids rather than collapsing onto one.
+        if body[i..].starts_with(b"Id=\"") {
+            let start = i + b"Id=\"".len();
+            if let Some(end) = body[start..]
+                .iter()
+                .position(|b| *b == b'"')
+                .map(|p| start + p)
+            {
+                let replacement = format!("Id=\"R{ids}\"");
+                if body[start..end] != replacement.as_bytes()[b"Id=\"".len()..replacement.len() - 1]
+                {
+                    changed = true;
+                }
+                out.extend_from_slice(replacement.as_bytes());
+                ids += 1;
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push(body[i]);
+        i += 1;
+    }
+
+    if changed {
+        *body = out;
+    }
+    changed
+}
+
+archive_pass!(
+    NupkgPackagingNames,
+    "nupkg-packaging-names",
+    RiskTier::Structural,
+    is_zip,
+    |a| {
+        // Only where this really is an OPC package. A plain zip with no relationships part is a
+        // wheel or a jar, and renaming members of one of those on the strength of a suffix is the
+        // kind of over-application a risk tier cannot excuse.
+        let has_rels = a
+            .entries
+            .iter()
+            .any(|e| e.path.as_bytes() == b"_rels/.rels");
+        if !has_rels {
+            return Touched::NONE;
+        }
+
+        let mut touched = Touched::NONE;
+        for e in a.entries.iter_mut() {
+            if is_psmdcp(e.path.as_bytes()) && e.path.as_bytes() != PSMDCP_CANONICAL {
+                e.path = trigon_core::EntryPath::new(PSMDCP_CANONICAL.to_vec());
+                e.mark_dirty();
+                touched.entries += 1;
+            }
+            if e.path.as_bytes() == b"_rels/.rels" {
+                // A body we cannot read is left alone rather than dropped: a relationships part
+                // that will not decode is a difference worth reporting, not one to normalize away.
+                if let Ok(body) = e.body_mut() {
+                    if normalize_rels(body) {
+                        touched.entries += 1;
+                    }
+                }
+            }
+        }
+        touched
+    }
+);
+
+entry_pass!(
+    /// Which tool packed it, and on what operating system.
+    ///
+    /// The core-properties part records `<lastModifiedBy>` — for the published Newtonsoft.Json
+    /// 11.0.1 that is `NuGet.Build.Tasks.Pack, Version=4.5.0.4, …;Microsoft Windows NT
+    /// 10.0.16299.0;.NET Framework 4.5`, naming a Windows machine in 2018. No rebuild on any other
+    /// machine can match it, and it says nothing about the package's contents.
+    ///
+    /// `Metadata`, for the same reason `gem-metadata-rubygems-version` is: this records the
+    /// packaging tool, not the payload.
+    NupkgPackagerVersion,
+    "nupkg-packager-version",
+    RiskTier::Metadata,
+    is_zip,
+    |e| {
+        if !is_psmdcp(e.path.as_bytes()) && e.path.as_bytes() != PSMDCP_CANONICAL {
+            return Touched::NONE;
+        }
+        let Ok(body) = e.body_mut() else {
+            return Touched::NONE;
+        };
+        let (open, close) = (&b"<lastModifiedBy>"[..], &b"</lastModifiedBy>"[..]);
+        let Some(start) = body.windows(open.len()).position(|w| w == open) else {
+            return Touched::NONE;
+        };
+        let from = start + open.len();
+        let Some(rel) = body[from..].windows(close.len()).position(|w| w == close) else {
+            return Touched::NONE;
+        };
+        if rel == 0 {
+            return Touched::NONE;
+        }
+        let before = body.len();
+        body.splice(from..from + rel, std::iter::empty());
+        Touched {
+            entries: 1,
+            bytes: (before - body.len()) as u64,
+        }
     }
 );

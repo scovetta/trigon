@@ -1,0 +1,61 @@
+# `dotnet restore`, separated from the pack so the network happens in the deps phase.
+#
+# The phase split is not cosmetic: at an enforced egress tier the build phase is the one being
+# watched, and a restore inside it would mix dependency traffic into the window where the package's
+# own code runs. Every other ecosystem here draws the same line.
+id: nuget/restore
+params:
+  dir:
+    required: false
+    doc: >-
+      The project directory, when it is not the working tree root. Defaults to `location.subdir`,
+      which is where the answer already is for a repository whose project sits in `src/<Name>/`.
+  source:
+    required: false
+    doc: >-
+      A NuGet feed to restore from, replacing the configured ones. Pointed at the mirror where one
+      is running. Without it, restore reaches api.nuget.org directly, which an enforced tier
+      forbids — so a run at `mirror-only` without this fails in deps rather than silently
+      resolving against the live feed.
+  locked:
+    required: false
+    default: "false"
+    doc: >-
+      Pass `--locked-mode`, which requires `packages.lock.json` and fails if it would change. Only
+      where the publisher committed one; forcing it otherwise turns a working restore into
+      "the lock file does not exist".
+steps:
+  - runs: |
+      {%- set project = with.dir if with.dir else location.subdir %}
+      # **Not `needs:`.** That names distribution packages and checks them with `dpkg -s`, and the
+      # .NET SDK is not one — Microsoft's images unpack it into /usr/share/dotnet, so the check
+      # failed and setup then tried `apt-get install dotnet`, which does not exist. A runtime that
+      # arrives as a tarball needs a `command -v`, which is exactly what the `needs:` machinery
+      # documents itself as being unable to use for `ca-certificates`. Both are right; they are
+      # different questions.
+      #
+      # The wording matters: `: not found` is what `env/missing-tool` matches on, so this reads as
+      # our base image being incomplete — fault `Bug`, ours — rather than as an unknown failure.
+      command -v dotnet >/dev/null 2>&1 || {
+        echo "dotnet: not found"
+        echo "This ecosystem builds with the .NET SDK, which is not a Debian package and so cannot"
+        echo "be listed in a strategy's needs:. Use a base image that carries it, for example:"
+        echo "    trigon base-image --from <mcr.microsoft.com/dotnet/sdk digest> --packages ca-certificates git wget"
+        exit 127
+      }
+      export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+      # Off the user profile, which the sandbox may not have made writable, and predictable enough
+      # that the pack phase finds what this phase restored.
+      export NUGET_PACKAGES=/trigon/nuget/packages
+      mkdir -p "$NUGET_PACKAGES"
+      set -- restore
+      {%- if project and project != '.' %}
+      set -- "$@" {{ project }}
+      {%- endif %}
+      {%- if with.source %}
+      set -- "$@" --source {{ with.source }}
+      {%- endif %}
+      {%- if with.locked == 'true' %}
+      set -- "$@" --locked-mode
+      {%- endif %}
+      dotnet "$@"

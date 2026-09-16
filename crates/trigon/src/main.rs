@@ -1860,13 +1860,13 @@ fn resolve_profile(
         Some("crate")
     } else if name.ends_with(".gem") {
         Some("gem")
+    } else if name.ends_with(".nupkg") {
+        // The arm the comment that used to sit here was waiting for. It described a `nupkg` profile
+        // that did not exist, whose lookup failed silently into the plain zip set — so the table
+        // claimed a NuGet-specific normalization the system could not perform and said nothing.
+        // The profile exists now, and the assertion below is what would have caught the gap.
+        Some("nupkg")
     } else {
-        // No `.nupkg` arm. It named a `nupkg` profile that `trigon-stabilize` does not have, and
-        // `by_kind.and_then(profile)` swallowed the miss and fell through to the plain zip set — so
-        // the table claimed a NuGet-specific normalization the system could not perform, and said
-        // nothing when it did not. A `.nupkg` still gets the zip set; the difference is that it is
-        // now the documented fallback rather than a silently failed lookup. `docs/17-backlog.md`
-        // B8 adds the profile, and the assertion below is what will notice when it does.
         None
     };
     match by_kind {
@@ -2385,6 +2385,18 @@ mod rebuild {
             trigon_core::Ecosystem::CratesIo => rungs.push(Box::new(
                 trigon_registry::CratesIoInferrer::new().with_mirror(mirror),
             )),
+            trigon_core::Ecosystem::NuGet => {
+                // The same shared cache: this rung asks the repository where the `.csproj` is,
+                // because nothing in a `.nuspec` says.
+                let sources = std::sync::Arc::new(trigon_registry::SourceCache::new(
+                    sources.unwrap_or_else(trigon_registry::SourceCache::default_root),
+                ));
+                rungs.push(Box::new(
+                    trigon_registry::NuGetInferrer::new()
+                        .with_mirror(mirror)
+                        .with_sources(Some(sources)),
+                ))
+            }
             trigon_core::Ecosystem::PyPI => {
                 // The same cache the npm rung and the model rung use: a target whose repository
                 // more than one of them wants is fetched once.

@@ -72,6 +72,19 @@ pub fn profile(id: &str) -> Option<StabilizerSet> {
             ],
         ]
         .concat(),
+        // A `.nupkg` is an OPC zip. The payload compiles deterministically — Roslyn's deterministic
+        // build is on by default for SDK projects, measured as byte-identical across two packs — so
+        // what is left is packaging bookkeeping: the gallery's signature, a per-pack GUID in a
+        // member name, and the name of the machine that packed it.
+        "nupkg" => [
+            zip_set(),
+            vec![
+                Arc::new(NupkgSignature) as Arc<dyn Stabilizer>,
+                Arc::new(NupkgPackagingNames) as Arc<dyn Stabilizer>,
+                Arc::new(NupkgPackagerVersion) as Arc<dyn Stabilizer>,
+            ],
+        ]
+        .concat(),
         "wheel" => [
             zip_set(),
             vec![
@@ -106,6 +119,7 @@ pub fn all_profiles() -> Vec<&'static str> {
         "crate",
         "gem",
         "wheel",
+        "nupkg",
         "raw",
     ]
 }

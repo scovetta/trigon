@@ -980,3 +980,403 @@ mod cargo_train_tests {
         assert_eq!(days_since_epoch("2026-09-16T10:00:00Z"), Some(20712));
     }
 }
+
+// --- nuget ---------------------------------------------------------------------------------------
+
+/// The `.csproj` that builds a given package, out of a repository listing.
+///
+/// .NET repositories put the project somewhere by convention rather than by declaration: usually
+/// `src/<PackageId>/<PackageId>.csproj`, sometimes `<PackageId>/<PackageId>.csproj`, sometimes at
+/// the root. Nothing in the `.nuspec` says which, so the file name is the evidence — a project
+/// whose name matches the package id, preferring the shallowest.
+///
+/// Matched on a squashed form, because a package id and a directory name disagree about separators
+/// far more often than about letters: `Microsoft.Extensions.Logging` lives in
+/// `src/Microsoft.Extensions.Logging/`, but plenty of projects publish `Foo.Bar` out of `FooBar/`.
+pub(crate) fn nuget_project(files: &[String], package: &str) -> Option<String> {
+    let squash = |s: &str| -> String {
+        s.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let wanted = squash(package);
+
+    let mut best: Option<(usize, String)> = None;
+    for f in files {
+        let Some(stem) = f.strip_suffix(".csproj") else {
+            continue;
+        };
+        let base = stem.rsplit_once('/').map(|(_, b)| b).unwrap_or(stem);
+        if squash(base) != wanted {
+            continue;
+        }
+        // The directory holding it, which is what the tools take as `dir`.
+        let dir = f.rsplit_once('/').map(|(d, _)| d.to_string());
+        let depth = dir
+            .as_deref()
+            .map(|d| d.matches('/').count() + 1)
+            .unwrap_or(0);
+        let candidate = dir.unwrap_or_else(|| ".".to_string());
+        // **Ties are refused rather than broken.** Two projects of the same name at the same depth
+        // — `src/Foo/Foo.csproj` and `test/Foo/Foo.csproj` is a real shape — means the evidence
+        // does not identify one, and picking either would be a guess wearing a heuristic's name.
+        match &best {
+            Some((d, existing)) if *d == depth && existing != &candidate => return None,
+            Some((d, _)) if *d <= depth => {}
+            _ => best = Some((depth, candidate)),
+        }
+    }
+    best.map(|(_, d)| d)
+}
+
+/// The project that *declares* this package id, from the `.csproj` files themselves.
+///
+/// Better evidence than the file name, and needed because the two disagree often: `Humanizer.Core`
+/// is built from `src/Humanizer/Humanizer.csproj`, and `System.Text.Json` from a directory that
+/// matches only by accident of convention. A `.csproj` carrying `<PackageId>` says outright what it
+/// publishes, and nothing else in a repository does.
+///
+/// Takes `(path, contents)` rather than reading, so the matching is testable without a checkout.
+pub(crate) fn nuget_project_by_id(projects: &[(String, String)], package: &str) -> Option<String> {
+    let wanted = package.to_ascii_lowercase();
+    let mut found: Option<String> = None;
+    for (path, body) in projects {
+        let Some(start) = body.find("<PackageId>") else {
+            continue;
+        };
+        let rest = &body[start + "<PackageId>".len()..];
+        let Some(end) = rest.find("</PackageId>") else {
+            continue;
+        };
+        let declared = rest[..end].trim();
+        // An MSBuild property reference — `<PackageId>$(AssemblyName).Core</PackageId>` — is not an
+        // answer. Evaluating it needs MSBuild, and guessing at it would be worse than falling
+        // through to the name match.
+        if declared.contains('$') || declared.to_ascii_lowercase() != wanted {
+            continue;
+        }
+        let dir = path
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_string())
+            .unwrap_or_else(|| ".".to_string());
+        match &found {
+            // Two projects claiming the same package id is a repository we do not understand, and
+            // picking one would be a guess. Refused, as the name matcher refuses a tie.
+            Some(existing) if existing != &dir => return None,
+            _ => found = Some(dir),
+        }
+    }
+    found
+}
+
+/// NuGet, where the packaging is deterministic and the toolchain is the whole question.
+///
+/// The `.nuspec` inside a published package can carry `<repository commit="…">`, and where it does
+/// this rung has the commit exactly. NuGet only began recording it around 2018, so for anything
+/// older the tag ladder is the rule rather than the fallback — the reverse of crates.io.
+#[derive(Default)]
+pub struct NuGetInferrer {
+    mirror: Option<String>,
+    sources: Option<std::sync::Arc<crate::SourceCache>>,
+}
+
+impl NuGetInferrer {
+    pub fn new() -> Self {
+        NuGetInferrer::default()
+    }
+
+    /// See [`NpmInferrer::with_mirror`].
+    pub fn with_mirror(mut self, mirror: Option<String>) -> Self {
+        self.mirror = mirror;
+        self
+    }
+
+    pub fn with_sources(mut self, sources: Option<std::sync::Arc<crate::SourceCache>>) -> Self {
+        self.sources = sources;
+        self
+    }
+}
+
+#[async_trait]
+impl StrategyInferrer for NuGetInferrer {
+    fn name(&self) -> &'static str {
+        "nuget-heuristic"
+    }
+
+    async fn infer(&self, target: &ResolvedTarget) -> Result<Vec<Candidate>, RegistryError> {
+        let Some(source) = &target.source else {
+            return Ok(Vec::new());
+        };
+        let mut assumptions = Vec::new();
+
+        let Ok((commit, how, tag)) = commit_for(target, false).await else {
+            return Ok(Vec::new());
+        };
+        if let Some(tag) = tag {
+            assumptions.push(from_a_tag(&tag));
+        }
+
+        // Where the project is. Declared subdirectory first; otherwise the repository is asked,
+        // exactly as the PyPI rung does for a `setup.py` that is not at the root.
+        let mut subdir = source.subdir.clone();
+        if subdir.is_none()
+            && let Some(sources) = self.sources.clone()
+        {
+            let (repo, at) = (source.repo_url.clone(), commit.clone());
+            let listed = tokio::task::spawn_blocking(move || {
+                let c = sources.checkout(&repo, &at)?;
+                let files = c.files(20_000)?;
+                // Bounded on both axes. A repository with hundreds of projects is a monorepo whose
+                // answer is not going to be found by reading all of them, and a `.csproj` is a
+                // small file — one that is not is not a project file.
+                let paths: Vec<&str> = files
+                    .iter()
+                    .filter(|f| f.ends_with(".csproj"))
+                    .take(64)
+                    .map(String::as_str)
+                    .collect();
+                let projects = c.read(&paths, 256 * 1024);
+                Ok::<_, crate::RegistryError>((files, projects))
+            })
+            .await;
+            match listed {
+                Ok(Ok((files, projects))) => {
+                    // Declared first, guessed second. A `.csproj` that says `<PackageId>` is
+                    // evidence; a directory whose name happens to match is a convention.
+                    if let Some(found) = nuget_project_by_id(&projects, &target.reference.name) {
+                        assumptions.push(format!(
+                            "`{found}` holds the `.csproj` that declares \
+                             `<PackageId>{}</PackageId>`, and the build runs there",
+                            target.reference.name
+                        ));
+                        subdir = Some(found);
+                    } else if let Some(found) = nuget_project(&files, &target.reference.name) {
+                        assumptions.push(format!(
+                            "no `.csproj` declares this package id, so the build runs in \
+                             `{found}` — the one project *named* for the package, which is a \
+                             convention rather than a declaration"
+                        ));
+                        subdir = Some(found);
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(repo = source.repo_url, "could not list the repository: {e}");
+                }
+                Err(e) => tracing::debug!("listing the repository panicked: {e}"),
+            }
+        }
+
+        // **The assumption this rung cannot discharge.** A `.nupkg` records which tool packed it —
+        // `NuGet.Build.Tasks.Pack, Version=4.5.0.4, …;Microsoft Windows NT 10.0` for
+        // Newtonsoft.Json 11.0.1 — and that is the only toolchain evidence NuGet publishes.
+        // It names the *packer*, not the compiler, and the compiler is what decides the IL. So
+        // unlike crates.io there is no version to derive, and the SDK in the image is what builds.
+        // Said plainly, because a `divergent` verdict caused by an SDK mismatch is otherwise
+        // indistinguishable from one caused by the source.
+        assumptions.push(
+            "NuGet publishes no compiler version, so this builds with whatever .NET SDK the base \
+             image carries. Roslyn compiles deterministically, so a matching SDK reproduces the \
+             assembly byte for byte and a different one diverges throughout — a divergence here is \
+             as likely to be the toolchain as the source"
+                .into(),
+        );
+
+        // **Declined rather than attempted where a mirror is running.** `dotnet pack` cannot work
+        // without `dotnet restore`, and restore needs a NuGet V3 feed — which this mirror does not
+        // serve yet. crates.io sidesteps the same problem because `cargo package --no-verify`
+        // resolves nothing; NuGet has no such escape.
+        //
+        // The alternative was to point `--source` at a `/-nuget/` route that does not exist, which
+        // is what the first draft did: restore failed with `NU1100 … the following source(s) were
+        // not considered`, and the mirror separately reported that it had never been contacted
+        // about a run claiming to be pinned. A rung that produces a recipe it knows cannot restore
+        // is worse than one that says why — the first reads as a package that will not build.
+        if self.mirror.is_some() {
+            return Ok(Vec::new());
+        }
+        assumptions.push(
+            "no mirror is in front of this build, so `dotnet restore` resolves against the live \
+             feed rather than against it as it stood when this version was published. A dependency \
+             published since then can reach this build, and nothing here would notice"
+                .into(),
+        );
+        let restore = BTreeMap::new();
+
+        let strategy = Strategy::Flow(FlowStrategy {
+            location: Location {
+                repo: source.repo_url.clone(),
+                git_ref: commit,
+                subdir: subdir.clone(),
+            },
+            src: vec![uses("git-checkout", BTreeMap::new())],
+            deps: vec![uses("nuget/restore", restore)],
+            build: vec![uses(
+                "nuget/build/pack",
+                BTreeMap::from([(
+                    // The version the feed served. .NET projects routinely carry a placeholder in
+                    // the committed `.csproj` and have CI stamp the real one at publish, so a
+                    // checkout at the release tag would otherwise pack `1.0.0`.
+                    "version".to_string(),
+                    target.reference.version.clone(),
+                )]),
+            )],
+            // **Not joined with the subdir**, which is the mistake that cost a working build:
+            // `dotnet pack -o <relative>` resolves against the working directory, and that is the
+            // checkout root however deep the project is. Polly packed to `/src/trigon-pack` while
+            // collection looked in `/src/src/Polly/trigon-pack`, so a build that had succeeded
+            // reported as a failure to find its own output.
+            output_dir: Some("trigon-pack".into()),
+            // **`*.nupkg`, not the whole directory.** `dotnet pack` writes a symbols package beside
+            // the package — `Polly.8.2.0.snupkg` next to `Polly.8.2.0.nupkg` — and collecting the
+            // directory handed the comparison the symbols one. It compared cleanly and reported
+            // `divergent` with every `lib/*/Polly.dll` "only in upstream" and a `.pdb` in its
+            // place: a real verdict about the wrong file, which is worse than a failure.
+            //
+            // `.snupkg` does not end in `.nupkg`, so this glob separates them exactly.
+            output_path: Some("trigon-pack/*.nupkg".into()),
+        });
+
+        Ok(vec![Candidate {
+            strategy,
+            derivation: Derivation::Heuristic,
+            confidence: confidence_of(how).max(Confidence::Weak),
+            discovery: how,
+            assumptions,
+        }])
+    }
+
+    async fn why_not(&self, target: &ResolvedTarget) -> Option<String> {
+        if let Err(why) = commit_for(target, false).await {
+            return Some(why);
+        }
+        if self.mirror.is_some() {
+            return Some(
+                "this run has a mirror in front of it, and the mirror does not serve a NuGet V3 \
+                 feed yet — so `dotnet restore` could not resolve anything and `dotnet pack` \
+                 cannot run without it. NuGet builds work at `--egress open` today. See B23."
+                    .into(),
+            );
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod nuget_project_tests {
+    use super::nuget_project;
+
+    fn owned(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn the_conventional_layout_is_found() {
+        let files = owned(&[
+            "README.md",
+            "Newtonsoft.Json.sln",
+            "Src/Newtonsoft.Json/Newtonsoft.Json.csproj",
+            "Src/Newtonsoft.Json.Tests/Newtonsoft.Json.Tests.csproj",
+        ]);
+        assert_eq!(
+            nuget_project(&files, "Newtonsoft.Json").as_deref(),
+            Some("Src/Newtonsoft.Json")
+        );
+    }
+
+    #[test]
+    fn a_project_at_the_root_reports_the_root() {
+        let files = owned(&["Foo.csproj", "Class1.cs"]);
+        assert_eq!(nuget_project(&files, "Foo").as_deref(), Some("."));
+    }
+
+    #[test]
+    fn separators_do_not_have_to_agree() {
+        // `Foo.Bar` published out of `FooBar/`, which is common enough to be worth matching.
+        let files = owned(&["src/FooBar/FooBar.csproj"]);
+        assert_eq!(
+            nuget_project(&files, "Foo.Bar").as_deref(),
+            Some("src/FooBar")
+        );
+    }
+
+    #[test]
+    fn a_tie_is_refused_rather_than_broken() {
+        // The same name at the same depth in two trees. Nothing here identifies which one ships,
+        // and picking the alphabetically-first would be a guess wearing a heuristic's name.
+        let files = owned(&["src/Foo/Foo.csproj", "test/Foo/Foo.csproj"]);
+        assert_eq!(nuget_project(&files, "Foo"), None);
+    }
+
+    #[test]
+    fn a_shallower_project_wins_over_a_deeper_one() {
+        let files = owned(&["src/Foo/Foo.csproj", "samples/deep/nested/Foo/Foo.csproj"]);
+        assert_eq!(nuget_project(&files, "Foo").as_deref(), Some("src/Foo"));
+    }
+
+    #[test]
+    fn a_repository_with_no_matching_project_says_so() {
+        let files = owned(&["src/Other/Other.csproj"]);
+        assert_eq!(nuget_project(&files, "Foo"), None);
+    }
+}
+
+#[cfg(test)]
+mod nuget_package_id_tests {
+    use super::nuget_project_by_id;
+
+    fn project(path: &str, id: Option<&str>) -> (String, String) {
+        let body = match id {
+            Some(i) => format!("<Project Sdk=\"Microsoft.NET.Sdk\">\n<PropertyGroup>\n<PackageId>{i}</PackageId>\n</PropertyGroup>\n</Project>\n"),
+            None => "<Project Sdk=\"Microsoft.NET.Sdk\">\n<PropertyGroup>\n<TargetFramework>net8.0</TargetFramework>\n</PropertyGroup>\n</Project>\n".to_string(),
+        };
+        (path.to_string(), body)
+    }
+
+    #[test]
+    fn a_declared_package_id_beats_the_directory_name() {
+        // The case the name matcher gets wrong: `Humanizer.Core` really is built from
+        // `src/Humanizer/`, and only the project file says so.
+        let projects = vec![
+            project("src/Humanizer/Humanizer.csproj", Some("Humanizer.Core")),
+            project("src/Humanizer.Tests/Humanizer.Tests.csproj", None),
+        ];
+        assert_eq!(
+            nuget_project_by_id(&projects, "Humanizer.Core").as_deref(),
+            Some("src/Humanizer")
+        );
+    }
+
+    #[test]
+    fn an_msbuild_property_is_not_an_answer() {
+        // `<PackageId>$(AssemblyName).Core</PackageId>` needs MSBuild to evaluate. Falling through
+        // to the name match is honest; pretending to have read it is not.
+        let projects = vec![project("src/Foo/Foo.csproj", Some("$(AssemblyName).Core"))];
+        assert_eq!(nuget_project_by_id(&projects, "Foo.Core"), None);
+    }
+
+    #[test]
+    fn two_projects_claiming_one_package_id_is_refused() {
+        let projects = vec![
+            project("src/A/A.csproj", Some("Shared.Id")),
+            project("src/B/B.csproj", Some("Shared.Id")),
+        ];
+        assert_eq!(nuget_project_by_id(&projects, "Shared.Id"), None);
+    }
+
+    #[test]
+    fn a_project_with_no_package_id_is_skipped_rather_than_matched() {
+        let projects = vec![project("src/Foo/Foo.csproj", None)];
+        assert_eq!(nuget_project_by_id(&projects, "Foo"), None);
+    }
+
+    #[test]
+    fn case_does_not_have_to_agree() {
+        // NuGet ids are case-insensitive, and the feed and the project file disagree routinely.
+        let projects = vec![project("src/Foo/Foo.csproj", Some("Foo.Bar"))];
+        assert_eq!(
+            nuget_project_by_id(&projects, "foo.bar").as_deref(),
+            Some("src/Foo")
+        );
+    }
+}

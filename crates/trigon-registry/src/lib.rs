@@ -41,7 +41,7 @@ pub use client::{
 pub use definitions::DefinitionsInferrer;
 pub use embedded::{crate_commit, nupkg_source};
 pub use error::RegistryError;
-pub use heuristic::{CratesIoInferrer, NpmInferrer, PyPiInferrer};
+pub use heuristic::{CratesIoInferrer, NpmInferrer, NuGetInferrer, PyPiInferrer};
 pub use infer::{Candidate, Climb, Derivation, StrategyInferrer, climb, infer};
 pub use model::{ArtifactMeta, BlobSink, ResolvedTarget};
 pub use npm::NpmRegistry;
