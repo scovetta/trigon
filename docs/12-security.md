@@ -323,7 +323,9 @@ Controls, in layers:
 - **The attestor re-derives the equivalence claim before signing**, running the same comparison a
   client runs with `--rerun-comparison`. It costs one stabilize-and-compare pass over local blobs,
   and nothing cheaper defends against a compromised judge worker.
-- Under **sigstore keyless** the workload identity is the crown jewel, so tokens stay run-scoped with
+- Under **sigstore keyless** — the road not taken, per
+  [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) — the workload identity is the crown
+  jewel, so tokens stay run-scoped with
   minute-scale TTLs and verification pins the identity policy.
 - Under **KMS**, only the attestor's service account holds the signing role, and key usage audits
   independently of Trigon's own logs.

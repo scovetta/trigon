@@ -37,7 +37,13 @@ separate process that reads blobs by hash ([`09`](09-attestations.md) §6). `ver
 artifact paths rather than a PURL, because the judgement half has no registry client by
 construction. And there is no `serve`, `work` or `ingest` yet: those are M4.
 
-The intended surface:
+The intended surface. **Aspirational, not a changelog** — much of this is unbuilt, and the
+attestation lines in particular have been overtaken: what exists today is `trigon keygen` /
+`public-key` for keys, `trigon attest --key <file> [--rekor <url>] [--dry-run]`, and
+`trigon verify-attestation [--public-key <hex>] [--rerun-comparison] [--transparency <entry>]`.
+`--sign kms://` and `--identity` below are the shape a fleet wants, and belong to
+[B21](17-backlog.md) steps 4-5. [`09-attestations.md`](09-attestations.md) §3 is the current
+account; `trigon --help` is the authority.
 
 ```
 # The front door. Starts from something the user already has.

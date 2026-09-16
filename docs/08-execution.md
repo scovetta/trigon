@@ -397,5 +397,7 @@ it takes all three columns of that table to hold. Egress alone leaves the blob s
 
 The sandbox writes outputs to a content-addressed store. A **separate attestor process**, in a
 different pod, never executing sandbox-derived code, reads by hash, re-derives the equivalence claim
-on its own, and signs only then. Under sigstore keyless the workload identity is the crown jewel, so
+on its own, and signs only then. Under sigstore keyless — the road not taken, per
+[ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) — the workload identity is the crown
+jewel, so
 tokens stay run-scoped with minute-scale TTLs. See [`09-attestations.md`](09-attestations.md) §3.

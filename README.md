@@ -30,7 +30,7 @@ records where building it proved the design wrong.
 |---|---|---|
 | **M0** the judgement half | done | differential against the reference implementation: 34 match, 24 deviate by a declared entry, **0 unexplained** |
 | **M1** first rebuilds | done | npm and PyPI rebuild end to end, under an enforced egress tier, against a time-filtered index |
-| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime` |
+| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`; published to a Rekor transparency log and verified offline against it |
 | **M3** the search half | begun | the deterministic parts first — failure signatures, log compression, the repair-loop policy, the Builder |
 
 Tier-1 observability landed early, out of milestone order: every run at an enforced egress tier now
@@ -177,7 +177,7 @@ process that ran the build could record any outcome it liked, so the attestor re
 from the artifact bytes before it signs anything.
 
 ```
-$ head -c 32 /dev/urandom > key.bin          # a development key; see docs/09 for the real options
+$ trigon keygen --out key.bin                # 0600, and refuses to overwrite an existing key
 $ trigon rebuild pkg:pypi/chardet@7.6.0 --image <as above> --work ./work-py \
       --egress open --timewarp auto --store ./store
 $ trigon runs --store ./store
@@ -207,7 +207,7 @@ $ trigon verify-attestation \
       --rerun-comparison \
       --upstream ./work-py/chardet-7.6.0-py3-none-any.whl \
       --rebuild ./work-py/rebuild/*/chardet-7.6.0-py3-none-any.whl \
-      --public-key <hex printed when the key signed>
+      --public-key "$(trigon public-key key.bin)"
 
 subject   chardet-7.6.0-py3-none-any.whl (4076d795897ce45239825956a1334e134322ecc4bfe84dbb12acd5390de0fbc1)
 predicate https://trigon.dev/equivalence/v1
@@ -220,6 +220,45 @@ Drop `--public-key` and it still re-derives; it just says the signature was pres
 because "unsigned" and "signed by someone you do not trust" are different answers. Edit the payload
 and the signature fails. Edit the claimed outcome and **the bytes refute it even with no key at
 all** — which is the property that makes an attestation from a rebuilder worth anything.
+
+### Putting it in a transparency log
+
+A signature says *who*. It does not say *when*, and with a long-lived key that is the gap that
+matters: a stolen key can sign anything, including something backdated. Add `--rekor` and the log
+answers the question the key cannot.
+
+```
+$ trigon attest --store ./store --key key.bin --rekor https://rekor.sigstage.dev
+rederived exact under wheel@58632c3c627d — signing
+logged at https://rekor.sigstage.dev index 56042318 (71d46696179fcd5d…)
+
+$ trigon runs --store ./store
+1789572025-1173b740  pkg:pypi/chardet@7.4.3   exact   attested   rekor.sigstage.dev index 56042318 on 2026-09-16
+```
+
+Use `rekor.sigstage.dev` (staging) while you are working things out. A transparency log is
+append-only: an entry published to production is there permanently, for everyone. `--dry-run` prints
+the exact entry and posts nothing, which is worth doing at least once — the signature is
+deterministic, so what you read is byte for byte what a real run would publish.
+
+Checking it needs no network and no faith in the log:
+
+```
+$ trigon verify-attestation ./store/attestations/.../equivalence.intoto.json \
+      --transparency <(jq .transparency ./store/runs/1789572025-1173b740.json)
+
+logged    rekor.sigstage.dev index 56042318 at 2026-09-16T15:20:26Z (71d46696179fcd5d)
+          the log's timestamp verifies, and the entry is about this bundle
+```
+
+Two things, and the second is the one that is easy to omit. The log's signed timestamp verifies —
+against a key compiled in and selected by the `logID` the entry names, which *is* the SHA-256 of
+that key. And the entry is about **this** bundle: a verifying timestamp on an unrelated entry proves
+some statement existed at some instant, which is not a claim anyone wants to make.
+
+What this does not yet do is check that timestamp against a signing certificate's validity window,
+because the certificates arrive with [B21](docs/17-backlog.md) steps 4-5. Today the entry is an
+auditable public record of when we said what; it is not yet what bounds a key compromise.
 
 ### Comparing two files you already have
 

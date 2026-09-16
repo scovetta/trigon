@@ -718,9 +718,16 @@ docs/09-attestations.md §2.1)*.
 1. **Re-derive it.** `trigon verify-attestation --rerun-comparison`, with a binary you built. This is
    the only thing that makes a *rebuilder's* attestation worth anything to someone who does not trust
    the rebuilder. If you also want independence from our build, produce R yourself.
-2. **Check the signing identity** against your own policy, and check Rekor inclusion if the bundle
-   carries it. Without `--public-key` the tool still re-derives and tells you the signature was
-   present and unchecked.
+2. **Check the signing identity** against your own policy with `--public-key <hex>`
+   (`trigon public-key <keyfile>` prints it). Without it the tool still re-derives and tells you the
+   signature was present and unchecked, which is a different answer from unsigned.
+
+   Where the run was logged, `--transparency <entry.json>` checks the log's signed timestamp *and*
+   that the entry is about that bundle, offline. The second half is not optional: a verifying
+   timestamp on an unrelated entry proves that some statement existed at some instant, with every
+   individual check passing. Note what this does **not** yet buy you — nothing checks the timestamp
+   against a certificate's validity window until [B21](17-backlog.md) steps 4-5, so it is an
+   auditable record of when we said what, not yet a bound on a key compromise.
 3. **Set your own threshold** with `Match::is_at_least`. The default is not a recommendation.
 4. **Read the `applied` list.** If you reject a particular normalization you can see it fired, with
    its risk tier and provenance, and discard the result.

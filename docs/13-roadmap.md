@@ -149,7 +149,13 @@ maintaining one whose shape is a guess. It arrives with M4.
       DSSE-wrapped over RFC 8785 canonical bytes. A conformant SLSA Provenance v1 statement remains:
       `rebuild/v1` already carries the SLSA shape but not the predicate type, and claiming
       conformance is worth doing only against the conformance suite.
-- [x] Signing works unsigned and with a local ed25519 key. Sigstore keyless and Rekor v2 remain.
+- [x] Signing works unsigned and with a local ed25519 key, with `trigon keygen` to make one.
+- [x] Statements publish to a Rekor transparency log (`--rekor`, `intoto` v0.0.1), and the log's
+      signed entry timestamp verifies offline in the `--no-default-features` verifier. Proven
+      against `rekor.sigstage.dev`.
+- [ ] A certificate chain to a pinned root, so the verified timestamp is checked against a validity
+      window and becomes load-bearing — [B21](17-backlog.md) steps 4-5. **Sigstore keyless is not
+      planned**; [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) has the reasoning.
 - [x] The attestor runs as a separate process and **re-derives the claim before signing**.
       `trigon attest` reads a store written by `trigon rebuild --store`, fetches every blob **by
       hash and checks it against that hash**, recomputes the claim from the artifact bytes, and

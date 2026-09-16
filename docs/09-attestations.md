@@ -514,7 +514,9 @@ Having the attestor run the same comparison a client would run is the cheapest d
 compromised judge worker, and it costs one stabilize-and-compare pass over blobs that are already
 local.
 
-Under sigstore keyless the workload identity is the crown jewel, so tokens stay **run-scoped with
+The road not taken, kept because the reasoning is what led to
+[ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md): under sigstore keyless the workload
+identity is the crown jewel, so tokens stay **run-scoped with
 minute-scale TTLs** and no worker holds a long-lived credential.
 
 ## 4. Model output never enters a signed document

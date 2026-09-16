@@ -36,12 +36,24 @@ published artifact and the purl is a secondary index.
 
 ### 2.1 The candidates
 
-**A transparency log (Rekor).** Already half-decided: `docs/09-attestations.md` names Rekor v2 and
-the signer supports sigstore keyless. Its strengths are exactly the ones we need — append-only,
-publicly auditable, and it needs nobody's permission. Its weakness is that it is a *transparency* log
-and not a *lookup* service. Rekor's maintainers say so; the v2 tile-based design is built for
-monitors that follow the whole log, not for a package manager doing a point query per dependency. It
-also wants small entries, and a divergence predicate carrying a difference signature is not small.
+**A transparency log (Rekor).** Built, and it settles this candidate rather than leaving it open.
+Statements publish with `trigon attest --rekor` as `intoto` **v0.0.1** over the v1 API, signed with
+a key we hold — **not** keyless, which [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md)
+decided against. (An earlier draft of this paragraph said "Rekor v2, and the signer supports
+sigstore keyless"; both halves are now wrong.)
+
+Its strengths are the ones we need — append-only, publicly auditable, nobody's permission required.
+Its weakness is that it is a *transparency* log and not a *lookup* service, which is **measured
+rather than taken from the maintainers' word**: Rekor's index answers a query by DSSE envelope hash
+or payload hash, and returns `[]` for the signing public key and for the artifact's own sha256. So
+our entries cannot be enumerated by key — the index keys on Fulcio-style identity and a self-issued
+certificate has none — and a consumer holding the artifact cannot find our attestation at all. They
+can check one they were handed, which is auditing, not lookup. See
+[`09-attestations.md`](09-attestations.md) §3 for the table.
+
+It also wants small entries, and a divergence predicate carrying a difference signature is not
+small. So the log stays what it is good at — dating a claim someone already has — and discovery
+needs one of the candidates below.
 
 **A git repository of attestations.** `trigon-attestations`, content-addressed, served over
 `raw.githubusercontent.com`. Cheap, familiar, forkable, greppable, and it needs no infrastructure.
@@ -247,7 +259,9 @@ it even if nobody cared about privacy.
 1. **Does the transparency-log split survive contact with a monitor?** Logging only a digest for
    divergences means a log monitor sees that *something* was claimed and cannot tell what. Is that an
    acceptable transparency story, or does it read as hiding the bad news?
-2. **Who signs?** Sigstore keyless binds the claim to a workflow identity, which is right for a
+2. **Who signs?** (Settled since this was written: a key under a trusted root, not keyless —
+   [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md). The reasoning below stands as the
+   argument that led there.) Sigstore keyless binds the claim to a workflow identity, which is right for a
    public instance and useless for an operator running a private sweep. Two identity models, or one
    with a documented downgrade?
 3. **What happens to the corpus when a stabilizer set changes?** Re-running a hundred thousand
