@@ -173,7 +173,11 @@ pub fn propose(provider: &dyn Provider, model: &str, task: &Task) -> Result<Cand
     let req = Request {
         prompt: prompt(task),
         model: model.to_string(),
-        max_output_tokens: 4096,
+        // The answer is a whole strategy document, and on a provider that reasons out of the same
+        // budget 4096 was never two things: a real repair spent 4095 of it thinking and had one
+        // token left to write with. The Anthropic client reserves `ANSWER_FLOOR` of this that a
+        // reasoning trace cannot touch, so what the caller asks for here is thinking *and* answer.
+        max_output_tokens: 16_384,
         temperature: 0.0,
         schema: caps.structured_output.then(candidate_schema),
         // The provider's, not this call's: whether a reasoning trace is worth its tokens is a

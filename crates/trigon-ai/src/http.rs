@@ -324,6 +324,17 @@ pub struct Anthropic {
 /// "whatever is current" is not a thing a request can ask for.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Output tokens a reasoning trace may never consume.
+///
+/// The answer this system asks for is a whole strategy document, so the floor is generous: running
+/// out mid-JSON produces a `stop_reason: max_tokens` and a parse failure, which reads as a broken
+/// provider rather than as a budget that was too small.
+const ANSWER_FLOOR: u32 = 6144;
+
+/// The API's own minimum for `budget_tokens`. Below it, thinking is disabled rather than requested
+/// and refused with a 400.
+const MIN_THINKING: u32 = 1024;
+
 /// Hosted, so ten minutes is the right bound: past that it is a fault rather than a slow model.
 const ANTHROPIC_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -366,6 +377,28 @@ impl Anthropic {
             "system": system,
             "messages": [{"role": "user", "content": content}],
         });
+        // **Thinking is stated, never inherited.** `max_tokens` on this API is the whole output
+        // budget and a reasoning trace is spent out of it, so a model that reasons by default can
+        // exhaust the budget before writing a word: a real repair came back as one `thinking` block
+        // with `stop_reason: max_tokens`, 4095 of 4096 tokens spent, and no answer. The comment
+        // beside the response parser asserted this could not happen "unless `thinking` is set on
+        // the request, and it is not set here" — true of the model that code was written against
+        // and false of every current one.
+        //
+        // Saying it explicitly is the fix, in both directions: `Off` disables it rather than being
+        // silently ignored, and `Default` enables it with a budget that leaves `ANSWER_FLOOR`
+        // tokens the trace cannot touch.
+        body["thinking"] = match req.reasoning {
+            Reasoning::Off => json!({"type": "disabled"}),
+            // Below the floor there is no room to think and answer, so the answer wins. A caller
+            // asking for a hundred tokens wants a hundred tokens of answer.
+            Reasoning::Default => match req.max_output_tokens.checked_sub(ANSWER_FLOOR) {
+                Some(budget) if budget >= MIN_THINKING => {
+                    json!({"type": "enabled", "budget_tokens": budget})
+                }
+                _ => json!({"type": "disabled"}),
+            },
+        };
         // Sampling parameters are **removed** on the current models and answer 400, so temperature
         // is sent only where something asked for one. Zero, which is every request this system
         // makes, is what those models do anyway.
@@ -407,16 +440,6 @@ impl Provider for Anthropic {
             ANTHROPIC_TIMEOUT,
         )?;
 
-        // The first text block. A response may also carry thinking blocks, which are not the
-        // answer and must not be concatenated into it.
-        let text = doc["content"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|b| b["type"] == "text")
-            .and_then(|b| b["text"].as_str())
-            .ok_or_else(|| LlmError::Malformed(format!("no text block in {doc}")))?;
-
         let stop = doc["stop_reason"].as_str().unwrap_or("unknown").to_string();
         // A decline is an outcome with a reason attached, not a malformed answer. Reported as one
         // so a run says "the provider refused" rather than "the provider is broken".
@@ -428,14 +451,61 @@ impl Provider for Anthropic {
                     .to_string(),
             ));
         }
+        // **Before the text is looked for, because it explains the text not being there.** This
+        // check sat *after* the extraction below, so a response that spent its whole budget
+        // thinking failed as `no text block` — with the field naming the cause sitting unread two
+        // lines further down.
+        if stop == "max_tokens" {
+            let thought = doc["usage"]["output_tokens_details"]["thinking_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+            return Err(LlmError::Truncated {
+                limit: req.max_output_tokens,
+                thinking: thought,
+            });
+        }
+
+        // The first text block. A response may also carry thinking blocks, which are not the
+        // answer and must not be concatenated into it.
+        let text = doc["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|b| b["type"] == "text")
+            .and_then(|b| b["text"].as_str())
+            // **The block types, never the document.** This printed the whole response, and a
+            // reasoning trace carries a multi-kilobyte signature — so the one useful fact arrived
+            // wrapped in thirty kilobytes of base64 that pushed it off the screen.
+            .ok_or_else(|| {
+                let kinds: Vec<&str> = doc["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|b| b["type"].as_str())
+                    .collect();
+                LlmError::Malformed(format!(
+                    "no text block: the answer carried [{}] and stopped for `{stop}`",
+                    kinds.join(", ")
+                ))
+            })?;
 
         let usage = &doc["usage"];
         let read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
         Ok(Response {
             text: text.to_string(),
-            // Extended thinking is off unless `thinking` is set on the request, and it is not set
-            // here, so there is no trace to keep rather than one being dropped.
-            reasoning: None,
+            // The trace, where the model produced one. It used to be `None` on the stated grounds
+            // that thinking "is not set here" — which stopped being true the moment a model
+            // reasoned by default, and the trace was being dropped rather than never existing.
+            // `docs/07-ai.md` §7 wants it recorded: a transcript is the evidence behind a
+            // `derivation: model_assisted`, and reasoning is most of what the model did.
+            reasoning: doc["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|b| b["type"] == "thinking")
+                .and_then(|b| b["thinking"].as_str())
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
             usage: Usage {
                 // Anthropic reports the cached and written parts *alongside* the uncached input, so
                 // the total this system records is their sum. Reading `input_tokens` alone
@@ -548,6 +618,55 @@ mod tests {
         OpenAiCompatible::new("http://x/v1", None, flavor)
             .unwrap()
             .body(&probe("operator instructions"))
+    }
+
+    fn anthropic_body(max: u32, reasoning: Reasoning) -> Value {
+        let mut req = probe("operator instructions");
+        req.max_output_tokens = max;
+        req.reasoning = reasoning;
+        Anthropic::new("k".to_string(), Some("http://x".to_string()))
+            .unwrap()
+            .body(&req)
+    }
+
+    #[test]
+    fn a_reasoning_trace_cannot_spend_the_whole_answer_budget() {
+        // The failure this exists for, from a real repair: one `thinking` block,
+        // `stop_reason: max_tokens`, 4095 of 4096 output tokens spent reasoning, and no answer at
+        // all. `max_tokens` here is the *whole* output budget and the trace comes out of it.
+        let b = anthropic_body(16_384, Reasoning::Default);
+        assert_eq!(b["thinking"]["type"], "enabled");
+        let budget = b["thinking"]["budget_tokens"].as_u64().unwrap();
+        let max = b["max_tokens"].as_u64().unwrap();
+        assert!(
+            budget < max,
+            "the trace has to leave room it cannot touch: {budget} of {max}"
+        );
+        assert_eq!(max - budget, ANSWER_FLOOR as u64);
+    }
+
+    #[test]
+    fn a_budget_too_small_to_think_and_answer_spends_it_on_answering() {
+        // A caller asking for a hundred tokens wants a hundred tokens of answer. Asking for a
+        // trace here would starve the answer again, or be refused outright — the API's own minimum
+        // for `budget_tokens` is 1024.
+        for small in [100, ANSWER_FLOOR, ANSWER_FLOOR + MIN_THINKING - 1] {
+            assert_eq!(
+                anthropic_body(small, Reasoning::Default)["thinking"]["type"],
+                "disabled",
+                "{small}"
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_off_is_said_rather_than_ignored() {
+        // `req.reasoning` was honoured by the Ollama flavour alone. This client dropped it and
+        // inherited whatever the model does by default, which is how the trace arrived unasked.
+        assert_eq!(
+            anthropic_body(16_384, Reasoning::Off)["thinking"]["type"],
+            "disabled"
+        );
     }
 
     #[test]
