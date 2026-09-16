@@ -204,10 +204,40 @@ fi
 
 say "done"
 "$TRIGON" runs --store "$STORE" | awk 'NR == 1' 
+# The two artifact paths, filled in rather than left as <published> and <rebuilt>. This script knows
+# both — the published one sits at the top of the work directory and the rebuilt one under
+# `rebuild/<strategy>-<pid>/` — and printing placeholders for values it holds is how a verify line
+# ends up retyped wrong or not run at all.
+# Found structurally rather than by parsing a record: the published artifact is the file at the top
+# of the work directory whose name also appears under `rebuild/<strategy>-<pid>/`. That pairing is
+# the definition of the two files `--rerun-comparison` wants, it holds for every ecosystem's
+# extension, and it needs no jq. Requiring both halves is what keeps a half-answer out of the line.
+UPSTREAM=""; REBUILT=""
+for candidate in "$WORK"/*; do
+    [ -f "$candidate" ] || continue
+    set -- "$WORK"/rebuild/*/"${candidate##*/}"
+    # Exactly one match, or none: rebuild directories accumulate across runs of the same target,
+    # and a verify line naming the wrong one is worse than naming none at all.
+    if [ $# -eq 1 ] && [ -f "$1" ]; then
+        if [ -n "$UPSTREAM" ]; then
+            # Two candidates means the guess is not a guess worth printing.
+            UPSTREAM=""; REBUILT=""
+            break
+        fi
+        UPSTREAM="$candidate"; REBUILT="$1"
+    fi
+done
+
 printf '\n  statements  %s/attestations/\n' "$STORE"
 printf '  verify      %s verify-attestation \\\n' "$TRIGON"
 printf '                %s/attestations/.../equivalence.intoto.json \\\n' "$STORE"
-printf '                --rerun-comparison --upstream <published> --rebuild <rebuilt>'
+if [ -n "$UPSTREAM" ] && [ -n "$REBUILT" ]; then
+    printf '                --rerun-comparison \\\n'
+    printf '                --upstream "%s" \\\n' "$UPSTREAM"
+    printf '                --rebuild "%s"' "$REBUILT"
+else
+    printf '                --rerun-comparison --upstream <published> --rebuild <rebuilt>'
+fi
 [ -n "$KEY" ] && printf ' \\\n                --public-key $(%s public-key %s)' "$TRIGON" "$KEY"
 # Only where there is an entry to check. Naming the flag after a run that never logged would send
 # someone looking for a file that was never written.
