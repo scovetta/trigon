@@ -655,6 +655,169 @@ fn evidence_value(target: &ResolvedTarget, source: &str) -> Option<String> {
         })
 }
 
+/// crates.io, where the registry records more about the build than any other and the artifact is
+/// harder to reproduce than any other.
+///
+/// The recipe is one command. What makes this ecosystem difficult is not the recipe but the
+/// **toolchain window**: `cargo package` rewrites `Cargo.toml` on the way into the tarball and the
+/// rewrite rules changed across Cargo releases, so the manifest inside the published `.crate` is a
+/// fingerprint of the Cargo that made it. This rung does not read that fingerprint. It pins what
+/// the registry stated — the `edition` floor, carried as a `ToolchainRange` by the resolver — and
+/// says so, because a window this rung guessed at is a window nobody can check.
+#[derive(Default)]
+pub struct CratesIoInferrer {
+    mirror: Option<String>,
+}
+
+impl CratesIoInferrer {
+    pub fn new() -> Self {
+        CratesIoInferrer::default()
+    }
+
+    /// See [`NpmInferrer::with_mirror`].
+    pub fn with_mirror(mut self, mirror: Option<String>) -> Self {
+        self.mirror = mirror;
+        self
+    }
+}
+
+#[async_trait]
+impl StrategyInferrer for CratesIoInferrer {
+    fn name(&self) -> &'static str {
+        "cargo-heuristic"
+    }
+
+    async fn infer(&self, target: &ResolvedTarget) -> Result<Vec<Candidate>, RegistryError> {
+        let Some(source) = &target.source else {
+            return Ok(Vec::new());
+        };
+        let mut assumptions = Vec::new();
+
+        // `.cargo_vcs_info.json` inside the published `.crate` gives the commit exactly, and the
+        // run reads it before inference — so unlike PyPI this rung usually has one already and the
+        // tag ladder is the fallback rather than the rule.
+        let Ok((commit, how, tag)) = commit_for(target, false).await else {
+            return Ok(Vec::new());
+        };
+        if let Some(tag) = tag {
+            assumptions.push(from_a_tag(&tag));
+        }
+
+        // The toolchain, from the edition floor the resolver recorded. A floor is not a version, so
+        // this says which it is: the lowest Cargo that could have packaged this edition, which is
+        // right for a crate published soon after an edition landed and wrong by years for one
+        // published later.
+        let rust = trigon_core::resolve_toolchain("cargo", &target.intrinsics.evidence);
+        let pinned = match &rust {
+            trigon_core::ToolchainResolution::Pinned { version } => Some(version.clone()),
+            // **A floor is not an estimate.** `edition = "2018"` puts Cargo at 1.31 or newer, and
+            // building a crate published in 2025 with Cargo 1.31 is wrong by seven years and
+            // thirty-odd releases — it fails outright, because `cargo package -p` did not exist
+            // then. The publish date is the better evidence and it is already here.
+            trigon_core::ToolchainResolution::Window { lo, .. } => {
+                let floor = lo.clone();
+                match target
+                    .intrinsics
+                    .publish_time
+                    .as_deref()
+                    .and_then(cargo_current_at)
+                {
+                    Some(v) => {
+                        assumptions.push(format!(
+                            "the crate's edition puts Cargo at {} or newer, and this builds with \
+                             {v} — the release current when the crate was published, computed from \
+                             Cargo's six-week train. The manifest rewrite inside the published \
+                             `.crate` is a tighter fingerprint and this rung does not read it, so \
+                             a crate packaged on an older or a nightly toolchain will diverge in \
+                             `Cargo.toml` and nowhere else",
+                            floor.as_deref().unwrap_or("any version")
+                        ));
+                        Some(v)
+                    }
+                    // A floor alone. Said as a floor rather than dressed up as a version.
+                    None => floor.map(|lo| {
+                        assumptions.push(format!(
+                            "no publish time, so this builds with {lo} — the *oldest* Cargo that \
+                             could have packaged this edition rather than an estimate of the one \
+                             that did"
+                        ));
+                        lo
+                    }),
+                }
+            }
+            _ => None,
+        };
+        let Some(rust_version) = pinned else {
+            tracing::debug!("no toolchain evidence for this crate; declining rather than guessing");
+            return Ok(Vec::new());
+        };
+
+        let mut deps = BTreeMap::from([("rust_version".to_string(), rust_version)]);
+        if let Some(m) = &self.mirror {
+            // **The host is part of the path.** The mirror's toolchain route is
+            // `/-toolchain/<host>/<path>`, so a base without the host makes the mirror read
+            // `rustup` as the upstream host and refuse it — and `wget -q` reported that as
+            // nothing at all.
+            deps.insert(
+                "toolchain_base".into(),
+                format!("http://{m}/-toolchain/static.rust-lang.org"),
+            );
+        } else {
+            assumptions.push(
+                "no mirror configured, so the toolchain is fetched from static.rust-lang.org \
+                 directly"
+                    .into(),
+            );
+        }
+
+        let strategy = Strategy::Flow(FlowStrategy {
+            location: Location {
+                repo: source.repo_url.clone(),
+                git_ref: commit,
+                subdir: source.subdir.clone(),
+            },
+            src: vec![uses("git-checkout", BTreeMap::new())],
+            deps: vec![uses("cargo/install-rust", deps)],
+            build: vec![uses(
+                "cargo/build/package",
+                // The crate's own name, which selects it out of a workspace. Always passed rather
+                // than only where a workspace is suspected: `-p serde` in a single-package
+                // repository names the one package there is, and guessing which shape a repository
+                // has before checking it out is the guess this avoids.
+                BTreeMap::from([("package".to_string(), target.reference.name.clone())]),
+            )],
+            // Relative to the checkout, which is what `output_dir` means. `cargo package` writes
+            // into `<target-dir>/package/`, and the tool's target directory is `target` for the
+            // reason its own docs give.
+            output_dir: Some("target/package".into()),
+            output_path: None,
+        });
+
+        Ok(vec![Candidate {
+            strategy,
+            derivation: Derivation::Heuristic,
+            confidence: confidence_of(how).max(Confidence::Weak),
+            discovery: how,
+            assumptions,
+        }])
+    }
+
+    async fn why_not(&self, target: &ResolvedTarget) -> Option<String> {
+        if let Err(why) = commit_for(target, false).await {
+            return Some(why);
+        }
+        match trigon_core::resolve_toolchain("cargo", &target.intrinsics.evidence) {
+            trigon_core::ToolchainResolution::Pinned { .. }
+            | trigon_core::ToolchainResolution::Window { lo: Some(_), .. } => None,
+            _ => Some(
+                "crates.io declared no edition for this version, so there is no floor for the \
+                 Cargo that packaged it and any version this rung picked would be a guess"
+                    .into(),
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod project_root_tests {
     use super::project_root;
@@ -725,5 +888,90 @@ mod project_root_tests {
         // a whole monorepo. Stated as a limit rather than discovered as a silent miss.
         let deep = owned(&["packages/python/google-auth/pyproject.toml"]);
         assert_eq!(project_root(&deep, "google-auth"), None);
+    }
+}
+
+/// The Cargo release current on a given day.
+///
+/// Arithmetic rather than a table, because Rust has shipped on a **six-week train** since 1.0 on
+/// 2015-05-15 and has not missed one. `docs/03-ecosystems.md` calls toolchain-window inference the
+/// game for this ecosystem; this is the cheap opening move, accurate to within a release, and it
+/// beats the edition floor by years for any crate published long after its edition landed.
+///
+/// What it is not: the fingerprint. The published `.crate` carries a `Cargo.toml` that Cargo
+/// rewrote, and the rewrite rules changed across releases — pretty arrays from 1.60, a header
+/// comment from 1.55 — so the artifact itself pins the window far tighter than a date does.
+/// Reading it is the real answer and is recorded in `docs/17-backlog.md` rather than done here.
+///
+/// A date before 1.0 gives `None`: crates.io predates the six-week train and nothing here can say
+/// what packaged something from 2014.
+fn cargo_current_at(rfc3339: &str) -> Option<String> {
+    let days = days_since_epoch(rfc3339)?;
+    const RUST_1_0: i64 = 16_570; // 2015-05-15
+    const TRAIN: i64 = 42;
+    let elapsed = days.checked_sub(RUST_1_0).filter(|d| *d >= 0)?;
+    Some(format!("1.{}.0", elapsed / TRAIN))
+}
+
+/// Days from 1970-01-01 for the `YYYY-MM-DD` at the head of an RFC 3339 instant.
+///
+/// Only the date, because the train is six weeks wide and an hour cannot change the answer.
+fn days_since_epoch(rfc3339: &str) -> Option<i64> {
+    let d = rfc3339.get(..10)?;
+    let mut it = d.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let day: i64 = it.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Howard Hinnant's days-from-civil, which is exact for the whole proleptic Gregorian calendar
+    // and needs no leap-year special cases at the call site.
+    let y = y - i64::from(m <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+#[cfg(test)]
+mod cargo_train_tests {
+    use super::{cargo_current_at, days_since_epoch};
+
+    #[test]
+    fn the_epoch_and_the_train_line_up_with_real_releases() {
+        // Anchors taken from Rust's own release history. Within one release is the accuracy this
+        // claims, and the assumption text says so.
+        for (date, want) in [
+            ("2015-05-15T00:00:00Z", "1.0.0"),
+            ("2021-10-21T00:00:00Z", "1.56.0"), // edition 2021 landed here
+            ("2025-02-20T00:00:00Z", "1.85.0"), // edition 2024 landed here
+        ] {
+            let got = cargo_current_at(date).unwrap();
+            let n = |v: &str| v.split('.').nth(1).unwrap().parse::<i64>().unwrap();
+            assert!(
+                (n(&got) - n(want)).abs() <= 1,
+                "{date}: got {got}, expected about {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_date_before_the_train_is_not_a_guess() {
+        // crates.io predates 1.0, and nothing here can say what packaged something from 2014.
+        assert_eq!(cargo_current_at("2014-01-01T00:00:00Z"), None);
+        assert_eq!(cargo_current_at("not-a-date"), None);
+        assert_eq!(cargo_current_at(""), None);
+    }
+
+    #[test]
+    fn the_civil_calendar_conversion_is_exact() {
+        assert_eq!(days_since_epoch("1970-01-01T00:00:00Z"), Some(0));
+        // A leap day, and the day after a century that is not a leap year.
+        assert_eq!(days_since_epoch("2000-02-29T00:00:00Z"), Some(11016));
+        assert_eq!(days_since_epoch("1900-03-01T00:00:00Z"), Some(-25508));
+        assert_eq!(days_since_epoch("2026-09-16T10:00:00Z"), Some(20712));
     }
 }

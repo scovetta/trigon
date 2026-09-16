@@ -197,9 +197,33 @@ async fn a_missing_version_lists_what_exists() {
 
 #[tokio::test]
 async fn an_unsupported_ecosystem_says_what_is_supported() {
-    let e = match for_ecosystem(Ecosystem::NuGet, client()) {
+    // RubyGems rather than NuGet, because NuGet gained a client. The test is about the *shape* of
+    // the refusal — the ecosystem named, the alternatives named — rather than about which of the
+    // eight we currently speak, so it follows the frontier instead of pinning it.
+    let e = match for_ecosystem(Ecosystem::RubyGems, client()) {
         Err(e) => e,
-        Ok(_) => panic!("nuget has no client in this build"),
+        Ok(_) => panic!("gem has no client in this build"),
     };
-    assert!(e.to_string().contains("does not speak nuget"), "{e}");
+    assert!(e.to_string().contains("does not speak gem"), "{e}");
+    assert!(e.to_string().contains("npm, pypi, cargo, nuget"), "{e}");
+}
+
+#[tokio::test]
+async fn every_ecosystem_with_a_client_produces_one() {
+    // The counterpart, and what the test above used to cover by accident: a factory arm that is
+    // written but not reachable reads exactly like one that was never written. Named individually
+    // so a missing arm says which.
+    for e in [
+        Ecosystem::Npm,
+        Ecosystem::PyPI,
+        Ecosystem::CratesIo,
+        Ecosystem::NuGet,
+    ] {
+        let r = for_ecosystem(e, client()).unwrap_or_else(|err| panic!("{e}: {err}"));
+        assert_eq!(
+            r.ecosystem(),
+            e,
+            "the client answers for a different ecosystem"
+        );
+    }
 }

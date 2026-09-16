@@ -295,6 +295,53 @@ commit from a release whose tag we failed to fetch. `Checkout::tags` carries the
 package. Turning that warning into a refusal needs a way to know a project is VCS-versioned before
 building it, which is a `pyproject.toml` read the inferrer does not do yet.
 
+## B19. Cargo needs an index commit, not a timestamp
+
+`pkg:cargo/serde@1.0.219` rebuilds end to end and diverges on exactly one of twenty-eight files:
+`Cargo.lock`. Every source file is byte-identical; the lockfile is today's dependency resolution
+rather than the publisher's.
+
+[`00-overview.md`](00-overview.md) §1 named this before any of it was built — "for Cargo, pin a
+`crates.io-index` git commit satisfying the lockfile — a timestamp isn't precise enough" — and
+`RegistryMoment::GitCommit` exists for it with nothing producing one. A timestamp is not precise
+enough because the index is a git repository whose commits are not evenly spaced in time, and
+resolution is a function of the commit rather than of the hour.
+
+Two pieces, and the first is worth more:
+
+- **The mirror does not speak crates.io.** `trigon_mirror::Platform` is npm and pypi, so at
+  `mirror-only` egress `cargo package` cannot reach the index at all and fails with a curl error
+  from libgit2. The run above is at `--egress open`, which is why it is a demonstration rather than
+  a verdict — `docs/12-security.md` §3 is explicit that a pass at open egress is a weaker claim and
+  gets a different name in the UI.
+- **Then the moment has to be a commit.** Serving a sparse index filtered to an instant is the
+  npm/PyPI shape and is probably wrong here; serving the index at a pinned commit is the shape
+  Cargo's own resolution expects.
+
+**Done when:** a crates.io target reproduces at `mirror-only` with the lockfile identical, and the
+attestation records which index commit it resolved against.
+
+## B20. The toolchain window is the game for Cargo and we compute a date instead
+
+`cargo/build/package` picks the Cargo release current when the crate was published, computed from
+the six-week train rather than a table. That is the cheap opening move and accurate to within one
+release, and it beats the edition floor by years — building `serde` 1.0.219 with edition 2018's
+floor of 1.31 fails outright, because `cargo package -p` did not exist then.
+
+It is not the fingerprint. The published `.crate` carries a `Cargo.toml` that **Cargo rewrote**, and
+the rewrite rules changed across releases — pretty-printed arrays from 1.60, a header comment from
+1.55, `debug = true` denormalized before 1.71, `doc-scrape-examples` from 1.67. The manifest inside
+the artifact therefore pins the window far tighter than any date can, and
+[`03-ecosystems.md`](03-ecosystems.md) calls reading it the game for this ecosystem.
+
+Everything needed is already here: `toml_edit` is a named dependency for exactly this (a
+format-preserving parse, because plain `toml` discards the information the trick depends on), and
+`Claim::ToolchainRange` intersects with the edition floor and the publish date through
+`resolve_toolchain` without any of the three knowing about the others.
+
+**Done when:** a crate whose manifest fingerprint contradicts its publish date resolves to the
+fingerprint's window, and the corpus says how often that happens.
+
 ## B18. The npm strata that build anything reproduce at 12% and 25%
 
 The 300-target common-path run, per stratum:

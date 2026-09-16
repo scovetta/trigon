@@ -33,12 +33,13 @@ pub fn for_ecosystem(
     match ecosystem {
         Ecosystem::Npm => Ok(Box::new(crate::npm::NpmRegistry::new(client))),
         Ecosystem::PyPI => Ok(Box::new(crate::pypi::PyPiRegistry::new(client))),
-        // Named rather than silently unsupported. M1 is npm and PyPI to a high standard; the
-        // others have tools and profiles but no client yet, and pretending otherwise would fail
-        // somewhere less obvious.
+        Ecosystem::CratesIo => Ok(Box::new(crate::cargo::CratesIoRegistry::new(client))),
+        Ecosystem::NuGet => Ok(Box::new(crate::nuget::NuGetRegistry::new(client))),
+        // Named rather than silently unsupported. These have profiles and, for some, tools, but no
+        // client — and pretending otherwise would fail somewhere less obvious.
         other => Err(RegistryError::Unsupported {
             ecosystem: other.to_string(),
-            supported: "npm, pypi".into(),
+            supported: "npm, pypi, cargo, nuget".into(),
         }),
     }
 }

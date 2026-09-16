@@ -569,14 +569,18 @@ fn resolve_refuses_a_purl_with_no_version() {
 #[cfg(feature = "build")]
 #[test]
 fn resolve_names_the_supported_ecosystems() {
+    // **The example moved from `nuget` to `gem` because `nuget` started working.** That is the
+    // right way for this test to fail: it is about the *shape* of the refusal — named ecosystem,
+    // named alternatives, `Policy` rather than a crash — and not about which four we happen to
+    // speak. Picking a still-unsupported one keeps it testing that.
     let out = Command::new(bin())
-        .args(["resolve", "pkg:nuget/Newtonsoft.Json@13.0.3"])
+        .args(["resolve", "pkg:gem/rails@7.1.3"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("does not speak nuget"), "{err}");
-    assert!(err.contains("npm, pypi"), "{err}");
+    assert!(err.contains("does not speak gem"), "{err}");
+    assert!(err.contains("npm, pypi, cargo, nuget"), "{err}");
     assert!(
         err.contains("fault=Policy"),
         "declining is policy, not breakage: {err}"

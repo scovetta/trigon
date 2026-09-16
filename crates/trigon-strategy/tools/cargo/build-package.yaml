@@ -1,0 +1,74 @@
+# `cargo package`, which is what produced the `.crate` on the registry.
+#
+# **`--no-verify` on purpose.** `cargo package` builds the crate after packing it, to prove the
+# tarball compiles — which is a fine thing for a publisher to check and pure cost here: the bytes
+# are already written by then, compiling needs every dependency, and a crate that fails to build
+# against today's resolved dependencies still packaged exactly as it did on publication day. The
+# artifact is a function of the source tree and the manifest rewrite, not of whether it compiles.
+#
+# **`--locked` where a lockfile exists.** A library crate usually has none, and forcing it turns a
+# reproducible pack into "error: the lock file needs to be updated". Passed by the caller rather
+# than assumed here.
+id: cargo/build/package
+params:
+  locator:
+    required: false
+    default: /trigon/rust/bin/
+    doc: >-
+      Where to find cargo. Defaults to where `cargo/install-rust` puts it, because the deps phase
+      and the build phase are separate shells and nothing carries a PATH between them — an empty
+      default meant `cargo package` ran as bare `cargo` and failed with `cargo: not found` after a
+      toolchain install that had worked perfectly.
+  home:
+    required: false
+    default: /trigon/rust
+    doc: >-
+      `CARGO_HOME`, which cargo needs in order to find the toolchain it was installed into rather
+      than the `~/.cargo` it assumes.
+  dir:
+    required: false
+    doc: >-
+      The package directory, when it is not the working tree root. Defaults to `location.subdir`,
+      which is where the answer already is for a workspace member — and a workspace is the common
+      case in this ecosystem rather than the exception.
+  package:
+    required: false
+    doc: >-
+      `-p <name>`, selecting one member of a workspace. **The common shape in this ecosystem rather
+      than the exception**: `serde-rs/serde` is a virtual manifest whose root is not a package at
+      all, and `cargo package` there fails with "is a virtual manifest, but this command requires
+      running against an actual package". Cargo has its own answer to the monorepo question and it
+      is better than the directory-guessing other ecosystems need — the member is selected by
+      *name*, which is exactly the thing the registry told us.
+  locked:
+    required: false
+    default: "false"
+    doc: Pass `--locked`. Only where the checkout has a `Cargo.lock` the publisher committed.
+  target_dir:
+    required: false
+    default: target
+    doc: >-
+      **Relative, and inside the tree.** An absolute path here seemed tidier — keep build output off
+      the checkout — and breaks collection: `output_dir` is joined onto the source root, so
+      `/trigon/cargo-target` became `/src//trigon/cargo-target` and the `.crate` that had just been
+      packaged could not be found. The worry it was avoiding is unfounded in this ecosystem anyway:
+      `cargo package` excludes `target/` from the package unconditionally, so it cannot pack itself.
+steps:
+  # **One line, no continuations.** A `\` followed by a space rather than by a newline escapes the
+  # space, and cargo reports that as `Found argument ' ' which wasn't expected` — which reads like a
+  # bad flag rather than like template whitespace. Conditional fragments and trailing backslashes do
+  # not mix, so the flags are assembled into a variable instead.
+  - runs: |
+      {%- set project = with.dir if with.dir else location.subdir %}
+      export CARGO_HOME={{ with.home }} RUSTUP_HOME={{ with.home }}
+      set -- --no-verify --allow-dirty --target-dir {{ with.target_dir }}
+      {%- if with.package %}
+      set -- "$@" -p {{ with.package }}
+      {%- endif %}
+      {%- if with.locked == 'true' %}
+      set -- "$@" --locked
+      {%- endif %}
+      {%- if project and project != '.' %}
+      set -- "$@" --manifest-path {{ project }}/Cargo.toml
+      {%- endif %}
+      {{ with.locator }}cargo package "$@"

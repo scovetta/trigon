@@ -1,0 +1,45 @@
+# Install a pinned Rust toolchain, through the mirror where one is running.
+#
+# The version matters more here than in most ecosystems and for a reason peculiar to Cargo: `cargo
+# package` **rewrites `Cargo.toml`** on the way into the tarball, and the rewrite rules changed
+# across releases — pretty-printed arrays from 1.60, a header comment from 1.55, `debug = true`
+# denormalized before 1.71. The manifest inside the published `.crate` is therefore a fingerprint of
+# the Cargo that made it, which is why `docs/03-ecosystems.md` treats toolchain-window inference as
+# the game for this ecosystem rather than a detail.
+id: cargo/install-rust
+# `wget`, not `curl`. The base image carries wget because the Node toolchain install needs it, and
+# nothing else has wanted curl — so naming curl here made every crates.io build fail in *setup*
+# with `env/base-image-incomplete` before it downloaded anything. Two tools that do one job, and
+# the one the image already has is the right one to ask for.
+needs: [wget, ca-certificates]
+params:
+  rust_version:
+    required: true
+    doc: An exact release, such as `1.85.0`. A channel name would resolve to different bytes daily.
+  home:
+    required: false
+    default: /trigon/rust
+    doc: >-
+      Where the toolchain goes, as `CARGO_HOME` and `RUSTUP_HOME`. A constant rather than `$HOME`
+      for the reason `VENV` is one: the deps phase and the build phase are separate shells, so
+      rustup's default of `~/.cargo` installs somewhere the next phase does not look and
+      `cargo package` fails with `cargo: not found` two phases after the mistake. Under `/trigon`
+      because that directory is ours and already writable — the root of a Debian image is 0555 and
+      the sandbox drops `CAP_DAC_OVERRIDE` by name.
+  toolchain_base:
+    required: false
+    default: https://static.rust-lang.org
+    doc: >-
+      Where rustup-init and the toolchain come from. Rewritten to the mirror's toolchain route where
+      one is running, so a build at an enforced tier can install a toolchain at all — the deps phase
+      runs inside the island and the mirror is the only host in there.
+steps:
+  - runs: |
+      # Not `-q`. A quiet wget that fails prints nothing, and the deps phase then ends with no
+      # line saying why — which is exactly the silence `docs/16-findings.md` keeps finding.
+      wget -O /tmp/rustup-init {{ with.toolchain_base }}/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+      chmod +x /tmp/rustup-init
+      CARGO_HOME={{ with.home }} RUSTUP_HOME={{ with.home }} \
+        RUSTUP_DIST_SERVER={{ with.toolchain_base }} \
+        /tmp/rustup-init -y --no-modify-path --profile minimal \
+        --default-toolchain {{ with.rust_version }}

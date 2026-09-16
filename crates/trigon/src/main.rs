@@ -2273,6 +2273,9 @@ mod rebuild {
                         .with_sources(Some(sources)),
                 ))
             }
+            trigon_core::Ecosystem::CratesIo => rungs.push(Box::new(
+                trigon_registry::CratesIoInferrer::new().with_mirror(mirror),
+            )),
             trigon_core::Ecosystem::PyPI => {
                 // The same cache the npm rung and the model rung use: a target whose repository
                 // more than one of them wants is fetched once.
@@ -2457,6 +2460,47 @@ mod rebuild {
                 println!("  generator  {:?}", e.claim);
             }
             resolved.intrinsics.evidence.extend(found);
+
+            // **And where the artifact says its own source is.** Two of the four ecosystems record
+            // it inside the package and neither records it in their API: a `.nuspec` carries
+            // `<repository url commit>`, and a `.crate` carries `.cargo_vcs_info.json`. Both are
+            // written by the publishing tool during the build being reproduced, so neither is an
+            // inference — and for NuGet it is close to the only rung there is, because three of
+            // twelve popular packages declare a forge in `projectUrl` and the rest point at a
+            // documentation site.
+            //
+            // Only ever *adds*. A source the API already gave is contemporary with the release and
+            // is not overridden; what this fills is the commit the API never has.
+            match target.ecosystem {
+                trigon_core::Ecosystem::NuGet => {
+                    if let Some(found) = trigon_registry::nupkg_source(&bytes) {
+                        if verbose {
+                            println!(
+                                "  nuspec     {} @ {}",
+                                found.repo_url,
+                                match found.commit.is_empty() {
+                                    true => "(no commit)",
+                                    false => &found.commit,
+                                }
+                            );
+                        }
+                        resolved.source = Some(found);
+                    }
+                }
+                trigon_core::Ecosystem::CratesIo => {
+                    if let Some(sha) = trigon_registry::crate_commit(&bytes)
+                        && let Some(src) = resolved.source.as_mut()
+                        && src.commit.is_empty()
+                    {
+                        if verbose {
+                            println!("  vcs-info   {sha}");
+                        }
+                        src.commit = sha;
+                        src.how = trigon_core::SourceDiscovery::PublishedProvenance;
+                    }
+                }
+                _ => {}
+            }
         }
 
         mark("strategy");

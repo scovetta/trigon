@@ -211,6 +211,8 @@ pub const VENV: &str = "/trigon/deps";
 
 const BUILTIN_TOOLS: &[&str] = &[
     include_str!("../tools/git-checkout.yaml"),
+    include_str!("../tools/cargo/install-rust.yaml"),
+    include_str!("../tools/cargo/build-package.yaml"),
     include_str!("../tools/pypi/setup-venv.yaml"),
     include_str!("../tools/pypi/setup-registry.yaml"),
     include_str!("../tools/pypi/install-deps.yaml"),

@@ -12,9 +12,9 @@ own `Registry` implementation and stabilizer profile, tells us the seam in
 |---|---|---|---|
 | **npm** | ~100% at tarball level (package managers hard-code archive metadata); **no source linkage whatsoever** | Source discovery and build inference | **M1** |
 | **PyPI** | ~12% → ~98% with `SOURCE_DATE_EPOCH` + umask fixes; timestamps are 87.7% of failures | Native-extension wheels | **M1** |
-| **crates.io** | Highly reproducible by design since `trim-paths` became the release default | Toolchain-window inference; build scripts and proc macros | M5 |
+| **crates.io** | Highly reproducible by design since `trim-paths` became the release default | Toolchain-window inference; build scripts and proc macros | **resolves, builds, compares** |
 | **RubyGems** | 0% → 99.9% since 3.6.7 defaults `SOURCE_DATE_EPOCH` and sorts gemspec metadata. **No independent verification infrastructure exists anywhere.** | Native extensions | M5 |
-| **NuGet** | Trusted publishing since Sept 2025; **almost no reproducibility infrastructure** | We are partly inventing this ecosystem's story | M5 |
+| **NuGet** | Trusted publishing since Sept 2025; **almost no reproducibility infrastructure** | We are partly inventing this ecosystem's story | **resolves and fetches; no build side** |
 | **GitHub** | Not applicable. The artifact is a release asset or source archive | Everything comes from the release workflow | M5 |
 
 Sources: the reproducible-builds project's per-ecosystem reporting through 2026, PEP 740 and the
@@ -180,6 +180,14 @@ rather than failure.
 ## 3. crates.io
 
 The most sophisticated inference of the six, and the one with the best trick.
+
+> **Built, and demonstrated once.** `pkg:cargo/serde@1.0.219` resolves, reads its commit out of
+> `.cargo_vcs_info.json` as `PublishedProvenance`, installs a pinned toolchain, packages the
+> workspace member and compares: **27 of 28 files byte-identical, and the twenty-eighth is
+> `Cargo.lock`.** That run is at `--egress open`, because the mirror does not speak crates.io and
+> `cargo package` cannot reach the index at an enforced tier — so it is a demonstration rather than
+> a verdict. [`17-backlog.md`](17-backlog.md) B19 is the index commit and B20 is the toolchain
+> window; the trick below is B20 and is not implemented.
 
 ### Resolution
 Metadata from `https://crates.io/api/v1/crates/{name}/{version}`; artifact from

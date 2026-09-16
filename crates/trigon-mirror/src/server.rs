@@ -40,7 +40,14 @@ pub struct Stats {
 ///
 /// Adding one is cheap and deliberate. What it must never become is a wildcard: the moment the
 /// build picks the host, `mirror-only` means nothing.
-pub const TOOLCHAIN_HOSTS: &[&str] = &["nodejs.org", "unofficial-builds.nodejs.org"];
+pub const TOOLCHAIN_HOSTS: &[&str] = &[
+    "nodejs.org",
+    "unofficial-builds.nodejs.org",
+    // rustup-init and every Rust toolchain. `static.rust-lang.org` is the only host rustup fetches
+    // from when `RUSTUP_DIST_SERVER` points at it, and its URLs name an exact release — the
+    // property this list requires.
+    "static.rust-lang.org",
+];
 
 /// Hosts the artifact route will fetch from.
 ///

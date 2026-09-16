@@ -164,6 +164,16 @@ async fn a_toolchain_host_outside_the_allowlist_is_refused() {
     assert_eq!(resp.status(), 403);
 
     assert!(trigon_mirror::toolchain_host_allowed("nodejs.org"));
+    assert!(trigon_mirror::toolchain_host_allowed(
+        "static.rust-lang.org"
+    ));
+    // The same exact-match rule as above, on the host this list gained for crates.io.
+    assert!(!trigon_mirror::toolchain_host_allowed(
+        "static.rust-lang.org.evil.example"
+    ));
+    assert!(!trigon_mirror::toolchain_host_allowed(
+        "evil-static.rust-lang.org"
+    ));
     assert!(!trigon_mirror::toolchain_host_allowed(
         "nodejs.org.evil.example"
     ));

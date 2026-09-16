@@ -15,14 +15,17 @@
 //! published from; PyPI records a project URL. That is one request we were making anyway, and it
 //! is a better answer than any amount of tag matching.
 
+mod cargo;
 pub mod ci;
 mod client;
 mod definitions;
+mod embedded;
 mod error;
 mod heuristic;
 mod infer;
 mod model;
 mod npm;
+mod nuget;
 mod promised;
 mod pypi;
 mod registry;
@@ -30,16 +33,19 @@ mod source;
 mod tags;
 pub mod wheel;
 
+pub use cargo::CratesIoRegistry;
 pub use ci::{CiInferrer, CiReading};
 pub use client::{
     Client, ClientConfig, HostTraffic, github_token_present, note_failure, note_request, traffic,
 };
 pub use definitions::DefinitionsInferrer;
+pub use embedded::{crate_commit, nupkg_source};
 pub use error::RegistryError;
-pub use heuristic::{NpmInferrer, PyPiInferrer};
+pub use heuristic::{CratesIoInferrer, NpmInferrer, PyPiInferrer};
 pub use infer::{Candidate, Climb, Derivation, StrategyInferrer, climb, infer};
 pub use model::{ArtifactMeta, BlobSink, ResolvedTarget};
 pub use npm::NpmRegistry;
+pub use nuget::NuGetRegistry;
 pub use promised::{promised, shortfall};
 pub use pypi::PyPiRegistry;
 pub use registry::{Registry, for_ecosystem};
