@@ -392,6 +392,61 @@ RFC 8785 JCS of exactly `{body, integratedTime, logID, logIndex}`, and the log's
 be pinned rather than fetched at verification time — fetching it from the log that produced the
 signature asks the log to vouch for itself.
 
+#### Reading an entry back
+
+`trigon runs` shows the log and index beside each run, so finding your own entry does not mean
+reading the store's JSON by hand:
+
+```
+run-4f2a  pkg:npm/demo@1.0.0   exact   attested   rekor.sigstage.dev index 56042173 on 2026-09-16
+```
+
+To check one rather than read it:
+
+```
+trigon verify-attestation <bundle> --transparency <entry.json>
+```
+
+where `entry.json` is a run record's `transparency` field (`jq .transparency runs/<id>.json`). Two
+things are checked, and the second is the one that is easy to leave out:
+
+1. **The SET verifies**, which is what says *when* this statement existed.
+2. **The entry is about this bundle**, by the payload hash the log recorded. A verifying timestamp
+   on an unrelated entry proves that some statement existed at some instant, which is not a claim
+   anyone wants to make. Rekor does not keep the envelope — the stored body has only hashes and the
+   public key — so the binding runs the other way: hash the statement you hold and check the log
+   recorded that one.
+
+No network, and it works in the `--no-default-features` verifier. The log's key is selected by the
+`logID` the entry names, which **is** the SHA-256 of that key — so the compiled-in table
+(`rekor.sigstore.dev`, `rekor.sigstage.dev`) is an index rather than an authority, and a wrong row
+cannot be chosen for an entry it does not belong to. `--log-key <pem>` covers any other log. A key
+should be pinned rather than fetched at verification time, because fetching it from the log whose
+signature is under test asks that log to vouch for itself.
+
+That identity check also fixed a real ambiguity: verifying against the wrong log's key used to
+surface as "the signature does not verify", which reads exactly like a forged entry. It is now
+refused by name, before any signature is checked.
+
+#### Finding an entry you did not record
+
+Measured against staging rather than assumed:
+
+| Search | Works |
+|---|---|
+| `GET /api/v1/log/entries?logIndex=N` | yes |
+| `GET /api/v1/log/entries/<uuid>` | yes |
+| `POST /api/v1/index/retrieve` with the **DSSE envelope hash** or **payload hash** | yes |
+| ...with the **public key** | **no** — returns `[]` |
+| ...with the **artifact's sha256** | **no** — returns `[]` |
+
+The last two matter. The index keys on Fulcio-style identity, and a self-issued certificate has
+none, so **our entries cannot be enumerated by key.** And Rekor indexes the envelope and payload
+hashes, not the statement's `subject` digest, so **a consumer holding the artifact cannot find our
+attestation** — they can only check one they were given. This confirms empirically what
+[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) takes from Rekor's maintainers:
+the log is an *audit* mechanism, not a *lookup* service. Discovery has to come from somewhere else.
+
 The gap worth naming: the SET yields a time, and **nothing consumes that time yet**, because
 certificate validity windows arrive with B21 steps 4-5. Until then the log entry is an auditable
 public record of when we said what, which is worth having, but it is not yet the thing that bounds

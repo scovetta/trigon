@@ -141,6 +141,22 @@ enum Cmd {
         /// for is worth exactly its re-derivation.
         #[arg(long)]
         public_key: Option<String>,
+        /// Check a transparency log entry for this bundle, offline.
+        ///
+        /// Takes a JSON log entry — the `transparency` field of a run record, or anything else in
+        /// that shape. Two things are checked and both matter: that the log's signed entry
+        /// timestamp verifies, which is what says *when* this statement existed and is the only
+        /// thing bounding a compromise of a long-lived signing key; and that the entry is about
+        /// **this** bundle, by the payload hash the log recorded.
+        ///
+        /// No network. The log's key is the one compiled in for the `logID` the entry names, or
+        /// `--log-key`. Fetching it from the log whose signature is under test would ask that log
+        /// to vouch for itself.
+        #[arg(long, value_name = "PATH")]
+        transparency: Option<PathBuf>,
+        /// The log's public key as PEM, for a log this binary does not carry.
+        #[arg(long, value_name = "PATH", requires = "transparency")]
+        log_key: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
     },
@@ -850,14 +866,22 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             rebuild,
             stabilizers,
             public_key,
+            transparency,
+            log_key,
             output,
         } => verify_attestation(
             &bundle,
             rerun_comparison,
-            upstream.as_deref(),
-            rebuild.as_deref(),
-            stabilizers.as_deref(),
+            Rerun {
+                upstream: upstream.as_deref(),
+                rebuild: rebuild.as_deref(),
+                stabilizers: stabilizers.as_deref(),
+            },
             public_key.as_deref(),
+            LogCheck {
+                entry: transparency.as_deref(),
+                key: log_key.as_deref(),
+            },
             output,
         ),
         Cmd::Stabilize {
@@ -5572,6 +5596,75 @@ fn score_run(
     Ok(())
 }
 
+/// Check a transparency log entry against the bundle it should be about.
+///
+/// Offline, and in the `--no-default-features` verifier too: everything here is arithmetic over
+/// bytes already on disk. Returns what to print, or the reason not to believe any of it.
+fn check_log_entry(
+    path: &Path,
+    log_key: Option<&Path>,
+    env: &trigon_attest::Envelope,
+) -> Result<String> {
+    let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let entry: trigon_attest::LogEntry = serde_json::from_slice(&raw).with_context(|| {
+        format!(
+            "{} is not a log entry. A run record's `transparency` field is one; the record itself \
+             is not — pass `jq .transparency <run>.json`.",
+            path.display()
+        )
+    })?;
+
+    // Whose key, and how we came to hold it. `logID` is the SHA-256 of the log's public key, so an
+    // entry names the key that must verify it and a wrong one is refused by name rather than
+    // surfacing as a signature failure that reads like a forgery.
+    let (name, pem) = match log_key {
+        Some(p) => {
+            let pem =
+                std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            (format!("{}", p.display()), pem)
+        }
+        None => match trigon_attest::known_log(&entry.log_id) {
+            Some((name, pem)) => (name.to_string(), pem.to_string()),
+            None => bail!(
+                "this entry is from log {}, which this binary does not carry a key for. Pass \
+                 `--log-key <pem>` with the key that log publishes — and pin it, rather than \
+                 fetching it from the log whose signature you are checking.",
+                entry.log_id
+            ),
+        },
+    };
+
+    let at = entry
+        .verify_set(&pem)
+        .context("the log's signed entry timestamp did not check out")?;
+
+    // **And that it is about this bundle.** A verifying SET on an unrelated entry proves that some
+    // statement existed at some time, which is not the claim anyone wants to make. The log does not
+    // keep the envelope, so the binding runs the other way: hash what we hold and check the log
+    // recorded that.
+    let payload = env.decoded_payload()?;
+    match entry.payload_sha256()? {
+        Some(_) if entry.is_about(&payload)? => {}
+        Some(other) => bail!(
+            "that log entry is about a different statement: the log recorded payload {other}, and \
+             this bundle's payload is {}. The timestamp is real and it is not about this bundle.",
+            trigon_attest::payload_id(&payload)
+        ),
+        None => bail!(
+            "that log entry records no payload hash, so nothing ties it to this bundle. It may be \
+             a log entry of another kind."
+        ),
+    }
+
+    Ok(format!(
+        "logged    {name} index {} at {} ({})\n          \
+         the log's timestamp verifies, and the entry is about this bundle",
+        entry.log_index,
+        trigon_attest::utc_rfc3339(at),
+        &entry.uuid[..16.min(entry.uuid.len())],
+    ))
+}
+
 /// Say what stabilizer set a statement was made under, from a published manifest.
 ///
 /// Printed on a set mismatch, which is otherwise a dead end: the verifier is told two digests
@@ -5626,13 +5719,30 @@ fn describe_set(st: &trigon_attest::Statement, from: Option<&Path>) {
     }
 }
 
+/// What `--rerun-comparison` needs: the two artifacts, and the set the claim was made under.
+///
+/// Grouped for the same reason [`Attest`] is — they are one decision, and they are meaningless
+/// apart.
+#[derive(Clone, Copy, Default)]
+struct Rerun<'a> {
+    upstream: Option<&'a Path>,
+    rebuild: Option<&'a Path>,
+    stabilizers: Option<&'a Path>,
+}
+
+/// Whether to check a transparency log entry, and whose key to check it against.
+#[derive(Clone, Copy, Default)]
+struct LogCheck<'a> {
+    entry: Option<&'a Path>,
+    key: Option<&'a Path>,
+}
+
 fn verify_attestation(
     bundle: &Path,
     rerun: bool,
-    upstream: Option<&Path>,
-    rebuild: Option<&Path>,
-    stabilizers: Option<&Path>,
+    files: Rerun<'_>,
     public_key: Option<&str>,
+    log: LogCheck<'_>,
     output: OutputFormat,
 ) -> Result<()> {
     let raw = std::fs::read(bundle).with_context(|| format!("reading {}", bundle.display()))?;
@@ -5667,11 +5777,20 @@ fn verify_attestation(
         }
     };
 
+    // The log, where one was offered. Before re-derivation, because the question it answers —
+    // *when* did this statement exist — is the one that cannot be recovered from the artifacts
+    // later, and a reader should see it beside the signature it qualifies.
+    let logged = match log.entry {
+        Some(path) => Some(check_log_entry(path, log.key, &env)?),
+        None => None,
+    };
+
     let rederived = if rerun {
-        let (u, r) = match (upstream, rebuild) {
+        let (u, r) = match (files.upstream, files.rebuild) {
             (Some(u), Some(r)) => (u, r),
             _ => bail!("--rerun-comparison needs both --upstream and --rebuild"),
         };
+        let stabilizers = files.stabilizers;
         let ub = std::fs::read(u).with_context(|| format!("reading {}", u.display()))?;
         let rb = std::fs::read(r).with_context(|| format!("reading {}", r.display()))?;
         // A `.wasm` module is run; anything else is read as a manifest and described. Chosen by
@@ -5724,6 +5843,7 @@ fn verify_attestation(
                 "predicateType": st.predicate_type,
                 "outcome": st.predicate["outcome"],
                 "signature": signature,
+                "transparency": logged,
                 "rederived": rederived.as_ref().map(|d| serde_json::json!({
                     "claimed": d.claimed,
                     "actual": d.actual.to_string(),
@@ -5733,6 +5853,9 @@ fn verify_attestation(
             }))?
         ),
         OutputFormat::Text => {
+            if let Some(line) = &logged {
+                println!("{line}");
+            }
             for s in &st.subject {
                 println!(
                     "subject   {} ({})",
@@ -6394,7 +6517,7 @@ mod attestor {
             for id in ids {
                 let r = store.get_run(&id).await?;
                 println!(
-                    "{id}  {:<34} {:<24} {}",
+                    "{id}  {:<34} {:<24} {:<10} {}",
                     r.target,
                     r.outcome.as_deref().unwrap_or(match r.guard_trips.len() {
                         0 => "-",
@@ -6404,6 +6527,18 @@ mod attestor {
                         "unattested"
                     } else {
                         "attested"
+                    },
+                    // The run record has carried this since the log client landed and nothing
+                    // showed it, so finding your own entry meant reading the store's JSON by hand.
+                    // The index is the address; the date is what the log's signature is over.
+                    match &r.transparency {
+                        Some(t) => format!(
+                            "{} index {} on {}",
+                            t.log.trim_start_matches("https://"),
+                            t.log_index,
+                            &trigon_attest::utc_rfc3339(t.integrated_time)[..10],
+                        ),
+                        None => "not logged".into(),
                     }
                 );
             }

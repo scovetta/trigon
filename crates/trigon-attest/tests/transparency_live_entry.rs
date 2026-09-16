@@ -49,19 +49,34 @@ fn the_time_it_attests_to_is_the_one_a_certificate_window_is_checked_against() {
 }
 
 #[test]
-fn another_logs_key_does_not_verify_this_logs_timestamp() {
-    // Production's key against a staging entry. Both are real Rekor keys, so this fails for the
-    // reason that matters — the signature is over a different log's view — rather than for a parse.
-    const PRODUCTION: &str = "-----BEGIN PUBLIC KEY-----\n\
-        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwr\n\
-        kBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==\n\
-        -----END PUBLIC KEY-----";
-    let err = entry()
-        .verify_set(PRODUCTION)
-        .expect_err("a staging entry is not signed by production");
-    assert!(
-        format!("{err}").contains("when this entry existed"),
-        "the message has to say what is lost: {err}"
+fn another_logs_key_is_refused_by_name_rather_than_by_a_failed_signature() {
+    // Production's key against a staging entry — both real Rekor keys, so this is the mistake
+    // someone actually makes. It used to surface as "the signature does not verify", which reads
+    // identically to a forged entry; `logID` is the SHA-256 of the log's own key, so the entry
+    // names which key must verify it and the mismatch is caught by identity instead.
+    let (name, production) = trigon_attest::known_log(
+        "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d",
+    )
+    .expect("production is compiled in");
+    assert_eq!(name, "rekor.sigstore.dev");
+
+    for e in [entry(), our_run()] {
+        let err = e
+            .verify_set(production)
+            .expect_err("a staging entry is not signed by production");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&e.log_id) && msg.contains("c0d23d6a"),
+            "the refusal has to name both logs: {msg}"
+        );
+    }
+
+    // And the staging key really is the one these entries name, so the refusal above is about the
+    // key handed over and not about the entries being unverifiable in general.
+    assert_eq!(
+        trigon_attest::log_key_id(LOG_KEY).unwrap(),
+        entry().log_id,
+        "the fixture key is not the key the fixture entry names"
     );
 }
 

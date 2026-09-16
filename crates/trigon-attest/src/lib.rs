@@ -20,7 +20,9 @@ pub use error::AttestError;
 pub use rebuild::{BUILD_OBSERVATION, REBUILD, RunFacts, SourceFacts, TranscriptRef};
 pub use signer::{LocalKey, Signer, Unsigned, verify as verify_signature};
 pub use statement::{DIVERGENCE, EQUIVALENCE, STATEMENT_TYPE, Statement, Subject};
-pub use transparency::{LogEntry, intoto_entry, within_validity};
+pub use transparency::{
+    LogEntry, intoto_entry, known_log, log_key_id, payload_id, utc_rfc3339, within_validity,
+};
 pub use verify::{
     ArchivedStabilizer, Rederived, rederive, rederive_with, sign_statement, subject_sha256,
 };
