@@ -983,10 +983,17 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
-        // Our mirror handed the build a body it could not read. Named as ours, loudly, because the
-        // symptom — a corrupt tarball — reads exactly like a broken package and would otherwise be
-        // counted against one. Found when the mirror was transparently gunzipping artifacts.
-        code: "trigon/mirror-corrupted-artifact",
+        // The build could not read a tarball it downloaded. Named as ours, loudly, because the
+        // symptom reads exactly like a broken package and would otherwise be counted against one.
+        //
+        // **It was named for the mirror, and the mirror was not doing it.** The first instance was
+        // ours — the mirror was transparently gunzipping artifacts — and the name outlived the
+        // cause. The six npm targets that carried this code on the M1 corpus were npm itself:
+        // every release from 7.0 to 8.2 splices the tarballs it fetches concurrently, on any Node,
+        // while the mirror's transcript recorded complete bodies matching upstream byte for byte
+        // and a second, unrelated server reproduced it. `tools/npm/npx.yaml` holds the evidence and
+        // the fix; this rule is the backstop for a client outside the range we serialize.
+        code: "trigon/client-corrupted-download",
         needles: &["Z_DATA_ERROR"],
         fault: Fault::Bug,
         retryable: true,
@@ -994,7 +1001,7 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
-        code: "trigon/mirror-corrupted-artifact",
+        code: "trigon/client-corrupted-download",
         needles: &["zlib: invalid stored block lengths"],
         fault: Fault::Bug,
         retryable: true,
@@ -1591,12 +1598,16 @@ strategy needs have to be in the image already. Build one with:\n\
     #[test]
     fn a_fault_of_ours_that_looks_like_a_broken_package_is_named_as_ours() {
         // A corrupt tarball reads exactly like a package problem. When the corruption is our
-        // mirror's, counting it against the package makes the reproduction rate a measure of our
-        // own bugs — which is the failure this whole taxonomy exists to prevent.
+        // harness's — our mirror, or a package manager we chose to pin — counting it against the
+        // package makes the reproduction rate a measure of our own bugs, which is the failure this
+        // whole taxonomy exists to prevent.
         let s = classify("npm ERR! code Z_DATA_ERROR\nnpm ERR! zlib: invalid stored block lengths");
-        assert_eq!(s.code, "trigon/mirror-corrupted-artifact");
+        assert_eq!(s.code, "trigon/client-corrupted-download");
         assert_eq!(s.fault, Fault::Bug);
-        assert!(!s.repairable, "no strategy change fixes our mirror");
+        assert!(
+            !s.repairable,
+            "no strategy change fixes a client that mangles its own download"
+        );
         assert!(s.retryable);
     }
 

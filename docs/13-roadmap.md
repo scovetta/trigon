@@ -101,8 +101,10 @@ M1 needs **two** corpora, and conflating them was a mistake in an earlier draft.
       **Neither is yet the number M1 reports, and the npm one is not a fact about npm.** 48 of
       npm's 62 failures were ours: 23 `trigon/mirror-refused-unfiltered` (since fixed — a build
       resolving from a lockfile asked for no packument, so the mirror's offered-set gate refused
-      every tarball), 13 more across `net/unreachable`, `env/missing-tool` and
-      `trigon/mirror-corrupted-artifact`. PyPI is the honest half: 9 failures ours, 8 the packages'.
+      every tarball), 13 more across `net/unreachable`, `env/missing-tool` and what was then called
+      `trigon/mirror-corrupted-artifact` — npm 7.0 through 8.2 corrupting the tarballs it fetches
+      concurrently, since fixed by serializing that range. PyPI is the honest half: 9 failures ours,
+      8 the packages'.
 
       What M1 needs before quoting a rate is the remaining 100 targets, a re-run on current code,
       and the per-stratum breakdown — an aggregate that hides a bad native-extension or monorepo

@@ -425,3 +425,91 @@ fn the_strategys_location_wins_over_the_contexts() {
         i.build
     );
 }
+
+/// The npm versions that corrupt their own concurrent downloads are serialized, on both branches.
+///
+/// npm 7.0 through 8.2 splices the tarballs it fetches in parallel; `tools/npm/npx.yaml` carries
+/// the evidence. The guard is a shell `case` rather than a template conditional because the
+/// boundary is the part that is easy to get wrong — `8.1.*` must catch `8.1.2` and must *not*
+/// catch `8.10.0`, which npm shipped and which is fine — and a glob on a dotted version gets that
+/// right where a prefix comparison does not. So the test runs the real `case` under a real `sh`
+/// instead of grepping for a string that is present either way.
+#[test]
+fn the_npm_versions_that_corrupt_concurrent_fetches_are_serialized() {
+    let tools = ToolRegistry::builtin().unwrap();
+    let script = |version: &str, locator: &str| -> String {
+        let s = from_yaml(&format!(
+            r#"
+kind: flow
+location:
+  repo: https://github.com/x/y
+  ref: 0000000000000000000000000000000000000000
+src:
+  - uses: git-checkout
+deps:
+  - uses: npm/npx
+    with:
+      command: npm ci
+      npm_version: "{version}"
+      locator: "{locator}"
+build:
+  - uses: npm/npx
+    with:
+      command: npm pack
+      npm_version: "{version}"
+      locator: "{locator}"
+output_dir: .
+"#
+        ))
+        .unwrap();
+        let i = render(&s, &cx(), &tools).unwrap();
+        format!("{}\n{}", i.deps, i.build)
+    };
+
+    // Both branches, because only one of them renders per invocation: a guard added to the branch
+    // without a `locator` silently does nothing for every definition that sets one.
+    for locator in ["", "/deps/bin/"] {
+        for (version, want) in [
+            ("7.0.0", "1"),
+            ("7.24.1", "1"),
+            ("8.0.0", "1"),
+            ("8.1.2", "1"),
+            ("8.2.0", "1"),
+            // The first release that fetches concurrently without corrupting anything, and the
+            // two-digit minors above it that a prefix test would have swept up by mistake.
+            ("8.3.0", "unset"),
+            ("8.10.0", "unset"),
+            ("8.19.4", "unset"),
+            ("6.14.18", "unset"),
+            ("11.6.2", "unset"),
+        ] {
+            let rendered = script(version, locator);
+            let guards: Vec<&str> = rendered
+                .match_indices("case \"")
+                .map(|(i, _)| {
+                    let rest = &rendered[i..];
+                    &rest[..rest.find("esac").expect("an unterminated case") + 4]
+                })
+                .collect();
+            assert_eq!(
+                guards.len(),
+                2,
+                "both the deps and the build script carry the guard: {rendered}"
+            );
+            for guard in guards {
+                let out = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!(
+                        "{guard}\necho \"${{npm_config_maxsockets:-unset}}\""
+                    ))
+                    .output()
+                    .expect("sh");
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stdout).trim(),
+                    want,
+                    "npm {version} (locator {locator:?}) got the wrong concurrency: {guard}"
+                );
+            }
+        }
+    }
+}

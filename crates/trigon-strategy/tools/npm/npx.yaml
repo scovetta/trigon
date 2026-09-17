@@ -52,6 +52,30 @@
 # Exported once at the top of the script, so npx's own download and everything it then runs inherit
 # it. Third instance of this shape in a day: a step that configures the mirror running after a step
 # that needs it.
+#
+# **npm 7.0 through 8.2 corrupts the tarballs it fetches concurrently, and it reads as a broken
+# mirror.** Six targets in the npm sweep died with `zlib: invalid distance too far back` and its
+# relatives; every one of them pinned an npm in that range and no target outside it did, across four
+# different Node versions. The mirror was innocent, and provably: its transcript recorded complete
+# bodies whose SHA-256 equalled the upstream tarball byte for byte, 120 concurrent fetches through
+# it all verified, and a second unrelated server — written in Python, buffering whole bodies behind
+# a `Content-Length`, logging a completed write for every one of 112 requests — reproduced the same
+# corruption. npm 8.3.0 is the first release that does not, on the same Node, against the same
+# mirror, minutes apart.
+#
+# What the errors say is that a body which started out valid stops being valid partway in, with no
+# integrity failure anywhere in the log. That is a stream spliced inside the client, not an artifact
+# that was ever wrong on the wire — and taking npm's concurrency away removes it at every affected
+# version tested.
+#
+# It does not fire against registry.npmjs.org, which is how the bug outlived those releases: that
+# CDN's timing happens to miss the window and ours lands in it. Nothing we can serve avoids it —
+# `Content-Length`, `Connection: close` and a warm, fast cache each only moved the count around.
+#
+# Serializing fetches makes those builds slower and only those: the range is closed behind us, so
+# nothing newer than December 2021 pays for it. A fetch-concurrency knob cannot change which
+# versions resolve or which bytes get built, so this is a statement about our sandbox in exactly the
+# sense `unsafe-perm` above is.
 id: npm/npx
 params:
   registry_time:
@@ -74,6 +98,9 @@ steps:
   # what keeps Debian's nodejs out of an image that already has the one we pinned.
   - runs: |
       export npm_config_unsafe_perm=true
+      case "{{ with.npm_version }}" in
+        7.*|8.0.*|8.1.*|8.2.*) export npm_config_maxsockets=1 ;;
+      esac
       {%- if with.registry_time %}
       export npm_config_registry={{ timewarp_url('npm', with.registry_time) }}
       {%- endif %}
@@ -89,6 +116,9 @@ steps:
     if: "{{ with.locator }}"
   - runs: |
       export npm_config_unsafe_perm=true
+      case "{{ with.npm_version }}" in
+        7.*|8.0.*|8.1.*|8.2.*) export npm_config_maxsockets=1 ;;
+      esac
       {%- if with.registry_time %}
       export npm_config_registry={{ timewarp_url('npm', with.registry_time) }}
       {%- endif %}

@@ -225,7 +225,7 @@ fn a_sweep_that_compared_nothing_reports_no_reproduction_rate_rather_than_zero_p
     write(
         &absent.join("results.tsv"),
         "pkg:npm/a@1\tbuild-failed:deps\t12.0\tnpm/peer-conflict\t0\n\
-         pkg:npm/b@1\terror:infra\t3.0\ttrigon/mirror-corrupted-artifact\t0\n",
+         pkg:npm/b@1\terror:infra\t3.0\ttrigon/client-corrupted-download\t0\n",
     );
     let zero = work("rate-zero");
     write(

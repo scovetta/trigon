@@ -45,21 +45,27 @@ the build's only route out is a time-filtered mirror that writes down everything
 
 | | reproduce | reach a comparison |
 |---|---|---|
-| npm | **95 of 126 (75%)** | 126 of 197 (64%) |
+| npm | **100 of 132 (76%)** | 132 of 197 (67%) |
 | PyPI | **136 of 163 (83%)** | 163 of 200 (81%) |
+
+The npm row folds in a six-target re-run rather than a second full sweep. npm 7.0 through 8.2
+corrupts the tarballs it fetches concurrently — it presented as a broken mirror for months, and was
+not — and it failed exactly the six targets pinning an npm in that window. Those six were re-run
+after the fix; no other target in the corpus pins one, so nothing else could have moved.
+[`16-findings.md`](docs/16-findings.md) §3.26 has the evidence.
 
 **Quote the strata, not the aggregate.** Both totals above conceal a range wide enough to make them
 useless on their own, which is the whole argument of [`15-corpora.md`](docs/15-corpora.md) §3:
 
 | npm | compared | reproduced | | PyPI | compared | reproduced | |
 |---|---:|---:|---|---|---:|---:|---|
-| no lifecycle script | 68 of 90 | 60 | 88% | flit / hatchling | 47 of 50 | 47 | **100%** |
+| no lifecycle script | 74 of 90 | 65 | 88% | flit / hatchling | 47 of 50 | 47 | **100%** |
 | `prepare`/`prepack` | 32 of 60 | 24 | 75% | setuptools + pyproject | 49 of 60 | 40 | 81% |
 | TypeScript build | 23 of 30 | 10 | 43% | setuptools + `setup.py` | 30 of 40 | 18 | 60% |
 | monorepo member | 3 of 17 | 1 | **33%** | poetry-core | 26 of 30 | 25 | 96% |
 | | | | | maturin / C extension | 11 of 20 | 6 | **54%** |
 
-npm's aggregate 75% spans 88% down to 33%; PyPI's 83% spans 100% down to 54%. **The reach is still
+npm's aggregate 76% spans 88% down to 33%; PyPI's 83% spans 100% down to 54%. **The reach is still
 the worse number**: only 3 of 17 monorepo members get as far as a comparison at all, so the 33%
 beside them is one of the three we could measure.
 

@@ -41,9 +41,11 @@ weeks and reads exactly like a build that happened not to need anything. A count
 better than no counter, but a build that *asserts* its pin took effect would have caught it on the
 first run. This is unbuilt and it is the most valuable thing on the list.
 
-**The taxonomy has to be able to blame us.** `trigon/mirror-corrupted-artifact` exists so that our
-own corruption is counted as ours. Before it, the same symptom was charged to `has-flag` in the
-reproduction rate. `Fault::Bug` and `Fault::Infra` are not decoration: without them a reproduction
+**The taxonomy has to be able to blame us.** `trigon/client-corrupted-download` exists so that a
+corrupt download is counted against us rather than the package. Before it, the same symptom was
+charged to `has-flag` in the reproduction rate. Its first name said `mirror`, which sent three
+investigations to the wrong component before [§3.26](#326-the-corruption-was-named-after-the-wrong-component)
+found npm doing it — a rule that blames us has to be right about *which* part of us. `Fault::Bug` and `Fault::Infra` are not decoration: without them a reproduction
 rate silently becomes a measure of our own reliability wearing the costume of a claim about
 packages.
 
@@ -103,7 +105,7 @@ Every failure in both corpora is now named, and the clusters are the diagnosis:
 |---|---|
 | `env/missing-shared-library:libatomic.so.1` | fixed: declared as a dependency, with the distro map handling Debian's soname suffix |
 | `git/commit-not-in-repo` | nothing to repair — npm's recorded `gitHead` was force-pushed away |
-| `trigon/mirror-corrupted-artifact` | **open**, ours, intermittent; see §5 |
+| `trigon/client-corrupted-download` | fixed: npm 7.0–8.2 corrupts concurrent fetches; that range is serialized ([§3.26](#326-the-corruption-was-named-after-the-wrong-component)) |
 | `iniconfig` divergence | setuptools-scm embeds the git commit; the publisher built without git metadata |
 | `py-cpuinfo` divergence | `bdist_wheel` names the *wheel* package, so setuptools' version is not recorded anywhere |
 
@@ -1082,8 +1084,8 @@ denominator grew from 15 to 18 and the numerator from 14 to 16. A rate computed 
 managed to build is not a rate; it is a statement about which targets we excluded.
 
 Both npm failures that remain are now named with nothing to repair, where before one of them was a
-DNS error about the wrong thing: `src/commit-not-on-the-forge` and
-`trigon/mirror-corrupted-artifact`.
+DNS error about the wrong thing: `src/commit-not-on-the-forge` and what was then called
+`trigon/mirror-corrupted-artifact` ([§3.26](#326-the-corruption-was-named-after-the-wrong-component)).
 
 **What this did not close, and what did.** (Closed in
 [§3.24](#324-the-filter-was-tested-the-ordering-that-reaches-it-was-not); left here as it stood,
@@ -1303,6 +1305,69 @@ along in `repository.directory`.
 - `break` in the collector stopped the reporting and not the lanes: workers ignore a failed send and
   take the next target. A breaker built to save seven hours would have saved none of them.
 
+### 3.26 The corruption was named after the wrong component
+
+`trigon/mirror-corrupted-artifact` had been open since M1, and the mirror was innocent. Six of the
+197 npm targets carried it — `is-glob@4.0.3`, `glob-parent@6.0.2`, `ansi-colors@4.1.3`,
+`path-exists@5.0.0`, `bytes@3.1.2`, `on-finished@2.4.1` — each dying inside `npm install` with
+`zlib: invalid distance too far back`, `incorrect data check`, `invalid block type`, and, in one
+verbose run, 19,472 `TAR_ENTRY_INVALID` lines. §5 said the measurement nobody had taken was the
+bytes on the *outgoing* side. That is the one that settled it.
+
+**What exonerated the mirror.** Its own transcript already held the answer: every artifact row for a
+failing run was `Checked::Hashed` and none was `Partial`, and the digests are the registry's.
+`source-map-0.6.1.tgz` recorded sha256 `bdbca10d17ff5a58…` at 199,644 bytes and
+`esquery-1.4.0.tgz` `6e5add1c721480e6…` at 160,592 — byte for byte what `registry.npmjs.org`
+serves today. Forty artifacts, forty at a time, three rounds, from inside the run's own network
+island: 120 requests, all verified. Then the outgoing measurement: a second server, written in
+Python, buffering each body whole behind a `Content-Length` and logging a completed write for every
+one of 112 requests — no truncation, no write error, no `Range` request anywhere — reproduced the
+same corruption. One client explains two unrelated server implementations failing alike; nothing
+about the servers does.
+
+**What it actually is.** npm 7.0 through 8.2 splices the tarballs it fetches concurrently. The
+correlation across the sweep is total: all six failures pinned an npm in that range, and none of the
+other 60 distinct npm versions in the corpus, spanning 2.8.3 to 11.13.0, failed this way. Bisecting
+against one mirror, in one sitting, on one Node: 7.0.15 corrupted 20 tarballs, 7.24.1 eight, 8.2.0
+four, and 8.3.0 and 8.3.1 none. The Node version is not the variable — the six failures span Node
+14.18.0, 16.2.0, 16.13.1 and 17.0.0 — and neither is the time filter, since 8.3.0 comes back clean
+through the same mirror at the same moment. The errors are decompression
+failures partway into a body that began as valid gzip, with no integrity failure anywhere in the
+log, which is what a spliced stream looks like from the inside.
+
+**Why it survived those releases.** It does not fire against `registry.npmjs.org`: npm 8.1.2 pulls
+`mocha@7.2.0` clean from the real registry over HTTPS and over plain HTTP alike. That CDN's timing
+misses the window; a mirror that resolves each request upstream lands in it. Nothing we can serve
+avoids it. Against a 14-tarball baseline, adding `Content-Length` moved it to 7, `Connection: close`
+to 15 or 11 depending on framing, and a warm in-memory cache serving at full speed to 6 — counts
+that wander because it is a race, and none of them zero. Taking npm's own concurrency away is the
+only thing that does: `maxsockets=1` gives zero in the repro, at every affected version tried.
+
+So `tools/npm/npx.yaml` exports `npm_config_maxsockets=1` for npm 7.0 through 8.2 and nothing else,
+on both of its branches. The guard is a shell `case` rather than a template comparison because the
+boundary is the part that is easy to get wrong — `8.1.*` must catch `8.1.2` and must not catch
+`8.10.0` — and the test runs that `case` under a real `sh` instead of grepping for a string the
+rendered script contains either way.
+
+**The re-run.** The six targets again, same base image, same `mirror-only` egress: `is-glob@4.0.3`,
+`glob-parent@6.0.2`, `path-exists@5.0.0`, `bytes@3.1.2` and `on-finished@2.4.1` reproduce `exact`,
+and `ansi-colors@4.1.3` reaches a comparison and diverges. Six results that were a statement about
+us are now six statements about packages, which is the only thing this was ever costing.
+
+It is a race and not a switch, and the re-run says so: `glob-parent` still logged one
+`seems to be corrupted`, retried, and got it right. Five of the six saw none at all and none reached
+`Z_DATA_ERROR`. Serializing turns a build that dies into a fetch that occasionally retries — worth
+stating plainly, because a fix described as elimination would be wrong the first time someone sees
+that warning again.
+
+**What the name cost.** For as long as the code said `mirror`, every reader who met it started at
+the mirror, and successive investigations did exactly that — the ruling-out recorded in §5 is all
+mirror-side. The rule is now
+`trigon/client-corrupted-download`, which is what the evidence supports: a build could not read
+something it downloaded, and the reason is not yet attributed by the name. It stays `Fault::Bug`
+and stays ours — we chose the pin — but it no longer accuses a component that was reading and
+serving the right bytes the whole time.
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher
@@ -1366,22 +1431,11 @@ use.
 **An archived `Normalized` claim re-derives as `NormalizedWithCaveats`.** See §4b: the provenance cap
 cannot be confirmed from bytes alone.
 
-**`trigon/mirror-corrupted-artifact`.** Intermittent; npm retries and then fails with
-`Z_DATA_ERROR`. Ruled out so far: transparent gzip decompression (fixed, and a serial fetch through
-the mirror is byte-identical to the registry's); concurrency (twelve parallel fetches, all
-identical); packument integrity mismatch (the declared sha512 matches the served bytes exactly); and
-a mislabelled transfer encoding — `registry.npmjs.org` sends no `Content-Encoding` on a tarball with
-or without `Accept-Encoding: gzip`, so the header the proxy forwards cannot be it. Re-measured on
-`has-flag@5.0.1`: the transcript records `typescript-4.3.5.tgz` at 10,627,908 bytes and sha256
-`c7be550da858…`, which is what the registry serves, and both fetches recorded `Checked::Hashed`
-rather than `Partial` — so the body was read whole and the client consumed it whole. It is correctly
-classified as ours with nothing to repair, so it does not contaminate any reproduction rate, but it
-is unexplained.
-
-The next measurement is the one nothing has taken: the bytes on the **outgoing** side. Everything
-ruled out so far is about what the mirror *obtained*; capturing what the container receives and
-diffing it against the transcript digest is what separates "the streaming response is at fault" from
-"npm is rejecting a body that is exactly what was published".
+**Closed: `trigon/mirror-corrupted-artifact`.** Left here as a signpost, because this is where it
+sat open across three investigations that each began at the mirror. It was never the mirror: npm 7.0
+through 8.2 splices the tarballs it fetches concurrently, the rule is now
+`trigon/client-corrupted-download`, and the affected range is serialized. See
+[§3.26](#326-the-corruption-was-named-after-the-wrong-component).
 
 **Two clean re-runs before publishing a divergence.** [`10.3`](00-overview.md) requires it and
 nothing implements it yet.
