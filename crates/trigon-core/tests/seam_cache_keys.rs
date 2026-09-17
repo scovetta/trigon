@@ -57,11 +57,25 @@ fn decision(s: &FailureSignature) -> Decision {
 const ONE_LINE_PER_RULE: &[(&str, &str)] = &[
     // Two spellings of a missing tool: bash says `command not found`, and `/bin/sh` on any Debian
     // image is dash, which says `not found`. Different rules, one code.
+    //
+    // **`npx`, not `pnpm`.** These lines used pnpm, and pnpm is no longer ours: a package manager
+    // the package's own lifecycle script reached for now keys as
+    // `npm/unsupported-package-manager`, which is `Fault::Build`. Leaving pnpm here broke the pair
+    // that made this check non-vacuous — the guard below caught it, which is what it is for.
     (
         "missing-tool/bash",
+        "/build/run.sh: line 3: npx: command not found",
+    ),
+    ("missing-tool/dash", "sh: 1: npx: not found"),
+    // And the split itself, in both spellings, so the pair that replaced the one above is covered.
+    (
+        "unsupported-package-manager/bash",
         "/build/run.sh: line 3: pnpm: command not found",
     ),
-    ("missing-tool/dash", "sh: 1: pnpm: not found"),
+    (
+        "unsupported-package-manager/dash",
+        "npm ERR! sh: 1: yarn: not found",
+    ),
     ("node-too-old", "Error: Cannot find module 'node:path'"),
     (
         "missing-shared-library",

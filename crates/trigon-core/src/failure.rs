@@ -140,6 +140,106 @@ struct Rule {
 /// Debian package split, `wheel` was pip running without build isolation.
 const RULES: &[Rule] = &[
     // ---- our own environment, not the package's fault -----------------------------------------
+    // **A package manager the *package* reached for, which is not the same as a tool our image
+    // lacks.** Both arrive as `: not found`, and collapsing them cost a real decision: a sweep
+    // reported nine `env/missing-tool` failures from four unrelated causes, an operator read a
+    // bucket named after the environment, and reasonably asked whether the environment should
+    // carry more. Three were ours. Six were packages whose own lifecycle scripts shell out to yarn
+    // or pnpm — `"prepack": "yarn build"`, `"prepare": "if [ ! -d 'dist' ]; then pnpm build; fi"` —
+    // which npm ran faithfully because the publisher wrote them.
+    //
+    // **One rule per manager, because needles are AND-ed and cannot express "any of these".** A
+    // single rule with the bare `: not found` needle would claim every missing tool in the table,
+    // including the ones that really are ours — the precise inversion this exists to prevent. They
+    // share a code, which the invariant test requires to agree on fault, retryable and repairable.
+    //
+    // **`Fault::Build`, and it earns it.** Trigon drives npm and never invokes these itself, so the
+    // call can only have come from the package. It declares a build needing a package manager we do
+    // not drive, at a version pinned in its own repository rather than ours to choose. Putting yarn
+    // in a base image would run it with *some* yarn and produce a verdict about a build the
+    // publisher never did.
+    //
+    // **Both spellings.** bash says `yarn: command not found`, dash says `yarn: not found`, and
+    // every Debian image's `/bin/sh` is dash — so a rule catching only one would charge the same
+    // failure to opposite parties depending on which shell ran the script.
+    //
+    // Before both general missing-tool rules, because those match any `: not found` and any
+    // `command not found`, and the table is first-match-wins within a line.
+    Rule {
+        code: "npm/unsupported-package-manager",
+        needles: &["yarn: not found"],
+        fault: Fault::Build,
+        retryable: false,
+        // A different recipe cannot conjure support for a package manager. Builder work, not repair.
+        repairable: false,
+        capture: Capture::WordBefore(": not found"),
+    },
+    Rule {
+        code: "npm/unsupported-package-manager",
+        needles: &["pnpm: not found"],
+        fault: Fault::Build,
+        retryable: false,
+        // A different recipe cannot conjure support for a package manager. Builder work, not repair.
+        repairable: false,
+        capture: Capture::WordBefore(": not found"),
+    },
+    Rule {
+        code: "npm/unsupported-package-manager",
+        needles: &["bun: not found"],
+        fault: Fault::Build,
+        retryable: false,
+        // A different recipe cannot conjure support for a package manager. Builder work, not repair.
+        repairable: false,
+        capture: Capture::WordBefore(": not found"),
+    },
+    Rule {
+        code: "npm/unsupported-package-manager",
+        needles: &["yarn: not found"],
+        fault: Fault::Build,
+        retryable: false,
+        repairable: false,
+        capture: Capture::WordBefore(": not found"),
+    },
+    Rule {
+        code: "npm/unsupported-package-manager",
+        needles: &["yarn: command not found"],
+        fault: Fault::Build,
+        retryable: false,
+        repairable: false,
+        capture: Capture::WordBefore(": command not found"),
+    },
+    Rule {
+        code: "npm/unsupported-package-manager",
+        needles: &["pnpm: not found"],
+        fault: Fault::Build,
+        retryable: false,
+        repairable: false,
+        capture: Capture::WordBefore(": not found"),
+    },
+    Rule {
+        code: "npm/unsupported-package-manager",
+        needles: &["pnpm: command not found"],
+        fault: Fault::Build,
+        retryable: false,
+        repairable: false,
+        capture: Capture::WordBefore(": command not found"),
+    },
+    Rule {
+        code: "npm/unsupported-package-manager",
+        needles: &["bun: not found"],
+        fault: Fault::Build,
+        retryable: false,
+        repairable: false,
+        capture: Capture::WordBefore(": not found"),
+    },
+    Rule {
+        code: "npm/unsupported-package-manager",
+        needles: &["bun: command not found"],
+        fault: Fault::Build,
+        retryable: false,
+        repairable: false,
+        capture: Capture::WordBefore(": command not found"),
+    },
     Rule {
         code: "env/missing-tool",
         needles: &["command not found"],
@@ -1287,6 +1387,43 @@ strategy needs have to be in the image already. Build one with:\n\
     }
 
     #[test]
+    fn a_package_manager_the_package_asked_for_is_not_our_image_lacking_a_tool() {
+        // Both arrive as `: not found` and they are opposite findings. Nine failures in one sweep
+        // collapsed into a bucket named after the environment; an operator read it and asked
+        // whether the environment should carry more, which for six of the nine would have meant
+        // running a build with some arbitrary yarn.
+        for (log, tool) in [
+            (
+                "npm ERR! command sh -c yarn build\nnpm ERR! sh: 1: yarn: not found",
+                "yarn",
+            ),
+            (
+                "> if [ ! -d 'dist' ]; then pnpm build; fi\nsh: 1: pnpm: not found",
+                "pnpm",
+            ),
+        ] {
+            let s = classify(log);
+            assert_eq!(s.code, "npm/unsupported-package-manager", "{log}");
+            assert_eq!(s.subject.as_deref(), Some(tool));
+            assert_eq!(
+                s.fault,
+                Fault::Build,
+                "trigon drives npm and never calls these, so the call came from the package"
+            );
+            assert!(!s.repairable, "no recipe change conjures a package manager");
+        }
+    }
+
+    #[test]
+    fn a_tool_our_own_recipe_invoked_is_still_charged_to_us() {
+        // The other side of the split. `npx` is reached for by *our* tool, so it must stay
+        // `Fault::Bug` — the specific rules above must not swallow the general one.
+        let s = classify("/trigon/deps.sh: 13: /usr/local/bin/npx: not found");
+        assert_eq!(s.code, "env/missing-tool");
+        assert_eq!(s.fault, Fault::Bug);
+    }
+
+    #[test]
     fn a_shell_that_is_not_bash_names_a_missing_tool_the_same_way() {
         // `/bin/sh` on a Debian image is dash, which says `npx: not found` where bash says
         // `npx: command not found`. Before this, a missing tool under dash clustered as `unknown`.
@@ -1306,12 +1443,27 @@ strategy needs have to be in the image already. Build one with:\n\
         // A shell prefixes the message with its own script and line number, and every delimiter
         // before the tool name appears in that preamble too. Reading forwards captured `line 3`,
         // which clusters by where the script happened to break rather than by what is missing.
+        // `npx`, not `yarn`: this test is about the *capture* reading backwards from the marker,
+        // and yarn now keys as `npm/unsupported-package-manager` because it can only have been
+        // invoked by the package. The preamble question is the same either way, so it is asserted
+        // on both codes rather than quietly moved off one of them.
+        for line in [
+            "/build/run.sh: line 3: npx: command not found",
+            "sh: 1: npx: command not found",
+            "bash: npx: command not found",
+        ] {
+            assert_eq!(classify(line).key(), "env/missing-tool:npx", "{line}");
+        }
         for line in [
             "/build/run.sh: line 3: yarn: command not found",
             "sh: 1: yarn: command not found",
             "bash: yarn: command not found",
         ] {
-            assert_eq!(classify(line).key(), "env/missing-tool:yarn", "{line}");
+            assert_eq!(
+                classify(line).key(),
+                "npm/unsupported-package-manager:yarn",
+                "{line}"
+            );
         }
     }
 
