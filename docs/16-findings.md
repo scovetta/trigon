@@ -1186,6 +1186,12 @@ three times in one codebase.
 
 ### 3.25 The corpus, and what one stratum was hiding
 
+> **Superseded as a measurement, kept as a finding.** Every figure in this section is from the first
+> full run of the corpus. The corpus has since been re-run at `0ff8aa1` and the numbers moved a
+> long way — npm's TypeScript stratum from 12% to 43%, PyPI's reach from 68% to 81% — so quote the
+> README for what is true now, and read this for what the first run *found*. The finding is not the
+> rate; it is that an aggregate hid a stratum, and that is still true at every rate since.
+
 The M1 common-path corpus ran for the first time: 197 npm and 200 PyPI, stratified by build system.
 Every rate published before it came from the 37-target smoke corpora, which are almost entirely one
 stratum — the easiest — and it shows.
@@ -1210,8 +1216,11 @@ Then the tail of each corpus was run alone — the strata added last and never m
 
 [`15-corpora.md`](15-corpora.md) §3 argued for stratification with a hypothetical: "an aggregate
 that hides a 20% rate on native extensions is not a number anyone can act on." It is not
-hypothetical. npm's monorepo and TypeScript strata reproduce at **20%**, and an aggregate over the
-whole corpus reports 73%.
+hypothetical. npm's monorepo and TypeScript strata reproduced at **20%** here, against an aggregate
+of 73% over the whole corpus.
+
+The re-run bears the argument out a second time rather than retiring it: those two strata are now
+43% and 33% against an aggregate of 75%, so the spread narrowed and the aggregate still hides it.
 
 **Confirmed at four times the sample.** 300 targets — 150 from each corpus, sampled proportionally
 across the strata because they are contiguous in the files and a head-150 contains no TypeScript,

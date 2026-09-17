@@ -45,18 +45,44 @@ the build's only route out is a time-filtered mirror that writes down everything
 
 | | reproduce | reach a comparison |
 |---|---|---|
-| npm | **84 of 115 (73%)** | 115 of 197 |
-| PyPI | **119 of 136 (88%)** | 136 of 200 |
+| npm | **95 of 126 (75%)** | 126 of 197 (64%) |
+| PyPI | **136 of 163 (83%)** | 163 of 200 (81%) |
 
-**These are lower than the numbers this README used to carry, and they are the first ones worth
-quoting.** Every earlier figure came from the 37-target smoke corpora, which are almost entirely one
-stratum — small utility packages with no build step. On those, npm reproduces at 89% and PyPI at
-88%. The common-path corpus adds TypeScript builds, monorepo members, poetry projects and native
-extensions, and reaching a comparison at all falls from ~90% to 58% and 68%.
+**Quote the strata, not the aggregate.** Both totals above conceal a range wide enough to make them
+useless on their own, which is the whole argument of [`15-corpora.md`](docs/15-corpora.md) §3:
 
-Run the hardest strata alone and the point of stratifying is plain: npm's TypeScript and monorepo
-targets reproduce at **20%**, not 73%. An aggregate hides that;
-[`15-corpora.md`](docs/15-corpora.md) §3 says why it must not.
+| npm | compared | reproduced | | PyPI | compared | reproduced | |
+|---|---:|---:|---|---|---:|---:|---|
+| no lifecycle script | 68 of 90 | 60 | 88% | flit / hatchling | 47 of 50 | 47 | **100%** |
+| `prepare`/`prepack` | 32 of 60 | 24 | 75% | setuptools + pyproject | 49 of 60 | 40 | 81% |
+| TypeScript build | 23 of 30 | 10 | 43% | setuptools + `setup.py` | 30 of 40 | 18 | 60% |
+| monorepo member | 3 of 17 | 1 | **33%** | poetry-core | 26 of 30 | 25 | 96% |
+| | | | | maturin / C extension | 11 of 20 | 6 | **54%** |
+
+npm's aggregate 75% spans 88% down to 33%; PyPI's 83% spans 100% down to 54%. **The reach is still
+the worse number**: only 3 of 17 monorepo members get as far as a comparison at all, so the 33%
+beside them is one of the three we could measure.
+
+**Why this corpus and not an easier one.** Every figure before it came from the 37-target smoke
+corpora, which are almost entirely one stratum — small utility packages with no build step — where
+npm reproduces at 89% and PyPI at 88%. The common-path corpus adds TypeScript builds, monorepo
+members, poetry projects and native extensions, and it exists to make the table above possible.
+
+**Both ecosystems moved since the previous figures, and PyPI's rate fell for a good reason.** npm
+was 84 of 115 (73%) reaching 115 of 197; PyPI was 119 of 136 (88%) reaching 136 of 200. npm improved
+on both axes — the mirror now serves a lockfile-resolved tarball the index never offered, which
+admitted a cluster that could not build at all, most of it TypeScript: that stratum went from 1 of 8
+to 10 of 23. PyPI's *reach* rose from 68% to 81% and its *rate* fell from 88% to 83%, and the second
+is a consequence of the first: twenty-seven more targets now reach a comparison and they are the
+hard ones. A rate over a larger and harder denominator is lower and means more.
+
+**Sixteen of npm's 71 non-compared targets are ours, not the packages'** — ten a missing tool, six a
+mirror that handed the build a body it could not read. Those stay out of the reproduction rate by
+design — only `Fault::Build` says anything about the package
+([`02-domain-model.md`](docs/02-domain-model.md) §4) — but they are inside the *reach* figure, which
+should therefore be read as a floor.
+
+Measured at `0ff8aa1`. Three npx failures have been fixed since and are not reflected above.
 
 What stops a target reaching a comparison is mostly named rather than mysterious — a base image
 missing a tool, a package whose install fetches from a forge, a monorepo member we build outside its
