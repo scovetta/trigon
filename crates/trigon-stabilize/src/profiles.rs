@@ -77,6 +77,10 @@ pub fn profile(id: &str) -> Option<StabilizerSet> {
         // what is left is packaging bookkeeping: the gallery's signature, a per-pack GUID in a
         // member name, and the name of the machine that packed it.
         "nupkg" => [
+            // **Before the zip set.** This renames entries, and `zip-entry-order` sorts them; a
+            // rename afterwards would leave the sort stale and the digest dependent on the order
+            // the two spellings happened to arrive in.
+            vec![Arc::new(NupkgPortableFolderName) as Arc<dyn Stabilizer>],
             zip_set(),
             vec![
                 Arc::new(NupkgSignature) as Arc<dyn Stabilizer>,

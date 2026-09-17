@@ -387,8 +387,34 @@ in length — consistent with a near-miss on compiler version rather than with d
   the project file says so.
 - **Hand-written `.nuspec` packed by a build script** does not. Humanizer keeps 40-odd
   `NuSpecs/*.nuspec` and packs them from a Cake script; nothing `dotnet pack` does reproduces that.
-  Neither does a package targeting `net20`/`net35`/`net40` or a portable profile, which needs
-  .NET Framework reference assemblies that do not exist on Linux.
+
+**An earlier draft of this section said .NET Framework and PCL targets "need reference assemblies
+that do not exist on Linux". That was wrong, and measurably so.** Newtonsoft.Json 11.0.1 targets
+nine frameworks — `net20`, `net35`, `net40`, `net45`, three `netstandard`s and two `portable-*`
+profiles — and all nine build and pack on Linux under `dotnet pack`:
+
+- **`net20` through `net48` need nothing at all.** The SDK adds
+  `Microsoft.NETFramework.ReferenceAssemblies` implicitly, so those targets build out of the box.
+- **The `MSB4057` failure that looked like "PCL is unsupported" was a different thing entirely.**
+  The project overrides `<LanguageTargets>` to `Microsoft.Portable.CSharp.targets`, a file the SDK
+  does not ship on Linux. That import fails quietly, the inner project never imports
+  `NuGet.targets`, and the outer restore's call into `_GetRestoreSettingsPerFramework` lands on a
+  project with no such target. MSBuild reports it against a PCL framework, which is a bystander.
+  `nuget/restore` now passes `-p:LanguageTargets=<sdk>/Microsoft.CSharp.targets` — the SDK's own
+  default for C#, so a no-op for any project that does not override it — and restore succeeds for
+  all nine.
+- **PCL profiles need reference assemblies that no NuGet package ships**, which is the one true part
+  of the old claim. They are about a megabyte, in Mono's `referenceassemblies-pcl`, and
+  `trigon base-image --pcl-reference-assemblies` vendors them. `nuget/build/pack` then writes a
+  `Directory.Build.props` wiring them up for `portable-*` targets only — never unconditionally,
+  because `net20`-`net48` get theirs through the same property and an unguarded override breaks
+  the four targets that work for free.
+
+Two spellings of one framework had to be reconciled before the comparison meant anything. The 2018
+client wrote `lib/portable-net45%2Bwin8%2Bwp8%2Bwpa81`; a modern one writes
+`lib/portable45-net45+win8+wp8+wpa81`. Same profile, same component order, different convention —
+so `nupkg-portable-folder-name` normalizes it, and without that a rebuild that reproduced both PCL
+assemblies exactly reported four members only in upstream and four only in the rebuild.
 
 ### 5.3 What a Polly rebuild found
 

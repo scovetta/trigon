@@ -382,6 +382,18 @@ enum Cmd {
         /// suggestion the suggesting program rejects is worse than no suggestion.
         #[arg(long, num_args = 1.., value_delimiter = ',')]
         packages: Vec<String>,
+        /// Also vendor the PCL reference assemblies that .NETPortable targets need.
+        ///
+        /// About a megabyte, extracted and not installed. NuGet ships no package for these — every
+        /// plausible id returns nothing — and the only public source is Mono's
+        /// `referenceassemblies-pcl`. Without them a `.NETPortable` target fails `MSB3644` with
+        /// advice to install a Windows Developer Pack, which reads as a dead end and is not one:
+        /// the .NET Framework targets need nothing at all, and only PCL needs this.
+        ///
+        /// Off by default because it is a network fetch from outside the distribution's archive,
+        /// and most images will never build a PCL target.
+        #[arg(long)]
+        pcl_reference_assemblies: bool,
         #[arg(long, default_value = "localhost/trigon-base:latest")]
         tag: String,
         /// Print the Containerfile instead of building it.
@@ -1041,9 +1053,10 @@ fn dispatch(cmd: Cmd) -> Result<()> {
         Cmd::BaseImage {
             from,
             packages,
+            pcl_reference_assemblies,
             tag,
             print,
-        } => mirror::base_image(&from, &packages, &tag, print),
+        } => mirror::base_image(&from, &packages, &tag, print, pcl_reference_assemblies),
         #[cfg(feature = "build")]
         Cmd::MirrorImage { tag } => mirror::build_image(&tag),
         #[cfg(feature = "build")]
@@ -4217,7 +4230,25 @@ mod mirror {
     ];
 
     /// Build a base image that carries what an enforced tier cannot install.
-    pub fn base_image(from: &str, packages: &[String], tag: &str, print: bool) -> Result<()> {
+    /// Mono's PCL reference assemblies, fetched and unpacked rather than installed.
+    ///
+    /// **Pinned to an exact file.** The archive is content-addressed by nothing, so a floating
+    /// `apt-get install` from a third-party repository would put different bytes in the image on
+    /// different days — the one thing a base image for a reproducibility tool must not do. This
+    /// names one `.deb` and checks its digest, and `dpkg-deb -x` unpacks it without running a
+    /// maintainer script or touching the package database.
+    const PCL_DEB: &str = "https://download.mono-project.com/repo/ubuntu/pool/main/r/referenceassemblies-pcl/referenceassemblies-pcl_2014.04.14-1xamarin7+ubuntu2004b1_all.deb";
+
+    /// Where the profiles land, and what the NuGet build tool looks for.
+    pub const PCL_ROOT: &str = "/opt/pcl-reference-assemblies";
+
+    pub fn base_image(
+        from: &str,
+        packages: &[String],
+        tag: &str,
+        print: bool,
+        pcl: bool,
+    ) -> Result<()> {
         // The sandbox's own rule, not a second copy of it. This used to require `@`, which refused
         // a bare `sha256:<id>` — the form a locally built base image has, and the form
         // `env/base-image-incomplete` puts into the fix command it prints. Trigon was telling an
@@ -4236,10 +4267,24 @@ mod mirror {
         };
         // The same expansion the sandbox would have used, so the image carries exactly what the
         // setup phase would have installed rather than an operator's guess at the package names.
-        let containerfile = format!(
+        let mut containerfile = format!(
             "FROM {from}\nRUN {}\n",
             trigon_sandbox::install_command(from, &packages)
         );
+        if pcl {
+            // `dpkg-deb -x`, not `dpkg -i`: unpack the tree and nothing else. Installing would run
+            // maintainer scripts from a third-party repository and write to the package database,
+            // neither of which this image wants — it needs the assemblies on disk, at a path the
+            // build tool knows.
+            containerfile.push_str(&format!(
+                "RUN set -eu; \\\n\
+                 \x20 wget -O /tmp/pcl.deb {PCL_DEB}; \\\n\
+                 \x20 mkdir -p {PCL_ROOT}; \\\n\
+                 \x20 dpkg-deb -x /tmp/pcl.deb {PCL_ROOT}; \\\n\
+                 \x20 rm /tmp/pcl.deb; \\\n\
+                 \x20 test -d {PCL_ROOT}/usr/lib/mono/xbuild-frameworks/.NETPortable\n"
+            ));
+        }
         // **Before the store check, deliberately.** `--print` renders a Containerfile out of two
         // strings; it pulls nothing, builds nothing and reads nothing from the local store, so
         // gating it on what that store happens to hold made the output a function of the machine

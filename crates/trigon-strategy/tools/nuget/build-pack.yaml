@@ -58,8 +58,87 @@ steps:
       export NUGET_PACKAGES=/trigon/nuget/packages
       # `--no-restore`: the deps phase already did it, and a restore here would open the network in
       # the phase that is supposed to be observable.
+      # **`LanguageTargets`, and it is the whole fix for a large stratum.** A project may override
+      # this to point at a Windows-only targets file — Newtonsoft.Json 11.0.1 names
+      # `Microsoft.Portable.CSharp.targets` — and on Linux that import fails silently. The inner
+      # project then never imports `NuGet.targets`, so the outer restore's call into
+      # `_GetRestoreSettingsPerFramework` lands on a project that has no such target and MSBuild
+      # reports `MSB4057`, naming a PCL framework. The framework is a bystander: neutralise the
+      # override and restore succeeds for every target, PCL included.
+      #
+      # Safe to pass unconditionally. For an SDK-style C# project this *is* the default value, so
+      # a project that does not override it sees no change; only one that points somewhere absent
+      # is affected, and for those the alternative is failing.
+      CSHARP_TARGETS="$(find /usr/share/dotnet/sdk -maxdepth 2 -name Microsoft.CSharp.targets 2>/dev/null | head -1)"
+      if [ -z "$CSHARP_TARGETS" ]; then
+        CSHARP_TARGETS="$(find "$(dirname "$(readlink -f "$(command -v dotnet)")")/sdk" -maxdepth 2 -name Microsoft.CSharp.targets 2>/dev/null | head -1)"
+      fi
+      # **PCL reference assemblies, where the image carries them.** `.NETPortable` profiles have no
+      # NuGet package — every plausible id returns nothing — so MSBuild cannot resolve them and fails
+      # `MSB3644` advising a Windows Developer Pack. `trigon base-image --pcl-reference-assemblies`
+      # vendors Mono's copy; this wires it up when it is there and changes nothing when it is not.
+      #
+      # Four details, each of which costs a build cycle to find:
+      #
+      #  * The item glob must live **inside a target**, not in the props body. A props file is evaluated
+      #    before `TargetFrameworkVersion` and `TargetFrameworkProfile` are set, so the glob matches
+      #    nothing and the whole thing silently does nothing.
+      #  * Gate on `TargetFramework`, **not** `TargetFrameworkIdentifier`, which is likewise unset then.
+      #  * `TargetFrameworkRootPath` alone is not enough: resolution then picks the profile-less
+      #    `v4.5/mscorlib.dll` and fails with `MSB3253` and `CS0400`. The profile's own assemblies have
+      #    to be named as `Reference` items.
+      #  * Never set these unconditionally. `net20` through `net48` get their reference assemblies from
+      #    the implicitly-added `Microsoft.NETFramework.ReferenceAssemblies` package through this same
+      #    property, so an unguarded override breaks the four targets that work for free.
+      {%- set proj = with.dir if with.dir else location.subdir %}
+      PROJECT_DIR="{% if proj and proj != '.' %}{{ proj }}{% else %}.{% endif %}"
+      PCL_ROOT=/opt/pcl-reference-assemblies/usr/lib/mono/xbuild-frameworks
+      if [ -d "$PCL_ROOT/.NETPortable" ]; then
+        echo "vendored PCL reference assemblies found; enabling .NETPortable targets"
+        # Chained, not shadowing. MSBuild takes the first `Directory.Build.props` it finds walking up,
+        # so writing one here would silently replace a repository's own — which is where a project of
+        # this vintage keeps its version and signing settings.
+        cat > "$PROJECT_DIR/Directory.Build.props" <<XML
+      <Project>
+        <!-- Into a property first: a Condition containing a property function whose own arguments
+             are single-quoted does not parse, and MSBuild blames the nested quote rather than the
+             nesting. No backticks anywhere in this document - the heredoc below is unquoted so the
+             reference-assembly path expands, which means the shell also runs backticks, and a
+             comment full of them printed "Condition: not found" on stderr and failed the build
+             for a reason that was not in the XML at all. -->
+        <PropertyGroup>
+          <TrigonParentProps>\$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '\$(MSBuildThisFileDirectory)../'))</TrigonParentProps>
+        </PropertyGroup>
+        <Import Project="\$(TrigonParentProps)" Condition="'\$(TrigonParentProps)' != ''" />
+        <PropertyGroup Condition="\$(TargetFramework.StartsWith('portable'))">
+          <TargetFrameworkRootPath>$PCL_ROOT/</TargetFrameworkRootPath>
+          <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+          <NoStdLib>true</NoStdLib>
+          <!-- The generated AssemblyInfo, suppressed for portable only. These profiles predate
+               the attributes the modern SDK writes into it: Profile328 has no
+               System.Reflection.AssemblyMetadataAttribute, so generation fails CS0234 before a
+               line of the package's own code is compiled. A project of this vintage ships its
+               own Properties/AssemblyInfo.cs - which is what the published assemblies were
+               built from - so this restores the original arrangement rather than dropping
+               information. Not for the other seven targets: they build with generation on, and
+               changing what they compile to fix an unrelated profile would be a silent edit to
+               outputs that are already correct. -->
+          <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+        </PropertyGroup>
+        <Target Name="TrigonAddPclReferences" BeforeTargets="BeforeResolveReferences"
+                Condition="\$(TargetFramework.StartsWith('portable'))">
+          <ItemGroup>
+            <Reference Include="$PCL_ROOT/.NETPortable/\$(TargetFrameworkVersion)/Profile/\$(TargetFrameworkProfile)/*.dll">
+              <Private>false</Private>
+            </Reference>
+          </ItemGroup>
+        </Target>
+      </Project>
+      XML
+      fi
       set -- pack --no-restore -c {{ with.configuration }} -o {{ with.output_dir }}
       set -- "$@" -p:ContinuousIntegrationBuild=true
+      [ -n "$CSHARP_TARGETS" ] && set -- "$@" -p:LanguageTargets="$CSHARP_TARGETS"
       {%- if with.version %}
       set -- "$@" -p:Version={{ with.version }}
       {%- endif %}

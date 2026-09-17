@@ -642,6 +642,66 @@ const RULES: &[Rule] = &[
         repairable: true,
         capture: Capture::None,
     },
+    // ---- NuGet and MSBuild -------------------------------------------------------------------------
+    Rule {
+        // **An MSBuild target that is not there, and the framework it names is a bystander.**
+        // Newtonsoft.Json 11.0.1 overrides `<LanguageTargets>` to `Microsoft.Portable.CSharp.targets`,
+        // a file the .NET SDK does not ship on Linux. That import fails quietly, so the inner
+        // project never imports `NuGet.targets`, so the outer restore's call into
+        // `_GetRestoreSettingsPerFramework` lands on a project with no such target. MSBuild reports
+        // it against a PCL target framework, which reads as "this old framework is unsupported" and
+        // is wrong: neutralise the override and all nine of that package's frameworks restore.
+        //
+        // `nuget/restore` now passes `-p:LanguageTargets=<sdk>/Microsoft.CSharp.targets`, which is
+        // the SDK's own default for C# and so a no-op for every project that does not override it.
+        // This rule is what is left over: reaching it means the override was not the cause, and
+        // someone should look rather than guess.
+        //
+        // **`Fault::Bug`, not `Build`.** Measured before it was named: unclaimed, this line keyed
+        // `unknown`, which defaults to `Fault::Build` — charging a package for our image's missing
+        // MSBuild target, and counting it against the reproduction rate.
+        //
+        // **`repairable: false`, which is the money decision.** `repairable` is the sole admission
+        // gate on model spend — `trigon_ai::Ledger::next` returns `Stop(NotRepairable)` before any
+        // budget check, and nothing gates the loop on `fault`. A model cannot conjure a missing
+        // targets file, and the one recipe change that helps is already applied above, so every
+        // call this would buy is spent.
+        //
+        // Captured on the target name so the cluster says which target was absent; that is a
+        // property of the SDK and the project's imports, and it is the same for every package that
+        // trips the same import.
+        code: "env/msbuild-target-missing",
+        needles: &["MSB4057"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: false,
+        capture: Capture::Between("The target \"", "\""),
+    },
+    Rule {
+        // **Reference assemblies the image does not carry**, for a framework that is perfectly
+        // buildable on Linux once it does. MSBuild's advice — "install the Developer Pack" — names
+        // a Windows installer, so the message reads as a dead end and is not one.
+        //
+        // The .NET Framework targets need nothing: the SDK adds
+        // `Microsoft.NETFramework.ReferenceAssemblies` implicitly, and `net20` through `net48` build
+        // out of the box. It is the **PCL** profiles (`.NETPortable`) that have no NuGet package at
+        // all; their reference assemblies ship in Mono's `referenceassemblies-pcl`, about a
+        // megabyte, which `trigon base-image --pcl-reference-assemblies` vendors into an image.
+        //
+        // `Fault::Policy` and not `Bug`, matching `env/base-image-incomplete`: the build is doing
+        // what it was asked and the image is missing a thing the operator adds. No strategy change
+        // reaches it, so it is not repairable — a model asked to fix this would rewrite the recipe
+        // until the budget ran out.
+        //
+        // Captured on the profile, so `Profile259` and `Profile328` cluster separately: they are
+        // different assemblies to vendor, even though today the same package supplies both.
+        code: "env/missing-reference-assemblies",
+        needles: &["MSB3644"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: false,
+        capture: Capture::Between("reference assemblies for ", " were not found"),
+    },
     // ---- native toolchains ------------------------------------------------------------------------
     Rule {
         code: "cc/missing-header",
@@ -994,6 +1054,55 @@ fn clip(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_msbuild_target_is_ours_and_not_the_packages() {
+        // Verbatim from a `pkg:nuget/Newtonsoft.Json@11.0.1` run. Unnamed, this keyed `unknown`,
+        // which defaults to `Fault::Build` — charging the package for our image, and admitting it
+        // to the repair loop, where `repairable` is the only gate on model spend.
+        let s = super::classify(
+            "/src/Src/Newtonsoft.Json/Newtonsoft.Json.csproj : error MSB4057: The target \
+             \"_GetRestoreSettingsPerFramework\" does not exist in the project. \
+             [TargetFramework=portable-net45+win8+wpa81+wp8]",
+        );
+        assert_eq!(s.code, "env/msbuild-target-missing");
+        assert_eq!(s.fault, super::Fault::Bug);
+        assert!(
+            !s.repairable,
+            "a missing targets file is not something a model can write"
+        );
+        assert!(!s.retryable);
+        assert!(
+            s.key().contains("getrestoresettingsperframework"),
+            "the cluster should name the target that was absent: {}",
+            s.key()
+        );
+    }
+
+    #[test]
+    fn missing_reference_assemblies_name_the_profile_and_are_not_repairable() {
+        // The failure after the `LanguageTargets` one is fixed: the image has no PCL reference
+        // assemblies. MSBuild's own advice names a Windows installer, so the message reads as a
+        // dead end when the answer is `trigon base-image --pcl-reference-assemblies`.
+        let s = super::classify(
+            "/usr/share/dotnet/sdk/8.0.423/Microsoft.Common.CurrentVersion.targets(1259,5): \
+             error MSB3644: The reference assemblies for \
+             .NETPortable,Version=v4.5,Profile=Profile259 were not found. To resolve this, \
+             install the Developer Pack",
+        );
+        assert_eq!(s.code, "env/missing-reference-assemblies");
+        assert_eq!(s.fault, super::Fault::Policy);
+        assert!(!s.repairable);
+        assert!(s.key().contains("profile259"), "{}", s.key());
+    }
+
+    #[test]
+    fn the_two_dotnet_failures_do_not_claim_each_others_lines() {
+        // Both are MSBuild errors with similar shapes, and the table is first-match-wins per line.
+        let a = super::classify("error MSB4057: The target \"X\" does not exist in the project.");
+        let b = super::classify("error MSB3644: The reference assemblies for Y were not found.");
+        assert_ne!(a.code, b.code);
+    }
+
     #[test]
     fn a_missing_build_toolchain_is_named_however_the_backend_words_it() {
         // Every line here is copied from a build log in the M1 PyPI pilot, where eight of ten

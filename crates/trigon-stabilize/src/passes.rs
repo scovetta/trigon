@@ -456,6 +456,7 @@ pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
         Arc::new(GemExcludeChecksums),
         Arc::new(GemExcludeSignatures),
         Arc::new(NupkgSignature),
+        Arc::new(NupkgPortableFolderName),
         Arc::new(NupkgPackagingNames),
         Arc::new(NupkgPackagerVersion),
     ]
@@ -1029,3 +1030,143 @@ entry_pass!(
         }
     }
 );
+
+/// Two spellings of one target framework, thirty NuGet releases apart.
+///
+/// A `.nupkg` names each payload folder after a target framework, and NuGet's own spelling of a
+/// PCL profile changed: the 2018 client wrote `lib/portable-net45%2Bwin8%2Bwp8%2Bwpa81` — percent
+/// encoding the `+` — and a modern one writes `lib/portable45-net45+win8+wp8+wpa81`, with the
+/// profile's .NET version spliced in after `portable`. Measured on Newtonsoft.Json 11.0.1: the
+/// components and their order are identical on both sides, and only the spelling differs.
+///
+/// Without this, a rebuild that reproduced both PCL assemblies exactly reports them as four
+/// members only in upstream and four only in the rebuild — a total miss on the framework that was
+/// hardest to build, for a reason that is a filename convention.
+///
+/// `Structural`: the mapping is a rename, nothing is added or dropped, and the stabilized form is
+/// only ever compared. Applied before the entry ordering, because a rename after the sort leaves
+/// the order stale.
+fn canonical_portable(segment: &[u8]) -> Option<Vec<u8>> {
+    if !segment.starts_with(b"portable") {
+        return None;
+    }
+    // `portable45-net45+...` -> `portable-net45+...`. Only digits, and only immediately after the
+    // word: anything else is a folder name we do not recognise and must not rewrite.
+    let rest = &segment[b"portable".len()..];
+    let digits = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+    let mut out = b"portable".to_vec();
+    out.extend_from_slice(&rest[digits..]);
+
+    // `%2B` -> `+`, in either case. Done after the prefix so both spellings converge on one.
+    let mut decoded = Vec::with_capacity(out.len());
+    let mut i = 0;
+    while i < out.len() {
+        if out[i] == b'%' && i + 2 < out.len() && out[i + 1] == b'2' && (out[i + 2] | 0x20) == b'b'
+        {
+            decoded.push(b'+');
+            i += 3;
+        } else {
+            decoded.push(out[i]);
+            i += 1;
+        }
+    }
+    (decoded != segment).then_some(decoded)
+}
+
+entry_pass!(
+    NupkgPortableFolderName,
+    "nupkg-portable-folder-name",
+    RiskTier::Structural,
+    is_zip,
+    |e| {
+        let path = e.path.as_bytes().to_vec();
+        // Only the framework segment of a payload path, which is the second component of `lib/`.
+        let Some(rest) = path.strip_prefix(b"lib/".as_slice()) else {
+            return Touched::NONE;
+        };
+        let Some(slash) = rest.iter().position(|c| *c == b'/') else {
+            return Touched::NONE;
+        };
+        let Some(canonical) = canonical_portable(&rest[..slash]) else {
+            return Touched::NONE;
+        };
+        let mut next = b"lib/".to_vec();
+        next.extend_from_slice(&canonical);
+        next.extend_from_slice(&rest[slash..]);
+        e.path = trigon_core::EntryPath::new(next);
+        e.mark_dirty();
+        Touched {
+            entries: 1,
+            bytes: 0,
+        }
+    }
+);
+
+#[cfg(test)]
+mod nupkg_portable_tests {
+    use super::canonical_portable;
+
+    #[test]
+    fn the_two_spellings_of_one_profile_converge() {
+        // Both taken verbatim from a real comparison: the published Newtonsoft.Json 11.0.1 on the
+        // left, a `dotnet pack` of its own source on the right.
+        let old = b"portable-net45%2Bwin8%2Bwp8%2Bwpa81".as_slice();
+        let new = b"portable45-net45+win8+wp8+wpa81".as_slice();
+        assert_eq!(
+            canonical_portable(old).unwrap(),
+            b"portable-net45+win8+wp8+wpa81".to_vec()
+        );
+        assert_eq!(
+            canonical_portable(new).unwrap(),
+            b"portable-net45+win8+wp8+wpa81".to_vec()
+        );
+    }
+
+    #[test]
+    fn the_other_profile_converges_too() {
+        for s in [
+            b"portable-net40%2Bsl5%2Bwin8%2Bwp8%2Bwpa81".as_slice(),
+            b"portable40-net40+sl5+win8+wp8+wpa81".as_slice(),
+        ] {
+            assert_eq!(
+                canonical_portable(s).unwrap(),
+                b"portable-net40+sl5+win8+wp8+wpa81".to_vec()
+            );
+        }
+    }
+
+    #[test]
+    fn a_framework_that_is_not_portable_is_left_alone() {
+        // The pass must not touch the seven target frameworks that already agree.
+        for s in [
+            b"net45".as_slice(),
+            b"netstandard2.0".as_slice(),
+            b"net6.0".as_slice(),
+        ] {
+            assert_eq!(
+                canonical_portable(s),
+                None,
+                "{}",
+                String::from_utf8_lossy(s)
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_already_canonical_reports_no_change() {
+        // `Touched` is how a run says which passes did anything; a pass that claims an entry it
+        // did not change inflates the applied list a verdict is read against.
+        assert_eq!(canonical_portable(b"portable-net45+win8"), None);
+    }
+
+    #[test]
+    fn only_digits_immediately_after_the_word_are_dropped() {
+        // `portable-net45...` has no digits to strip; `portable45-...` has two. A rule that
+        // stripped any digits would mangle the profile's own version numbers.
+        assert_eq!(
+            canonical_portable(b"portable45-net45+win8").unwrap(),
+            b"portable-net45+win8".to_vec()
+        );
+        assert_eq!(canonical_portable(b"portablish-net45"), None);
+    }
+}

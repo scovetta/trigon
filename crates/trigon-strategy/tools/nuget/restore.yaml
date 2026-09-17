@@ -53,10 +53,26 @@ steps:
       # that the pack phase finds what this phase restored.
       export NUGET_PACKAGES=/trigon/nuget/packages
       mkdir -p "$NUGET_PACKAGES"
+      # **`LanguageTargets`, and it is the whole fix for a large stratum.** A project may override
+      # this to point at a Windows-only targets file — Newtonsoft.Json 11.0.1 names
+      # `Microsoft.Portable.CSharp.targets` — and on Linux that import fails silently. The inner
+      # project then never imports `NuGet.targets`, so the outer restore's call into
+      # `_GetRestoreSettingsPerFramework` lands on a project that has no such target and MSBuild
+      # reports `MSB4057`, naming a PCL framework. The framework is a bystander: neutralise the
+      # override and restore succeeds for every target, PCL included.
+      #
+      # Safe to pass unconditionally. For an SDK-style C# project this *is* the default value, so
+      # a project that does not override it sees no change; only one that points somewhere absent
+      # is affected, and for those the alternative is failing.
+      CSHARP_TARGETS="$(find /usr/share/dotnet/sdk -maxdepth 2 -name Microsoft.CSharp.targets 2>/dev/null | head -1)"
+      if [ -z "$CSHARP_TARGETS" ]; then
+        CSHARP_TARGETS="$(find "$(dirname "$(readlink -f "$(command -v dotnet)")")/sdk" -maxdepth 2 -name Microsoft.CSharp.targets 2>/dev/null | head -1)"
+      fi
       set -- restore
       {%- if project and project != '.' %}
       set -- "$@" {{ project }}
       {%- endif %}
+      [ -n "$CSHARP_TARGETS" ] && set -- "$@" -p:LanguageTargets="$CSHARP_TARGETS"
       {%- if with.source %}
       # `<clear />` in every section, so nothing the repository or the machine configured survives.
       # `packageSourceMapping` especially: leaving it in place lets a repository decide that the
