@@ -295,6 +295,50 @@ commit from a release whose tag we failed to fetch. `Checkout::tags` carries the
 package. Turning that warning into a refusal needs a way to know a project is VCS-versioned before
 building it, which is a `pyproject.toml` read the inferrer does not do yet.
 
+## B24. A content-addressed toolchain store, mounted rather than layered
+
+[ADR-0012](adr/0012-base-images-supply-bytes-not-decisions.md) says a base image may supply bytes
+and never decisions, which leaves every build paying to fetch its own toolchain. This is how to stop
+paying without putting the decision back in the image.
+
+Keep unpacked toolchains on the worker at `/var/lib/trigon/toolchains/<sha256-of-tarball>/`, mounted
+read-only into the build, and have `npm/install-node` (and the Cargo and .NET equivalents) look there
+**by hash** before reaching the network. The identity of the toolchain then travels as a hash in the
+run record rather than as a layer in an image digest — so two runs using the same Node are
+comparable even if the images differ, which is the opposite of what a per-version image does.
+
+Measured on the M1 npm corpus, which is what makes this worth doing rather than assuming:
+
+- **4.1% of wall time** is toolchain install: 457s of ~11,000s across 197 targets.
+- **8.66 GB of toolchain egress**, of which only **4.41 GB is distinct content** — the rest is the
+  same 102 tarballs fetched again. (Total corpus egress is 39.2 GB; toolchains are 22% of it.)
+- **102 distinct Node versions** — the reason an image axis cannot work and a hash-keyed store can:
+  the store holds 102 entries at ~50 MB without creating 102 environments.
+
+**The cheapest win is not the toolchain at all.** `registry.npmjs.org/npm` is a 22.3 MB packument
+fetched **309 times — 6.89 GB, 17.6% of all corpus traffic**, because `npx --package=npm@X` asks for
+it on nearly every target. Caching one document by digest changes no fidelity whatsoever and is
+worth doing first, independently of the rest.
+
+**Host-side, not mirror-side, and that is the design's load-bearing detail.** A cache inside
+`trigon-mirror` would be invisible to the attestation — not in the run key, not in
+`Environment`, not in `externalParameters` — and would sit beside `guard.rs`, the code enforcing
+that a build cannot fetch its own published artifact. Mutable state that silently defines the
+environment, next to the component whose whole job is to be a boundary, is the wrong first cache. A
+host-side store whose every entry is verified **by hash on use** is a different proposition: it can
+only ever hand back the bytes that were asked for, and a corrupted or tampered entry fails the check
+rather than forging an environment.
+
+The mechanism exists already: `crates/trigon-sandbox/src/podman.rs` assembles a `--volume` for
+`/out`, and at `mirror-only` the deps phase runs inside `podman run`, which is exactly where a second
+read-only mount lands. `rebuild/network.jsonl` already records each toolchain download with
+`"checked":"hashed"`, so the keys are being computed today and thrown away.
+
+**Done when:** a second sweep of the same corpus fetches no toolchain it fetched the first time, the
+run record names the toolchain by hash, and a deliberately corrupted store entry fails the build
+rather than being used — that last one is the test, because a cache that cannot be caught serving
+the wrong bytes is the thing this design exists to avoid.
+
 ## B21. Keyed signing under a trusted root, and the Rekor client
 
 [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) settles the design and staging has

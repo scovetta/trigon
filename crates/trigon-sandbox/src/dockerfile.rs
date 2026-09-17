@@ -59,6 +59,12 @@ impl BuildContext {
 /// installing is impossible — but *verifying* is not, because every package manager can answer
 /// "is this installed" from its own on-disk database.
 ///
+/// **What belongs in a base image at all** is settled by ADR-0012: an image supplies *bytes* the
+/// evidence does not pin — a compiler, `ca-certificates`, `git` — and never a *decision* it does,
+/// which is why Node, npm and the .NET SDK are installed per run from the version the registry
+/// recorded rather than baked in. A `needs:` entry that names one of those is asking the image to
+/// answer a question the package already answered.
+///
 /// This is better than refusing the run before it starts, which was the first design: a pre-flight
 /// refusal cannot know what a base image contains, so it has to refuse every strategy that declares
 /// a package even when the image carries all of them. The check knows, and it names the ones that

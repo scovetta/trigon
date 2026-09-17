@@ -16,3 +16,4 @@ considered, and the reasoning, so the reasoning outlasts the people who did the 
 | [0009](0009-no-gha-emulation.md) | Read GitHub Actions, do not emulate runners |
 | [0010](0010-publish-divergences.md) | Publish divergences automatically, with technical safeguards |
 | [0011](0011-keyed-signing-under-a-trusted-root.md) | Sign with a key under a trusted root, and log to Rekor anyway — not keyless |
+| [0012](0012-base-images-supply-bytes-not-decisions.md) | A base image supplies bytes, never decisions — few images, no version axis |
