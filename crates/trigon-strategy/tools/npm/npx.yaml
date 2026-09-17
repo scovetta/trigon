@@ -1,5 +1,21 @@
 # Run a command under a specific npm, in the package directory.
 #
+# **`npx` did not always exist, and the pinned toolchain is often older than it.** npx ships with
+# npm 5.2.0, July 2017. A package published before that pins an npm that has no npx at all — and the
+# fallback below reached for it on exactly those targets. `once@1.4.0` pins npm 3.10.7 on Node 6.5.0,
+# whose bundled npm is 3.10.3; the versions differ, so the fallback ran, and the deps phase died with
+# `/usr/local/bin/npx: not found` on a toolchain from 2016 being driven by a command from 2017.
+#
+# So there are three cases, not two: the bundled npm is already the one we want; npx exists and can
+# fetch the one we want; or neither, and the bundled npm installs the pinned npm over itself. The
+# last is what a publisher in 2016 would have done, and it is faithful — the npm that runs the build
+# is still the one the registry says published the package.
+#
+# **The tempting wrong fix is to put npx in the base image.** It would make this failure disappear
+# and would run a 2016 package's build under a modern npm, discarding the version pin that is the
+# point of the exercise. A verdict that reproduces under the wrong toolchain is worth less than a
+# failure that says so.
+#
 # The bundled npm first. Every Node distribution ships one, and when it is already the version we
 # want, `npx --package=npm@X` re-downloads and re-unpacks the same npm for nothing. That is not
 # only waste: npm 5.5.1 on Node 9.2.1, which is exactly what published left-pad 1.3.0, aborts in
@@ -64,8 +80,11 @@ steps:
       TRIGON_NPM_CMD='{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'
       if [ "$({{ with.locator }}npm --version 2>/dev/null)" = "{{ with.npm_version }}" ]; then
         sh -c "$TRIGON_NPM_CMD"
-      else
+      elif command -v {{ with.locator }}npx >/dev/null 2>&1; then
         {{ with.locator }}npx --package=npm@{{ with.npm_version }} -c "$TRIGON_NPM_CMD"
+      else
+        {{ with.locator }}npm install -g npm@{{ with.npm_version }}
+        sh -c "$TRIGON_NPM_CMD"
       fi
     if: "{{ with.locator }}"
   - runs: |
@@ -76,8 +95,11 @@ steps:
       TRIGON_NPM_CMD='{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'
       if [ "$(npm --version 2>/dev/null)" = "{{ with.npm_version }}" ]; then
         sh -c "$TRIGON_NPM_CMD"
-      else
+      elif command -v npx >/dev/null 2>&1; then
         npx --package=npm@{{ with.npm_version }} -c "$TRIGON_NPM_CMD"
+      else
+        npm install -g npm@{{ with.npm_version }}
+        sh -c "$TRIGON_NPM_CMD"
       fi
     if: "{% if not with.locator %}yes{% endif %}"
     needs: [npm]
