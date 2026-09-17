@@ -25,6 +25,10 @@ usage: rebuild-and-attest.sh <purl> [options]
   --work <dir>      where this run's artifacts go    (default: ./work/<purl-slug>)
   --egress <tier>   deny-all | mirror-only | open    (default: mirror-only)
   --image <ref>     base image. Resolved from the local store when omitted.
+  --model <spec>    ask a model for a strategy when nothing deterministic produced one. Off by
+                    default: a run that silently calls a model is a run whose cost and derivation
+                    are a surprise. `replay:<transcript.json>` answers from a recording and opens
+                    no socket, which is the form to use in a test.
   --prune           drop the rebuilt bytes after attesting, keeping the digests
   --rekor <url>     publish the equivalence statement to a transparency log and record what it
                     said. Needs --key. Use https://rekor.sigstage.dev while working things out:
@@ -43,6 +47,7 @@ STORE="./trigon-store"
 WORK=""
 EGRESS="mirror-only"
 IMAGE=""
+MODEL=""
 PRUNE=""
 REKOR=""
 DRYRUN=""
@@ -54,6 +59,7 @@ while [ $# -gt 0 ]; do
         --work)   WORK="$2";   shift 2 ;;
         --egress) EGRESS="$2"; shift 2 ;;
         --image)  IMAGE="$2";  shift 2 ;;
+        --model)  MODEL="$2";  shift 2 ;;
         --prune)  PRUNE=1;     shift ;;
         --rekor)  REKOR="$2";  shift 2 ;;
         --dry-run) DRYRUN=1;   shift ;;
@@ -130,12 +136,17 @@ printf '  image   %s\n  egress  %s\n  store   %s\n  work    %s\n' \
 
 rm -rf "$WORK"
 set +e
-"$TRIGON" rebuild "$PURL" \
-    --image "$IMAGE" \
-    --egress "$EGRESS" \
-    --timewarp auto \
-    --work "$WORK" \
-    --store "$STORE"
+REBUILD_ARGS=(rebuild "$PURL"
+    --image "$IMAGE"
+    --egress "$EGRESS"
+    --timewarp auto
+    --work "$WORK"
+    --store "$STORE")
+# Appended rather than passed empty. `--model ""` is not "no model": clap takes the empty string as
+# the value, and the ladder then reports a model rung that cannot answer instead of one that was
+# never asked.
+[ -n "$MODEL" ] && REBUILD_ARGS+=(--model "$MODEL")
+"$TRIGON" "${REBUILD_ARGS[@]}"
 REBUILD_STATUS=$?
 set -e
 
