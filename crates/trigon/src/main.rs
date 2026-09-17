@@ -3140,10 +3140,34 @@ mod rebuild {
                         cached_in: after.cached_input.saturating_sub(before.cached_input),
                     });
                     match proposed {
-                        Ok(next) => {
-                            strategy = next;
-                            continue;
-                        }
+                        // **Rendered before it is accepted.** Parsing is not enough: a proposal can
+                        // be valid YAML naming a tool parameter that does not exist, and the
+                        // rejection then happens inside the *next* build, where it is a fatal error
+                        // rather than a rejected suggestion. A model asked to repair Newtonsoft.Json
+                        // proposed `project:` for a tool whose parameter is `dir`, and that killed a
+                        // run which had already produced a complete comparison — the divergence was
+                        // computed, the artifact was on disk, and all of it was thrown away because
+                        // the suggestion for improving it was malformed.
+                        //
+                        // A repair is an attempt to do better than an answer we already have. It
+                        // must never be able to cost us that answer.
+                        Ok(next) => match usable(&next) {
+                            Ok(()) => {
+                                strategy = next;
+                                continue;
+                            }
+                            Err(e) => {
+                                if verbose {
+                                    println!("  repair     discarded: {e}");
+                                }
+                                report.repair_stopped =
+                                    Some(format!("the proposed recipe does not render: {e}"));
+                                tracing::warn!(
+                                    "the repair proposed a recipe that will not render: {e:#}"
+                                );
+                                break (built, strategy_digest);
+                            }
+                        },
                         Err(e) => {
                             // A model that will not answer, or an answer that will not parse. The
                             // run ends on the build failure it already had rather than on ours.
@@ -5376,6 +5400,38 @@ mod sweep {
 // verifier's whole job is to decode one payload and check one signature, and every field we add
 // beside the envelope is a field that is not covered by that signature.
 
+/// Whether a strategy will render, without running anything.
+///
+/// Behind `build`, because its only caller is the repair loop and the verifier links no model. The
+/// verifier build is `-D warnings`, so an ungated helper is a hard error there rather than a lint.
+///
+/// The same check the build does, done early so a proposal that cannot work is discarded as a
+/// suggestion instead of aborting the run that asked for it. Deliberately the real `render` rather
+/// than a cheaper approximation: the failure this exists to catch — a tool parameter that does not
+/// exist — is found nowhere else.
+#[cfg(feature = "build")]
+fn usable(strategy: &trigon_strategy::Strategy) -> Result<(), String> {
+    let tools = trigon_strategy::ToolRegistry::builtin().map_err(|e| e.to_string())?;
+    let loc = strategy.location().cloned().unwrap_or_default();
+    let cx = trigon_strategy::Context {
+        location: trigon_strategy::LocationCtx {
+            repo: loc.repo,
+            git_ref: loc.git_ref,
+            subdir: loc.subdir.unwrap_or_default(),
+        },
+        env: trigon_strategy::EnvCtx {
+            arch: "x86_64".into(),
+            platform: "linux".into(),
+            has_repo: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    trigon_strategy::render(strategy, &cx, &tools)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Where a statement goes and who signs it. Grouped because they are one decision — whether this
 /// run leaves behind something a third party can check — and travel together everywhere.
 #[derive(Clone, Copy, Default)]
@@ -6669,5 +6725,64 @@ mod attestor {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(all(test, feature = "build"))]
+mod usable_tests {
+    /// The proposal that killed a completed run, verbatim in shape: valid YAML, a real tool, and a
+    /// parameter that tool does not declare. `nuget/build/pack` takes `dir`, not `project`.
+    const NAMES_A_PARAMETER_THAT_DOES_NOT_EXIST: &str = "\
+schema: 1
+kind: flow
+location:
+  repo: https://github.com/JamesNK/Newtonsoft.Json
+  ref: d50b912e9948472e122cfaf24ffeebbf77032806
+  subdir: Src/Newtonsoft.Json
+src:
+- uses: git-checkout
+build:
+- uses: nuget/build/pack
+  with:
+    project: Src/Newtonsoft.Json
+output_dir: trigon-pack
+";
+
+    const USES_THE_PARAMETER_IT_DECLARES: &str = "\
+schema: 1
+kind: flow
+location:
+  repo: https://github.com/JamesNK/Newtonsoft.Json
+  ref: d50b912e9948472e122cfaf24ffeebbf77032806
+  subdir: Src/Newtonsoft.Json
+src:
+- uses: git-checkout
+build:
+- uses: nuget/build/pack
+  with:
+    dir: Src/Newtonsoft.Json
+output_dir: trigon-pack
+";
+
+    #[test]
+    fn a_proposal_that_will_not_render_is_refused_before_it_can_replace_a_working_recipe() {
+        // A repair is an attempt to do better than an answer we already have. Accepting this one
+        // cost a run that had already computed a complete comparison: the rejection happened inside
+        // the *next* build, where it was a fatal error rather than a discarded suggestion.
+        let bad = trigon_strategy::from_yaml(NAMES_A_PARAMETER_THAT_DOES_NOT_EXIST).unwrap();
+        let why = super::usable(&bad).expect_err("`project` is not a parameter of this tool");
+        assert!(why.contains("has no parameter"), "{why}");
+        assert!(why.contains("project"), "{why}");
+        // And it names what the tool does take, so the operator reading the line can tell whether
+        // the model was close or lost.
+        assert!(why.contains("dir"), "{why}");
+    }
+
+    #[test]
+    fn a_proposal_that_renders_is_accepted() {
+        // The other half. A check that rejected everything would discard working repairs as
+        // readily as broken ones, and would look identical from the outside.
+        let good = trigon_strategy::from_yaml(USES_THE_PARAMETER_IT_DECLARES).unwrap();
+        super::usable(&good).expect("`dir` is what the tool declares");
     }
 }

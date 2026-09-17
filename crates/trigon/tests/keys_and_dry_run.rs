@@ -475,3 +475,76 @@ fn runs_prints_the_id_first_and_the_target_second() {
         "column 2 is the target: {line}"
     );
 }
+
+// --- a repair must never cost the run the answer it already has ---------------------------------
+
+/// A strategy naming a tool parameter that does not exist, of the kind a model proposes.
+const BAD_REPAIR: &str = r#"
+schema: 1
+kind: flow
+location:
+  repo: https://github.com/JamesNK/Newtonsoft.Json
+  ref: d50b912e9948472e122cfaf24ffeebbf77032806
+  subdir: Src/Newtonsoft.Json
+src:
+- uses: git-checkout
+deps:
+- uses: nuget/restore
+build:
+- uses: nuget/build/pack
+  with:
+    project: Src/Newtonsoft.Json
+    version: 11.0.1
+output_dir: trigon-pack
+"#;
+
+/// The same strategy with the parameter the tool actually declares.
+const GOOD_REPAIR: &str = r#"
+schema: 1
+kind: flow
+location:
+  repo: https://github.com/JamesNK/Newtonsoft.Json
+  ref: d50b912e9948472e122cfaf24ffeebbf77032806
+  subdir: Src/Newtonsoft.Json
+src:
+- uses: git-checkout
+deps:
+- uses: nuget/restore
+build:
+- uses: nuget/build/pack
+  with:
+    dir: Src/Newtonsoft.Json
+    version: 11.0.1
+output_dir: trigon-pack
+"#;
+
+#[test]
+fn a_proposal_naming_a_parameter_that_does_not_exist_is_caught_before_it_is_run() {
+    // **The failure this guards.** A model proposed `project:` for a tool whose parameter is `dir`.
+    // It parsed, so the loop accepted it, and the rejection then happened inside the *next* build
+    // as a fatal error — destroying a run that had already computed a complete comparison. A repair
+    // is an attempt to do better than an answer we already have; it must not be able to cost us
+    // that answer.
+    let bad = trigon_strategy::from_yaml(BAD_REPAIR).expect("this is valid YAML and a valid shape");
+    let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+    let cx = trigon_strategy::Context::default();
+    let err = trigon_strategy::render(&bad, &cx, &tools)
+        .expect_err("`project` is not a parameter of nuget/build/pack");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("has no parameter") && msg.contains("project"),
+        "the rejection should name the parameter: {msg}"
+    );
+    // And it should say what the tool does declare, so the next proposal can be right.
+    assert!(msg.contains("dir"), "{msg}");
+}
+
+#[test]
+fn the_corrected_proposal_renders() {
+    // The other half: the check must not reject a usable recipe, or a working repair would be
+    // discarded as readily as a broken one.
+    let good = trigon_strategy::from_yaml(GOOD_REPAIR).unwrap();
+    let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+    trigon_strategy::render(&good, &trigon_strategy::Context::default(), &tools)
+        .expect("`dir` is what the tool declares");
+}
