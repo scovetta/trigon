@@ -2772,6 +2772,20 @@ mod rebuild {
             subdir: loc.subdir.clone(),
             how: candidate.discovery,
         });
+        // **And back onto the target, because two later readers ask it rather than the strategy.**
+        // `Configured::inputs` and the model rung both read `ResolvedTarget.source.commit`, which is
+        // the commit the *registry* recorded — and that is empty for every PyPI target, every NuGet
+        // package published without SourceLink, and every npm monorepo with no `gitHead`. The
+        // commit the ladder resolved from a tag lives only in the candidate's location, so both of
+        // them declined on targets whose repository this run had *already cloned*: a divergent
+        // Newtonsoft.Json run printed `no repair: no source commit, so there is no repository to
+        // read` three lines under the commit it had just resolved, and `--model` was a silent no-op
+        // on the same targets the model rung exists to rescue.
+        //
+        // Assigned rather than merged: `report.source` is built from the location the build will
+        // use plus the declared fields off `resolved`, so it is strictly better informed than what
+        // it replaces.
+        resolved.source = report.source.clone();
         if verbose {
             println!("  source     {} @ {}", loc.repo, loc.git_ref);
             println!(

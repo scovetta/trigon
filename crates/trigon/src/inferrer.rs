@@ -74,12 +74,39 @@ impl trigon_registry::StrategyInferrer for ModelInferrer {
             tracing::debug!("no source recorded, so there is no repository to read");
             return Ok(Vec::new());
         };
-        if source.commit.is_empty() {
-            return Ok(Vec::new());
-        }
+        // **A commit from a tag, where the registry recorded none.** This used to return an empty
+        // vec here, silently: the model rung — the last one on the ladder, the one that exists to
+        // rescue what nothing deterministic could infer — declined on *every* PyPI target, every
+        // NuGet package published without SourceLink, and every npm monorepo with no `gitHead`,
+        // because `source.commit` is the commit the **registry** recorded and those registries
+        // record none. The heuristic rungs already resolve it from a version tag through this same
+        // function; the model rung simply never did, so `--model` was a no-op on the exact targets
+        // it was reached for.
+        let commit = if source.commit.is_empty() {
+            match trigon_registry::resolve_version_tag(
+                &source.repo_url,
+                &target.reference.version,
+                &target.reference.name,
+            )
+            .await
+            {
+                Some((sha, tag, _)) => {
+                    tracing::debug!(
+                        tag,
+                        "no registry commit; the model rung is reading tag {tag}"
+                    );
+                    sha
+                }
+                // Still a decline, but a described one. `why_not` below turns it into a sentence in
+                // the run record rather than a rung that said nothing.
+                None => return Ok(Vec::new()),
+            }
+        } else {
+            source.commit.clone()
+        };
 
         let cache = self.cache.clone();
-        let (repo, commit) = (source.repo_url.clone(), source.commit.clone());
+        let repo = source.repo_url.clone();
         let checkout = tokio::task::spawn_blocking(move || cache.checkout(&repo, &commit))
             .await
             .map_err(|e| RegistryError::Source {
@@ -135,6 +162,33 @@ impl trigon_registry::StrategyInferrer for ModelInferrer {
             discovery: source.how,
             assumptions: assumptions(&proposed),
         }])
+    }
+
+    /// Why this rung said nothing, when it did.
+    ///
+    /// It had no answer at all before, so a run whose last rung was the model one reported an empty
+    /// `declines` list and printed "no rung proposed a recipe, and none said why" — which is true
+    /// and useless. Both reasons here are about the repository, not the package.
+    async fn why_not(&self, target: &ResolvedTarget) -> Option<String> {
+        let source = target.source.as_ref()?;
+        if !source.commit.is_empty() {
+            return None;
+        }
+        match trigon_registry::resolve_version_tag(
+            &source.repo_url,
+            &target.reference.version,
+            &target.reference.name,
+        )
+        .await
+        {
+            Some(_) => None,
+            None => Some(format!(
+                "the registry recorded no commit for this version and no tag in {} matches {}, so \
+                 there is no tree to read. A model asked to guess a repository state is how a \
+                 corpus grows targets that pass for the wrong reason.",
+                source.repo_url, target.reference.version
+            )),
+        }
     }
 }
 

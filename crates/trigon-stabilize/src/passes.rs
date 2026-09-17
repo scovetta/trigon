@@ -457,6 +457,8 @@ pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
         Arc::new(GemExcludeSignatures),
         Arc::new(NupkgSignature),
         Arc::new(NupkgPortableFolderName),
+        Arc::new(NupkgTextEol),
+        Arc::new(NupkgDocMemberOrder),
         Arc::new(NupkgPackagingNames),
         Arc::new(NupkgPackagerVersion),
     ]
@@ -1168,5 +1170,236 @@ mod nupkg_portable_tests {
             b"portable-net45+win8".to_vec()
         );
         assert_eq!(canonical_portable(b"portablish-net45"), None);
+    }
+}
+
+/// Whether a `.nupkg` member is text that a packer wrote line endings into.
+///
+/// By extension, not by sniffing. A heuristic that guessed at content would eventually rewrite a
+/// `.dll` that happened to contain no `0x00` in its first page, and the cost of that mistake — a
+/// false match on an executable member — is the most expensive one in the system.
+fn is_nupkg_text(path: &[u8]) -> bool {
+    const TEXT: &[&[u8]] = &[b".nuspec", b".rels", b".psmdcp", b".xml", b".md", b".txt"];
+    TEXT.iter().any(|e| path.ends_with(e))
+}
+
+entry_pass!(
+    /// CRLF against LF, which is what a Windows publisher and a Linux rebuilder disagree about
+    /// before they disagree about anything else.
+    ///
+    /// **The highest-leverage difference in this ecosystem, and not a quirk of one package.** NuGet
+    /// writes a package's text members with the line endings of the machine that packed it, so a
+    /// package published from Windows — which is most of them, historically — differs from any
+    /// Linux rebuild in every `.nuspec`, `.rels`, `.psmdcp`, `[Content_Types].xml`, `.md` and
+    /// generated `.xml` doc it contains. Measured on Newtonsoft.Json 11.0.1: nine of twenty-three
+    /// members are byte-identical once this is applied and differ without it.
+    ///
+    /// **`Content`, not `Metadata`.** These are bytes a consumer receives, and the provenance cap
+    /// is meant to bite: a package that matches only after its line endings are rewritten has not
+    /// been reproduced byte for byte, and `NormalizedWithCaveats` is the honest ceiling for it.
+    NupkgTextEol,
+    "nupkg-text-eol",
+    RiskTier::Content,
+    is_zip,
+    |e| {
+        if !is_nupkg_text(e.path.as_bytes()) {
+            return Touched::NONE;
+        }
+        let Ok(body) = e.body_mut() else {
+            return Touched::NONE;
+        };
+        // Only `\r` immediately before `\n`. A lone `\r` is a classic-Mac line ending and a lone
+        // `\n` is already what we want; rewriting either would be changing the file rather than
+        // reconciling two spellings of the same break.
+        let before = body.len();
+        let mut out = Vec::with_capacity(before);
+        let mut i = 0;
+        while i < body.len() {
+            if body[i] == b'\r' && body.get(i + 1) == Some(&b'\n') {
+                i += 1;
+                continue;
+            }
+            out.push(body[i]);
+            i += 1;
+        }
+        if out.len() == before {
+            return Touched::NONE;
+        }
+        *body = out;
+        Touched {
+            entries: 1,
+            bytes: (before - body.len()) as u64,
+        }
+    }
+);
+
+/// Sort the `<member>` elements of a generated XML documentation file by name.
+///
+/// Roslyn emits them in the host's collation order, and Windows and ICU disagree about where `.`
+/// sorts — so the same source produces the same elements in a different order on a different
+/// machine. Measured on Newtonsoft.Json 11.0.1: exactly one twenty-one-line block moves, in four of
+/// the nine doc files, with no content difference at all.
+///
+/// Byte-level rather than through an XML parser, for the reason `embedded.rs` gives for reading a
+/// `.nuspec` the same way. The shape this relies on is narrow and is checked before anything is
+/// rewritten: one `<members>` element whose children are `<member ...>` elements.
+fn sort_doc_members(body: &[u8]) -> Option<Vec<u8>> {
+    let open = b"<members>";
+    let close = b"</members>";
+    let start = body.windows(open.len()).position(|w| w == open)? + open.len();
+    let end = body.windows(close.len()).position(|w| w == close)?;
+    if end <= start {
+        return None;
+    }
+    let inner = &body[start..end];
+
+    // Split on the element boundary rather than on lines: a `<member>` body can contain anything,
+    // including text that looks like a tag.
+    let mark = b"<member ";
+    let mut cuts = Vec::new();
+    let mut i = 0;
+    while let Some(p) = inner[i..].windows(mark.len()).position(|w| w == mark) {
+        cuts.push(i + p);
+        i += p + mark.len();
+    }
+    if cuts.len() < 2 {
+        return None;
+    }
+    let mut blocks: Vec<&[u8]> = Vec::with_capacity(cuts.len());
+    for (n, c) in cuts.iter().enumerate() {
+        let stop = cuts.get(n + 1).copied().unwrap_or(inner.len());
+        blocks.push(&inner[*c..stop]);
+    }
+    let lead = &inner[..cuts[0]];
+
+    // Keyed on the `name` attribute, which is the documented identity of the element. Ordering by
+    // the whole block would sort by the documentation text, which is not stable under an edit that
+    // changes only prose.
+    let key = |b: &&[u8]| -> Vec<u8> {
+        let m = b"name=\"";
+        match b.windows(m.len()).position(|w| w == m) {
+            Some(p) => {
+                let from = p + m.len();
+                let to = b[from..].iter().position(|c| *c == b'"').unwrap_or(0) + from;
+                b[from..to].to_vec()
+            }
+            None => Vec::new(),
+        }
+    };
+    let mut sorted = blocks.clone();
+    sorted.sort_by_key(key);
+    if sorted == blocks {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(body.len());
+    out.extend_from_slice(&body[..start]);
+    out.extend_from_slice(lead);
+    for b in sorted {
+        out.extend_from_slice(b);
+    }
+    out.extend_from_slice(&body[end..]);
+    Some(out)
+}
+
+entry_pass!(
+    NupkgDocMemberOrder,
+    "nupkg-doc-member-order",
+    RiskTier::Structural,
+    is_zip,
+    |e| {
+        // Only the generated documentation beside an assembly, which is where the ordering comes
+        // from a collation rather than from the author.
+        let p = e.path.as_bytes();
+        if !p.starts_with(b"lib/") || !p.ends_with(b".xml") {
+            return Touched::NONE;
+        }
+        let Ok(body) = e.body_mut() else {
+            return Touched::NONE;
+        };
+        let Some(sorted) = sort_doc_members(body) else {
+            return Touched::NONE;
+        };
+        *body = sorted;
+        Touched {
+            entries: 1,
+            bytes: 0,
+        }
+    }
+);
+
+#[cfg(test)]
+mod nupkg_text_tests {
+    use super::{is_nupkg_text, sort_doc_members};
+
+    #[test]
+    fn only_text_members_are_candidates_for_rewriting() {
+        for yes in [
+            b"Newtonsoft.Json.nuspec".as_slice(),
+            b"_rels/.rels".as_slice(),
+            b"[Content_Types].xml".as_slice(),
+            b"LICENSE.md".as_slice(),
+            b"lib/net45/Newtonsoft.Json.xml".as_slice(),
+        ] {
+            assert!(is_nupkg_text(yes), "{}", String::from_utf8_lossy(yes));
+        }
+        // The one that must never be rewritten. A content pass that reached an assembly could turn
+        // a real difference into a match, which is the most expensive mistake in the system.
+        for no in [
+            b"lib/net45/Newtonsoft.Json.dll".as_slice(),
+            b".signature.p7s".as_slice(),
+            b"lib/net45/Newtonsoft.Json.pdb".as_slice(),
+        ] {
+            assert!(!is_nupkg_text(no), "{}", String::from_utf8_lossy(no));
+        }
+    }
+
+    #[test]
+    fn doc_members_sort_by_name_and_keep_their_bodies() {
+        let doc = b"<?xml version=\"1.0\"?>\n<doc>\n<members>\n\
+            <member name=\"T:B\">\n<summary>bee</summary>\n</member>\n\
+            <member name=\"T:A\">\n<summary>ay</summary>\n</member>\n\
+            </members>\n</doc>\n"
+            .as_slice();
+        let out = sort_doc_members(doc).expect("the order changed");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.find("T:A").unwrap() < text.find("T:B").unwrap(),
+            "not sorted: {text}"
+        );
+        // Bodies travel with their elements rather than being reordered independently.
+        assert!(
+            text.contains("<member name=\"T:A\">\n<summary>ay</summary>"),
+            "{text}"
+        );
+        assert!(
+            text.contains("<member name=\"T:B\">\n<summary>bee</summary>"),
+            "{text}"
+        );
+        // And the frame is untouched.
+        assert!(
+            text.starts_with("<?xml version=\"1.0\"?>\n<doc>\n<members>"),
+            "{text}"
+        );
+        assert!(text.trim_end().ends_with("</members>\n</doc>"), "{text}");
+    }
+
+    #[test]
+    fn a_document_already_in_order_reports_no_change() {
+        // `Touched` is what a verdict's `applied` list is read against; a pass that claims an entry
+        // it did not change inflates it.
+        let doc = b"<doc><members><member name=\"T:A\"/><member name=\"T:B\"/></members></doc>";
+        assert!(sort_doc_members(doc).is_none());
+    }
+
+    #[test]
+    fn a_shape_this_does_not_understand_is_left_alone() {
+        // No `<members>`, one member, or an unterminated document: all reasons to do nothing rather
+        // than to rewrite on a guess.
+        assert!(sort_doc_members(b"<doc>no members here</doc>").is_none());
+        assert!(
+            sort_doc_members(b"<doc><members><member name=\"T:A\"/></members></doc>").is_none()
+        );
+        assert!(sort_doc_members(b"<doc><members><member name=\"T:B\"/>").is_none());
     }
 }

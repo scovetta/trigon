@@ -364,6 +364,45 @@ not leaking to ordinary packages.
 Measured on `Polly@8.2.0` at `--egress mirror-only`: 28 index requests, **441 versions withheld**,
 `attestable: true`, and a signed divergence statement.
 
+### 5.0.2 What a NuGet divergence is actually made of
+
+Dissected on `Newtonsoft.Json@11.0.1`, which rebuilds all nine of its frameworks and still compares
+`divergent`. Of twenty-three members, **thirteen are normalization and ten are not**, and the ten
+split into two very different things.
+
+**Line endings are the biggest single lever in this ecosystem.** NuGet writes a package's text
+members with the line endings of the machine that packed it, so a package published from Windows —
+which is most of them, historically — differs from any Linux rebuild in its `.nuspec`, `.rels`,
+`.psmdcp`, `[Content_Types].xml`, `.md` and every generated `.xml` doc. `nupkg-text-eol` is
+`Content` risk and the cap is meant to bite: a package that matches only after its line endings are
+rewritten has not been reproduced byte for byte, and `NormalizedWithCaveats` is the honest ceiling.
+
+`nupkg-doc-member-order` is the other: Roslyn emits `<member>` elements in the host's collation
+order, and Windows and ICU disagree about where `.` sorts. One block moves, in four of the nine doc
+files, with no content difference.
+
+**The nine assemblies are a six-year compiler gap, and that is not normalization's business.** The
+publisher built with .NET SDK 2.1.4xx / Roslyn 2.6; a current image carries SDK 8.0 / Roslyn 4.11,
+and the project sets `<LangVersion>latest</LangVersion>`. Measured across 33,367 matched method
+pairs: 92% are identical modulo metadata-token renumbering and 7.7% are genuinely different
+lowering — Roslyn rewrote the async state machines. Two compiler-injected types shift every token in
+the file, so the longest identical aligned run in a 658 KB assembly is 136 bytes. This is the
+toolchain question of §5.1 in its most concrete form, and nothing but the original SDK closes it.
+
+**And one ceiling that no toolchain reaches: the published assemblies are strong-name signed** with
+a key that is not in the repository. `build.ps1` runs with `$signAssemblies=$true` against
+`newtonsoft.snk`, which also defines a `SIGNED` constant that changes the `InternalsVisibleTo`
+attributes the source compiles. Newtonsoft.Json 11.0.1 therefore **cannot** be byte-reproduced by
+anyone without the publisher's private key, at any SDK version. That is a fact about the package
+rather than about Trigon, and it is the kind of fact a rebuilder exists to establish.
+
+The nuspec's four remaining differences are the packer's vintage — NuGet 4.5.0.4 emitted `<owners>`
+and `<requireLicenseAcceptance>false>` where 6.11 omits both, wrote `.NETPortable0.0-Profile259`
+where 6.11 writes `.NETPortable4.5-`, and our package carries a `repository commit=` the published
+one lacks. **Deliberately not normalized.** Those are elements a consumer can observe, and the last
+is more provenance than the original had; a pass that erased them would be the tool deciding that a
+manifest difference does not count.
+
 ### 5.1 The toolchain, which is the open question
 
 **NuGet publishes no compiler version.** The only toolchain evidence in a package is the packer

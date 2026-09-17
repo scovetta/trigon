@@ -274,14 +274,23 @@ for candidate in "$WORK"/*; do
     fi
 done
 
-# The equivalence statement's path, from the record the attestor just wrote rather than from a
+# The claim's path, from the record the attestor just wrote rather than from a glob over the
 # glob over the store: a store accumulates runs, and the bundle this line should name is the one
 # this run produced. Read with sed because the record puts one path per line, so the script keeps
 # working on a machine without jq — the `--transparency` line below is the only part that needs it.
+# **`equivalence` OR `divergence`.** A run that reproduces writes the first and a run that does not
+# writes the second, and this matched only the first — so every divergent run, which is exactly the
+# run someone most wants to check by hand, printed a placeholder for a bundle sitting in the store
+# under the other name. The other two statements a run writes, `rebuild` and `buildobservation`,
+# describe how the artifact was produced rather than how it compared, and `--rerun-comparison` has
+# nothing to re-derive from either.
 BUNDLE=""
 INCOMPLETE=""
 if [ -f "$STORE/runs/$LATEST.json" ]; then
-    REL="$(sed -n 's|.*"\(attestations/[^"]*/equivalence\.intoto\.json\)".*|\1|p' \
+    # `#` as the delimiter, not `|`. With `|` delimiting the s-command, the `\|` below reads as an
+    # escaped delimiter rather than an alternation, so the expression matched nothing at all and
+    # every run printed a placeholder — including the ones that did reproduce.
+    REL="$(sed -n 's#.*"\(attestations/[^"]*/\(equivalence\|divergence\)\.intoto\.json\)".*#\1#p' \
            "$STORE/runs/$LATEST.json" | head -1)"
     [ -n "$REL" ] && [ -f "$STORE/$REL" ] && BUNDLE="$STORE/$REL"
 fi
@@ -291,7 +300,7 @@ printf '  verify      %s verify-attestation \\\n' "$TRIGON"
 if [ -n "$BUNDLE" ]; then
     printf '                "%s" \\\n' "$BUNDLE"
 else
-    printf '                %s/attestations/.../equivalence.intoto.json \\\n' "$STORE"
+    printf '                %s/attestations/.../{equivalence,divergence}.intoto.json \\\n' "$STORE"
     INCOMPLETE=1
 fi
 if [ -n "$UPSTREAM" ] && [ -n "$REBUILT" ]; then
