@@ -2717,8 +2717,24 @@ mod rebuild {
             .map(|(rung, why)| format!("{rung}: {why}"))
             .collect();
         let Some(candidate) = climb.candidate else {
+            // **Printed, not logged.** These went to `tracing::info!`, which is off at the default
+            // level, so a `no-strategy` run said everything it knew about the package and nothing
+            // about why it stopped — the comment above says this is exactly the run whose reasons
+            // nobody could otherwise see, and then the reasons went somewhere nobody sees. Every
+            // other line this command emits is a `println!`; the one explaining a dead end was the
+            // exception.
+            //
+            // A run with no reasons at all is worse still, and possible: a ladder whose every rung
+            // declined silently. Saying so beats printing a blank space where an explanation goes.
+            println!();
+            if report.declines.is_empty() {
+                println!(
+                    "  no-strategy  no rung proposed a recipe, and none said why. That is a gap in \
+                     Trigon rather than a fact about this package."
+                );
+            }
             for d in &report.declines {
-                tracing::info!("{d}");
+                println!("  declined   {d}");
             }
             return Ok(Ran {
                 outcome: Outcome::NoStrategy,
