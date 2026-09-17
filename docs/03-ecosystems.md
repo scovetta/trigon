@@ -14,7 +14,7 @@ own `Registry` implementation and stabilizer profile, tells us the seam in
 | **PyPI** | ~12% → ~98% with `SOURCE_DATE_EPOCH` + umask fixes; timestamps are 87.7% of failures | Native-extension wheels | **M1** |
 | **crates.io** | Highly reproducible by design since `trim-paths` became the release default | Toolchain-window inference; build scripts and proc macros | **resolves, builds, compares** |
 | **RubyGems** | 0% → 99.9% since 3.6.7 defaults `SOURCE_DATE_EPOCH` and sorts gemspec metadata. **No independent verification infrastructure exists anywhere.** | Native extensions | M5 |
-| **NuGet** | Trusted publishing since Sept 2025; **almost no reproducibility infrastructure** | We are partly inventing this ecosystem's story | **builds and compares at `--egress open`; declined at enforced tiers ([B23](17-backlog.md))** |
+| **NuGet** | Trusted publishing since Sept 2025; **almost no reproducibility infrastructure** | We are partly inventing this ecosystem's story | **resolves, builds, compares and attests at `mirror-only`** |
 | **GitHub** | Not applicable. The artifact is a release asset or source archive | Everything comes from the release workflow | M5 |
 
 Sources: the reproducible-builds project's per-ecosystem reporting through 2026, PEP 740 and the
@@ -327,6 +327,42 @@ bookkeeping, and the `nupkg` stabilizer profile is exactly that list:
 
 With those, two independent packs of one source reconcile to `normalized` with every member
 identical.
+
+### 5.0.1 The mirror serves a V3 feed
+
+`dotnet pack` cannot run without `dotnet restore`, so unlike crates.io — where
+`cargo package --no-verify` resolves nothing — NuGet has no way to sidestep the index. The mirror
+serves one at `/-nuget/<moment>/`: a service index, a registration filtered by `published`, and a
+flat container whose version list is **derived** from that filtered registration rather than
+proxied, because upstream's own version list carries no dates and so cannot be filtered at all.
+
+Four things this cost that were not obvious from the specification:
+
+- **Registration pages may be remote.** A page either carries its leaves inline or an `@id` to
+  fetch them from, and which one depends on how many versions a package has. `newtonsoft.json` is
+  wholly inline; `system.text.json` has three pages and *none* of them are. A filter reading only
+  what arrived inline is correct on the first and silently passes everything on the second.
+- **`1900-01-01` means unlisted, not published in 1900.** Filtering Newtonsoft.Json to mid-2018
+  removed every listed release after the moment and left `13.0.4-beta1` standing, because delisted
+  packages carry that sentinel and it precedes every moment there is.
+- **`--source` does not override `packageSourceMapping`.** A repository that configures one — Polly
+  does — answers `NU1100 … the following source(s) were not considered` and never contacts the
+  mirror. The restore tool writes a `NuGet.config` with `<clear />` in every section and passes
+  `--configfile`.
+- **NuGet 6.11 refuses plain HTTP sources** rather than warning as older versions did, with
+  `NU1301` and nothing reaching the mirror at all. The generated config sets
+  `allowInsecureConnections="true"`, which is right here: the mirror is the only host inside the
+  build's network island.
+
+**The toolchain's own packages are exempt from the date filter**, by the same reasoning as the
+`-toolchain` route. SDK 8.0.423 demands `Microsoft.NETCore.App.Ref 6.0.36`, a targeting pack
+released a year after Polly 8.2.0 was published; that version is a function of the SDK in the image,
+not of anything the project asked for, so dating it asks the wrong question and leaves a constraint
+nothing can satisfy. The exemption is a short list of Microsoft-owned id prefixes and is tested for
+not leaking to ordinary packages.
+
+Measured on `Polly@8.2.0` at `--egress mirror-only`: 28 index requests, **441 versions withheld**,
+`attestable: true`, and a signed divergence statement.
 
 ### 5.1 The toolchain, which is the open question
 

@@ -16,6 +16,7 @@ mod error;
 mod guard;
 mod moment;
 mod npm;
+mod nuget;
 mod pypi;
 mod server;
 

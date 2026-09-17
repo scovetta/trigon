@@ -295,35 +295,6 @@ commit from a release whose tag we failed to fetch. `Checkout::tags` carries the
 package. Turning that warning into a refusal needs a way to know a project is VCS-versioned before
 building it, which is a `pyproject.toml` read the inferrer does not do yet.
 
-## B23. A NuGet V3 feed in the mirror
-
-NuGet builds reach a comparison at `--egress open` and are **declined at every enforced tier**,
-because `dotnet pack` cannot run without `dotnet restore` and the mirror serves no V3 feed. The
-decline says so by name rather than reporting the package as unbuildable.
-
-crates.io has no equivalent problem and the reason is worth recording: `cargo package --no-verify`
-resolves nothing, so that ecosystem never asks the mirror for an index at all. NuGet has no such
-escape — restore is mandatory, and it is where every dependency enters.
-
-What it needs, modelled on `mirror/src/pypi.rs`:
-
-1. A **service index** at `/-nuget/index.json` advertising `PackageBaseAddress/3.0.0` and
-   `RegistrationsBaseUrl/3.6.0` pointed back at this mirror.
-2. The **registration index**, filtered by `published` against the run's moment. This is the only
-   NuGet document carrying dates, so it is the only one that can be filtered — the flat container's
-   `versions` array has none.
-3. A **flat container** whose version list is derived from the filtered registration, and whose
-   `.nupkg` downloads proxy under the existing artifact rules so the guard still applies.
-4. `api.nuget.org` in `ARTIFACT_HOSTS`, and `withhold_version` for the target's own release.
-
-The paging is the part to be careful with: a registration index for a large package splits into
-pages fetched by `@id`, so a filter that reads only the inline `items` silently passes everything
-for exactly the packages most likely to matter.
-
-**Done when:** a NuGet target rebuilds at `--egress mirror-only` with a non-zero
-`versions_withheld`, which is the evidence that the pin bound something — a run that reports zero
-is the failure this must not ship with.
-
 ## B21. Keyed signing under a trusted root, and the Rekor client
 
 [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) settles the design and staging has

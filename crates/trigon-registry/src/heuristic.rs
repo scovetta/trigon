@@ -1182,26 +1182,33 @@ impl StrategyInferrer for NuGetInferrer {
                 .into(),
         );
 
-        // **Declined rather than attempted where a mirror is running.** `dotnet pack` cannot work
-        // without `dotnet restore`, and restore needs a NuGet V3 feed — which this mirror does not
-        // serve yet. crates.io sidesteps the same problem because `cargo package --no-verify`
-        // resolves nothing; NuGet has no such escape.
-        //
-        // The alternative was to point `--source` at a `/-nuget/` route that does not exist, which
-        // is what the first draft did: restore failed with `NU1100 … the following source(s) were
-        // not considered`, and the mirror separately reported that it had never been contacted
-        // about a run claiming to be pinned. A rung that produces a recipe it knows cannot restore
-        // is worse than one that says why — the first reads as a package that will not build.
-        if self.mirror.is_some() {
-            return Ok(Vec::new());
+        // The feed, pointed at the mirror where one is running. The moment travels in the path
+        // rather than in credentials: `dotnet restore` is handed a `--source` URL and sends no
+        // userinfo with it, so a moment carried the npm way would be silently dropped.
+        let mut restore = BTreeMap::new();
+        match (&target.intrinsics.publish_time, &self.mirror) {
+            (Some(t), Some(m)) => {
+                restore.insert(
+                    "source".to_string(),
+                    format!("http://{m}/-nuget/{t}/index.json"),
+                );
+            }
+            // A mirror with no publish time to pin it to would serve an unfiltered feed under a
+            // name that claims filtering. Refused rather than pinned to nothing.
+            (None, Some(_)) => {
+                assumptions.push(
+                    "the feed declared no publish time for this version, so there is no moment to \
+                     pin the index to and dependencies resolve against today's feed"
+                        .into(),
+                );
+            }
+            (_, None) => assumptions.push(
+                "no mirror is in front of this build, so `dotnet restore` resolves against the \
+                 live feed rather than against it as it stood when this version was published. A \
+                 dependency published since then can reach this build, and nothing would notice"
+                    .into(),
+            ),
         }
-        assumptions.push(
-            "no mirror is in front of this build, so `dotnet restore` resolves against the live \
-             feed rather than against it as it stood when this version was published. A dependency \
-             published since then can reach this build, and nothing here would notice"
-                .into(),
-        );
-        let restore = BTreeMap::new();
 
         let strategy = Strategy::Flow(FlowStrategy {
             location: Location {
@@ -1249,14 +1256,6 @@ impl StrategyInferrer for NuGetInferrer {
     async fn why_not(&self, target: &ResolvedTarget) -> Option<String> {
         if let Err(why) = commit_for(target, false).await {
             return Some(why);
-        }
-        if self.mirror.is_some() {
-            return Some(
-                "this run has a mirror in front of it, and the mirror does not serve a NuGet V3 \
-                 feed yet — so `dotnet restore` could not resolve anything and `dotnet pack` \
-                 cannot run without it. NuGet builds work at `--egress open` today. See B23."
-                    .into(),
-            );
         }
         None
     }

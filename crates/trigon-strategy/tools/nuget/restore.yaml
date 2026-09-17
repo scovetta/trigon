@@ -13,10 +13,15 @@ params:
   source:
     required: false
     doc: >-
-      A NuGet feed to restore from, replacing the configured ones. Pointed at the mirror where one
-      is running. Without it, restore reaches api.nuget.org directly, which an enforced tier
-      forbids — so a run at `mirror-only` without this fails in deps rather than silently
-      resolving against the live feed.
+      The NuGet feed to restore from, written into a generated `NuGet.config` and passed with
+      `--configfile`. Pointed at the mirror where one is running.
+
+      **Not `--source`.** That *adds* a source and leaves the repository's own configuration in
+      place, and a repository with `<packageSourceMapping>` then refuses to consider the new one:
+      Polly's restore failed with `NU1100 … PackageSourceMapping is enabled, the following
+      source(s) were not considered` and never contacted the mirror at all. A config file with
+      `<clear />` in both sections replaces the chain rather than appending to it, which is the
+      only way to be sure the feed a build resolves from is the one this run chose.
   locked:
     required: false
     default: "false"
@@ -53,7 +58,53 @@ steps:
       set -- "$@" {{ project }}
       {%- endif %}
       {%- if with.source %}
-      set -- "$@" --source {{ with.source }}
+      # `<clear />` in every section, so nothing the repository or the machine configured survives.
+      # `packageSourceMapping` especially: leaving it in place lets a repository decide that the
+      # mirror is not a source it will consider, which reads as the feed being empty.
+      mkdir -p /trigon/nuget
+      cat > /trigon/nuget/NuGet.config <<'XML'
+      <?xml version="1.0" encoding="utf-8"?>
+      <configuration>
+        <packageSources>
+          <clear />
+          <!-- `allowInsecureConnections`, because the mirror speaks plain HTTP inside the network
+               island and NuGet 6.11 — which ships in the SDK 8.0.4xx band — refuses an `http://`
+               source outright rather than warning as older versions did. The symptom is NU1301
+               "Unable to load the service index" with **nothing reaching the mirror at all**: its
+               transcript is empty, which reads as a network fault rather than as a client policy.
+               Ignored by older NuGet, so it is safe to set unconditionally.
+
+               Plain HTTP is right here and TLS would be worse: the mirror is inside the build's
+               network island, it is the only host in there, and a certificate would have to be
+               minted and trusted by the build to say something the topology already says. -->
+          <add key="trigon" value="{{ with.source }}" allowInsecureConnections="true" />
+        </packageSources>
+        <packageSourceMapping>
+          <clear />
+        </packageSourceMapping>
+        <disabledPackageSources>
+          <clear />
+        </disabledPackageSources>
+        <fallbackPackageFolders>
+          <clear />
+        </fallbackPackageFolders>
+      </configuration>
+      XML
+      # No de-indenting step: YAML strips this block's common indentation before the shell ever
+      # sees it, so the closing `XML` really is at column 0 in the rendered script. A `sed` here
+      # looked necessary and would have quietly rewritten nothing.
+      set -- "$@" --configfile /trigon/nuget/NuGet.config
+      # **Prove the feed answers before handing it to NuGet.** `NU1301 Unable to load the service
+      # index` is emitted for every reason there is — DNS, connect, TLS policy, a 404, a body that
+      # will not parse — and NuGet prints none of them. One `wget` turns "something went wrong"
+      # into a status line and a body, and distinguishes a mirror that is unreachable from one that
+      # is answering something NuGet dislikes.
+      echo "probing {{ with.source }}"
+      wget -S -O /trigon/nuget/probe.json "{{ with.source }}" 2>&1 | sed 's/^/  /' || {
+        echo "the feed did not answer, so restore would fail with NU1301 and say nothing about why"
+        exit 1
+      }
+      head -c 400 /trigon/nuget/probe.json; echo
       {%- endif %}
       {%- if with.locked == 'true' %}
       set -- "$@" --locked-mode

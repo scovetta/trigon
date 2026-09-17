@@ -244,7 +244,13 @@ say "done"
 UPSTREAM=""; REBUILT=""
 for candidate in "$WORK"/*; do
     [ -f "$candidate" ] || continue
-    set -- "$WORK"/rebuild/*/"${candidate##*/}"
+    # **Case-insensitively.** NuGet ids are case-insensitive and the feed serves the filename
+    # folded, so the published artifact arrives as `polly.8.2.0.nupkg` while `dotnet pack` writes
+    # `Polly.8.2.0.nupkg`. An exact match found neither and printed placeholders for a run that had
+    # both files sitting in the work directory. Other ecosystems are unaffected: their two names
+    # already agree, so folding changes nothing for them.
+    base="${candidate##*/}"
+    set -- $(find "$WORK"/rebuild -maxdepth 2 -type f -iname "$base" 2>/dev/null)
     # Exactly one match, or none: rebuild directories accumulate across runs of the same target,
     # and a verify line naming the wrong one is worse than naming none at all.
     if [ $# -eq 1 ] && [ -f "$1" ]; then

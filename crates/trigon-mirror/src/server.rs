@@ -4,6 +4,7 @@
 //! in the credentials: the same mirror serves npm and PyPI and the client says which by how it
 //! addressed it.
 
+use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,7 +63,13 @@ pub const TOOLCHAIN_HOSTS: &[&str] = &[
 /// check, so it needed none. At `mirror-only` egress this mirror is the build's only route out, so
 /// that made the tier a general HTTP proxy to the internet wearing the name of a boundary — a
 /// larger hole than the one it was found while closing.
-pub const ARTIFACT_HOSTS: &[&str] = &["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"];
+pub const ARTIFACT_HOSTS: &[&str] = &[
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    // NuGet serves its registration metadata and its `.nupkg` bytes from the one host.
+    "api.nuget.org",
+];
 
 /// Whether the artifact route will proxy to this host.
 ///
@@ -587,6 +594,25 @@ async fn serve_one(mirror: &Mirror, req: Request) -> Result<Response, MirrorErro
         }
     }
 
+    // NuGet, before the auth check for the same reason the artifact route is: the filter travels
+    // in the path. `dotnet restore` is configured with a `--source` URL and sends no credentials to
+    // it, so a moment carried in userinfo would be dropped exactly as npm drops it on a tarball
+    // request — the failure `moment.rs` records as its broken assumption.
+    if let Some(rest) = path_now.strip_prefix("/-nuget/") {
+        // The authority the client reached us on, so the documents we serve point back at the same
+        // place. Taken from the request rather than from configuration: the mirror is addressed by
+        // a container alias inside the network island (`timewarp:PORT`) and by `127.0.0.1` from the
+        // host, and a document that named the wrong one would resolve for one caller and not the
+        // other.
+        let via = req
+            .headers()
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        return nuget_route(mirror, rest, &path_now, &via).await;
+    }
+
     // Toolchains, likewise before the auth check and for a stronger reason: there is nothing to
     // filter by date. A pinned toolchain URL names its own version, so the bytes are a function of
     // the URL. Without this route a build at `mirror-only` egress cannot install the toolchain that
@@ -627,6 +653,12 @@ async fn serve_one(mirror: &Mirror, req: Request) -> Result<Response, MirrorErro
     match filter.platform {
         Platform::Npm => npm_request(mirror, &filter, &path, &query, &host).await,
         Platform::PyPI => pypi_request(mirror, &filter, &path, &query, &accept, &host).await,
+        // **Named rather than waved through.** This match is reached only by a request whose
+        // filter came out of *credentials*, and NuGet's never does: `dotnet restore` is handed a
+        // `--source` URL and sends no userinfo with it, so the moment travels in the path and
+        // `/-nuget/` is answered before the auth check. A NuGet filter arriving here means
+        // something built one from credentials, which is a bug rather than a request to serve.
+        Platform::NuGet => Err(MirrorError::NoFilter),
     }
 }
 
@@ -835,6 +867,194 @@ async fn artifact(mirror: &Mirror, rest: &str, query: &str) -> Result<Response, 
 /// `/-toolchain/<host>/<path>`. No filter and no credentials: the URL names an exact version, so
 /// there is no moment to pin it to and nothing a date filter could remove. The guard still applies,
 /// because "the artifact arrived dressed as a toolchain" is exactly the route it exists to close.
+/// A NuGet V3 feed, filtered to a moment.
+///
+/// Addressed as `/-nuget/{moment}/...` so every request says what it is filtered to, the way
+/// `/-artifact/{platform}/{moment}/...` does. Three shapes:
+///
+/// * `{moment}/index.json` — the service index, pointing the client back here.
+/// * `{moment}/reg/{id}/index.json` — the registration, filtered. **Every page resolved and
+///   inlined**, so the client never holds a URL this mirror would have to serve separately and a
+///   remote page cannot slip past the filter unread.
+/// * `{moment}/flat/{id}/index.json` — the version list, *derived* from the filtered registration.
+/// * `{moment}/flat/{id}/{version}/{file}` — the `.nupkg`, proxied under the guard.
+async fn nuget_route(
+    mirror: &Mirror,
+    rest: &str,
+    path: &str,
+    via: &str,
+) -> Result<Response, MirrorError> {
+    let (moment, tail) = rest.split_once('/').ok_or(MirrorError::NoFilter)?;
+    if moment.is_empty() {
+        return Err(MirrorError::NoFilter);
+    }
+    let filter = Filter {
+        platform: Platform::NuGet,
+        moment: moment.to_string(),
+    };
+    // The authority this mirror is reachable at, so the documents it serves point back at it.
+    let base = format!("http://{via}/-nuget/{moment}");
+
+    if tail == "index.json" {
+        mirror.seen.note_moment(moment);
+        mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
+        // Through `json_response`, not `axum::Json`: it transcribes the exact bytes served as an
+        // `index` exchange. A counter alone is invisible to the pin evidence, which is built from
+        // the transcript — the first working run reported `it was contacted but served no index
+        // document` while having served three, because the route bumped a counter and recorded
+        // nothing.
+        return Ok(json_response(
+            &mirror.seen,
+            &format!("{base}/index.json"),
+            &crate::nuget::service_index(&base),
+            "application/json",
+            0,
+        ));
+    }
+
+    if let Some(p) = tail.strip_prefix("reg/") {
+        let id = p
+            .strip_suffix("/index.json")
+            .ok_or_else(|| MirrorError::NotFound {
+                path: path.to_string(),
+            })?;
+        let (pages, removed, withheld) = nuget_pages(mirror, id, &filter, &base).await?;
+        mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
+        mirror
+            .stats
+            .versions_withheld
+            .fetch_add(removed as u64, Ordering::Relaxed);
+        tracing::debug!(id, moment, removed, withheld, "filtered a registration");
+        let count: usize = pages
+            .iter()
+            .map(|p| p.get("items").and_then(Value::as_array).map_or(0, Vec::len))
+            .sum();
+        let url = format!("{base}/reg/{}/index.json", crate::nuget::normalized(id));
+        return Ok(json_response(
+            &mirror.seen,
+            &url,
+            &serde_json::json!({
+                "@id": url,
+                "count": pages.len(),
+                "totalVersions": count,
+                "items": pages,
+            }),
+            "application/json",
+            removed as u64,
+        ));
+    }
+
+    if let Some(p) = tail.strip_prefix("flat/") {
+        // `{id}/index.json` is the version list; anything else is a file to proxy.
+        if let Some(id) = p.strip_suffix("/index.json") {
+            let (pages, removed, _) = nuget_pages(mirror, id, &filter, &base).await?;
+            mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
+            mirror
+                .stats
+                .versions_withheld
+                .fetch_add(removed as u64, Ordering::Relaxed);
+            // **Derived, never proxied.** The upstream version list carries no dates, so a mirror
+            // that forwarded it would answer with every version and report that it had filtered.
+            return Ok(json_response(
+                &mirror.seen,
+                &format!("{base}/flat/{}/index.json", crate::nuget::normalized(id)),
+                &serde_json::json!({ "versions": crate::nuget::versions(&pages) }),
+                "application/json",
+                removed as u64,
+            ));
+        }
+        // The bytes. Through `proxy`, so the guard hashes them and the target's own artifact is
+        // refused exactly as it is on every other route.
+        mirror
+            .stats
+            .passthrough_requests
+            .fetch_add(1, Ordering::Relaxed);
+        let url = format!("{}/{p}", crate::nuget::FLAT_BASE);
+        return proxy(mirror, &url, &filter, "artifact").await;
+    }
+
+    Err(MirrorError::NotFound {
+        path: path.to_string(),
+    })
+}
+
+/// Every registration page for a package, resolved, filtered and pointed back at this mirror.
+///
+/// Returns the pages, how many leaves the moment removed, and how many the withheld target did.
+///
+/// **Remote pages are fetched here and nowhere else.** A registration index either carries its
+/// leaves inline or carries an `@id` to fetch them from, and which one depends on how many versions
+/// the package has: `newtonsoft.json` is wholly inline, `system.text.json` has three pages and none
+/// of them are. Filtering only what arrived inline would pass every version of the second kind
+/// through while reporting that it had filtered — so the fetch happens before the filter, and the
+/// result is inlined so the client never asks for a page separately.
+async fn nuget_pages(
+    mirror: &Mirror,
+    id: &str,
+    filter: &Filter,
+    base: &str,
+) -> Result<(Vec<Value>, usize, usize), MirrorError> {
+    let id = crate::nuget::normalized(id);
+    mirror.seen.note_moment(&filter.moment);
+    let url = format!("{}/{id}/index.json", crate::nuget::REGISTRATION_BASE);
+    let index: Value = fetch(mirror, &url, filter, &[]).await?.json().await?;
+
+    let mut pages: Vec<Value> = index
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let (mut removed, mut withheld) = (0usize, 0usize);
+    for page in pages.iter_mut() {
+        if !crate::nuget::page_is_inline(page)
+            && let Some(u) = crate::nuget::page_url(page)
+        {
+            // Only upstream's own registration base. A page `@id` pointing anywhere else is a
+            // document we do not understand, and following it would make this route a proxy to
+            // whatever a feed chose to name.
+            let u = u.to_string();
+            if u.starts_with(crate::nuget::REGISTRATION_BASE) {
+                match fetch(mirror, &u, filter, &[]).await {
+                    Ok(r) => match r.json::<Value>().await {
+                        Ok(full) => *page = full,
+                        Err(e) => {
+                            return Err(MirrorError::Upstream {
+                                platform: "nuget".into(),
+                                status: 502,
+                            })
+                            .inspect_err(|_| tracing::warn!("registration page {u}: {e}"));
+                        }
+                    },
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        // A page that is still not inline after that resolved to nothing we can read. Refused
+        // rather than served empty: an empty page is indistinguishable from a filtered one, and
+        // this route's whole job is to be distinguishable.
+        if !crate::nuget::page_is_inline(page) {
+            return Err(MirrorError::Upstream {
+                platform: "nuget".into(),
+                status: 502,
+            });
+        }
+        removed += crate::nuget::filter_page(page, &filter.moment);
+        if let Some(w) = mirror.guard.withheld() {
+            withheld += crate::nuget::withhold_version(page, w);
+        }
+        crate::nuget::rewrite_urls(page, base);
+    }
+    if withheld > 0 {
+        tracing::info!(
+            id,
+            "the version under test was withheld from this registration, so a resolver picks \
+             another rather than being offered one it will then be refused"
+        );
+    }
+    Ok((pages, removed, withheld))
+}
+
 async fn toolchain(mirror: &Mirror, rest: &str, query: &str) -> Result<Response, MirrorError> {
     let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
     if !toolchain_host_allowed(host) {

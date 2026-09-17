@@ -25,6 +25,7 @@ pub struct Filter {
 pub enum Platform {
     Npm,
     PyPI,
+    NuGet,
 }
 
 impl Platform {
@@ -32,6 +33,7 @@ impl Platform {
         match s {
             "npm" => Some(Platform::Npm),
             "pypi" => Some(Platform::PyPI),
+            "nuget" => Some(Platform::NuGet),
             _ => None,
         }
     }
@@ -40,6 +42,9 @@ impl Platform {
         match self {
             Platform::Npm => "https://registry.npmjs.org",
             Platform::PyPI => "https://pypi.org",
+            // The registration and flat-container bases live on this host; the NuGet routes name
+            // the full URL themselves rather than joining onto this, so it is the bare origin.
+            Platform::NuGet => "https://api.nuget.org",
         }
     }
 
@@ -47,6 +52,7 @@ impl Platform {
         match self {
             Platform::Npm => "npm",
             Platform::PyPI => "pypi",
+            Platform::NuGet => "nuget",
         }
     }
 }
