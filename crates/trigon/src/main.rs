@@ -3049,10 +3049,45 @@ mod rebuild {
                             cached_in: after.cached_input.saturating_sub(before.cached_input),
                         });
                         match proposed {
-                            Ok(next) => {
-                                strategy = next;
-                                continue;
-                            }
+                            // **Rendered before it is accepted**, exactly as on the build-failure
+                            // path. This is the site that actually fires for a divergence, and it
+                            // is the one where losing the run costs most: the build *succeeded*,
+                            // the comparison is computed, and the verdict is sitting in `judged`
+                            // waiting to be recorded. A proposal naming four parameters the tool
+                            // does not declare threw all of it away.
+                            //
+                            // Both arms below keep `judged`, so the run reports the divergence it
+                            // found rather than an error about the suggestion for improving it.
+                            Ok(next) => match usable(&next) {
+                                Ok(()) if !changes_anything(&next, &strategy_digest) => {
+                                    if verbose {
+                                        println!(
+                                            "  repair     proposed the same recipe; nothing to try"
+                                        );
+                                    }
+                                    report.repair_stopped = Some(
+                                        "the proposal renders to the recipe that just ran".into(),
+                                    );
+                                    judged = Some((rebuilt, comparison));
+                                    break (built, strategy_digest);
+                                }
+                                Ok(()) => {
+                                    strategy = next;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    if verbose {
+                                        println!("  repair     discarded: {e}");
+                                    }
+                                    report.repair_stopped =
+                                        Some(format!("the proposed recipe does not render: {e}"));
+                                    tracing::warn!(
+                                        "the repair proposed a recipe that will not render: {e:#}"
+                                    );
+                                    judged = Some((rebuilt, comparison));
+                                    break (built, strategy_digest);
+                                }
+                            },
                             Err(e) => {
                                 tracing::warn!("the proposal produced nothing: {e:#}");
                                 judged = Some((rebuilt, comparison));
@@ -3152,6 +3187,16 @@ mod rebuild {
                         // A repair is an attempt to do better than an answer we already have. It
                         // must never be able to cost us that answer.
                         Ok(next) => match usable(&next) {
+                            Ok(()) if !changes_anything(&next, &strategy_digest) => {
+                                if verbose {
+                                    println!(
+                                        "  repair     proposed the same recipe; nothing to try"
+                                    );
+                                }
+                                report.repair_stopped =
+                                    Some("the proposal renders to the recipe that just ran".into());
+                                break (built, strategy_digest);
+                            }
                             Ok(()) => {
                                 strategy = next;
                                 continue;
@@ -5409,6 +5454,29 @@ mod sweep {
 /// suggestion instead of aborting the run that asked for it. Deliberately the real `render` rather
 /// than a cheaper approximation: the failure this exists to catch — a tool parameter that does not
 /// exist — is found nowhere else.
+/// Whether a proposal actually changes the recipe.
+///
+/// **Measured on a real run**: a repair proposed a strategy that rendered to the same digest as the
+/// one that had just diverged, and the loop rebuilt it — a hundred seconds of container time and a
+/// second round of tokens to reach a result that was identical by construction. Two attempts, two
+/// `strategy ab54e552a23d45d0` blocks, one answer.
+///
+/// Compared on the digest rather than the YAML, for the same reason the attestation names it: a
+/// reordered key or an edited comment is not a different recipe.
+#[cfg(feature = "build")]
+fn changes_anything(next: &trigon_strategy::Strategy, current: &Option<String>) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    match trigon_strategy::ToolRegistry::builtin()
+        .and_then(|tools| trigon_strategy::strategy_digest(next, &tools))
+    {
+        // A digest we cannot compute is not evidence of sameness. Proceed, and let the build say.
+        Err(_) => true,
+        Ok(d) => &d != current,
+    }
+}
+
 #[cfg(feature = "build")]
 fn usable(strategy: &trigon_strategy::Strategy) -> Result<(), String> {
     let tools = trigon_strategy::ToolRegistry::builtin().map_err(|e| e.to_string())?;
@@ -6776,6 +6844,61 @@ output_dir: trigon-pack
         // And it names what the tool does take, so the operator reading the line can tell whether
         // the model was close or lost.
         assert!(why.contains("dir"), "{why}");
+    }
+
+    #[test]
+    fn every_place_a_proposal_is_accepted_validates_it_first() {
+        // **The class, not the instance.** There are two repair paths — one for a build failure and
+        // one for a divergence — and the first fix guarded only the build-failure one. The
+        // divergence path is the one that actually fires for a package that builds and compares,
+        // and it is where losing the run costs most: the verdict is already computed.
+        //
+        // Read out of the source rather than asserted about behaviour, because what must not
+        // happen is a *third* acceptance site added without the check. A behavioural test on the
+        // two that exist would pass on the day someone adds one.
+        let src = include_str!("main.rs");
+        let accepts = src.matches("strategy = next;").count();
+        assert!(
+            accepts >= 2,
+            "the acceptance sites moved; this test needs rewriting"
+        );
+        let guards = src.matches("match usable(&next)").count();
+        assert_eq!(
+            accepts, guards,
+            "{accepts} place(s) accept a repair proposal and {guards} validate it first. An \
+             unvalidated one can abort a run that already has an answer."
+        );
+        // And each guard must keep the run's result rather than propagate. Both paths break with
+        // the state they had; neither may use `?` on the proposal.
+        // Split so this test's own source does not contain the pattern it forbids — it reads
+        // `main.rs`, and `main.rs` is where this assertion lives.
+        let propagates = concat!("usable(&next)", "?");
+        assert!(
+            !src.contains(propagates),
+            "a validation failure must discard the proposal, not end the run"
+        );
+    }
+
+    #[test]
+    fn a_proposal_identical_to_the_recipe_that_just_ran_is_not_worth_a_rebuild() {
+        let same = trigon_strategy::from_yaml(USES_THE_PARAMETER_IT_DECLARES).unwrap();
+        let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+        let digest = trigon_strategy::strategy_digest(&same, &tools).unwrap();
+        assert!(
+            !super::changes_anything(&same, &Some(digest)),
+            "a proposal rendering to the digest that just ran changes nothing"
+        );
+        // A different recipe does change something.
+        let other = trigon_strategy::from_yaml(
+            &USES_THE_PARAMETER_IT_DECLARES.replace("Src/Newtonsoft.Json", "Src/Other"),
+        )
+        .unwrap();
+        assert!(super::changes_anything(
+            &other,
+            &Some(trigon_strategy::strategy_digest(&same, &tools).unwrap())
+        ));
+        // And an unknown current digest is not evidence of sameness.
+        assert!(super::changes_anything(&same, &None));
     }
 
     #[test]
