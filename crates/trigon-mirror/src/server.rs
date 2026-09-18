@@ -48,6 +48,10 @@ pub const TOOLCHAIN_HOSTS: &[&str] = &[
     // from when `RUSTUP_DIST_SERVER` points at it, and its URLs name an exact release — the
     // property this list requires.
     "static.rust-lang.org",
+    // io.js, for the year before it merged back into Node at 4.0.0. `_nodeVersion` values of 1.x,
+    // 2.x and 3.x name releases that only ever existed here — nodejs.org has no v1, v2 or v3 — and
+    // the URLs name an exact version, which is the property this list requires.
+    "iojs.org",
 ];
 
 /// Hosts the artifact route will fetch from.
@@ -1635,6 +1639,12 @@ mod allowlist_tests {
         assert!(host_allowed("artifact", "registry.npmjs.org"));
         assert!(host_allowed("passthrough", "pypi.org"));
         assert!(host_allowed("toolchain", "nodejs.org"));
+        // io.js, which served majors 1 to 3 before the merge. Without this the toolchain route
+        // refuses the only host those versions were ever published from, and the refusal reads as
+        // the mirror being broken rather than as a host nobody added.
+        assert!(host_allowed("toolchain", "iojs.org"));
+        // And it is a toolchain host, not an artifact one: the lists do not bleed.
+        assert!(!host_allowed("artifact", "iojs.org"));
 
         // The lists do not bleed into each other: a toolchain host is not somewhere the artifact
         // route may fetch from, and vice versa. That separation is the reason there are two lists.

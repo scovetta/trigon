@@ -513,3 +513,71 @@ output_dir: .
         }
     }
 }
+
+/// io.js versions resolve to io.js's own host, and nothing else moves.
+///
+/// For the year before the projects merged at 4.0.0, majors 1 to 3 were io.js releases served from
+/// `iojs.org/dist` under an `iojs-` filename; nodejs.org has no v1, v2 or v3. `delayed-stream@1.0.0`
+/// records `_nodeVersion: 1.6.4` and asked nodejs.org for a file that never existed there.
+///
+/// The selection is a shell `case`, so the test runs that `case` under a real `sh` rather than
+/// grepping the rendered text — the boundary is the part that is easy to get wrong, and `1.*` must
+/// catch `1.6.4` while leaving `10.9.2` alone.
+#[test]
+fn iojs_versions_come_from_iojs_and_the_boundary_holds_either_side() {
+    let tools = ToolRegistry::builtin().unwrap();
+    let deps_for = |version: &str| -> String {
+        let s = from_yaml(&format!(
+            r#"
+kind: flow
+location:
+  repo: https://github.com/felixge/node-delayed-stream
+  ref: 0000000000000000000000000000000000000000
+src:
+  - uses: git-checkout
+deps:
+  - uses: npm/install-node
+    with:
+      node_version: "{version}"
+build:
+  - runs: npm pack
+output_path: '*.tgz'
+"#
+        ))
+        .unwrap();
+        render(&s, &cx(), &tools).unwrap().deps
+    };
+
+    // Every io.js major, plus the versions on each side of the two boundaries. Node 0.x predates
+    // io.js and 4.0.0 is the merge, so both belong to nodejs.org.
+    for (version, host, name) in [
+        ("0.12.7", "nodejs.org", "node"),
+        ("1.0.0", "iojs.org", "iojs"),
+        ("1.6.4", "iojs.org", "iojs"),
+        ("2.5.0", "iojs.org", "iojs"),
+        ("3.3.1", "iojs.org", "iojs"),
+        ("4.0.0", "nodejs.org", "node"),
+        ("8.9.4", "nodejs.org", "node"),
+        // The trap a prefix comparison walks into: two-digit majors must not read as io.js.
+        ("10.9.2", "nodejs.org", "node"),
+        ("22.14.0", "nodejs.org", "node"),
+    ] {
+        let deps = deps_for(version);
+        let start = deps.find("TRIGON_NODE_URL=").expect("the fetch is in there");
+        let block = &deps[start..deps[start..].find("esac").map(|i| start + i + 4).unwrap()];
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{block}\necho \"$TRIGON_NODE_URL\""))
+            .output()
+            .expect("sh");
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(
+            url.contains(host),
+            "node {version} should come from {host}: {url}"
+        );
+        assert!(
+            url.contains(&format!("/{name}-v{version}-linux-x64.tar.gz")),
+            "node {version} should be named {name}-v{version}: {url}"
+        );
+    }
+}

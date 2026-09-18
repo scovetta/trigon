@@ -339,7 +339,7 @@ run record names the toolchain by hash, and a deliberately corrupted store entry
 rather than being used — that last one is the test, because a cache that cannot be caught serving
 the wrong bytes is the thing this design exists to avoid.
 
-## B27. A `_nodeVersion` we cannot fetch, and what to build instead
+## B27. A `_nodeVersion` we cannot fetch, and what to build instead — io.js half done
 
 `env/toolchain-unavailable` now names this honestly and stops there. What it does *not* do is
 decide which toolchain to build with, because that is a fidelity question rather than an
@@ -355,11 +355,18 @@ against `nodejs.org/dist`, and exactly these two 404. A further five targets rec
 `_nodeVersion` at all, which the rung already declines on. So this is 2 of 197, not a systemic gap —
 worth fixing correctly rather than urgently.
 
-**io.js is the easy half and should not wait for the hard half.** `1.6.4` is fetchable today:
-`https://iojs.org/dist/v1.6.4/iojs-v1.6.4-linux-x64.tar.gz` returns 200. That is a host-and-filename
-mapping for `_nodeVersion` below 4.0.0, not a guess about what the publisher ran — it reproduces
-exactly the binary they used. `iojs.org` would need adding to `TOOLCHAIN_HOSTS`, which
-[`server.rs`](../crates/trigon-mirror/src/server.rs) says is deliberately hand-maintained.
+**~~io.js is the easy half~~ — done.** `npm/install-node` routes majors 1, 2 and 3 to
+`iojs.org/dist` under the `iojs-` filename, and `iojs.org` is on `TOOLCHAIN_HOSTS`. Not a
+substitution: iojs.org still serves that exact binary, so the build gets the toolchain the publisher
+ran. `delayed-stream@1.0.0` went from `build-failed:deps` to **`normalized`**, 6 of 6 members
+identical, with the transcript recording
+`https://iojs.org/dist/v1.6.4/iojs-v1.6.4-linux-x64.tar.gz` at 8,224,933 bytes.
+
+Node 0.x stays on nodejs.org and so does everything from 4.0.0 on, so the selection names three
+majors rather than a range. It is a shell `case` for the reason `npm/npx.yaml` gives — `1.*` catches
+`1.6.4` and leaves `10.9.2` alone, where a prefix test would not — and a test runs that `case` under
+a real `sh` across both boundaries. `libc: musl` is deliberately not wired up: unofficial-builds
+carries no io.js, so an Alpine image asking for one gets `env/toolchain-unavailable`, which is true.
 
 **The pre-release half is a real choice, and the options are not equal.**
 
@@ -384,9 +391,9 @@ version does not change the packed bytes, substituting one is cheap and a stated
 it; if it can, declining is the honest answer. Nobody has measured which, and that measurement is
 the first task here, not the last.
 
-**Done when:** `delayed-stream@1.0.0` builds from the io.js distribution, and `isexe@2.0.0` either
-reproduces under a substitution whose assumption the run states, or declines with a reason — chosen
-on evidence about whether Node's version reaches the tarball.
+**Done when:** `isexe@2.0.0` either reproduces under a substitution whose assumption the run states,
+or declines with a reason — chosen on evidence about whether Node's version reaches the tarball.
+(`delayed-stream@1.0.0` building from the io.js distribution is done.)
 
 ## B26. The repair loop has no provider that reliably finishes a repair-sized turn
 

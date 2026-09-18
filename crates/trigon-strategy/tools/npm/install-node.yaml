@@ -33,6 +33,22 @@
 # built from master reports before 8.0.0 is cut. nodejs.org never published it, so the URL 404s at
 # every egress tier — and the run was filed `net/http-error` with `fault: policy`, which points an
 # operator at their egress settings for a file that exists nowhere.
+#
+# **Majors 1 to 3 are io.js and came from a different host under a different name.** For the year
+# before the projects merged at 4.0.0, `_nodeVersion` values like `1.6.4` were io.js releases served
+# from `iojs.org/dist` as `iojs-v1.6.4-linux-x64.tar.gz`. nodejs.org has no v1, v2 or v3 at all, so
+# `delayed-stream@1.0.0` — which records `1.6.4` — asked nodejs.org for a file that was never there.
+# This is not a substitution: iojs.org still serves that exact binary, so the build gets the
+# toolchain the publisher actually ran rather than a nearby guess. Node 0.x stays on nodejs.org, and
+# so does everything from 4.0.0 on, which is why the `case` names three majors and not a range.
+#
+# A shell `case` rather than a template comparison, for the reason `npm/npx.yaml` gives: the
+# boundary is the part that is easy to get wrong, and a glob on a dotted version gets it right where
+# a prefix test does not — `1.*` catches `1.6.4` and does not catch `10.9.2`. A test runs this
+# `case` under a real `sh`.
+#
+# `libc: musl` is deliberately not wired up for io.js: unofficial-builds carries no io.js at all, so
+# an Alpine image asking for one gets `env/toolchain-unavailable`, which is the true answer.
 id: npm/install-node
 params:
   node_version:
@@ -61,6 +77,9 @@ steps:
         TRIGON_NODE_URL={{ toolchain_url('unofficial-builds.nodejs.org', 'download/release/v' ~ with.node_version ~ '/node-v' ~ with.node_version ~ '-linux-x64-musl.tar.gz') }}
       {%- else %}
         TRIGON_NODE_URL={{ toolchain_url('nodejs.org', 'dist/v' ~ with.node_version ~ '/node-v' ~ with.node_version ~ '-linux-x64.tar.gz') }}
+        case "{{ with.node_version }}" in
+          1.*|2.*|3.*) TRIGON_NODE_URL={{ toolchain_url('iojs.org', 'dist/v' ~ with.node_version ~ '/iojs-v' ~ with.node_version ~ '-linux-x64.tar.gz') }} ;;
+        esac
       {%- endif %}
         TRIGON_WGET=0
         wget -O /tmp/trigon-node.tar.gz "$TRIGON_NODE_URL" || TRIGON_WGET=$?
