@@ -124,6 +124,71 @@ pub struct NpmInferrer {
     sources: Option<std::sync::Arc<crate::SourceCache>>,
 }
 
+/// Whether a recorded `_nodeVersion` names something a toolchain host actually serves.
+///
+/// Exactly three all-numeric components. `8.0.0-pre` fails on the third, which is the case this
+/// exists for: it is what a Node built from `master` reports before 8.0.0 is cut, and no
+/// distribution host ever carried it. io.js versions like `1.6.4` pass, because they are real
+/// releases — `npm/install-node` routes majors 1 to 3 to iojs.org and gets the publisher's own
+/// binary, so those need no substitution at all.
+fn is_fetchable_node(version: &str) -> bool {
+    let numeric = |p: Option<&str>| {
+        p.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let mut parts = version.split('.');
+    numeric(parts.next()) && numeric(parts.next()) && numeric(parts.next()) && parts.next().is_none()
+}
+
+/// Sort key for a plain `x.y.z`, so "highest" means highest *number* and not longest string.
+fn node_order(version: &str) -> (u64, u64, u64) {
+    let mut p = version.split('.').map(|x| x.parse::<u64>().unwrap_or(0));
+    (
+        p.next().unwrap_or(0),
+        p.next().unwrap_or(0),
+        p.next().unwrap_or(0),
+    )
+}
+
+/// The highest Node release published at or before `instant`.
+///
+/// **Highest by number, not newest by date, and the difference decides whether the build runs.**
+/// Node maintains several lines at once, so the most recent *release event* before an instant is
+/// often an old LTS patch: on 2017-03-21 Node shipped both 4.8.1 and 7.7.4. Measured on
+/// `isexe@2.0.0`, whose recorded npm is 4.4.2 — under 4.8.1 the deps phase dies installing that
+/// npm, under 7.7.4 the package reproduces with every member identical. Picking by date would have
+/// chosen the one that cannot run the toolchain the registry recorded.
+///
+/// Filtered to releases that actually ship `linux-x64`, because that is the file
+/// `npm/install-node` asks for and a release without it would 404 exactly as the pre-release does.
+///
+/// Fetched rather than computed: Node's releases are irregular, so there is no train to derive them
+/// from the way `cargo_current_at` derives Cargo's. Only reached when the recorded version is
+/// unfetchable, which across the npm corpus is one target in 197.
+async fn highest_node_release_at(client: &Client, instant: &str) -> Option<String> {
+    // `index.json` dates are `YYYY-MM-DD`; a publish instant is RFC 3339 and starts with one.
+    let day = instant.get(..10)?;
+    let body = client
+        .get("https://nodejs.org/dist/index.json", "npm")
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let index: Vec<serde_json::Value> = serde_json::from_str(&body).ok()?;
+    index
+        .iter()
+        .filter(|e| e["date"].as_str().is_some_and(|d| d <= day))
+        .filter(|e| {
+            e["files"]
+                .as_array()
+                .is_some_and(|f| f.iter().any(|x| x.as_str() == Some("linux-x64")))
+        })
+        .filter_map(|e| e["version"].as_str()?.strip_prefix('v'))
+        .filter(|v| is_fetchable_node(v))
+        .max_by_key(|v| node_order(v))
+        .map(str::to_string)
+}
+
 /// Whether a Cargo release understands a `sparse+http://` registry.
 ///
 /// Sparse registries were stabilized in **1.68.0**. Below that the scheme prefix is not recognized
@@ -186,7 +251,6 @@ impl StrategyInferrer for NpmInferrer {
         let Some(source) = &target.source else {
             return Ok(Vec::new());
         };
-        let _ = &self.client;
 
         let mut assumptions = Vec::new();
 
@@ -218,6 +282,39 @@ impl StrategyInferrer for NpmInferrer {
                 "no _nodeVersion/_npmVersion recorded; declining rather than guessing a toolchain"
             );
             return Ok(Vec::new());
+        };
+
+        // **A `_nodeVersion` no host serves, replaced by the nearest one that does.** The publisher
+        // used a Node built from master — `isexe@2.0.0` records `8.0.0-pre` — and nodejs.org never
+        // published it, so the toolchain fetch 404s at every egress tier. Declining would be honest
+        // and would lose the target; substituting silently would answer a different question from
+        // the one asked. So it substitutes and says so, which is what `assumptions` is for.
+        //
+        // The npm that packs the tarball is still the recorded one, and that is the half that
+        // shapes the artifact: `npm pack`'s manifest rewrite is npm's behaviour, not Node's.
+        let node = if is_fetchable_node(&node) {
+            node
+        } else {
+            let Some(publish) = target.intrinsics.publish_time.as_deref() else {
+                tracing::debug!(
+                    node,
+                    "an unfetchable _nodeVersion and no publish time to resolve it against"
+                );
+                return Ok(Vec::new());
+            };
+            let Some(nearest) = highest_node_release_at(&self.client, publish).await else {
+                tracing::debug!(node, "could not resolve a Node release at the publish instant");
+                return Ok(Vec::new());
+            };
+            assumptions.push(format!(
+                "the registry records Node {node} for this publish, which is a build from master \
+                 rather than a release and exists on no distribution host; this builds with \
+                 {nearest}, the highest Node released at or before the publish instant. The npm \
+                 that packs the tarball is still the one the registry recorded, and for a package \
+                 with no build step that is what shapes the artifact — but a package whose build \
+                 runs under Node could differ, and this run cannot tell you it did not"
+            ));
+            nearest
         };
 
         let mut deps = BTreeMap::from([
@@ -1468,5 +1565,49 @@ mod nuget_package_id_tests {
             nuget_project_by_id(&projects, "foo.bar").as_deref(),
             Some("src/Foo")
         );
+    }
+}
+
+#[cfg(test)]
+mod node_substitution_tests {
+    use super::{is_fetchable_node, node_order};
+
+    /// What counts as a version a toolchain host will serve.
+    ///
+    /// `isexe@2.0.0` records `8.0.0-pre` — the string a Node built from master reports before 8.0.0
+    /// is cut. Nothing ever distributed it, so the fetch 404s at every egress tier.
+    #[test]
+    fn a_pre_release_is_not_fetchable_and_a_real_release_is() {
+        assert!(!is_fetchable_node("8.0.0-pre"), "the case this exists for");
+        for odd in ["8.0.0-nightly20170323ee19e2923a", "8.0.0-rc.1", "v8.0.0", "8.0", "8", ""] {
+            assert!(!is_fetchable_node(odd), "{odd} is not an x.y.z release");
+        }
+
+        // io.js versions are real releases and must NOT be substituted: `npm/install-node` routes
+        // majors 1 to 3 to iojs.org and fetches the publisher's own binary. Substituting one would
+        // trade an exact toolchain for a nearby guess, which is strictly worse.
+        for real in ["1.6.4", "2.5.0", "3.3.1", "0.12.7", "4.8.1", "7.7.4", "22.14.0"] {
+            assert!(is_fetchable_node(real), "{real} is a release we can fetch");
+        }
+    }
+
+    /// "Highest" means highest number, and on the day that matters it disagrees with "newest".
+    ///
+    /// Node ships several lines at once. On 2017-03-21 it released both 4.8.1 and 7.7.4; ordering by
+    /// date picks 4.8.1, under which `isexe@2.0.0`'s recorded npm 4.4.2 fails to install at all,
+    /// while 7.7.4 reproduces the package with every member identical.
+    #[test]
+    fn highest_is_by_number_not_by_string_or_date() {
+        let mut releases = ["4.8.1", "7.7.4", "0.12.18", "6.10.1"];
+        releases.sort_by_key(|v| node_order(v));
+        assert_eq!(releases.last(), Some(&"7.7.4"));
+
+        // The trap a string comparison walks into: "10.0.0" < "9.0.0" lexically.
+        let mut two_digit = ["9.11.2", "10.0.0"];
+        two_digit.sort_by_key(|v| node_order(v));
+        assert_eq!(two_digit.last(), Some(&"10.0.0"), "10 is above 9, not below it");
+
+        assert!(node_order("7.7.4") > node_order("4.8.1"));
+        assert!(node_order("8.0.0") > node_order("7.7.4"));
     }
 }

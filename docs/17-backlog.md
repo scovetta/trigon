@@ -339,7 +339,7 @@ run record names the toolchain by hash, and a deliberately corrupted store entry
 rather than being used — that last one is the test, because a cache that cannot be caught serving
 the wrong bytes is the thing this design exists to avoid.
 
-## B27. A `_nodeVersion` we cannot fetch, and what to build instead — io.js half done
+## B27. ~~A `_nodeVersion` we cannot fetch, and what to build instead~~ — closed
 
 `env/toolchain-unavailable` now names this honestly and stops there. What it does *not* do is
 decide which toolchain to build with, because that is a fidelity question rather than an
@@ -410,11 +410,30 @@ Caveat on the strength of this: `isexe@2.0.0` is the whole population of the pre
 this corpus — 1 of 1, not 1 of many — so the substitution is validated for the only target that
 needs it, and the *rule* remains an extrapolation to targets not yet seen.
 
-**Done when:** `isexe@2.0.0` reproduces under a substitution the run states as an assumption, or
-declines with a reason. The evidence above says the substitution works and which rule to resolve it
-by; what remains is the decision to make trigon build with a toolchain the publisher did not use,
-and the assumption line that has to accompany every run that does.
-(`delayed-stream@1.0.0` building from the io.js distribution is done.)
+**Closed.** Both targets reproduce, by different mechanisms, and the difference is the point:
+
+- `delayed-stream@1.0.0` → **`normalized`** on the publisher's own binary, fetched from iojs.org.
+  No assumption, because nothing was substituted.
+- `isexe@2.0.0` → **`normalized`**, 8 of 8 members identical, attested and signed — built on Node
+  7.7.4 where the registry recorded `8.0.0-pre`, and the run says so:
+
+  > the registry records Node 8.0.0-pre for this publish, which is a build from master rather than
+  > a release and exists on no distribution host; this builds with 7.7.4, the highest Node released
+  > at or before the publish instant. The npm that packs the tarball is still the one the registry
+  > recorded, and for a package with no build step that is what shapes the artifact — but a package
+  > whose build runs under Node could differ, and this run cannot tell you it did not
+
+The substitution fires only when the recorded version is not a plain `x.y.z`, so io.js versions are
+never substituted — trading an exact toolchain for a nearby one would be strictly worse. It resolves
+by fetching `nodejs.org/dist/index.json`, filtered to releases that ship `linux-x64`, because Node's
+releases are irregular and there is no train to compute them from the way `cargo_current_at`
+computes Cargo's. One target in 197 reaches that fetch.
+
+**What stays open, smaller:** both of the Node versions the measurement rejected failed as
+`unknown` — `4.8.1` with `Cannot find module '@npmcorp/copy'` while installing npm 4.4.2, `8.0.0`
+with a bare exit 255. Neither is reachable now that the rule picks by version number, but `unknown`
+is the bucket that hides our own bugs among the packages', and an old npm failing to install over
+itself is a nameable class.
 
 ## B26. The repair loop has no provider that reliably finishes a repair-sized turn
 
