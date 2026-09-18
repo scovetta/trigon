@@ -88,13 +88,20 @@ to 10 of 23. PyPI's *reach* rose from 68% to 81% and its *rate* fell from 88% to
 is a consequence of the first: twenty-seven more targets now reach a comparison and they are the
 hard ones. A rate over a larger and harder denominator is lower and means more.
 
-**Sixteen of npm's 71 non-compared targets are ours, not the packages'** — ten a missing tool, six a
-mirror that handed the build a body it could not read. Those stay out of the reproduction rate by
-design — only `Fault::Build` says anything about the package
-([`02-domain-model.md`](docs/02-domain-model.md) §4) — but they are inside the *reach* figure, which
-should therefore be read as a floor.
+**Sixteen of npm's 65 non-compared targets are ours, not the packages'** — ten a missing tool
+(3 × npx, 3 × pnpm, 3 × yarn, 1 × just), five a `workspace:` protocol npm does not speak, and one a
+workspace sibling the recipe did not build first. A further fifteen are `Fault::Policy`: the
+enforced tier doing what it was asked, mostly a host the build may not reach. Nineteen are the
+package's own build, eleven produced no strategy at all, and four are upstream's.
 
-Measured at `0ff8aa1`. Three npx failures have been fixed since and are not reflected above.
+Those first sixteen stay out of the reproduction rate by design — only `Fault::Build` says anything
+about the package ([`02-domain-model.md`](docs/02-domain-model.md) §4) — but they are inside the
+*reach* figure, which should therefore be read as a floor.
+
+The six that were a mirror handing the build a body it could not read are gone from this list: that
+was npm corrupting its own concurrent fetches, and those targets now reach a comparison. The three
+npx failures have been fixed since the sweep and are still counted above, because they have not been
+re-run.
 
 What stops a target reaching a comparison is mostly named rather than mysterious — a base image
 missing a tool, a package whose install fetches from a forge, a monorepo member we build outside its
