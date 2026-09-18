@@ -98,8 +98,8 @@ Measured twice, because the gap between them is the honest measure of "needs the
 | | offline | live |
 |---|---|---|
 | **Judgement half** — `core`, `archive`, `stabilize`, `compare`, `attest` | **88.4%** | **88.4%** |
-| `trigon-mirror` | 73.6% | 90.7% |
-| Workspace | 69.6% | 72.8% |
+| `trigon-mirror` | 77.7% | 86.3% |
+| Workspace | 69.0% | 71.4% |
 
 The judgement half moving by **0.0%** is the result worth keeping: the half that decides a verdict is
 covered entirely by tests that open no socket, which is the architecture's central claim measured

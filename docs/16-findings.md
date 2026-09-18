@@ -791,18 +791,28 @@ the difference between them is the honest measure of "needs the network" versus 
 | | offline | live |
 |---|---|---|
 | **Judgement half** (`core`, `archive`, `stabilize`, `compare`, `attest`) | **88.4%** | **88.4%** |
-| `trigon-mirror` | 73.6% | 90.7% |
-| `trigon-ai` | 80.9% | 87.3% |
-| `trigon-registry` | 71.4% | 76.3% |
-| `trigon-sandbox` | 78.0% | 78.7% |
-| `trigon` (CLI + UI) | 40.4% | 41.4% |
-| Workspace | 69.6% | 72.8% |
+| `trigon-mirror` | 77.7% | 86.3% |
+| `trigon-ai` | 80.8% | 86.7% |
+| `trigon-registry` | 72.7% | 76.4% |
+| `trigon-sandbox` | 76.3% | 76.3% |
+| `trigon` (CLI + UI) | 39.2% | 40.1% |
+| Workspace | 69.0% | 71.4% |
 
 **The judgement half moves by 0.0%.** That is worth more than the number beside it. It is the
 central architectural claim — that the half which decides a verdict is deterministic and reaches no
 network — measured rather than asserted: every line of it that is covered at all is covered by a
-test that opens no socket. The crates that move are exactly the ones that are supposed to: the
-mirror gains 17 points, `npm.rs` and `client.rs` roughly double.
+test that opens no socket. Not equal to one decimal: **4817 of 5452 lines in both runs**, the same
+count, and the same figure per crate. The crates that move are exactly the ones that are supposed
+to: the mirror gains nine points and `trigon-ai` six.
+
+Measured over 901 tests. The live column carries one failing test —
+`copilot_answers_through_its_cli_and_sees_no_tools`, which asserts the model obeys an instruction
+placed inside the fence that tells it to obey nothing there — so `trigon-ai`'s live figure is a
+floor rather than a reading. `cargo llvm-cov` skips report generation on a non-zero test exit;
+`cargo llvm-cov report` recovers it from the same profdata. Concurrent coverage runs share
+`target/llvm-cov-target` and delete each other's test binaries at startup, and cargo-llvm-cov 0.9.1
+has no `--target-dir` — set `CARGO_TARGET_DIR` and check stderr for `never executed` before
+trusting any figure here.
 
 The judgement half is the half that matters: it is what the verifier binary contains, what a third
 party re-derives a verdict with, and the only part whose bugs are silent — a divergence is

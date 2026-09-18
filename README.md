@@ -607,7 +607,7 @@ cargo test  -p trigon-stabilize-wasm --features host
 ```
 
 The judgement half — `core`, `archive`, `stabilize`, `compare`, `attest` — is at **88.4% of lines**;
-the workspace is at 69.6%, or 72.8% with `TRIGON_LIVE=1` set so the tests that need a network run.
+the workspace is at 69.0%, or 71.4% with `TRIGON_LIVE=1` set so the tests that need a network run.
 That split is deliberate: the judgement half is what the verifier binary contains, what a third party
 re-derives a verdict with, and the only part whose bugs are silent. A divergence is self-consistent,
 so both sides get the same wrong treatment and the failure surfaces as a wrong verdict rather than a
