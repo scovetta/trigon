@@ -124,6 +124,26 @@ pub struct NpmInferrer {
     sources: Option<std::sync::Arc<crate::SourceCache>>,
 }
 
+/// Whether a Cargo release understands a `sparse+http://` registry.
+///
+/// Sparse registries were stabilized in **1.68.0**. Below that the scheme prefix is not recognized
+/// and Cargo resolves `sparse+http` as a hostname, so the check is on the pinned toolchain rather
+/// than on the error it would otherwise produce.
+///
+/// A version that will not parse is treated as **not** speaking sparse: the consequence of being
+/// wrong in that direction is a stated assumption and a run at open egress, and in the other
+/// direction it is a libgit2 DNS error several layers from the cause.
+fn speaks_sparse(version: &str) -> bool {
+    let mut parts = version.split(['.', '-', '+']);
+    let (Some(major), Some(minor)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    match (major.parse::<u32>(), minor.parse::<u32>()) {
+        (Ok(major), Ok(minor)) => (major, minor) >= (1, 68),
+        _ => false,
+    }
+}
+
 impl NpmInferrer {
     pub fn new(client: Client) -> Self {
         NpmInferrer {
@@ -757,7 +777,9 @@ impl StrategyInferrer for CratesIoInferrer {
             return Ok(Vec::new());
         };
 
+        let rust_for_steps = rust_version.clone();
         let mut deps = BTreeMap::from([("rust_version".to_string(), rust_version)]);
+        let mut deps_steps: Vec<Step> = Vec::new();
         if let Some(m) = &self.mirror {
             // **The host is part of the path.** The mirror's toolchain route is
             // `/-toolchain/<host>/<path>`, so a base without the host makes the mirror read
@@ -775,6 +797,60 @@ impl StrategyInferrer for CratesIoInferrer {
             );
         }
 
+        deps_steps.push(uses("cargo/install-rust", deps));
+
+        // **Cargo has to be pointed at the mirror as well as told where its toolchain lives.**
+        // `cargo package` resolves the dependency graph in order to write the `Cargo.lock` that
+        // goes inside the `.crate`, so it reaches `index.crates.io` even with `--no-verify` and
+        // even for a crate whose dependencies it will never compile. Without this step that fetch
+        // has nowhere to go at `mirror-only` and the build dies in libcurl — which is what
+        // `pkg:cargo/hashbrown@0.17.1` did, reported as `unknown`.
+        if let Some(m) = &self.mirror {
+            match target.intrinsics.publish_time.as_deref() {
+                // **Only a Cargo that speaks the sparse protocol.** It landed in 1.68; an older one
+                // reads `sparse+http://host/` as a URL whose *host* is `sparse+http` and dies in
+                // libgit2 with `failed to resolve address for sparse+http`, which reads as DNS
+                // rather than as a protocol it does not have. `rand@0.8.5` pins 1.58.0 and did
+                // exactly that. The alternative for those is a git index, which this mirror does
+                // not serve — so the run says what it cannot do instead of failing obscurely.
+                Some(t) if speaks_sparse(&rust_for_steps) => {
+                    deps_steps.push(uses(
+                        "cargo/setup-registry",
+                        BTreeMap::from([
+                            ("registry_time".to_string(), t.to_string()),
+                            ("index_base".to_string(), format!("http://{m}/-cargo")),
+                        ]),
+                    ));
+                    // Stated on every run that resolves through the mirror, because it cannot be
+                    // known per-run whether it mattered: crates.io publishes no yank timestamp, in
+                    // the index or the API, so "was this version yanked that day" is unanswerable.
+                    assumptions.push(
+                        "dependencies resolve against the crates.io index as it stood at the \
+                         publish instant, except for yank state, which crates.io never timestamps \
+                         — a version yanked since is offered as live, because treating today's \
+                         yanks as facts about that day made Cargo resolve an older dependency than \
+                         the publisher did and the lockfile differ because of it"
+                            .into(),
+                    );
+                }
+                Some(_) => assumptions.push(format!(
+                    "this crate pins Cargo {rust_for_steps}, which predates the sparse registry \
+                     protocol Cargo gained in 1.68 — the mirror serves no git index, so dependency \
+                     resolution cannot be pinned to the publish instant and this needs \
+                     `--egress open` to build at all"
+                )),
+                // No instant to pin to, so the index is not configured at all rather than
+                // configured to *now*. A mirror serving today's index under a moment nobody chose
+                // resolves a dependency graph that never existed, and does it silently; a build
+                // that cannot reach the index says so in the log.
+                None => assumptions.push(
+                    "no publish time for this crate, so the index is not pinned and dependency \
+                     resolution is not reproducible — this needs `--egress open` to build at all"
+                        .into(),
+                ),
+            }
+        }
+
         let strategy = Strategy::Flow(FlowStrategy {
             location: Location {
                 repo: source.repo_url.clone(),
@@ -782,14 +858,29 @@ impl StrategyInferrer for CratesIoInferrer {
                 subdir: source.subdir.clone(),
             },
             src: vec![uses("git-checkout", BTreeMap::new())],
-            deps: vec![uses("cargo/install-rust", deps)],
+            deps: deps_steps,
             build: vec![uses(
                 "cargo/build/package",
                 // The crate's own name, which selects it out of a workspace. Always passed rather
                 // than only where a workspace is suspected: `-p serde` in a single-package
                 // repository names the one package there is, and guessing which shape a repository
                 // has before checking it out is the guess this avoids.
-                BTreeMap::from([("package".to_string(), target.reference.name.clone())]),
+                {
+                    let mut b = BTreeMap::from([(
+                        "package".to_string(),
+                        target.reference.name.clone(),
+                    )]);
+                    // The build phase needs it too, not only the deps phase: a repository with a
+                    // `rust-toolchain.toml` turns `cargo` into a rustup proxy that installs
+                    // components on demand, and it does that here.
+                    if let Some(m) = &self.mirror {
+                        b.insert(
+                            "toolchain_base".to_string(),
+                            format!("http://{m}/-toolchain/static.rust-lang.org"),
+                        );
+                    }
+                    b
+                },
             )],
             // Relative to the checkout, which is what `output_dir` means. `cargo package` writes
             // into `<target-dir>/package/`, and the tool's target directory is `target` for the

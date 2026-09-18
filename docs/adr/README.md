@@ -17,3 +17,4 @@ considered, and the reasoning, so the reasoning outlasts the people who did the 
 | [0010](0010-publish-divergences.md) | Publish divergences automatically, with technical safeguards |
 | [0011](0011-keyed-signing-under-a-trusted-root.md) | Sign with a key under a trusted root, and log to Rekor anyway — not keyless |
 | [0012](0012-base-images-supply-bytes-not-decisions.md) | A base image supplies bytes, never decisions — few images, no version axis |
+| [0013](0013-a-cache-supplies-bytes-never-decisions.md) | A cache supplies bytes, never decisions — behind the mirror, three tiers, the index tier records its staleness |

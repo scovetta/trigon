@@ -1,0 +1,56 @@
+# Point Cargo at the time-filtered mirror, for the whole build and not just one command.
+#
+# **Why a config file and not an environment variable.** Cargo has no `CARGO_REGISTRY_URL`. Source
+# replacement is the only mechanism that makes every dependency resolve somewhere else, and it lives
+# in `$CARGO_HOME/config.toml`. Writing it in the deps phase is what makes it apply in the build
+# phase too: the two are separate shells with nothing carried between them, but the file is on disk.
+#
+# **Source *replacement*, not a second registry.** `[source.crates-io] replace-with` keeps the
+# canonical source name in everything Cargo writes down, so the generated `Cargo.lock` records
+# `source = "registry+https://github.com/rust-lang/crates.io-index"` exactly as the publisher's did.
+# Declaring the mirror as a separate registry instead would put *our* URL in the lockfile, and the
+# lockfile is inside the published `.crate` — the rebuild would then differ from the published
+# artifact in the one file [`B19`](../../../../docs/17-backlog.md) says is already the hard part, and
+# it would differ because of us.
+#
+# **Plain HTTP is deliberate and is not a hole.** The mirror is reachable only inside the build's
+# network island, it is the only host in there, and the alternative is a TLS certificate the sandbox
+# would have to trust — which is a larger surface than the loopback-equivalent link it protects.
+# Cargo accepts a `sparse+http://` replacement without complaint.
+#
+# **`sparse+`, and a trailing slash.** Without the scheme prefix Cargo treats the URL as a git index
+# and clones it, which is a protocol this mirror does not speak. Without the trailing slash Cargo
+# joins `config.json` onto the last path segment rather than onto the directory, and asks for
+# `/-cargo/<moment>config.json`.
+id: cargo/setup-registry
+params:
+  registry_time:
+    required: true
+    doc: >-
+      The instant to pin the index to, as the mirror's `-cargo` route spells it. The mirror
+      normalizes it and refuses what it cannot parse, so a malformed value fails here rather than
+      quietly resolving against today's index.
+  index_base:
+    required: true
+    doc: >-
+      The mirror's Cargo route, with host: `http://timewarp:8129/-cargo`. Carries the host for the
+      same reason `cargo/install-rust`'s `toolchain_base` does — a base without it makes the mirror
+      read the first path segment as the moment and refuse the request.
+  home:
+    required: false
+    default: /trigon/rust
+    doc: '`CARGO_HOME`. Must match what `cargo/install-rust` used, or Cargo reads a different file.'
+steps:
+  # A quoted heredoc, so nothing inside is expanded by the shell. The template has already
+  # substituted everything that needs substituting, and an unquoted heredoc would hand the rest to
+  # the shell — which is how a `Condition:` line in a .NET strategy once became command substitution
+  # and reported `not found`.
+  - runs: |
+      mkdir -p {{ with.home }}
+      cat > {{ with.home }}/config.toml <<'TRIGON_CARGO_CONFIG'
+      [source.crates-io]
+      replace-with = "trigon-mirror"
+
+      [source.trigon-mirror]
+      registry = "sparse+{{ with.index_base }}/{{ with.registry_time }}/"
+      TRIGON_CARGO_CONFIG

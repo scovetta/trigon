@@ -12,6 +12,7 @@
 //! It is also what makes `EgressTier::MirrorOnly` mean anything. A build allowed to reach only this
 //! is a build that cannot reach the artifact it is supposed to be reproducing.
 
+mod cargo;
 mod error;
 mod guard;
 mod moment;

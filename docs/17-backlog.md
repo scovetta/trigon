@@ -339,6 +339,53 @@ run record names the toolchain by hash, and a deliberately corrupted store entry
 rather than being used — that last one is the test, because a cache that cannot be caught serving
 the wrong bytes is the thing this design exists to avoid.
 
+## B25. The fetch cache behind the mirror, in three tiers
+
+[ADR-0013](adr/0013-a-cache-supplies-bytes-never-decisions.md) decides the shape; this is the work.
+[B24](#b24-a-content-addressed-toolchain-store-mounted-rather-than-layered) is its toolchain tier
+and lands first — the two should not be built as one thing, because only one of them has a
+correctness question.
+
+Measured on one 186-run npm sweep at `mirror-only`: **39.23 GB of egress across 143,362 fetches,
+of which ~4.1 GB is distinct.** The split is the surprise and it decides the order of work:
+
+| route | fetches | bytes | distinct | once each |
+|---|---:|---:|---:|---:|
+| index | 57,219 | **25.70 GB** | 4,962 | **1.52 GB** |
+| toolchain | 181 | 8.66 GB | ~30 | ~0.20 GB |
+| artifact | 85,962 | 4.87 GB | 14,138 | 2.40 GB |
+
+**Tier 1 — toolchains.** B24, host-side, keyed by tarball sha256.
+
+**Tier 2 — artifacts.** Keyed by upstream URL, verified against the digest the registry published
+on **every** read, permanent. A `.tgz`, a wheel, a `.nupkg` and a `.crate` are immutable and already
+hashed on the way past by `guarded_stream`, so the check costs nothing that is not already paid. An
+entry failing it is a miss, never a warning. 4.87 GB → 2.40 GB, 86k requests → 14k.
+
+**Tier 3 — indices, and the only part with a correctness question.** 94% of index traffic is
+redundant, and one document — `registry.npmjs.org/npm`, 22.3 MB, 309 fetches, 6.89 GB — is 18% of
+the whole sweep. But a packument decides which versions exist, so:
+
+- Scope the entry to a single sweep invocation rather than giving it a TTL. The 309 fetches happen
+  within hours of each other, so this collects nearly all of the prize while bounding staleness by
+  construction instead of by a number someone picked.
+- Record the **instant the snapshot was fetched** in the run's pin evidence, beside `rejected`. A
+  reader must be able to tell "filtered a document fetched seconds ago" from "filtered a document
+  fetched on Tuesday" without knowing the ADR exists.
+- Ship the live-comparison control with the tier, not after it: re-fetch upstream, re-filter, and
+  compare the digest of the filtered result against what the cached path produced. A cache whose
+  slow path is only a debugging flag is a cache whose slow path has rotted.
+
+**The bug class to design against is the one we just paid for.** `trigon/client-corrupted-download`
+took three investigations because a partially-delivered body read as a whole one. A disk cache adds
+eviction, concurrent writers and partial writes to a component that has none of them today: write to
+a temporary path and rename, and read every entry back through the same digest check as the network
+path, or this reintroduces that failure with our name properly on it this time.
+
+Not a route the build can reach, and not in front of the guard: `guard.refuses(url)` runs before the
+fetch and `guarded_stream` writes the transcript row, and both must keep running exactly as they do
+now. The cache answers "where did the mirror get this", never "what did the build receive".
+
 ## B21. Keyed signing under a trusted root, and the Rekor client
 
 [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) settles the design and staging has
@@ -384,31 +431,42 @@ verifier, with the Rekor SET checked against the leaf's validity window, and the
 negative tests fail — a signature outside the window, a chain to the wrong root, a SET that does not
 verify.
 
-## B19. Cargo needs an index commit, not a timestamp
+## B19. ~~Cargo needs an index commit, not a timestamp~~ — mostly closed, one part outlived it
 
-`pkg:cargo/serde@1.0.219` rebuilds end to end and diverges on exactly one of twenty-eight files:
-`Cargo.lock`. Every source file is byte-identical; the lockfile is today's dependency resolution
-rather than the publisher's.
+`pkg:cargo/serde@1.0.219` used to rebuild at `--egress open` and diverge on exactly one of
+twenty-eight files, `Cargo.lock`, because the lockfile was today's dependency resolution rather than
+the publisher's. It now reproduces **`exact` at `--egress mirror-only`**, lockfile included, as does
+`hashbrown@0.17.1` across 50 members.
 
-[`00-overview.md`](00-overview.md) §1 named this before any of it was built — "for Cargo, pin a
-`crates.io-index` git commit satisfying the lockfile — a timestamp isn't precise enough" — and
-`RegistryMoment::GitCommit` exists for it with nothing producing one. A timestamp is not precise
-enough because the index is a git repository whose commits are not evenly spaced in time, and
-resolution is a function of the commit rather than of the hour.
+**The premise expired.** This item argued that a timestamp "isn't precise enough" because the index
+was a git repository whose commits are not evenly spaced in time. The sparse index now carries a
+`pubtime` on every line — all 56 versions of `hashbrown`, all 316 of `serde`, back to 2014, in the
+RFC 3339 UTC form [`moment.rs`](../crates/trigon-mirror/src/moment.rs) already compares lexically.
+The instant became a property of the document, so the npm and PyPI shape applied after all and the
+git-commit machinery was never needed. `RegistryMoment::GitCommit` still has nothing producing one.
 
-Two pieces, and the first is worth more:
+Both halves of the old "done when" are met except one clause: the attestation records the **moment**
+it resolved against, not an index commit. That is now the right thing to record, because the moment
+is what the filter used.
 
-- **The mirror does not speak crates.io.** `trigon_mirror::Platform` is npm and pypi, so at
-  `mirror-only` egress `cargo package` cannot reach the index at all and fails with a curl error
-  from libgit2. The run above is at `--egress open`, which is why it is a demonstration rather than
-  a verdict — `docs/12-security.md` §3 is explicit that a pass at open egress is a weaker claim and
-  gets a different name in the UI.
-- **Then the moment has to be a commit.** Serving a sparse index filtered to an instant is the
-  npm/PyPI shape and is probably wrong here; serving the index at a pinned commit is the shape
-  Cargo's own resolution expects.
+**Yank state has no history anywhere, so it is a choice rather than a lookup.** A line's `yanked`
+flag is its state *today*. The sparse index does not record when a version was yanked and neither
+does the API — `/api/v1/crates/{name}/versions` returns `yanked` and `yank_message` and no
+timestamp — so the state at the pinned instant cannot be reconstructed from anything crates.io
+publishes.
 
-**Done when:** a crates.io target reproduces at `mirror-only` with the lockfile identical, and the
-attestation records which index commit it resolved against.
+Both answers are wrong somewhere. Keeping today's flag was measurably the worse one:
+`bitflags@2.6.0` requires `bytemuck = "1.12"` and its published lockfile names 1.16.1, but every
+1.15.x and 1.16.x has been yanked since, so Cargo resolved 1.14.0 and the crate diverged on
+`Cargo.lock` — two of ten crates in a sweep failed exactly that way, each blamed on the package for
+a fact about our own afternoon. The mirror now clears the flag on every surviving line, and the
+cargo rung states it as an assumption on every run that resolves through the mirror.
+
+The residual error runs the other way: a version already yanked *at* the pin is offered as live.
+That is much rarer, because Cargo takes the newest version satisfying a requirement and a
+long-yanked one is normally superseded by something it would pick instead. The remaining work is to
+notice when it bites — a resolved version that was yanked before the pin is not distinguishable
+today from one yanked after it.
 
 ## B20. The toolchain window is the game for Cargo and we compute a date instead
 
@@ -428,8 +486,28 @@ format-preserving parse, because plain `toml` discards the information the trick
 `Claim::ToolchainRange` intersects with the edition floor and the publish date through
 `resolve_toolchain` without any of the three knowing about the others.
 
+**The corpus now says how often.** A ten-crate sweep at `mirror-only`, after the index filter and
+the `--allow-dirty` fix landed: five reproduce `exact` (`itoa`, `bitflags`, `clap`, `tokio`, plus
+`hashbrown` and `serde` alongside), and **every remaining divergence is this item**, in two shapes:
+
+- **`Cargo.toml`** — `anyhow@1.0.86`, `regex@1.10.5`, `syn@2.0.66`. The published manifest carries
+  `build = false`, `autobins = false`, `autoexamples = false`, `autobenches = false` and an explicit
+  `[lib]` table that ours does not, which is a *newer* Cargo than the date estimate picked. The
+  divergence is one file and it is the rewrite.
+- **`Cargo.lock` format** — `serde_derive@1.0.219`. The published lockfile is v1
+  (`"unicode-ident 1.0.18 (registry+…)"`, no `checksum` fields, no `version =` line) and ours is v3.
+  Same cause, different surface: the lockfile format a `cargo package` writes is a property of the
+  Cargo that wrote it, so it is a second fingerprint pointing at the same window — and a cheaper one
+  to read than the manifest, since the format version is a single line.
+
+So the estimate is wrong in the *old* direction for recent crates and the manifest says so. Note
+also that `libc@0.2.155` declines outright — crates.io declares no edition for it, so there is no
+floor and the rung refuses to guess. A fingerprint read from the artifact would give that crate an
+answer where the edition gives none, which makes this item the fix for a `no-strategy` as well as
+for the divergences.
+
 **Done when:** a crate whose manifest fingerprint contradicts its publish date resolves to the
-fingerprint's window, and the corpus says how often that happens.
+fingerprint's window, and the three named above reproduce `exact`.
 
 ## B18. The npm strata that build anything reproduce at 12% and 25%
 

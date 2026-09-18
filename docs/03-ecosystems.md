@@ -181,13 +181,16 @@ rather than failure.
 
 The most sophisticated inference of the six, and the one with the best trick.
 
-> **Built, and demonstrated once.** `pkg:cargo/serde@1.0.219` resolves, reads its commit out of
-> `.cargo_vcs_info.json` as `PublishedProvenance`, installs a pinned toolchain, packages the
-> workspace member and compares: **27 of 28 files byte-identical, and the twenty-eighth is
-> `Cargo.lock`.** That run is at `--egress open`, because the mirror does not speak crates.io and
-> `cargo package` cannot reach the index at an enforced tier — so it is a demonstration rather than
-> a verdict. [`17-backlog.md`](17-backlog.md) B19 is the index commit and B20 is the toolchain
-> window; the trick below is B20 and is not implemented.
+> **Built, and reproducing at the enforced tier.** `pkg:cargo/serde@1.0.219` resolves, reads its
+> commit out of `.cargo_vcs_info.json` as `PublishedProvenance`, installs a pinned toolchain,
+> packages the workspace member and compares **`exact` at `--egress mirror-only`** — including
+> `Cargo.lock`, which was the one file of twenty-eight that used to differ. `hashbrown@0.17.1` does
+> the same across 50 members.
+>
+> The lockfile stopped differing because the mirror now serves the crates.io sparse index filtered
+> to the publish instant, so `cargo package` resolves the graph the publisher resolved rather than
+> today's. [`17-backlog.md`](17-backlog.md) B19 has what that closed and the one thing it did not;
+> B20 is the toolchain window, and the trick below is B20 and is not implemented.
 
 ### Resolution
 Metadata from `https://crates.io/api/v1/crates/{name}/{version}`; artifact from
@@ -223,11 +226,28 @@ plain `toml` discards the information the trick depends on.
 
 We reject Rust versions with no musl build, since the base image is Alpine.
 
-### Registry pinning by index commit
-Cargo skips the time filter. We resolve a `crates.io-index` **git commit** that satisfies every
-version in the target's `Cargo.lock`, then serve the registry from that commit, either as a local
-registry replacement (`[source.crates-io] replace-with`) or over the sparse protocol for Rust 1.68
-and later. A timestamp lacks the precision, so this is a correctness fix.
+### Registry pinning by publication time
+**Planned as an index commit, built as a time filter, because the index started carrying the
+timestamp.** The argument for a commit was that resolution is a function of a git commit and
+commits are not evenly spaced in time, so an hour could not name one. The sparse index now carries
+a `pubtime` on every line — present on all 56 versions of `hashbrown` and all 316 of `serde`, back
+to 2014, in the RFC 3339 UTC form the mirror already compares lexically — so the instant is a
+property of the document and the npm and PyPI shape applies after all.
+
+The mirror serves the index at `/-cargo/{moment}/`, dropping every line published after the moment,
+and rewrites `config.json`'s `dl` to its own artifact route. Cargo is pointed at it with
+`[source.crates-io] replace-with`, which is source *replacement* rather than a second registry on
+purpose: the lockfile then records `registry+https://github.com/rust-lang/crates.io-index` exactly
+as the publisher's did, and the lockfile ships inside the `.crate`.
+
+**Yank state is the one field with no history, and the mirror clears it.** A line's `yanked` flag
+is its state today; crates.io timestamps a yank nowhere, neither in the index nor in the API. Both
+available answers are therefore wrong somewhere, and keeping today's flag is the worse one:
+`bitflags@2.6.0` resolved `bytemuck` 1.14.0 instead of the 1.16.1 in its published lockfile, purely
+because 1.15.x and 1.16.x have been yanked since. The flag is cleared on every surviving line and
+the run says so in its assumptions. The residual error — a version already yanked at the pin being
+offered as live — is rarer, because Cargo takes the newest satisfying version and a long-yanked one
+is normally superseded by one it would pick anyway.
 
 ### Build
 `cargo package --no-verify` (with `--exclude-lockfile` where supported), `CARGO_TARGET_DIR=$PWD/target`,

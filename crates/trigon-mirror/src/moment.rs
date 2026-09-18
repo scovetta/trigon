@@ -26,6 +26,7 @@ pub enum Platform {
     Npm,
     PyPI,
     NuGet,
+    Cargo,
 }
 
 impl Platform {
@@ -34,6 +35,7 @@ impl Platform {
             "npm" => Some(Platform::Npm),
             "pypi" => Some(Platform::PyPI),
             "nuget" => Some(Platform::NuGet),
+            "cargo" => Some(Platform::Cargo),
             _ => None,
         }
     }
@@ -45,6 +47,9 @@ impl Platform {
             // The registration and flat-container bases live on this host; the NuGet routes name
             // the full URL themselves rather than joining onto this, so it is the bare origin.
             Platform::NuGet => "https://api.nuget.org",
+            // The sparse index. Crate bytes come from `static.crates.io`, which the artifact route
+            // names itself rather than joining onto this.
+            Platform::Cargo => crate::cargo::INDEX_BASE,
         }
     }
 
@@ -53,6 +58,7 @@ impl Platform {
             Platform::Npm => "npm",
             Platform::PyPI => "pypi",
             Platform::NuGet => "nuget",
+            Platform::Cargo => "cargo",
         }
     }
 }

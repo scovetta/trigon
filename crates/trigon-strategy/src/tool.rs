@@ -212,6 +212,7 @@ pub const VENV: &str = "/trigon/deps";
 const BUILTIN_TOOLS: &[&str] = &[
     include_str!("../tools/git-checkout.yaml"),
     include_str!("../tools/cargo/install-rust.yaml"),
+    include_str!("../tools/cargo/setup-registry.yaml"),
     include_str!("../tools/cargo/build-package.yaml"),
     include_str!("../tools/nuget/restore.yaml"),
     include_str!("../tools/nuget/build-pack.yaml"),

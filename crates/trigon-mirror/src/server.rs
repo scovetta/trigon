@@ -69,6 +69,10 @@ pub const ARTIFACT_HOSTS: &[&str] = &[
     "files.pythonhosted.org",
     // NuGet serves its registration metadata and its `.nupkg` bytes from the one host.
     "api.nuget.org",
+    // Where crates.io's `config.json` points `dl` at, and the only host a `.crate` comes from.
+    // The index itself is fetched by the mirror rather than proxied — it is filtered, not passed
+    // through — so `index.crates.io` is deliberately not here.
+    "static.crates.io",
 ];
 
 /// Whether the artifact route will proxy to this host.
@@ -613,6 +617,20 @@ async fn serve_one(mirror: &Mirror, req: Request) -> Result<Response, MirrorErro
         return nuget_route(mirror, rest, &path_now, &via).await;
     }
 
+    // Cargo, before the auth check for the reason NuGet is: the moment travels in the path.
+    // A sparse registry is configured as a bare URL in `config.toml` and Cargo sends no
+    // credentials to it, so a moment in userinfo would be dropped exactly as npm drops it on a
+    // tarball request.
+    if let Some(rest) = path_now.strip_prefix("/-cargo/") {
+        let via = req
+            .headers()
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        return cargo_route(mirror, rest, &path_now, &via).await;
+    }
+
     // Toolchains, likewise before the auth check and for a stronger reason: there is nothing to
     // filter by date. A pinned toolchain URL names its own version, so the bytes are a function of
     // the URL. Without this route a build at `mirror-only` egress cannot install the toolchain that
@@ -658,7 +676,10 @@ async fn serve_one(mirror: &Mirror, req: Request) -> Result<Response, MirrorErro
         // `--source` URL and sends no userinfo with it, so the moment travels in the path and
         // `/-nuget/` is answered before the auth check. A NuGet filter arriving here means
         // something built one from credentials, which is a bug rather than a request to serve.
-        Platform::NuGet => Err(MirrorError::NoFilter),
+        // Cargo lands here for the same reason, and is refused for the same reason: a sparse
+        // registry is a bare URL in `config.toml` that Cargo sends no credentials to, so its
+        // moment travels in the path and `/-cargo/` is answered before the auth check.
+        Platform::NuGet | Platform::Cargo => Err(MirrorError::NoFilter),
     }
 }
 
@@ -988,6 +1009,93 @@ async fn nuget_route(
 /// of them are. Filtering only what arrived inline would pass every version of the second kind
 /// through while reporting that it had filtered — so the fetch happens before the filter, and the
 /// result is inlined so the client never asks for a page separately.
+/// Serve the crates.io sparse index at `/-cargo/{moment}/...`, filtered to that instant.
+///
+/// Two documents and nothing else. `config.json` is generated here so `dl` points back at this
+/// mirror; every other path is an index document fetched from `index.crates.io` and filtered by
+/// `pubtime`. The index is **not proxied** — it is rebuilt — which is why `index.crates.io` is
+/// absent from `ARTIFACT_HOSTS`: there is no route on which a build can ask us for it unfiltered.
+async fn cargo_route(
+    mirror: &Mirror,
+    rest: &str,
+    path: &str,
+    via: &str,
+) -> Result<Response, MirrorError> {
+    let (moment, tail) = rest.split_once('/').ok_or(MirrorError::NoFilter)?;
+    if moment.is_empty() || tail.is_empty() {
+        return Err(MirrorError::NoFilter);
+    }
+    // **Normalized here, not taken as written.** A moment that arrives in credentials goes through
+    // `Filter::from_authorization`, which normalizes it; one that arrives in the path has had
+    // nothing done to it. `published_by` normalizes the *timestamp* it is comparing and not the
+    // moment it compares against, so an un-normalized `...:04.251Z` would be compared against
+    // normalized `...:04` — string comparison that happens to work in one direction and silently
+    // shifts the boundary in the other. Refusing a moment we cannot parse is the same choice
+    // `normalize` documents for every other route.
+    let moment = &crate::moment::normalize(moment)?;
+    let filter = Filter {
+        platform: Platform::Cargo,
+        moment: moment.clone(),
+    };
+
+    if tail == "config.json" {
+        mirror.seen.note_moment(moment);
+        mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
+        let artifact_base = format!("http://{via}/-artifact/cargo/{moment}");
+        return Ok(json_response(
+            &mirror.seen,
+            &format!("http://{via}/-cargo/{moment}/config.json"),
+            &crate::cargo::config_json(&artifact_base),
+            "application/json",
+            0,
+        ));
+    }
+
+    // Anything else is an index path. Cargo derives it from the crate name, so it is
+    // `1/x`, `2/xy`, `3/x/xyz` or `ab/cd/abcdef` and never contains `..` — but the check is on the
+    // path we are about to build rather than on that reasoning, because the reasoning is about
+    // Cargo and the request is from whatever is on the other end of the socket.
+    if tail.contains("..") || tail.starts_with('/') {
+        return Err(MirrorError::NotFound {
+            path: path.to_string(),
+        });
+    }
+    mirror.seen.note_moment(moment);
+    let url = format!("{}/{tail}", crate::cargo::INDEX_BASE);
+    let body = fetch(mirror, &url, &filter, &[]).await?.text().await?;
+    let (filtered, withheld, unyanked) = crate::cargo::filter_index(&body, moment);
+    mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
+    mirror
+        .stats
+        .versions_withheld
+        .fetch_add(withheld, Ordering::Relaxed);
+    tracing::debug!(
+        tail,
+        moment,
+        withheld,
+        unyanked,
+        "filtered a crates.io index document"
+    );
+
+    // Every version postdates the pin, so at that moment the crate did not exist. A 404 is what
+    // Cargo already reports well; an empty 200 is a document claiming the crate exists with no
+    // versions, which surfaces several layers from the cause.
+    if crate::cargo::is_empty(&filtered) {
+        return Err(MirrorError::NotFound {
+            path: path.to_string(),
+        });
+    }
+
+    let served = format!("http://{via}/-cargo/{moment}/{tail}");
+    Ok(text_response(
+        &mirror.seen,
+        &served,
+        filtered.into_bytes(),
+        "text/plain; charset=utf-8",
+        withheld,
+    ))
+}
+
 async fn nuget_pages(
     mirror: &Mirror,
     id: &str,
@@ -1481,6 +1589,24 @@ fn transcribe_generated(seen: &Seen, url: &str, body: &[u8], withheld: u64) {
 /// The serialization happens once and both the response and the digest come out of it. Hashing a
 /// second serialization would be hashing something the build never saw, which is the same class of
 /// mistake as recording a partial body.
+/// Serve a body this mirror composed, as text rather than JSON.
+///
+/// The sparse index is newline-delimited JSON, which is not a JSON document — round-tripping it
+/// through `serde_json::Value` would reorder keys and reserialize numbers, changing bytes Cargo
+/// checksums nothing about but that this mirror transcribes. It goes out as it was assembled.
+fn text_response(
+    seen: &Seen,
+    url: &str,
+    body: Vec<u8>,
+    content_type: &'static str,
+    withheld: u64,
+) -> Response {
+    transcribe_generated(seen, url, &body, withheld);
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    (StatusCode::OK, headers, Body::from(body)).into_response()
+}
+
 fn json_response(
     seen: &Seen,
     url: &str,

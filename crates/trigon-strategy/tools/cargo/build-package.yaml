@@ -44,6 +44,31 @@ params:
     required: false
     default: "false"
     doc: Pass `--locked`. Only where the checkout has a `Cargo.lock` the publisher committed.
+  allow_dirty:
+    required: false
+    default: "false"
+    doc: >-
+      Pass `--allow-dirty`. **Off, because it silently removes a file from the artifact.** On Cargo
+      releases before roughly 1.8x, `--allow-dirty` suppresses `.cargo_vcs_info.json` *whether or
+      not the tree is actually dirty* — the flag is read as "this is not a faithful VCS snapshot"
+      rather than as "tolerate dirt". Every published `.crate` carries that file, so passing it
+      unconditionally meant every crate built with an older Cargo diverged by at least one member,
+      and diverged because of a flag rather than because of the package. Measured: `itoa@1.0.11`
+      differed in exactly that one file and nothing else.
+      Newer Cargo hides the problem by writing the file anyway with `"dirty": true`, which is why
+      `hashbrown@0.17.1` on 1.95.0 reproduced `exact` while the same code on 1.77.0 did not.
+      Turn it on only for a strategy whose source phase really does modify the tree; then the
+      publisher's own artifact almost certainly lacks the file too.
+  toolchain_base:
+    required: false
+    doc: >-
+      Where rustup may fetch from **during the build phase**, as `RUSTUP_DIST_SERVER`. Not a
+      duplicate of the one on `cargo/install-rust`: a repository carrying a `rust-toolchain.toml`
+      makes the `cargo` shim a rustup proxy that installs on demand, and it does that in *this*
+      phase. `dtolnay/anyhow` asks for `components = ["rust-src"]`, which `--profile minimal` did
+      not install, so rustup re-synced the channel from `static.rust-lang.org` and the build died
+      with `Network is unreachable` — a toolchain fetch at `mirror-only` that nothing had pointed
+      at the mirror. Empty leaves rustup alone, which is what `--egress open` wants.
   target_dir:
     required: false
     default: target
@@ -61,7 +86,13 @@ steps:
   - runs: |
       {%- set project = with.dir if with.dir else location.subdir %}
       export CARGO_HOME={{ with.home }} RUSTUP_HOME={{ with.home }}
-      set -- --no-verify --allow-dirty --target-dir {{ with.target_dir }}
+      {%- if with.toolchain_base %}
+      export RUSTUP_DIST_SERVER={{ with.toolchain_base }}
+      {%- endif %}
+      set -- --no-verify --target-dir {{ with.target_dir }}
+      {%- if with.allow_dirty == 'true' %}
+      set -- "$@" --allow-dirty
+      {%- endif %}
       {%- if with.package %}
       set -- "$@" -p {{ with.package }}
       {%- endif %}

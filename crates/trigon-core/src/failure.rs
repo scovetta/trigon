@@ -649,7 +649,15 @@ const RULES: &[Rule] = &[
     // ---- npm -----------------------------------------------------------------------------------
     Rule {
         code: "npm/peer-conflict",
-        needles: &["ERESOLVE"],
+        // **`npm ERR!`, not bare `ERESOLVE`.** npm prints `npm WARN ERESOLVE overriding peer
+        // dependency` on installs that *succeed*, often thousands of lines before the real error,
+        // and `classify` scans backwards for the last line any rule claims. A bare needle therefore
+        // caught every unnamed npm failure in the corpus and reported it as a peer conflict: it
+        // took `npm/workspace-unbuilt-sibling` below for one instance, and `ts-node@10.9.2` — which
+        // actually dies on `unzip is required to install dprint` — for another. Naming each new
+        // symptom as it appears treats the instance; requiring the fatal marker treats the cause,
+        // and an unnamed failure now falls through to `unknown`, which is honest.
+        needles: &["npm ERR! code ERESOLVE"],
         fault: Fault::Build,
         retryable: false,
         repairable: true,
@@ -979,6 +987,63 @@ const RULES: &[Rule] = &[
         needles: &["400 Bad Request - GET http://timewarp"],
         fault: Fault::Bug,
         retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        // **A Cargo too old to know what `sparse+http://` is.** Sparse registries stabilized in
+        // 1.68; below that the prefix is not a scheme Cargo recognizes, so it resolves
+        // `sparse+http` as a *hostname* and libgit2 reports a DNS failure. The message names our
+        // configuration and reads as the network being broken, which is the shape of error this
+        // taxonomy exists to separate.
+        //
+        // The rung now checks the pinned toolchain and declines to configure a sparse registry
+        // below 1.68, so this fires when a strategy was written by hand or carried forward. Not
+        // repairable: the fix is a git index the mirror does not serve, not a different recipe.
+        code: "trigon/cargo-sparse-unsupported",
+        needles: &["failed to resolve address for sparse+http"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        // **A package's own install script naming the tool it needs.** `dprint` unpacks a release
+        // archive from its `postinstall` and stops with `unzip is required to install dprint.` —
+        // a sentence, not a shell error, so none of the `command not found` rules above see it.
+        // `ts-node@10.9.2` failed this way and was reported as `npm/peer-conflict`.
+        //
+        // Repairable, and cheaply: the tool goes in the strategy's `needs`, which is what puts it
+        // in the image. That is a statement about our sandbox rather than about the package, in
+        // the sense ADR-0012 means — `unzip` decides nothing.
+        code: "env/missing-tool",
+        needles: &["is required to install"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        // The tool, which is the first word of the sentence and the thing to install.
+        capture: Capture::WordBefore("is required to install"),
+    },
+    Rule {
+        // **Cargo reaching for the index with nowhere to go.** `cargo package` resolves the whole
+        // dependency graph in order to write the `Cargo.lock` that goes inside the `.crate`, so it
+        // contacts `index.crates.io` even with `--no-verify` and even for a crate whose
+        // dependencies it will never compile. At `mirror-only` egress that host is not reachable
+        // and must not be: the mirror serves the index itself, filtered to the publish instant.
+        //
+        // Named because it read as `unknown` — `pkg:cargo/hashbrown@0.17.1` failed here with four
+        // lines of libcurl and nothing in the taxonomy, which puts a fault of ours in the same
+        // bucket as a package that does not build. Firing now means the registry was not
+        // configured for this run, which `cargo/setup-registry` does whenever a mirror is running
+        // and the crate has a publish time to pin to.
+        //
+        // The `Caused by` line rather than the curl warning above it: cargo retries three times
+        // and prints the warning each time, so matching that would classify a run that went on to
+        // succeed.
+        code: "trigon/cargo-index-unreachable",
+        needles: &["failed to download from `https://index.crates.io"],
+        fault: Fault::Bug,
+        retryable: false,
         repairable: false,
         capture: Capture::None,
     },
@@ -1593,6 +1658,60 @@ strategy needs have to be in the image already. Build one with:\n\
         ] {
             assert_eq!(classify(log).key(), key, "log: {log}");
         }
+    }
+
+    #[test]
+    fn a_peer_dependency_warning_is_not_a_peer_dependency_failure() {
+        // npm prints this on installs that succeed. Matching it made every unnamed npm failure in
+        // the corpus report as a peer conflict, and sent the repair loop after a problem that was
+        // not the failure — twice, in two different packages, before the needle was tightened.
+        let warned_then_died = "npm WARN ERESOLVE overriding peer dependency\n\
+             npm WARN Conflicting peer dependency: typescript@4.5.5\n\
+             npm ERR! code 1\n\
+             npm ERR! Error: unzip is required to install dprint.\n";
+        let s = classify(warned_then_died);
+        assert_ne!(
+            s.code, "npm/peer-conflict",
+            "a warning npm prints on success must not name the failure"
+        );
+        assert_eq!(s.code, "env/missing-tool");
+        assert_eq!(s.subject.as_deref(), Some("unzip"), "it has to name the tool to install");
+        assert!(s.repairable);
+
+        // The real thing still classifies.
+        let fatal = classify("npm ERR! code ERESOLVE\nnpm ERR! while resolving: left-pad@1.3.0");
+        assert_eq!(fatal.code, "npm/peer-conflict");
+    }
+
+    #[test]
+    fn a_cargo_too_old_for_sparse_is_named_rather_than_read_as_dns() {
+        // `rand@0.8.5` pins Cargo 1.58.0, five years before sparse registries. The failure names a
+        // host called `sparse+http`, which is our own URL scheme arriving somewhere that has never
+        // heard of it — and classified as `unknown` it sat in the same bucket as a package that
+        // genuinely does not build.
+        let s = classify(
+            "warning: spurious network error (1 tries remaining): failed to resolve address for \
+             sparse+http: Name or service not known; class=Net (12)\n\
+             error: failed to prepare local package for uploading\n",
+        );
+        assert_eq!(s.code, "trigon/cargo-sparse-unsupported");
+        assert_eq!(s.fault, Fault::Bug);
+        assert!(!s.repairable, "a git index is not something a recipe rewrite provides");
+    }
+
+    #[test]
+    fn cargo_reaching_the_real_index_is_ours_and_is_not_repairable() {
+        // The real failure, trimmed to the lines cargo prints. It classified as `unknown` before
+        // this rule, which is the bucket that hides our own bugs among the packages'.
+        let s = classify(
+            "warning: spurious network error (3 tries remaining): [7] Could not connect to server\n             error: failed to prepare local package for uploading\n             Caused by:\n  download of config.json failed\n             Caused by:\n  failed to download from `https://index.crates.io/config.json`\n",
+        );
+        assert_eq!(s.code, "trigon/cargo-index-unreachable");
+        assert_eq!(s.fault, Fault::Bug, "the mirror not serving the index is ours");
+        assert!(
+            !s.repairable,
+            "no rewrite of the build recipe gives cargo a route to the index"
+        );
     }
 
     #[test]
