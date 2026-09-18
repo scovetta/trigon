@@ -13,8 +13,10 @@ and that gap is where build-time supply-chain attacks live.
 **Today it rebuilds npm, PyPI, crates.io and NuGet packages.** RubyGems and GitHub releases are
 designed for and sequenced next; a target in one of those is refused by name rather than attempted.
 Comparing two artifacts you already have — the judgement half, below — needs no network and has no
-prerequisites at all. Tarballs, wheels, gems, crates and `.nupkg` files each get their own
-normalization, on top of the generic tar and zip sets.
+prerequisites at all. Wheels, gems, crates and `.nupkg` files each get their own normalization. An npm
+tarball does not — nothing inside a `.tgz` says whose it is — so it takes the generic tar+gzip set
+unless `verify` or `stabilize` is given `--profile npm-tarball`, which is why the left-pad run below
+reports `tar-gzip`.
 
 **Using it?** [`docs/using-trigon.md`](docs/using-trigon.md) is the task-oriented guide: install,
 compare two artifacts, rebuild a package, read a verdict, and — the section worth reading first —
@@ -146,8 +148,9 @@ tar" are different findings and a single digest cannot tell you which you have.
 
 ## How it works
 
-One rebuild, end to end. The boxes are the four persisted states; the labels on the arrows between
-them are the only things that cross.
+One rebuild, end to end. The boxes are four of the five persisted states — `Queued` is the sweep
+planner's and a single `trigon rebuild` never sits in it — and the labels on the arrows between them
+are the only things that cross.
 
 ```mermaid
 flowchart TB
@@ -158,7 +161,7 @@ flowchart TB
         resolve["Resolve<br/>registry metadata → artifact URL,<br/>digest, declared repo, publish instant"]
         decompose["Decompose<br/>fetch the published artifact,<br/>enumerate its members"]
         locate["LocateSource<br/>provenance → tag ladder →<br/>tree hash → model"]
-        strategy["InferStrategy<br/>cache → definitions → CI →<br/>heuristic → model"]
+        strategy["InferStrategy<br/>definitions → ecosystem heuristic<br/>→ model, where one is named"]
         materialize["Materialize<br/>git fetch at the pinned commit"]
         resolve --> decompose --> locate --> strategy --> materialize
     end
@@ -209,9 +212,10 @@ network island whose one reachable host serves the registry index *as it stood a
 instant* — so a dependency resolved during the rebuild is the one the publisher would have got, not
 today's. Everything it serves is hashed on the way past and written to a transcript the run keeps.
 
-A fifth step, `Explain`, sits inside Judging and may call a model to describe a difference in
-words. It is advisory and cannot change a verdict: the verdict is the digest comparison, and that
-half of the system is the one that links nothing.
+The design puts a fifth step, `Explain`, inside Judging, to describe a difference in words.
+It is not built: `Phase` has no such variant, and the `--explain` flag that exists only raises a
+print limit — it opens no socket and calls no model. When it arrives it will be advisory and unable
+to change a verdict, because the verdict is the digest comparison, and that half links nothing.
 
 **The four boxes are states, not processes.** On a fleet they are separate workers with different
 credentials, which is the point of drawing them apart. On a laptop `trigon rebuild` runs the first
@@ -234,7 +238,7 @@ $ trigon rebuild pkg:npm/left-pad@1.3.0 \
 
   artifact   left-pad-1.3.0.tgz
   published  sha256 870c0fe1096223a5
-  guarding   the artifact and 10 of its members
+  guarding   the artifact and 0 of its members (10 too small, too common, or also in the source)
   source     https://github.com/stevemao/left-pad @ ff8e7ba8b41228…
   strategy   Heuristic, commit found by RegistryCommit, confidence Certain
 
@@ -264,8 +268,8 @@ property of the package, not of the afternoon it was rebuilt on.
 The `mirror` line is the evidence that the dependency index really was pinned to the publish date.
 The count is across all 69 packuments the build fetched, not left-pad's own — left-pad has published
 nothing since 2018, so none of its fifteen versions were withheld. The thousand-odd come from its
-devDependency tree, where `mocha` alone accounts for 111 versions that did not exist in April 2018
-and `glob` for 73.
+devDependency tree, where `fast-check` alone accounts for 198 versions that did not exist in April
+2018, `core-js` for 180 and `glob` for 73.
 
 ### A PyPI package
 
@@ -469,7 +473,9 @@ credential helper, and a tree that is read and copied but never executed.
 ### Asking a model
 
 Off unless you name a provider. The ladder tries a checked-in definition, then the ecosystem
-heuristic, and only then — if `--model` says so — asks a model for a strategy:
+heuristic, and only then — if `--model` says so — asks a model for a strategy. The model rung answers
+for npm and PyPI only: on a crates.io or NuGet target `--model` adds no rung at all, though it still
+drives the repair loop below.
 
 ```
 $ trigon rebuild pkg:npm/some-package@1.0.0 --model ollama:qwen2.5:0.5b …
@@ -532,15 +538,18 @@ problem.** Search is where a model helps. Equivalence is where it must never be 
 
 ```
                          trigon-core
-                    /         |        \
-      trigon-archive    trigon-strategy   trigon-attest
-             |                                  |
-      trigon-stabilize                          |
-             |                                  |
-      trigon-compare                            |
+                    /              \
+      trigon-archive            trigon-strategy
+             |
+      trigon-stabilize
+             |
+      trigon-compare
+             |
+      trigon-attest        (core, archive, compare and stabilize — all four)
               \____________ _______ ___________/
    ================= JUDGEMENT / SEARCH LINE =================
-   trigon-registry  trigon-ai  trigon-sandbox  trigon-store  trigon-mirror
+   trigon-registry  trigon-ai  trigon-sandbox ──▶ trigon-mirror
+                    trigon-store ──▶ trigon-attest, trigon-stabilize
                              |
                         trigon (bin)
 ```

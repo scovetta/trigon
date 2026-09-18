@@ -184,7 +184,8 @@ Everything above the line stays synchronous, with no tokio, no reqwest, and zero
 - **`trigon-archive`** sits apart from `trigon-stabilize`. It churns at a different rate, it is the
   crate to fuzz in isolation, and `trigon-compare` walks archives to produce diffs without needing
   stabilizer rules.
-- **`trigon-attest`** depends only on `trigon-core`, so we can build `trigon verify` from
+- **`trigon-attest`** depends on `trigon-core`, `trigon-archive`, `trigon-compare` and
+  `trigon-stabilize` — every crate above the line and nothing below it — so we can build `trigon verify` from
   `core + archive + stabilize + compare + attest` and nothing else.
 
 ### 2.2 The dependency policy, and how it is enforced
