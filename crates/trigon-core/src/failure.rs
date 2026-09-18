@@ -616,12 +616,71 @@ const RULES: &[Rule] = &[
         repairable: true,
         capture: Capture::None,
     },
+    Rule {
+        // **The toolchain we pinned is not where we looked for it.** Named here rather than left to
+        // the 404 below, because only the fetching step knows *which* toolchain and *which*
+        // version, and that is the whole content of the finding — `npm/install-node` prints it and
+        // this reads it back.
+        //
+        // Two real shapes, both from the M1 npm corpus and both reported as `net/http-error` with
+        // `fault: policy`, which sends an operator to their egress settings for a file that no
+        // egress setting can reach:
+        //
+        // - `isexe@2.0.0` records `_nodeVersion: 8.0.0-pre`, the string a Node built from master
+        //   reports before 8.0.0 is cut. nodejs.org never published it.
+        // - `delayed-stream@1.0.0` records `1.6.4`, which is **io.js** — a real release, but only
+        //   ever at `iojs.org/dist` and under an `iojs-` filename. The URL template only knows
+        //   nodejs.org.
+        //
+        // So the message says "not available at <url>" and not "not published": one of the two is
+        // published, somewhere this template does not look, and a rule that asserted otherwise
+        // would be wrong about half the cases it fires on.
+        //
+        // `Fault::Bug` — ours. We derived a URL for a toolchain we cannot obtain, and the publisher
+        // did nothing unusual. Not `Build`, which would charge it to the package, and an `env/`
+        // code may not be `Build` or `Upstream` anyway. Repairable: a different version, or a
+        // different host, is a strategy change.
+        code: "env/toolchain-unavailable",
+        needles: &["the pinned Node", "is not available at"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: true,
+        // The version, which is the thing to change. One cluster per unobtainable toolchain.
+        capture: Capture::WordAfter("Node"),
+    },
+    Rule {
+        // **A 404 is not a refusal.** The rule below reads any `ERROR 4xx` as a policy outcome, and
+        // for 400 and 403 — the two its comment defends — that is right: those are our own mirror
+        // turning a request away. A 404 is the opposite claim. Nothing said no; the thing is not
+        // there, and no egress tier, image or allowlist changes that. Filing it as `Policy` points
+        // the reader at settings that cannot help.
+        //
+        // Worth separating on the evidence rather than on the principle: across the 197-target npm
+        // corpus `ERROR 4` matched exactly one log, and that one was a 404 — the `delayed-stream`
+        // case above. The 400/403 reading the rule was written for has never once fired, so the
+        // status it actually sees is the one it describes least well.
+        //
+        // `Fault::Upstream`, matching `npm/version-gone`: the server answered, and what we asked
+        // for is not on it. Not retryable — a 404 is a fact, not a flake.
+        code: "net/not-found",
+        needles: &["ERROR 404"],
+        fault: Fault::Upstream,
+        retryable: false,
+        repairable: true,
+        // No capture: the status is the rule. `net/http-error` captures it because it spans several.
+        capture: Capture::None,
+    },
     // A fetch that reached a server and was turned away. Under an enforced tier the server is
     // almost always our own mirror, and the status says which refusal: 400 for a request that
     // arrived without the time filter, 403 for a host outside the toolchain allowlist or for the
     // run's own artifact. Classified separately from `net/unreachable` because the fix is
     // different — the route exists and the request was wrong — and because an unclassified failure
     // clusters as `unknown`, where twenty-six identical ones once hid a single bug of ours.
+    //
+    // **404 is handled above and deliberately not here.** `Policy` is a claim that something
+    // refused, which is true of 400 and 403 and false of a file that does not exist. This stays the
+    // catch-all for the rest of the 4xx range, because the alternative — letting them fall through
+    // to `unknown` — is `Fault::Build`, and that charges the package for a status it never saw.
     Rule {
         code: "net/http-error",
         needles: &["ERROR 4"],
@@ -1724,6 +1783,61 @@ strategy needs have to be in the image already. Build one with:\n\
             !s.repairable,
             "no rewrite of the build recipe gives cargo a route to the index"
         );
+    }
+
+    /// The `isexe@2.0.0` log, end to end, as the deps phase now writes it.
+    ///
+    /// Before: the pipeline swallowed wget's status, the phase died on gzip, and the last line a
+    /// rule claimed was `ERROR 404` — filed `net/http-error` with `fault: policy`, which tells an
+    /// operator to look at their egress tier for a file nodejs.org never published.
+    #[test]
+    fn a_toolchain_that_was_never_published_is_ours_and_names_the_version() {
+        let log = "--2026-09-18 12:57:03--  http://timewarp:8129/-toolchain/nodejs.org/dist/v8.0.0-pre/node-v8.0.0-pre-linux-x64.tar.gz\n\
+             HTTP request sent, awaiting response... 404 Not Found\n\
+             2026-09-18 12:57:03 ERROR 404: Not Found.\n\
+             trigon: the pinned Node 8.0.0-pre is not available at http://timewarp:8129/-toolchain/nodejs.org/dist/v8.0.0-pre/node-v8.0.0-pre-linux-x64.tar.gz\n";
+        let s = classify(log);
+        assert_eq!(s.code, "env/toolchain-unavailable");
+        assert_eq!(
+            s.subject.as_deref(),
+            Some("8.0.0-pre"),
+            "the version is the thing to change, so it is the cluster key"
+        );
+        assert_eq!(s.fault, Fault::Bug, "we built the URL; the publisher did nothing unusual");
+        assert!(!s.fault.is_about_the_package(), "this must not reach the reproduction rate");
+        assert!(!s.retryable, "the file will be just as absent next time");
+
+        // The io.js shape reaches the same rule and keeps its own version. 1.6.4 *is* published —
+        // at iojs.org, under an `iojs-` filename — so the wording may not say "not published".
+        let iojs = classify(
+            "trigon: the pinned Node 1.6.4 is not available at https://nodejs.org/dist/v1.6.4/node-v1.6.4-linux-x64.tar.gz\n",
+        );
+        assert_eq!(iojs.code, "env/toolchain-unavailable");
+        assert_eq!(iojs.subject.as_deref(), Some("1.6.4"));
+    }
+
+    /// A 404 with no toolchain message above it still must not read as a refusal.
+    #[test]
+    fn a_404_is_not_a_policy_refusal_and_400_still_is() {
+        let missing = classify("2026-09-18 12:57:03 ERROR 404: Not Found.\n");
+        assert_eq!(missing.code, "net/not-found");
+        assert_eq!(
+            missing.fault,
+            Fault::Upstream,
+            "nothing refused: the server answered and the file is not on it"
+        );
+        assert!(!missing.retryable);
+
+        // The statuses the catch-all was written for keep it, and keep `Policy`: those really are
+        // our own mirror turning a request away.
+        for line in [
+            "2026-09-18 12:57:03 ERROR 400: Bad Request.",
+            "2026-09-18 12:57:03 ERROR 403: Forbidden.",
+        ] {
+            let s = classify(line);
+            assert_eq!(s.code, "net/http-error", "{line}");
+            assert_eq!(s.fault, Fault::Policy, "{line}");
+        }
     }
 
     #[test]

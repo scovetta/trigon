@@ -339,6 +339,55 @@ run record names the toolchain by hash, and a deliberately corrupted store entry
 rather than being used — that last one is the test, because a cache that cannot be caught serving
 the wrong bytes is the thing this design exists to avoid.
 
+## B27. A `_nodeVersion` we cannot fetch, and what to build instead
+
+`env/toolchain-unavailable` now names this honestly and stops there. What it does *not* do is
+decide which toolchain to build with, because that is a fidelity question rather than an
+implementation detail. Two corpus targets, and they are not the same problem:
+
+| target | `_nodeVersion` | why the URL 404s |
+|---|---|---|
+| `isexe@2.0.0` | `8.0.0-pre` | the string a Node built from master reports before 8.0.0 is cut; nodejs.org never published it |
+| `delayed-stream@1.0.0` | `1.6.4` | **io.js** — a real release, but only ever at `iojs.org/dist`, under an `iojs-` filename |
+
+Measured, not assumed: every distinct `_nodeVersion` in the npm corpus (117 of them) was probed
+against `nodejs.org/dist`, and exactly these two 404. A further five targets record no
+`_nodeVersion` at all, which the rung already declines on. So this is 2 of 197, not a systemic gap —
+worth fixing correctly rather than urgently.
+
+**io.js is the easy half and should not wait for the hard half.** `1.6.4` is fetchable today:
+`https://iojs.org/dist/v1.6.4/iojs-v1.6.4-linux-x64.tar.gz` returns 200. That is a host-and-filename
+mapping for `_nodeVersion` below 4.0.0, not a guess about what the publisher ran — it reproduces
+exactly the binary they used. `iojs.org` would need adding to `TOOLCHAIN_HOSTS`, which
+[`server.rs`](../crates/trigon-mirror/src/server.rs) says is deliberately hand-maintained.
+
+**The pre-release half is a real choice, and the options are not equal.**
+
+- **Decline it.** Consistent with what the rung already does when `_nodeVersion` is absent, and with
+  ADR-0012's line that we may supply bytes and never decisions. Costs the target.
+- **The nightly the publisher actually used.** It existed: the Wayback snapshot of nodejs.org's
+  nightly index taken 2017-03-25 lists `v8.0.0-nightly20170323ee19e2923a` — isexe's own publish date
+  — alongside near-daily v8.0.0 nightlies through March 2017. The live index is pruned to two
+  entries for that month, so those builds are *gone now*, not never there. Any scheme resting on
+  them depends on an archive, which is a different reliability claim from nodejs.org/dist.
+- **The nearest release, under a stated assumption.** Note that "nearest" has two defensible answers
+  and they differ: on 2017-03-21 Node shipped both **v4.8.1** (newest by date) and **v7.7.4**
+  (highest by number). A rule has to pick one and say which, in the run's assumptions, next to the
+  toolchain-window line the cargo rung already writes.
+- **The same major.** `8.0.0` for `8.0.0-pre` reads closest to the string and is the furthest from
+  the truth in time — released 2017-05-30, two months *after* publication.
+
+**What bears on the choice.** The npm artifact is `npm pack`'s output, and
+[`03-ecosystems.md`](03-ecosystems.md) treats the packer rather than the interpreter as what shapes
+it — `_npmVersion` for isexe is `4.4.2`, a real npm, and is pinned correctly either way. If the Node
+version does not change the packed bytes, substituting one is cheap and a stated assumption covers
+it; if it can, declining is the honest answer. Nobody has measured which, and that measurement is
+the first task here, not the last.
+
+**Done when:** `delayed-stream@1.0.0` builds from the io.js distribution, and `isexe@2.0.0` either
+reproduces under a substitution whose assumption the run states, or declines with a reason — chosen
+on evidence about whether Node's version reaches the tarball.
+
 ## B26. The repair loop has no provider that reliably finishes a repair-sized turn
 
 `--model copilot` is the only provider that needs no API key, which makes it the one a contributor

@@ -9,6 +9,30 @@
 # parameter, defaulting to the official glibc distribution, which carries every version back to the
 # beginning. An Alpine image passes `libc: musl` and accepts the narrower version range that comes
 # with it.
+# **The download is not piped into tar, and that is the point.** It was
+# `wget -O - <url> | tar xzf -`, and a shell pipeline reports the *last* command's status: wget's
+# 404 was discarded and the phase died on `gzip: stdin: unexpected end of file` three lines later,
+# with wget's own `ERROR 404` scrolled off above it. `set -o pipefail` would fix the status and not
+# the message, and it is not POSIX — `/bin/sh` here is dash. So the fetch lands in a file, its exit
+# status is checked, and the failure says which version could not be had and from where.
+#
+# **Only exit 8, and every other failure keeps its own name.** GNU wget — which is what a Debian
+# base image carries — exits 8 when the *server* answered with an error, 4 for a network failure, 6
+# for auth, and so on. Renaming any non-zero exit would relabel a transient DNS failure inside the
+# toolchain fetch, and `net/unreachable` is the honest name for that one. So a server error is named
+# and everything else is re-raised untouched, with wget's own message already in the log for the
+# classifier to reach.
+#
+# **`|| TRIGON_WGET=$?`, not a bare command.** Every phase runs under `set -eu`
+# (`sandbox/dockerfile.rs`), so a bare failing `wget` exits the shell on the spot and the lines that
+# were going to explain it never run. The first version of this fix did exactly that: the phase
+# still died on the 404 and printed nothing new. A command on the left of `||` is exempt from
+# `-e`, which is what makes the status readable at all.
+#
+# The case that produced this: `isexe@2.0.0` records `_nodeVersion: 8.0.0-pre`, a string a Node
+# built from master reports before 8.0.0 is cut. nodejs.org never published it, so the URL 404s at
+# every egress tier — and the run was filed `net/http-error` with `fault: policy`, which points an
+# operator at their egress settings for a file that exists nowhere.
 id: npm/install-node
 params:
   node_version:
@@ -34,10 +58,20 @@ steps:
         echo "the image already has node v{{ with.node_version }}"
       else
       {%- if with.libc == 'musl' %}
-        wget -O - {{ toolchain_url('unofficial-builds.nodejs.org', 'download/release/v' ~ with.node_version ~ '/node-v' ~ with.node_version ~ '-linux-x64-musl.tar.gz') }} | tar xzf - --no-same-owner --strip-components=1 -C /usr/local/
+        TRIGON_NODE_URL={{ toolchain_url('unofficial-builds.nodejs.org', 'download/release/v' ~ with.node_version ~ '/node-v' ~ with.node_version ~ '-linux-x64-musl.tar.gz') }}
       {%- else %}
-        wget -O - {{ toolchain_url('nodejs.org', 'dist/v' ~ with.node_version ~ '/node-v' ~ with.node_version ~ '-linux-x64.tar.gz') }} | tar xzf - --no-same-owner --strip-components=1 -C /usr/local/
+        TRIGON_NODE_URL={{ toolchain_url('nodejs.org', 'dist/v' ~ with.node_version ~ '/node-v' ~ with.node_version ~ '-linux-x64.tar.gz') }}
       {%- endif %}
+        TRIGON_WGET=0
+        wget -O /tmp/trigon-node.tar.gz "$TRIGON_NODE_URL" || TRIGON_WGET=$?
+        if [ "$TRIGON_WGET" -eq 8 ]; then
+          echo "trigon: the pinned Node {{ with.node_version }} is not available at $TRIGON_NODE_URL"
+          exit 1
+        elif [ "$TRIGON_WGET" -ne 0 ]; then
+          exit "$TRIGON_WGET"
+        fi
+        tar xzf /tmp/trigon-node.tar.gz --no-same-owner --strip-components=1 -C /usr/local/
+        rm -f /tmp/trigon-node.tar.gz
       fi
     # `--no-same-owner` because the official tarballs record uid/gid 500, and a deferred deps phase
     # runs inside the container rather than as an image layer: the user namespace there maps a
