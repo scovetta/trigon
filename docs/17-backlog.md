@@ -384,15 +384,36 @@ carries no io.js, so an Alpine image asking for one gets `env/toolchain-unavaila
 - **The same major.** `8.0.0` for `8.0.0-pre` reads closest to the string and is the furthest from
   the truth in time — released 2017-05-30, two months *after* publication.
 
-**What bears on the choice.** The npm artifact is `npm pack`'s output, and
-[`03-ecosystems.md`](03-ecosystems.md) treats the packer rather than the interpreter as what shapes
-it — `_npmVersion` for isexe is `4.4.2`, a real npm, and is pinned correctly either way. If the Node
-version does not change the packed bytes, substituting one is cheap and a stated assumption covers
-it; if it can, declining is the honest answer. Nobody has measured which, and that measurement is
-the first task here, not the last.
+**Measured.** The question was whether Node's version reaches the packed bytes. For `isexe@2.0.0`
+it does not, and the substitution reproduces: built from the pinned commit with its recorded npm
+4.4.2 under **Node 7.7.4**, the artifact compares **`normalized` against the published tarball, 8 of
+8 members identical** (stabilized `5862967ffd0b…`). The package has no dependencies and no
+`prepare`/`prepack` script, so the only thing that could have differed is npm's manifest rewrite,
+and npm is pinned from `_npmVersion` either way.
 
-**Done when:** `isexe@2.0.0` either reproduces under a substitution whose assumption the run states,
-or declines with a reason — chosen on evidence about whether Node's version reaches the tarball.
+**The choice of "nearest" is load-bearing, and two of the three candidates do not even build.** Same
+strategy, same npm, only the Node version varying:
+
+| Node | chosen by | outcome |
+|---|---|---|
+| 4.8.1 | newest release **by date** at the publish moment | deps failed — `Cannot find module '@npmcorp/copy'` installing npm 4.4.2 |
+| **7.7.4** | **highest version number** at or before the publish moment | **`normalized`, 8 of 8 members identical** |
+| 8.0.0 | same major as the `8.0.0-pre` string | deps failed, exit 255 |
+
+So "nearest release" resolved by date picks a toolchain that cannot run the pinned npm, and the
+same-major reading picks one released two months after publication that also cannot. Highest
+version number at or before the publish instant is the only one of the three that works here, and
+that is a measurement rather than a preference. Both failures classify as `unknown`, which is a
+separate gap worth a rule.
+
+Caveat on the strength of this: `isexe@2.0.0` is the whole population of the pre-release case in
+this corpus — 1 of 1, not 1 of many — so the substitution is validated for the only target that
+needs it, and the *rule* remains an extrapolation to targets not yet seen.
+
+**Done when:** `isexe@2.0.0` reproduces under a substitution the run states as an assumption, or
+declines with a reason. The evidence above says the substitution works and which rule to resolve it
+by; what remains is the decision to make trigon build with a toolchain the publisher did not use,
+and the assumption line that has to accompany every run that does.
 (`delayed-stream@1.0.0` building from the io.js distribution is done.)
 
 ## B26. The repair loop has no provider that reliably finishes a repair-sized turn
