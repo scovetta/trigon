@@ -820,11 +820,13 @@ reach more of the CLI. Nothing is conserved; one crate is simply noisy.
 So a per-crate figure for those two is a sample rather than a value, and a re-derivation that differs
 there has not found a mistake. Quote the workspace total and the judgement half.
 
-Measured over 901 tests. The live column carries one failing test —
-`copilot_answers_through_its_cli_and_sees_no_tools`, which asserts the model obeys an instruction
-placed inside the fence that tells it to obey nothing there — so `trigon-ai`'s live figure is a
-floor rather than a reading. `cargo llvm-cov` skips report generation on a non-zero test exit;
-`cargo llvm-cov report` recovers it from the same profdata. Concurrent coverage runs share
+Measured over 901 tests. The live run of that measurement had one failing test,
+`copilot_answers_through_its_cli_and_sees_no_tools`, and it cost no coverage: the panic is an
+assertion *after* the provider returned a fully constructed response, the harness caught the unwind,
+the other tests in that binary ran, and the profdata was written whole. The lines it did not reach
+are in the test file, which `--ignore-filename-regex` excludes — the report has no row for it. Both
+columns are readings, not floors. `cargo llvm-cov` does skip report generation on a non-zero test
+exit; `cargo llvm-cov report` recovers it from the same profdata. Concurrent coverage runs share
 `target/llvm-cov-target` and delete each other's test binaries at startup, and cargo-llvm-cov 0.9.1
 has no `--target-dir` — set `CARGO_TARGET_DIR` and check stderr for `never executed` before
 trusting any figure here.
