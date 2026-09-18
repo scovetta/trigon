@@ -806,12 +806,19 @@ count, and the same figure per crate. The crates that move are exactly the ones 
 to: the mirror gains nine points and `trigon-ai` six.
 
 **Two of these rows are not stable to the line, and the workspace total is.** Two independent
-measurements of this table agreed exactly on the workspace figure (16105 of 23354 lines) and on
-judgement, mirror, `ai` and registry, while disagreeing on `trigon-sandbox` and `trigon` — 810 + 2517
-against 826 + 2501, which is the same 3327 split differently. Sixteen lines move across the boundary
-between the sandbox crate and the binary from run to run, so a per-crate figure for those two is a
-sample rather than a value, and a re-derivation that differs there has not found a mistake. Quote
-the workspace total and the judgement half; treat those two rows as approximate.
+measurements agreed exactly on the workspace figure (16105 of 23354 lines) and on judgement, mirror,
+`ai` and registry, and disagreed on `trigon-sandbox` and `trigon`. `trigon-sandbox` is the unstable
+one: 810 in four separate datasets and 826 in a fifth, drifting by 11 lines between two runs of the
+same tree in `podman.rs` and `network.rs`, which is container timing deciding which lines execute.
+
+The two rows do **not** trade off against each other, and the arithmetic that first suggested they
+might — 810 + 2517 against 826 + 2501, both 3327 — is a coincidence of one pair of runs. Across a
+different pair the binary's coverage is byte-identical at 2572 of 6413 while the sandbox moves; across
+ours the reverse, the sandbox fixed at 810 while the binary climbs 2517 to 2572 because live tests
+reach more of the CLI. Nothing is conserved; one crate is simply noisy.
+
+So a per-crate figure for those two is a sample rather than a value, and a re-derivation that differs
+there has not found a mistake. Quote the workspace total and the judgement half.
 
 Measured over 901 tests. The live column carries one failing test —
 `copilot_answers_through_its_cli_and_sees_no_tools`, which asserts the model obeys an instruction
