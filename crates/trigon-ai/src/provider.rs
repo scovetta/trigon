@@ -210,6 +210,15 @@ pub enum LlmError {
     Http { status: u16, body: String },
     #[error("could not read the provider's answer: {0}")]
     Malformed(String),
+    /// The provider ended the turn without producing an answer at all.
+    ///
+    /// Distinct from `Malformed`, which says an answer arrived and could not be read, and from
+    /// `Truncated`, which says the answer hit a budget *we* set. This is the provider stopping
+    /// mid-turn with nothing to show and no error: the Copilot CLI does it on a hard prompt, ending
+    /// the stream inside the model's reasoning with no `assistant.message` and no `error` event.
+    /// Nothing was returned, so there is nothing to parse and nothing that says why.
+    #[error("the provider ended the turn without an answer: {0}")]
+    EmptyTurn(String),
     #[error("transport: {0}")]
     Transport(String),
 }
@@ -222,6 +231,8 @@ impl trigon_core::Classify for LlmError {
             LlmError::Refused(_) => trigon_core::Fault::Policy,
             LlmError::Http { .. } | LlmError::Transport(_) => trigon_core::Fault::Infra,
             LlmError::Malformed(_) => trigon_core::Fault::Upstream,
+            // The provider's, like a 5xx: it accepted the request and returned nothing.
+            LlmError::EmptyTurn(_) => trigon_core::Fault::Infra,
             // **Ours, not the provider's.** The model answered exactly as asked; the budget we
             // gave it was too small for the answer we wanted. Charging this upstream would put a
             // configuration mistake of ours in a column about somebody else's reliability.
@@ -249,6 +260,12 @@ impl trigon_core::Classify for LlmError {
             // parseable one next time — but the repair loop already owns that decision and has a
             // budget for it, and treating it as transport-level would retry inside the retry.
             LlmError::Malformed(_) => false,
+            // **Retryable, and this is the one that earns it.** A turn that produced nothing is not
+            // a different answer to the same question — it is no answer, and the next attempt is
+            // the first one that gets to be an answer. Observed three times in four real repairs
+            // against the Copilot CLI, with the same prompt succeeding on a manual replay, so the
+            // failure is in the turn and not in what was asked.
+            LlmError::EmptyTurn(_) => true,
             // The same budget produces the same truncation. Retrying spends tokens to reach the
             // identical wall, which is the shape `docs/07-ai.md` §5's "if the failure signature
             // repeats twice, abort" exists to stop.

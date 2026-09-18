@@ -128,6 +128,26 @@ impl Provider for Copilot {
     }
 
     fn complete(&self, req: &Request) -> Result<Response, LlmError> {
+        // **One retry, and only for a turn that produced nothing.** `http.rs` owns retries for the
+        // providers that speak HTTP; this one speaks to a process, so its own transport failure is
+        // its own to handle. Every other error falls straight through: a refusal is the same answer
+        // twice, and an unreadable answer is the repair loop's budget to spend, not this function's.
+        //
+        // Worth exactly one. The failure was observed three times in four real repairs and the same
+        // prompt answered on a manual replay, so a second attempt is likely to land — but a
+        // provider that ends two turns in a row is telling us something a third will not change.
+        match self.attempt(req) {
+            Err(LlmError::EmptyTurn(first)) => {
+                tracing::warn!("{first}; asking once more");
+                self.attempt(req)
+            }
+            other => other,
+        }
+    }
+}
+
+impl Copilot {
+    fn attempt(&self, req: &Request) -> Result<Response, LlmError> {
         let mut child = Command::new(&self.binary)
             .current_dir(&self.workdir)
             .arg("-p")
@@ -191,6 +211,24 @@ impl Provider for Copilot {
 ///
 /// Kept separate from the spawn so the wire format has a test that needs no Copilot subscription:
 /// the shape of these events is the part that will change under us.
+/// Token counts, from the cache-state block of the usage checkpoint.
+///
+/// That is where the CLI records what it actually sent. Output tokens are not reported at all —
+/// Copilot bills in premium requests — so what is not there is left at zero rather than estimated.
+fn usage_of(events: &[Value]) -> Usage {
+    let mut usage = Usage::default();
+    if let Some(models) = events
+        .iter()
+        .rfind(|e| e["type"] == "session.usage_checkpoint")
+        .and_then(|e| e["data"]["promptCacheBreakState"][0]["models"].as_object())
+        && let Some(m) = models.values().next()
+    {
+        usage.input = m["prompt_tokens"].as_u64().unwrap_or(0);
+        usage.cached_input = m["cache_read"].as_u64().unwrap_or(0);
+    }
+    usage
+}
+
 fn parse(stdout: &str, stderr: &str, asked_for: &str) -> Result<Response, LlmError> {
     let events: Vec<Value> = stdout
         .lines()
@@ -213,13 +251,100 @@ fn parse(stdout: &str, stderr: &str, asked_for: &str) -> Result<Response, LlmErr
         e["type"] == "assistant.message"
             && e["data"]["content"].as_str().is_some_and(|c| !c.is_empty())
     });
+    // **The consolidated event is not the only copy, and it may belong to an older message.** The
+    // CLI streams the answer as `assistant.message_delta` chunks — `deltaContent`, keyed by
+    // `messageId` — and only then emits the `assistant.message` carrying the whole thing. A turn cut
+    // short after the model began writing has the answer on the wire with no event holding it:
+    // `xstate@4.38.3`'s repair ended on a delta, and the run reported "no assistant message" while
+    // discarding text it already had.
+    //
+    // The check is whether the message the turn was *last writing* ever got its consolidated event,
+    // not whether any message did. One turn can carry several, so an earlier completed message sits
+    // in the stream looking like an answer — and taking it would answer an older question
+    // confidently, which is worse than reporting nothing. A test pins exactly that case.
+    //
+    // A reconstruction can be incomplete where the consolidated event would not be; the stream
+    // stopped, after all. What stands between an incomplete recipe and a build is what stands there
+    // for a complete one — it has to parse, and `usable()` has to render it — and a half-written
+    // answer that fails either is re-asked with the reason, which beats discarding one that is
+    // usually whole.
+    let pending = events
+        .iter()
+        .rev()
+        .find(|e| e["type"] == "assistant.message_delta")
+        .and_then(|e| e["data"]["messageId"].as_str())
+        .map(str::to_string);
+    if let Some(id) = pending.filter(|id| {
+        !events.iter().any(|e| {
+            e["type"] == "assistant.message" && e["data"]["messageId"].as_str() == Some(id.as_str())
+        })
+    }) {
+        let text: String = events
+            .iter()
+            .filter(|e| {
+                e["type"] == "assistant.message_delta"
+                    && e["data"]["messageId"].as_str() == Some(id.as_str())
+            })
+            .filter_map(|e| e["data"]["deltaContent"].as_str())
+            .collect();
+        if !text.trim().is_empty() {
+            tracing::warn!(
+                "the turn ended before the CLI wrote its message event; reassembled {} chars \
+                 from the deltas it had already sent",
+                text.len()
+            );
+            let model = events
+                .iter()
+                .rev()
+                .find_map(|e| e["data"]["model"].as_str())
+                .unwrap_or(asked_for)
+                .to_string();
+            return Ok(Response {
+                text,
+                reasoning: None,
+                usage: usage_of(&events),
+                model,
+                // Not `end_turn`: the turn did not end, it stopped. Said plainly here because this
+                // is the one field a caller can read to know the answer may be short.
+                stop_reason: "truncated_stream".into(),
+            });
+        }
+    }
+
     let Some(answer) = answer else {
         let refused = events
             .iter()
             .find(|e| e["type"] == "error")
             .map(|e| e["data"].to_string());
+        // **A turn that ended inside the model's reasoning.** The only model this CLI offers is a
+        // reasoning one, and on a hard prompt it can spend the whole turn thinking and be shut
+        // down before it writes anything: the stream then carries dozens of
+        // `assistant.reasoning_delta` events, no `assistant.message`, no `error`, and the CLI's own
+        // log says `Timed out dispose: PromptMode.stdout`. Distinguished from a genuinely
+        // unreadable answer because the two want opposite responses — this one is worth asking
+        // again or asking something smaller, and a malformed answer is not.
+        //
+        // The same shape `provider.rs` reports for OpenAI-compatible providers as reasoning
+        // exhausting the output budget. It has no token counts here, because Copilot reports none.
+        let reasoning = events
+            .iter()
+            .filter(|e| {
+                e["type"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("assistant.reasoning"))
+            })
+            .count();
         return Err(match refused {
             Some(d) => LlmError::Refused(d),
+            // `EmptyTurn` rather than `Truncated`, which carries a token limit and a thinking
+            // count that Copilot reports neither of, and rather than `Malformed`, which says an
+            // answer arrived and could not be read. Nothing arrived.
+            None if reasoning > 0 => LlmError::EmptyTurn(format!(
+                "the turn ended inside the model's reasoning: {reasoning} reasoning events and no \
+                 answer among {} in total, with no error event. Copilot's own log records this as \
+                 `Timed out dispose: PromptMode.stdout`",
+                events.len()
+            )),
             None => LlmError::Malformed(format!(
                 "no assistant message among {} events; the last was {}",
                 events.len(),
@@ -234,16 +359,7 @@ fn parse(stdout: &str, stderr: &str, asked_for: &str) -> Result<Response, LlmErr
     // Token counts live in the cache-state block of the usage checkpoint, which is where the CLI
     // records what it actually sent. Output tokens are not reported at all: Copilot bills in
     // premium requests, so what is not there is left at zero rather than estimated.
-    let mut usage = Usage::default();
-    if let Some(models) = events
-        .iter()
-        .rfind(|e| e["type"] == "session.usage_checkpoint")
-        .and_then(|e| e["data"]["promptCacheBreakState"][0]["models"].as_object())
-        && let Some(m) = models.values().next()
-    {
-        usage.input = m["prompt_tokens"].as_u64().unwrap_or(0);
-        usage.cached_input = m["cache_read"].as_u64().unwrap_or(0);
-    }
+    let usage = usage_of(&events);
 
     Ok(Response {
         text: answer["data"]["content"].as_str().unwrap_or("").to_string(),
@@ -346,5 +462,87 @@ mod tests {
         let only_tools = JSONL.lines().take(2).collect::<Vec<_>>().join("\n");
         let e = parse(&only_tools, "", "m").unwrap_err();
         assert!(matches!(e, LlmError::Malformed(_)), "{e}");
+    }
+}
+
+#[cfg(test)]
+mod reasoning_turn_tests {
+    use super::*;
+
+    /// A turn the CLI ended while the model was still thinking.
+    ///
+    /// The real shape, reduced: dozens of `assistant.reasoning_delta` events, no
+    /// `assistant.message`, no `error`. `ts-node@10.9.2`'s repair died this way and the message
+    /// said only "no assistant message among 65 events", which reads like a wire-format change
+    /// rather than a turn that ran out of room.
+    /// A turn cut off after the model began writing, which is recoverable.
+    ///
+    /// The CLI streams `assistant.message_delta` chunks and only then emits the consolidated
+    /// `assistant.message`. `xstate@4.38.3`'s repair ended on a delta, so the answer was on the
+    /// wire with no event holding it — and the run reported "no assistant message" and threw away
+    /// text it already had.
+    #[test]
+    fn an_answer_cut_off_mid_message_is_reassembled_from_its_deltas() {
+        let stream = concat!(
+            r#"{"type":"assistant.message_delta","data":{"messageId":"m1","deltaContent":"stale "}}"#,
+            "\n",
+            r#"{"type":"assistant.message","data":{"messageId":"m1","content":"stale answer"}}"#,
+            "\n",
+            r#"{"type":"assistant.message_delta","data":{"messageId":"m2","deltaContent":"kind: flow\n"}}"#,
+            "\n",
+            r#"{"type":"assistant.message_delta","data":{"messageId":"m2","deltaContent":"deps: []\n"}}"#,
+            "\n",
+        );
+        // The consolidated `m1` message exists and is *not* the answer: it belongs to an earlier
+        // message in the same turn, and taking it would answer the wrong question confidently.
+        let r = parse(stream, "", "gpt-5.6-luna").expect("the deltas carry the answer");
+        assert_eq!(r.text, "kind: flow\ndeps: []\n");
+        assert_eq!(
+            r.stop_reason, "truncated_stream",
+            "a caller has to be able to tell this from a turn that finished"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ended_inside_the_reasoning_says_so() {
+        let stream = concat!(
+            r#"{"type":"user.message","data":{}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_start","data":{}}"#,
+            "\n",
+            r#"{"type":"assistant.reasoning_delta","data":{"content":"thinking"}}"#,
+            "\n",
+            r#"{"type":"assistant.reasoning_delta","data":{"content":"still thinking"}}"#,
+            "\n",
+        );
+        let e = parse(stream, "", "gpt-5.6-luna").expect_err("no answer arrived");
+        assert!(
+            matches!(e, LlmError::EmptyTurn(_)),
+            "a turn that produced nothing is retryable; a malformed answer is not: {e}"
+        );
+        assert!(
+            trigon_core::Classify::is_retryable(&e),
+            "the next attempt is the first one that gets to be an answer"
+        );
+        let msg = e.to_string();
+        assert!(
+            msg.contains("ended inside the model's reasoning"),
+            "the diagnosis has to be in the message: {msg}"
+        );
+        assert!(msg.contains('2'), "it should count the reasoning events: {msg}");
+
+        // An empty stream is still the other thing, and a stream that simply lacks an answer with
+        // no reasoning at all keeps the original wording — the two cases want different responses.
+        let no_reasoning = concat!(
+            r#"{"type":"user.message","data":{}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_end","data":{}}"#,
+            "\n",
+        );
+        let other = parse(no_reasoning, "", "gpt-5.6-luna")
+            .expect_err("still no answer")
+            .to_string();
+        assert!(other.contains("no assistant message"), "{other}");
+        assert!(!other.contains("reasoning"), "{other}");
     }
 }

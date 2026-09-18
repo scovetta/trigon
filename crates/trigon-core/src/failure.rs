@@ -1013,14 +1013,24 @@ const RULES: &[Rule] = &[
         // a sentence, not a shell error, so none of the `command not found` rules above see it.
         // `ts-node@10.9.2` failed this way and was reported as `npm/peer-conflict`.
         //
-        // Repairable, and cheaply: the tool goes in the strategy's `needs`, which is what puts it
-        // in the image. That is a statement about our sandbox rather than about the package, in
-        // the sense ADR-0012 means — `unzip` decides nothing.
+        // **Not repairable, and the model is what settled it.** The other `env/missing-tool` rules
+        // above stay repairable because the tool is one *our recipe* reached for — `npx` was fixed
+        // by a strategy that stops calling npx. This one is different: the tool is demanded by the
+        // package's own install script, and no recipe that still installs the package avoids it.
+        //
+        // Asked anyway, the repair rung answered: "adding `needs: [unzip]` would fail with
+        // `env/base-image-incomplete`. None of the registered npm tools can suppress that lifecycle
+        // script, exclude the lint-only dependency, or build dprint from source. Emitting a recipe
+        // would therefore be knowingly non-runnable." That is correct, and it cost a model call to
+        // hear — `builder.rs`'s own preamble tells the model the image is fixed before its recipe
+        // is read, so this class was one the system had already ruled out and then paid to ask
+        // about. Same operator action as `env/base-image-incomplete`, and the same answer to
+        // whether a strategy change helps.
         code: "env/missing-tool",
         needles: &["is required to install"],
         fault: Fault::Bug,
         retryable: false,
-        repairable: true,
+        repairable: false,
         // The tool, which is the first word of the sentence and the thing to install.
         capture: Capture::WordBefore("is required to install"),
     },
@@ -1676,7 +1686,9 @@ strategy needs have to be in the image already. Build one with:\n\
         );
         assert_eq!(s.code, "env/missing-tool");
         assert_eq!(s.subject.as_deref(), Some("unzip"), "it has to name the tool to install");
-        assert!(s.repairable);
+        // Not repairable: the tool is the package's own install script's, not our recipe's, so no
+        // strategy change reaches it. The repair rung was asked once and said exactly that.
+        assert!(!s.repairable, "asking a model to fix a fixed image costs a call to be told no");
 
         // The real thing still classifies.
         let fatal = classify("npm ERR! code ERESOLVE\nnpm ERR! while resolving: left-pad@1.3.0");
