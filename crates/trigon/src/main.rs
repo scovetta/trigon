@@ -3099,10 +3099,21 @@ mod rebuild {
             };
             // Only a failure the build itself reported carries a signature. Our own errors and a
             // void run are not something a different recipe fixes.
-            report.failure = e
+            // **Set, never cleared.** A later iteration's error can be one of ours — a repaired
+            // recipe that will not render or will not execute — and `downcast_ref` yields `None`
+            // for it. Assigning that would erase the signature this run actually found and file
+            // the whole thing as `error:infra` with no failure code, which is the second half of
+            // the same defect `usable` closes: the repair must not be able to cost us the answer.
+            let this_failure = e
                 .downcast_ref::<crate::BuildFailure>()
                 .map(|f| f.signature.clone());
-            let Some(failure) = report.failure.clone() else {
+            if let Some(sig) = &this_failure {
+                report.failure = Some(sig.clone());
+            }
+            // The decision to attempt a repair is about *this* iteration's failure, so it reads
+            // `this_failure` and not the sticky one — otherwise a render error would be answered
+            // by repairing a build failure that has already been repaired once.
+            let Some(failure) = this_failure else {
                 break (built, strategy_digest);
             };
             let Some(cfg) = &model else {
@@ -5495,9 +5506,17 @@ fn usable(strategy: &trigon_strategy::Strategy) -> Result<(), String> {
         },
         ..Default::default()
     };
+    // **Rendered *and* checked for executability, because the executor checks both.** `executable`
+    // is deliberately not part of `render` — `trigon strategy render` exists to look at a
+    // deps-only fragment and must not refuse one — so a guard that only renders accepts a proposal
+    // the build will then reject. That is the gap this function exists to close, and it was open:
+    // a repair for `xstate@4.38.3` proposed a recipe that rendered an empty build phase, passed
+    // here, replaced the strategy, and died on the next iteration with an error that was not a
+    // `BuildFailure`. The run was filed `error:infra` with no failure code — the repair having
+    // cost us exactly the answer the comment at its call site says it must never cost.
     trigon_strategy::render(strategy, &cx, &tools)
-        .map(|_| ())
         .map_err(|e| e.to_string())
+        .and_then(|i| i.executable().map_err(|e| e.to_string()))
 }
 
 /// Where a statement goes and who signs it. Grouped because they are one decision — whether this
@@ -6899,6 +6918,32 @@ output_dir: trigon-pack
         ));
         // And an unknown current digest is not evidence of sameness.
         assert!(super::changes_anything(&same, &None));
+    }
+
+    /// A recipe that renders and builds nothing must not get past the guard.
+    ///
+    /// `Instructions::executable` is deliberately not part of `render` — `trigon strategy render`
+    /// has to be able to show a deps-only fragment — so the guard has to ask for both. It did not,
+    /// and the consequence was measured: a repair for `xstate@4.38.3` proposed exactly this shape,
+    /// passed, replaced the strategy, and the next iteration died with an error that carried no
+    /// signature. The run was filed `error:infra` with no failure code, losing a real
+    /// `npm/workspace-unbuilt-sibling` verdict to a suggestion for improving it.
+    #[test]
+    fn a_proposal_that_renders_but_builds_nothing_is_rejected() {
+        let empty = trigon_strategy::from_yaml(
+            "kind: flow\n\
+             location:\n  repo: https://github.com/statelyai/xstate\n  ref: e87600ea\n\
+             src:\n  - uses: git-checkout\n\
+             deps:\n  - runs: npm ci\n\
+             build: []\n\
+             output_path: '*.tgz'\n",
+        )
+        .expect("this parses; that is the point");
+        let why = super::usable(&empty).expect_err("a recipe that builds nothing is not usable");
+        assert!(
+            why.contains("empty build phase"),
+            "the rejection has to say what is wrong with it: {why}"
+        );
     }
 
     #[test]
