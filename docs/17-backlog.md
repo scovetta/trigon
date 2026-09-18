@@ -97,7 +97,7 @@ Measured twice, because the gap between them is the honest measure of "needs the
 
 | | offline | live |
 |---|---|---|
-| **Judgement half** — `core`, `archive`, `stabilize`, `compare`, `attest` | **89.3%** | **89.3%** |
+| **Judgement half** — `core`, `archive`, `stabilize`, `compare`, `attest` | **88.4%** | **88.4%** |
 | `trigon-mirror` | 73.6% | 90.7% |
 | Workspace | 69.6% | 72.8% |
 

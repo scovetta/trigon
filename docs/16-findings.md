@@ -790,7 +790,7 @@ the difference between them is the honest measure of "needs the network" versus 
 
 | | offline | live |
 |---|---|---|
-| **Judgement half** (`core`, `archive`, `stabilize`, `compare`, `attest`) | **89.3%** | **89.3%** |
+| **Judgement half** (`core`, `archive`, `stabilize`, `compare`, `attest`) | **88.4%** | **88.4%** |
 | `trigon-mirror` | 73.6% | 90.7% |
 | `trigon-ai` | 80.9% | 87.3% |
 | `trigon-registry` | 71.4% | 76.3% |
