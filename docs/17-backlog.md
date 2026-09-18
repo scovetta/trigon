@@ -339,6 +339,35 @@ run record names the toolchain by hash, and a deliberately corrupted store entry
 rather than being used — that last one is the test, because a cache that cannot be caught serving
 the wrong bytes is the thing this design exists to avoid.
 
+## B26. The repair loop has no provider that reliably finishes a repair-sized turn
+
+`--model copilot` is the only provider that needs no API key, which makes it the one a contributor
+reaches for first. It does not reliably finish a repair. Measured across four real repairs of
+`ts-node@10.9.2` and `xstate@4.38.3`: three turns ended inside the model's reasoning with no answer
+at all, and the ones that did produce text produced 704 and 130 characters before the stream
+stopped — enough to parse into a strategy, not enough to be a whole one. The CLI's own log records
+each as `Timed out dispose: PromptMode.stdout`. The same prompt, replayed by hand, answered in full.
+
+[§3.27](16-findings.md#327-four-things-wrong-on-the-path-nothing-had-walked) has what was fixed
+around it: answers are no longer discarded when the consolidated event never arrives, an empty turn
+is retried once, and a short answer can no longer replace a good verdict. None of that makes the
+turn finish.
+
+Three things would, in increasing order of effort:
+
+- **Ask for less.** The repair prompt carries the previous strategy, the failure, up to 200
+  repository paths and a compressed build log, and asks for a whole strategy document back. A
+  repair is usually a change to one or two steps, and a diff-shaped answer would be a fraction of
+  the output — which is the half that is running out.
+- **Say when an answer was short.** `stop_reason` is now `truncated_stream` on a reassembled
+  answer and nothing reads it. The repair loop could re-ask on that alone, before the parser has to
+  discover the answer is half a document.
+- **Have a provider in CI that finishes.** Everything above is guesswork until one run of the
+  corpus goes through the loop end to end. That needs a key, so it is a decision rather than a task.
+
+**Done when:** one corpus target fails deterministically, is repaired by a model, and rebuilds — and
+the corpus says how often a repair helps at all, which no number anywhere currently says.
+
 ## B25. The fetch cache behind the mirror, in three tiers
 
 [ADR-0013](adr/0013-a-cache-supplies-bytes-never-decisions.md) decides the shape; this is the work.

@@ -1368,6 +1368,76 @@ something it downloaded, and the reason is not yet attributed by the name. It st
 and stays ours — we chose the pin — but it no longer accuses a component that was reading and
 serving the right bytes the whole time.
 
+### 3.27 Four things wrong on the path nothing had walked
+
+Asked for a package that fails to build and then builds after a model repairs the recipe, the
+honest answer turned out to be that the repair path had never been run end to end against a live
+provider. Four faults, in the order they blocked each other — each one hidden behind the one before.
+
+**The rule that chose the target was wrong about every target.** `npm/peer-conflict` matched bare
+`ERESOLVE`, which npm prints as a **warning on installs that succeed**, and `classify` scans
+backwards for the last line any rule claims. So it caught every unnamed npm failure in the corpus.
+Counted rather than estimated: **0 of the 197 build logs contain `npm ERR! code ERESOLVE`, and 7
+contain only the warning.** The rule had a 100% false-positive rate and had never once named the
+thing it is called after. `ts-node@10.9.2` dies on `unzip is required to install dprint`; it was
+filed as a peer conflict, and a repair loop reading that file would have gone looking for a
+dependency conflict that does not exist.
+
+This had been diagnosed once before. The comment on `npm/workspace-unbuilt-sibling` in
+[`failure.rs`](../crates/trigon-core/src/failure.rs) records it exactly — "with no rule for this one
+the scan ran past it to `npm WARN ERESOLVE` ... so a workspace link error was reported as
+`npm/peer-conflict`, and the repair loop spent a model call fixing a peer conflict that was never
+the failure" — and the fix was to name that one new symptom. Naming symptoms treats instances; requiring `npm ERR! code ERESOLVE` treats the cause, and
+an unnamed failure now falls through to `unknown`, which is the honest bucket.
+
+**The second target was a class the system had already ruled out and then paid to ask about.** With
+the misattribution gone, `ts-node` classified as `env/missing-tool:unzip` — `repairable: true`, so
+the loop spent a call. The model answered correctly and completely:
+
+> adding `needs: [unzip]` would fail with `env/base-image-incomplete`. None of the registered npm
+> tools can suppress that lifecycle script, exclude the lint-only dependency, or build dprint from
+> source. Emitting a recipe would therefore be knowingly non-runnable.
+
+Which is what `builder.rs`'s own preamble tells it: the image is fixed before the recipe is read.
+The distinction that survives is between a tool **our recipe** reached for and a tool the
+**package's own install script** demands. The first is avoidable — `env/missing-tool:npx` was fixed
+by a strategy that stops calling npx — and stays repairable. The second is not, and now says so.
+
+**The provider was discarding answers it had already received.** The Copilot CLI streams an answer
+as `assistant.message_delta` chunks and only then emits the `assistant.message` holding all of it.
+A turn cut short after the model began writing therefore has the answer on the wire and no event
+carrying it. Three of four real repairs failed this way, reported as "no assistant message among 65
+events" — which reads like a wire-format change rather than a truncation, and sent this
+investigation looking at the parser twice before looking at the stream.
+
+Reassembly keys on whether the message the turn was **last writing** ever got its consolidated
+event, not on whether any message did: one turn can carry several, and an earlier completed one
+sits in the stream looking like an answer. Taking it would answer an older question confidently.
+A test pins that trap and caught the first implementation of this walking straight into it.
+Where a turn stops before any text at all, that is now `EmptyTurn` — distinct from `Malformed`,
+which says an answer arrived and could not be read, and from `Truncated`, which says a budget *we*
+set was too small — classified `Fault::Infra`, retryable, with one retry inside the provider.
+
+**And then the repair cost the run the answer it already had.** With answers no longer discarded,
+the loop got a proposal: a recipe that rendered an **empty build phase**. `usable()` exists to stop
+exactly this before a proposal replaces a working strategy, and it renders — but
+`Instructions::executable` is deliberately *not* part of `render`, because `trigon strategy render`
+has to be able to show a deps-only fragment. So the guard checked one of the two things the
+executor checks. The proposal passed, replaced the strategy, and the next iteration died on an
+error carrying no signature.
+
+`report.failure` is assigned from each iteration's error, so that error assigned `None` over the
+`npm/workspace-unbuilt-sibling:xstate` the run had genuinely found. The record read
+`outcome: error:infra, failure: None` — a real verdict about a recipe, replaced by a suggestion for
+improving it, which the comment at the call site says in as many words must never happen. The guard
+now asks for both, and the failure is set and never cleared.
+
+**What the exercise was worth.** No package was repaired. What the attempt found is four defects on
+a path that every `--model` run takes, three of them invisible from the outside: a rule that was
+wrong about everything it named, a class of spend that could never pay off, a provider that dropped
+good answers, and a guard that let a bad one destroy a good verdict. A demo would have shown one
+package building. This showed why none of them could.
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher
