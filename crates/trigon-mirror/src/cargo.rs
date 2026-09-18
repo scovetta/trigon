@@ -202,12 +202,18 @@ mod tests {
         );
         let (out, withheld, unyanked) = filter_index(idx, "2024-06-24T23:57:30");
         assert_eq!(withheld, 0);
-        assert_eq!(unyanked, 1, "the yank postdates the pin, so it is not a fact about that day");
+        assert_eq!(
+            unyanked, 1,
+            "the yank postdates the pin, so it is not a fact about that day"
+        );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
         let newest: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(newest["vers"], "1.16.1");
-        assert_eq!(newest["yanked"], false, "Cargo would otherwise resolve 1.14.0");
+        assert_eq!(
+            newest["yanked"], false,
+            "Cargo would otherwise resolve 1.14.0"
+        );
         // Untouched lines keep their exact bytes.
         assert!(lines[0].starts_with(r#"{"name":"bytemuck","vers":"1.14.0""#));
     }

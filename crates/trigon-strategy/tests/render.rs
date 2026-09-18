@@ -563,7 +563,9 @@ output_path: '*.tgz'
         ("22.14.0", "nodejs.org", "node"),
     ] {
         let deps = deps_for(version);
-        let start = deps.find("TRIGON_NODE_URL=").expect("the fetch is in there");
+        let start = deps
+            .find("TRIGON_NODE_URL=")
+            .expect("the fetch is in there");
         let block = &deps[start..deps[start..].find("esac").map(|i| start + i + 4).unwrap()];
         let out = std::process::Command::new("sh")
             .arg("-c")

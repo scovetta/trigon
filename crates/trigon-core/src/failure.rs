@@ -1744,10 +1744,17 @@ strategy needs have to be in the image already. Build one with:\n\
             "a warning npm prints on success must not name the failure"
         );
         assert_eq!(s.code, "env/missing-tool");
-        assert_eq!(s.subject.as_deref(), Some("unzip"), "it has to name the tool to install");
+        assert_eq!(
+            s.subject.as_deref(),
+            Some("unzip"),
+            "it has to name the tool to install"
+        );
         // Not repairable: the tool is the package's own install script's, not our recipe's, so no
         // strategy change reaches it. The repair rung was asked once and said exactly that.
-        assert!(!s.repairable, "asking a model to fix a fixed image costs a call to be told no");
+        assert!(
+            !s.repairable,
+            "asking a model to fix a fixed image costs a call to be told no"
+        );
 
         // The real thing still classifies.
         let fatal = classify("npm ERR! code ERESOLVE\nnpm ERR! while resolving: left-pad@1.3.0");
@@ -1767,7 +1774,10 @@ strategy needs have to be in the image already. Build one with:\n\
         );
         assert_eq!(s.code, "trigon/cargo-sparse-unsupported");
         assert_eq!(s.fault, Fault::Bug);
-        assert!(!s.repairable, "a git index is not something a recipe rewrite provides");
+        assert!(
+            !s.repairable,
+            "a git index is not something a recipe rewrite provides"
+        );
     }
 
     #[test]
@@ -1778,7 +1788,11 @@ strategy needs have to be in the image already. Build one with:\n\
             "warning: spurious network error (3 tries remaining): [7] Could not connect to server\n             error: failed to prepare local package for uploading\n             Caused by:\n  download of config.json failed\n             Caused by:\n  failed to download from `https://index.crates.io/config.json`\n",
         );
         assert_eq!(s.code, "trigon/cargo-index-unreachable");
-        assert_eq!(s.fault, Fault::Bug, "the mirror not serving the index is ours");
+        assert_eq!(
+            s.fault,
+            Fault::Bug,
+            "the mirror not serving the index is ours"
+        );
         assert!(
             !s.repairable,
             "no rewrite of the build recipe gives cargo a route to the index"
@@ -1803,8 +1817,15 @@ strategy needs have to be in the image already. Build one with:\n\
             Some("8.0.0-pre"),
             "the version is the thing to change, so it is the cluster key"
         );
-        assert_eq!(s.fault, Fault::Bug, "we built the URL; the publisher did nothing unusual");
-        assert!(!s.fault.is_about_the_package(), "this must not reach the reproduction rate");
+        assert_eq!(
+            s.fault,
+            Fault::Bug,
+            "we built the URL; the publisher did nothing unusual"
+        );
+        assert!(
+            !s.fault.is_about_the_package(),
+            "this must not reach the reproduction rate"
+        );
         assert!(!s.retryable, "the file will be just as absent next time");
 
         // The io.js shape reaches the same rule and keeps its own version. 1.6.4 *is* published —

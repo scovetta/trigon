@@ -132,11 +132,13 @@ pub struct NpmInferrer {
 /// releases — `npm/install-node` routes majors 1 to 3 to iojs.org and gets the publisher's own
 /// binary, so those need no substitution at all.
 fn is_fetchable_node(version: &str) -> bool {
-    let numeric = |p: Option<&str>| {
-        p.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
-    };
+    let numeric =
+        |p: Option<&str>| p.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
     let mut parts = version.split('.');
-    numeric(parts.next()) && numeric(parts.next()) && numeric(parts.next()) && parts.next().is_none()
+    numeric(parts.next())
+        && numeric(parts.next())
+        && numeric(parts.next())
+        && parts.next().is_none()
 }
 
 /// Sort key for a plain `x.y.z`, so "highest" means highest *number* and not longest string.
@@ -303,7 +305,10 @@ impl StrategyInferrer for NpmInferrer {
                 return Ok(Vec::new());
             };
             let Some(nearest) = highest_node_release_at(&self.client, publish).await else {
-                tracing::debug!(node, "could not resolve a Node release at the publish instant");
+                tracing::debug!(
+                    node,
+                    "could not resolve a Node release at the publish instant"
+                );
                 return Ok(Vec::new());
             };
             assumptions.push(format!(
@@ -963,10 +968,8 @@ impl StrategyInferrer for CratesIoInferrer {
                 // repository names the one package there is, and guessing which shape a repository
                 // has before checking it out is the guess this avoids.
                 {
-                    let mut b = BTreeMap::from([(
-                        "package".to_string(),
-                        target.reference.name.clone(),
-                    )]);
+                    let mut b =
+                        BTreeMap::from([("package".to_string(), target.reference.name.clone())]);
                     // The build phase needs it too, not only the deps phase: a repository with a
                     // `rust-toolchain.toml` turns `cargo` into a rustup proxy that installs
                     // components on demand, and it does that here.
@@ -1579,14 +1582,23 @@ mod node_substitution_tests {
     #[test]
     fn a_pre_release_is_not_fetchable_and_a_real_release_is() {
         assert!(!is_fetchable_node("8.0.0-pre"), "the case this exists for");
-        for odd in ["8.0.0-nightly20170323ee19e2923a", "8.0.0-rc.1", "v8.0.0", "8.0", "8", ""] {
+        for odd in [
+            "8.0.0-nightly20170323ee19e2923a",
+            "8.0.0-rc.1",
+            "v8.0.0",
+            "8.0",
+            "8",
+            "",
+        ] {
             assert!(!is_fetchable_node(odd), "{odd} is not an x.y.z release");
         }
 
         // io.js versions are real releases and must NOT be substituted: `npm/install-node` routes
         // majors 1 to 3 to iojs.org and fetches the publisher's own binary. Substituting one would
         // trade an exact toolchain for a nearby guess, which is strictly worse.
-        for real in ["1.6.4", "2.5.0", "3.3.1", "0.12.7", "4.8.1", "7.7.4", "22.14.0"] {
+        for real in [
+            "1.6.4", "2.5.0", "3.3.1", "0.12.7", "4.8.1", "7.7.4", "22.14.0",
+        ] {
             assert!(is_fetchable_node(real), "{real} is a release we can fetch");
         }
     }
@@ -1605,7 +1617,11 @@ mod node_substitution_tests {
         // The trap a string comparison walks into: "10.0.0" < "9.0.0" lexically.
         let mut two_digit = ["9.11.2", "10.0.0"];
         two_digit.sort_by_key(|v| node_order(v));
-        assert_eq!(two_digit.last(), Some(&"10.0.0"), "10 is above 9, not below it");
+        assert_eq!(
+            two_digit.last(),
+            Some(&"10.0.0"),
+            "10 is above 9, not below it"
+        );
 
         assert!(node_order("7.7.4") > node_order("4.8.1"));
         assert!(node_order("8.0.0") > node_order("7.7.4"));

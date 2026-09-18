@@ -529,7 +529,10 @@ mod reasoning_turn_tests {
             msg.contains("ended inside the model's reasoning"),
             "the diagnosis has to be in the message: {msg}"
         );
-        assert!(msg.contains('2'), "it should count the reasoning events: {msg}");
+        assert!(
+            msg.contains('2'),
+            "it should count the reasoning events: {msg}"
+        );
 
         // An empty stream is still the other thing, and a stream that simply lacks an answer with
         // no reasoning at all keeps the original wording — the two cases want different responses.
