@@ -10,11 +10,11 @@ trust us.
 Registries distribute artifacts. People audit source. Almost nothing checks that the two correspond,
 and that gap is where build-time supply-chain attacks live.
 
-**Today it rebuilds npm and PyPI packages.** crates.io, RubyGems, NuGet and GitHub releases are
+**Today it rebuilds npm, PyPI, crates.io and NuGet packages.** RubyGems and GitHub releases are
 designed for and sequenced next; a target in one of those is refused by name rather than attempted.
 Comparing two artifacts you already have — the judgement half, below — needs no network and has no
-prerequisites at all. Tarballs, wheels, gems and crates each get their own normalization; a `.nupkg`
-gets the generic zip set until someone writes NuGet's.
+prerequisites at all. Tarballs, wheels, gems, crates and `.nupkg` files each get their own
+normalization, on top of the generic tar and zip sets.
 
 **Using it?** [`docs/using-trigon.md`](docs/using-trigon.md) is the task-oriented guide: install,
 compare two artifacts, rebuild a package, read a verdict, and — the section worth reading first —
@@ -47,6 +47,12 @@ the build's only route out is a time-filtered mirror that writes down everything
 |---|---|---|
 | npm | **100 of 132 (76%)** | 132 of 197 (67%) |
 | PyPI | **136 of 163 (83%)** | 163 of 200 (81%) |
+
+**crates.io and NuGet have no rate here, because they have no corpus yet.** Both rebuild end to end
+at `mirror-only`, but neither has a stratified corpus, and a number quoted over targets picked by
+hand is not a rate. What is known: of twelve crates tried, six reproduce — `hashbrown@0.17.1` and
+`serde@1.0.219` among them, lockfile included — and every remaining divergence is the `Cargo.toml`
+manifest rewrite that [`17-backlog.md`](docs/17-backlog.md) B20 is about.
 
 The npm row folds in a six-target re-run rather than a second full sweep. npm 7.0 through 8.2
 corrupts the tarballs it fetches concurrently — it presented as a broken mirror for months, and was
@@ -130,6 +136,82 @@ is named, and the exit code is 1.
 
 Three digests per side, not one, because "the same tar in different gzip framing" and "a different
 tar" are different findings and a single digest cannot tell you which you have.
+
+## How it works
+
+One rebuild, end to end. The boxes are the four persisted states; the labels on the arrows between
+them are the only things that cross.
+
+```mermaid
+flowchart TB
+    target(["pkg:npm/left-pad@1.3.0"])
+
+    subgraph inferring["Inferring — may use the network and a model, holds no build rights"]
+        direction TB
+        resolve["Resolve<br/>registry metadata → artifact URL,<br/>digest, declared repo, publish instant"]
+        decompose["Decompose<br/>fetch the published artifact,<br/>enumerate its members"]
+        locate["LocateSource<br/>provenance → tag ladder →<br/>tree hash → model"]
+        strategy["InferStrategy<br/>cache → definitions → CI →<br/>heuristic → model"]
+        materialize["Materialize<br/>git fetch at the pinned commit"]
+        resolve --> decompose --> locate --> strategy --> materialize
+    end
+
+    subgraph building["Building — egress-restricted, write-only blob access"]
+        direction TB
+        run["Build<br/>container, under a declared egress tier"]
+        mirror[("trigon-mirror<br/>the registry index as it stood<br/>at the publish instant")]
+        extract["Extract<br/>find the artifact it produced"]
+        run -->|"every fetch, hashed and transcribed"| mirror
+        run --> extract
+    end
+
+    subgraph judging["Judging — links no async runtime, no network client, no model"]
+        direction TB
+        stabilize["Stabilize<br/>normalize both sides identically"]
+        compare["Compare<br/>one pass, six digests,<br/>structured notes"]
+        stabilize --> compare
+    end
+
+    subgraph done["Done — a separate process, and the only one holding the signing key"]
+        direction TB
+        attest["Attest<br/>in-toto statement, DSSE"]
+        publish["Publish<br/>store, optional transparency log"]
+        attest --> publish
+    end
+
+    target --> resolve
+    materialize -->|"strategy as data · pinned source ·<br/>guard manifest: digests, never bytes"| run
+    decompose -->|"the published artifact"| stabilize
+    extract -->|"the rebuilt artifact"| stabilize
+    compare -->|"exact · normalized · normalized-with-caveats · divergent"| attest
+    decompose -. "never: a build must not reach the artifact<br/>it is going to be compared against" .-> run
+```
+
+Two edges in that picture are load-bearing, and both are easy to lose in implementation.
+
+**The dashed one never happens.** Judging reads both sides, so a build must be unable to reach the
+published artifact at all — including through our own content-addressed store, whose digest travels
+with every target and whose reads would never cross the egress proxy. Today that is enforced by
+`Decompose` handing forward a set of hashes rather than bytes: the guard manifest names what the
+build must not produce, and carries none of it. The fleet shape adds a second rule, a write-only
+blob credential scoped to the one run, which [`01-architecture.md`](docs/01-architecture.md) §1
+specifies and no code enforces yet.
+
+**The mirror is the build's only route out.** At `--egress mirror-only` the container sits in a
+network island whose one reachable host serves the registry index *as it stood at the publish
+instant* — so a dependency resolved during the rebuild is the one the publisher would have got, not
+today's. Everything it serves is hashed on the way past and written to a transcript the run keeps.
+
+A fifth step, `Explain`, sits inside Judging and may call a model to describe a difference in
+words. It is advisory and cannot change a verdict: the verdict is the digest comparison, and that
+half of the system is the one that links nothing.
+
+**The four boxes are states, not processes.** On a fleet they are separate workers with different
+credentials, which is the point of drawing them apart. On a laptop `trigon rebuild` runs the first
+three in one process and `trigon attest` is the second command in
+[`scripts/rebuild-and-attest.sh`](scripts/rebuild-and-attest.sh) — deliberately not one, so the
+thing holding the key re-derives the verdict from stored bytes rather than being told it by the
+process that just executed a package's build script.
 
 ## Verify a package end to end
 
@@ -490,7 +572,7 @@ scripts/                  the cross-machine verification check
 ## Build and check
 
 ```
-cargo test --workspace                      # 680 pass, 0 fail
+cargo test --workspace                      # 901 pass, 0 fail
 TRIGON_LIVE=1 cargo test --workspace        # plus the ones that need a network
 cargo run -p xtask -- policy                # the dependency policy
 cargo run -p xtask -- differential          # against the reference implementation
