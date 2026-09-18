@@ -805,6 +805,14 @@ test that opens no socket. Not equal to one decimal: **4817 of 5452 lines in bot
 count, and the same figure per crate. The crates that move are exactly the ones that are supposed
 to: the mirror gains nine points and `trigon-ai` six.
 
+**Two of these rows are not stable to the line, and the workspace total is.** Two independent
+measurements of this table agreed exactly on the workspace figure (16105 of 23354 lines) and on
+judgement, mirror, `ai` and registry, while disagreeing on `trigon-sandbox` and `trigon` — 810 + 2517
+against 826 + 2501, which is the same 3327 split differently. Sixteen lines move across the boundary
+between the sandbox crate and the binary from run to run, so a per-crate figure for those two is a
+sample rather than a value, and a re-derivation that differs there has not found a mistake. Quote
+the workspace total and the judgement half; treat those two rows as approximate.
+
 Measured over 901 tests. The live column carries one failing test —
 `copilot_answers_through_its_cli_and_sees_no_tools`, which asserts the model obeys an instruction
 placed inside the fence that tells it to obey nothing there — so `trigon-ai`'s live figure is a
