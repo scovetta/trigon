@@ -684,7 +684,7 @@ eventually exposed §1's `PIP_TRUSTED_HOST` finding after weeks of reading zero.
 
 The reason is the same shape as §3.16 and arrives from the opposite direction. The counters live on
 the `Mirror` object. Under an enforced tier that object runs *inside the build's network island*,
-and the host has no route to it — which is not a bug, it is the definition of the island. So the
+and the host has no route to it — which is the definition of the island rather than a bug. So the
 control was present at `open`, where a build can bypass the mirror entirely and the evidence is
 nearly worthless, and absent at `mirror-only`, where it is the claim being made.
 

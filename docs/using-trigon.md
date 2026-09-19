@@ -338,7 +338,7 @@ this":
 | `derivation`, `confidence`, `assumptions` | Which rung produced the recipe, how much to believe it, and every guess it had to make |
 | `declines` | One line per rung that was asked and said no, with its reason. A `no-strategy` is otherwise a verdict with no explanation |
 | `attestable`, `egress`, `network_exchanges`, `network_bytes` | Whether the build's egress is fully accounted for, and what crossed |
-| `pin` | What the time-filtering mirror was actually asked for and what it withheld — evidence the moment *bound*, not just that it was configured |
+| `pin` | What the time-filtering mirror was actually asked for and what it withheld — evidence the moment *bound* rather than that it was configured |
 | `guard_trips`, `refused_artifact`, `guard_notes` | The artifact guard tripping (the run is void), the build asking for its own artifact and being refused (the control working), and near-misses |
 | `failure`, `timings` | The classified failure and where the time went. A `None` timing means no data, never zero |
 

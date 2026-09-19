@@ -265,7 +265,7 @@ different egress tier, and a fresh `npm pack` does not produce the same bytes tw
 **stabilized** digest is `f0a01941419d…` in both, which is the entire point: the verdict is a
 property of the package, not of the afternoon it was rebuilt on.
 
-The `mirror` line is the evidence that the dependency index really was pinned to the publish date.
+The `mirror` line is the evidence that the dependency index was pinned to the publish date.
 The count is across all 69 packuments the build fetched, not left-pad's own — left-pad has published
 nothing since 2018, so none of its fifteen versions were withheld. The thousand-odd come from its
 devDependency tree, where `fast-check` alone accounts for 198 versions that did not exist in April
@@ -341,7 +341,7 @@ signature verified
 rederived exact under wheel@58632c3c627d — the claim holds
 ```
 
-Drop `--public-key` and it still re-derives; it just says the signature was present and unchecked,
+Drop `--public-key` and it still re-derives; it says only that the signature was present and unchecked,
 because "unsigned" and "signed by someone you do not trust" are different answers. Edit the payload
 and the signature fails. Edit the claimed outcome and **the bytes refute it even with no key at
 all** — which is the property that makes an attestation from a rebuilder worth anything.
