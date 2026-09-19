@@ -2437,7 +2437,17 @@ async fn run(
     body.push_str(&format!(
         "<p><a href=\"/run/{index}/source\"><strong>how the source became this artifact →</strong></a></p>"
     ));
+    // Parsed and compared once, then read by two panels. The ladder says why the verdict is what
+    // it is; the notes say what was observed on the way. Both are derived from the bytes on disk
+    // rather than from a stored record, so a run without `--store` still has them.
+    let recomputed = recompare(&dir);
+    if let Some(cmp) = &recomputed {
+        body.push_str(&digest_ladder(cmp));
+    }
     body.push_str(&compare_panel(&dir, index));
+    if let Some(cmp) = &recomputed {
+        body.push_str(&notes_panel(cmp));
+    }
     body.push_str(&network_panel(&dir, index));
 
     body.push_str("<h2>Build log</h2>");
@@ -3413,6 +3423,189 @@ async fn source_page(
     ));
 
     page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response()
+}
+
+/// The verdict as three questions, of which exactly one decided it.
+///
+/// **Six digests, made readable.** A comparison produces a raw pair, a container pair and a
+/// stabilized pair, and a page that prints six hex strings has told a reader nothing. The verdict
+/// is a walk down three rungs, and it stops at the first that answers:
+///
+/// 1. **Are the published and rebuilt bytes the same?** If yes the verdict is `exact` and no pass
+///    ran on anything that mattered.
+/// 2. **Are they the same after the stabilizers?** If yes the verdict is `normalized`, and the
+///    ledger below says which passes did it and whether any of them can hide a real difference.
+/// 3. **Which members differ?** Only reached when the first two say no, and then the answer is the
+///    divergence itself.
+///
+/// The rung that answered is drawn live and the others are greyed, because a reader's question is
+/// "why is this the verdict" and the answer is one of the three.
+fn digest_ladder(cmp: &trigon_compare::Comparison) -> String {
+    let short = |d: &trigon_core::Digest| {
+        let hex = d.to_hex();
+        format!(
+            "<code title=\"{}\">{}</code>",
+            esc(&hex),
+            esc(&hex[..8.min(hex.len())])
+        )
+    };
+    let raw_same = cmp.upstream.raw.sha256 == cmp.rebuild.raw.sha256;
+    let stab_same = cmp.upstream.stabilized.sha256 == cmp.rebuild.stabilized.sha256;
+    let decided = if raw_same {
+        0
+    } else if stab_same {
+        1
+    } else {
+        2
+    };
+
+    let differs = cmp.diff.as_ref().map(|d| d.differs).unwrap_or(0);
+    let identical = cmp.diff.as_ref().map(|d| d.identical).unwrap_or(0);
+
+    let rungs = [
+        (
+            "the published bytes and the rebuilt bytes",
+            format!(
+                "{} {} {}",
+                short(&cmp.upstream.raw.sha256),
+                if raw_same { "=" } else { "≠" },
+                short(&cmp.rebuild.raw.sha256)
+            ),
+            if raw_same {
+                "identical, so nothing had to be normalized away"
+            } else {
+                "different, so the next question is whether the difference survives normalization"
+            },
+        ),
+        (
+            "after the stabilizers",
+            format!(
+                "{} {} {}",
+                short(&cmp.upstream.stabilized.sha256),
+                if stab_same { "=" } else { "≠" },
+                short(&cmp.rebuild.stabilized.sha256)
+            ),
+            if stab_same {
+                "equal, so every difference was one a named pass removes"
+            } else {
+                "still different, so the difference is in the members themselves"
+            },
+        ),
+        (
+            "member by member",
+            format!("<strong>{differs}</strong> differ, {identical} identical"),
+            "which files, and how, is below",
+        ),
+    ];
+
+    let mut out = String::from("<h2>Why this is the verdict</h2><table>");
+    for (i, (question, answer, gloss)) in rungs.iter().enumerate() {
+        // Greyed rather than hidden. A reader who wants to know what the *other* questions would
+        // have said is asking something reasonable, and a rung that vanished would leave them
+        // reconstructing the ladder from the outcome word.
+        let live = i == decided;
+        let style = if live { "" } else { " style=\"opacity:.45\"" };
+        out.push_str(&format!(
+            "<tr{style}><td>{}{}</td><td>{answer}</td><td class=\"dim\">{gloss}</td></tr>",
+            if live { "▸ " } else { "&nbsp;&nbsp;" },
+            esc(question),
+        ));
+        if live {
+            break;
+        }
+    }
+    out.push_str("</table>");
+    out.push_str(&format!(
+        "<p class=\"note\">The marked row is the one that decided <code>{}</code>.{}</p>",
+        esc(&cmp.outcome.to_string()),
+        // Only where there are any. Printing "the rows below were never asked" under the last rung
+        // is the small kind of wrong that makes a reader distrust the rest of the page.
+        if decided + 1 < rungs.len() {
+            " The rows below it were never asked."
+        } else {
+            " Every question was asked, and this is the last one there is."
+        }
+    ));
+    out
+}
+
+/// What the comparison observed and nobody has ever been shown.
+///
+/// **A promise made by a type and kept by no renderer.** `NoteCode::ExecutableContentDiffers`
+/// carries the doc comment "Never benign", `is_noteworthy()` says these "should reach a human even
+/// when the verdict is a clean match", and a seam test asserts the promise against the enum — while
+/// the only references to `is_noteworthy` in the whole tree are in tests. `Newtonsoft.Json@11.0.1`'s
+/// stored comparison holds ten notes, nine of them that code, and no page has ever rendered one.
+///
+/// Recomputed from the two artifacts rather than read from the store, for the reason the rest of
+/// this page works that way: a run without `--store` still has its bytes, and a reader holding the
+/// artifacts can redo the arithmetic instead of trusting a record.
+fn recompare(dir: &Path) -> Option<trigon_compare::Comparison> {
+    let (upstream, rebuild) = artifact_pair(dir)?;
+    let format = trigon_core::Format::from_file_name(
+        &upstream.file_name().unwrap_or_default().to_string_lossy(),
+    )?;
+    let (ub, rb) = (
+        std::fs::read(&upstream).ok()?,
+        std::fs::read(&rebuild).ok()?,
+    );
+    let set = trigon_stabilize::default_for(format);
+    trigon_compare::compare_bytes(ub, rb, format, &set, &trigon_archive::Limits::default()).ok()
+}
+
+fn notes_panel(cmp: &trigon_compare::Comparison) -> String {
+    // Both sides' parse notes and the comparison's own, in one list: a reader does not care which
+    // phase observed something, only that something was observed.
+    let mut all: Vec<&trigon_core::Note> = Vec::new();
+    all.extend(&cmp.notes);
+    all.extend(&cmp.upstream.notes);
+    all.extend(&cmp.rebuild.notes);
+    if all.is_empty() {
+        return "<h2>What the comparison noticed</h2><p class=\"note\">nothing beyond the verdict. \
+                Not an empty section by accident: parse limits, malformed entries and executables \
+                whose content differs all leave a note here, and none did.</p>"
+            .to_string();
+    }
+
+    let mut by_code: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
+    for n in all {
+        let entry = by_code
+            .entry(format!("{:?}", n.code))
+            .or_insert((n.code.is_noteworthy(), Vec::new()));
+        if let Some(p) = &n.path {
+            entry
+                .1
+                .push(String::from_utf8_lossy(p.as_bytes()).into_owned());
+        }
+    }
+
+    let mut out = String::from("<h2>What the comparison noticed</h2><table>");
+    for (code, (noteworthy, paths)) in &by_code {
+        // The enum's own word, not a gloss on it: `ExecutableContentDiffers` is documented "Never
+        // benign", and a page that softened that would be editorialising over the type.
+        let weight = if *noteworthy {
+            " <span class=\"fail\">reaches a human even on a clean match</span>"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "<tr><td><code>{}</code>{weight}</td><td class=\"n\">{}</td><td><code class=\"dim\">{}</code></td></tr>",
+            esc(code),
+            paths.len().max(1),
+            esc(&clip(&paths.join(", "), 160)),
+        ));
+    }
+    out.push_str("</table>");
+    if by_code.contains_key("ExecutableContentDiffers") {
+        out.push_str(
+            "<p class=\"note\"><strong>An executable whose content differs is never benign</strong> \
+             — the enum says so in those words. Two builds of the same source produce different \
+             machine code for ordinary reasons (a path baked in, a timestamp, a compiler version), \
+             and also for the reason that matters. Nothing here tells those apart; what this says \
+             is that the difference is in a file that runs.</p>",
+        );
+    }
+    out
 }
 
 #[cfg(test)]

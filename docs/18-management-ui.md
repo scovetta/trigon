@@ -218,7 +218,25 @@ nothing here has run.
     mistake the tiers exist to prevent — committed in the lookup rather than in the join. Raw is
     consulted first, always, and the two counts are never added.
 
-- **Stage 2** — the chain ribbon, the three-rung digest ladder, and the stabilizer ledger.
+- **Stage 2 — the digest ladder and the notes, built.** Two panels on the run page, both recomputed
+  from the artifacts on disk rather than read from the store, so a run without `--store` has them.
+
+  **Why this is the verdict.** Six digests are unreadable; a verdict is a walk down three questions
+  that stops at the first one that answers. Are the published and rebuilt bytes the same? Are they
+  the same after the stabilizers? Which members differ? The rung that answered is drawn live and the
+  ones above it are greyed, because a reader's question is "why is this the verdict" and the answer
+  is exactly one of the three. Measured: `once@1.4.0` stops at rung two (`710ec70c = 710ec70c`,
+  `normalized`); `Newtonsoft.Json@11.0.1` falls to rung three (`95b47bae ≠ 0f46106c`, then
+  `2e82f42f ≠ 3020952e`, then 18 differ — `divergent`).
+
+  **What the comparison noticed.** `NoteCode::ExecutableContentDiffers` carries the doc comment
+  "Never benign"; `is_noteworthy()` says such a note "should reach a human even when the verdict is
+  a clean match"; a seam test asserts that promise against the enum. The only references to
+  `is_noteworthy` in the tree were in tests. Newtonsoft's stored comparison holds ten notes, nine of
+  them that code, and no page had ever rendered one. Seven reach a human now, named, with the paths.
+
+  Still to do from the original stage 2: the chain ribbon, and demoting `/compare` to the stabilizer
+  ledger.
 - **Stage 3+** — the board, behind the recording that would make it honest.
 
 Two findings constrain stage 1 and are worth more than the rest of the plan:
