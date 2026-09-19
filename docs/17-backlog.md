@@ -1350,3 +1350,30 @@ deleted without a reason comes back as a rediscovery.
 
 - **high** — The confirming second attempt is enqueued outside the outbox transaction, so a crash between finish and confirm withholds that target for ever  
   `trigon-engine/src/lib.rs:238`
+
+## B30. A comparator fix is invisible on every run already in the store
+
+Every improvement to `trigon-compare` applies only to runs made after it. The comparison a page
+renders is a stored blob, and nothing re-renders one.
+
+Found immediately after [§3.52](16-findings.md#352-the-page-named-members-the-artifacts-had-never-heard-of):
+the member-name fix landed, the tests passed, and the real NuGet divergence page still showed five
+dead links out of twenty-three, because its blob was written the day before and carries no
+`upstream_raw_path`. The code was right and the corpus still showed the bug.
+
+`trigon attest` looked like the answer — it "reads blobs by hash, checks each against the hash it
+asked for, **recomputes the claim**, and only then signs". It does recompute, with the current
+comparator, and then writes only the attestations: `record.comparison` is left pointing at the old
+blob. So the re-derivation that already happened is thrown away, and the only way to refresh a
+comparison is to rebuild the package from source — containers, network, minutes per target, for a
+change that touches no bytes of either artifact.
+
+The two artifacts are already in the store, addressed by hash. Re-comparing them is a pure function
+of bytes we hold.
+
+**Done when:** there is a command that re-compares the stored artifacts of a run, or a sweep of
+them, and updates `record.comparison` — and it refuses on a run whose artifact bytes were pruned,
+rather than silently comparing nothing. Whether `attest` should also store what it re-derived is the
+narrower question inside this one, and it is worth answering carefully: making the record agree with
+what was signed is the point of that command, and a subcommand that rewrites a record mid-attestation
+is not obviously safe.
