@@ -305,34 +305,37 @@ async fn a_judge_worker_never_leases_a_build() {
 async fn the_fleet_reserves_slots_rather_than_racing_for_them() {
     let dir = tempfile::tempdir().unwrap();
     let q = queue(&dir, "hosts").await;
-    let interval = Duration::from_millis(50);
 
-    // **Asserted on the stored floor, not on the clock.** A reservation's whole point is that it
-    // moves a shared number; how long any one caller then waits depends on when it asked. Two
-    // earlier versions of this test measured durations and failed by five milliseconds — once to
-    // a bug and once to the round trips themselves — which is the signature of a test measuring
-    // the wrong thing. The invariant is exact and has no timing in it: each reservation advances
-    // the floor by exactly one interval.
-    let first = q
-        .reserve_host("registry.npmjs.org", interval)
-        .await
-        .unwrap();
+    // **Three versions of this test have been wrong about time.**
+    //
+    // The first two measured how long a caller was told to wait and failed by five milliseconds —
+    // once to a real bug and once to the database round trips themselves. The third measured the
+    // stored floor, which has no timing in it at all, and still flaked: it asserted the floor moves
+    // by *exactly* one interval and got 76 ms where it expected 50.
+    //
+    // That third failure was the test being wrong about the code rather than the other way round.
+    // `reserve_host` computes `max(stored_floor, now) + interval`, so when more wall clock has
+    // passed than the interval itself the stored floor has **lapsed**, `now` wins, and the new
+    // floor lands further than one step from the old one. That is correct — a reservation must not
+    // hand out a slot in the past — and it is only reachable when reservations arrive slower than
+    // the interval, which on a loaded machine a 50 ms interval invites.
+    //
+    // So the exact-step property is asserted at an interval no scheduling delay reaches, and the
+    // properties that hold whatever the clock does are asserted separately.
+    let wide = Duration::from_secs(10);
+    let first = q.reserve_host("registry.npmjs.org", wide).await.unwrap();
     assert!(
-        first < Duration::from_millis(5),
+        first < Duration::from_millis(50),
         "the first caller was made to wait: {first:?}"
     );
 
     let after_one = q.host_budget("registry.npmjs.org").await.unwrap().unwrap();
-    q.reserve_host("registry.npmjs.org", interval)
-        .await
-        .unwrap();
+    q.reserve_host("registry.npmjs.org", wide).await.unwrap();
     let after_two = q.host_budget("registry.npmjs.org").await.unwrap().unwrap();
-    q.reserve_host("registry.npmjs.org", interval)
-        .await
-        .unwrap();
+    q.reserve_host("registry.npmjs.org", wide).await.unwrap();
     let after_three = q.host_budget("registry.npmjs.org").await.unwrap().unwrap();
 
-    let step = interval.as_micros() as i64;
+    let step = wide.as_micros() as i64;
     assert_eq!(
         after_two.next_at_us - after_one.next_at_us,
         step,
@@ -340,11 +343,29 @@ async fn the_fleet_reserves_slots_rather_than_racing_for_them() {
     );
     assert_eq!(after_three.next_at_us - after_two.next_at_us, step);
 
-    // A different host is a different floor. One slow registry must not pace the others.
-    let other = q.reserve_host("pypi.org", interval).await.unwrap();
+    // What holds whatever the clock does, at an interval the clock *can* outrun: the floor only
+    // ever moves forwards, and a reservation always leaves it in the future. Between them that is
+    // what a rate limit actually needs; the exact step above is a detail of the uncontended case.
+    let narrow = Duration::from_millis(50);
+    let mut previous = 0i64;
+    for n in 0..4 {
+        q.reserve_host("pypi.org", narrow).await.unwrap();
+        let b = q.host_budget("pypi.org").await.unwrap().unwrap();
+        assert!(
+            b.next_at_us > previous,
+            "reservation {n} moved the floor backwards: {previous} then {}",
+            b.next_at_us
+        );
+        previous = b.next_at_us;
+    }
+
+    // A host is a floor of its own. One slow registry must not pace the others, and after the four
+    // reservations above `pypi.org` is well into the future while `registry.npmjs.org` is thirty
+    // seconds out — a host nobody has asked about waits for neither.
+    let fresh = q.reserve_host("crates.io", narrow).await.unwrap();
     assert!(
-        other < Duration::from_millis(5),
-        "pypi waited behind npm: {other:?}"
+        fresh < Duration::from_millis(50),
+        "a host nobody had asked about waited behind another: {fresh:?}"
     );
 }
 

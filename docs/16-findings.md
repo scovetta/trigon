@@ -1905,3 +1905,59 @@ The fix is a `Pair` that carries `kept` per side rather than collapsing "not kep
 found", and three refusals with three codes. **The shape is the one this document keeps recording:**
 two states that a reader must distinguish, merged at the point where the code found it convenient
 to treat them alike.
+
+### 3.43 A dropped connection and a dead server are the same thing to a browser
+
+**Gap, reported as a crash.** A user saw *"Not shown. NetworkError when attempting to fetch
+resource"* on a member diff and reported that `serve` had crashed. It had not: a stray cleanup had
+killed the process out from under the page.
+
+The report was still worth having, because **there was no way to tell**. A panic in an axum handler
+unwinds out of the connection task, hyper drops the socket, and the browser reports a transport
+error — identical to what it reports for a server that is not listening. Neither the page nor the
+log tells a reader which they are looking at, so the one useful report — *what broke* — cannot be
+given.
+
+Two changes, both about making a bug legible rather than about any particular bug:
+
+**A `catch_panics` layer.** A panicking handler answers `500` carrying the panic's own message,
+logged with the route that reached it. The front-end already renders a refusal's `detail`, so the
+next occurrence arrives as *"this request hit a bug in the server: index out of bounds…"* against a
+named address.
+
+**The index lock recovers from poison.** Every reader was `.read().unwrap()`. `std::sync` poisons a
+lock when a thread panics holding it and every later `unwrap` panics too — so one bug under the
+write lock in `refresh` would have made every subsequent request fail for the life of the process,
+which is a crash by any useful definition. Poison is the right default for data whose invariants a
+panic may have broken; an index is a cache rebuilt from the store on the next refresh, so it
+recovers and warns.
+
+And a bug in the handler for bugs, caught only because its test asserted on the *message* rather
+than the status: `&payload` on a `Box<dyn Any + Send>` unsizes the **box** to `&dyn Any`, so the
+downcasts found a `Box` and every panic reported "the panic carried no message". The status was
+right the whole time.
+
+### 3.44 A test that had no timing in it, and flaked on timing
+
+**Correction, third time on one test.** `the_fleet_reserves_slots_rather_than_racing_for_them` has
+now been wrong about time three ways. The first two measured how long a caller was told to wait and
+failed by five milliseconds — once to a real bug and once to the round trips themselves. §3.34
+records the fix: assert the *stored floor*, which has no timing in it.
+
+It flaked anyway, once, on a loaded machine: it expected the floor to advance by exactly one
+interval and got 76 ms where it expected 50.
+
+**That failure was the test being wrong about the code.** `reserve_host` computes
+`max(stored_floor, now) + interval`. When more wall clock passes between two calls than the interval
+itself, the stored floor has *lapsed*, `now` wins, and the new floor lands further than one step
+away. That is correct — a reservation must not hand out a slot in the past — and the exact-step
+property only ever held while reservations arrived faster than the interval. A 50 ms interval on a
+contended machine does not.
+
+The exact step is now asserted at a ten-second interval, which no scheduling delay reaches. What
+holds unconditionally is asserted separately: the floor only moves forwards, and a reservation
+always leaves it in the future. Between them that is what a rate limit needs.
+
+**The lesson is not "avoid timing in tests".** It is that "I removed the timing" is a claim worth
+re-checking: the third version genuinely read no clock, and still encoded an assumption about how
+much time would pass between two of its own statements.

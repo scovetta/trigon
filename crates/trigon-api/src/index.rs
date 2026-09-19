@@ -132,6 +132,34 @@ impl Default for Index {
 }
 
 impl Index {
+    /// Read the index, recovering from a poisoned lock rather than propagating the poison.
+    ///
+    /// **`.read().unwrap()` was a way for one bug to become a permanently broken server.** A
+    /// `std::sync` lock is poisoned when a thread panics while holding it, and every later
+    /// `unwrap` on it panics too — so a single panic under the write lock in `refresh` would make
+    /// every subsequent request fail for the life of the process. A reader would call that a crash,
+    /// and they would be right to.
+    ///
+    /// Poison is the correct default for data whose invariants a panic could have broken. This is
+    /// a **cache**: entries derived from records that are still on disk, rebuilt wholesale on the
+    /// next refresh. The worst a half-written one costs is a stale row until then, which is cheaper
+    /// by a wide margin than refusing to serve anything ever again.
+    fn read_or_recover(&self) -> std::sync::RwLockReadGuard<'_, Inner> {
+        self.inner.read().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "the index lock was poisoned by an earlier panic; serving the entries it holds. \
+                 They are rebuilt from the store on the next refresh."
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    fn write_or_recover(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
+        self.inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     pub fn new() -> Self {
         Index {
             inner: Arc::new(RwLock::new(Inner::default())),
@@ -151,7 +179,7 @@ impl Index {
             .map_err(|e| format!("listing runs: {e}"))?;
 
         let known: Vec<String> = {
-            let g = self.inner.read().unwrap();
+            let g = self.read_or_recover();
             ids.iter()
                 .filter(|id| !g.records.contains_key(*id))
                 .cloned()
@@ -169,7 +197,7 @@ impl Index {
         }
         let added = fetched.len();
 
-        let mut g = self.inner.write().unwrap();
+        let mut g = self.write_or_recover();
         for r in fetched {
             g.records.insert(r.id.clone(), r);
         }
@@ -178,7 +206,7 @@ impl Index {
     }
 
     pub fn get(&self, id: &str) -> Option<RunRecord> {
-        self.inner.read().unwrap().records.get(id).cloned()
+        self.read_or_recover().records.get(id).cloned()
     }
 
     pub fn entry(&self, id: &str) -> Option<Entry> {
@@ -192,7 +220,7 @@ impl Index {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.read().unwrap().entries.len()
+        self.read_or_recover().entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -205,7 +233,7 @@ impl Index {
     /// asked for and were then held back — which is the number they need — rather than every
     /// withheld row in the corpus, which tells them nothing about their query.
     pub fn page(&self, q: &Query, public: bool) -> Page {
-        let g = self.inner.read().unwrap();
+        let g = self.read_or_recover();
         let matched: Vec<&Entry> = g.entries.iter().filter(|e| q.matches(e)).collect();
         let total = matched.len();
 
@@ -247,7 +275,7 @@ impl Index {
     }
 
     pub fn stats(&self, public: bool) -> Stats {
-        let g = self.inner.read().unwrap();
+        let g = self.read_or_recover();
         let mut s = Stats::default();
         for e in &g.entries {
             if public && !e.publication.is_public() {
@@ -475,6 +503,58 @@ mod tests {
             g.entries = build(&g.records, Switches::default());
         }
         ix
+    }
+
+    /// A poisoned lock keeps serving.
+    ///
+    /// `std::sync` poisons a lock when a thread panics while holding it, and every later `unwrap`
+    /// on it panics too — so one bug anywhere under the write lock would make every subsequent
+    /// request fail for the life of the process, which a reader would call a crash and be right to.
+    ///
+    /// Poison is the right default for data whose invariants a panic may have broken. This is a
+    /// cache rebuilt from the store on the next refresh, so serving a possibly-stale entry beats
+    /// refusing to serve anything ever again. The test lives here because poisoning requires
+    /// holding the guard across the panic, which only this module can arrange.
+    #[test]
+    fn a_poisoned_lock_keeps_serving() {
+        let ix = index_of(vec![rec(
+            "1700000001-aa",
+            "pkg:npm/a@1",
+            Some("exact"),
+            None,
+        )]);
+
+        let poisoner = ix.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = poisoner.inner.write().unwrap();
+            panic!("a panic while the index was being rebuilt");
+        })
+        .join();
+        assert!(
+            joined.is_err(),
+            "the fixture did not panic, so nothing is poisoned"
+        );
+        assert!(
+            ix.inner.read().is_err(),
+            "the lock is not poisoned, so this test asserts nothing"
+        );
+
+        // And the readers still answer.
+        assert_eq!(ix.len(), 1);
+        assert_eq!(
+            ix.page(
+                &Query {
+                    limit: 10,
+                    ..Default::default()
+                },
+                false
+            )
+            .rows
+            .len(),
+            1
+        );
+        assert_eq!(ix.stats(false).runs, 1);
+        assert!(ix.get("1700000001-aa").is_some());
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub mod evidence;
 pub mod index;
 pub mod member;
 pub mod publication;
+pub mod recover;
 pub mod request;
 pub mod routes;
 pub mod serve;
@@ -106,5 +107,9 @@ pub fn router(api: Arc<Api>) -> axum::Router {
         .route("/v1/runs", axum::routing::post(request::request_run))
         .route("/", get(ui::index_html))
         .route("/{*path}", get(ui::asset))
+        // Last, so it wraps every route above. A handler that panics answers with a 500 that says
+        // what broke, rather than dropping the socket and leaving a browser to report that the
+        // network failed — which is what a reader saw the first time one did.
+        .layer(axum::middleware::from_fn(recover::catch_panics))
         .with_state(api)
 }
