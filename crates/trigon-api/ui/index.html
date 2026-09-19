@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trigon — the rebuild corpus</title>
+<meta name="description" content="Every package Trigon has rebuilt, what the rebuild matched, and what it could not tell.">
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#9651;</text></svg>">
+</head>
+<body>
+<header class="site">
+  <div class="wrap">
+    <span class="brand"><a href="/">Trigon</a><small>the rebuild corpus</small></span>
+    <span class="spacer"></span>
+    <span class="mode" id="mode" hidden></span>
+  </div>
+</header>
+
+<!-- Served by `trigon serve`, this comment is replaced with the corpus summary so the first
+     painted frame carries real content. Served from a CDN it stays a comment and the script below
+     fetches the same numbers. Neither path is required by the other, which is what keeps this file
+     the same bytes in both places. -->
+<!--BOOT-->
+
+<main class="wrap" id="view" aria-live="polite">
+  <p class="empty">Loading the corpus…</p>
+</main>
+
+<footer class="site wrap">
+  <p>
+    Every verdict here is recomputed from two artifacts and a named stabilizer set, and every
+    signed one can be checked without asking us:
+    <code>trigon verify-attestation --rerun-comparison</code>.
+    <a href="/v1/openapi.json">The API this page is built on</a> is the only contract between it
+    and the tool.
+  </p>
+</footer>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

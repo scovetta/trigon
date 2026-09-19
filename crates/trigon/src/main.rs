@@ -547,6 +547,41 @@ enum Cmd {
         #[arg(long)]
         baseline: Option<PathBuf>,
     },
+    /// Serve the corpus: browse, search and read every run in a store, from a browser.
+    ///
+    /// Not `watch`, and the difference is the point. `watch` reads a **work directory** — one
+    /// sweep, live, on this disk, loopback only, correct even after the sweep it watches has
+    /// died. `serve` reads a **store**: the corpus, historical, over an object store that may be
+    /// a bucket, and it is the surface a decoupled front-end talks to. See
+    /// `docs/22-management-layer.md`.
+    #[cfg(feature = "build")]
+    Serve {
+        /// The store to read. A local directory, or anything `trigon-store` can open.
+        store: PathBuf,
+        /// Loopback by default, for the reason `watch` is: a store holds build logs that have not
+        /// been redacted, and `--public` is what makes it safe to bind anywhere else.
+        #[arg(long, default_value = "127.0.0.1:8100")]
+        bind: String,
+        /// Treat unauthenticated callers as the public rather than as an operator.
+        ///
+        /// Turns on both halves of `docs/22` §7: the ADR-0010 publication gate, so only results
+        /// with two agreeing attempts and a restricted egress tier are shown; and the evidence
+        /// class table, so no build log, network transcript or comparison leaves the process. Set
+        /// this before binding to anything but loopback. Leaving it off on a routable address
+        /// publishes unredacted build logs.
+        #[arg(long)]
+        public: bool,
+        /// Stop publishing divergences. ADR-0010's fifth safeguard, which exists so that crossing
+        /// a false-mismatch threshold is something a human can act on in one command.
+        ///
+        /// Matches are unaffected: a false match is an error and a false divergence is an
+        /// accusation, and the two do not deserve the same switch.
+        #[arg(long)]
+        stop_divergences: bool,
+        /// How often to look for runs written since startup. Zero serves a fixed snapshot.
+        #[arg(long, default_value_t = 30)]
+        refresh_seconds: u64,
+    },
     /// Ask a registry what it knows about a package.
     #[cfg(feature = "build")]
     Resolve {
@@ -1137,6 +1172,14 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             store,
             baseline,
         } => watch::serve(work, targets, bind, store, baseline),
+        #[cfg(feature = "build")]
+        Cmd::Serve {
+            store,
+            bind,
+            public,
+            stop_divergences,
+            refresh_seconds,
+        } => serve_corpus(&store, bind, public, stop_divergences, refresh_seconds),
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
         #[cfg(feature = "build")]
@@ -2130,6 +2173,51 @@ fn resolve_profile(
         })),
         None => Ok(default_for(fmt)),
     }
+}
+
+/// `trigon serve`: the corpus, from a browser.
+///
+/// Builds its own runtime for the same reason `watch` does — the judgement half is sync, and a
+/// command that needs a reactor makes one rather than the binary carrying one everywhere.
+///
+/// **`--public` is one flag and two controls**, which is deliberate: the publication gate and the
+/// evidence class table protect different things and a reader who turned on only one of them would
+/// have a site that either accuses without confirmation or leaks unredacted logs. There is no way
+/// to ask for half.
+#[cfg(feature = "build")]
+fn serve_corpus(
+    store: &std::path::Path,
+    bind: String,
+    public: bool,
+    stop_divergences: bool,
+    refresh_seconds: u64,
+) -> Result<()> {
+    let store = trigon_store::Store::local(store)?;
+    let cfg = trigon_api::Config {
+        bind,
+        unauthenticated: if public {
+            trigon_api::Principal::Anonymous
+        } else {
+            trigon_api::Principal::Operator
+        },
+        switches: trigon_api::Switches { stop_divergences },
+        refresh_seconds,
+    };
+    // Loudly, not in a doc comment nobody reads at three in the morning. A store bound to a
+    // routable address without `--public` serves build logs that were never redacted, and D14 says
+    // in as many words that loopback was the only thing that ever mitigated that.
+    if !public && !cfg.bind.starts_with("127.") && !cfg.bind.starts_with("localhost") {
+        eprintln!(
+            "warning: binding {} without --public. Build logs and network transcripts are stored \
+             unredacted and this serves them to anyone who can reach that address.",
+            cfg.bind
+        );
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(trigon_api::run(store, cfg))
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 fn print_text(c: &Comparison, explain: bool) {

@@ -448,14 +448,40 @@ source view rather than after, and without which the aligned ORIGIN/VERDICT bars
 outside a machine holding the checkout.
 *Unblocks everything. Nothing moves from a work directory to a corpus until this is true.*
 
-**Stage 1 — the read-only site, over the store that exists.** *~2 weeks.* `trigon serve --read-only`
-against `Arc<dyn ObjectStore>`: `list_runs` / `get_run` / blobs, an index built at startup and
-refreshed on a cursor, cursor pagination, the anonymous routes of §5.1, the evidence classes of §7.2
-from the first byte, and the publication gate of §7.1 reading a column stage 0 can already write.
-The front-end is a separate static deployable; the same build is vendored with `rust-embed` for
-local `serve`, so the API is the only contract and there is never a second front-end.
+**Stage 1 — the read-only site, over the store that exists. BUILT.** `trigon serve <store>` in
+`crates/trigon-api`, against `Arc<dyn ObjectStore>`: `list_runs` / `get_run` / blobs, an index built
+at startup and refreshed on a timer, cursor pagination, the twelve anonymous routes of §5.1, the
+evidence classes of §7.2 enforced from the first byte, and the publication gate of §7.1 as one
+object with one producer. `--public` turns on both halves at once, because a reader who enabled only
+one would have a site that either accuses without confirmation or leaks unredacted logs.
+
+The front-end is static files that talk to nothing but the JSON API, compiled into the binary and
+deployable to a CDN unchanged. No bundler, no `node_modules`, nothing loaded off-origin — the same
+"boring technology" reading that picked Postgres over a search service, applied to a page whose
+subject is supply chains.
+
 *Delivers browse, search and view-details — three of the four things asked for — with no Postgres, no
 queue, no engine split, no auth and no write path.*
+
+Four things only rendering it found:
+
+- **The gate withholds the entire corpus today**, all 32 runs, every one `awaiting_confirmation`.
+  That is correct: safeguard 1 is "two agreeing attempts, divergences and matches alike", and every
+  run on disk is a single attempt. It is also the number that makes stage 0's `attempt` and
+  `cache_key` fields real work rather than schema decoration.
+- **`by_fault` is empty and `evidence` is 32 of 32.** The store holds no failure at all, because
+  `record_run` sits past the comparison early return. A browse page over it reports a perfect
+  reproduction rate on a corpus where nothing has ever failed to build — exactly what §4.1 predicted,
+  now visible rather than argued.
+- **The page's own CSP broke its bar chart.** `style-src 'self'` blocks the `style` *attribute*, so
+  four proportional bars were written, silently dropped, and drawn at the track's full width. CSP
+  does not govern CSSOM, so the fix was to assign each property rather than to add `'unsafe-inline'`.
+- **A permalink painted the word "Loading".** An SPA that fetches its own data puts that word in
+  every link preview and screenshot of itself, and a permalink is the URL people share. The document
+  now carries a `<!--BOOT-->` marker the server fills with the route's data, and the publication gate
+  is asked again when filling it — injecting a withheld run into the page source and trusting the
+  front-end not to draw it would put the accusation in `view-source:`, which is the one place a
+  front-end cannot gate.
 
 **Stage 2 — the schema and the queue in `trigon-store`.** *~2–3 weeks. The largest single piece, and
 the irreversible one.* Postgres and SQLite behind one trait: the job table exactly as ADR-0005
@@ -582,3 +608,50 @@ absorb them, or a milestone of their own between M4 and M5. This plan does not m
 One criterion should be restated either way. "The UI ships six views" now splits three ways: `watch`
 (local, live, directory-rooted), the public site (corpus, historical, attested), and CI-facing
 `check`. Left as one line it is unfalsifiable.
+
+## 12. What stage 1 actually shipped
+
+`crates/trigon-api`, `trigon serve <store>`, and the static front-end beside it.
+
+**The API** — twelve GET routes, no verb that writes, and the absence is structural rather than
+observed: the crate does not depend on `trigon-compare` or `trigon-stabilize`, so no handler can
+produce a `Match` however the code is arranged. `xtask policy` refuses the verifier build if
+`trigon-api` reaches it. `GET /v1/openapi.json` is generated from the route table, and a route that
+answers without appearing in that table fails a test.
+
+**The publication gate** — `publication::decide`, one function, `Published` / `Void` / `Withheld`,
+with the reason attached and a sentence a reader can act on. Safeguard 2's clauses are checked
+before safeguard 1's, so an open-egress run reads "published as void" rather than being told to wait
+for a confirmation that could not change the answer. The gate is asked **twice** for a permalink:
+once by the JSON route and once when filling the boot island, because a withheld run injected into
+the page source is an accusation the front-end has no way to take back.
+
+**The evidence classes** — `Statement` and `Definition` anonymous, everything else needing a
+principal. Definitions are anonymous on purpose: a third party who has to ask our permission for the
+stabilizer set a verdict was computed under cannot check that verdict, and checkability is the claim.
+
+**The front-end** — browse with filters and text search, a package's version ladder, lookup by the
+sha256 of an artifact you are holding, run detail with the chain, the source, the costs and the
+class-gated evidence links, and cursor paging. Both themes. No bundler, no `node_modules`, nothing
+loaded off-origin, and a CSP that says so.
+
+**Two denominators, still apart.** The landing page has two cards and no third. There is no
+percentage anywhere in the front-end, because the only honest one needs a denominator the reader has
+to choose.
+
+### What it measured on the corpus that exists
+
+| | |
+|---|---|
+| Runs in the store | 32 |
+| Reached a verdict | 32 |
+| Never became evidence | **0** |
+| Released to a public reader | **0** — all 32 `awaiting_confirmation` |
+
+Both zeroes are findings rather than results. The first is §4.1's prediction confirmed from the
+other side: `record_run` sits past the comparison early return, so a build that failed leaves no
+record at all, and a corpus browser over today's store reports a perfect reproduction rate on a
+corpus where nothing has ever failed to build. The second is ADR-0010 safeguard 1 meeting a
+single-attempt corpus, which is what `attempt` and `cache_key` exist to fix.
+
+Stage 0 is now the next thing to build, and the site is the reason it is legible.

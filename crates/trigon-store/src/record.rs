@@ -183,6 +183,11 @@ pub struct Tokens {
     pub calls: u32,
 }
 
+/// One, so `attempt` can be `u32` rather than `Option<u32>`. See the field.
+fn one() -> u32 {
+    1
+}
+
 /// Everything one run produced, with the large parts left in the blob store.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -212,6 +217,30 @@ pub struct RunRecord {
     pub started: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<String>,
+
+    /// Which attempt at this exact piece of work this is, counting from 1.
+    ///
+    /// [ADR-0010]'s first safeguard is **two agreeing attempts before anything publishes**,
+    /// divergences and matches alike, on different workers at different times — because one attempt
+    /// cannot tell a deterministic recipe from a lucky one, and the risk that dominates is ambient
+    /// nondeterminism rather than malice. Nothing could express that: every record looked like a
+    /// first and only attempt, so the safeguard was enforced by nothing and
+    /// `12-security.md`'s invariant 12 says so in that word.
+    ///
+    /// Defaulted to 1 rather than made optional. A record written before this field existed *was* a
+    /// single attempt, so 1 is the fact and not a filler — and it is the value that leaves the gate
+    /// correctly withholding, which an `Option` treated as "unknown, probably fine" would not.
+    ///
+    /// [ADR-0010]: ../../../docs/adr/0010-publish-divergences.md
+    #[serde(default = "one")]
+    pub attempt: u32,
+    /// What makes two attempts attempts *at the same thing*.
+    ///
+    /// The target, the strategy digest and the stabilizer set: change any of them and the second
+    /// run is a different question, not a confirmation of the first. `None` on a record written
+    /// before the field existed, which the gate reads as unconfirmable rather than as confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
 
     pub environment: Environment,
     /// Canonical JSON of the strategy, and its digest. The digest is what a cache key is built from
@@ -328,6 +357,8 @@ impl RunRecord {
             refused_artifact: Vec::new(),
             started: started.into(),
             finished: None,
+            attempt: 1,
+            cache_key: None,
             environment,
             strategy: None,
             strategy_digest: None,

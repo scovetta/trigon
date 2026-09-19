@@ -1,0 +1,29 @@
+[package]
+name = "trigon-api"
+version = "0.0.0"
+description = "The read path a decoupled front-end talks to: verdicts, runs, and class-gated evidence."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+trigon-store.workspace = true
+trigon-attest.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+# A store with a real run in it, so the HTTP tests serve a record that went through `put_run`
+# rather than one hand-built in memory.
+tokio = { workspace = true }
+# Calling the router directly, so the tests exercise the real handlers rather than a copy of their
+# logic. `axum` already depends on it; naming it here is what makes `Service::call` reachable.
+tower-service = "0.3"

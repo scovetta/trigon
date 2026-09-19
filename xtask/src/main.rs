@@ -502,6 +502,10 @@ fn verifier_tree() -> Result<Vec<String>> {
         "trigon-sandbox",
         "trigon-ai",
         "trigon-registry",
+        // The HTTP read path. A verifier is a binary that reproduces a verdict from two artifacts
+        // and links no server; `docs/22-management-layer.md` §9 makes that an explicit condition of
+        // the management layer rather than something the feature flags happen to give us today.
+        "trigon-api",
         // The `wasm` feature exists and is off by default. It nearly doubles this tree, so a
         // verifier that acquired it by accident — a default-features slip, a feature unified in
         // from elsewhere — would have quietly given up the property the build exists to demonstrate.

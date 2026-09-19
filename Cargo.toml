@@ -14,6 +14,7 @@ members = [
     "crates/trigon-mirror",
     "crates/trigon-ai",
     "crates/trigon-store",
+    "crates/trigon-api",
     "crates/trigon-stabilize-wasm",
     "crates/trigon",
     "xtask",
@@ -39,6 +40,7 @@ trigon-registry = { path = "crates/trigon-registry", version = "0.0.0" }
 trigon-mirror = { path = "crates/trigon-mirror", version = "0.0.0" }
 trigon-ai = { path = "crates/trigon-ai", version = "0.0.0" }
 trigon-store = { path = "crates/trigon-store", version = "0.0.0" }
+trigon-api = { path = "crates/trigon-api", version = "0.0.0" }
 trigon-stabilize-wasm = { path = "crates/trigon-stabilize-wasm", version = "0.0.0" }
 
 # Judgement half: sync, no tokio, no reqwest. See docs/01-architecture.md §2.2.

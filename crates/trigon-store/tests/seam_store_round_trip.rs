@@ -60,6 +60,11 @@ fn every_field_populated() -> RunRecord {
         // Not `Done`: a state that is nobody's default, so a dropped field cannot masquerade.
         state: RunState::Judging,
         outcome: Some("normalized_with_caveats".into()),
+        // Not 1, which is the serde default and what a dropped field would read back as. The
+        // publication gate keys on this pair: a record that loses them looks like a first and only
+        // attempt, which is the value that leaves a confirmed result withheld forever.
+        attempt: 3,
+        cache_key: Some("babel-core-7.24.0/ab54e552/nupkg-2b104124".into()),
         // What the log said, every field set. The SET especially: a record that carries an index
         // and an instant but loses the log's signature over them has kept the claim and dropped
         // the only thing that makes it checkable.
@@ -306,6 +311,8 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "guard_trips",
         "started",
         "finished",
+        "attempt",
+        "cache_key",
         "environment",
         "strategy",
         "strategy_digest",
