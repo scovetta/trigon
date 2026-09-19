@@ -682,6 +682,54 @@ impl Refusal {
     }
 }
 
+/// One request this mirror actually put on the wire, and one body it did not have to.
+///
+/// **A transcript row stopped being a request when the cache landed.** The row says what crossed
+/// into the build, which is what it exists for and what a cache does not change; the host process
+/// was also deriving "what did we ask of this registry" from those same rows, and those are now
+/// different questions — 309 fetches of one packument become one fetch and 308 reads from disk.
+///
+/// Emitted from the two places a body can come from and nowhere else: `outbound`, which is every
+/// request this mirror makes, and `Cache::get`, which is every one it did not have to. Counting at
+/// the choke points rather than threading a flag through six response helpers is also what keeps
+/// the two from drifting apart.
+pub const ASKED_MARKER: &str = "NET-ASKED";
+
+/// Where one served body came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Asked {
+    pub host: String,
+    /// True where the mirror served it from disk and asked nobody.
+    pub cached: bool,
+    /// For a cached **index** document, the unix second its bytes were fetched from upstream.
+    ///
+    /// **ADR-0013's obligation, and the only one it could not discharge by construction.** An
+    /// artifact is immutable, so where it came from changes no answer. A packument decides which
+    /// versions exist, so "resolved against the index as it stood at moment M" and "resolved
+    /// against our copy of it from day D" are different claims, and a record that carries only the
+    /// first has rounded the second off. `None` on everything else, including a cached artifact:
+    /// absent because the question does not apply, not because the answer is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_fetched_at: Option<u64>,
+}
+
+impl Asked {
+    pub fn line(&self) -> String {
+        match serde_json::to_string(self) {
+            Ok(json) => format!("{ASKED_MARKER} {json}"),
+            Err(e) => format!("{ASKED_MARKER} {{\"unserializable\":\"{e}\"}}"),
+        }
+    }
+
+    pub fn emit(&self) {
+        println!("{}", self.line());
+    }
+
+    pub fn parse_log(logs: &str) -> Result<Vec<Asked>, String> {
+        records(logs, ASKED_MARKER, "asked")
+    }
+}
+
 /// One upstream host telling this mirror to slow down.
 ///
 /// **Out through the log, because a counter cannot leave the island.** Under an enforced tier the

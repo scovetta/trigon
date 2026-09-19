@@ -127,7 +127,10 @@ Doing (4) before (1) to (3) would mean describing traffic we cannot produce and 
    container whose owner is alive. Re-verified at four lanes on four npm targets: four of four
    reproduced, no race in any log. The rule naming it stays, because a control whose near-misses
    are invisible cannot be told from one that never fires.
-2. **[`B25`][b25], the fetch cache.** §2. [`B24`][b24] is its toolchain tier and lands first; the
+2. ~~**[`B25`][b25], the fetch cache.**~~ **Built**, as two tiers: bytes (permanent, digest-checked
+   on every read) and index (scoped to one invocation, with the snapshot instant in the run
+   record). The live-comparison control the ADR asks for is not, and is the one thing left.
+   Originally stated as: §2. [`B24`][b24] is its toolchain tier and lands first; the
    artifact tier is digest-verified and safe; the index tier is the one carrying a correctness
    question, and [`ADR-0013`](adr/0013-a-cache-supplies-bytes-never-decisions.md) has the rule.
 3. **§3 items 1 to 3**: the limiter on the mirror, the limiter made process-global, and the count

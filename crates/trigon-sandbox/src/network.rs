@@ -70,6 +70,13 @@ pub struct MirrorLog {
     /// no body and has no digest — and because "somebody asked and was refused" is a different
     /// thing to investigate than silence.
     pub refusals: Vec<trigon_mirror::Refusal>,
+    /// Where every body the mirror served came from: the network, or its own disk.
+    ///
+    /// The transcript says what crossed into the build, which a cache does not change. This says
+    /// what we asked of a registry, which a cache changes completely — 309 fetches of one packument
+    /// become one fetch and 308 reads. Counting requests off transcript rows would report traffic
+    /// nobody sent.
+    pub asked: Vec<trigon_mirror::Asked>,
     /// Every time an upstream host told the mirror to slow down.
     ///
     /// The one thing the transcript cannot carry: it lists bodies that crossed, and a 429 has
@@ -99,6 +106,7 @@ impl Island {
         mirror_image: &str,
         mirror_port: u16,
         guard: Option<&std::path::Path>,
+        cache: Option<&(std::path::PathBuf, String)>,
     ) -> Result<Self, SandboxError> {
         let name = format!("trigon-{run_id}");
         let mut island = Island {
@@ -145,6 +153,16 @@ impl Island {
             args.push("--volume".into());
             args.push(format!("{}:/guard.json:ro,Z", crate::mount_source(g)));
         }
+        // Read-write, unlike the guard: this is the one thing the mirror is allowed to add to.
+        // It is on the host so it outlives the container, which is the whole point — the mirror is
+        // created per target, and the repeats worth collecting are across targets.
+        if let Some((root, _)) = cache {
+            // Created here rather than left to the mirror: podman creates a missing bind source as
+            // a root-owned directory, and the mirror inside the container then cannot write to it.
+            let _ = std::fs::create_dir_all(root);
+            args.push("--volume".into());
+            args.push(format!("{}:/cache:Z", crate::mount_source(root)));
+        }
         args.extend([
             mirror_image.to_string(),
             "mirror".into(),
@@ -153,6 +171,14 @@ impl Island {
         ]);
         if guard.is_some() {
             args.extend(["--guard".to_string(), "/guard.json".into()]);
+        }
+        if let Some((_, scope)) = cache {
+            args.extend([
+                "--cache".to_string(),
+                "/cache".into(),
+                "--cache-scope".into(),
+                scope.clone(),
+            ]);
         }
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         run_ok(binary, &argv)
@@ -292,6 +318,15 @@ impl Island {
                 .filter(|l| l.contains(trigon_mirror::REFUSED_ARTIFACT_MARKER))
                 .map(str::to_owned)
                 .collect(),
+            asked: trigon_mirror::Asked::parse_log(&logs).map_err(|detail| {
+                SandboxError::Failed {
+                    phase: "build".into(),
+                    detail: format!(
+                        "the mirror wrote a request line this build cannot read, so what was asked \
+                         of the registries is unknown rather than nothing: {detail}"
+                    ),
+                }
+            })?,
             throttled: trigon_mirror::Throttled::parse_log(&logs).map_err(|detail| {
                 SandboxError::Failed {
                     phase: "build".into(),

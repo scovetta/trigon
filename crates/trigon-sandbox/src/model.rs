@@ -229,6 +229,14 @@ pub struct RunOpts {
     /// Without it the island still enforces egress, but nothing notices if the build downloads the
     /// artifact it is meant to be reproducing from somewhere the mirror proxies.
     pub guard: Option<std::path::PathBuf>,
+    /// A directory the mirror may serve upstream bytes from, and which invocation its index
+    /// entries belong to.
+    ///
+    /// `None` fetches everything every time, which is honest and is 39 GB per sweep
+    /// (`docs/adr/0013-a-cache-supplies-bytes-never-decisions.md`). The scope is the sweep's
+    /// identifier where there is a sweep: index documents decide which versions exist, so they are
+    /// shared within one invocation and never across two.
+    pub cache: Option<(std::path::PathBuf, String)>,
     /// Called as each event is recorded. `None` is the ordinary case: nothing is watching.
     pub on_event: Option<EventSink>,
     /// Build without reusing any cached layer.
@@ -255,6 +263,7 @@ impl std::fmt::Debug for RunOpts {
             .field("retain", &self.retain)
             .field("mirror_port", &self.mirror_port)
             .field("guard", &self.guard)
+            .field("cache", &self.cache)
             .field("on_event", &self.on_event.is_some())
             .finish()
     }
@@ -268,6 +277,7 @@ impl Default for RunOpts {
             retain: false,
             mirror_port: 8129,
             guard: None,
+            cache: None,
             on_event: None,
             no_cache: false,
         }
@@ -373,6 +383,8 @@ pub struct BuildOutcome {
     /// run whose per-host table said `0 throttled` because nothing recorded the 429s would be
     /// asserting that our request rate was fine, about the run where it was not.
     pub throttled: Vec<trigon_mirror::Throttled>,
+    /// Where each body the mirror served came from. See [`crate::network::MirrorLog::asked`].
+    pub asked: Vec<trigon_mirror::Asked>,
 }
 
 impl BuildOutcome {

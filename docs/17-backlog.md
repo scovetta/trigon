@@ -486,7 +486,7 @@ Three things would, in increasing order of effort:
 **Done when:** one corpus target fails deterministically, is repaired by a model, and rebuilds — and
 the corpus says how often a repair helps at all, which no number anywhere currently says.
 
-## B25. The fetch cache behind the mirror, in three tiers
+## B25. ~~The fetch cache behind the mirror, in three tiers~~ — two of three built
 
 [ADR-0013](adr/0013-a-cache-supplies-bytes-never-decisions.md) decides the shape; this is the work.
 [B24](#b24-a-content-addressed-toolchain-store-mounted-rather-than-layered) is its toolchain tier
@@ -501,6 +501,24 @@ of which ~4.1 GB is distinct.** The split is the surprise and it decides the ord
 | index | 57,219 | **25.70 GB** | 4,962 | **1.52 GB** |
 | toolchain | 181 | 8.66 GB | ~30 | ~0.20 GB |
 | artifact | 85,962 | 4.87 GB | 14,138 | 2.40 GB |
+
+**Built, as two tiers rather than three.** `trigon-mirror`'s `cache.rs`, reached by
+`trigon rebuild --cache <dir>` and `trigon sweep --cache <dir>`, mounted into the per-target mirror
+container as a read-write volume because the mirror runs inside the build's network island and a
+cache that died with it would collect only the 8% of repeats that happen inside one target.
+
+- **Bytes** (artifacts and toolchains): permanent, shared by every run on the machine, digest
+  re-checked on every read with a mismatch treated as a miss and the entry removed. B24's separate
+  toolchain store is now redundant with this and should be closed rather than built.
+- **Index**: scoped to one invocation — one sweep, or one standalone rebuild, which means a single
+  rebuild shares nothing with anybody. The scope is a path component, so bounding staleness needs no
+  TTL and no clock.
+
+The obligations ADR-0013 attaches to the index tier are both in: `run.json` carries a `fetch_cache`
+block with the hit and fetch counts and **the instant the oldest index document it resolved against
+was fetched**, and `trigon watch` renders it in those words. What is *not* built is the ADR's
+live-comparison control — re-fetch, re-filter, compare digests — and `--no-cache` is the absence of
+`--cache` rather than a path that is exercised.
 
 **Tier 1 — toolchains.** B24, host-side, keyed by tarball sha256.
 

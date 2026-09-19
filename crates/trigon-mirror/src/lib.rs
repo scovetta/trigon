@@ -12,6 +12,7 @@
 //! It is also what makes `EgressTier::MirrorOnly` mean anything. A build allowed to reach only this
 //! is a build that cannot reach the artifact it is supposed to be reproducing.
 
+mod cache;
 mod cargo;
 mod error;
 mod guard;
@@ -21,11 +22,12 @@ mod nuget;
 mod pypi;
 mod server;
 
+pub use cache::{Cache, CacheStats, Tier, now_unix};
 pub use error::MirrorError;
 pub use guard::{
-    Checked, EXCHANGE_MARKER, Exchange, Guard, GuardManifest, GuardMatch, REFUSAL_MARKER,
-    REFUSED_ARTIFACT_MARKER, Refusal, THROTTLE_MARKER, TRIP_MARKER, Throttled, Trip, Withheld,
-    member_digests, member_digests_at, voiding,
+    ASKED_MARKER, Asked, Checked, EXCHANGE_MARKER, Exchange, Guard, GuardManifest, GuardMatch,
+    REFUSAL_MARKER, REFUSED_ARTIFACT_MARKER, Refusal, THROTTLE_MARKER, TRIP_MARKER, Throttled,
+    Trip, Withheld, member_digests, member_digests_at, voiding,
 };
 pub use moment::{Filter, Platform, normalize, published_by, url_for};
 pub use npm::filter_packument;

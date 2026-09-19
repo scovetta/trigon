@@ -81,6 +81,7 @@ fn opts(run_id: &str) -> RunOpts {
         retain: false,
         mirror_port: 8129,
         guard: None,
+        cache: None,
         on_event: None,
         // **Every test in this file asserts about what a build did**, and a cached layer means it
         // did nothing: the probe that proves a phase could not reach the internet is satisfied by a

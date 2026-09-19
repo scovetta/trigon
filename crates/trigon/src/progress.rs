@@ -450,6 +450,27 @@ mod tests {
 ///
 /// Every `Option` is a real absence. A timing we failed to read is not a phase that took no time,
 /// and a run with no strategy digest is not a run whose strategy hashed to nothing.
+/// What a run took from the fetch cache, and how stale the stalest decision behind it was.
+///
+/// **ADR-0013's obligation, in the record.** The artifact tier changes no answer: those bytes are
+/// immutable and verified by digest on every read. The index tier does — a packument decides which
+/// versions exist — so a run that resolved against a cached one has to say so, and say when that
+/// copy was taken. Without this, "resolved against the index as it stood at moment M" quietly
+/// becomes "resolved against our copy of it from day D", and nothing tells the two apart.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchCache {
+    /// Bodies served from disk.
+    pub hits: u64,
+    /// Bodies fetched from a registry.
+    pub fetched: u64,
+    /// The oldest index document this run decided against, as RFC 3339.
+    ///
+    /// `None` where no cached index was read, which means every resolution in this run went to the
+    /// network. Not the same as "fresh": it is the stronger answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_index_snapshot: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RunReport {
     pub purl: String,
@@ -544,6 +565,12 @@ pub struct RunReport {
     /// not a measurement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_bytes: Option<u64>,
+    /// What the mirror served from its own disk rather than from a registry.
+    ///
+    /// `None` where no cache ran, which is the state every run was in before one existed and is
+    /// not the same as a cache that served nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_cache: Option<FetchCache>,
     /// What this run asked of each upstream host, and what each said back.
     ///
     /// **Beside `network_exchanges`, and for the reason that count exists alone today.** The

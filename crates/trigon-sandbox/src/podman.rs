@@ -396,6 +396,7 @@ impl BuildHandle for PodmanBuild {
                     image,
                     self.opts.mirror_port,
                     self.opts.guard.as_deref(),
+                    self.opts.cache.as_ref(),
                 )
                 .await?,
             ),
@@ -793,9 +794,15 @@ impl PodmanBuild {
         seen: Option<crate::network::MirrorLog>,
     ) -> BuildOutcome {
         let pin = seen.as_ref().map(|s| s.observed());
-        let (arrived, refused_artifact, throttled, from_mirror) = match seen {
-            Some(s) => (s.trips, s.refused_artifact, s.throttled, Some(s.transcript)),
-            None => (Vec::new(), Vec::new(), Vec::new(), None),
+        let (arrived, refused_artifact, throttled, asked, from_mirror) = match seen {
+            Some(s) => (
+                s.trips,
+                s.refused_artifact,
+                s.throttled,
+                s.asked,
+                Some(s.transcript),
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None),
         };
         // **Reported, not decided.** Whether a trip voids the run depends on whether the bytes came
         // back out in the rebuilt artifact, and the caller resolves that artifact — the runner's
@@ -820,6 +827,7 @@ impl PodmanBuild {
             transcript,
             pin,
             throttled,
+            asked,
         }
     }
 }

@@ -254,6 +254,16 @@ enum Cmd {
         /// Where to keep the source checkouts a model rung reads.
         #[arg(long)]
         source_cache: Option<PathBuf>,
+        /// Let the mirror serve upstream bytes it already has, from this directory.
+        ///
+        /// Off by default: every run before this fetched everything, every time. Measured over one
+        /// 186-run npm sweep that is 39 GB and 143,362 requests, of which **86.7% were repeats** —
+        /// one packument alone was fetched 309 times for 6.89 GB. Artifacts and toolchains are
+        /// immutable and shared permanently; index documents are scoped to this invocation,
+        /// because a packument decides which versions exist and that is not a decision to inherit
+        /// from last Tuesday. See `docs/adr/0013-a-cache-supplies-bytes-never-decisions.md`.
+        #[arg(long)]
+        cache: Option<PathBuf>,
         /// Record the run — its artifacts, log, comparison and environment — in a store, so that a
         /// separate `trigon attest` can re-derive the claim and sign it without ever running a
         /// build. This is what makes the signing process separable from the one that executes
@@ -425,6 +435,23 @@ enum Cmd {
         /// members of it worth watching for inside anything else.
         #[arg(long)]
         guard: Option<PathBuf>,
+        /// Serve upstream bytes from this directory where they are already in it.
+        ///
+        /// Behind the mirror, never in front of it: the guard still runs first, every body still
+        /// goes through the same hashing stream, and the transcript is byte for byte what it would
+        /// have been. See ADR-0013.
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        /// Which invocation index entries belong to.
+        ///
+        /// An artifact is immutable and shared by every run on the machine. An index document
+        /// decides which versions exist, so it is scoped to one invocation rather than given a
+        /// lifetime — staleness bounded by construction instead of by a number somebody picked.
+        #[arg(long, requires = "cache")]
+        cache_scope: Option<String>,
+        /// Prune the cache to this many bytes at startup, oldest first.
+        #[arg(long, requires = "cache")]
+        cache_max_bytes: Option<u64>,
     },
     /// Rebuild many packages and report the rate.
     ///
@@ -464,6 +491,16 @@ enum Cmd {
         concurrency: usize,
         #[arg(long)]
         source_cache: Option<PathBuf>,
+        /// Let the mirror serve upstream bytes it already has, from this directory.
+        ///
+        /// Off by default: every run before this fetched everything, every time. Measured over one
+        /// 186-run npm sweep that is 39 GB and 143,362 requests, of which **86.7% were repeats** —
+        /// one packument alone was fetched 309 times for 6.89 GB. Artifacts and toolchains are
+        /// immutable and shared permanently; index documents are scoped to this invocation,
+        /// because a packument decides which versions exist and that is not a decision to inherit
+        /// from last Tuesday. See `docs/adr/0013-a-cache-supplies-bytes-never-decisions.md`.
+        #[arg(long)]
+        cache: Option<PathBuf>,
     },
     /// Watch a sweep's work directory, from a browser, while it runs.
     ///
@@ -720,10 +757,22 @@ fn voiding_trips(
 /// verifier without `RUSTFLAGS` and so agreed the build was fine.
 #[cfg(feature = "build")]
 fn now_rfc3339() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    rfc3339_from_unix(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+}
+
+/// A unix second as RFC 3339 UTC.
+///
+/// Split from [`now_rfc3339`] when the fetch cache needed to render an instant it was handed rather
+/// than the current one. The mirror stores seconds because it has no formatter and this repository
+/// already carries five copies of the one it would need; this is the caller that has one.
+#[cfg(feature = "build")]
+fn rfc3339_from_unix(secs: u64) -> String {
+    let secs = secs as i64;
     let days = secs.div_euclid(86_400);
     let tod = secs.rem_euclid(86_400);
     // Civil-from-days, Howard Hinnant's algorithm: exact, branch-free and about ten lines,
@@ -968,6 +1017,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             store,
             model,
             source_cache,
+            cache,
         } => rebuild::run(rebuild::Args {
             purl,
             artifact,
@@ -984,6 +1034,10 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             store,
             model,
             source_cache,
+            // One target, so its own scope: an index document is a decision and there is nobody
+            // here to share one with. The artifact tier is shared with every run on the machine,
+            // which is the half that is immutable.
+            fetch_cache: cache.map(|c| (c, format!("run-{}", std::process::id()))),
             // One target on a terminal: the phases are already in front of whoever asked.
             phases: None,
         }),
@@ -1001,6 +1055,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             model,
             concurrency,
             source_cache,
+            cache,
         } => sweep::run(sweep::Args {
             targets,
             image,
@@ -1014,6 +1069,11 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             model,
             source_cache,
             concurrency,
+            // **One scope for the whole sweep**, which is where the prize is. Only 8% of index
+            // fetches repeat within a single target; the 309 fetches of `registry.npmjs.org/npm`
+            // that were 18% of one sweep's egress were spread across its targets. A resumed sweep
+            // is a new invocation and gets a new scope, which is the conservative answer.
+            fetch_cache: cache.map(|c| (c, format!("sweep-{}", std::process::id()))),
         }),
         Cmd::Keygen { out, public_out } => keygen(&out, public_out.as_deref()),
         Cmd::PublicKey { key, pem } => {
@@ -1072,7 +1132,19 @@ fn dispatch(cmd: Cmd) -> Result<()> {
         #[cfg(feature = "build")]
         Cmd::MirrorImage { tag } => mirror::build_image(&tag),
         #[cfg(feature = "build")]
-        Cmd::Mirror { port, guard } => mirror::serve(port, guard.as_deref()),
+        Cmd::Mirror {
+            port,
+            guard,
+            cache,
+            cache_scope,
+            cache_max_bytes,
+        } => mirror::serve(
+            port,
+            guard.as_deref(),
+            cache.as_deref(),
+            cache_scope.as_deref(),
+            cache_max_bytes,
+        ),
         #[cfg(feature = "build")]
         Cmd::Resolve { purl, output } => registry::resolve(&purl, output),
         #[cfg(feature = "build")]
@@ -1108,6 +1180,8 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             None,
             source.as_deref(),
             None,
+            None,
+            // One strategy, run by hand. There is nothing for it to share with anybody.
             None,
         )
         .map(|_| ()),
@@ -1295,6 +1369,8 @@ mod build {
         pub refused_artifact: Vec<String>,
         /// Every time an upstream host told the mirror to slow down during this build.
         pub throttled: Vec<trigon_mirror::Throttled>,
+        /// Where each body the mirror served came from: the network, or its own disk.
+        pub asked: Vec<trigon_mirror::Asked>,
         /// Guarded members that arrived over the network and are **not** in the rebuilt artifact.
         ///
         /// The bytes came in and did not come out, which is not the harm the guard exists to catch
@@ -1338,6 +1414,9 @@ mod build {
         // Told as each phase starts, for anything watching this run from outside the process.
         on_event: Option<trigon_sandbox::EventSink>,
         source_cache: Option<&Path>,
+        // Where the mirror may keep upstream bytes, and which invocation its index entries
+        // belong to. `None` fetches everything every time.
+        fetch_cache: Option<&(PathBuf, String)>,
     ) -> Result<Built> {
         let egress = egress_tier(egress)?;
 
@@ -1487,6 +1566,7 @@ mod build {
                 retain,
                 mirror_port: 8129,
                 guard: guard.map(Path::to_path_buf),
+                cache: fetch_cache.cloned(),
                 on_event,
                 // Read from the environment rather than given a flag, because the caller that needs
                 // it is not a person: it is the clean-re-run path of `docs/09-attestations.md` §5,
@@ -1729,6 +1809,7 @@ mod build {
                 pin: outcome.pin,
                 refused_artifact: outcome.refused_artifact,
                 throttled: outcome.throttled,
+                asked: outcome.asked,
                 guard_notes,
                 artifact: outcome.artifact,
             })
@@ -2619,6 +2700,12 @@ mod rebuild {
         pub model: Option<String>,
         /// Where the model rung keeps its source checkouts.
         pub source_cache: Option<PathBuf>,
+        /// Where the mirror may keep upstream bytes, and which invocation shares index entries.
+        ///
+        /// `None` is what every run did before this existed: fetch everything, every time. Honest
+        /// and, measured over one 186-run npm sweep, 39 GB and 143,362 requests — 86.7% of them
+        /// for bytes already fetched (`docs/adr/0013-…`).
+        pub fetch_cache: Option<(PathBuf, String)>,
         /// Where to report which phase this target is in, when something is watching.
         ///
         /// `None` for a single `trigon rebuild`: nobody is watching one target, and the phases are
@@ -3239,6 +3326,7 @@ mod rebuild {
                     )
                 },
                 args.source_cache.as_deref(),
+                args.fetch_cache.as_ref(),
             );
 
             // What the build produced, taken before the guard is consulted rather than after.
@@ -3570,11 +3658,37 @@ mod rebuild {
         if let Ok(b) = built.as_ref() {
             let mut remote: std::collections::BTreeMap<String, trigon_politeness::HostTraffic> =
                 Default::default();
-            for e in b.transcript.iter().flatten() {
-                remote
-                    .entry(trigon_politeness::host_of(&e.url))
-                    .or_default()
-                    .requests += 1;
+            // **Requests, not transcript rows.** A row says a body crossed into the build, which a
+            // cache behind the mirror does not change; whether anybody asked a registry for it is
+            // a different question the moment one exists. `Asked` is emitted from the two places a
+            // body can come from and nowhere else.
+            //
+            // A run from a mirror too old to emit them falls back to the transcript, which is what
+            // it meant before the cache: every body was a request, because there was nowhere else
+            // for one to come from.
+            if b.asked.is_empty() {
+                for e in b.transcript.iter().flatten() {
+                    remote
+                        .entry(trigon_politeness::host_of(&e.url))
+                        .or_default()
+                        .requests += 1;
+                }
+            } else {
+                for a in b.asked.iter().filter(|a| !a.cached) {
+                    remote.entry(a.host.clone()).or_default().requests += 1;
+                }
+                // What the cache did, and the one thing ADR-0013 could not discharge by
+                // construction: how old the oldest index document this run decided against was.
+                report.fetch_cache = Some(crate::progress::FetchCache {
+                    hits: b.asked.iter().filter(|a| a.cached).count() as u64,
+                    fetched: b.asked.iter().filter(|a| !a.cached).count() as u64,
+                    oldest_index_snapshot: b
+                        .asked
+                        .iter()
+                        .filter_map(|a| a.index_fetched_at)
+                        .min()
+                        .map(rfc3339_from_unix),
+                });
             }
             for t in &b.throttled {
                 let h = remote.entry(t.host.clone()).or_default();
@@ -4819,13 +4933,24 @@ mod mirror {
             //
             // A cache mount is not part of the resulting layer, so the binary has to be copied out
             // of the target directory before the mount goes away.
+            //
+            // **The `touch` is not a superstition.** `COPY` writes the context's files with
+            // normalized timestamps, and cargo's fingerprints live in the cached `target` — so a
+            // crate of ours whose source changed could look unchanged and be served from a stale
+            // rlib. That happened: a build failed on a function that was in the tree and not in the
+            // compiled library, and it would have failed the other way round just as easily —
+            // producing an image labelled with this source digest, carrying a binary compiled from
+            // older code. The staleness warning compares labels, so it would have said the image
+            // was current. Touching only `crates/` costs the recompile of our seven and keeps the
+            // ~180 dependencies cached.
             "FROM docker.io/library/rust:1-alpine AS build\n\
              RUN apk add --no-cache musl-dev\n\
              WORKDIR /src\n\
              COPY . .\n\
              RUN --mount=type=cache,target=/usr/local/cargo/registry \\\n\
              \x20   --mount=type=cache,target=/src/target \\\n\
-             \x20   cargo build --release -p trigon --bin trigon \\\n\
+             \x20   find crates -name '*.rs' -exec touch {} + \\\n\
+             \x20   && cargo build --release -p trigon --bin trigon \\\n\
              \x20   && cp target/release/trigon /trigon\n\
              \n\
              FROM docker.io/library/alpine:3.20\n\
@@ -4944,7 +5069,13 @@ mod mirror {
         }
     }
 
-    pub fn serve(port: u16, guard: Option<&Path>) -> Result<()> {
+    pub fn serve(
+        port: u16,
+        guard: Option<&Path>,
+        cache: Option<&Path>,
+        cache_scope: Option<&str>,
+        cache_max_bytes: Option<u64>,
+    ) -> Result<()> {
         let manifest = match guard {
             Some(p) => {
                 let text = std::fs::read_to_string(p)
@@ -4958,11 +5089,22 @@ mod mirror {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
+        // Owned before the runtime takes the closure.
+        let cache = cache.map(Path::to_path_buf);
+        // A scope nobody named is this process, which gives a standalone mirror its own and shares
+        // nothing. The conservative default: the prize is across the targets of one sweep, and a
+        // mirror serving one build has nothing to share with anybody.
+        let scope = cache_scope
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("pid-{}", std::process::id()));
+        let rt = rt;
         rt.block_on(async move {
-            let handle = trigon_mirror::Mirror::new()?
-                .with_guard(manifest)
-                .serve(port)
-                .await?;
+            let mut mirror = trigon_mirror::Mirror::new()?.with_guard(manifest);
+            if let Some(root) = cache {
+                mirror = mirror.with_cache(root.clone(), scope.clone(), cache_max_bytes)?;
+                println!("  cache      {} (index scope {scope})", root.display());
+            }
+            let handle = mirror.serve(port).await?;
             if armed {
                 println!("  guard armed");
             }
@@ -5012,6 +5154,8 @@ mod sweep {
         /// rate measured over a mixture of the two is not a rate of anything.
         pub model: Option<String>,
         pub source_cache: Option<PathBuf>,
+        /// Where the mirror may keep upstream bytes, shared by every target in this sweep.
+        pub fetch_cache: Option<(PathBuf, String)>,
         /// Targets built at once.
         ///
         /// **Defaults to 1, which is what a sweep did before this existed.** Raising it is the
@@ -5393,6 +5537,10 @@ mod sweep {
                 store: args.store.clone(),
                 model: args.model.clone(),
                 source_cache: args.source_cache.clone(),
+                // Every target in the sweep shares one, which is where the repeats are: only 8% of
+                // index fetches repeat inside a single target, and the 309 fetches of the npm
+                // packument that were 18% of one sweep's egress were spread across its targets.
+                fetch_cache: args.fetch_cache.clone(),
                 phases: Some(progress.clone()),
             },
             false,

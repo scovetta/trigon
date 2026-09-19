@@ -234,6 +234,11 @@ pub struct Mirror {
     stats: Arc<Stats>,
     guard: Arc<crate::guard::Guard>,
     seen: Arc<Seen>,
+    /// Where the mirror got a body, when it did not get it from the network.
+    ///
+    /// `None` is the default and the whole of the behaviour before this existed. A mirror with no
+    /// cache fetches everything, every time, which is honest and is 39 GB per sweep.
+    cache: Option<Arc<crate::cache::Cache>>,
 }
 
 /// What this mirror served, kept in memory beside the counters that count it.
@@ -364,6 +369,7 @@ pub struct MirrorHandle {
     stats: Arc<Stats>,
     guard: Arc<crate::guard::Guard>,
     seen: Arc<Seen>,
+    cache: Option<Arc<crate::cache::Cache>>,
     shutdown: tokio::sync::oneshot::Sender<()>,
     joined: tokio::task::JoinHandle<()>,
 }
@@ -386,6 +392,11 @@ impl MirrorHandle {
     /// What this mirror served, row by row. See [`Seen`] for why this exists beside the counters.
     pub fn seen(&self) -> &Seen {
         &self.seen
+    }
+
+    /// What the cache did, where one was configured.
+    pub fn cache_stats(&self) -> Option<crate::CacheStats> {
+        self.cache.as_ref().map(|c| c.stats())
     }
 
     /// What the mirror actually did, as plain numbers a caller can act on.
@@ -457,7 +468,38 @@ impl Mirror {
             stats: Arc::new(Stats::default()),
             guard: Arc::new(crate::guard::Guard::default()),
             seen: Arc::new(Seen::default()),
+            cache: None,
         })
+    }
+
+    /// Serve from a cache on disk, rooted at `root`, with index entries scoped to `scope`.
+    ///
+    /// Behind the mirror rather than in front of it: the guard still runs first, the bytes still go
+    /// through the same hashing stream, and the transcript is byte for byte what it would have
+    /// been. See [`ADR-0013`](../../../docs/adr/0013-a-cache-supplies-bytes-never-decisions.md).
+    pub fn with_cache(
+        mut self,
+        root: std::path::PathBuf,
+        scope: String,
+        max_bytes: Option<u64>,
+    ) -> Result<Self, MirrorError> {
+        let cache = crate::cache::Cache::open(root, scope).map_err(MirrorError::Cache)?;
+        if let Some(max) = max_bytes {
+            match cache.prune(max) {
+                Ok(0) => {}
+                Ok(freed) => tracing::info!(freed, "pruned the cache to its ceiling"),
+                // Never fatal. A cache that cannot be pruned is a disk to look at, not a reason to
+                // refuse to serve a build.
+                Err(e) => tracing::warn!("could not prune the cache: {e}"),
+            }
+        }
+        self.cache = Some(Arc::new(cache));
+        Ok(self)
+    }
+
+    /// What the cache did, for the run record.
+    pub fn cache_stats(&self) -> Option<crate::CacheStats> {
+        self.cache.as_ref().map(|c| c.stats())
     }
 
     /// Refuse this run's own artifact, and watch for it arriving by any other route.
@@ -485,6 +527,7 @@ impl Mirror {
         let stats = self.stats.clone();
         let guard = self.guard.clone();
         let seen = self.seen.clone();
+        let cache = self.cache.clone();
         let app = axum::Router::new()
             .fallback(handle)
             .with_state(Arc::new(self));
@@ -507,6 +550,7 @@ impl Mirror {
             stats,
             guard,
             seen,
+            cache,
             shutdown: tx,
             joined,
         })
@@ -715,8 +759,8 @@ async fn npm_request(
     }
 
     mirror.seen.note_moment(&filter.moment);
-    let resp = fetch(mirror, &url, filter, &[]).await?;
-    let mut doc: serde_json::Value = resp.json().await?;
+    let (body, _) = fetch_index(mirror, &url, filter, &[]).await?;
+    let mut doc: serde_json::Value = serde_json::from_slice(&body).map_err(upstream_json("npm"))?;
     let removed = crate::npm::filter_packument(&mut doc, &filter.moment);
     let withheld = match mirror.guard.withheld() {
         Some(w) => crate::npm::withhold_version(&mut doc, w),
@@ -778,14 +822,15 @@ async fn pypi_request(
 
     // Always ask upstream for JSON, whatever the client wanted. The HTML simple API carries no
     // upload times, so proxying it would pass every file through and quietly do nothing.
-    let resp = fetch(
+    let (body, _) = fetch_index(
         mirror,
         &url,
         filter,
         &[(header::ACCEPT, "application/vnd.pypi.simple.v1+json")],
     )
     .await?;
-    let mut doc: serde_json::Value = resp.json().await?;
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&body).map_err(upstream_json("pypi"))?;
     let removed = crate::pypi::filter_simple(&mut doc, &filter.moment);
     let withheld = match mirror.guard.withheld() {
         Some(w) => crate::pypi::withhold_version(&mut doc, w),
@@ -860,6 +905,14 @@ async fn outbound(
         // out for the whole process, and this is where that is paid.
         politeness::pace(&host).await;
         politeness::note_request(&host);
+        // One line per request that actually goes on the wire, including a retry and each hop of a
+        // redirect: the host is counting what upstream saw, not what we intended.
+        crate::guard::Asked {
+            host: host.clone(),
+            cached: false,
+            index_fetched_at: None,
+        }
+        .emit();
         let resp = match build().send().await {
             Ok(r) => r,
             Err(e) => {
@@ -898,12 +951,40 @@ async fn outbound(
     }
 }
 
-async fn fetch(
+/// A document upstream sent that we cannot parse. Theirs, and a 502, the way a bad body always was
+/// when `reqwest` did the parsing.
+fn upstream_json(platform: &'static str) -> impl Fn(serde_json::Error) -> MirrorError {
+    move |e| {
+        tracing::warn!("{platform} sent an index document that will not parse: {e}");
+        MirrorError::Upstream {
+            platform: platform.into(),
+            status: 502,
+        }
+    }
+}
+
+/// An upstream index document, from disk where we have it and from the network otherwise.
+///
+/// **The bytes are cached; the decision never is.** What comes back here is the document as the
+/// registry published it, and the time filter runs on it afterwards on every request — so a cached
+/// document resolved at a different moment still gets that moment's filter. The cache supplies
+/// bytes, never an answer.
+///
+/// The second return says whether the bytes came from disk. `Cache::get` already emits the marker
+/// the host counts, so nothing has to thread this through the response helpers — it is here for a
+/// caller that wants to log or branch on it, and every caller today ignores it.
+async fn fetch_index(
     mirror: &Mirror,
     url: &str,
     filter: &Filter,
     headers: &[(header::HeaderName, &str)],
-) -> Result<reqwest::Response, MirrorError> {
+) -> Result<(Vec<u8>, bool), MirrorError> {
+    if let Some(cache) = &mirror.cache
+        && let Some(entry) = cache.get(crate::Tier::Index, url)
+    {
+        tracing::debug!(url, fetched_at = entry.fetched_at, "index from cache");
+        return Ok((entry.body, true));
+    }
     let resp = outbound(url, || {
         let mut req = mirror.client.get(url);
         for (k, v) in headers {
@@ -918,7 +999,28 @@ async fn fetch(
             status: resp.status().as_u16(),
         });
     }
-    Ok(resp)
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let body = resp.bytes().await?.to_vec();
+    if let Some(cache) = &mirror.cache {
+        cache.note_miss();
+        // Best effort. A cache that cannot be written is a slower sweep, never a wrong one, so a
+        // failure here is logged and the body is served.
+        if let Err(e) = cache.put(
+            crate::Tier::Index,
+            url,
+            &body,
+            &content_type,
+            crate::now_unix(),
+        ) {
+            tracing::warn!(url, "could not cache an index document: {e}");
+        }
+    }
+    Ok((body, false))
 }
 
 /// Serve an artifact addressed as `/-artifact/{platform}/{moment}/{host}/{path}`.
@@ -1140,7 +1242,8 @@ async fn cargo_route(
     }
     mirror.seen.note_moment(moment);
     let url = format!("{}/{tail}", crate::cargo::INDEX_BASE);
-    let body = fetch(mirror, &url, &filter, &[]).await?.text().await?;
+    let (raw, _) = fetch_index(mirror, &url, &filter, &[]).await?;
+    let body = String::from_utf8_lossy(&raw).into_owned();
     let (filtered, withheld, unyanked) = crate::cargo::filter_index(&body, moment);
     mirror.stats.index_requests.fetch_add(1, Ordering::Relaxed);
     mirror
@@ -1183,7 +1286,8 @@ async fn nuget_pages(
     let id = crate::nuget::normalized(id);
     mirror.seen.note_moment(&filter.moment);
     let url = format!("{}/{id}/index.json", crate::nuget::REGISTRATION_BASE);
-    let index: Value = fetch(mirror, &url, filter, &[]).await?.json().await?;
+    let (body, _) = fetch_index(mirror, &url, filter, &[]).await?;
+    let index: Value = serde_json::from_slice(&body).map_err(upstream_json("nuget"))?;
 
     let mut pages: Vec<Value> = index
         .get("items")
@@ -1201,8 +1305,8 @@ async fn nuget_pages(
             // whatever a feed chose to name.
             let u = u.to_string();
             if u.starts_with(crate::nuget::REGISTRATION_BASE) {
-                match fetch(mirror, &u, filter, &[]).await {
-                    Ok(r) => match r.json::<Value>().await {
+                match fetch_index(mirror, &u, filter, &[]).await {
+                    Ok((page_body, _)) => match serde_json::from_slice::<Value>(&page_body) {
                         Ok(full) => *page = full,
                         Err(e) => {
                             return Err(MirrorError::Upstream {
@@ -1321,11 +1425,11 @@ async fn filtered_index_offers(mirror: &Mirror, path: &str) -> bool {
         moment,
     };
     let url = format!("{}/{name}", Platform::Npm.upstream());
-    let Ok(resp) = fetch(mirror, &url, &filter, &[]).await else {
+    let Ok((body, _cached)) = fetch_index(mirror, &url, &filter, &[]).await else {
         tracing::debug!(%name, "could not ask the index about a lockfile tarball");
         return false;
     };
-    let Ok(mut doc) = resp.json::<serde_json::Value>().await else {
+    let Ok(mut doc) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return false;
     };
     crate::npm::filter_packument(&mut doc, &filter.moment);
@@ -1428,6 +1532,38 @@ async fn proxy(
             url: url.to_string(),
         });
     }
+
+    // **After the guard, never before it.** An artifact this run is trying to reproduce must be
+    // refused whether or not we happen to have it on disk — a cache that answered first would turn
+    // the one control that separates a verdict from a tautology into a control on cold requests.
+    //
+    // Only the immutable routes. `passthrough` is whatever an index host served that no filter
+    // applied to, which is not something to keep and call permanent.
+    if let (Some(cache), true) = (&mirror.cache, matches!(route, "artifact" | "toolchain"))
+        && let Some(entry) = cache.get(crate::Tier::Bytes, url)
+    {
+        // Through the same hashing stream as the network path, so the transcript row, the digest
+        // and everything the guard does are byte for byte what they would have been. The cache
+        // supplies bytes and changes nothing else about the evidence.
+        let body = entry.body;
+        let stream = guarded_stream(
+            futures::stream::iter([Ok(bytes::Bytes::from(body))]),
+            mirror.guard.clone(),
+            mirror.seen.clone(),
+            url.to_string(),
+            route,
+        );
+        return Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, entry.content_type)],
+            Body::from_stream(stream),
+        )
+            .into_response());
+    }
+    if let (Some(cache), true) = (&mirror.cache, matches!(route, "artifact" | "toolchain")) {
+        cache.note_miss();
+    }
+
     let resp = outbound(url, || mirror.passthrough.get(url)).await?;
     // Redirects are followed here rather than passed on, because a client behind an enforced egress
     // boundary cannot follow one itself: the destination is exactly the host it has no route to.
@@ -1490,13 +1626,31 @@ async fn proxy(
         .map(str::to_string);
 
     // Streamed, not buffered: an artifact can be gigabytes and the mirror serves a whole fleet.
-    // The guard hashes as the bytes go past rather than holding them.
+    // The guard hashes as the bytes go past rather than holding them, and the cache is filled the
+    // same way — a temporary file that is renamed into place only if the body reaches its end, so a
+    // download the client abandons leaves nothing a later read could mistake for a whole one.
+    //
+    // **Content-encoded bodies are not cached.** What goes past here is undecoded, and the entry
+    // would have to carry the encoding to be replayable; serving a `Content-Encoding: gzip` body
+    // without that header is the corruption this proxy already learned about the hard way.
+    let writer = match (&mirror.cache, matches!(route, "artifact" | "toolchain")) {
+        (Some(cache), true) if content_encoding.is_none() => cache.writer(crate::Tier::Bytes, url),
+        _ => None,
+    };
     let stream = guarded_stream(
         resp.bytes_stream(),
         mirror.guard.clone(),
         mirror.seen.clone(),
         url.to_string(),
         route,
+    );
+    // Boxed because `unfold` produces a stream that is not `Unpin` and this one polls it by
+    // reference. One allocation per response, against a body that is measured in megabytes.
+    let stream = caching_stream(
+        Box::pin(stream),
+        writer,
+        content_type.clone(),
+        mirror.cache.clone(),
     );
     let mut out = (
         StatusCode::OK,
@@ -1510,6 +1664,61 @@ async fn proxy(
         out.headers_mut().insert(header::CONTENT_ENCODING, v);
     }
     Ok(out)
+}
+
+/// Fill a cache entry from a body as it passes, completing it only where the body completes.
+///
+/// A separate wrapper rather than another job for `guarded_stream`, which already hashes, guards,
+/// transcribes and tracks whether the body finished. The one rule this has to keep is the same one:
+/// a partial body must never become a whole entry, so the rename happens in the `None` arm and
+/// nowhere else, and the writer's `Drop` removes the temporary file on every other path.
+fn caching_stream<S>(
+    inner: S,
+    writer: Option<crate::cache::CacheWriter>,
+    content_type: String,
+    cache: Option<Arc<crate::cache::Cache>>,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>>
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    struct State<S> {
+        inner: S,
+        writer: Option<crate::cache::CacheWriter>,
+        content_type: String,
+        cache: Option<Arc<crate::cache::Cache>>,
+    }
+    futures::stream::unfold(
+        Some(State {
+            inner,
+            writer,
+            content_type,
+            cache,
+        }),
+        |s| async move {
+            let mut s = s?;
+            match futures::StreamExt::next(&mut s.inner).await {
+                Some(Ok(chunk)) => {
+                    if let Some(w) = &mut s.writer {
+                        w.write(&chunk);
+                    }
+                    Some((Ok(chunk), Some(s)))
+                }
+                // Mid-stream error: the entry is abandoned by dropping the writer, which removes its
+                // temporary file. Half an artifact under a whole artifact's URL is the one thing this
+                // must never leave behind.
+                Some(Err(e)) => Some((Err(e), None)),
+                None => {
+                    if let Some(w) = s.writer.take()
+                        && w.finish(&s.content_type, crate::now_unix())
+                        && let Some(c) = &s.cache
+                    {
+                        c.note_write();
+                    }
+                    None
+                }
+            }
+        },
+    )
 }
 
 /// Pass a body through, hashing it, checking it, and transcribing it.

@@ -2720,6 +2720,30 @@ fn report_panel(r: Option<&crate::progress::RunReport>) -> String {
     }
     out.push_str("</table>");
 
+    // Where the mirror got the bytes, which ADR-0013 requires the run to say rather than leave to
+    // whoever remembers the cache exists.
+    if let Some(c) = &r.fetch_cache {
+        out.push_str(&format!(
+            "<h2>What the mirror already had</h2><p>{} body/bodies from disk, {} from a \
+             registry.</p>",
+            c.hits, c.fetched,
+        ));
+        out.push_str(&match &c.oldest_index_snapshot {
+            // The claim this weakens, stated rather than rounded off. An artifact is immutable and
+            // its digest is checked on every read; an index document decides which versions exist.
+            Some(when) => format!(
+                "<p class=\"note\">the oldest index document this run resolved against was \
+                 fetched at <code>{}</code>. A packument decides which versions exist, so a \
+                 divergence here is readable against when that copy was taken rather than as a \
+                 fact about the package.</p>",
+                esc(when)
+            ),
+            None => "<p class=\"note\">no cached index was read, so every resolution in this run \
+                     went to the network. Stronger than fresh, and different from it.</p>"
+                .to_string(),
+        });
+    }
+
     // **What this run asked of each host, beside what it concluded from them.** The mirror's
     // transcript said what a build fetched and the per-host counters went to a sweep's stdout, so
     // nothing this system wrote down stated what it had asked of anybody.

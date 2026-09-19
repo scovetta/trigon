@@ -1111,3 +1111,57 @@ async fn refusing_the_runs_own_artifact_is_not_the_artifact_arriving() {
     );
     assert_eq!(g.arrived()[0].matched, GuardMatch::WholeArtifact);
 }
+
+/// Two requests for one artifact: the first from the registry, the second from disk.
+///
+/// The unit tests in `cache.rs` cover the store — round trip, a corrupt entry refused, scoping,
+/// pruning. What they cannot cover is the **wiring**: that the proxy consults it after the guard,
+/// that a body streamed to a client is also written, and that the second request serves the same
+/// bytes without asking anybody. That gap is where this project's bugs live — a control that is
+/// correct in isolation and not in the path.
+#[tokio::test]
+async fn a_second_request_for_one_artifact_asks_nobody() {
+    if !live() {
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("trigon-cache-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let m = Mirror::new()
+        .unwrap()
+        .with_cache(root.clone(), "test-scope".into(), None)
+        .unwrap()
+        .serve(0)
+        .await
+        .unwrap();
+    let host = m.host();
+    let path = "/-artifact/npm/2018-04-09T01:10:45/registry.npmjs.org/ms/-/ms-2.1.3.tgz";
+
+    let first = reqwest::get(format!("http://{host}{path}")).await.unwrap();
+    assert_eq!(first.status(), 200);
+    let first_bytes = first.bytes().await.unwrap();
+    assert!(!first_bytes.is_empty());
+
+    let second = reqwest::get(format!("http://{host}{path}")).await.unwrap();
+    assert_eq!(second.status(), 200);
+    let second_bytes = second.bytes().await.unwrap();
+    assert_eq!(
+        first_bytes, second_bytes,
+        "the cached body is not the fetched one"
+    );
+
+    let stats = m.cache_stats().expect("a cache was configured");
+    assert_eq!((stats.hits, stats.written), (1, 1), "{stats:?}");
+    assert_eq!(stats.rejected, 0, "{stats:?}");
+
+    // And the transcript still lists both, because it describes what crossed into the build and a
+    // cache does not change that. It is the *request* count that changes, which is why the two are
+    // no longer derived from the same rows.
+    assert_eq!(
+        m.seen().exchanges().len(),
+        2,
+        "a served body is a transcript row whether or not we fetched it"
+    );
+    m.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}

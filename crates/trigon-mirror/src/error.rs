@@ -19,6 +19,13 @@ pub enum MirrorError {
     #[error("upstream {platform} answered {status}")]
     Upstream { platform: String, status: u16 },
 
+    #[error(
+        "the cache directory could not be opened: {0}. A cache is an optimisation and never a \
+         reason to serve a build wrong, so this refuses at startup rather than quietly running \
+         without one — a sweep that thinks it is caching and is not looks like a slow machine."
+    )]
+    Cache(#[source] std::io::Error),
+
     #[error("upstream {platform} returned {content_type}, which cannot be filtered by date")]
     Unfilterable {
         platform: String,
@@ -71,7 +78,7 @@ impl MirrorError {
             MirrorError::HostNotAllowed { .. } => 403,
             MirrorError::Upstream { status, .. } => *status,
             MirrorError::Unfilterable { .. } | MirrorError::BadRedirect { .. } => 502,
-            MirrorError::Bind { .. } => 500,
+            MirrorError::Bind { .. } | MirrorError::Cache(_) => 500,
             MirrorError::Refused { .. } => 403,
             MirrorError::NotFound { .. } => 404,
             MirrorError::Transport(_) => 502,
@@ -91,7 +98,9 @@ impl Classify for MirrorError {
             | MirrorError::Unfilterable { .. }
             | MirrorError::BadRedirect { .. }
             | MirrorError::Transport(_) => Fault::Upstream,
-            MirrorError::Bind { .. } => Fault::Infra,
+            // Ours: a directory this machine could not open. Never the package's, and never the
+            // registry's.
+            MirrorError::Bind { .. } | MirrorError::Cache(_) => Fault::Infra,
             // A policy this run is enforcing, not a broken package and not broken infrastructure.
             MirrorError::Refused { .. } => Fault::Policy,
             // **Ours.** A path shape this mirror does not serve means we told a client to ask for
