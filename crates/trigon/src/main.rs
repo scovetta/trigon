@@ -657,6 +657,17 @@ enum Cmd {
         /// whoever enqueued it ask for an unsandboxed build. See `docs/22-management-layer.md` §2.4.
         #[arg(long, default_value = "mirror-only", value_parser = ["deny-all", "mirror-only", "git-and-mirror", "open"])]
         egress: String,
+        /// What this worker may do: `infer`, `build` or `judge`.
+        ///
+        /// A capability, not a hint. `docs/12-security.md` §2.6: the judge reads the upstream
+        /// artifact and the build worker has to be unable to, or a build can reproduce the artifact
+        /// by copying it out of our own storage. A worker asked for jobs outside its class is
+        /// refused rather than quietly given the subset it may have.
+        ///
+        /// `build` is the only class with a worker today, because the `rebuild` job still runs
+        /// inference, the build and the comparison in one process. See `docs/17-backlog.md` B32.
+        #[arg(long, default_value = "build", value_parser = ["infer", "build", "judge"])]
+        class: String,
         /// Names this worker in every lease and every event. Defaults to host and pid, which is
         /// what answers "which process held this" months later, from a row.
         #[arg(long)]
@@ -1338,6 +1349,7 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             work,
             store,
             egress,
+            class,
             name,
             timeout,
             definitions,
@@ -1369,6 +1381,13 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
                         std::process::id()
                     )
                 }),
+                class: match class.as_str() {
+                    "infer" => trigon_engine::Class::Infer,
+                    "judge" => trigon_engine::Class::Judge,
+                    // `value_parser` above admits only the three, so this is the third and not a
+                    // default standing in for an unrecognised one.
+                    _ => trigon_engine::Class::Build,
+                },
                 confirm: !no_confirm,
                 ..Default::default()
             },

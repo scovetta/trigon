@@ -1463,3 +1463,29 @@ nothing can record that it is evidence.
 digests** — `fc0b2ded67e7` against `50edec6be3ea` — and different member verdicts, 0 identical
 against 13. Two attempts straddling that boundary answered measurably different questions, and
 under today's key, which is the purl twice, they would share a key and be counted as agreeing.
+
+## B32. The `rebuild` job is all three worker classes in one process
+
+[`10-scale.md`](10-scale.md) names three: `infer` (cheap, network- and model-heavy, high
+concurrency), `build` (expensive, isolated, egress-restricted, low concurrency), `judge` (cheap,
+fetches the upstream artifact, runs no container). [`12-security.md`](12-security.md) §2.6 says why
+it is a control and not a cost lever: **the judge reads the upstream artifact and the build worker
+has to be unable to**, or a build can produce a perfect reproduction by copying the thing it was
+meant to reproduce out of our own storage.
+
+The classes now exist and are enforced at the queue — `trigon_engine::Class`, a `--class` flag on
+`trigon worker`, and a worker that asks for a kind outside its class is refused rather than quietly
+handed the subset it may have. The kernel boundary that stops the *container* reaching the blob
+store is now tested for real, against a listener on the host, paired with an open-egress control so
+the probe cannot pass by being broken.
+
+What is left is the split itself. The `rebuild` job still runs inference, the build and the
+comparison in one process, so `build` is the only class with a worker and the separation is a seam
+rather than a deployment. The host process fetches the upstream artifact, which is exactly the
+capability the build class is defined not to have — it is only the *container* that cannot reach it.
+
+**Done when:** `infer`, `build` and `judge` are three jobs with three payloads, a build worker's
+process holds no upstream bytes at any point (not merely its container), and the blob credential it
+carries is write-only and run-scoped as §2.6 specifies. The last of those is the piece with no
+implementation anywhere: where a blob store cannot express write-only access, §2.6 calls for a
+sidecar that holds the credential and exposes an append-only endpoint.

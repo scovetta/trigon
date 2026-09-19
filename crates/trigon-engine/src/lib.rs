@@ -48,6 +48,71 @@ pub enum EngineError {
          human-touched artifact published as though nobody had touched it."
     )]
     CapEscaped { run: String, outcome: String },
+    /// A worker asked to lease work its class may not do.
+    ///
+    /// Refused rather than filtered, because a class is a *capability* statement and a process
+    /// that quietly leased less than it asked for would be a fleet silently missing a worker.
+    #[error(
+        "a `{class}` worker asked to lease `{kind}` jobs, which belong to another class. The \
+         class decides what this process may reach — see docs/12-security.md §2.6 — so leasing \
+         across it is a deployment mistake, not a job to skip."
+    )]
+    WrongClass { class: &'static str, kind: String },
+}
+
+/// What a worker may do, and therefore which jobs it may lease.
+///
+/// [`docs/10-scale.md`](../../../docs/10-scale.md) §"Three classes": `infer` is cheap, network-
+/// and model-heavy, and runs at high concurrency; `build` is expensive, isolated and
+/// egress-restricted, at low concurrency; `judge` is cheap, fetches the upstream artifact, and
+/// executes no container.
+///
+/// **The split is a control before it is a cost lever.** `docs/12-security.md` §2.6: judging reads
+/// the upstream artifact and the build worker has to be unable to, or a build can produce a
+/// perfect reproduction by copying the thing it was meant to reproduce. The blob store is on the
+/// build's deny list for the same reason the registry is, and
+/// `trigon-sandbox/tests/podman.rs::a_blob_store_read_from_inside_the_sandbox_is_denied` asserts
+/// the kernel boundary that makes it true.
+///
+/// **What is not here yet.** The `rebuild` kind still runs inference, the build and the comparison
+/// in one process, so `Build` is the only class with a worker today and the separation is enforced
+/// at this seam rather than achieved across machines. Splitting that job is `docs/17-backlog.md`
+/// B32; until then this type is what stops the three classes from being three names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Class {
+    Infer,
+    Build,
+    Judge,
+}
+
+impl Class {
+    /// The job kinds a worker of this class may lease, and no others.
+    pub const fn kinds(self) -> &'static [&'static str] {
+        match self {
+            Class::Infer => &["infer"],
+            // `rebuild` is the combined job described above. It is registered here because what it
+            // executes is a container, which is what makes a worker a build worker.
+            Class::Build => &["rebuild"],
+            Class::Judge => &["judge"],
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Class::Infer => "infer",
+            Class::Build => "build",
+            Class::Judge => "judge",
+        }
+    }
+
+    /// Whether a worker of this class may hold the upstream artifact's bytes.
+    ///
+    /// Stated as a method so the answer has one home. It is not yet an access control — see the
+    /// note on [`Class`] — and the kernel boundary that does enforce it for the *container* is
+    /// tested in `trigon-sandbox`.
+    pub const fn may_read_upstream(self) -> bool {
+        matches!(self, Class::Judge)
+    }
 }
 
 /// What a worker did with a job.
@@ -124,6 +189,8 @@ pub struct Config {
     /// Names this worker in every lease and every event. A hostname plus a pid, usually: the
     /// question it has to answer is "which process is holding this", months later, from a row.
     pub worker: String,
+    /// What this worker may do. See [`Class`].
+    pub class: Class,
     /// How long a lease lasts without a heartbeat. Long enough that a slow build does not lose its
     /// job, short enough that a dead worker's job comes back within it.
     pub lease: Duration,
@@ -154,6 +221,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             worker: "worker".into(),
+            class: Class::Build,
             lease: Duration::from_secs(300),
             batch: 1,
             idle: Duration::from_secs(12),
@@ -187,6 +255,19 @@ impl Engine {
     /// case for most of a fleet's life.
     pub async fn tick(&self, work: &dyn Work) -> Result<usize, EngineError> {
         let kinds = work.kinds();
+        // **The class is checked before anything is leased.** A worker that asked for a kind
+        // outside its class is misconfigured, and the honest response is to say so rather than
+        // lease the subset it happens to be allowed — a fleet whose judge workers silently do
+        // nothing looks exactly like a fleet with no judging to do.
+        if let Some(kind) = kinds
+            .iter()
+            .find(|k| !self.cfg.class.kinds().contains(&k.as_str()))
+        {
+            return Err(EngineError::WrongClass {
+                class: self.cfg.class.name(),
+                kind: kind.clone(),
+            });
+        }
         let refs: Vec<&str> = kinds.iter().map(String::as_str).collect();
         let jobs = self
             .queue

@@ -725,3 +725,138 @@ async fn an_enforced_tier_verifies_its_base_image_instead_of_installing() {
         "a package that is present must not be reported missing: {log}"
     );
 }
+
+/// The third leg of `docs/12-security.md` row 6, which that table already claims is covered.
+///
+/// The row reads: *"The build worker cannot reach the upstream artifact — Three integration tests:
+/// the mirror refuses its URL, an egress fetch of it voids the run, **a blob-store read from
+/// inside the sandbox is denied**"*, and is marked **yes**. The first two exist
+/// (`trigon-mirror/tests/server.rs::the_mirror_refuses_the_runs_own_artifact` and the
+/// `seam_*_fail_closed` suites). The third did not.
+///
+/// It matters more than it looks. §12.6 is about the hole the other two do not cover:
+///
+/// ```text
+/// GET <cas>/blobs/sha256/<upstream_digest>   →   cp to the output path
+/// ```
+///
+/// That request never goes to a registry, so the mirror never sees it and the egress guard never
+/// hashes it. A build that can reach the blob store can read the artifact it is supposed to be
+/// reproducing, out of our own storage, and reproduce it perfectly past every clean re-run.
+///
+/// The control is structural rather than configured: at `mirror-only` the build's only interface
+/// is a podman `--internal` network whose sole route out is the mirror container, so a host-side
+/// service has no route to it at all. This asserts that, against a real listener on this machine
+/// standing in for the blob store.
+///
+/// **Paired with the open-egress case on purpose.** A probe that cannot reach anything proves
+/// nothing about the boundary, so the same listener, on the same address, must be reached when the
+/// tier permits it. Asserted on the host side — a connection really arrived — rather than on the
+/// probe's own exit code.
+#[tokio::test]
+async fn a_blob_store_read_from_inside_the_sandbox_is_denied() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let _store = store().await;
+    let r = PodmanRunner::new(workdir()).with_mirror_image(Some(MIRROR_IMAGE.into()));
+    if !usable(&r).await || !mirror_image_available() {
+        return;
+    }
+
+    // The address a container on an ordinary network can reach this machine on. Found by asking
+    // the routing table which local address it would use to leave, rather than guessing at
+    // podman's gateway, which differs between rootless and rootful.
+    let Some(host_ip) = ({
+        std::net::UdpSocket::bind("0.0.0.0:0")
+            .ok()
+            .and_then(|s| s.connect("1.1.1.1:80").ok().map(|()| s))
+            .and_then(|s| s.local_addr().ok())
+            .map(|a| a.ip().to_string())
+    }) else {
+        refuse_to_skip("this machine has no outbound route, so there is no address to probe");
+        return;
+    };
+
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").expect("bind a stand-in blob store");
+    let port = listener.local_addr().expect("addr").port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if stream.is_ok() {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+
+    // By IP and port, so a blocked resolver is not mistaken for a blocked route — the same
+    // reasoning as `mirror_only_egress_blocks_everything_but_the_mirror`.
+    let probe = format!(
+        "nc -w 3 -z {host_ip} {port} && echo REACHED-BLOBSTORE\n\
+         echo probe-finished\n"
+    );
+
+    let plan = |egress| {
+        BuildPlan::Oci(OciPlan {
+            base_image: ALPINE.into(),
+            system_deps: BTreeSet::new(),
+            source: "true".into(),
+            deps: "true".into(),
+            build: probe.clone(),
+            output_path: ".".into(),
+            egress,
+            privileged: false,
+            extra_hosts: Default::default(),
+            source_tree: None,
+        })
+    };
+
+    // 1. The control. Same listener, same address, a tier that permits it.
+    let open = r
+        .start(&plan(EgressTier::Open), &opts("blobstore-open"))
+        .await
+        .expect("starts")
+        .wait()
+        .await
+        .expect("completes");
+    assert!(
+        open.log_tail.contains("probe-finished"),
+        "the probe did not run under open egress, so it proves nothing below:\n{}",
+        open.log_tail
+    );
+    assert!(
+        hits.load(Ordering::SeqCst) > 0,
+        "nothing reached the stand-in blob store at {host_ip}:{port} even under open egress. The \
+         probe is broken, not the boundary — this test would otherwise pass for the wrong reason."
+    );
+
+    let reached_when_allowed = hits.load(Ordering::SeqCst);
+
+    // 2. The boundary.
+    let closed = r
+        .start(&plan(EgressTier::MirrorOnly), &opts("blobstore-denied"))
+        .await
+        .expect("starts")
+        .wait()
+        .await
+        .expect("completes");
+
+    assert!(
+        !closed.log_tail.contains("REACHED-BLOBSTORE"),
+        "the build reached a host-side blob store under mirror-only egress. That request never \
+         goes to a registry, so the mirror never sees it and the artifact guard never hashes \
+         it:\n{}",
+        closed.log_tail
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        reached_when_allowed,
+        "a connection arrived at the stand-in blob store while the build was at mirror-only"
+    );
+    assert!(
+        closed.log_tail.contains("probe-finished") || !closed.succeeded(),
+        "the probe should have run and failed, not been skipped:\n{}",
+        closed.log_tail
+    );
+}

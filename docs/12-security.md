@@ -344,7 +344,7 @@ fails open and reports success: it reads as assurance and is not.
 | 3 | Stabilizers are total and never panic | `fuzz/fuzz_targets/{parse,roundtrip,stabilize}.rs` | **yes** |
 | 4 | Stabilization is idempotent | `trigon-stabilize/tests/properties.rs` — a proptest over generated tars | **yes** |
 | 5 | Both artifacts receive an identical transform | The type signature. A stabilizer takes no side parameter. | **structural** |
-| 6 | The build worker cannot reach the upstream artifact | Three integration tests: the mirror refuses its URL, an egress fetch of it voids the run, a blob-store read from inside the sandbox is denied | **yes** |
+| 6 | The build worker cannot reach the upstream artifact | Three integration tests: the mirror refuses its URL (`trigon-mirror/tests/server.rs`), an egress fetch of it voids the run (the `seam_*_fail_closed` suites), and a blob-store read from inside the sandbox is denied (`trigon-sandbox/tests/podman.rs::a_blob_store_read_from_inside_the_sandbox_is_denied`) | **yes** |
 | 7 | A model-authored strategy cannot raise the egress tier | `trigon-strategy/tests/seam_rendering.rs` — a strategy cannot ask for privilege, egress, a base image or a platform | **yes** |
 | 8 | Signing never occurs in a process that executed sandbox output | `trigon attest` is a separate invocation that reads blobs by hash and re-derives before signing. There is **no deployment test**, and no attestor image to test. | **partly** |
 | 9 | Identical inputs produce identical verdicts | **nothing.** No flake test exists, and the `smoke` corpus it would run against is itself an unmet M1 exit criterion. | **no** |

@@ -593,3 +593,79 @@ async fn renewing_a_lease_does_not_erase_the_phase() {
         "the loop invented a phase of its own and buried the worker's: {phases:?}"
     );
 }
+
+/// A worker leases only what its class may do, and says so when asked for more.
+///
+/// The three classes are a control before they are a cost lever. `docs/12-security.md` §2.6: the
+/// judge reads the upstream artifact and the build worker has to be unable to, because a build
+/// that can reach our own blob store can reproduce the artifact by copying it —
+/// `trigon-sandbox/tests/podman.rs::a_blob_store_read_from_inside_the_sandbox_is_denied` asserts
+/// the kernel boundary for the container half.
+///
+/// **Refused rather than filtered.** A judge worker that quietly leased nothing because its kinds
+/// were outside its class looks exactly like a fleet with no judging to do, which is the failure
+/// that would go unnoticed longest.
+#[tokio::test]
+async fn a_worker_cannot_lease_across_its_class() {
+    use trigon_engine::Class;
+
+    // The mapping itself: every kind belongs to exactly one class, so no job is reachable from two.
+    let mut seen: Vec<&str> = Vec::new();
+    for c in [Class::Infer, Class::Build, Class::Judge] {
+        for k in c.kinds() {
+            assert!(
+                !seen.contains(k),
+                "`{k}` belongs to two classes, so a job of that kind is reachable from both"
+            );
+            seen.push(k);
+        }
+    }
+
+    // Only the judge may hold upstream bytes. This is the whole reason the split exists.
+    assert!(Class::Judge.may_read_upstream());
+    assert!(!Class::Build.may_read_upstream());
+    assert!(!Class::Infer.may_read_upstream());
+
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "classes").await;
+    q.enqueue(&NewJob::rebuild("pkg:npm/a@1", "k-class", Tier::Bulk))
+        .await
+        .unwrap();
+
+    // `Fake` leases `rebuild`, which is the build class's kind. A judge worker asking for it is a
+    // deployment mistake and is named as one.
+    let judge = engine(
+        q.clone(),
+        Config {
+            worker: "j".into(),
+            class: Class::Judge,
+            ..Default::default()
+        },
+    );
+    let e = judge
+        .tick(Fake::answering(Some("exact")).as_ref())
+        .await
+        .expect_err("a judge worker must not lease a build");
+    let text = format!("{e}");
+    assert!(text.contains("judge"), "the error must name the class: {text}");
+    assert!(text.contains("rebuild"), "and the kind it refused: {text}");
+
+    // And nothing was taken: the job is still there for a worker that may do it.
+    assert_eq!(q.depth().await.unwrap(), vec![("ready".to_string(), 1)]);
+
+    let builder = engine(
+        q.clone(),
+        Config {
+            worker: "b".into(),
+            class: Class::Build,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        builder
+            .tick(Fake::answering(Some("exact")).as_ref())
+            .await
+            .expect("a build worker may lease a rebuild"),
+        1
+    );
+}
