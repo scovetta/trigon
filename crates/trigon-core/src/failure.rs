@@ -1174,6 +1174,47 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // **NuGet refusing a dependency graph the project itself describes.** `NU1605` is a
+        // package *downgrade*: one path through the graph asks for 4.5.2 and another pins 4.5.0,
+        // and the SDK treats it as an error rather than a warning by default. It is the project's
+        // own constraints, so `Fault::Build` — the one rule in this cluster that genuinely belongs
+        // to the package.
+        //
+        // Named because it was `unknown` the first time a NuGet target got far enough to hit it.
+        // Twenty-one of twenty-five NuGet targets on the random sweep never reached a `dotnet` at
+        // all; getting past that surfaces the layer underneath, and an unnamed failure there would
+        // have been charged to the package with no explanation attached, which is the same loss in
+        // a different place.
+        // **The SDK in the image is older than what the project targets.** `NETSDK1045` is the
+        // .NET toolchain saying so exactly: "The current .NET SDK does not support targeting
+        // .NET 10.0."
+        //
+        // `Fault::Bug` — ours. We supplied the image, the project declared its target framework
+        // years ago, and nothing the package did caused this. It is also the sharpest argument for
+        // why `dotnet` is a `Decision` in the admission table rather than something automation
+        // installs: an SDK that is merely *too old* fails loudly here, and one that is merely
+        // *different* compiles quietly into a different assembly. Only the first kind announces
+        // itself.
+        //
+        // Not repairable: a different base image is not a different recipe. The subject is the
+        // framework version the project wants, so a cluster of these says which SDK to go and get.
+        code: "env/dotnet-sdk-too-old",
+        needles: &["NETSDK1045"],
+        fault: Fault::Bug,
+        retryable: false,
+        repairable: false,
+        capture: Capture::WordAfter("does not support targeting .NET"),
+    },
+    Rule {
+        code: "nuget/package-downgrade",
+        needles: &["NU1605"],
+        fault: Fault::Build,
+        retryable: false,
+        // Nothing about the recipe would change it: the constraint is in the project file.
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
         code: "src/refused-url",
         needles: &["refusing to read the source at"],
         fault: Fault::Policy,
@@ -1369,7 +1410,13 @@ fn capture(line: &str, how: Capture) -> Option<String> {
                 .split_whitespace()
                 .next()
                 .map(|w| {
+                    // Interior dots are part of the name — `Python.h`, `x86_64-linux-gnu-gcc`,
+                    // `10.0` — so the general trim keeps them. A *trailing* one is the sentence
+                    // ending, never the name: no filename and no version ends in a dot. Without
+                    // this, ".NET 10.0." became the cluster key `10.0.`, which is the small kind
+                    // of wrong that makes a reader distrust the rest of the page.
                     w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.')
+                        .trim_end_matches('.')
                         .to_string()
                 })
         }
@@ -2230,5 +2277,51 @@ mod evidence_that_says_nothing {
             sig.evidence,
             "the frobnicator exploded in an unprecedented way"
         );
+    }
+}
+
+#[cfg(test)]
+mod nuget_after_the_sdk_arrives {
+    use super::*;
+
+    /// What a NuGet target fails on once it has an SDK to fail with.
+    ///
+    /// Twenty-one of twenty-five NuGet targets on the random sweep never reached a `dotnet`. Fixing
+    /// the image does not make them build; it moves them to the next question, and an unnamed
+    /// failure there is the same loss in a different place.
+    #[test]
+    fn a_package_downgrade_is_the_projects_own_constraint() {
+        let sig = classify(
+            "/src/src/AsyncEnumerable.csproj : error NU1605: Warning As Error: Detected package \
+             downgrade: System.Threading.Tasks.Extensions from 4.5.2 to 4.5.0.\n",
+        );
+        assert_eq!(sig.code, "nuget/package-downgrade");
+        // The one in this cluster that really is the package's: the constraint is in its own
+        // project file, and no change to our recipe alters it.
+        assert_eq!(sig.fault, Fault::Build);
+        assert!(!sig.repairable);
+    }
+
+    #[test]
+    fn an_sdk_older_than_the_project_targets_is_ours_and_says_which_version() {
+        // `QuestPDF@2026.9.0` targets .NET 10 and the image carried 8.0. Charged to the package as
+        // `unknown` before this rule, which is `Fault::Build`.
+        let sig = classify(
+            "error NETSDK1045: The current .NET SDK does not support targeting .NET 10.0.               Either target .NET 8.0 or lower, or use a version of the .NET SDK that supports              .NET 10.\n",
+        );
+        assert_eq!(sig.code, "env/dotnet-sdk-too-old");
+        assert_eq!(sig.fault, Fault::Bug);
+        assert!(!sig.fault.is_about_the_package());
+        // The version the project wants, so a cluster of these says which SDK to fetch.
+        assert_eq!(sig.subject.as_deref(), Some("10.0"));
+    }
+
+    #[test]
+    fn a_missing_sdk_is_still_ours_and_still_distinguishable() {
+        // The rule this sits beside must keep answering first for the image problem, or fixing one
+        // would hide the other.
+        let sig = classify("dotnet: not found\n");
+        assert_eq!(sig.code, "env/missing-tool");
+        assert!(!sig.fault.is_about_the_package());
     }
 }

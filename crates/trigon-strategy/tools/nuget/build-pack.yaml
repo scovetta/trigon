@@ -50,8 +50,19 @@ steps:
       command -v dotnet >/dev/null 2>&1 || {
         echo "dotnet: not found"
         echo "This ecosystem builds with the .NET SDK, which is not a Debian package and so cannot"
-        echo "be listed in a strategy's needs:. Use a base image that carries it, for example:"
-        echo "    trigon base-image --from <mcr.microsoft.com/dotnet/sdk digest> --packages ca-certificates git wget"
+        echo "be listed in a strategy's needs: — and `--image auto` cannot add it either, because"
+        echo "the SDK version decides the assembly and an image may not supply a decision. Name the"
+        echo "parent yourself and auto will add the rest on top of it:"
+        echo ""
+        echo "    podman pull mcr.microsoft.com/dotnet/sdk:8.0"
+        echo "    podman images --no-trunc | grep dotnet/sdk      # prints the image id"
+        echo "    export TRIGON_BASE_PARENT=<that id>"
+        echo "    trigon rebuild <purl> --image auto"
+        echo ""
+        echo "or build one image once and pass it with --image:"
+        echo "    trigon base-image --from \\$TRIGON_BASE_PARENT"
+        echo ""
+        echo "A project with .NETPortable targets also needs --pcl-reference-assemblies."
         exit 127
       }
       export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
