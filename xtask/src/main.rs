@@ -506,6 +506,11 @@ fn verifier_tree() -> Result<Vec<String>> {
         // and links no server; `docs/22-management-layer.md` §9 makes that an explicit condition of
         // the management layer rather than something the feature flags happen to give us today.
         "trigon-api",
+        // The queue's driver. `trigon-store` is already outside the verifier build, but the
+        // `queue` feature is the kind of thing a feature unification pulls in from a sibling, and
+        // a verifier that acquired a database client would have given up the property the build
+        // exists to demonstrate without anybody editing a manifest.
+        "sqlx",
         // The `wasm` feature exists and is off by default. It nearly doubles this tree, so a
         // verifier that acquired it by accident — a default-features slip, a feature unified in
         // from elsewhere — would have quietly given up the property the build exists to demonstrate.

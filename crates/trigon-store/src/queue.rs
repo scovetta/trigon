@@ -18,8 +18,8 @@
 //! compromised worker can write to.
 //!
 //! **One divergence between the two backends, and it is inherent.** Postgres leases with
-//! `FOR UPDATE SKIP LOCKED`; SQLite has one writer, so it leases inside `BEGIN IMMEDIATE` and needs
-//! no such clause. Every other statement is one string used by both. [ADR-0008] is about one
+//! `FOR UPDATE SKIP LOCKED`; SQLite has a single writer, so the same statement without that clause
+//! is already exclusive. Every other statement is one string used by both. [ADR-0008] is about one
 //! *owner* per seam, and the owner is this module.
 //!
 //! [ADR-0005]: ../../../docs/adr/0005-own-the-queue.md
@@ -181,6 +181,19 @@ impl Queue {
             Backend::Sqlite
         };
         let pool = AnyPoolOptions::new()
+            // SQLite gives up on a busy database immediately unless told otherwise, and a queue is
+            // by definition contended. WAL so a reader never blocks the writer; five seconds so a
+            // lease behind another lease waits instead of failing. Both are no-ops on Postgres,
+            // which declines an unknown pragma rather than erroring — so the statement is only sent
+            // where it means something.
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    for p in ["PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 5000"] {
+                        let _ = sqlx::query(p).execute(&mut *conn).await;
+                    }
+                    Ok(())
+                })
+            })
             // ADR-0005's third caveat. The cap is small on purpose and belongs in front of
             // pgbouncer in transaction mode: with a public API and N workers the connection count
             // becomes a function of site traffic, which is not what the caveat was written against.
@@ -253,10 +266,18 @@ impl Queue {
 
     /// Take up to `n` jobs, by tier and then by age.
     ///
+    /// **One statement, no transaction.** `UPDATE … WHERE id IN (SELECT … LIMIT n) RETURNING …` is
+    /// atomic in both backends, and the Postgres form takes `FOR UPDATE SKIP LOCKED` in the
+    /// subquery, which is the canonical shape. The first version opened a deferred transaction,
+    /// selected, then updated — and two concurrent SQLite leases deadlocked on the upgrade with
+    /// `database is locked`, because a deferred transaction that becomes a writer cannot wait. The
+    /// test that found it is `one_job_goes_to_one_worker`, which is the property the whole queue
+    /// exists for.
+    ///
     /// **The lease is a timestamp, not a lock.** A worker that dies holds nothing: `leased_until`
-    /// passes and the row is `Ready` again to the next query, with no reaper process and nothing to
-    /// notice the death. That is the property that makes a fleet of unreliable workers workable,
-    /// and it is why `visible_at` and `leased_until` are two columns rather than one.
+    /// passes and the row is visible again to the next query, with no reaper process and nothing to
+    /// notice the death. That is what makes a fleet of unreliable workers workable, and it is why
+    /// `visible_at` and `leased_until` are two columns rather than one.
     pub async fn lease(
         &self,
         worker: &str,
@@ -271,63 +292,41 @@ impl Queue {
             .map(|k| format!("'{}'", k.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(",");
-        // The one place the two backends differ. Postgres skips rows another worker has locked;
-        // SQLite has a single writer, so the transaction *is* the exclusion.
-        let pick = format!(
-            "SELECT id FROM job \
-             WHERE kind IN ({kind_list}) \
-               AND visible_at <= {now} \
-               AND (state = 'ready' OR (state = 'leased' AND leased_until < {now})) \
-             ORDER BY CASE tier WHEN 'interactive' THEN 0 WHEN 'regression' THEN 1 ELSE 2 END, \
-                      created \
-             LIMIT {n}{}",
+        let sql = format!(
+            "UPDATE job SET state = 'leased', leased_by = $1, leased_until = $2 \
+             WHERE id IN ( \
+               SELECT id FROM job \
+               WHERE kind IN ({kind_list}) \
+                 AND visible_at <= {now} \
+                 AND (state = 'ready' OR (state = 'leased' AND leased_until < {now})) \
+               ORDER BY CASE tier WHEN 'interactive' THEN 0 WHEN 'regression' THEN 1 ELSE 2 END, \
+                        created, id \
+               LIMIT {n}{}) \
+             RETURNING id, kind, target, cache_key, attempt, tier, payload, payload_ref, failures",
             match self.backend {
+                // The one clause that differs. Postgres skips rows another worker has locked;
+                // SQLite has a single writer, so the statement itself is the exclusion.
                 Backend::Postgres => " FOR UPDATE SKIP LOCKED",
                 Backend::Sqlite => "",
             }
         );
+        let rows = sqlx::query(&sql)
+            .bind(worker)
+            .bind(until)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StoreError::Malformed(format!("leasing: {e}")))?;
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| StoreError::Malformed(format!("starting a lease: {e}")))?;
-        let ids: Vec<i64> = sqlx::query(&pick)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| StoreError::Malformed(format!("picking jobs: {e}")))?
-            .into_iter()
-            .map(|r| r.get::<i64, _>("id"))
-            .collect();
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let in_list = ids
-            .iter()
-            .map(|i| i.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        sqlx::query(&format!(
-            "UPDATE job SET state = 'leased', leased_by = $1, leased_until = $2 \
-             WHERE id IN ({in_list})"
-        ))
-        .bind(worker)
-        .bind(until)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| StoreError::Malformed(format!("taking the lease: {e}")))?;
-
-        let rows = sqlx::query(&format!(
-            "SELECT id, kind, target, cache_key, attempt, tier, payload, payload_ref, failures \
-             FROM job WHERE id IN ({in_list})"
-        ))
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| StoreError::Malformed(format!("reading leased jobs: {e}")))?;
-        tx.commit()
-            .await
-            .map_err(|e| StoreError::Malformed(format!("committing a lease: {e}")))?;
-        Ok(rows.iter().map(job_of).collect())
+        // **`RETURNING` does not promise the subquery's order.** The `ORDER BY` above decides
+        // *which* rows are taken; it says nothing about the order they come back in, and on SQLite
+        // they came back by id — so a worker handed a batch would have built a bulk sweep job
+        // before an interactive one it was holding at the same time. Ordering the batch here is
+        // what makes the tier mean something all the way to the worker, rather than only to the
+        // selection. Another instance of the shape this tree keeps finding: two things that had to
+        // agree, with nothing asserting they did.
+        let mut jobs: Vec<Job> = rows.iter().map(job_of).collect();
+        jobs.sort_by_key(|j| (priority(j.tier), j.id));
+        Ok(jobs)
     }
 
     /// Keep a lease alive, and say what phase the work is in.
@@ -379,13 +378,12 @@ impl Queue {
     }
 
     pub async fn events(&self, job: i64) -> Result<Vec<(i64, String, Option<String>)>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT at, phase, detail FROM run_event WHERE job = $1 ORDER BY at, id",
-        )
-        .bind(job)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| StoreError::Malformed(format!("reading events: {e}")))?;
+        let rows =
+            sqlx::query("SELECT at, phase, detail FROM run_event WHERE job = $1 ORDER BY at, id")
+                .bind(job)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| StoreError::Malformed(format!("reading events: {e}")))?;
         Ok(rows
             .iter()
             .map(|r| {
@@ -484,10 +482,11 @@ impl Queue {
 
     /// How many jobs are in each state, for a health page.
     pub async fn depth(&self) -> Result<Vec<(String, i64)>, StoreError> {
-        let rows = sqlx::query("SELECT state, COUNT(*) AS n FROM job GROUP BY state ORDER BY state")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| StoreError::Malformed(format!("measuring the queue: {e}")))?;
+        let rows =
+            sqlx::query("SELECT state, COUNT(*) AS n FROM job GROUP BY state ORDER BY state")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| StoreError::Malformed(format!("measuring the queue: {e}")))?;
         Ok(rows
             .iter()
             .map(|r| (r.get::<String, _>("state"), r.get::<i64, _>("n")))
@@ -513,21 +512,30 @@ impl Queue {
             .await
             .map_err(|e| StoreError::Malformed(format!("reserving a slot: {e}")))?;
 
-        let existing: Option<i64> = sqlx::query("SELECT next_at_us FROM host_budget WHERE host = $1")
-            .bind(host)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| StoreError::Malformed(format!("reading a host budget: {e}")))?
-            .map(|r| r.get::<i64, _>("next_at_us"));
+        let existing: Option<i64> =
+            sqlx::query("SELECT next_at_us FROM host_budget WHERE host = $1")
+                .bind(host)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StoreError::Malformed(format!("reading a host budget: {e}")))?
+                .map(|r| r.get::<i64, _>("next_at_us"));
 
         let slot = existing.unwrap_or(now_us).max(now_us);
         let next = slot + interval_us;
+        // **Every placeholder appears once.** Reusing `$2` in the `DO UPDATE` clause read back as
+        // a 4 ms interval where 50 ms was asked for — `sqlx`'s `Any` layer binds positionally, so a
+        // repeated `$n` consumed a fresh slot and silently shifted every value after it. Repeating
+        // the bind is the fix; `excluded.*` would also work and says less about which value is
+        // which.
         sqlx::query(
             "INSERT INTO host_budget (host, next_at_us, interval_ms, throttled, updated) \
              VALUES ($1, $2, $3, 0, $4) \
-             ON CONFLICT (host) DO UPDATE SET next_at_us = $2, interval_ms = $3, updated = $4",
+             ON CONFLICT (host) DO UPDATE SET next_at_us = $5, interval_ms = $6, updated = $7",
         )
         .bind(host)
+        .bind(next)
+        .bind(interval.as_millis() as i64)
+        .bind(now_ms())
         .bind(next)
         .bind(interval.as_millis() as i64)
         .bind(now_ms())
@@ -556,12 +564,15 @@ impl Queue {
             "INSERT INTO host_budget (host, next_at_us, interval_ms, throttled, updated) \
              VALUES ($1, $2, 1000, 1, $3) \
              ON CONFLICT (host) DO UPDATE SET \
-               next_at_us = CASE WHEN host_budget.next_at_us > $2 THEN host_budget.next_at_us \
-                                 ELSE $2 END, \
+               next_at_us = CASE WHEN host_budget.next_at_us > $4 THEN host_budget.next_at_us \
+                                 ELSE $5 END, \
                throttled = host_budget.throttled + 1, \
-               updated = $3",
+               updated = $6",
         )
         .bind(host)
+        .bind(until_us)
+        .bind(now_ms())
+        .bind(until_us)
         .bind(until_us)
         .bind(now_ms())
         .execute(&self.pool)
@@ -666,6 +677,16 @@ fn job_of(r: &AnyRow) -> Job {
         payload: r.get::<Option<String>, _>("payload"),
         payload_ref: r.get::<Option<String>, _>("payload_ref"),
         failures: r.get::<i32, _>("failures"),
+    }
+}
+
+/// Tier order, as the query's `CASE` computes it. Named once so the batch a worker receives is
+/// sorted by the same rule that chose it.
+fn priority(t: Tier) -> u8 {
+    match t {
+        Tier::Interactive => 0,
+        Tier::Regression => 1,
+        Tier::Bulk => 2,
     }
 }
 

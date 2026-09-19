@@ -17,15 +17,23 @@
 //! attestations/<eco>/<name>/<version>/<artifact>/<predicate>.intoto.json
 //! ```
 //!
-//! Postgres, the queue and the rollups arrive with M4, where there is a fleet to justify them.
+//! **The queue arrived with M4** and lives in [`queue`], behind a feature flag, for the reason
+//! ADR-0005 gives: `enqueue` and the run-state write must share one `sqlx::Transaction`, and a
+//! `trigon-queue` crate would put a boundary between them that buys nothing and costs the
+//! transaction. The content-addressed layout above is unchanged and still holds everything a
+//! signature is about; the database holds pointers, small scalars, and the jobs.
 
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
 mod blobs;
+#[cfg(feature = "queue")]
+pub mod queue;
 mod record;
 
 pub use blobs::Blobs;
+#[cfg(feature = "queue")]
+pub use queue::{Backend, HostBudget, Job, JobState, NewJob, Queue, Tier};
 pub use record::{ArtifactRef, Costs, Environment, PinEvidence, RunRecord, RunState, Tokens};
 
 use std::path::Path;

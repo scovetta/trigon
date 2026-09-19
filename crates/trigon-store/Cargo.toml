@@ -8,6 +8,15 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# The queue. Off by default so a build that only needs blobs and run records — the attestor, the
+# verifier's dependency check, anything embedding this to read a corpus — does not acquire a
+# database driver. ADR-0005 puts the queue in this crate because `enqueue` and the run-state write
+# must share one transaction; a feature flag is how that costs nothing to the callers that do not
+# enqueue.
+default = []
+queue = ["dep:sqlx"]
+
 [dependencies]
 trigon-core.workspace = true
 trigon-attest.workspace = true
@@ -20,8 +29,10 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]
+sqlx.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile.workspace = true
 # The test that a reader checks a blob against its digest has to write past the digest, which means

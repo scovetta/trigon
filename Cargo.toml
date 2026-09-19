@@ -84,6 +84,10 @@ futures = "0.3"
 # backends behind features: `docs/17` says to use it directly rather than wrap it in a trait of our
 # own, and the local backend is all a single binary needs.
 object_store = "0.14"
+# The queue, and only the queue. `any` so one set of statements serves both backends; `sqlite` for
+# a laptop and `postgres` for a fleet, which is what `10-scale.md` §4 asks for. `rustls` rather
+# than native TLS, matching every other network client in the tree.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "macros"] }
 # Only for the `wasm` feature of the verifier, which is off by default. Roughly doubles the
 # verifier's dependency tree (99 crates against the 100 it has), which is exactly why it is a
 # feature: the small binary is the claim, and only a verifier checking *across* stabilizer-set
