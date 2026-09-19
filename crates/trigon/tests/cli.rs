@@ -148,6 +148,43 @@ fn stabilizers_lists_a_profile_with_its_set_digest() {
 }
 
 #[test]
+fn listing_the_profiles_names_the_one_nothing_selects() {
+    let out = Command::new(bin())
+        .args(["stabilizers", "--list-profiles"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for id in [
+        "tar",
+        "tar-gzip",
+        "zip",
+        "gzip",
+        "npm-tarball",
+        "crate",
+        "gem",
+        "wheel",
+        "nupkg",
+        "raw",
+    ] {
+        assert!(text.contains(id), "{id} is missing from:\n{text}");
+    }
+    // The fact the command exists to surface. `npm-tarball` is a profile the selector cannot
+    // reach, so `npm-install-fields` has never run on anything this tool verified.
+    assert!(
+        text.contains("Nothing selects one profile: npm-tarball"),
+        "an unreachable profile has to be named as one:\n{text}"
+    );
+    // And the cap is described as conditional, because `compare` reads it off the passes that
+    // fired rather than off the profile.
+    assert!(text.contains("wheel-record (content)"), "{text}");
+    assert!(
+        text.contains("caps nothing on a run where it found nothing to do"),
+        "{text}"
+    );
+}
+
+#[test]
 fn stabilize_writes_a_file_and_honours_pass_selection() {
     let a = write_tgz("g.tgz", b"payload", 1_700_000_000);
     let full = tmp().join("full.out");

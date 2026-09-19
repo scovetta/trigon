@@ -187,6 +187,9 @@ enum Cmd {
     Stabilizers {
         #[arg(long, default_value = "tar-gzip")]
         profile: String,
+        /// List every profile instead: how many passes each has, its digest, and what selects it.
+        #[arg(long, conflicts_with = "profile")]
+        list_profiles: bool,
     },
     /// Work with strategy documents.
     #[command(subcommand)]
@@ -930,7 +933,16 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             &disable_passes,
             report,
         ),
-        Cmd::Stabilizers { profile: prof } => stabilizers(&prof),
+        Cmd::Stabilizers {
+            profile: prof,
+            list_profiles,
+        } => {
+            if list_profiles {
+                list_profiles_cmd()
+            } else {
+                stabilizers(&prof)
+            }
+        }
         Cmd::Strategy(StrategyCmd::Render {
             file,
             import,
@@ -1857,6 +1869,44 @@ fn resolve_format(path: &Path, explicit: Option<&str>) -> Result<Format> {
 /// `.tgz` deliberately stays generic. An npm tarball is a `.tgz` and so is a great deal else, and
 /// nothing in the name says which. The registry knows, and will say so once it exists; guessing
 /// here would apply npm-specific passes to whatever happened to share the extension.
+/// Which profile a filename selects, and the only table that decides it.
+///
+/// One table, used by [`resolve_profile`] and printed by [`show_profiles`]. It was a `match` arm
+/// and nothing else, so a profile the selector could not reach was invisible from outside — and
+/// `npm-tarball` is exactly that: it exists, `docs/03-ecosystems.md` says npm uses it, and every
+/// npm rebuild in the store carries the set digest of plain `tar-gzip`.
+const BY_EXTENSION: &[(&str, &str)] = &[
+    (".whl", "wheel"),
+    (".crate", "crate"),
+    (".gem", "gem"),
+    // The arm the comment that used to sit here was waiting for. It described a `nupkg` profile
+    // that did not exist, whose lookup failed silently into the plain zip set — so the table
+    // claimed a NuGet-specific normalization the system could not perform and said nothing.
+    (".nupkg", "nupkg"),
+];
+
+/// Every format, so a listing over the fallbacks cannot silently miss one.
+///
+/// The `match` below is exhaustive on purpose: adding a variant to [`Format`] fails this file
+/// rather than quietly dropping a row from `show-profiles`.
+const ALL_FORMATS: [Format; 5] = [
+    Format::Tar,
+    Format::TarGz,
+    Format::Zip,
+    Format::Gzip,
+    Format::Raw,
+];
+
+const _: () = {
+    // Exhaustiveness, checked by the compiler rather than by remembering.
+    const fn covered(f: Format) -> bool {
+        match f {
+            Format::Tar | Format::TarGz | Format::Zip | Format::Gzip | Format::Raw => true,
+        }
+    }
+    assert!(covered(Format::Tar));
+};
+
 fn resolve_profile(
     artifact: &Path,
     requested: Option<&str>,
@@ -1875,21 +1925,10 @@ fn resolve_profile(
         .unwrap_or_default()
         .to_string_lossy()
         .to_ascii_lowercase();
-    let by_kind = if name.ends_with(".whl") {
-        Some("wheel")
-    } else if name.ends_with(".crate") {
-        Some("crate")
-    } else if name.ends_with(".gem") {
-        Some("gem")
-    } else if name.ends_with(".nupkg") {
-        // The arm the comment that used to sit here was waiting for. It described a `nupkg` profile
-        // that did not exist, whose lookup failed silently into the plain zip set — so the table
-        // claimed a NuGet-specific normalization the system could not perform and said nothing.
-        // The profile exists now, and the assertion below is what would have caught the gap.
-        Some("nupkg")
-    } else {
-        None
-    };
+    let by_kind = BY_EXTENSION
+        .iter()
+        .find(|(ext, _)| name.ends_with(ext))
+        .map(|(_, id)| *id);
     match by_kind {
         // Compiled-in on both sides, so a name here that the registry does not know is a
         // programming error rather than anything a user did, and it must not read as a fallback.
@@ -2034,6 +2073,221 @@ fn row(label: &str, a: &str, b: &str) {
 
 fn short(hex: &str) -> String {
     format!("{}…", &hex[..hex.len().min(12)])
+}
+
+/// What selects a profile, in the words the reader would use to cause it.
+///
+/// Empty where nothing does, which is the answer worth having: a profile no selector reaches is a
+/// normalization the tool claims and never performs.
+fn selectors_for(id: &str) -> Vec<String> {
+    let mut out: Vec<String> = BY_EXTENSION
+        .iter()
+        .filter(|(_, p)| *p == id)
+        .map(|(ext, _)| (*ext).to_string())
+        .collect();
+    for fmt in ALL_FORMATS {
+        if default_for(fmt).id.as_str() == id {
+            out.push(format!("any {fmt}"));
+        }
+    }
+    out
+}
+
+/// The passes in a profile that can hold a match at `normalized_with_caveats`.
+///
+/// The rule lives in `trigon_compare::compare` and is read off the passes that **fired**, so this
+/// says *can*: a profile carrying a content-risk pass caps nothing on a run where that pass found
+/// nothing to do. Naming them is the point — `urllib3` is caveated for exactly one reason, and
+/// "which pass" is the first thing anybody asks.
+fn capping_passes(set: &trigon_stabilize::StabilizerSet) -> Vec<String> {
+    set.members
+        .iter()
+        .filter(|m| !m.provenance().is_builtin() || m.risk() > trigon_core::RiskTier::Metadata)
+        .map(|m| {
+            format!(
+                "{} ({})",
+                m.id().as_str(),
+                format!("{:?}", m.risk()).to_lowercase()
+            )
+        })
+        .collect()
+}
+
+/// Every profile, with what it costs a verdict and what reaches it.
+///
+/// `trigon stabilizers` answers "what is in this one" and needed you to already know the name.
+/// There was no way to see the set, so the one fact that matters across them — that a profile can
+/// exist and be selected by nothing — was not visible from any command.
+fn list_profiles_cmd() -> Result<()> {
+    let ids = trigon_stabilize::all_profiles();
+    let sets: Vec<trigon_stabilize::StabilizerSet> = ids
+        .iter()
+        .map(|id| {
+            profile(id).unwrap_or_else(|| {
+                panic!("all_profiles() lists `{id}`, which profile() does not answer to")
+            })
+        })
+        .collect();
+
+    // Sized to what is present rather than to a guess, the way `stabilizers` does it.
+    let w = ids.iter().map(|i| i.len()).max().unwrap_or(0).max(7);
+    println!("{} stabilizer profiles.", ids.len());
+    println!();
+    println!(
+        "  {:<w$}  {:>6}  {:<16}  selected by",
+        "profile", "passes", "set digest"
+    );
+    for set in &sets {
+        let sel = selectors_for(set.id.as_str());
+        println!(
+            "  {:<w$}  {:>6}  {:<16}  {}",
+            set.id.as_str(),
+            set.members.len(),
+            &set.digest().to_hex()[..16],
+            if sel.is_empty() {
+                "nothing".to_string()
+            } else {
+                sel.join(", ")
+            },
+        );
+    }
+
+    println!();
+    println!("Passes that can hold a match at `normalized_with_caveats`:");
+    let mut any = false;
+    for set in &sets {
+        let caps = capping_passes(set);
+        if caps.is_empty() {
+            continue;
+        }
+        any = true;
+        println!("  {:<w$}  {}", set.id.as_str(), caps.join(", "));
+    }
+    if !any {
+        println!("  none: every pass in every profile is built in, at metadata risk or below");
+    }
+    println!(
+        "  The cap is read off the passes that fired, not off this list, so a profile carrying one"
+    );
+    println!("  caps nothing on a run where it found nothing to do.");
+
+    let orphans: Vec<&str> = sets
+        .iter()
+        .filter(|s| selectors_for(s.id.as_str()).is_empty())
+        .map(|s| s.id.as_str())
+        .collect();
+    if !orphans.is_empty() {
+        println!();
+        println!(
+            "Nothing selects {}: {}. An artifact of that shape gets the fallback for its format, \
+             so these passes never run and the normalization they describe does not happen. \
+             `--profile` reaches one by hand.",
+            if orphans.len() == 1 {
+                "one profile".to_string()
+            } else {
+                format!("{} profiles", orphans.len())
+            },
+            orphans.join(", ")
+        );
+    }
+    println!();
+    println!(
+        "The digest is over the passes and their tiers, and it is what an attestation carries:"
+    );
+    println!(
+        "a statement stays readable against the set it named, and reordering a pass makes a new one."
+    );
+    println!("`trigon stabilizers --profile <id>` lists the passes in one.");
+    Ok(())
+}
+
+#[cfg(test)]
+mod profile_listing {
+    use super::*;
+
+    #[test]
+    fn the_listing_and_the_selector_read_one_table() {
+        // They were a `match` arm and a hand-written list, which is the shape of defect this
+        // project keeps finding: two things that had to agree, with nothing asserting they did.
+        for (ext, id) in BY_EXTENSION {
+            let picked = resolve_profile(Path::new(&format!("a-1.0{ext}")), None, Format::Zip)
+                .expect("a built-in profile");
+            assert_eq!(picked.id.as_str(), *id, "{ext}");
+            assert!(
+                selectors_for(id).iter().any(|s| s == ext),
+                "{id} is selected by {ext} and does not say so"
+            );
+        }
+        // And a name that matches nothing falls to the format's own profile, which is what makes
+        // an unselected profile possible at all.
+        let fallback = resolve_profile(Path::new("a-1.0.tgz"), None, Format::TarGz).unwrap();
+        assert_eq!(fallback.id.as_str(), "tar-gzip");
+    }
+
+    #[test]
+    fn a_profile_nothing_selects_is_named_rather_than_listed_like_the_rest() {
+        // `npm-tarball` exists, `docs/03-ecosystems.md` §1 says npm's profile is "tar set + gzip
+        // set + npm-tarball", and every npm run in the store carries the set digest of plain
+        // `tar-gzip`: an artifact named `.tgz` matches no extension arm and falls to the format's
+        // fallback. So `npm-install-fields` has never run on anything this tool has verified.
+        //
+        // Pinned as a list rather than asserted empty, because emptying it is a decision about
+        // verdicts — the set digest changes and npm statements stop matching the ones before them.
+        // This is here so the list shrinks on purpose and never grows by accident.
+        let orphans: Vec<&str> = trigon_stabilize::all_profiles()
+            .into_iter()
+            .filter(|id| selectors_for(id).is_empty())
+            .collect();
+        assert_eq!(orphans, vec!["npm-tarball"]);
+    }
+
+    #[test]
+    fn the_capping_list_is_the_comparators_rule_and_not_a_second_one() {
+        // `compare` caps on `provenance != Builtin || risk > Metadata`, read off the passes that
+        // fired. A listing that drew the line anywhere else would describe a tool that does not
+        // exist — and this is a page-versus-behaviour claim, which is where this project's bugs
+        // live.
+        for id in trigon_stabilize::all_profiles() {
+            let set = profile(id).unwrap();
+            let named = capping_passes(&set);
+            let expected: Vec<String> = set
+                .members
+                .iter()
+                .filter(|m| {
+                    !m.provenance().is_builtin() || m.risk() > trigon_core::RiskTier::Metadata
+                })
+                .map(|m| m.id().as_str().to_string())
+                .collect();
+            assert_eq!(named.len(), expected.len(), "{id}");
+            for (row, want) in named.iter().zip(&expected) {
+                assert!(row.starts_with(want), "{id}: {row} is not {want}");
+            }
+        }
+        // The two real shapes: a wheel can be capped four ways, a gem by nothing at all.
+        assert!(
+            capping_passes(&profile("wheel").unwrap())
+                .iter()
+                .any(|c| c.starts_with("wheel-record (content)"))
+        );
+        assert!(capping_passes(&profile("gem").unwrap()).is_empty());
+    }
+
+    #[test]
+    fn every_format_has_a_fallback_and_the_listing_names_it() {
+        // `default_for` panics on a format with no profile, and it is called on a path where the
+        // answer decides a verdict. A listing that walked a shorter list of formats than the
+        // selector does would hide exactly that.
+        for fmt in ALL_FORMATS {
+            let set = default_for(fmt);
+            assert!(
+                selectors_for(set.id.as_str())
+                    .iter()
+                    .any(|s| s == &format!("any {fmt}")),
+                "{fmt} falls to {} and the listing does not say so",
+                set.id.as_str()
+            );
+        }
+    }
 }
 
 fn stabilizers(prof: &str) -> Result<()> {

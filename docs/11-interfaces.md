@@ -28,7 +28,7 @@ trigon rebuild <purl> --image <pinned> [--egress TIER] [--timewarp auto] [--stor
 trigon sweep <targets> --image <pinned> [--store D]
 trigon attest [--store D] [<run>] [--key K] [--prune]
 trigon runs [--store D]
-trigon stabilize | stabilizers | strategy render|tools | mirror | mirror-image | resolve | fetch | build
+trigon stabilize | stabilizers [--list-profiles] | strategy render|tools | mirror | mirror-image | resolve | fetch | build
 ```
 
 Three differences from the intended surface are decisions rather than gaps.

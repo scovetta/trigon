@@ -1465,6 +1465,36 @@ wrong about everything it named, a class of spend that could never pay off, a pr
 good answers, and a guard that let a bad one destroy a good verdict. A demo would have shown one
 package building. This showed why none of them could.
 
+### 3.28 A profile that exists, and nothing selects
+
+`trigon stabilizers` lists the passes in one profile and needs you to know its name. There was no
+way to see the set, so nothing ever asked the question a listing asks by existing: **does anything
+reach this one?**
+
+`npm-tarball` does not. The selector matches on extension — `.whl`, `.crate`, `.gem`, `.nupkg` — and
+an npm tarball is `.tgz`, which matches nothing, so it falls to `default_for(TarGz)` and gets plain
+`tar-gzip`. Checked against the store rather than by reading: every npm comparison blob carries
+`["tar-gzip", "4598411b…"]`. `npm-install-fields` has never run on anything this tool has verified,
+and [`03`](03-ecosystems.md) §1 said for months that it had.
+
+This is the `nupkg` finding in reverse. There, the selector named a profile that did not exist and
+the lookup failed into the plain zip set, so the table claimed a NuGet-specific normalization the
+system could not perform. Here the profile exists and the selector cannot reach it. One table now
+serves both the selector and the listing, so a profile nothing selects is printed as such:
+
+```
+Nothing selects one profile: npm-tarball. An artifact of that shape gets the fallback for its
+format, so these passes never run and the normalization they describe does not happen.
+```
+
+**Left unfixed on purpose.** Routing `.tgz` to `npm-tarball` changes the set digest every npm
+statement carries, so the statements written before the change stop matching the ones after it, and
+`npm-install-fields` starts firing on artifacts whose verdicts are already published. That is a
+decision about verdicts. A test pins the list of unselected profiles at exactly `["npm-tarball"]`,
+so the list shrinks deliberately and never grows by accident.
+
+---
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher

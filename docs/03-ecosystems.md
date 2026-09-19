@@ -69,9 +69,17 @@ Two flow templates:
   then runs `npm pack`.
 
 ### Output and stabilizer profile
-`{name}-{version}.tgz`, tar+gzip. Profile: tar set + gzip set + `npm-tarball`, which normalizes the
-`package/` prefix and drops `_resolved` / `_integrity` / `_from` fields injected by the installing
-client.
+`{name}-{version}.tgz`, tar+gzip. The profile *should* be tar set + gzip set + `npm-tarball`, which
+normalizes the `package/` prefix and drops `_resolved` / `_integrity` / `_from` fields injected by
+the installing client.
+
+**It is not what runs.** The selector matches on extension — `.whl`, `.crate`, `.gem`, `.nupkg` —
+and a `.tgz` matches none of them, so every npm artifact falls to the format's fallback and gets
+plain `tar-gzip`. Every npm run in the store carries `tar-gzip`'s set digest, and
+`npm-install-fields` has never run on anything this tool has verified. `trigon stabilizers --list-profiles`
+names it: the profile exists, and nothing selects it. Fixing it is a decision about verdicts rather than a
+typo — the set digest changes, and npm statements stop matching the ones written before them — so it
+is recorded rather than quietly patched. See [`16`](16-findings.md) §3.28.
 
 ### Nondeterminism
 Mostly **dependency drift**. A floating `^` or `~` range resolves to different versions today than
