@@ -21,6 +21,12 @@ directory, a strategy's template rendering into a shell script.
 **Done when:** every finding is either fixed or written down with a reason it is acceptable, and
 each one has a test that would catch the regression.
 
+**First pass done.** Seventeen reviewers over every crate and the front end, each finding re-read by
+a second agent told to refute it. The ones that were reproduced are fixed, with tests, in
+[`16-findings.md`](16-findings.md) §3.48–§3.56; the rest are listed in
+[B29](#b29-what-the-whole-tree-review-found-and-did-not-fix) and are leads rather than facts. This
+entry stays open: a sweep is not done when a list exists, it is done when the list is empty.
+
 ## B2. ~~A threat model for Trigon~~ — closed, as an unratified draft
 
 [`threat-model.md`](threat-model.md) and its generated companion
@@ -1087,3 +1093,260 @@ exists and the checkout does not: the ordering is the invariant and the signatur
 Measured: `packaging@26.3` guards **0 of 29 members** — every one is a file the repository also
 contains — and reproduces `normalized_with_caveats`, 29 identical, 0 differing. `pyproject-hooks@1.2.0`
 likewise. Both were `void`.
+
+---
+
+## B29. What the whole-tree review found and did not fix
+
+The sweep [B1](#b1-security-sweep-over-the-whole-codebase) asks for: seventeen reviewers over every
+crate and the front-end, each finding independently re-read by a second agent told to refute it.
+117 claims, 108 survived, and this is what is left after the ones fixed on the spot.
+
+**Read these as leads, not as facts.** A 92% survival rate is too high for the verification to have
+been as adversarial as intended, and four claims the verifiers *did* refute were things already
+fixed while they were reading — so the tree moved under them. Every item below has a file and a
+line and a stated mechanism; none has been reproduced by a human or by a test. The ones that were
+reproduced were fixed, and are in [`16-findings.md`](16-findings.md) §3.48–§3.56 instead.
+
+**Done when:** each item below is either reproduced and fixed with a test that would catch the
+regression, or written off with a reason — and the ones written off say why, because an item
+deleted without a reason comes back as a rediscovery.
+
+### `trigon`
+
+- **high** — `guard_manifest`/`guarded_members` are set on every run, so a signed build observation says the artifact-hash check was performed on runs where no guard was ever armed  
+  `trigon/src/main.rs:3820`
+- **high** — An accepted divergence repair drops the comparison it already has, so a failed next build reports `build-failed` instead of `divergent`  
+  `trigon/src/main.rs:4053`
+- **high** — `--public-key` is silently ignored when the bundle carries no signature, and `verify-attestation` still exits 0  
+  `trigon/src/main.rs:7683`
+- **medium** — A comparison that could not be stored is recorded as a non-evidence run whose `terminal` field is a verdict string  
+  `trigon/src/main.rs:4933`
+- **medium** — A failed read of the published artifact silently substitutes an empty guard manifest for the whole run  
+  `trigon/src/main.rs:5271`
+- **medium** — `sweep::one` labels every orchestration error `Fault::Policy`, including the sweep's own infrastructure failures  
+  `trigon/src/main.rs:6711`
+- **medium** — member_diffs joins the two member lists with a linear scan per member (O(n²))  
+  `trigon/src/watch.rs:2390`
+- **medium** — chain_ribbon byte-slices source.commit at index 8, panicking in the request handler  
+  `trigon/src/watch.rs:3620`
+- **medium** — worker.rs re-derives retryability from the fault class, discarding Classify::is_retryable  
+  `trigon/src/worker.rs:162`
+- **low** — The attestor stores a log entry without checking it is about our statement  
+  `trigon/src/main.rs:8244`
+- **low** — `check_log_entry` byte-slices a `uuid` the SET does not cover  
+  `trigon/src/main.rs:7591`
+- **low** — "the entry is about this bundle" is asserted from the payload hash alone  
+  `trigon/src/main.rs:7573`
+- **low** — Every production `rebuild/v1` statement omits the stabilizer set  
+  `trigon/src/main.rs:8426`
+- **low** — `sweep::completed` accepts a row whose seconds field does not parse, unlike the file's other two readers  
+  `trigon/src/main.rs:6826`
+- **low** — `capping_passes` hand-copies the provenance cap instead of calling `trigon_core::caps_normalized`, and its test writes the predicate a third time  
+  `trigon/src/main.rs:2683`
+- **low** — checkout_dir hashes the raw repo/commit while SourceCache keys on the normalized form  
+  `trigon/src/provenance.rs:112`
+- **low** — index_checkout gives up at MAX_FILES but reports the truncated walk as a completed search  
+  `trigon/src/provenance.rs:171`
+- **low** — The checkout index memo is an unbounded, never-evicted static cache in a long-lived server  
+  `trigon/src/provenance.rs:296`
+- **low** — join() attributes every line-ending match to nupkg-text-eol regardless of format or stabilizer set  
+  `trigon/src/provenance.rs:275`
+- **low** — The stabilizer ledger drops every member a pass removed, contradicting the comment above the join  
+  `trigon/src/watch.rs:2381`
+
+### `trigon-mirror`
+
+- **high** — `from_a_toolchain` matches the npm toolchain path as a bare prefix, so every package whose name begins with `npm` is exempt from voiding  
+  `trigon-mirror/src/guard.rs:482`
+- **high** — `same_artifact`'s two-segment fallback reduces a crates.io URL to `{version}/download`, so any dependency at the same version as the target is refused  
+  `trigon-mirror/src/guard.rs:1109`
+- **high** — `another_release_of` treats any filename `<project><sep><digit>…` as another release, so an attacker-named carrier package is exempt from voiding  
+  `trigon-mirror/src/guard.rs:459`
+- **high** — `MAX_DECOMPOSE_BYTES` caps compressed input while the decompression it gates inflates into one 4 GiB allocation, synchronously on a runtime thread  
+  `trigon-mirror/src/guard.rs:977`
+- **high** — Guard's toolchain exemption matches `/npm` as a path prefix, so every npm package named `npm*` is exempt from the member-void check  
+  `trigon-mirror/src/guard.rs:482`
+- **medium** — A cache hit reads the whole artifact into memory and SHA-256s it synchronously on the tokio runtime  
+  `trigon-mirror/src/cache.rs:158`
+- **medium** — The toolchain host list exists twice and the two copies disagree, so a legitimate io.js or musl-Node toolchain fetch voids the run  
+  `trigon-mirror/src/guard.rs:469`
+- **medium** — The guard's private toolchain host list disagrees with the mirror's real one: `iojs.org` and `unofficial-builds.nodejs.org` are proxied but not exempt, `www.python.org` is exempt but never proxied  
+  `trigon-mirror/src/guard.rs:469`
+- **medium** — `guard::another_release_of` does a raw byte prefix where `pypi::is_version_of` normalizes per PEP 503, so it fails on every hyphenated PyPI project  
+  `trigon-mirror/src/guard.rs:456`
+- **medium** — The /-artifact route proxies arbitrary paths on the index hosts and caches them as permanent immutable bytes  
+  `trigon-mirror/src/server.rs:1050`
+- **medium** — The bare-npm-tarball gate falls through instead of refusing, so a client sending Authorization gets any tarball unfiltered  
+  `trigon-mirror/src/server.rs:647`
+- **medium** — The NuGet flat route has no dot-segment check, so /-nuget/{m}/flat/../... proxies arbitrary api.nuget.org paths  
+  `trigon-mirror/src/server.rs:1181`
+- **medium** — nuget_route uses the path moment verbatim, so an unparseable moment is accepted and the filter silently no-ops  
+  `trigon-mirror/src/server.rs:1096`
+- **low** — `normalize` deletes a UTC offset instead of applying it, and accepts the same instant written two ways with two different answers  
+  `trigon-mirror/src/moment.rs:107`
+- **low** — Proxy counters bump before the proxy runs, so observed() and from_transcript() disagree whenever it fails  
+  `trigon-mirror/src/server.rs:1063`
+- **low** — The index client follows Location to any host, with no allowlist check and one pacer/transcript record per chain  
+  `trigon-mirror/src/server.rs:450`
+- **low** — cargo_route never applies the withhold, so the version under test stays in the sparse index and the build dies on the guard  
+  `trigon-mirror/src/server.rs:1255`
+- **low** — The index client still follows redirects automatically, so index fetches skip the host allowlist the passthrough client was fixed to enforce  
+  `trigon-mirror/src/server.rs:450`
+
+### `trigon-registry`
+
+- **high** — npm build-script name from a workflow reaches `sh -c` unquoted; the guard the heuristic rung applies to the same parameter is absent  
+  `trigon-registry/src/ci/lower.rs:604`
+- **high** — The project directory parsed out of the workflow's build command reaches `python3 -m build` completely unquoted  
+  `trigon-registry/src/ci/lower.rs:512`
+- **high** — `working-directory` is never `${{ }}`-resolved and never validated before becoming `Location.subdir` and `Claim::SubdirIs`  
+  `trigon-registry/src/ci/select.rs:753`
+- **medium** — `curl`/`wget` that writes a file into the working tree is classified `Network` rather than `MutatesTree`, so the recipe silently drops the fetch  
+  `trigon-registry/src/ci/cmd.rs:227`
+- **medium** — `lower_npm` reads `_npmVersion`/`_nodeVersion` without the `is_plain_version` gate the heuristic rung applies to the same two fields  
+  `trigon-registry/src/ci/lower.rs:538`
+- **medium** — `Decline::PackageManagerUnsupported` cannot fire when the pnpm/yarn command is the publish step, and the `Marker::manager` that did detect it is discarded  
+  `trigon-registry/src/ci/lower.rs:285`
+- **medium** — `expand_matrix` reserves the full uncapped cross product before the cap that exists to prevent it  
+  `trigon-registry/src/ci/parse.rs:407`
+- **medium** — `glob_matches` is an unmemoized backtracking matcher over an attacker-supplied pattern, run on the runtime thread  
+  `trigon-registry/src/ci/select.rs:486`
+- **medium** — Retry-After parsed unclamped: overflow panic in politeness::throttled, and a process-wide stall on a merely large value  
+  `trigon-registry/src/client.rs:142`
+- **medium** — npm build-shortfall check ignores source.subdir: wrong manifest, and promises compared against a differently-rooted file list  
+  `trigon-registry/src/heuristic.rs:402`
+- **medium** — catalog_entry uses `?` inside its page loop: one unreadable page discards the publish moment for every later page  
+  `trigon-registry/src/nuget.rs:94`
+- **medium** — SourceCache::checkout has no locking: concurrent lanes delete each other's in-progress checkouts  
+  `trigon-registry/src/source.rs:105`
+- **low** — fetch_verified enforces no size bound and checks the digest only after the whole body is written  
+  `trigon-registry/src/npm.rs:446`
+- **low** — Two private looks_like_a_forge implementations with lists that differ in both directions  
+  `trigon-registry/src/pypi.rs:329`
+- **low** — Checkout::files truncates silently and three callers use the truncated list as an existence oracle  
+  `trigon-registry/src/source.rs:287`
+
+### `trigon-api`
+
+- **high** — setFilter deletes the cursor it was asked to set, so "next page →" cannot advance past the first 50 rows  
+  `trigon-api/ui/app.js:359`
+- **medium** — `/v1/artifacts/{digest}` searches only the 500 newest runs  
+  `trigon-api/src/routes.rs:641`
+- **medium** — `/v1/runs/{id}/diff` parses an unbounded comparison blob, anonymously, with no concurrency permit  
+  `trigon-api/src/routes.rs:537`
+- **medium** — JOB_POLL is never cleared on navigation, so a job page keeps polling /v1/jobs/{id}/events for the life of the tab  
+  `trigon-api/ui/app.js:591`
+- **low** — hunks() emits the same context line in two hunks and produces overlapping hunk ranges when changes are 4 or 5 lines apart  
+  `trigon-api/src/member.rs:587`
+- **low** — differing_runs over-counts by one when a trailing length difference abuts a differing run  
+  `trigon-api/src/member.rs:688`
+- **low** — `member_pair` discards the real refusal from `artifact_bytes` and blames the store  
+  `trigon-api/src/routes.rs:343`
+- **low** — /targets/… and /artifacts/… await a fetch before their first paint and get no boot island  
+  `trigon-api/ui/app.js:659`
+- **low** — Overlapping hex regions produce a negative "… not shown …" gap label and a dump row drawn twice  
+  `trigon-api/ui/app.js:1118`
+- **low** — A non-JSON error body is reported as statusText, empty over HTTP/2, so the reason a request failed is dropped  
+  `trigon-api/ui/app.js:83`
+- **low** — No navigation generation token: a view whose fetch resolves late paints over the view the reader navigated to  
+  `trigon-api/ui/app.js:161`
+
+### `trigon-sandbox`
+
+- **high** — Resource ceilings and hardening flags are applied only to `podman run`, never to `podman build`, so the deps phase that executes package install scripts is unbounded  
+  `trigon-sandbox/src/podman.rs:466`
+- **high** — The network island and its mirror container leak on every early return after `Island::create`, including the wall-clock timeout, and the build container is never stopped  
+  `trigon-sandbox/src/podman.rs:548`
+- **high** — `PodmanBuild::events` accumulates every build output line in host memory and nothing ever reads it  
+  `trigon-sandbox/src/podman.rs:280`
+- **medium** — `render()` emits a package-manager install for `plan.system_deps` without consulting `admission()`, so a `Decision` name is installed at the default egress tier  
+  `trigon-sandbox/src/dockerfile.rs:429`
+- **medium** — `failing_phase` matches podman's `COPY` step announcement, so under `defer_deps` a script that was only copied is reported as the phase that failed  
+  `trigon-sandbox/src/podman.rs:929`
+- **medium** — The wall-clock ceiling is per podman invocation rather than per build, and `resolve_host_gateway` has no timeout at all  
+  `trigon-sandbox/src/podman.rs:271`
+- **low** — The shared fetch cache is bind-mounted `:Z`, so concurrent mirror containers relabel it out from under each other on SELinux hosts  
+  `trigon-sandbox/src/network.rs:164`
+- **low** — `StoreLock::shared()` spins on `std::thread::sleep` for up to five seconds inside an async task  
+  `trigon-sandbox/src/store_lock.rs:118`
+
+### `trigon-ai`
+
+- **high** — Copilot's stdout/stderr pipes are never drained until the child exits, so a large answer deadlocks until the 600s deadline  
+  `trigon-ai/src/copilot.rs:183`
+- **high** — OpenAI-compatible provider never inspects `finish_reason`, so truncation is misreported as `Malformed` (or silently accepted) while Anthropic raises `Truncated`  
+  `trigon-ai/src/http.rs:307`
+- **medium** — `strip_fence` only strips a fence at byte 0, so a "prose, then ```yaml block```" answer is discarded  
+  `trigon-ai/src/builder.rs:250`
+- **low** — Copilot's injection fence encloses our own prelude, tool vocabulary and operator constraints, labelling them as package-written text  
+  `trigon-ai/src/copilot.rs:92`
+- **low** — The whole prompt is one argv entry, so a repository with large manifests makes the Copilot provider fail to spawn  
+  `trigon-ai/src/copilot.rs:154`
+- **low** — The Copilot agent's working directory is a fixed shared-temp path, never emptied and created through symlinks  
+  `trigon-ai/src/copilot.rs:70`
+- **low** — A replayed transcript with a short `prompt_sha256` panics instead of reporting a mismatch  
+  `trigon-ai/src/transcript.rs:238`
+
+### `trigon-store`
+
+- **high** — A dead job permanently blocks every later enqueue of that target, and POST /v1/runs reports it as already answered  
+  `trigon-store/src/queue.rs:243`
+- **high** — request_rebuild's INSERT has no ON CONFLICT although enqueue's does, so a double-click returns 500 on Postgres  
+  `trigon-store/src/queue.rs:954`
+- **medium** — Daily quota is a non-locking COUNT under READ COMMITTED, so a concurrent burst overruns it on Postgres  
+  `trigon-store/src/queue.rs:946`
+- **medium** — An expired lease is not counted as a failure, so max_failures cannot bound a job that kills its worker  
+  `trigon-store/src/queue.rs:301`
+- **medium** — Daily quota is a `SELECT COUNT(*)` then an `INSERT` in one READ COMMITTED transaction  
+  `trigon-store/src/queue.rs:919`
+- **medium** — `POST /v1/runs` races itself into a unique-constraint violation reported as "the queue could not be reached"  
+  `trigon-store/src/queue.rs:955`
+
+### `trigon-core`
+
+- **medium** — `FailureSignature::subject` is unbounded while `evidence` is clipped to 300, so build output controls the size of the string embedded in the repair prompt and the run record  
+  `trigon-core/src/failure.rs:1354`
+- **medium** — Two divergent `strip_controls` implementations; the logs.rs copy breaks on `is_ascii_alphabetic` instead of the CSI final-byte range and eats real text  
+  `trigon-core/src/logs.rs:312`
+- **low** — `normalize_subject` unconditionally strips every directory component, so `env/cannot-write-path` merges distinct paths into one cluster — contradicting the rule's own comment  
+  `trigon-core/src/failure.rs:1434`
+- **low** — `normalize_subject` strips only `==`, so `env/needs-the-package-under-test` keys one cluster per version specifier  
+  `trigon-core/src/failure.rs:1435`
+- **low** — The JCS canonicalizer emits integers outside ±2^53 verbatim instead of in RFC 8785 ES6 `Number::toString` form  
+  `trigon-core/src/jcs.rs:57`
+
+### `trigon-archive`
+
+- **high** — Tar long names, link targets and PAX values are written through String::from_utf8_lossy, so two archives with different non-UTF-8 long member names serialize to byte-identical stabilized output  
+  `trigon-archive/src/tar.rs:252`
+- **medium** — A legal multi-member gzip stream is rejected as "malformed gzip: crc32 mismatch", accusing a well-formed artifact of corruption  
+  `trigon-archive/src/gzip.rs:110`
+- **medium** — flatten copies every member body into a fresh heap Vec, so serialize peaks at roughly 4x the payload and 2x the stated expansion ceiling  
+  `trigon-archive/src/parse.rs:336`
+- **low** — A STORED zip member's declared uncompressed size is never checked against its body, so Entry::meta.size is an attacker-chosen number unrelated to the bytes  
+  `trigon-archive/src/zip.rs:348`
+
+### `trigon-attest`
+
+- **high** — Archived-set re-derivation reports every `normalized` claim as refuted  
+  `trigon-attest/src/verify.rs:199`
+- **low** — Non-ASCII `stabilizerSet.digest.sha256` panics the verifier on a byte slice  
+  `trigon-attest/src/verify.rs:137`
+
+### `trigon-stabilize`
+
+- **medium** — npm-install-fields drops any line whose first token is a dropped key, at any nesting depth  
+  `trigon-stabilize/src/passes.rs:381`
+- **low** — npm-install-fields rewrites line endings only on the side that carried a dropped key  
+  `trigon-stabilize/src/passes.rs:388`
+
+### `trigon-compare`
+
+- **medium** — A nested single-member gzip is keyed by its FNAME header, producing false member-only codes and membership notes  
+  `trigon-compare/src/diff.rs:167`
+
+### `trigon-engine`
+
+- **high** — The confirming second attempt is enqueued outside the outbox transaction, so a crash between finish and confirm withholds that target for ever  
+  `trigon-engine/src/lib.rs:238`
