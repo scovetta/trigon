@@ -682,6 +682,51 @@ impl Refusal {
     }
 }
 
+/// One upstream host telling this mirror to slow down.
+///
+/// **Out through the log, because a counter cannot leave the island.** Under an enforced tier the
+/// mirror runs inside the build's network namespace and the host process has no route to it — the
+/// same reason `Withheld` is a per-response field rather than a counter, and the reason `Observed`
+/// read `null` on exactly the tier where it is the claim.
+///
+/// A throttle is the one thing a transcript cannot show. The transcript lists bodies that crossed,
+/// and a 429 carries none: a run that was rate limited into a failure would otherwise leave a
+/// per-host table reading `0 throttled`, which is the claim "nobody stopped us" made about a run
+/// where somebody did.
+pub const THROTTLE_MARKER: &str = "NET-THROTTLED";
+
+/// One upstream refusal to serve us at this rate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Throttled {
+    pub host: String,
+    /// What the server asked for, where it said. `None` means it sent a 429 and no `Retry-After`,
+    /// which is a different fact from asking for no delay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_s: Option<u64>,
+    /// Whether the mirror gave up rather than waiting again. A build that failed here failed
+    /// because of our request rate, and the record should not read as a finding about the package.
+    pub gave_up: bool,
+}
+
+impl Throttled {
+    /// The exact line [`emit`](Self::emit) writes.
+    pub fn line(&self) -> String {
+        match serde_json::to_string(self) {
+            Ok(json) => format!("{THROTTLE_MARKER} {json}"),
+            Err(e) => format!("{THROTTLE_MARKER} {{\"unserializable\":\"{e}\"}}"),
+        }
+    }
+
+    pub fn emit(&self) {
+        println!("{}", self.line());
+    }
+
+    /// Read them back out of a container log. Strict, for the reason [`Exchange::parse_log`] is.
+    pub fn parse_log(logs: &str) -> Result<Vec<Throttled>, String> {
+        records(logs, THROTTLE_MARKER, "throttle")
+    }
+}
+
 /// How far the artifact guard got with one body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

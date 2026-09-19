@@ -14,6 +14,8 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
+use trigon_politeness as politeness;
+
 use crate::error::MirrorError;
 use crate::moment::{Filter, Platform};
 
@@ -427,13 +429,17 @@ impl Mirror {
     pub fn new() -> Result<Self, MirrorError> {
         Ok(Mirror {
             client: reqwest::Client::builder()
-                .user_agent(concat!("trigon-mirror/", env!("CARGO_PKG_VERSION")))
+                // **The same string every other route declares.** This said
+                // `trigon-mirror/0.0.0` with no contact URL while carrying every byte a build
+                // fetches, so the traffic that mattered was the traffic nobody could trace back
+                // to a person. An anonymous crawler is the thing registries block first.
+                .user_agent(politeness::user_agent())
                 // Redirects are followed here. A client behind an enforced egress boundary cannot
                 // follow one itself: the destination is exactly what the boundary forbids.
                 .redirect(reqwest::redirect::Policy::limited(5))
                 .build()?,
             passthrough: reqwest::Client::builder()
-                .user_agent(concat!("trigon-mirror/", env!("CARGO_PKG_VERSION")))
+                .user_agent(politeness::user_agent())
                 // **No automatic redirects.** This used to be `limited(5)`, which meant reqwest
                 // followed a `Location` to any host on the internet without asking, and a second
                 // hand-rolled hop in `proxy` did the same. The host allowlist — the entire content
@@ -827,17 +833,85 @@ async fn pypi_request(
         .into_response())
 }
 
+/// How many times a 429 is waited out before the build is told the host refused.
+///
+/// Small: the build is blocked on this request, and a mirror that silently waits five minutes is
+/// indistinguishable from a hang. Past this the refusal is reported, and `Fault::Upstream` keeps it
+/// off the package's record.
+const MAX_THROTTLE_RETRIES: u32 = 2;
+
+/// One outbound request: paced, counted, and willing to wait when a host asks it to.
+///
+/// **Every byte a build fetches at an enforced tier goes through here**, and until now none of it
+/// was paced, counted or backed off. A 186-run npm sweep put 143,362 requests through this
+/// function's callers, which is the measurement in `docs/20-m4-plan.md` §2 — so this is the route
+/// the rate limiting was missing from, while the careful client sat on the metadata route.
+///
+/// Takes a builder rather than a request because a retry needs a second one, and a `RequestBuilder`
+/// is consumed by `send`.
+async fn outbound(
+    url: &str,
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, MirrorError> {
+    let host = politeness::host_of(url);
+    let mut attempt = 0;
+    loop {
+        // Waits out a backoff another lane earned, too: `throttled` below pushes this host's slot
+        // out for the whole process, and this is where that is paid.
+        politeness::pace(&host).await;
+        politeness::note_request(&host);
+        let resp = match build().send().await {
+            Ok(r) => r,
+            Err(e) => {
+                politeness::note_failure(&host);
+                return Err(e.into());
+            }
+        };
+        if resp.status().as_u16() != 429 {
+            return Ok(resp);
+        }
+        // What the server asked for. Guessing our own backoff against a host that told us what it
+        // wanted is how throttling becomes a ban.
+        let retry_after = resp
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
+        politeness::throttled(&host, retry_after);
+        let gave_up = attempt >= MAX_THROTTLE_RETRIES;
+        // Out through the log, where the host process can read it. The counter this just bumped
+        // dies with the container.
+        crate::guard::Throttled {
+            host: host.clone(),
+            retry_after_s: retry_after.map(|d| d.as_secs()),
+            gave_up,
+        }
+        .emit();
+        if gave_up {
+            politeness::note_failure(&host);
+            tracing::warn!(url, "upstream is still rate limiting; giving up");
+            return Ok(resp);
+        }
+        tracing::warn!(url, attempt, ?retry_after, "rate limited; waiting");
+        attempt += 1;
+    }
+}
+
 async fn fetch(
     mirror: &Mirror,
     url: &str,
     filter: &Filter,
     headers: &[(header::HeaderName, &str)],
 ) -> Result<reqwest::Response, MirrorError> {
-    let mut req = mirror.client.get(url);
-    for (k, v) in headers {
-        req = req.header(k, *v);
-    }
-    let resp = req.send().await?;
+    let resp = outbound(url, || {
+        let mut req = mirror.client.get(url);
+        for (k, v) in headers {
+            req = req.header(k, *v);
+        }
+        req
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(MirrorError::Upstream {
             platform: filter.platform.as_str().into(),
@@ -1354,7 +1428,7 @@ async fn proxy(
             url: url.to_string(),
         });
     }
-    let resp = mirror.passthrough.get(url).send().await?;
+    let resp = outbound(url, || mirror.passthrough.get(url)).await?;
     // Redirects are followed here rather than passed on, because a client behind an enforced egress
     // boundary cannot follow one itself: the destination is exactly the host it has no route to.
     //
@@ -1390,7 +1464,9 @@ async fn proxy(
         if !host_allowed(route, &host) {
             return Err(MirrorError::HostNotAllowed { host, route });
         }
-        resp = mirror.passthrough.get(next).send().await?;
+        // Each hop is its own request to its own host, so each one is paced and counted against
+        // that host rather than against the one that redirected us.
+        resp = outbound(next.as_str(), || mirror.passthrough.get(next.clone())).await?;
     }
     if !resp.status().is_success() {
         return Err(MirrorError::Upstream {
@@ -1759,5 +1835,99 @@ mod lockfile_tarball_tests {
         ] {
             assert_eq!(npm_tarball_coords(path), None, "{path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod outbound_politeness {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+
+    /// An upstream that says 429 the first `refusals` times and then answers.
+    ///
+    /// Hand-rolled over a `TcpListener` because the thing under test is what our client does with
+    /// a status and a header, and standing up a framework to produce three bytes of status line
+    /// would put more code in the fixture than in the control.
+    fn upstream_that_throttles(refusals: usize) -> (String, std::thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let mut served = 0;
+            for stream in listener.incoming().take(refusals + 1) {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let body = if served < refusals {
+                    // One second, so the test waits a real interval rather than a guessed one.
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                };
+                let _ = s.write_all(body.as_bytes());
+                let _ = s.flush();
+                served += 1;
+            }
+            served
+        });
+        (format!("http://127.0.0.1:{port}/thing"), handle)
+    }
+
+    #[tokio::test]
+    async fn a_429_is_waited_out_rather_than_handed_to_the_build_as_a_failure() {
+        // The mirror had no 429 path at all: a rate-limited registry became
+        // `MirrorError::Upstream` and the build failed, on a run whose only problem was our own
+        // request rate. The build cannot retry — it has no route out except this proxy — so
+        // waiting is this process's job.
+        let client = reqwest::Client::new();
+        let (url, server) = upstream_that_throttles(2);
+
+        let started = std::time::Instant::now();
+        let resp = super::outbound(&url, || client.get(&url))
+            .await
+            .expect("the third attempt answers");
+
+        assert_eq!(resp.status(), 200, "the wait should have been worth it");
+        assert_eq!(server.join().unwrap(), 3, "two refusals and one answer");
+        // Two `Retry-After: 1` waits. Honouring the header is the difference between being
+        // throttled and being banned, so this asserts the delay happened rather than that the
+        // status was read.
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(2),
+            "it answered in {:?}, which is faster than the two seconds upstream asked for",
+            started.elapsed()
+        );
+
+        // And it is counted, on the route that carries the bytes. Three requests, because a
+        // retried request is a request the host saw. Keyed by host *and port*: that is the
+        // endpoint a rate limit applies to.
+        let host = trigon_politeness::host_of(&url);
+        let traffic = trigon_politeness::traffic();
+        let t = traffic
+            .get(&host)
+            .unwrap_or_else(|| panic!("nothing counted for {host}: {traffic:?}"));
+        assert_eq!(t.requests, 3, "{t:?}");
+        assert_eq!(t.throttled, 2, "{t:?}");
+        assert_eq!(t.failed, 0, "it answered in the end: {t:?}");
+    }
+
+    #[test]
+    fn a_throttle_leaves_the_island_through_the_log() {
+        // A counter cannot leave: the mirror runs inside the build's network namespace and the
+        // host process has no route to it. The transcript cannot carry this either — it lists
+        // bodies that crossed and a 429 has none — so without the marker a rate-limited run would
+        // record `0 throttled`, which is the claim that nobody stopped us.
+        let t = crate::guard::Throttled {
+            host: "registry.npmjs.org".into(),
+            retry_after_s: Some(30),
+            gave_up: false,
+        };
+        let logs = format!("some build noise\n{}\nmore noise\n", t.line());
+        assert_eq!(crate::guard::Throttled::parse_log(&logs).unwrap(), vec![t]);
+        // And a log with none says none, rather than failing to parse.
+        assert!(
+            crate::guard::Throttled::parse_log("nothing here")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

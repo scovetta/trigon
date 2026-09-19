@@ -13,7 +13,7 @@ Verified against the code rather than against the roadmap.
 |---|---|---|
 | A 5,000-target sweep within budget | **partial** | `trigon sweep` runs a corpus at N lanes and has run 197 npm + 200 PyPI. It loses targets to [`B6`][b6] at concurrency 3, and §2 shows the request volume is mis-sized. |
 | Three worker classes enforced | **none** | No queue, no worker split. `trigon-engine` appears in [`01-architecture.md`](01-architecture.md)'s crate table and **is not a crate**. The write-only blob credential that makes the build/judge split real is specified and implemented nowhere. |
-| Per-host rate limiting, backoff, `User-Agent` | **on the wrong client** | See §3. The politeness is real, tested, and on `trigon-registry::Client`. The mirror, which carries every byte a build fetches, has none of it. |
+| Per-host rate limiting, backoff, `User-Agent` | **built, minus the fleet half** | Was on the wrong client entirely: see §3. Now `trigon-politeness`, one process-wide limiter and one counter table behind every route, with the contact-URL `User-Agent` enforced by `xtask policy`. Backoff across *workers* needs the queue, which is Stage B. |
 | UI: lockfile, clusters, run, diff, cost, fleet health | **partial** | `watch.rs` serves board, cluster, run, network, compare, `/api/state`. No lockfile, cost or fleet-health view. Overlaps the watch redesign — see §5. |
 | `trigon check --format sarif` | **none** | No `check` subcommand and no `sarif` anywhere in the tree. |
 | Continuous ingestion with a per-feed cursor | **none** | No `ingest`, no cursor. |
@@ -95,9 +95,13 @@ record and no report; `network_exchanges` is persisted per run and covers only t
 joins them, so no artefact this system produces states what it asked of any host. Criterion 3's
 "registries have been contacted" needs a number we do not currently keep.
 
+**Items 1 to 3 are done** — `trigon-politeness`, and the per-host table in `run.json`. What is
+below is how it was stated before the work; item 4 is still to do and item 2's fleet half waits on
+the queue.
+
 Four things, in this order:
 
-1. **Move the politeness to where the bytes are.** The mirror's outbound fetch is the one place all
+1. ~~**Move the politeness to where the bytes are.**~~ **Done.** The mirror's outbound fetch is the one place all
    egress converges; it is the natural home for spacing, `Retry-After`, and the contact-URL
    `User-Agent`. A test should assert the mirror's UA contains the contact URL, the same way the
    egress tests assert the guard runs before the fetch.

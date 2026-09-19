@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 trigon-core.workspace = true
+trigon-politeness.workspace = true
 trigon-archive.workspace = true
 trigon-compare.workspace = true
 serde.workspace = true

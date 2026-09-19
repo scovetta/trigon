@@ -541,7 +541,9 @@ enum Auth {
 /// One client, with the provider's own retries switched off.
 fn client() -> Result<reqwest::blocking::Client, LlmError> {
     reqwest::blocking::Client::builder()
-        .user_agent(concat!("trigon/", env!("CARGO_PKG_VERSION")))
+        // The same string every other route declares. A model endpoint is upstream too, and a
+        // provider noticing our traffic should reach a person rather than guess.
+        .user_agent(trigon_politeness::user_agent())
         // No overall deadline here: it is set per request, because a model on this machine and a
         // hosted endpoint want different ones (see `Flavor::request_timeout`). A connect timeout
         // still bounds the case this is really for — a host that is not listening at all.

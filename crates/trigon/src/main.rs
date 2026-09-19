@@ -1293,6 +1293,8 @@ mod build {
         /// nothing arrived — but usually the explanation for whatever failed next, and a sweep
         /// without `--store` has only `run.json` to find it in.
         pub refused_artifact: Vec<String>,
+        /// Every time an upstream host told the mirror to slow down during this build.
+        pub throttled: Vec<trigon_mirror::Throttled>,
         /// Guarded members that arrived over the network and are **not** in the rebuilt artifact.
         ///
         /// The bytes came in and did not come out, which is not the harm the guard exists to catch
@@ -1726,6 +1728,7 @@ mod build {
                 transcript: outcome.transcript,
                 pin: outcome.pin,
                 refused_artifact: outcome.refused_artifact,
+                throttled: outcome.throttled,
                 guard_notes,
                 artifact: outcome.artifact,
             })
@@ -2765,7 +2768,16 @@ mod rebuild {
         let work = args.work.clone();
         let purl = args.purl.clone();
         let mut report = crate::progress::RunReport::new(&purl);
+        // Bracketed here rather than counted inside, because the traffic table is process-wide and
+        // this is the only scope that knows where one run's share of it begins. Taken before
+        // anything resolves: the first thing a run does is ask a registry.
+        let before = trigon_politeness::traffic();
         let out = run_inner(args, verbose, &mut report);
+        // Added to what `run_inner` derived from the mirror's transcript, never replacing it: this
+        // process resolves and fetches, and the mirror inside the island does the rest. A table
+        // holding one of those would be a complete-looking account of a fraction of the traffic —
+        // which is what it was, reading 3 requests for a run that made 399.
+        trigon_politeness::merge(&mut report.hosts, trigon_politeness::since(&before));
         match &out {
             Ok(ran) => report.outcome = Some(ran.outcome.label()),
             // Our own error, not the package's. Recorded as such rather than left absent, because
@@ -3543,6 +3555,29 @@ mod rebuild {
             .ok()
             .and_then(|b| b.transcript.as_ref())
             .map(|t| t.iter().map(|e| e.bytes).sum());
+        // **The mirror's share, derived from what crossed rather than read off a counter.** At an
+        // enforced tier the mirror runs inside the build's network namespace in its own process,
+        // so its counters die with the container — the same constraint that put `Withheld` in the
+        // transcript instead of in `Observed`. The transcript names the upstream URL of every body
+        // that crossed, which is the request count; the 429s that carried no body come out through
+        // the log as `Throttled`. `run_one` adds this process's own requests to it afterwards.
+        if let Ok(b) = built.as_ref() {
+            for e in b.transcript.iter().flatten() {
+                report
+                    .hosts
+                    .entry(trigon_politeness::host_of(&e.url))
+                    .or_default()
+                    .requests += 1;
+            }
+            for t in &b.throttled {
+                let h = report.hosts.entry(t.host.clone()).or_default();
+                h.throttled += 1;
+                // A give-up is a request that failed, and it failed because of our request rate.
+                if t.gave_up {
+                    h.failed += 1;
+                }
+            }
+        }
         report.inference_seconds = model.as_ref().and_then(|m| m.inference_seconds());
         // **Beside the tokens, because they are two facts about one provider.** `model_calls` was
         // set only at the success return, past every early return a failing run takes — so a repair

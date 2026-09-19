@@ -70,6 +70,12 @@ pub struct MirrorLog {
     /// no body and has no digest — and because "somebody asked and was refused" is a different
     /// thing to investigate than silence.
     pub refusals: Vec<trigon_mirror::Refusal>,
+    /// Every time an upstream host told the mirror to slow down.
+    ///
+    /// The one thing the transcript cannot carry: it lists bodies that crossed, and a 429 has
+    /// none. Without this a run that was rate limited into failing would leave a per-host table
+    /// reading `0 throttled`, which asserts that nobody stopped us about a run where somebody did.
+    pub throttled: Vec<trigon_mirror::Throttled>,
 }
 
 impl MirrorLog {
@@ -286,6 +292,15 @@ impl Island {
                 .filter(|l| l.contains(trigon_mirror::REFUSED_ARTIFACT_MARKER))
                 .map(str::to_owned)
                 .collect(),
+            throttled: trigon_mirror::Throttled::parse_log(&logs).map_err(|detail| {
+                SandboxError::Failed {
+                    phase: "build".into(),
+                    detail: format!(
+                        "the mirror wrote a throttle line this build cannot read, so whether a \
+                         registry rate limited us is unknown rather than no: {detail}"
+                    ),
+                }
+            })?,
             refusals: trigon_mirror::Refusal::parse_log(&logs).map_err(|detail| {
                 SandboxError::Failed {
                     phase: "build".into(),

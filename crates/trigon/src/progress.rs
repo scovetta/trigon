@@ -24,6 +24,7 @@
 //! and stuck, and that is the state that pages a human — so it is derived from a threshold the
 //! sweep itself chose, its own per-target timeout, rather than from a number we invented.
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -543,6 +544,18 @@ pub struct RunReport {
     /// not a measurement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_bytes: Option<u64>,
+    /// What this run asked of each upstream host, and what each said back.
+    ///
+    /// **Beside `network_exchanges`, and for the reason that count exists alone today.** The
+    /// mirror's transcript is persisted per run and covers only what a build fetched; the per-host
+    /// counters were printed to a sweep's stdout and kept nowhere, so no artefact this system
+    /// produced stated what it had asked of anybody. M4's rate-limiting criterion needs a number,
+    /// and a console line that scrolled past is not one (`docs/20-m4-plan.md` §3).
+    ///
+    /// This run's share, not the process total: the table is global and a sweep runs hundreds of
+    /// targets through it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hosts: BTreeMap<String, trigon_politeness::HostTraffic>,
     /// Seconds spent waiting on a model, and the tokens it cost. `None` where none was asked,
     /// which `docs/07-ai.md` §6 says should be the healthy majority of a corpus.
     #[serde(default, skip_serializing_if = "Option::is_none")]

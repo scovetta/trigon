@@ -341,6 +341,20 @@ fn check_policy_with(
         }
     }
 
+    match anonymous_user_agents() {
+        Ok(found) if !found.is_empty() => violations.push(format!(
+            "an outbound HTTP client declares its own User-Agent at {}. Every route this project \
+             opens has to name the tool and a contact URL, from `trigon_politeness::user_agent()` \
+             and nowhere else. The mirror declared `trigon-mirror/0.0.0` with no contact while \
+             carrying every byte of a sweep, which is the traffic nobody could trace back to a \
+             person — and an anonymous crawler is the thing registries block first.",
+            found.join(", ")
+        )),
+        Ok(_) => lines
+            .push("  every route        declares one User-Agent, with a contact URL".to_string()),
+        Err(e) => violations.push(format!("could not scan for User-Agents: {e}")),
+    }
+
     if !violations.is_empty() {
         bail!(
             "dependency policy violated:\n  - {}",
@@ -382,6 +396,60 @@ fn hashmap_uses(crate_name: &str) -> Result<Vec<String>> {
             for (i, line) in text.lines().enumerate() {
                 // A line that says why it is banned is documentation, not a use.
                 if line.contains("HashMap") && !line.trim_start().starts_with("//") {
+                    out.push(format!("{}:{}", shown.display(), i + 1));
+                }
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Every `.user_agent(...)` call that does not take the one shared string.
+///
+/// **A structural check because the failure is structural.** `trigon-registry::Client` was careful
+/// — a User-Agent naming the tool and a contact URL, per-host spacing, a `Retry-After`-aware 429
+/// path — and `trigon-mirror`, which carries every byte a build fetches at an enforced tier, built
+/// bare clients with none of it. Two routes, one of them polite, and nothing that noticed. A test
+/// of either half would have passed.
+///
+/// The allowed forms are the shared function and a config field that is initialised from it. A new
+/// client that names itself anything else fails the build here rather than in a registry's abuse
+/// report.
+fn anonymous_user_agents() -> Result<Vec<String>> {
+    const ALLOWED: &[&str] = &[
+        ".user_agent(politeness::user_agent())",
+        ".user_agent(trigon_politeness::user_agent())",
+        // `ClientConfig::user_agent`, whose default is the shared string and which exists so an
+        // operator can add their own contact to it.
+        ".user_agent(config.user_agent.clone())",
+    ];
+    let mut out = Vec::new();
+    let root = workspace_root();
+    let mut stack = vec![root.join("crates")];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir)?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                // `target` directories hold vendored sources that are nobody's policy problem.
+                if p.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                stack.push(p);
+                continue;
+            }
+            if p.extension().is_none_or(|x| x != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p)?;
+            let shown = p.strip_prefix(&root).unwrap_or(&p).to_path_buf();
+            for (i, line) in text.lines().enumerate() {
+                let t = line.trim();
+                // A line that says why it is banned is documentation, not a call.
+                if t.starts_with("//") || !t.contains(".user_agent(") {
+                    continue;
+                }
+                if !ALLOWED.iter().any(|a| t.contains(a)) {
                     out.push(format!("{}:{}", shown.display(), i + 1));
                 }
             }

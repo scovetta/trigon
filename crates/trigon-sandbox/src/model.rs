@@ -367,6 +367,12 @@ pub struct BuildOutcome {
     /// Derived from the transcript rather than carried out as a number, so a reader holding the
     /// transcript can redo the arithmetic instead of trusting it.
     pub pin: Option<trigon_mirror::Observed>,
+    /// Every time an upstream host told the mirror to slow down during this build.
+    ///
+    /// Not derivable from the transcript, which lists bodies that crossed: a 429 carries none. A
+    /// run whose per-host table said `0 throttled` because nothing recorded the 429s would be
+    /// asserting that our request rate was fine, about the run where it was not.
+    pub throttled: Vec<trigon_mirror::Throttled>,
 }
 
 impl BuildOutcome {

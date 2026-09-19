@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 trigon-core.workspace = true
+trigon-politeness.workspace = true
 trigon-strategy.workspace = true
 # For reading what a published wheel says about the toolchain that made it.
 trigon-archive.workspace = true

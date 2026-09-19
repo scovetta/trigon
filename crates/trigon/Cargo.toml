@@ -26,6 +26,7 @@ trigon-stabilize.workspace = true
 trigon-compare.workspace = true
 trigon-strategy.workspace = true
 trigon-attest.workspace = true
+trigon-politeness = { workspace = true, optional = true }
 trigon-sandbox = { workspace = true, optional = true }
 trigon-registry = { workspace = true, optional = true }
 # Publishing to a transparency log, which is the one thing the attestor does over a socket. Optional
@@ -53,7 +54,7 @@ default = ["build"]
 # Everything that needs an async runtime. `--no-default-features` produces the verifier: a binary
 # that reproduces a verdict from two artifacts and links no runtime and no network client, which is
 # the claim a sceptic can check with `cargo tree` rather than take on trust.
-build = ["dep:trigon-sandbox", "dep:trigon-registry", "dep:trigon-mirror", "dep:trigon-store", "dep:trigon-ai", "dep:tokio", "dep:async-trait", "dep:axum", "dep:reqwest"]
+build = ["dep:trigon-politeness", "dep:trigon-sandbox", "dep:trigon-registry", "dep:trigon-mirror", "dep:trigon-store", "dep:trigon-ai", "dep:tokio", "dep:async-trait", "dep:axum", "dep:reqwest"]
 # Run an archived stabilizer set rather than only describing it, so a claim made under a set this
 # binary does not carry can still be re-derived. Off by default: it roughly doubles the verifier's
 # dependency tree, and the small tree is the thing a sceptic checks instead of trusting us. A

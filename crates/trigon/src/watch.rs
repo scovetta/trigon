@@ -2720,6 +2720,51 @@ fn report_panel(r: Option<&crate::progress::RunReport>) -> String {
     }
     out.push_str("</table>");
 
+    // **What this run asked of each host, beside what it concluded from them.** The mirror's
+    // transcript said what a build fetched and the per-host counters went to a sweep's stdout, so
+    // nothing this system wrote down stated what it had asked of anybody.
+    out.push_str("<h2>What this run asked upstream</h2>");
+    if r.hosts.is_empty() {
+        out.push_str(
+            "<p class=\"note\">no per-host counts — this run predates the counter, or it made no \
+             request of its own. Not a run that asked for nothing: a run that asked for nothing \
+             would have resolved no package.</p>",
+        );
+    } else {
+        out.push_str(
+            "<table><tr><th>host</th><th class=\"n\">requests</th><th class=\"n\">throttled</th>\
+             <th class=\"n\">failed</th></tr>",
+        );
+        for (host, t) in &r.hosts {
+            out.push_str(&format!(
+                "<tr><td><code>{}</code></td><td class=\"n\">{}</td>\
+                 <td class=\"n\">{}</td><td class=\"n\">{}</td></tr>",
+                esc(host),
+                t.requests,
+                // Non-zero means the numbers from this run are about our politeness rather than
+                // about the package, which is worth colouring rather than leaving in a column.
+                if t.throttled > 0 {
+                    format!("<span class=\"fail\">{}</span>", t.throttled)
+                } else {
+                    "0".into()
+                },
+                if t.failed > 0 {
+                    format!("<span class=\"ours\">{}</span>", t.failed)
+                } else {
+                    "0".into()
+                },
+            ));
+        }
+        out.push_str("</table>");
+        if r.hosts.values().any(|t| t.throttled > 0) {
+            out.push_str(
+                "<p class=\"note\">a host told us to slow down during this run, so read whatever \
+                 failed below as a statement about our request rate before reading it as one about \
+                 the package</p>",
+            );
+        }
+    }
+
     if !r.timings.is_empty() {
         out.push_str("<h2>Timeline</h2><table><tr><th>phase</th><th class=\"n\">seconds</th></tr>");
         for (phase, secs) in &r.timings {

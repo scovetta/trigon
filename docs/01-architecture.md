@@ -163,6 +163,7 @@ Everything above the line stays synchronous, with no tokio, no reqwest, and zero
 | `trigon-sandbox` | `BuildRunner`/`BuildHandle`, OCI and k8s adapters, egress proxy, observability | yes |
 | `trigon-store` | `object_store` blobs, Postgres metadata, and the queue | yes |
 | `trigon-ai` | `LlmProvider`, the Builder agent, budgets, transcripts, replay | yes |
+| `trigon-politeness` | what we ask of an upstream host, and how fast: the process-wide limiter, the per-host counters, the one User-Agent | yes |
 | `trigon-engine` | the state machine over the traits above | yes |
 | `trigon` | One binary: `serve`, `work`, `verify`, `check`, `run`, `sweep`, `bench` | yes |
 

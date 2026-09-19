@@ -9,6 +9,7 @@ members = [
     "crates/trigon-strategy",
     "crates/trigon-attest",
     "crates/trigon-sandbox",
+    "crates/trigon-politeness",
     "crates/trigon-registry",
     "crates/trigon-mirror",
     "crates/trigon-ai",
@@ -33,6 +34,7 @@ trigon-compare = { path = "crates/trigon-compare", version = "0.0.0" }
 trigon-strategy = { path = "crates/trigon-strategy", version = "0.0.0" }
 trigon-attest = { path = "crates/trigon-attest", version = "0.0.0" }
 trigon-sandbox = { path = "crates/trigon-sandbox", version = "0.0.0" }
+trigon-politeness = { path = "crates/trigon-politeness", version = "0.0.0" }
 trigon-registry = { path = "crates/trigon-registry", version = "0.0.0" }
 trigon-mirror = { path = "crates/trigon-mirror", version = "0.0.0" }
 trigon-ai = { path = "crates/trigon-ai", version = "0.0.0" }

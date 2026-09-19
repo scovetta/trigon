@@ -11,13 +11,17 @@
 //! - **retry on the transient statuses only**, with the delay the server asked for, and
 //! - a **`Retry-After`-aware 429 path**, because ignoring that header is what turns throttling
 //!   into a ban.
+//!
+//! **None of that lives here any more.** It lived here and on no other route, while
+//! `trigon-mirror` carried every byte a build fetches with none of it — and the spacing was a
+//! field on a struct a sweep rebuilds per target, so the floor reset four hundred times and
+//! multiplied by every lane. Both halves are now `trigon-politeness`, which holds the pacing and
+//! the counting in one process-global table so neither can describe traffic the other does not.
+//! This module keeps the retry policy, which is about what a *registry* means by a status code.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
-use tokio::time::Instant;
+use trigon_politeness as politeness;
 
 use crate::error::RegistryError;
 
@@ -34,81 +38,25 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         ClientConfig {
-            // Names the tool, the version, and somewhere to complain. An anonymous crawler is the
-            // thing registries block first.
-            user_agent: format!(
-                "trigon/{} (+https://github.com/trigon-dev/trigon; rebuild verification)",
-                env!("CARGO_PKG_VERSION")
-            ),
-            min_interval: Duration::from_millis(100),
+            // Names the tool, the version, and somewhere to complain. One string, shared with
+            // every other route, because a route that declares itself differently is a route
+            // nobody can trace back to us.
+            user_agent: politeness::user_agent(),
+            min_interval: politeness::min_interval(),
             timeout: Duration::from_secs(60),
             max_retries: 3,
         }
     }
 }
 
-/// What this process has asked of each host, and what each host said about it.
-///
-/// **Upstream reputation is what breaks first at scale** (`docs/10-scale.md` §3) and until now
-/// nothing counted. A sweep that exhausts a rate limit does not slow down: it starts failing, each
-/// failure lands on a different target, and the run reports a reproduction rate containing
-/// infrastructure faults. Counting is what lets a sweep say "GitHub stopped answering after 60
-/// requests" instead of "140 packages have no strategy".
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct HostTraffic {
-    pub requests: u64,
-    /// Times the host told us to slow down: a 429, or a 403 that carried an exhausted rate-limit
-    /// header. Non-zero means the numbers from this run are about our politeness, not the packages.
-    pub throttled: u64,
-    /// Requests that failed after every retry.
-    pub failed: u64,
-}
+/// Re-exported so the callers that already name these keep working, and so there is exactly one
+/// definition of what we asked of a host.
+pub use politeness::{HostTraffic, note_failure, note_request, traffic};
 
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     config: ClientConfig,
-    /// Last request time per host. `HashMap` is fine here: nothing about iteration order reaches a
-    /// digest, which is the only reason the judgement half bans it.
-    last: Arc<Mutex<HashMap<String, Instant>>>,
-}
-
-/// Per host, for the whole **process**, not per client.
-///
-/// A sweep builds a fresh `Client` for every target (`crates/trigon/src/main.rs:2392`), so a
-/// per-instance counter would reset four hundred times and report that we asked GitHub for two
-/// things. The question "what have we asked of this host" belongs to the process, because the rate
-/// limit does: GitHub counts our requests, not our structs.
-///
-/// `BTreeMap` so a report reads the same way twice.
-static TRAFFIC: std::sync::Mutex<std::collections::BTreeMap<String, HostTraffic>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-/// What this process has asked of each host so far.
-pub fn traffic() -> std::collections::BTreeMap<String, HostTraffic> {
-    TRAFFIC.lock().map(|t| t.clone()).unwrap_or_default()
-}
-
-/// Record one request to a host this client did not make.
-///
-/// **Git is egress too.** A sweep opens roughly two connections to a forge per target — an
-/// `ls-remote` to resolve a tag and a `fetch` to get the commit — which at 400 targets is more
-/// conversations with github.com than with either registry, and none of them go through this
-/// client. Counting them here rather than somewhere new means one table answers "what did we ask
-/// of whom", which is the question a throttled run needs answered.
-pub fn note_request(host: &str) {
-    count(host, |t| t.requests += 1);
-}
-
-/// Record one request to a host that refused or failed, for the same reason.
-pub fn note_failure(host: &str) {
-    count(host, |t| t.failed += 1);
-}
-
-fn count(host: &str, f: impl FnOnce(&mut HostTraffic)) {
-    if let Ok(mut t) = TRAFFIC.lock() {
-        f(t.entry(host.to_string()).or_default());
-    }
 }
 
 impl Client {
@@ -117,11 +65,7 @@ impl Client {
             .user_agent(config.user_agent.clone())
             .timeout(config.timeout)
             .build()?;
-        Ok(Client {
-            http,
-            config,
-            last: Arc::new(Mutex::new(HashMap::new())),
-        })
+        Ok(Client { http, config })
     }
 
     pub fn config(&self) -> &ClientConfig {
@@ -147,14 +91,14 @@ impl Client {
         url: &str,
         ecosystem: &str,
     ) -> Result<reqwest::Response, RegistryError> {
-        let host = host_of(url);
+        let host = politeness::host_of(url);
         let mut attempt = 0;
 
         loop {
-            self.pace(&host).await;
+            politeness::pace(&host).await;
             tracing::debug!(url, attempt, "GET");
 
-            count(&host, |t| t.requests += 1);
+            politeness::note_request(&host);
             let result = self.authorized(url, &host).send().await;
             let response = match result {
                 Ok(r) => r,
@@ -188,9 +132,6 @@ impl Client {
                     .is_some_and(|v| v.trim() == "0");
 
             if status.as_u16() == 429 || exhausted {
-                // The header, when they sent one. Guessing our own backoff against a server that
-                // told us what it wanted is how throttling becomes a ban.
-                count(&host, |t| t.throttled += 1);
                 // `Retry-After` when they sent one, and GitHub's `X-RateLimit-Reset` — an absolute
                 // unix time rather than a duration — when they sent that instead. Guessing our own
                 // backoff against a server that told us what it wanted is how throttling becomes a
@@ -201,6 +142,10 @@ impl Client {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok())
                     .or_else(|| reset_in(&response));
+                // Told to the process, not to this client. Every other lane is about to ask the
+                // same host for the same kind of thing, and this is the only thing that can hold
+                // them off — the sleep below only delays the task that heard it.
+                politeness::throttled(&host, retry_after.map(Duration::from_secs));
                 if attempt >= self.config.max_retries {
                     return Err(RegistryError::RateLimited {
                         ecosystem: ecosystem.to_string(),
@@ -230,34 +175,13 @@ impl Client {
             // reports trouble on a healthy run is worse than no number, because the next real one
             // is read as noise.
             if status.as_u16() != 404 {
-                count(&host, |t| t.failed += 1);
+                politeness::note_failure(&host);
             }
             return Err(RegistryError::Http {
                 ecosystem: ecosystem.to_string(),
                 url: url.to_string(),
                 status: status.as_u16(),
             });
-        }
-    }
-
-    /// Wait until this host may be asked again.
-    async fn pace(&self, host: &str) {
-        let wait = {
-            let mut last = self.last.lock().await;
-            let now = Instant::now();
-            let wait = last
-                .get(host)
-                .map(|t| {
-                    self.config
-                        .min_interval
-                        .saturating_sub(now.duration_since(*t))
-                })
-                .unwrap_or_default();
-            last.insert(host.to_string(), now + wait);
-            wait
-        };
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
         }
     }
 }
@@ -306,14 +230,6 @@ fn reset_in(response: &reqwest::Response) -> Option<u64> {
     Some(at.saturating_sub(now).min(3600))
 }
 
-fn host_of(url: &str) -> String {
-    url.split("://")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or(url)
-        .to_string()
-}
-
 /// Exponential, capped. Not jittered here because the per-host pacing already spreads a fleet's
 /// requests; jitter matters once many workers retry the same URL at once, which is a fleet concern.
 fn backoff(attempt: u32) -> Duration {
@@ -338,15 +254,6 @@ mod tests {
             ua.contains("https://"),
             "it must say where to complain: {ua}"
         );
-    }
-
-    #[test]
-    fn hosts_are_extracted_for_pacing() {
-        assert_eq!(
-            host_of("https://registry.npmjs.org/left-pad"),
-            "registry.npmjs.org"
-        );
-        assert_eq!(host_of("https://pypi.org/pypi/x/json"), "pypi.org");
     }
 
     #[test]

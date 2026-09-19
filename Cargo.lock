@@ -2640,6 +2640,7 @@ dependencies = [
  "trigon-compare",
  "trigon-core",
  "trigon-mirror",
+ "trigon-politeness",
  "trigon-registry",
  "trigon-sandbox",
  "trigon-stabilize",
@@ -2660,6 +2661,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "trigon-core",
+ "trigon-politeness",
 ]
 
 [[package]]
@@ -2744,6 +2746,16 @@ dependencies = [
  "trigon-archive",
  "trigon-compare",
  "trigon-core",
+ "trigon-politeness",
+]
+
+[[package]]
+name = "trigon-politeness"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2761,6 +2773,7 @@ dependencies = [
  "tracing",
  "trigon-archive",
  "trigon-core",
+ "trigon-politeness",
  "trigon-strategy",
  "zip",
 ]
