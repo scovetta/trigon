@@ -59,6 +59,7 @@ async fn api_over(records: Vec<RunRecord>, who: Principal) -> Arc<Api> {
         index,
         switches: Switches::default(),
         unauthenticated: who,
+        member_reads: trigon_api::default_member_permits(),
     })
 }
 
@@ -368,6 +369,7 @@ async fn a_members_content_cannot_close_the_island() {
         switches: Switches::default(),
         // Operator, because that is the principal the member panel is booted for at all.
         unauthenticated: Principal::Operator,
+        member_reads: trigon_api::default_member_permits(),
     });
 
     let (status, body) = get(api, "/runs/1700000001-aa?member=package%2Findex.js").await;
@@ -426,6 +428,7 @@ async fn an_anonymous_reader_gets_no_member_in_the_page_source() {
         index,
         switches: Switches::default(),
         unauthenticated: Principal::Anonymous,
+        member_reads: trigon_api::default_member_permits(),
     });
 
     let (status, body) = get(api.clone(), "/runs/1700000001-aa?member=package%2Findex.js").await;
@@ -441,4 +444,63 @@ async fn an_anonymous_reader_gets_no_member_in_the_page_source() {
     );
     // The run is published, so the page is not empty — the member alone was withheld.
     assert!(body.contains("divergent"));
+}
+
+/// One bad query parameter costs that parameter, not the deep link.
+///
+/// `?member=x&offset=abc` used to boot nothing: deserializing `DocQuery` is all-or-nothing, so an
+/// unreadable `offset` discarded the `member` beside it. The reason a reader's link did nothing
+/// would have been a parameter with no bearing on which member they asked for.
+#[tokio::test]
+async fn a_bad_parameter_does_not_discard_the_rest_of_the_query() {
+    let store = Arc::new(Store::in_memory());
+    let up = artifact_with(&store, "package/index.js", b"one\ntwo\n").await;
+    let rb = artifact_with(&store, "package/index.js", b"one\nTWO\n").await;
+
+    let mut r = record("1700000001-aa", "pkg:npm/a@1.0.0", Some("divergent"), None);
+    r.upstream = ArtifactRef {
+        name: "pkg.zip".into(),
+        sha256: up,
+        bytes: 1,
+        stored: true,
+    };
+    r.rebuild = Some(ArtifactRef {
+        name: "pkg.zip".into(),
+        sha256: rb,
+        bytes: 1,
+        stored: true,
+    });
+    store.put_run(&r).await.unwrap();
+
+    let index = Index::new();
+    index.refresh(&store, Switches::default()).await.unwrap();
+    let api = Arc::new(Api {
+        store,
+        queue: None,
+        index,
+        switches: Switches::default(),
+        unauthenticated: Principal::Operator,
+        member_reads: trigon_api::default_member_permits(),
+    });
+
+    // The member alone boots, as a control.
+    let (_, plain) = get(api.clone(), "/runs/1700000001-aa?member=package%2Findex.js").await;
+    assert!(
+        plain.contains("package/index.js"),
+        "the control did not boot"
+    );
+
+    for query in [
+        "member=package%2Findex.js&offset=abc",
+        "member=package%2Findex.js&offset=",
+        "member=package%2Findex.js&utm_source=somewhere",
+        "member=package%2Findex.js&view=hex&offset=-1",
+    ] {
+        let (status, body) = get(api.clone(), &format!("/runs/1700000001-aa?{query}")).await;
+        assert_eq!(status, 200, "?{query} cost the page");
+        assert!(
+            body.contains("package/index.js"),
+            "?{query} threw the member away with the parameter it could not read"
+        );
+    }
 }

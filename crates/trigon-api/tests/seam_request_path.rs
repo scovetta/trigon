@@ -36,6 +36,7 @@ async fn api_with_queue(dir: &tempfile::TempDir, public: bool) -> (Arc<Api>, Que
             } else {
                 Principal::Operator
             },
+            member_reads: trigon_api::default_member_permits(),
         }),
         queue,
     )
@@ -245,6 +246,7 @@ async fn a_reader_with_no_queue_refuses_plainly() {
         index: Index::new(),
         switches: Switches::default(),
         unauthenticated: Principal::Anonymous,
+        member_reads: trigon_api::default_member_permits(),
     });
     let (status, body) = post(api, "/v1/runs", None, r#"{"target":"pkg:npm/a@1"}"#).await;
     // Anonymous first: the instance's shape is not something an unauthenticated caller needs told.

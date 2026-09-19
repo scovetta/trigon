@@ -201,6 +201,28 @@ pub(crate) async fn artifact_bytes(
              has only the first.",
         ));
     };
+    // **Refused from the record, before a byte is read.** The size cap lives in `member::read`,
+    // which runs *after* the whole artifact has been fetched and copied — so an over-cap artifact
+    // cost 608 MiB of resident memory and then a 404 saying it was too large to read. The record
+    // already knows how big it is.
+    //
+    // This is an optimisation and not the guarantee: a record can carry a wrong `bytes`, and the
+    // check inside `read` is what actually holds. But for a record this tool wrote, it turns the
+    // common refusal from half a gigabyte into nothing.
+    let declared = match side {
+        "upstream" => r.upstream.bytes,
+        _ => r.rebuild.as_ref().map(|a| a.bytes).unwrap_or(0),
+    };
+    if declared > crate::member::MAX_ARTIFACT as u64 {
+        return Err(refuse(
+            StatusCode::NOT_FOUND,
+            "too_large",
+            &format!(
+                "that artifact is {declared} bytes and this will not parse anything that large to \
+                 reach one member of it. The whole artifact is still downloadable."
+            ),
+        ));
+    }
     let stored = match side {
         "upstream" => r.upstream.stored,
         _ => r.rebuild.as_ref().is_some_and(|a| a.stored),
@@ -320,6 +342,9 @@ pub async fn member(
     let Some(r) = api.index.get(&id) else {
         return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
     };
+    // Held for the whole read. See `Api::member_reads`: one of these costs twice an artifact, and
+    // the number in flight is what decides whether that is a lot of memory or a fatal amount.
+    let _permit = api.member_reads.clone().acquire_owned().await;
     if !admits(api.principal(), Class::Artifact) {
         return refuse(
             StatusCode::FORBIDDEN,
@@ -382,6 +407,7 @@ pub async fn member_raw(
     let Some(r) = api.index.get(&id) else {
         return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
     };
+    let _permit = api.member_reads.clone().acquire_owned().await;
     if !admits(api.principal(), Class::Artifact) {
         return refuse(
             StatusCode::FORBIDDEN,

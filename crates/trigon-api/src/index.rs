@@ -210,9 +210,7 @@ impl Index {
     }
 
     pub fn entry(&self, id: &str) -> Option<Entry> {
-        self.inner
-            .read()
-            .unwrap()
+        self.read_or_recover()
             .entries
             .iter()
             .find(|e| e.id == id)
@@ -503,6 +501,39 @@ mod tests {
             g.entries = build(&g.records, Switches::default());
         }
         ix
+    }
+
+    /// Nothing outside the two recovery helpers takes the lock directly.
+    ///
+    /// `entry()` was missed when the readers were converted: `rustfmt` had split
+    /// `self.inner.read().unwrap()` across four lines, and the edit that fixed the others matched
+    /// the single-line form. One accessor kept the poison — and it is the one every run page and
+    /// every diff route calls, so the conversion protected everything except the hot path.
+    ///
+    /// **Whitespace is stripped entirely before matching**, because the first version of this test
+    /// normalised runs of whitespace to single spaces and therefore matched
+    /// `self.inner\n.write()` but not `self.inner.read()`. A check for a formatting-dependent
+    /// mistake that is itself formatting-dependent is not a check.
+    #[test]
+    fn no_accessor_takes_the_lock_without_recovering_from_poison() {
+        let src = include_str!("index.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let dense: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+
+        for form in ["self.inner.read().unwrap()", "self.inner.write().unwrap()"] {
+            assert!(
+                !dense.contains(form),
+                "an accessor takes the lock with `{form}` rather than through \
+                 `read_or_recover`/`write_or_recover`, so one panic anywhere poisons it for good"
+            );
+        }
+        // And the lock is taken in exactly the two helpers, nowhere else.
+        assert_eq!(
+            dense.matches("self.inner.read()").count()
+                + dense.matches("self.inner.write()").count(),
+            2,
+            "the lock is taken somewhere other than the two recovery helpers"
+        );
     }
 
     /// A poisoned lock keeps serving.

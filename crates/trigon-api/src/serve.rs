@@ -50,6 +50,7 @@ pub async fn run(store: trigon_store::Store, cfg: Config) -> Result<(), String> 
         index: index.clone(),
         switches: cfg.switches,
         unauthenticated: cfg.unauthenticated,
+        member_reads: crate::default_member_permits(),
     });
 
     if cfg.refresh_seconds > 0 {

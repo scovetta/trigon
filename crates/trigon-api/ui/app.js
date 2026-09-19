@@ -1154,6 +1154,13 @@ function textView(d) {
         el('span', { class: 'dm', text: l.kind === 'removed' ? '−' : l.kind === 'added' ? '+' : ' ' }),
         el('span', { class: 'dt', text: l.text || ' ' }))),
     ])),
+    t.lines_omitted
+      ? el('p', { class: 'withheld-note' },
+          el('strong', { text: `${t.lines_omitted.toLocaleString()} further changed line(s) are not shown. ` }),
+          'The rendered diff stops at ', el('strong', { text: t.lines_shown.toLocaleString() }),
+          ' line(s). A file that differs this widely is read by downloading both copies, not by scrolling; '
+            + 'both are on the raw links above.')
+      : null,
     el('p', { class: 'note' },
       el('strong', { text: '−' }), ' is the published copy, ', el('strong', { text: '+' }), ' the rebuilt one. ',
       `${t.upstream_lines} line(s) published, ${t.rebuild_lines} rebuilt.`));

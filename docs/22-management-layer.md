@@ -939,6 +939,14 @@ Until now the island held package names and counts. It now holds **the bytes of 
 else published**, which is the most attacker-controlled thing on the page — a member whose content
 is `</script><script>…` would be executing on this origin before the first paint.
 
+### What a member request costs
+
+Twice the artifact, because both copies are fetched and parsed to compare one file inside them.
+Measured: 409 MiB peak for a 200 MiB-per-side artifact. `MAX_ARTIFACT` allows 256 MiB a side, so a
+request can cost half a gigabyte and nothing bounded how many ran at once — member reads hold one of
+four permits now, and an artifact the record says is over the cap is refused before the blob store
+is touched at all. `docs/16-findings.md` §3.45 has the table.
+
 ## 13. What is left
 
 Three things, and each is blocked on something real rather than on time.

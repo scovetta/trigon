@@ -68,12 +68,23 @@ impl ArchivedSet {
     }
 
     /// The set digest this module implements, for the named profile.
+    ///
+    /// A zero here means one thing and not the other three. `trigon_set_digest` returns zero for a
+    /// profile it does not implement or for profile bytes that are not UTF-8 — and the bytes came
+    /// from `&str`, so they are UTF-8. The module does not implement the profile. Saying that,
+    /// rather than the generic refusal, is the whole difference between a verifier looking at their
+    /// module and a verifier looking at the package.
     pub fn digest(&mut self, profile: &str) -> Result<Digest> {
         let p = self.write(profile.as_bytes())?;
         let packed = self
             .set_digest
             .call(&mut self.store, (p, profile.len() as u32))
             .context("calling trigon_set_digest")?;
+        if packed == 0 {
+            bail!(
+                "this module does not implement the profile `{profile}`. It was archived before                  that profile existed, or it is a set that never had it. Either way the artifact                  is not the problem."
+            );
+        }
         let bytes = self.read(packed)?;
         let bytes: [u8; 32] = bytes
             .try_into()
@@ -82,6 +93,12 @@ impl ArchivedSet {
     }
 
     /// Stabilize one artifact through the archived set.
+    ///
+    /// `trigon_stabilize` returns zero for an unknown profile, an unparseable artifact, and a
+    /// failed serialize alike, and the ABI is archival — it may only be appended to, so the guest
+    /// cannot start distinguishing them without orphaning every module already written. The host
+    /// can, though: it asks `trigon_set_digest` about the same profile, which answers that one
+    /// question on its own.
     pub fn stabilize(&mut self, profile: &str, format: Format, data: &[u8]) -> Result<Vec<u8>> {
         let p = self.write(profile.as_bytes())?;
         let d = self.write(data)?;
@@ -98,6 +115,11 @@ impl ArchivedSet {
                 ),
             )
             .context("calling trigon_stabilize")?;
+        if packed == 0 {
+            // Re-ask the one question the sentinel merged away. If the module has the profile, the
+            // refusal really was about these bytes.
+            self.digest(profile)?;
+        }
         self.read(packed)
     }
 
@@ -133,7 +155,10 @@ impl ArchivedSet {
     /// Unpack `(ptr << 32) | len` and copy the bytes out.
     fn read(&mut self, packed: u64) -> Result<Vec<u8>> {
         if packed == 0 {
-            bail!("the module refused: it could not parse the artifact under that profile");
+            bail!(
+                "the module refused these bytes under a profile it does implement: it could not \
+                 parse them as that format, or could not serialize the result"
+            );
         }
         let (ptr, len) = ((packed >> 32) as usize, (packed & 0xffff_ffff) as usize);
         let data = self.memory.data(&self.store);

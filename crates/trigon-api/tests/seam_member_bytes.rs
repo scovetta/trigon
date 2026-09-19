@@ -183,6 +183,7 @@ async fn a_member_with_no_bytes_says_which_of_the_three_reasons_it_is() {
             index,
             switches: trigon_api::Switches::default(),
             unauthenticated: trigon_api::Principal::Operator,
+            member_reads: trigon_api::default_member_permits(),
         });
         let mut router = trigon_api::router(api);
         let res = router
@@ -257,4 +258,191 @@ async fn a_member_with_no_bytes_says_which_of_the_three_reasons_it_is() {
         "{body}"
     );
     assert!(!body.contains("not_kept"), "{body}");
+}
+
+/// An artifact too large to parse is refused from the record, before a byte is read.
+///
+/// Measured before this existed: a request for a member of a 300 MiB-per-side artifact reached
+/// **608 MiB of resident memory** and then answered 404 saying the artifact was too large to read.
+/// The cap lived inside `member::read`, which runs after the whole thing has been fetched and
+/// copied. The record already knows the size.
+///
+/// The check inside `read` is still the guarantee — a record can carry a wrong `bytes`, and this
+/// test's sibling below relies on that. This one turns the common case from half a gigabyte into
+/// nothing.
+#[tokio::test]
+async fn an_artifact_too_large_is_refused_without_reading_it() {
+    use std::sync::Arc;
+    use trigon_core::Digest;
+    use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
+
+    // An empty store: the blob this record names does not exist. If the handler tried to fetch it
+    // the refusal would name the *store*, so the message below is proof nothing was read.
+    let store = Arc::new(Store::in_memory());
+    let mut r = RunRecord::new(
+        "1700000001-aa",
+        "pkg:npm/a@1.0.0",
+        ArtifactRef {
+            name: "pkg.zip".into(),
+            sha256: Digest::from_bytes([1u8; 32]),
+            // Larger than MAX_ARTIFACT.
+            bytes: 300 * 1024 * 1024,
+            stored: true,
+        },
+        Environment {
+            base_image: "x@sha256:0".into(),
+            egress: "mirror".into(),
+            isolation: "podman".into(),
+            attestable: true,
+            registry_moment: None,
+            pin: None,
+            guard_manifest: None,
+            guarded_members: None,
+        },
+        "2026-01-01T00:00:00Z",
+    );
+    r.state = RunState::Done;
+    r.outcome = Some("divergent".into());
+    store.put_run(&r).await.unwrap();
+
+    let index = trigon_api::Index::new();
+    index
+        .refresh(&store, trigon_api::Switches::default())
+        .await
+        .unwrap();
+    let api = Arc::new(trigon_api::Api {
+        store,
+        queue: None,
+        index,
+        switches: trigon_api::Switches::default(),
+        unauthenticated: trigon_api::Principal::Operator,
+        member_reads: trigon_api::default_member_permits(),
+    });
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower_service::Service as _;
+    let mut router = trigon_api::router(api);
+    let res = router
+        .call(
+            Request::builder()
+                .uri("/v1/runs/1700000001-aa/member/raw?path=a&side=upstream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&body);
+
+    assert!(body.contains("too_large"), "{body}");
+    assert!(
+        !body.contains("no_such_blob"),
+        "the handler went to the store before checking the size it already knew: {body}"
+    );
+}
+
+/// Only so many member reads run at once.
+///
+/// One costs twice the artifact — 409 MiB measured for a 200 MiB-per-side artifact, against a cap
+/// that allows 256 MiB a side. Unbounded concurrency is therefore unbounded memory, and the way
+/// that ends is the process being killed, which a reader reports as the server crashing.
+#[tokio::test]
+async fn member_reads_are_bounded() {
+    let permits = trigon_api::default_member_permits();
+    let total = permits.available_permits();
+    assert!(
+        (1..=8).contains(&total),
+        "the bound is {total}, which is either no bound at all or too tight to serve anybody"
+    );
+
+    // Taking them all leaves the next caller waiting rather than proceeding.
+    let held: Vec<_> = (0..total)
+        .map(|_| permits.clone().try_acquire_owned().expect("a permit"))
+        .collect();
+    assert!(
+        permits.clone().try_acquire_owned().is_err(),
+        "a {total}-permit semaphore handed out {}",
+        total + 1
+    );
+    drop(held);
+    assert_eq!(
+        permits.available_permits(),
+        total,
+        "permits were not returned"
+    );
+}
+
+/// A cap on what is read in is not a cap on what is sent out.
+///
+/// `MAX_TEXT` bounds a member at 2 MiB. Two MiB of bare newlines against two MiB of `x\n` is
+/// 3,145,728 changed lines — and before this bound existed, all of them were rendered: an 86 MB
+/// JSON body that took three and a half seconds to serialize, four of which at once peaked at a
+/// gigabyte. A browser handed 86 MB of JSON is a browser that looks like it lost the network.
+///
+/// Asserted on the shape rather than the exact number, so it survives a change to the limit: the
+/// diff must be small, and it must say how much it left out.
+#[test]
+fn a_diff_too_large_to_render_says_how_much_it_left_out() {
+    let up = vec![b'\n'; 2 << 20];
+    let rb: Vec<u8> = std::iter::repeat_n(*b"x\n", (2 << 20) / 2)
+        .flatten()
+        .collect();
+    let (up_lines, rb_lines) = (up.len(), rb.len() / 2);
+
+    let v = trigon_api::member::view("wide.txt", Some(up), Some(rb), None);
+    let t = v.text.as_ref().expect("newlines are text");
+
+    let rendered: usize = t.hunks.iter().map(|h| h.lines.len()).sum();
+    assert_eq!(rendered, t.lines_shown, "lines_shown must count the hunks");
+    assert!(
+        rendered < 10_000,
+        "the diff rendered {rendered} lines; the point of the bound is that it does not"
+    );
+
+    // The bound is only honest if the number it withheld is stated, and stated as a count of what
+    // the reader is missing rather than of what some loop skipped.
+    assert_eq!(
+        t.lines_shown + t.lines_omitted,
+        up_lines + rb_lines,
+        "shown plus omitted must account for every changed line: {} + {} against {up_lines} \
+         removed and {rb_lines} added",
+        t.lines_shown,
+        t.lines_omitted
+    );
+    assert!(t.unaligned, "a middle this wide is past MAX_ALIGN");
+
+    let body = serde_json::to_vec(&v).expect("serialize");
+    assert!(
+        body.len() < (4 << 20),
+        "the body was {} MB; it is meant to be a page, not a download",
+        body.len() >> 20
+    );
+}
+
+/// The same bound on the one-sided case, where there is no alignment at all and every line of the
+/// surviving copy is an addition. This path builds its hunk directly rather than through `hunks`,
+/// so it needs its own assertion or it keeps the old unbounded behaviour.
+#[test]
+fn a_new_file_too_large_to_render_is_bounded_the_same_way() {
+    let rb: Vec<u8> = std::iter::repeat_n(*b"x\n", (2 << 20) / 2)
+        .flatten()
+        .collect();
+    let total = rb.len() / 2;
+
+    let v = trigon_api::member::view("added.txt", None, Some(rb), None);
+    let t = v.text.as_ref().expect("text");
+
+    assert!(
+        t.lines_shown < 10_000,
+        "a one-sided view rendered {} lines",
+        t.lines_shown
+    );
+    assert_eq!(
+        t.lines_shown + t.lines_omitted,
+        total,
+        "shown plus omitted must account for the whole file"
+    );
 }

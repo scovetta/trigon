@@ -208,3 +208,70 @@ fn a_file_that_is_not_wasm_at_all_fails_with_its_path() {
     };
     assert!(text.contains("not-a-module.wasm"), "{text}");
 }
+
+/// A module that predates a profile must say so, rather than blame the artifact.
+///
+/// Found by running this file's own parity test against a module built four days earlier: `nupkg`
+/// had been added to the native set in the meantime, and asking the old module for it produced
+/// "the module refused: it could not parse the artifact under that profile". The artifact was a
+/// well-formed `.nupkg`. A verifier reading that goes and looks at the package.
+///
+/// The cause is a sentinel doing double duty: the guest returns `0` for an unknown profile, for an
+/// unparseable artifact, and for a failed serialize alike, and the host turned every one of them
+/// into the middle sentence. Which is [`docs/16-findings.md` §3.42] again — three reasons a thing
+/// has no bytes, reported as one — in a second crate.
+///
+/// The ABI is archival and may only be appended to, so the fix is on the host side: it re-asks
+/// `trigon_set_digest`, which answers the profile question by itself.
+#[test]
+fn a_profile_the_module_does_not_have_blames_the_module_not_the_artifact() {
+    let Some(path) = module() else {
+        panic!("the stabilizer module is not built; see the sibling test");
+    };
+    let mut archived = trigon_stabilize_wasm::ArchivedSet::load(&path).unwrap();
+
+    // A profile no set has ever implemented stands in for one archived before it existed: the
+    // guest cannot tell those apart either, and returns the same zero for both.
+    let e = archived.digest("no-such-profile").unwrap_err().to_string();
+    assert!(
+        e.contains("does not implement the profile `no-such-profile`"),
+        "asking for a missing profile must name the profile: {e}"
+    );
+    assert!(
+        !e.contains("parse"),
+        "and must not blame the artifact, which was never passed: {e}"
+    );
+
+    // The same question reached through `stabilize`, where the sentinel is genuinely ambiguous and
+    // the host has to go and disambiguate it.
+    let e = archived
+        .stabilize("no-such-profile", Format::Zip, &wheel(&[("a.txt", b"one")]))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("does not implement the profile"),
+        "a valid artifact under an unknown profile is a module problem: {e}"
+    );
+
+    // And the converse still reports what it used to, or the fix has just moved the confusion.
+    let e = archived
+        .stabilize("wheel", Format::Zip, b"not a zip at all")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("refused these bytes"),
+        "a profile the module has, with bytes it cannot read, is an artifact problem: {e}"
+    );
+
+    // `check` is the control that stops a verifier running the wrong set, so its diagnosis is the
+    // one that most needs to point at the right thing.
+    let e = archived
+        .check("no-such-profile", &"ab".repeat(32))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("does not implement the profile"),
+        "check must distinguish `this module lacks the profile` from `this module has a different \
+         set`, because the two have different remedies: {e}"
+    );
+}

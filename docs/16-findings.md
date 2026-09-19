@@ -1961,3 +1961,158 @@ always leaves it in the future. Between them that is what a rate limit needs.
 **The lesson is not "avoid timing in tests".** It is that "I removed the timing" is a claim worth
 re-checking: the third version genuinely read no clock, and still encoded an assumption about how
 much time would pass between two of its own statements.
+
+### 3.45 A cap that is checked after the thing it caps has been loaded
+
+**Gap, and a measurement.** An adversarial audit of the member-diff routes asked what one request
+costs in memory. Measured, on this machine:
+
+| artifact, per side | status | peak RSS |
+|---|---|---|
+| 200 MiB | 200 | **409 MiB** |
+| 300 MiB (over `MAX_ARTIFACT`) | 404 | **608 MiB** |
+
+Two things in that table.
+
+**A member request costs twice the artifact.** It fetches and parses *both* copies to compare one
+file inside them, which is inherent — you cannot diff one side. With `MAX_ARTIFACT` at 256 MiB that
+is half a gigabyte per request, and nothing bounded how many ran at once. Unbounded concurrency over
+an unbounded multiplier is how a process gets killed, and a killed process is what a reader calls a
+crash. Member reads now hold one of four permits.
+
+**The over-cap row is the sharper finding.** That request was *refused* — and it still cost 608 MiB
+first, because the size check lived inside `member::read`, which runs after the whole artifact has
+been fetched from the blob store and copied into a `Vec`. The record has carried the artifact's size
+all along. Refusing from the record turns the common refusal from half a gigabyte into nothing.
+
+The post-load check stays, because a record can carry a wrong size and only the bytes settle it.
+The pre-check is an optimisation; the permit is the guarantee.
+
+**The shape:** a limit enforced at the point where the expensive thing is *used* rather than where
+it is *acquired* does not limit the expense. It only limits the answer.
+
+### 3.46 The conversion protected everything except the hot path
+
+**Correction, found by an audit rather than by the change's own review.** When every index reader
+was converted from `.read().unwrap()` to a helper that recovers from lock poison (§3.43), one was
+missed: `entry()`. `rustfmt` had split its call across four lines, and the edit that fixed the
+others matched the single-line form.
+
+`entry()` is called by every run page and every diff route. So the conversion protected the
+accessors nobody would have noticed and left the one that would have taken the site down.
+
+Three independent reviewers flagged it. What none of them needed was cleverness — a `grep` would
+have found it, which is exactly why the guard is now a `grep`:
+`no_accessor_takes_the_lock_without_recovering_from_poison` strips whitespace from the module's own
+source and asserts the lock is taken in the two helpers and nowhere else.
+
+The first version of that guard normalised runs of whitespace to single spaces, and therefore
+matched `self.inner\n.write()` but not `self.inner.read()`. **A check for a formatting-dependent
+mistake that is itself formatting-dependent is not a check.**
+
+### 3.47 One bad query parameter discarded the deep link
+
+**Gap, in code three commits old.** `?member=x&offset=abc` booted nothing. Deserializing the
+document's query into a struct is all-or-nothing, so an unreadable `offset` failed the whole parse
+and `unwrap_or_default()` threw away the `member` beside it. A reader whose link did nothing would
+have had no way to connect that to a parameter with no bearing on which member they asked for — and
+`?utm_source=` pasted on by a link shortener would have done the same.
+
+The query is read one field at a time now, from a `Vec<(String, String)>` that cannot fail on a
+value. A bad `offset` costs the offset.
+
+**The shape:** a parse that binds several independent fields together makes every field as fragile
+as the most fragile one. It is the "two things merged where the code found it convenient" pattern
+again, in the request parser rather than in a record.
+
+### 3.48 The input was capped; the output was not
+
+**Real, and measured before it was believed.** A reviewer claimed the text diff could produce an
+enormous response. `MAX_TEXT` caps a member at 2 MiB, so the claim looked like it had already been
+answered. It had not: the cap bounds the *bytes read in*, and the diff's size is set by the *number
+of lines* those bytes contain.
+
+The worst case is two MiB of bare newlines against two MiB of `x\n` — a file of nothing but line
+breaks, which is the most lines two MiB can hold. Both middles are past `MAX_ALIGN`, so the view
+takes the unaligned path and reports the whole middle as removed and re-added: 2,097,152 removals
+plus 1,048,576 additions. Measured:
+
+| | before | after |
+| --- | --- | --- |
+| line structs | 3,145,728 | 2,000 |
+| JSON body | 86 MB | 61 KB |
+| serialize | 3.52 s | 2.4 ms |
+| four at once, peak RSS | 1064 MB | — |
+
+The 86 MB number is the interesting one, because of how it fails. It is not a crash. The server
+builds the body, spends three and a half seconds serializing it, and sends all of it. What the
+reader sees is a page that sits there and eventually gives up — which is indistinguishable, from the
+browser's side, from the server having died. This tree had already chased that exact symptom once
+([3.43](#343-a-dropped-connection-and-a-dead-server-are-the-same-thing-to-a-browser)), and the
+answer there was to make a bug arrive as a sentence. A response that is merely too big to be useful
+arrives as no sentence at all.
+
+`MAX_DIFF_LINES` bounds the rendered diff at two thousand lines across every hunk, and both
+constructions that skip `hunks()` — the one-sided "this file is new" view and the wholly-replaced
+middle — are bounded on the same budget and asserted separately, because a bound that lives in one
+of three constructors is not a bound.
+
+What is dropped is counted and stated: `lines_shown + lines_omitted` equals every changed line, and
+the test asserts that identity rather than either number, so it survives a change to the limit. The
+count is taken from the ops the budget did not reach rather than from what the emit loop skipped —
+those differ, and only the first is the number a reader is missing.
+
+**The shape:** this is [3.45](#345-a-cap-that-is-checked-after-the-thing-it-caps-has-been-loaded)
+pointed the other way. There, a limit sat downstream of the expense it was meant to prevent. Here a
+limit sits upstream of an expense that is *not proportional to it* — two MiB of prose and two MiB of
+newlines cost the same to read and differ by three orders of magnitude to render. A cap only caps
+what it is measured in. Ask what the expensive structure is counted in, and cap that.
+
+### 3.49 One sentinel, four refusals, and the wrong one printed
+
+**Real, and found by running a test against a module four days old.** The stabilizer-parity suite
+compares the archived WebAssembly stabilizer set against the compiled one. It failed with:
+
+> the module refused: it could not parse the artifact under that profile
+
+The artifact was a well-formed archive. The real cause was that `nupkg` had been added to the
+native profile list on the 17th and the module on disk was built on the 14th, so it did not
+implement that profile at all.
+
+The guest returns `0` for an unknown profile, for profile bytes that are not UTF-8, for an
+artifact it cannot parse, and for a result it cannot serialize. The host's `read()` turned every
+one of those into the sentence above. A verifier who reads it goes and looks at the package, which
+is the one thing that was fine.
+
+This is [3.42](#342-three-reasons-a-file-has-no-bytes-reported-as-one) in a second crate: several
+reasons a call produced nothing, reported as whichever one somebody wrote down first.
+
+The ABI is archival — `format_from_u32`'s comment already says it may only be appended to, because
+a module written today is read by a host built later — so the guest cannot start returning richer
+sentinels without orphaning every module already in existence. The fix is therefore entirely on the
+host:
+
+- `digest()` no longer routes its zero through `read()`. For `trigon_set_digest` a zero has exactly
+  one meaning the host cannot already rule out — the host built the profile string from a `&str`,
+  so it is UTF-8 — and that meaning is "this module does not implement that profile". It says so,
+  and names the profile.
+- `stabilize()`'s zero is genuinely ambiguous, so on a zero it asks `trigon_set_digest` about the
+  same profile. That question is answerable on its own, and answering it separates the two cases.
+- `read()`'s remaining message no longer claims to know why, only what: the module refused *these
+  bytes*, under a profile it does implement.
+
+`check()` inherits the first of these, which matters most: `check` is the control that stops a
+verifier running one stabilizer set while believing they ran another, and "your module predates
+this profile" and "your module implements a different set" have different remedies.
+
+**Also worth saying: the parity test could not have caught this in CI.** The `wasm-parity` job
+builds the module from the same checkout it tests against, so it compares a fresh wasm build to a
+fresh native build. That is a real check — two compilation targets can diverge — but it is not the
+claim the crate exists for, which is that *an old archived set still answers correctly*. Nothing
+tests an old module against a newer host. The drift was only visible because a stale artifact
+happened to be sitting in `target/`.
+
+**The shape:** a sentinel value carries no room for a reason, so the reason gets supplied by
+whoever writes the error string, once, for the case they had in mind. If a function can fail four
+ways and returns one `0`, the caller that must explain the failure has to re-derive which one — and
+the place to do that is the caller, because the ABI is the thing that cannot change.

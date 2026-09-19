@@ -77,15 +77,36 @@ pub async fn index_html(State(api): State<Arc<Api>>, uri: Uri) -> Response {
     document(&api, None, query_of(&uri)).await
 }
 
-/// The document's query, or nothing.
+/// The document's query, read one field at a time.
 ///
-/// Parsed from the `Uri` rather than extracted, so a stray or malformed parameter costs a *boot*
-/// rather than the page: `Query<T>` as an extractor rejects the request, and a document that 400s
-/// because somebody appended `?utm_source=` is a document nobody can share.
+/// Parsed from the `Uri` rather than extracted, so a stray parameter costs a *boot* rather than the
+/// page: `Query<T>` as an extractor rejects the request, and a document that 400s because somebody
+/// appended `?utm_source=` is a document nobody can share.
+///
+/// **Field by field, because deserializing the struct is all-or-nothing.** The first version did
+/// `Query::<DocQuery>::try_from_uri(uri).unwrap_or_default()`, so `?member=x&offset=abc` failed to
+/// deserialize `offset` and threw away `member` with it — the deep link booted nothing, and the
+/// reason was a parameter that has nothing to do with which member was asked for. A bad `offset`
+/// now costs the offset.
 fn query_of(uri: &Uri) -> DocQuery {
-    Query::<DocQuery>::try_from_uri(uri)
-        .map(|Query(q)| q)
-        .unwrap_or_default()
+    // A `Vec<(String, String)>` cannot fail on a value, because every value is a string. The
+    // percent-decoding and `+` handling still come from the same place as before.
+    let pairs = Query::<Vec<(String, String)>>::try_from_uri(uri)
+        .map(|Query(v)| v)
+        .unwrap_or_default();
+    let get = |k: &str| {
+        pairs
+            .iter()
+            .find(|(name, _)| name == k)
+            .map(|(_, v)| v.clone())
+    };
+    DocQuery {
+        member: get("member").filter(|s| !s.is_empty()),
+        view: get("view").filter(|s| !s.is_empty()),
+        // An unreadable offset is no offset, which is the difference-centred default. Silently the
+        // right thing, and it no longer takes the member with it.
+        offset: get("offset").and_then(|s| s.parse().ok()),
+    }
 }
 
 pub async fn asset(State(api): State<Arc<Api>>, Path(path): Path<String>, uri: Uri) -> Response {
@@ -270,6 +291,9 @@ async fn member_boot(
     if !admits(api.principal(), Class::Artifact) {
         return serde_json::Value::Null;
     }
+    // The document path reads a member too, so it takes the same permit. Booting was the change
+    // that made this reachable from a plain page load rather than only from an explicit fetch.
+    let _permit = api.member_reads.clone().acquire_owned().await;
     let Ok(pair) = crate::routes::member_pair(api, record, path).await else {
         return serde_json::Value::Null;
     };

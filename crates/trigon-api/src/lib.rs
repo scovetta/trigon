@@ -58,12 +58,32 @@ pub struct Api {
     pub queue: Option<trigon_store::Queue>,
     pub index: index::Index,
     pub switches: Switches,
+    /// How many member reads may be in flight at once.
+    ///
+    /// **Peak memory for one member request is twice the artifact**, because both sides are fetched
+    /// and parsed to compare one file inside them. Measured: 409 MiB for a 200 MiB-per-side
+    /// artifact, and `MAX_ARTIFACT` allows 256 MiB — so an unbounded number of concurrent requests
+    /// is an unbounded amount of memory, and the way that ends is the process being killed. Which
+    /// is what a reader would report as the server crashing.
+    ///
+    /// Four, so the worst case is about two gigabytes rather than however many requests arrive. A
+    /// request that waits is slow; a process that is killed takes everybody's page with it.
+    pub member_reads: Arc<tokio::sync::Semaphore>,
     /// What an unauthenticated caller counts as.
     ///
     /// `Anonymous` is what `--public` selects and is the mode the class gating and the publication
     /// gate are written for. `Operator` is the default, because the default bind is loopback and a
     /// person reading their own store should not have to authenticate to themselves.
     pub unauthenticated: Principal,
+}
+
+/// How many member reads may be in flight at once, by default.
+///
+/// Named rather than spelled `Semaphore::new(4)` at each construction, so the number that bounds
+/// the server's peak memory is stated once and has somewhere to carry its reasoning — and so a test
+/// building an `Api` gets the production bound rather than whatever it happened to type.
+pub fn default_member_permits() -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(4))
 }
 
 impl Api {

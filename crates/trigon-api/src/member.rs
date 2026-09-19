@@ -39,7 +39,7 @@ use trigon_core::{Digest, Format};
 /// Parsing holds the whole archive in memory, and `Blobs::get` re-hashes the blob on the way in, so
 /// the cost of a request is linear in this. Generous enough for every ecosystem this project
 /// handles and small enough that a pathological artifact is a refusal rather than an outage.
-const MAX_ARTIFACT: usize = 256 << 20;
+pub(crate) const MAX_ARTIFACT: usize = 256 << 20;
 
 /// The largest member this will return or diff.
 const MAX_MEMBER: usize = 16 << 20;
@@ -56,6 +56,19 @@ const MAX_ALIGN: usize = 600;
 
 /// Lines of unchanged context either side of a change.
 const CONTEXT: usize = 3;
+
+/// Lines the rendered diff will carry, across every hunk.
+///
+/// **`MAX_TEXT` bounds the input and bounded nothing about the output.** Measured on the worst case
+/// — 2 MiB of bare newlines against 2 MiB of `x\n` — the view held **3,145,728 line structs**,
+/// serialized to an **86 MB** JSON body, and took 3.5 seconds to do it. Four of those at once
+/// peaked at a gigabyte. A browser handed 86 MB of JSON is a browser that appears to have lost the
+/// network, which is the symptom this whole investigation started from.
+///
+/// Two thousand is far more than anyone reads and turns that body into about a hundred kilobytes.
+/// What is dropped is counted and said, because a list that stops without saying so is a list that
+/// lies about its total — the same rule the hex view's `differing_bytes` exists for.
+const MAX_DIFF_LINES: usize = 2_000;
 
 /// Total bytes of hex to return across all regions.
 const MAX_HEX: usize = 8 << 10;
@@ -100,6 +113,9 @@ pub struct TextDiff {
     /// wholly replaced. Saying so matters: "every line changed" and "we did not look" are
     /// different claims and they render identically.
     pub unaligned: bool,
+    /// Lines the diff holds, and lines it stopped short of. See [`MAX_DIFF_LINES`].
+    pub lines_shown: usize,
+    pub lines_omitted: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -322,17 +338,18 @@ fn text_diff(up: Option<&[u8]>, rb: Option<&[u8]>) -> TextDiff {
     };
 
     // A file present on one side only is not a diff; it is a file. Every line is an addition or a
-    // removal, which is both true and the only honest rendering.
+    // removal, which is both true and the only honest rendering — up to the line budget.
     if up.is_none() || rb.is_none() {
         let kind = if up.is_none() { "added" } else { "removed" };
         let src = if up.is_none() { &b } else { &a };
+        let shown = src.len().min(MAX_DIFF_LINES);
         return TextDiff {
             upstream_lines: a.len(),
             rebuild_lines: b.len(),
             hunks: vec![Hunk {
                 upstream_start: 1,
                 rebuild_start: 1,
-                lines: src
+                lines: src[..shown]
                     .iter()
                     .map(|l| Line {
                         kind,
@@ -342,6 +359,8 @@ fn text_diff(up: Option<&[u8]>, rb: Option<&[u8]>) -> TextDiff {
             }],
             truncated,
             unaligned: false,
+            lines_shown: shown,
+            lines_omitted: src.len() - shown,
         };
     }
 
@@ -363,6 +382,8 @@ fn text_diff(up: Option<&[u8]>, rb: Option<&[u8]>) -> TextDiff {
             rebuild_lines: b.len(),
             truncated,
             unaligned: false,
+            lines_shown: 0,
+            lines_omitted: 0,
         };
     }
 
@@ -377,8 +398,11 @@ fn text_diff(up: Option<&[u8]>, rb: Option<&[u8]>) -> TextDiff {
         align(am, bm)
     };
 
+    let (hunks, omitted) = hunks(&a, &b, head, tail, &ops);
     TextDiff {
-        hunks: hunks(&a, &b, head, tail, &ops),
+        lines_shown: hunks.iter().map(|h| h.lines.len()).sum(),
+        lines_omitted: omitted,
+        hunks,
         upstream_lines: a.len(),
         rebuild_lines: b.len(),
         truncated,
@@ -452,7 +476,17 @@ fn align(a: &[String], b: &[String]) -> Vec<Op> {
 }
 
 /// Turn the op list back into hunks with context, against the untrimmed files.
-fn hunks(a: &[String], b: &[String], head: usize, tail: usize, ops: &[Op]) -> Vec<Hunk> {
+///
+/// Stops at [`MAX_DIFF_LINES`] and returns how many lines it did not reach. The budget is spent on
+/// the first changes rather than sampled across the file, because a reader who opens a diff starts
+/// at the top — and because the alternative is a rendering whose gaps nobody can locate.
+fn hunks(
+    a: &[String],
+    b: &[String],
+    head: usize,
+    tail: usize,
+    ops: &[Op],
+) -> (Vec<Hunk>, usize) {
     // Replay the whole file as ops, so line numbers below are the real ones.
     let mut all: Vec<Op> = vec![Op::Same; head];
     all.extend_from_slice(ops);
@@ -462,8 +496,18 @@ fn hunks(a: &[String], b: &[String], head: usize, tail: usize, ops: &[Op]) -> Ve
     let mut cur: Option<Hunk> = None;
     let (mut ai, mut bi) = (0usize, 0usize);
     let mut quiet = 0usize;
+    let mut spent = 0usize;
+    // Every changed line the budget did not reach. Counted from the ops rather than from what was
+    // emitted, so the number is what a reader is missing rather than what the loop skipped.
+    let mut omitted = 0usize;
 
     for (k, op) in all.iter().enumerate() {
+        if spent >= MAX_DIFF_LINES {
+            if *op != Op::Same {
+                omitted += 1;
+            }
+            continue;
+        }
         let changed = *op != Op::Same;
         if changed {
             if cur.is_none() {
@@ -497,6 +541,7 @@ fn hunks(a: &[String], b: &[String], head: usize, tail: usize, ops: &[Op]) -> Ve
         }
 
         if let Some(h) = cur.as_mut() {
+            spent += 1;
             match op {
                 Op::Same => h.lines.push(Line {
                     kind: "same",
@@ -524,7 +569,7 @@ fn hunks(a: &[String], b: &[String], head: usize, tail: usize, ops: &[Op]) -> Ve
     if let Some(h) = cur {
         out.push(h);
     }
-    out
+    (out, omitted)
 }
 
 // --------------------------------------------------------------------------
