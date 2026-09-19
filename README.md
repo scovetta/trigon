@@ -660,3 +660,52 @@ hard, then [`docs/12-security.md`](docs/12-security.md) for the attack that shap
 ## License
 
 Apache-2.0.
+
+---
+
+## Running a fleet
+
+Four commands, and they compose. The queue is SQLite on a laptop and Postgres in a cloud; the same
+statements serve both, and which one you get comes from the URL.
+
+```console
+$ trigon enqueue sqlite://queue.db pkg:npm/left-pad@1.3.0 --migrate
+offered 1 target(s) to the bulk queue
+  ready    1
+
+$ trigon worker sqlite://queue.db --image auto --work ./work --store ./store
+worker host-4821 on sqlite://queue.db, building with auto at egress mirror-only
+```
+
+A job goes to exactly one worker. A worker that dies releases its job without anybody noticing —
+the lease is a timestamp, not a lock, so nothing has to observe the death. The run and the
+acknowledgement land in one transaction, so nothing is built twice.
+
+**A verdict enqueues a second, independent attempt**, and that is what makes anything publishable:
+[`ADR-0010`](docs/adr/0010-publish-divergences.md)'s first safeguard is two agreeing attempts,
+divergences and matches alike, because one attempt cannot tell a deterministic recipe from a lucky
+one.
+
+Then serve it:
+
+```console
+$ trigon serve ./store --public --queue sqlite://queue.db
+serving 2 run(s) on http://127.0.0.1:8100  (public: an unauthenticated reader sees only what the
+publication gate released, and no unredacted bytes)
+```
+
+`--public` turns on two controls at once, and there is no way to ask for half: the publication
+gate, so nothing reaches an anonymous reader until two attempts agree and the run was not built at
+an open egress tier; and the evidence class table, so no build log or network transcript leaves the
+process. Build logs are stored unredacted, and until this existed the only thing protecting them
+was that `trigon watch` binds to loopback.
+
+Reading is anonymous. Asking costs a credential and a quota:
+
+```console
+$ trigon grant sqlite://queue.db alice --scopes request --daily-quota 20
+token      27807464512f…                    # shown once; only its digest is stored
+```
+
+See [`docs/22-management-layer.md`](docs/22-management-layer.md) for what is built, what is
+planned, and which of the two each stage is.

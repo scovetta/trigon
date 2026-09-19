@@ -71,9 +71,13 @@ trigon strategy pin <target> --to ./build.yaml
 trigon attest <run-id> --sign kms://...
 trigon verify-attestation ./trigon.intoto.jsonl --identity <policy> --rerun-comparison
 
-# Running the thing.
-trigon serve --workers 4                   # API + UI + workers, SQLite + local filesystem
-trigon work --classes build,judge          # a worker joining an existing control plane
+# Running the thing. The first four exist; the rest of this block is still design.
+trigon serve <store> [--public] [--queue sqlite://…|postgres://…]
+                                           # the corpus as a website, and its API
+trigon worker <queue> --image auto --work ./w --store ./s
+                                           # one worker; run as many as you like
+trigon enqueue <queue> <purl>...           # put targets on the queue
+trigon grant <queue> <id> --scopes request # issue a credential, printed once
 trigon sweep create --ecosystem npm --top 100000 --budget '$500' --tier bulk \
                     --selection bulk-default        # packages to artifacts; see 02 §8.1
 trigon sweep status <sweep-id>

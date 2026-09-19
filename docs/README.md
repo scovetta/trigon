@@ -56,7 +56,7 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
 | [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) | Where a verdict is published, and how an end user looks one up — design only |
 | [`20-m4-plan.md`](20-m4-plan.md) | What M4 needs before it starts: the six exit criteria against the code, the measured cost of a 5,000-target sweep, and the order |
 | [`21-base-image-automation.md`](21-base-image-automation.md) | Deriving a base image automatically when a build needs a tool the image lacks, and what `--image auto` may and may not decide — design only |
-| [`22-management-layer.md`](22-management-layer.md) | The decoupled front-end, the database, and multiple workers: a public site that browses and searches the corpus, requests rebuilds behind auth, and governs user-applied transforms. Stage 1 — the read-only site and the publication gate — is built (`trigon serve`); the rest is plan |
+| [`22-management-layer.md`](22-management-layer.md) | The decoupled front-end, the database, and multiple workers. Stages 0, 1, 2 and most of 3 and 4 are built: `trigon serve`, `trigon worker`, `trigon enqueue`, `trigon grant`, the ADR-0010 publication gate, the evidence classes and the queue. Each stage says what is built and what is still plan |
 | [`threat-model.md`](threat-model.md) | The contract with a consumer of a verdict: what is assumed, guaranteed, disclaimed, and out of scope |
 | [`threat-model.yaml`](threat-model.yaml) | The same, as a machine-readable index for triage. Generated from the prose by `scripts/threat-model-sidecar.py` |
 | [`adr/`](adr/) | Short records for the load-bearing decisions |

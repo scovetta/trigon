@@ -36,6 +36,7 @@ reqwest = { workspace = true, optional = true }
 trigon-mirror = { workspace = true, optional = true }
 trigon-store = { workspace = true, optional = true }
 trigon-api = { workspace = true, optional = true }
+trigon-engine = { workspace = true, optional = true }
 trigon-ai = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
@@ -55,7 +56,7 @@ default = ["build"]
 # Everything that needs an async runtime. `--no-default-features` produces the verifier: a binary
 # that reproduces a verdict from two artifacts and links no runtime and no network client, which is
 # the claim a sceptic can check with `cargo tree` rather than take on trust.
-build = ["dep:trigon-politeness", "dep:trigon-sandbox", "dep:trigon-registry", "dep:trigon-mirror", "dep:trigon-store", "dep:trigon-api", "dep:trigon-ai", "dep:tokio", "dep:async-trait", "dep:axum", "dep:reqwest"]
+build = ["dep:trigon-politeness", "dep:trigon-sandbox", "dep:trigon-registry", "dep:trigon-mirror", "dep:trigon-store", "dep:trigon-api", "dep:trigon-engine", "dep:trigon-ai", "dep:tokio", "dep:async-trait", "dep:axum", "dep:reqwest"]
 # Run an archived stabilizer set rather than only describing it, so a claim made under a set this
 # binary does not carry can still be re-derived. Off by default: it roughly doubles the verifier's
 # dependency tree, and the small tree is the thing a sceptic checks instead of trusting us. A

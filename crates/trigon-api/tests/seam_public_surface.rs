@@ -53,6 +53,9 @@ async fn api_over(records: Vec<RunRecord>, who: Principal) -> Arc<Api> {
         .expect("refresh");
     Arc::new(Api {
         store,
+        // No queue: these assert the read path, and an instance that reads a corpus out of object
+        // storage is exactly the shape stage 1 shipped.
+        queue: None,
         index,
         switches: Switches::default(),
         unauthenticated: who,

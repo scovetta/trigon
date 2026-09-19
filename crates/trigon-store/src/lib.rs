@@ -33,7 +33,7 @@ mod record;
 
 pub use blobs::Blobs;
 #[cfg(feature = "queue")]
-pub use queue::{Backend, HostBudget, Job, JobState, NewJob, Queue, Tier};
+pub use queue::{Backend, HostBudget, Job, JobState, NewJob, Principal, Queue, Requested, Tier};
 pub use record::{ArtifactRef, Costs, Environment, PinEvidence, RunRecord, RunState, Tokens};
 
 use std::path::Path;

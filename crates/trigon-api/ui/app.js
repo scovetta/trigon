@@ -47,8 +47,39 @@ const el = (tag, attrs = {}, ...kids) => {
   return n;
 };
 
-const api = async (path) => {
-  const r = await fetch(path, { headers: { accept: 'application/json' } });
+// The viewer's own credential, if they have pasted one.
+//
+// `localStorage`, deliberately and with its limits stated: it is this browser's copy of a token the
+// operator issued, it never leaves the origin, and a viewer who clears it is simply anonymous
+// again. It is not an account, there is no session, and nothing here can mint one — `trigon grant`
+// does that on the machine holding the queue.
+const TOKEN = {
+  get() {
+    try {
+      return localStorage.getItem('trigon.token') || null;
+    } catch {
+      // Private windows and blocked site data both throw. Anonymous is the correct fallback.
+      return null;
+    }
+  },
+  set(v) {
+    try {
+      if (v) localStorage.setItem('trigon.token', v);
+      else localStorage.removeItem('trigon.token');
+    } catch { /* nothing to do; the page works without it */ }
+  },
+};
+
+const api = async (path, opts = {}) => {
+  const headers = { accept: 'application/json', ...(opts.headers || {}) };
+  const token = TOKEN.get();
+  if (token) headers.authorization = `Bearer ${token}`;
+  if (opts.body !== undefined) headers['content-type'] = 'application/json';
+  const r = await fetch(path, {
+    method: opts.method || 'GET',
+    headers,
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+  });
   const body = await r.json().catch(() => ({ error: 'unreadable', detail: r.statusText }));
   if (!r.ok) throw Object.assign(new Error(body.detail || r.statusText), { body, status: r.status });
   return body;
@@ -115,6 +146,9 @@ const routes = [
   [/^\/runs\/([^/]+)$/, (m) => detail(decodeURIComponent(m[1]))],
   [/^\/targets\/(.+)$/, (m) => target(decodeURIComponent(m[1]))],
   [/^\/artifacts\/([0-9a-fA-F:]+)$/, (m) => artifact(m[1])],
+  [/^\/queue$/, () => queueView()],
+  [/^\/jobs\/(\d+)$/, (m) => jobView(Number(m[1]))],
+  [/^\/account$/, () => accountView()],
 ];
 
 async function route() {
@@ -191,12 +225,48 @@ function paintMode() {
       ? 'You are seeing only what the publication gate released: two agreeing attempts, a restricted egress tier, and no stabilizer a person or a model wrote.'
       : 'You are reading a store directly. Everything is shown, including runs the publication gate would hold back from a public reader.';
   }
+  const nav = document.getElementById?.('nav');
+  if (nav) {
+    nav.replaceChildren(
+      el('a', { href: '/queue', text: 'queue' }),
+      el('a', { href: '/account', text: ME?.principal ? ME.principal : 'sign in' }),
+    );
+  }
 }
+
+/* ---- the credential, and what it can do --------------------------------- */
+
+let ME = null;
+async function me(force) {
+  if (ME && !force) return ME;
+  ME = await api('/v1/me').catch(() => ({ principal: null, scopes: [] }));
+  return ME;
+}
+
+// **Never awaited on a first paint.** Who the viewer is depends on a token this browser holds and
+// the server did not see when it built the document, so `/v1/me` is a fetch no boot island can
+// remove — and awaiting it put the word "Loading" back into the first frame of every page that
+// did. So: paint with what is known, put the credential-dependent part in a slot, and fill the
+// slot when the answer arrives. The page is correct at both instants; it is only more useful at
+// the second.
+function whenIdentified(slot, render) {
+  if (ME) {
+    slot.replaceChildren(...[render()].flat().filter(Boolean));
+    return;
+  }
+  me().then(() => {
+    slot.replaceChildren(...[render()].flat().filter(Boolean));
+    paintMode();
+  });
+}
+
+const mayRequest = () => !!ME?.scopes?.includes('request');
 
 /* ---- browse ------------------------------------------------------------- */
 
 let FIRST_VIEW_SPENT = false;
 let DETAIL_BOOT_SPENT = false;
+let QUEUE_BOOT_SPENT = false;
 
 // How a run ended without a verdict, in a sentence. Each is a statement about a different thing,
 // and the whole reason `terminal` is a field rather than a flag is that collapsing them makes a
@@ -332,7 +402,217 @@ async function browse(params) {
     : null;
 
   document.title = 'Trigon — the rebuild corpus';
-  view.replaceChildren(denominators, filters, table, withheldNote, more);
+  const ask = el('div', {});
+  whenIdentified(ask, () => requestPanel(params.get('q')));
+  view.replaceChildren(denominators, filters, table, withheldNote, more, ask);
+}
+
+/* ---- ask for a rebuild -------------------------------------------------- */
+
+// Shown only where the credential actually carries the scope, and read from `/v1/me` rather than
+// guessed: a form that appears and then refuses teaches a visitor that the site is arbitrary.
+function requestPanel(prefill) {
+  if (!mayRequest()) return null;
+  const input = el('input', {
+    type: 'text',
+    placeholder: 'pkg:npm/left-pad@1.3.0',
+    value: prefill || '',
+    'aria-label': 'A package URL to rebuild',
+    id: 'request-target',
+  });
+  const out = el('p', { class: 'note', text: '' });
+
+  const ask = async () => {
+    const target = input.value.trim();
+    if (!target) return;
+    out.className = 'note';
+    out.textContent = 'asking…';
+    try {
+      const r = await api('/v1/runs', { method: 'POST', body: { target } });
+      const quota = r.quota ? ` ${r.quota.spent} of ${r.quota.daily} today.` : '';
+      out.replaceChildren(
+        el('span', { text: r.detail + quota + ' ' }),
+        r.job ? el('a', { href: `/jobs/${r.job}`, text: 'follow it →' }) : null,
+      );
+      await me(true);
+    } catch (e) {
+      out.className = 'withheld-note';
+      out.textContent = e.message;
+    }
+  };
+
+  return el('section', { class: 'panel' },
+    el('h2', { text: 'Ask for a rebuild' }),
+    el('div', { class: 'filters' },
+      input,
+      el('button', { class: 'chip', onclick: ask, text: 'request' })),
+    out,
+    el('p', { class: 'note' },
+      'A request names a package and nothing else — no build recipe, no stabilizer, and no network tier. ',
+      'Nothing publishes until a second, independent attempt agrees with the first.'));
+}
+
+/* ---- the queue ----------------------------------------------------------- */
+
+async function queueView() {
+  await health();
+  document.title = 'Queue — Trigon';
+  // The server puts the queue in the document when this page is entered directly, so the first
+  // frame carries the depth rather than the word "Loading". Spent once; a return visit re-fetches,
+  // because a queue a few seconds stale is the one thing this page must not show.
+  const booted = BOOT?.queue && !QUEUE_BOOT_SPENT;
+  QUEUE_BOOT_SPENT = true;
+  const q = booted ? BOOT.queue : await api('/v1/queue');
+
+  if (!q.depth) {
+    view.replaceChildren(
+      el('p', {}, el('a', { href: '/', text: '← the corpus' })),
+      el('div', { class: 'verdict-head' }, el('h1', { text: 'Queue' })),
+      el('p', { class: 'empty', text: q.detail }));
+    return;
+  }
+
+  const rows = q.in_flight.map((j) => el('tr', {},
+    el('td', { class: 'pkg' },
+      el('a', { href: `/jobs/${j.job}`, text: j.target.replace(/^pkg:[^/]+\//, '') })),
+    el('td', { class: 'opt', text: j.target.replace(/^pkg:/, '').split('/')[0] }),
+    el('td', {}, el('span', {
+      class: `tag ${j.state === 'leased' ? 'normalized_with_caveats' : 'none'}`,
+      text: j.state === 'leased' ? 'building' : 'waiting',
+    })),
+    el('td', { class: 'n', text: `attempt ${j.attempt}` }),
+  ));
+
+  const ask = el('div', {});
+  whenIdentified(ask, () => requestPanel());
+  view.replaceChildren(
+    el('p', {}, el('a', { href: '/', text: '← the corpus' })),
+    el('div', { class: 'verdict-head' },
+      el('h1', { text: 'Queue' }),
+      el('p', { class: 'purl', text: 'What the fleet is about to look at. Nothing here is a finding about anybody.' })),
+    el('section', { class: 'panel' },
+      el('h2', { text: 'Depth' }),
+      bars(q.depth)),
+    ask,
+    rows.length
+      ? el('table', { class: 'runs' },
+          el('thead', {}, el('tr', {},
+            el('th', { text: 'package' }),
+            el('th', { class: 'opt', text: 'ecosystem' }),
+            el('th', { text: 'state' }),
+            el('th', { class: 'n', text: '' }))),
+          el('tbody', {}, rows))
+      : el('p', { class: 'empty', text: 'Nothing waiting and nothing running.' }),
+  );
+}
+
+/* ---- one job, while it runs --------------------------------------------- */
+
+// Polled rather than streamed. `docs/22` §5.4 refuses a route that proxies to the worker — the
+// reader has to survive the producer's death, and with several workers the API shares no
+// filesystem with the build anyway. Events come from a table, so a worker dying mid-build leaves
+// the page showing exactly how far it got.
+let JOB_POLL = null;
+async function jobView(id) {
+  await health();
+  document.title = `Job ${id} — Trigon`;
+  if (JOB_POLL) clearInterval(JOB_POLL);
+
+  const list = el('ul', { class: 'assumptions' });
+  const head = el('p', { class: 'sentence', text: 'Waiting for a worker to pick this up.' });
+
+  const draw = async () => {
+    let data;
+    try {
+      data = await api(`/v1/jobs/${id}/events`);
+    } catch {
+      return;
+    }
+    const events = data.events || [];
+    list.replaceChildren(...events.map((e) => el('li', {},
+      el('strong', { text: e.phase.replace(/-/g, ' ') }),
+      e.detail ? el('span', { text: ` — ${e.detail}` }) : null,
+      el('span', { class: 'empty', text: `  ${ago(new Date(e.at).toISOString())}` }))));
+    const last = events[events.length - 1];
+    head.textContent = !last
+      ? 'Waiting for a worker to pick this up.'
+      : last.phase === 'recorded'
+        ? 'Finished and recorded. It publishes once a second attempt agrees.'
+        : last.phase === 'dead'
+          ? 'Out of attempts. The row is kept, because a queue that tidies these away looks healthy while something is broken.'
+          : `Running: ${last.phase}.`;
+    if (last && (last.phase === 'recorded' || last.phase === 'dead') && JOB_POLL) {
+      clearInterval(JOB_POLL);
+      JOB_POLL = null;
+    }
+  };
+
+  view.replaceChildren(
+    el('p', {}, el('a', { href: '/queue', text: '← the queue' })),
+    el('div', { class: 'verdict-head' }, el('h1', { text: `Job ${id}` })),
+    head,
+    el('section', { class: 'panel' }, el('h2', { text: 'What it has done' }), list),
+  );
+  await draw();
+  JOB_POLL = setInterval(draw, 3000);
+}
+
+/* ---- the credential ------------------------------------------------------ */
+
+// The one page whose whole content *is* the identity, so it cannot avoid the fetch. What it can
+// avoid is painting somebody else's placeholder while it waits: the shell goes up immediately,
+// says what it is checking, and the two panels fill in. "Loading the corpus…" on a page about a
+// credential is a frame that tells the reader nothing and looks broken.
+async function accountView() {
+  await health();
+  document.title = 'Credential — Trigon';
+
+  const held = el('div', {}, el('p', { class: 'empty', text: 'checking what this browser holds…' }));
+  const form = el('div', {});
+  view.replaceChildren(
+    el('p', {}, el('a', { href: '/', text: '← the corpus' })),
+    el('div', { class: 'verdict-head' },
+      el('h1', { text: 'Your credential' }),
+      el('p', { class: 'purl', text: 'Reading this site needs nothing. Asking it to spend a build needs a token.' })),
+    el('section', { class: 'panel' }, el('h2', { text: 'What you hold' }), held),
+    el('section', { class: 'panel' }, el('h2', { text: 'Sign in' }), form),
+  );
+
+  await me(true);
+  paintMode();
+
+  held.replaceChildren(
+    ME?.principal
+      ? el('dl', { class: 'kv' },
+          kv('principal', ME.principal),
+          kv('name', ME.name),
+          kv('may', ME.scopes.length ? ME.scopes.join(', ') : el('span', { class: 'empty', text: 'read only' })),
+          kv('quota', `${ME.daily_quota} rebuild(s) a day`))
+      : el('p', { class: 'empty', text: ME?.detail || 'Nothing. You are reading anonymously.' }),
+  );
+
+  const input = el('input', {
+    type: 'password',
+    placeholder: 'paste a token',
+    'aria-label': 'Your token',
+    id: 'token',
+  });
+  const save = async () => {
+    TOKEN.set(input.value.trim() || null);
+    input.value = '';
+    accountView();
+  };
+  form.replaceChildren(
+    el('div', { class: 'filters' },
+      input,
+      el('button', { class: 'chip', onclick: save, text: 'save' }),
+      ME?.principal
+        ? el('button', { class: 'chip', onclick: () => { TOKEN.set(null); accountView(); }, text: 'forget it' })
+        : null),
+    el('p', { class: 'note' },
+      'Kept in this browser only. It never reaches another origin, and clearing it makes you anonymous again. ',
+      'An operator issues one with ', el('code', { text: 'trigon grant' }), '.'),
+  );
 }
 
 /* ---- one package, every run against it --------------------------------- */

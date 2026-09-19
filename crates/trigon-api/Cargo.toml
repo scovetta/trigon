@@ -10,7 +10,7 @@ authors.workspace = true
 
 [dependencies]
 trigon-core.workspace = true
-trigon-store.workspace = true
+trigon-store = { workspace = true, features = ["queue"] }
 trigon-attest.workspace = true
 axum.workspace = true
 tokio.workspace = true
@@ -27,3 +27,4 @@ tokio = { workspace = true }
 # Calling the router directly, so the tests exercise the real handlers rather than a copy of their
 # logic. `axum` already depends on it; naming it here is what makes `Service::call` reachable.
 tower-service = "0.3"
+tempfile.workspace = true

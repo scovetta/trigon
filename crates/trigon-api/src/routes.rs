@@ -440,17 +440,30 @@ mod tests {
     }
 
     #[test]
-    fn no_route_names_a_verb_that_writes() {
-        // The router declares only `get`. This asserts the *contract* agrees, so a POST added to
-        // one and not the other cannot ship a write path the documentation denies exists.
+    fn nothing_deletes_and_nothing_replaces() {
+        // **The rule is narrower than "no writes", and it was always the rule.** The first version
+        // of this test banned every verb but `get`, which was a fair proxy while there was no
+        // write path at all; `POST /v1/runs` enqueues a job and expresses no verdict, so the proxy
+        // expired and the rule did not.
+        //
+        // What stays forbidden: `DELETE`, because supersession is an appended statement and
+        // nothing signed is ever removed; and `PUT`/`PATCH`, because every write this API has is a
+        // request for work rather than an edit to a record.
         let src = include_str!("lib.rs");
-        for verb in ["post(", "put(", "delete(", "patch("] {
+        for verb in ["delete(", "put(", "patch("] {
             assert!(
                 !src.contains(verb),
-                "the router declares `{verb}` — this crate has no write path, and a route that \
-                 mutates would have to be argued for in docs/22 §5.4 first"
+                "the router declares `{verb}`. Nothing here edits or removes a record — a \
+                 divergence is superseded by appending, never by replacing — so a route that did \
+                 would have to be argued for in docs/22 §5.4 first"
             );
         }
+        // And exactly one write route, so a second one cannot appear without this line changing.
+        assert_eq!(
+            src.matches("post(").count(),
+            1,
+            "a second write route appeared"
+        );
     }
 
     #[test]

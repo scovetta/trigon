@@ -769,3 +769,325 @@ fn schema(serial: &str) -> Vec<String> {
         "CREATE INDEX IF NOT EXISTS run_key ON run (cache_key, outcome)".into(),
     ]
 }
+
+// ---------------------------------------------------------------------------
+// Identity, quota, and the request button
+// ---------------------------------------------------------------------------
+
+/// Who asked. `docs/22-management-layer.md` §4.1: ten tables and not one recorded it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Principal {
+    pub id: String,
+    pub name: String,
+    /// `request`, `review`, `operate`. A row, not a claim in a token: a scope that travels inside
+    /// the credential is a scope that cannot be revoked without revoking the credential.
+    pub scopes: Vec<String>,
+    /// How many rebuilds this principal may ask for in a day.
+    ///
+    /// **A bound, not a report.** `20-m4-plan.md` §6: the budget should be enforced by the thing
+    /// that admits work, which stops when it is exceeded, rather than checked afterwards in a
+    /// report nobody reads until the block arrives.
+    pub daily_quota: i64,
+}
+
+impl Principal {
+    pub fn may(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|s| s == scope)
+    }
+}
+
+/// What happened to a request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Requested {
+    /// A new job. `job` is its id.
+    Queued { job: i64, spent: i64, quota: i64 },
+    /// This work was already on the queue, or already done. The request is idempotent, so a repeat
+    /// costs the requester nothing and produces no second build.
+    Already { job: i64, spent: i64, quota: i64 },
+    /// Out of quota for today. Refused at admission rather than admitted and reported.
+    OverQuota { spent: i64, quota: i64 },
+}
+
+impl Queue {
+    /// Create the identity tables. Separate from [`Self::migrate`] so a fleet with no public
+    /// surface does not carry tables nothing writes.
+    pub async fn migrate_identity(&self) -> Result<(), StoreError> {
+        let serial = match self.backend {
+            Backend::Postgres => "BIGSERIAL PRIMARY KEY",
+            Backend::Sqlite => "INTEGER PRIMARY KEY AUTOINCREMENT",
+        };
+        for stmt in identity_schema(serial) {
+            sqlx::query(&stmt)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| StoreError::Malformed(format!("creating identity tables: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Register a principal and mint a token for it.
+    ///
+    /// Returns the token **once**. Only its digest is stored, so a stolen database yields no
+    /// credentials — the same reason the blob store holds digests rather than paths it trusts.
+    pub async fn add_principal(
+        &self,
+        id: &str,
+        name: &str,
+        scopes: &[&str],
+        daily_quota: i64,
+        token: &str,
+    ) -> Result<(), StoreError> {
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO principal (id, name, scopes, daily_quota, created) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (id) DO UPDATE SET name = $6, scopes = $7, daily_quota = $8",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(scopes.join(","))
+        .bind(daily_quota)
+        .bind(now)
+        .bind(name)
+        .bind(scopes.join(","))
+        .bind(daily_quota)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StoreError::Malformed(format!("adding a principal: {e}")))?;
+
+        sqlx::query(
+            "INSERT INTO api_token (hash, principal, created) VALUES ($1, $2, $3) \
+             ON CONFLICT (hash) DO NOTHING",
+        )
+        .bind(token_hash(token))
+        .bind(id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StoreError::Malformed(format!("adding a token: {e}")))?;
+        Ok(())
+    }
+
+    /// Who is this token? `None` for an unknown one, which is also what a revoked one gives.
+    pub async fn principal_for(&self, token: &str) -> Result<Option<Principal>, StoreError> {
+        let row = sqlx::query(
+            "SELECT p.id, p.name, p.scopes, p.daily_quota FROM api_token t \
+             JOIN principal p ON p.id = t.principal WHERE t.hash = $1",
+        )
+        .bind(token_hash(token))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| StoreError::Malformed(format!("resolving a token: {e}")))?;
+        Ok(row.map(|r| Principal {
+            id: r.get::<String, _>("id"),
+            name: r.get::<String, _>("name"),
+            scopes: r
+                .get::<String, _>("scopes")
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            daily_quota: r.get::<i64, _>("daily_quota"),
+        }))
+    }
+
+    /// Ask for a rebuild, and charge it — **in one transaction**.
+    ///
+    /// `docs/22-management-layer.md` §5.2 and `20-m4-plan.md` §6 both insist on this shape and it is
+    /// the whole reason identity lives in the same database as the queue. A rate limiter in front
+    /// of the API is a different process reading a different number, and the gap between the check
+    /// and the insert is exactly where a burst of clicks gets through. Counting and inserting in one
+    /// transaction has no such gap.
+    ///
+    /// Idempotent on the target, so a repeat costs the requester nothing and produces no second
+    /// build: somebody clicking twice should get their answer, not two builds of it.
+    pub async fn request_rebuild(
+        &self,
+        who: &Principal,
+        target: &str,
+        day: &str,
+    ) -> Result<Requested, StoreError> {
+        let now = now_ms();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StoreError::Malformed(format!("starting a request: {e}")))?;
+
+        let spent: i64 =
+            sqlx::query("SELECT COUNT(*) AS n FROM request WHERE principal = $1 AND day = $2")
+                .bind(&who.id)
+                .bind(day)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| StoreError::Malformed(format!("counting requests: {e}")))?
+                .get::<i64, _>("n");
+
+        // Already queued or already answered: not a new request, not charged, not a second build.
+        let existing: Option<i64> =
+            sqlx::query("SELECT id FROM job WHERE cache_key = $1 AND attempt = 1")
+                .bind(target)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| StoreError::Malformed(format!("looking for the job: {e}")))?
+                .map(|r| r.get::<i64, _>("id"));
+        if let Some(job) = existing {
+            tx.commit()
+                .await
+                .map_err(|e| StoreError::Malformed(format!("committing: {e}")))?;
+            return Ok(Requested::Already {
+                job,
+                spent,
+                quota: who.daily_quota,
+            });
+        }
+
+        if spent >= who.daily_quota {
+            tx.rollback().await.ok();
+            return Ok(Requested::OverQuota {
+                spent,
+                quota: who.daily_quota,
+            });
+        }
+
+        sqlx::query(
+            "INSERT INTO job (kind, target, cache_key, attempt, tier, state, visible_at, \
+             failures, created) VALUES ('rebuild', $1, $2, 1, 'interactive', 'ready', $3, 0, $4)",
+        )
+        .bind(target)
+        .bind(target)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StoreError::Malformed(format!("enqueueing a request: {e}")))?;
+
+        let job = sqlx::query("SELECT id FROM job WHERE cache_key = $1 AND attempt = 1")
+            .bind(target)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| StoreError::Malformed(format!("reading back the job: {e}")))?
+            .get::<i64, _>("id");
+
+        sqlx::query(
+            "INSERT INTO request (principal, target, job, day, created) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&who.id)
+        .bind(target)
+        .bind(job)
+        .bind(day)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StoreError::Malformed(format!("charging the request: {e}")))?;
+
+        // Append-only, and in the same transaction: an action that happened without an audit row
+        // is an action nobody can account for later.
+        sqlx::query("INSERT INTO audit (at, principal, action, detail) VALUES ($1, $2, $3, $4)")
+            .bind(now)
+            .bind(&who.id)
+            .bind("request_rebuild")
+            .bind(target)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StoreError::Malformed(format!("writing the audit row: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StoreError::Malformed(format!("committing a request: {e}")))?;
+        Ok(Requested::Queued {
+            job,
+            spent: spent + 1,
+            quota: who.daily_quota,
+        })
+    }
+
+    /// What is on the queue right now, for a status page.
+    pub async fn in_flight(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(i64, String, String, i32)>, StoreError> {
+        let rows = sqlx::query(&format!(
+            "SELECT id, target, state, attempt FROM job \
+             WHERE state IN ('ready', 'leased') \
+             ORDER BY CASE tier WHEN 'interactive' THEN 0 WHEN 'regression' THEN 1 ELSE 2 END, \
+                      created \
+             LIMIT {limit}"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StoreError::Malformed(format!("reading the queue: {e}")))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<i64, _>("id"),
+                    r.get::<String, _>("target"),
+                    r.get::<String, _>("state"),
+                    r.get::<i32, _>("attempt"),
+                )
+            })
+            .collect())
+    }
+
+    /// The job covering a target, if any, with its state.
+    pub async fn job_for(&self, target: &str) -> Result<Option<(i64, String)>, StoreError> {
+        let row = sqlx::query("SELECT id, state FROM job WHERE cache_key = $1 AND attempt = 1")
+            .bind(target)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StoreError::Malformed(format!("finding a job: {e}")))?;
+        Ok(row.map(|r| (r.get::<i64, _>("id"), r.get::<String, _>("state"))))
+    }
+}
+
+/// A token's digest, which is all that is ever stored.
+fn token_hash(token: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    h.update(token.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+fn identity_schema(serial: &str) -> Vec<String> {
+    vec![
+        "CREATE TABLE IF NOT EXISTS principal (
+           id          TEXT PRIMARY KEY,
+           name        TEXT NOT NULL,
+           scopes      TEXT NOT NULL,
+           daily_quota BIGINT NOT NULL,
+           created     BIGINT NOT NULL
+         )"
+        .into(),
+        // Only the digest. A stolen database yields no credentials.
+        "CREATE TABLE IF NOT EXISTS api_token (
+           hash      TEXT PRIMARY KEY,
+           principal TEXT NOT NULL,
+           created   BIGINT NOT NULL,
+           last_used BIGINT
+         )"
+        .into(),
+        format!(
+            "CREATE TABLE IF NOT EXISTS request (
+               id        {serial},
+               principal TEXT NOT NULL,
+               target    TEXT NOT NULL,
+               job       BIGINT,
+               day       TEXT NOT NULL,
+               created   BIGINT NOT NULL
+             )"
+        ),
+        "CREATE INDEX IF NOT EXISTS request_quota ON request (principal, day)".into(),
+        // Append-only. Nothing in this module updates or deletes a row here.
+        format!(
+            "CREATE TABLE IF NOT EXISTS audit (
+               id        {serial},
+               at        BIGINT NOT NULL,
+               principal TEXT NOT NULL,
+               action    TEXT NOT NULL,
+               detail    TEXT
+             )"
+        ),
+    ]
+}

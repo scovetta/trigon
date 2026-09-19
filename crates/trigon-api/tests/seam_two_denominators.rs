@@ -44,6 +44,7 @@ async fn stats_over(records: Vec<RunRecord>) -> trigon_api::index::Stats {
     index.refresh(&store, Switches::default()).await.unwrap();
     let api = Arc::new(Api {
         store,
+        queue: None,
         index,
         switches: Switches::default(),
         unauthenticated: Principal::Operator,

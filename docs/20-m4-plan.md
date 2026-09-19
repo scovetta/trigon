@@ -164,6 +164,11 @@ a tautology, and of the two rules specified for it the guard manifest carrying d
 the write-only blob credential is not. Fleet-global backoff — the criterion's word is
 "propagation", and the queue is the only thing that can carry it — rides along here.
 
+Stage B's first half and most of its second are built: `crates/trigon-store/src/queue.rs`,
+`crates/trigon-engine`, `trigon worker` and `trigon enqueue`. What is *not* built is the
+infer/build/judge split, which is what the enforcement criterion is actually about —
+[`22`](22-management-layer.md) §8 stage 3 says so rather than letting a green-looking stage imply it.
+
 **Stage C — continuous ingestion.** [`10-scale.md`](10-scale.md) §5. After M4 the steady state is
 ingestion, and a sweep becomes what runs when the selection policy or the stabilizer set changes.
 This is what makes M4 an operating mode rather than an event. Needs the cursor and the catch-up

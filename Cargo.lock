@@ -3151,6 +3151,7 @@ dependencies = [
  "trigon-attest",
  "trigon-compare",
  "trigon-core",
+ "trigon-engine",
  "trigon-mirror",
  "trigon-politeness",
  "trigon-registry",
@@ -3184,6 +3185,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tower-service",
@@ -3254,6 +3256,21 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "trigon-engine"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "trigon-core",
+ "trigon-store",
 ]
 
 [[package]]

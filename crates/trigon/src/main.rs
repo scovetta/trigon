@@ -221,7 +221,7 @@ enum Cmd {
         #[arg(long)]
         definitions: Option<PathBuf>,
         /// Image holding `trigon mirror`, which is what makes `--egress mirror-only` enforceable.
-        #[arg(long, default_value = "localhost/trigon-mirror:latest")]
+        #[arg(long, default_value = MIRROR_IMAGE)]
         mirror_image: String,
         /// Resolve dependencies against the index as it stood when the package was published.
         ///
@@ -420,7 +420,7 @@ enum Cmd {
     /// except this container.
     #[cfg(feature = "build")]
     MirrorImage {
-        #[arg(long, default_value = "localhost/trigon-mirror:latest")]
+        #[arg(long, default_value = MIRROR_IMAGE)]
         tag: String,
     },
     /// Serve a registry index as it stood at a named instant.
@@ -472,7 +472,7 @@ enum Cmd {
         timeout: u64,
         #[arg(long)]
         definitions: Option<PathBuf>,
-        #[arg(long, default_value = "localhost/trigon-mirror:latest")]
+        #[arg(long, default_value = MIRROR_IMAGE)]
         mirror_image: String,
         #[arg(long)]
         timewarp: Option<String>,
@@ -581,6 +581,104 @@ enum Cmd {
         /// How often to look for runs written since startup. Zero serves a fixed snapshot.
         #[arg(long, default_value_t = 30)]
         refresh_seconds: u64,
+        /// The queue this site may put requested rebuilds on.
+        ///
+        /// Without it the site is read-only: it serves the corpus and answers every write route
+        /// with "this instance has no queue" rather than accepting a request it cannot honour.
+        #[arg(long)]
+        queue: Option<String>,
+    },
+    /// Give somebody a credential for `trigon serve`.
+    ///
+    /// Prints the token **once**; only its digest is stored, so a stolen database yields no
+    /// credentials. Re-running with the same id rotates the quota and scopes and adds a token
+    /// rather than replacing one, because revoking is a separate decision from issuing.
+    #[cfg(feature = "build")]
+    Grant {
+        /// The queue holding the identity tables.
+        queue: String,
+        /// A stable id for the principal. Appears in every audit row.
+        id: String,
+        /// What to call them on a page.
+        #[arg(long)]
+        name: Option<String>,
+        /// `request`, `review`, `operate`. Read access needs none of these — reading is anonymous.
+        #[arg(long, default_value = "request")]
+        scopes: String,
+        /// How many rebuilds a day. Enforced where work is admitted, not reported afterwards.
+        #[arg(long, default_value_t = 20)]
+        daily_quota: i64,
+    },
+    /// Take work off a queue and rebuild what it names.
+    ///
+    /// One worker. Run several against the same queue on as many machines as you like: a job goes
+    /// to exactly one of them, a worker that dies releases its job without anybody noticing, and
+    /// the run and the acknowledgement land in one transaction so nothing is built twice.
+    #[cfg(feature = "build")]
+    Worker {
+        /// `sqlite:///var/lib/trigon/queue.db` or `postgres://…`.
+        queue: String,
+        /// A pinned base image, or `auto`.
+        #[arg(long)]
+        image: String,
+        /// Where builds happen. One directory per job and attempt underneath.
+        #[arg(long)]
+        work: PathBuf,
+        /// Where records and blobs go. Every worker points at the same one.
+        #[arg(long)]
+        store: PathBuf,
+        /// The egress tier every job runs at.
+        ///
+        /// A property of the **worker**, never of the job: the shipped default elsewhere is `open`,
+        /// which adds no network isolation, and a job payload that could name a tier would let
+        /// whoever enqueued it ask for an unsandboxed build. See `docs/22-management-layer.md` §2.4.
+        #[arg(long, default_value = "mirror-only", value_parser = ["deny-all", "mirror-only", "git-and-mirror", "open"])]
+        egress: String,
+        /// Names this worker in every lease and every event. Defaults to host and pid, which is
+        /// what answers "which process held this" months later, from a row.
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        #[arg(long)]
+        definitions: Option<PathBuf>,
+        #[arg(long, default_value = MIRROR_IMAGE)]
+        mirror_image: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        source_cache: Option<PathBuf>,
+        /// Create the queue's tables if they are not there.
+        #[arg(long)]
+        migrate: bool,
+        /// Take one batch and stop. For a cron, and for checking a deployment.
+        #[arg(long)]
+        once: bool,
+        /// Do not enqueue a confirming second attempt after a verdict.
+        ///
+        /// ADR-0010 safeguard 1 needs two agreeing attempts before anything publishes, so a fleet
+        /// run this way produces results no public reader will ever be shown. For a private corpus
+        /// where that is the intent, and it says so rather than being discovered later.
+        #[arg(long)]
+        no_confirm: bool,
+    },
+    /// Put targets on a queue for workers to pick up.
+    #[cfg(feature = "build")]
+    Enqueue {
+        /// `sqlite://…` or `postgres://…`.
+        queue: String,
+        /// Package URLs, or `-` to read them one per line from stdin.
+        #[arg(required = true)]
+        targets: Vec<String>,
+        /// `interactive`, `regression`, or `bulk`.
+        ///
+        /// A sweep is `bulk` and should stay there: the tier exists so that somebody waiting on a
+        /// single answer is not queued behind five thousand of them.
+        #[arg(long, default_value = "bulk")]
+        tier: String,
+        /// Create the queue's tables if they are not there.
+        #[arg(long)]
+        migrate: bool,
     },
     /// Ask a registry what it knows about a package.
     #[cfg(feature = "build")]
@@ -626,7 +724,7 @@ enum Cmd {
         #[arg(long)]
         retain: bool,
         /// Image holding `trigon mirror`, which is what makes `--egress mirror-only` enforceable.
-        #[arg(long, default_value = "localhost/trigon-mirror:latest")]
+        #[arg(long, default_value = MIRROR_IMAGE)]
         mirror_image: String,
         /// Host the strategy calls the mirror, mapped by the runner to wherever it is.
         #[arg(long, default_value = "timewarp:8129")]
@@ -850,12 +948,14 @@ mod progress;
 mod provenance;
 #[cfg(feature = "build")]
 mod watch;
+#[cfg(feature = "build")]
+mod worker;
 
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
     let cli = Cli::parse();
     init_logging(cli.verbose, cli.log_json);
-    let result = dispatch(cli.cmd);
+    let result = dispatch(cli.cmd, cli.verbose > 0);
     if let Err(e) = &result {
         report_fault(e);
     }
@@ -966,7 +1066,10 @@ fn retryable_of(e: &anyhow::Error) -> Option<bool> {
     r
 }
 
-fn dispatch(cmd: Cmd) -> Result<()> {
+///  reaches only the worker, which is the one command that hands it on to a build it did
+/// not itself start. Everything else reads it through the tracing subscriber.
+fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
+    let _ = verbose;
     match cmd {
         Cmd::Verify {
             upstream,
@@ -1091,6 +1194,12 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             fetch_cache: cache.map(|c| (c, format!("run-{}", std::process::id()))),
             // One target on a terminal: the phases are already in front of whoever asked.
             phases: None,
+            // **No key, deliberately.** A `trigon rebuild` is one person asking one question, and
+            // inventing a key here would make two unrelated local runs look to the publication
+            // gate like a confirmed pair. Confirmation is something a queue arranges, between two
+            // attempts it knows are attempts at the same work.
+            cache_key: None,
+            attempt: 1,
         }),
         #[cfg(feature = "build")]
         Cmd::Sweep {
@@ -1179,7 +1288,74 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             public,
             stop_divergences,
             refresh_seconds,
-        } => serve_corpus(&store, bind, public, stop_divergences, refresh_seconds),
+            queue,
+        } => serve_corpus(
+            &store,
+            bind,
+            public,
+            stop_divergences,
+            refresh_seconds,
+            queue,
+        ),
+        #[cfg(feature = "build")]
+        Cmd::Grant {
+            queue,
+            id,
+            name,
+            scopes,
+            daily_quota,
+        } => grant(&queue, &id, name.as_deref(), &scopes, daily_quota),
+        #[cfg(feature = "build")]
+        Cmd::Worker {
+            queue,
+            image,
+            work,
+            store,
+            egress,
+            name,
+            timeout,
+            definitions,
+            mirror_image,
+            model,
+            source_cache,
+            migrate,
+            once,
+            no_confirm,
+        } => worker::serve(
+            &queue,
+            worker::Builder {
+                image,
+                egress,
+                work,
+                store,
+                timeout,
+                definitions,
+                mirror_image,
+                model,
+                source_cache,
+                verbose,
+            },
+            trigon_engine::Config {
+                worker: name.unwrap_or_else(|| {
+                    format!(
+                        "{}-{}",
+                        std::env::var("HOSTNAME").unwrap_or_else(|_| "host".into()),
+                        std::process::id()
+                    )
+                }),
+                confirm: !no_confirm,
+                ..Default::default()
+            },
+            migrate,
+            once,
+        ),
+        #[cfg(feature = "build")]
+        Cmd::Enqueue {
+            queue,
+            targets,
+            tier,
+            migrate,
+        } => enqueue_targets(&queue, &targets, &tier, migrate),
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
         #[cfg(feature = "build")]
@@ -2108,6 +2284,18 @@ fn resolve_format(path: &Path, explicit: Option<&str>) -> Result<Format> {
 /// and nothing else, so a profile the selector could not reach was invisible from outside — and
 /// `npm-tarball` is exactly that: it exists, `docs/03-ecosystems.md` says npm uses it, and every
 /// npm rebuild in the store carries the set digest of plain `tar-gzip`.
+/// The mirror image every command that builds defaults to.
+///
+/// **One constant, because five copies drifted.** `worker` was added with `:dev` while `rebuild`,
+/// `sweep` and the rest kept `:latest`, so the first fleet run pulled an image that does not exist
+/// and failed at `setup` with a connection refused to `localhost:443` — a message that says
+/// nothing about the actual mistake. Two commands that must build identically cannot have two
+/// defaults; a literal repeated five times is four opportunities for exactly this.
+/// Every command naming it is behind `build`, and the verifier's `-D warnings` is what noticed:
+/// a constant no reachable code uses is dead code in that build.
+#[cfg(feature = "build")]
+const MIRROR_IMAGE: &str = "localhost/trigon-mirror:latest";
+
 const BY_EXTENSION: &[(&str, &str)] = &[
     (".whl", "wheel"),
     (".crate", "crate"),
@@ -2175,6 +2363,116 @@ fn resolve_profile(
     }
 }
 
+/// `trigon grant`: issue a credential.
+///
+/// The token is 32 bytes of the system's randomness, hex-encoded, and printed once. Nothing stores
+/// it — `add_principal` keeps its sha256 — so losing it means issuing another, which is the right
+/// trade for a credential that can spend compute.
+#[cfg(feature = "build")]
+fn grant(url: &str, id: &str, name: Option<&str>, scopes: &str, daily_quota: i64) -> Result<()> {
+    use trigon_store::queue::Queue;
+
+    let scopes: Vec<&str> = scopes
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    for s in &scopes {
+        anyhow::ensure!(
+            matches!(*s, "request" | "review" | "operate"),
+            "unknown scope `{s}`; known: request, review, operate"
+        );
+    }
+    let token = {
+        let mut bytes = [0u8; 32];
+        getrandom(&mut bytes)?;
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let q = Queue::open(url).await.map_err(anyhow::Error::from)?;
+        q.migrate_identity().await.map_err(anyhow::Error::from)?;
+        q.add_principal(id, name.unwrap_or(id), &scopes, daily_quota, &token)
+            .await
+            .map_err(anyhow::Error::from)?;
+        println!("principal  {id} ({})", scopes.join(", "));
+        println!("quota      {daily_quota} rebuild(s) a day");
+        println!("token      {token}");
+        println!();
+        println!(
+            "Shown once; only its digest is stored. Use it as `Authorization: Bearer <token>`."
+        );
+        anyhow::Ok(())
+    })
+}
+
+/// Bytes from the operating system, with no dependency for it.
+///
+/// `/dev/urandom` on the platforms this runs on. A credential's randomness is worth reading
+/// directly rather than through a crate whose defaults could change.
+#[cfg(feature = "build")]
+fn getrandom(buf: &mut [u8]) -> Result<()> {
+    use std::io::Read as _;
+    let mut f = std::fs::File::open("/dev/urandom").context("opening /dev/urandom")?;
+    f.read_exact(buf).context("reading /dev/urandom")?;
+    Ok(())
+}
+
+/// `trigon enqueue`: put targets on a queue.
+///
+/// The cache key is the target plus the tier's *absence* — a key made of the target alone, so a
+/// bulk sweep and an interactive request for the same package are one job rather than two. That is
+/// the behaviour somebody clicking "rebuild this" on a package a sweep already covers should get:
+/// their answer, not a second build of it.
+#[cfg(feature = "build")]
+fn enqueue_targets(url: &str, targets: &[String], tier: &str, migrate: bool) -> Result<()> {
+    use trigon_store::queue::{NewJob, Queue, Tier};
+
+    let tier = match tier {
+        "interactive" => Tier::Interactive,
+        "regression" => Tier::Regression,
+        "bulk" => Tier::Bulk,
+        other => anyhow::bail!("unknown tier `{other}`; known: interactive, regression, bulk"),
+    };
+    let list: Vec<String> = if targets == ["-"] {
+        std::io::BufRead::lines(std::io::stdin().lock())
+            .map_while(Result::ok)
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect()
+    } else {
+        targets.to_vec()
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let q = Queue::open(url).await.map_err(anyhow::Error::from)?;
+        if migrate {
+            q.migrate().await.map_err(anyhow::Error::from)?;
+        }
+        let mut n = 0;
+        for t in &list {
+            q.enqueue(&NewJob::rebuild(t.clone(), t.clone(), tier))
+                .await
+                .map_err(anyhow::Error::from)?;
+            n += 1;
+        }
+        // The count is of targets *offered*, not of jobs created: `enqueue` is idempotent, so
+        // re-running this over the same list adds nothing and says so rather than claiming to have
+        // queued five thousand builds it did not queue.
+        println!("offered {n} target(s) to the {} queue", tier.as_str());
+        for (state, count) in q.depth().await.map_err(anyhow::Error::from)? {
+            println!("  {state:<8} {count}");
+        }
+        anyhow::Ok(())
+    })
+}
+
 /// `trigon serve`: the corpus, from a browser.
 ///
 /// Builds its own runtime for the same reason `watch` does — the judgement half is sync, and a
@@ -2191,6 +2489,7 @@ fn serve_corpus(
     public: bool,
     stop_divergences: bool,
     refresh_seconds: u64,
+    queue: Option<String>,
 ) -> Result<()> {
     let store = trigon_store::Store::local(store)?;
     let cfg = trigon_api::Config {
@@ -2202,6 +2501,7 @@ fn serve_corpus(
         },
         switches: trigon_api::Switches { stop_divergences },
         refresh_seconds,
+        queue,
     };
     // Loudly, not in a doc comment nobody reads at three in the morning. A store bound to a
     // routable address without `--public` serves build logs that were never redacted, and D14 says
@@ -2905,6 +3205,16 @@ mod rebuild {
         /// `None` for a single `trigon rebuild`: nobody is watching one target, and the phases are
         /// on the terminal already.
         pub phases: Option<std::sync::Arc<crate::progress::Progress>>,
+        /// What makes two runs runs at the *same thing*, and which attempt this is.
+        ///
+        /// **Carried in rather than invented here.** The publication gate groups attempts by
+        /// `cache_key` and releases nothing until two of them agree, so a record written without
+        /// one corroborates nothing — including itself. A worker knows the key because the job
+        /// carries it; a bare `trigon rebuild` has none, and `None` is the honest answer there
+        /// rather than a key made up on the spot, which would make one run look like a
+        /// confirmation of another.
+        pub cache_key: Option<String>,
+        pub attempt: u32,
     }
 
     /// The ladder, in the order `docs/04-strategies.md` §6 sets out.
@@ -3027,6 +3337,13 @@ mod rebuild {
     pub struct Ran {
         pub outcome: Outcome,
         pub model_calls: u32,
+        /// The id of the record this run wrote, where a store was configured.
+        ///
+        /// Handed back rather than rediscovered. A worker that has to find "the newest record for
+        /// this target" is a worker that finds the wrong one whenever two attempts at the same
+        /// package overlap — which, now that a verdict enqueues a confirmation, is the normal case
+        /// rather than an unlucky one.
+        pub record_id: Option<String>,
     }
 
     impl From<Outcome> for Ran {
@@ -3034,6 +3351,7 @@ mod rebuild {
             Ran {
                 outcome,
                 model_calls: 0,
+                record_id: None,
             }
         }
     }
@@ -3099,14 +3417,20 @@ mod rebuild {
     ) -> Result<Ran> {
         let store = args.store.clone();
         let mut rec = Recording::default();
-        let out = run_body(args, verbose, report, &mut rec);
+        let mut out = run_body(args, verbose, report, &mut rec);
         if let Some(dir) = &store
             && rec.record_id.is_none()
-            && let Err(e) = record_terminal(dir, &rec, report, &out)
         {
-            // A failure to record does not fail the run, for the reason the compared path gives:
-            // losing the record is a thing to report, not a reason to throw the result away.
-            tracing::warn!("could not record this run: {e:#}");
+            match record_terminal(dir, &rec, report, &out) {
+                Ok(id) => rec.record_id = id,
+                // A failure to record does not fail the run, for the reason the compared path
+                // gives: losing the record is a thing to report, not a reason to throw the result
+                // away.
+                Err(e) => tracing::warn!("could not record this run: {e:#}"),
+            }
+        }
+        if let Ok(ran) = &mut out {
+            ran.record_id = rec.record_id.clone();
         }
         out
     }
@@ -3297,6 +3621,8 @@ mod rebuild {
             work: args.work.clone(),
             image: args.image.clone(),
             egress: args.egress.clone(),
+            cache_key: args.cache_key.clone(),
+            attempt: args.attempt,
             // The instant the index was actually pinned to, not the flag that asked for one.
             // `auto` is a description of our command line; a signed statement has to describe the
             // environment, and a consumer reading `auto` learns nothing they could check.
@@ -3380,6 +3706,7 @@ mod rebuild {
             return Ok(Ran {
                 outcome: Outcome::NoStrategy,
                 model_calls: calls(&model),
+                record_id: None,
             });
         };
         report.derivation = Some(candidate.derivation.to_string());
@@ -4085,6 +4412,7 @@ mod rebuild {
                 return Ok(Ran {
                     outcome: Outcome::Void { reason },
                     model_calls: calls(&model),
+                    record_id: None,
                 });
             }
         }
@@ -4097,11 +4425,13 @@ mod rebuild {
                         reason: reason.to_string(),
                     },
                     model_calls: calls(&model),
+                    record_id: None,
                 });
             }
             return Ok(Ran {
                 outcome: build_outcome(&e),
                 model_calls: calls(&model),
+                record_id: None,
             });
         }
 
@@ -4111,6 +4441,7 @@ mod rebuild {
             return Ok(Ran {
                 outcome,
                 model_calls: calls(&model),
+                record_id: None,
             });
         }
         let Some((rebuilt, comparison)) = judged else {
@@ -4128,6 +4459,7 @@ mod rebuild {
                             .into(),
                     }),
                 },
+                record_id: None,
             });
         };
         if verbose {
@@ -4215,6 +4547,7 @@ mod rebuild {
         Ok(Ran {
             outcome: Outcome::Compared(comparison.outcome),
             model_calls: calls(&model),
+            record_id: None,
         })
     }
 
@@ -4298,6 +4631,10 @@ mod rebuild {
         /// `derivation: model_assisted` with no transcript is an assertion, and one with a
         /// transcript is evidence.
         transcript: Option<trigon_ai::Transcript>,
+        /// The identity of the work: see [`Args::cache_key`]. Without it the publication gate
+        /// cannot tell two attempts at one package from two runs against two packages.
+        cache_key: Option<String>,
+        attempt: u32,
         /// Why each rung that could have answered did not, what the chosen strategy had to assume,
         /// and how far the derivation trusts itself. Lived in the work directory and nowhere the
         /// store could see, so a corpus could report a rate and not what to build next.
@@ -4460,6 +4797,8 @@ mod rebuild {
             // A verdict leaves `terminal` absent by construction: the two are exclusive, and a
             // record carrying both would be saying it did and did not reach a comparison.
             record.terminal = None;
+            record.cache_key = args.cache_key.clone();
+            record.attempt = args.attempt;
             record.declines = args.declines.clone();
             record.assumptions = args.assumptions.clone();
             record.confidence = args.confidence.clone();
@@ -4518,14 +4857,14 @@ mod rebuild {
         rec: &Recording,
         report: &crate::progress::RunReport,
         out: &Result<Ran>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
 
         // No artifact means the run died resolving or fetching, before there was anything to be a
         // record about — and before there was a digest to build a run id from. Those stay in the
         // work directory, where `RunReport` already records them on every path.
         let (Some(inputs), Some((path, digest, bytes))) = (&rec.inputs, &rec.upstream) else {
-            return Ok(());
+            return Ok(None);
         };
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -4574,6 +4913,8 @@ mod rebuild {
                 &report.started,
             );
             record.state = RunState::Done;
+            record.cache_key = inputs.cache_key.clone();
+            record.attempt = inputs.attempt;
             // No outcome, ever, on this path. `outcome` is what a comparison produced and this ran
             // without one; the story is in `failure` and in `guard_trips`.
             record.outcome = None;
@@ -4640,7 +4981,7 @@ mod rebuild {
             });
             store.put_run(&record).await?;
             tracing::debug!(run = %id, "recorded a run that reached no verdict");
-            anyhow::Ok(())
+            anyhow::Ok(Some(id))
         })
     }
 
@@ -6351,6 +6692,10 @@ mod sweep {
                 // packument that were 18% of one sweep's egress were spread across its targets.
                 fetch_cache: args.fetch_cache.clone(),
                 phases: Some(progress.clone()),
+                // A sweep runs each target once. Its second attempt, where one is wanted, comes
+                // from the queue — which is the component that knows what a confirmation is.
+                cache_key: None,
+                attempt: 1,
             },
             false,
         )

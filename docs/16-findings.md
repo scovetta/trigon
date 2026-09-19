@@ -1670,3 +1670,101 @@ nothing implements it yet.
 **The corpora are smoke sets.** Twenty npm and seventeen PyPI targets, not sampled by prevalence.
 Every percentage here is a signal about the pipeline, not an estimate of an ecosystem, and
 [`15`](15-corpora.md) §2 says what a real corpus needs.
+
+### 3.31 A page that judged under a set the run never used
+
+**Correction.** `trigon watch`'s `/compare` derived the stabilizer set from the artifact's
+**format**. A run does not: `resolve_profile` reads the file name first — `.whl`, `.crate`, `.gem`,
+`.nupkg` — and falls through to the format only when none matches. A `.nupkg` is a zip, so the
+page's digest ladder, member table and note list were all computed under the `zip` set while the
+verdict printed beside them had been computed under `nupkg`: six passes short, among them
+`nupkg-text-eol`, which decides members on exactly these packages.
+
+Measured on `Newtonsoft.Json@11.0.1`: the page said **29 members, 18 differing**; the record said
+**23 and 10**.
+
+Found within a minute of the chain ribbon existing, because the ribbon prints the set and the set
+it printed disagreed with the run's own stored record — the third instance this tree has recorded
+of *two things that had to agree, with nothing asserting they did*. The assertion now exists, over
+the CLI's own extension table, so a kind added there is covered without anybody remembering.
+
+### 3.32 A corpus that could not hold a failure
+
+**Gap, found by building the thing that reads it.** `record_run` had one call site, past the early
+return that unwraps the comparison. So a `no-strategy`, a build failure, a tripped guard and an
+infrastructure error all left the store untouched, and nothing noticed for as long as the only
+reader was a person who already knew.
+
+Pointing the new corpus browser at this machine's store said it out loud: **32 runs, 32 of them
+evidence, zero failures** — on a project whose last random sweep reached comparison 7 times in 125.
+A browse page over that store reports a reproduction rate of one.
+
+Three fields were needed, not one. `outcome` is what a *comparison* produced and must stay one of
+the four matches; `failure` is a signature, and a `no-strategy` is a scope statement with no failure
+in it. Without a third field — `terminal` — every run that reached no verdict was indistinguishable
+from every other, and the page could only file them as `unclassified`, which is the word for a
+cause nobody named rather than one that was named and dropped on the way to the store.
+
+### 3.33 The safeguard enforced by nothing, and what it cost to enforce it
+
+**Correction, and a measurement.** [`ADR-0010`](adr/0010-publish-divergences.md)'s first safeguard
+is two agreeing attempts before anything publishes, divergences and matches alike.
+[`12-security.md`](12-security.md) records invariant 12's enforcement as the word **nothing**, and
+that was accurate: no component in the system had ever asked the same question twice.
+
+The publication gate went in first and immediately withheld the entire corpus — 32 runs, every one
+`awaiting_confirmation`. That is the correct answer to a single-attempt corpus and a useless
+website, and it is what made the rest of the work concrete rather than theoretical.
+
+What closed it: `attempt` and `cache_key` on the record, so two runs can be shown to be attempts at
+the same work; and a worker loop that enqueues a second, independent attempt after a verdict, at
+`Regression` tier and delayed, because the risk the safeguard exists against is ambient
+nondeterminism and two runs back to back on a warm cache sample the same moment twice.
+
+Measured end to end: `left-pad@1.3.0` built by worker `w1`, confirmed by worker `w2`, and shown to
+an anonymous reader as **published** — the first result this project has released under the ADR's
+safeguards rather than in spite of their absence.
+
+### 3.34 Five bugs that only running it found
+
+**Gap.** Each of these compiled, passed the existing tests, and was wrong.
+
+- **A page's own Content-Security-Policy broke its bar chart.** `style-src 'self'` blocks the
+  `style` *attribute*, so four proportional bars were written, silently dropped by the browser, and
+  drawn at the track's full width. The page looked finished until somebody compared the bar lengths
+  to the numbers beside them. CSP does not govern CSSOM, so the fix was to assign each property
+  rather than to add `'unsafe-inline'`.
+- **A permalink painted the word "Loading"** into every preview of itself, three times, each with a
+  different cause: no boot island at all, then an island that covered only the browse view, then a
+  view that awaited `/v1/me` — an identity that depends on a token the server never saw and so
+  cannot be booted at all.
+- **Two concurrent SQLite leases deadlocked** with `database is locked`. A deferred transaction
+  that becomes a writer cannot wait. The lease became one `UPDATE … RETURNING`, which is atomic in
+  both backends and takes `FOR UPDATE SKIP LOCKED` in the Postgres subquery.
+- **`RETURNING` does not preserve the subquery's `ORDER BY`.** The tier decided which rows were
+  taken and not what order a worker received them in, so a bulk sweep job could be built ahead of
+  an interactive one held at the same moment.
+- **A worker acknowledged infrastructure failures as completed work.** `run_one` returns `Ok` for
+  every terminal outcome including the ones that say *we* could not test this package, so one
+  worker on a broken machine would have drained a queue without building anything.
+
+And one that is the same shape as §3.31 and §3.28: **five copies of the mirror-image default**, of
+which the newest drifted to a tag that does not exist. It surfaced as a connection refused to
+`localhost:443`, which says nothing about the mistake. Two commands that must build identically
+cannot have two defaults; a literal repeated five times is four opportunities for exactly this.
+
+### 3.35 Two tests that were wrong in the way the code was right
+
+**Gap.** Worth recording because both were written *as* guards and both guarded the wrong thing.
+
+A test asserting this crate cannot reach the comparator scanned its own source for the forbidden
+name — and the needle was a string literal in the file doing the scanning. The `pgrep -f` shape,
+in a test. Then, fixed to skip the test module, it failed on `lib.rs`'s module documentation, which
+states the rule by naming the function it forbids: a check that a file may not *discuss* what it may
+not *call* forbids writing the rule down. The durable version is the manifest, where a crate that
+does not depend on the comparator cannot reach it however the code is arranged.
+
+A host-budget test asserted durations and failed by five milliseconds — twice, once to a real bug
+and once to the database round trips themselves. A reservation is absolute, so a caller arriving
+late is correctly told to wait less. The invariant has no timing in it at all: each reservation
+advances the stored floor by exactly one interval.

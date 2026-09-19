@@ -507,29 +507,111 @@ Four things only rendering it found:
   front-end not to draw it would put the accusation in `view-source:`, which is the one place a
   front-end cannot gate.
 
-**Stage 2 — the schema and the queue in `trigon-store`.** *~2–3 weeks. The largest single piece, and
-the irreversible one.* Postgres and SQLite behind one trait: the job table exactly as ADR-0005
+**Stage 2 — the schema and the queue in `trigon-store`. BUILT.** Postgres and SQLite behind one trait: the job table exactly as ADR-0005
 specifies, `FOR UPDATE SKIP LOCKED`, visibility timeout, attempt counter; the §4 tables;
 `run_events` and `host_budget` separate; row versions so two writers stop being last-writer-wins;
 `enqueue` and `record_state` in one transaction; pgbouncer and autovacuum settings from §4.4.
 Stage 1's reader gains a second backend and loses nothing.
 *This is M4 Stage B's first half, unchanged in shape. Its blast radius grows, not its design.*
 
-**Stage 3 — `trigon-engine`, enforcement test first.** *~2 weeks.* Cut `run_one` into leasable stages
+`crates/trigon-store/src/queue.rs`, behind a `queue` feature so nothing that only reads a corpus
+acquires a database driver, and `sqlx` added to the verifier's forbidden list. Postgres or SQLite
+from the URL, with one statement differing between them and every other statement shared.
+
+Three bugs the tests found: two concurrent SQLite leases deadlocking on a deferred transaction's
+write upgrade, fixed by making the lease one `UPDATE … RETURNING`; `RETURNING` not preserving the
+subquery's `ORDER BY`, so a batch arrived unsorted and a bulk job could be built ahead of an
+interactive one held at the same moment; and a reused `$2` placeholder silently shifting every bind
+after it, reading back a 4 ms interval where 50 ms was asked for.
+
+Not yet: `runs`, `verdicts` and `rollups` as specified. The `run` table here is the pointers-and-
+scalars row the outbox needs — id, target, ecosystem, state, outcome, terminal, fault, failure code,
+attempt, cache key, and the digest of the record — and the API still reads the object store. Row
+versions are a column and not yet a conditional update, so D7 is narrowed rather than closed.
+
+**Stage 3 — `trigon-engine`, enforcement test first. BUILT (in part).** Cut `run_one` into leasable stages
 with a serialisable handoff (strategy, pinned source, and a guard manifest of digests only). Write
 *the build worker cannot fetch the upstream artifact* **first**, now in three parts: network refusal
 (built), blob denial, and — new — the build worker's DB role cannot read a target's upstream digest.
 Adopt the write sidecar (§2.8).
-*M4 Stage B's second half. Converts invariant 6 from collocation into enforcement, which is exactly
-what splitting build from judge across machines otherwise removes.*
+*M4 Stage B's second half.*
 
-**Stage 4 — identity, quota, and the request button.** *~1.5 weeks.* Principals, tokens and OIDC,
+`crates/trigon-engine` owns the loop — lease, heartbeat, outbox, backoff, the confirmation attempt
+and the cap refusal — and owns nothing about how a package is rebuilt. That is a `Work`
+implementation, so the whole loop is tested without podman, a network or a registry.
+`trigon worker` implements it by calling the same `run_one` the CLI calls; a worker that rebuilt
+differently from `trigon rebuild` would make every local reproduction of a fleet result a
+coincidence. `trigon enqueue` puts targets on the queue.
+
+**The confirmation attempt is what makes anything publishable.** A verdict enqueues a second,
+independent attempt at `Regression` tier, delayed, because the risk safeguard 1 exists against is
+ambient nondeterminism and two runs back to back on a warm cache sample the same moment twice. A
+run that reached *no* verdict is not confirmed — a `no-strategy` asked twice is still a
+`no-strategy` — and a confirmation does not confirm itself.
+
+Measured end to end: `enqueue` → worker `w1` builds `left-pad@1.3.0` and records `normalized` →
+the engine enqueues attempt 2 → worker `w2` builds it and agrees → `trigon serve --public` shows
+**`published`**, for the first time in this project's history. Everything before it was
+`awaiting_confirmation`, correctly, because nothing had ever asked the same question twice.
+
+Four bugs only running it found:
+
+- **The worker acknowledged infrastructure failures as completed work.** `run_one` returns `Ok` for
+  every terminal outcome including the ones that say *we* could not test this package, so one
+  worker on a broken machine would have drained a queue without building anything. A run that is
+  about the package is finished work whatever it concluded; a run that is about us goes back.
+- **Five copies of the mirror-image default**, and the new one drifted to a tag that does not
+  exist. The failure surfaced as a connection refused to `localhost:443`, which says nothing about
+  the mistake. One constant now.
+- **`--egress mirror`** is not a tier; the tiers are `deny-all`, `mirror-only`, `git-and-mirror`,
+  `open`. Now validated at the flag rather than 1,400 lines later.
+- **Records carried no `cache_key`**, so the gate could not tell two attempts at one package from
+  two packages, and the confirmation it had just enqueued would have corroborated nothing.
+
+**Not yet, and it matters:** `run_one` is not cut into three independently leasable stages. That is
+what **invariant 6** needs, and until it exists the invariant still holds by collocation rather than
+by enforcement. The enforcement test — the build worker cannot fetch the upstream artifact, in its
+three parts — waits on that split, and the threat model should not be updated to claim otherwise.
+
+**Stage 4 — identity, quota, and the request button. BUILT (in part).** Principals, tokens and OIDC,
 scopes, audit. `POST /v1/runs` into the `interactive` tier, charged inside the enqueue transaction,
 `--egress mirror` by construction. Scheduler admission that stops rather than overspends.
 `host_budget` read before leasing and seeded into each island at creation, accepting one run of
 latency.
-*Delivers "visitors request rebuilds (behind auth)". Gives the `interactive` tier its first producer
-and the fleet the shared floor B28's file lock gives only one node.*
+*Delivers "visitors request rebuilds (behind auth)". Gives the `interactive` tier its first
+producer.*
+
+`principal`, `api_token`, `request` and an append-only `audit` table; `trigon grant` issues a
+credential and prints it once, storing only its sha256. `POST /v1/runs` is the API's one write
+route, and the rule it keeps is not "no writes" but **no route can express a verdict** — enforced
+by the crate not depending on anything that computes one. The front-end gains a request form shown
+only where `/v1/me` says the credential carries the scope, a queue page, and a job page that polls
+the events table rather than a worker.
+
+**The quota is charged inside the enqueue transaction**, which is the whole reason identity lives
+in the same database as the queue: a limiter in front of the API is a different process reading a
+different number, and the gap between its check and the insert is where a burst of clicks gets
+through. A repeat request is idempotent, so clicking twice gets an answer rather than two builds.
+
+A request names a **target and nothing else** — no strategy, no stabilizer, no base image, and
+above all no egress tier, which is a property of the worker. Extra fields in the body are dropped
+by the type, so there is no path by which one could reach a job.
+
+**Not yet:** OIDC, tenancy, and the scheduler's fair-share across ecosystems. A token is a row and
+a scope is a string; that is enough to have the button and not enough to run a public instance.
+
+### What a first frame costs, three times over
+
+The same bug appeared on three routes and each fix was narrower than the last. An SPA that fetches
+its own data paints "Loading" into every link preview, screenshot and slow connection — so the
+document carries a `<!--BOOT-->` marker the server fills with the route's data. That fixed browse.
+Then a *permalink* — the URL people actually share — painted it again, because the island only
+covered browse; `run_boot` fixed that, and asks the publication gate a second time while filling it,
+since a withheld run injected into the page source is an accusation no front-end can take back.
+Then `/queue` painted it a third time, and the cause was different: the view awaited `/v1/me`, and
+who the viewer is depends on a token the server never saw. Identity cannot be booted, so it is no
+longer awaited — the page paints with what is known and fills the credential-dependent slot when
+the answer arrives.
 
 **Stage 5 — transforms, governance before execution.** *~3 weeks. The riskiest stage.* In order:
 (a) §6.4's three gaps; (b) `Stage::Patch` execution with `Provenance::Human { reviewer }` wired and
@@ -678,4 +760,43 @@ record at all, and a corpus browser over today's store reports a perfect reprodu
 corpus where nothing has ever failed to build. The second is ADR-0010 safeguard 1 meeting a
 single-attempt corpus, which is what `attempt` and `cache_key` exist to fix.
 
-Stage 0 is now the next thing to build, and the site is the reason it is legible.
+Both are now fixed, and the second is worth recording as a measurement rather than a plan:
+
+| | then | now |
+|---|---|---|
+| Runs in the store | 32 | 35 |
+| Never became evidence | **0** | 3, each `no-strategy`, each carrying the rung's own sentence |
+| Released to a public reader | **0** | `left-pad@1.3.0`, on two agreeing attempts from two workers |
+
+The second row is stage 0. The third is the engine's confirmation attempt, and it is the first
+thing this project has ever published under ADR-0010's safeguards rather than in spite of their
+absence.
+
+## 13. What is left
+
+Three things, and each is blocked on something real rather than on time.
+
+**Transforms (stage 5).** The write half of the user's request, and the only one of their four asks
+that is not built. It is not a matter of adding a button: §10 rejects shipping apply before the
+corpus-wide preview, on the grounds that doing so ships the feature with its safety case removed —
+and the preview is a judge-only re-comparison over a sampled corpus, which needs the judge worker
+class that stage 3 has not split out yet. The engine already carries the refusal that will guard
+it: a job with a non-`Builtin` overlay whose comparison returns `normalized` is refused, left dead,
+and raised, because the cap should have held it.
+
+**The infer/build/judge split (stage 3's remainder).** Invariant 6 — the build worker cannot fetch
+the upstream artifact — holds today by *collocation*: one process does all three, so there is no
+boundary to cross. A fleet does not change that, because the fleet's unit of work is still one
+whole run. Splitting it is what turns the invariant into something a test can assert, and the
+enforcement test waits on the split rather than the other way around. Until then the threat model
+should keep saying collocation.
+
+**The §4 tables, and D7.** `run` is the pointers-and-scalars row the outbox needs, not
+`10-scale.md` §4's `runs`/`verdicts`/`rollups`. The API still reads the object store, which is
+correct at this size and is the thing stage 2 was supposed to replace behind the same reader.
+`version` is a column and not yet a conditional update, so concurrent writers are narrowed rather
+than excluded.
+
+Everything else in §8 is built. §11's scope call is still the scope call: stages 4 and 5 are not
+M4, and the part of stage 4 that shipped is the cheap half — a token is a row and a scope is a
+string, which is enough to have the button and not enough to run a public instance.

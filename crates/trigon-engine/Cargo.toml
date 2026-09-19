@@ -1,0 +1,22 @@
+[package]
+name = "trigon-engine"
+version = "0.0.0"
+description = "The worker loop: lease a job, run it, record it, or give it back."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+trigon-core.workspace = true
+trigon-store = { workspace = true, features = ["queue"] }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

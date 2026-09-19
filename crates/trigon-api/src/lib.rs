@@ -17,6 +17,7 @@
 pub mod evidence;
 pub mod index;
 pub mod publication;
+pub mod request;
 pub mod routes;
 pub mod serve;
 pub mod ui;
@@ -45,6 +46,13 @@ pub enum Principal {
 /// Everything a handler can reach.
 pub struct Api {
     pub store: Arc<trigon_store::Store>,
+    /// The queue, where one is configured.
+    ///
+    /// `None` is a reader over a corpus in object storage and nothing else — the shape stage 1
+    /// shipped, which needs no database at all. Every write route answers "this instance has no
+    /// queue" rather than pretending, because an instance that silently accepted requests it could
+    /// not queue would be worse than one that says so.
+    pub queue: Option<trigon_store::Queue>,
     pub index: index::Index,
     pub switches: Switches,
     /// What an unauthenticated caller counts as.
@@ -61,10 +69,11 @@ impl Api {
     }
 }
 
-/// The routes, and nothing else.
+/// The routes.
 ///
-/// Every one is a `get`. That is not a coincidence to be maintained by attention: this crate has no
-/// handler that takes a body, and `no_route_mutates_anything` asserts the router agrees.
+/// One of them is a `POST`, and it enqueues. The rule this crate keeps is not "no writes" — that
+/// was a proxy for it, true while there was no write path — but **no route can express a verdict**,
+/// which is enforced by the crate not depending on anything that computes one.
 pub fn router(api: Arc<Api>) -> axum::Router {
     use axum::routing::get;
     axum::Router::new()
@@ -80,6 +89,12 @@ pub fn router(api: Arc<Api>) -> axum::Router {
         .route("/v1/targets/{purl}", get(routes::target))
         .route("/v1/evidence/{digest}", get(routes::evidence_blob))
         .route("/v1/openapi.json", get(routes::openapi))
+        .route("/v1/me", get(request::me))
+        .route("/v1/queue", get(request::queue_state))
+        .route("/v1/jobs/{id}/events", get(request::job_events))
+        // The one write route. It enqueues a job; it cannot express an outcome, so it cannot
+        // launder one. See `request`'s module documentation and `docs/22` §5.4.
+        .route("/v1/runs", axum::routing::post(request::request_run))
         .route("/", get(ui::index_html))
         .route("/{*path}", get(ui::asset))
         .with_state(api)

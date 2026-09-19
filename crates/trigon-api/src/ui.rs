@@ -54,7 +54,7 @@ const ASSETS: &[(&str, &str, &str)] = &[
 /// handlers replace it with a JSON island, and the script uses the island when it is there and
 /// fetches when it is not. A CDN copy still works; a served copy paints something true immediately.
 pub async fn index_html(State(api): State<Arc<Api>>) -> Response {
-    document(&api, None)
+    document(&api, None).await
 }
 
 pub async fn asset(State(api): State<Arc<Api>>, Path(path): Path<String>) -> Response {
@@ -68,15 +68,22 @@ pub async fn asset(State(api): State<Arc<Api>>, Path(path): Path<String>) -> Res
             axum::Json(serde_json::json!({"error": "no_such_route"})),
         )
             .into_response(),
-        None => document(&api, Some(&path)),
+        None => document(&api, Some(&path)).await,
     }
 }
 
 /// `path` is the front-end route being entered directly, `runs/<id>` for a permalink.
-fn document(api: &Api, path: Option<&str>) -> Response {
+async fn document(api: &Api, path: Option<&str>) -> Response {
     let public = api.principal() == Principal::Anonymous;
-    let boot = match path.and_then(|p| p.strip_prefix("runs/")) {
-        Some(id) => run_boot(api, id, public),
+    // Every route a reader can arrive on directly gets a first frame with content in it. A route
+    // missing from here still works — the script falls through to a fetch — but it paints the word
+    // "Loading" into every preview of itself, which is how this was noticed twice.
+    let boot = match path {
+        Some(p) if p.starts_with("runs/") => run_boot(api, &p[5..], public),
+        Some("queue") => queue_boot(api, public).await,
+        // A job page is a live view by definition: its content is what has happened in the last
+        // few seconds, so there is nothing worth freezing into the document.
+        Some(_) => serde_json::json!({ "health": health_boot(api, public) }),
         None => browse_boot(api, public),
     };
     let Some((_, mime, body)) = ASSETS.iter().find(|(n, ..)| *n == "index.html") else {
@@ -100,6 +107,39 @@ fn health_boot(api: &Api, public: bool) -> serde_json::Value {
         "runs": api.index.len(),
         "principal": if public { "anonymous" } else { "operator" },
         "divergence_publication": if api.switches.stop_divergences { "stopped" } else { "running" },
+    })
+}
+
+/// The queue's depth and what is in flight.
+///
+/// Anonymous, and it names targets. A deliberate call: the queue says what we are *about to look
+/// at*, which is not a finding about anybody, and it is the thing a visitor who has just asked for
+/// a rebuild most wants to see. Nothing here says whether a package reproduced.
+async fn queue_boot(api: &Api, public: bool) -> serde_json::Value {
+    let health = health_boot(api, public);
+    let Some(q) = api.queue.as_ref() else {
+        return serde_json::json!({
+            "health": health,
+            "queue": { "depth": null, "detail": "this instance reads a corpus and has no queue." },
+        });
+    };
+    let (Ok(depth), Ok(flight)) = (q.depth().await, q.in_flight(50).await) else {
+        // A queue that cannot be read leaves the frame without it, and the script's own fetch
+        // surfaces the error. A boot island is an optimisation; it must never be the only way a
+        // page can report that something is wrong.
+        return serde_json::json!({ "health": health });
+    };
+    serde_json::json!({
+        "health": health,
+        "queue": {
+            "depth": depth.into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+            "in_flight": flight
+                .into_iter()
+                .map(|(job, target, state, attempt)| serde_json::json!({
+                    "job": job, "target": target, "state": state, "attempt": attempt,
+                }))
+                .collect::<Vec<_>>(),
+        },
     })
 }
 
