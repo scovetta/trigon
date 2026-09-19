@@ -101,6 +101,46 @@ impl Family {
             Family::NoStrategy => "none",
         }
     }
+
+    /// The same colour the class in `STYLE` sets, for a swatch that cannot take one from CSS.
+    ///
+    /// Two places holding one colour is the shape of defect this project keeps finding, so a test
+    /// reads `STYLE` and asserts the pair still agree rather than trusting that they do.
+    fn colour(self) -> &'static str {
+        match self {
+            Family::Reproduced => "#137333",
+            Family::Divergent => "#b26a00",
+            Family::BuildFailed => "#b3261e",
+            Family::Error => "#6b4fbb",
+            Family::Void => "#6b6b66",
+            Family::NoStrategy => "#6b6b66",
+        }
+    }
+
+    /// The word for a legend.
+    fn label(self) -> &'static str {
+        match self {
+            Family::Reproduced => "reproduced",
+            Family::Divergent => "divergent",
+            Family::BuildFailed => "build failed",
+            Family::Error => "ours",
+            Family::Void => "void",
+            Family::NoStrategy => "no strategy",
+        }
+    }
+
+    /// Every family, in the order a legend reads them: the two that are evidence, then the three
+    /// that are a failure of some kind, then the one that is nothing at all.
+    fn all() -> [Family; 6] {
+        [
+            Family::Reproduced,
+            Family::Divergent,
+            Family::BuildFailed,
+            Family::NoStrategy,
+            Family::Error,
+            Family::Void,
+        ]
+    }
 }
 
 /// Read `results.tsv`.
@@ -216,6 +256,40 @@ pub fn ago(secs: u64) -> String {
     }
 }
 
+/// The run's own end-to-end duration, where both ends are readable.
+///
+/// `None` rather than zero: a run whose timestamps this page cannot parse did not take no time.
+fn bracket_seconds(r: &crate::progress::RunReport) -> Option<i64> {
+    let start = rfc3339_epoch(&r.started)?;
+    let finish = rfc3339_epoch(r.finished.as_deref()?)?;
+    Some((finish - start).max(0))
+}
+
+/// The row a report makes, for the layouts whose rows are reports rather than `results.tsv` lines.
+///
+/// One function because there are now two of those, and a second copy is how the synthetic row a
+/// single rebuild gets and the one an index gets start disagreeing about what an absent outcome
+/// means.
+fn row_of(r: &crate::progress::RunReport) -> Row {
+    Row {
+        purl: r.purl.clone(),
+        // A report with no outcome is a run that raised before a verdict. `Family::of` sends
+        // anything it does not recognise to `Error`, which is the safe direction: an unlabelled run
+        // is never counted against the package.
+        label: r
+            .outcome
+            .clone()
+            .or_else(|| r.error.as_ref().map(|_| "error:infra".to_string()))
+            .unwrap_or_else(|| "error:unknown".into()),
+        // The started→finished bracket, which is the only honest duration a report carries. `0.0`
+        // where it cannot be computed, and every page that shows it says so rather than letting a
+        // zero read as an instant run.
+        seconds: bracket_seconds(r).unwrap_or(0) as f64,
+        cluster: r.failure.as_ref().map(|f| f.key()),
+        model_calls: Some(r.model_calls),
+    }
+}
+
 /// Everything a page needs, re-read per request.
 struct Sweep {
     work: PathBuf,
@@ -301,18 +375,74 @@ async fn find_record(store: &Path, purl: &str) -> Lookup {
 ///
 /// `watch` was written for a sweep and understood nothing else, so a plain
 /// `trigon rebuild --work ./work` — the command the README opens with — rendered "no results". The
-/// two layouts are told apart by what is on disk rather than by a flag, because a flag is a second
+/// layouts are told apart by what is on disk rather than by a flag, because a flag is a second
 /// thing that has to agree with the directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layout {
-    /// `results.tsv` is present. Evidence lives in `<work>/{index:03}`.
+    /// A sweep wrote here: `results.tsv`, or the `sweep.json` and `status.json` it writes before
+    /// its first target lands. Evidence lives in `<work>/{index:03}`.
     Sweep,
-    /// No `results.tsv`, but a run left its report or its strategy at the root. One target, whose
-    /// evidence directory *is* `<work>`.
+    /// No sweep, but a run left its report or its strategy at the root. One target, whose evidence
+    /// directory *is* `<work>`.
     Single,
-    /// Neither. Not a work directory this page can read, which is a different answer from an empty
-    /// sweep and is said in those words.
+    /// No run at the root, and subdirectories that each hold one.
+    ///
+    /// What `scripts/rebuild-and-attest.sh` produces — one `./work/<purl-slug>` per invocation —
+    /// and the shape every run in this repository is actually stored in. It rendered as `Unknown`,
+    /// so `trigon watch ./work` answered **"state unknown · 0 attempted"** over twenty-four
+    /// finished rebuilds: a sweep's vocabulary applied to a directory no sweep made, reporting
+    /// evidence that is right there as absence. The first rule at the top of this file, running
+    /// backwards.
+    Index,
+    /// None of those. Not a work directory this page can read, which is a different answer from an
+    /// empty sweep and is said in those words.
     Unknown,
+}
+
+/// One run-bearing subdirectory of an [`Layout::Index`] directory.
+///
+/// **The directory's name is not the target.** `rebuild-and-attest.sh` names it by replacing every
+/// character a path dislikes in the purl, which is lossy, and is one script's convention rather
+/// than anything `trigon` writes — `--work` takes any path at all. So the target is read from
+/// `run.json` or it is not known, and a directory without one is named as a directory.
+struct Entry {
+    dir: PathBuf,
+    name: String,
+    report: Option<crate::progress::RunReport>,
+}
+
+/// The subdirectories of a work directory that hold a run, in name order.
+///
+/// One `read_dir` and two `is_file` per child, no recursion: the question is only whether this
+/// directory is a shelf of runs, and answering it by descending would cost a page load proportional
+/// to every artifact underneath.
+///
+/// Name order rather than mtime, because the number in `/run/{i}` is a position in this list, and a
+/// list that reorders itself under the reader turns a bookmarked run into a different one. It still
+/// shifts when a new run lands — the sweep layout's numbering has the same property — so the page
+/// names the target it is showing rather than leaving the number to carry it.
+fn run_bearing_children(work: &Path) -> Vec<Entry> {
+    let Ok(dir) = std::fs::read_dir(work) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Entry> = dir
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| p.join("run.json").is_file() || p.join("strategy.yaml").is_file())
+        .map(|p| Entry {
+            name: p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            report: std::fs::read_to_string(p.join("run.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok()),
+            dir: p,
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 struct View {
@@ -330,6 +460,11 @@ struct View {
     age: Option<u64>,
     /// Target purls in the order the sweep will attempt them, when a targets file was named.
     targets: Option<Vec<String>>,
+    /// Under [`Layout::Index`], the run-bearing subdirectories in name order — one per row.
+    ///
+    /// Positionally joined to `rows`: `rows[i]` is what `entries[i]` recorded. That join is what
+    /// makes `/run/{i}` resolve to a directory nobody numbered.
+    entries: Vec<Entry>,
     /// What the sweep said about itself, where it wrote it down.
     sweep: Option<crate::progress::Sweep>,
     status: Option<crate::progress::Status>,
@@ -351,10 +486,29 @@ impl Sweep {
             .as_deref()
             .and_then(|t| serde_json::from_str(t).ok());
         let report_unreadable = report_text.is_some() && report.is_none();
-        let layout = if results.is_file() {
+        // A sweep that has not finished its first target has no `results.tsv` yet and is still a
+        // sweep: it writes `sweep.json` before it starts and heartbeats into `status.json` while it
+        // runs. Without those two, such a directory would read as an index of whatever its
+        // in-flight `000/` happens to contain, and the liveness strip — the only thing worth
+        // watching at that moment — would be replaced by a table of one.
+        let sweepish = results.is_file()
+            || self.work.join("sweep.json").is_file()
+            || self.work.join("status.json").is_file();
+        let singleish = report_text.is_some() || self.work.join("strategy.yaml").is_file();
+        // Asked only where the answer can change anything. On a sweep of five thousand targets this
+        // would be a `read_dir` and ten thousand `stat`s per page load, to re-answer a question
+        // `results.tsv` already settled.
+        let entries = if sweepish || singleish {
+            Vec::new()
+        } else {
+            run_bearing_children(&self.work)
+        };
+        let layout = if sweepish {
             Layout::Sweep
-        } else if report_text.is_some() || self.work.join("strategy.yaml").is_file() {
+        } else if singleish {
             Layout::Single
+        } else if !entries.is_empty() {
+            Layout::Index
         } else {
             Layout::Unknown
         };
@@ -364,30 +518,26 @@ impl Sweep {
         // that its evidence directory is the work root rather than `{index:03}` — is `Layout`'s
         // job, which is why the two travel together.
         let (rows, dropped) = match (layout, &report) {
-            (Layout::Single, Some(r)) => (
-                vec![Row {
-                    purl: r.purl.clone(),
-                    // A report with no outcome is a run that raised before a verdict. `Family::of`
-                    // sends anything it does not recognise to `Error`, which is the safe direction:
-                    // an unlabelled run is never counted against the package.
-                    label: r
-                        .outcome
-                        .clone()
-                        .or_else(|| r.error.as_ref().map(|_| "error:infra".to_string()))
-                        .unwrap_or_else(|| "error:unknown".into()),
-                    // Seconds are the started→finished bracket, which is the only honest duration a
-                    // report carries. `0.0` where it cannot be computed, and the page says so
-                    // rather than letting a zero read as an instant run.
-                    seconds: r
-                        .finished
-                        .as_deref()
-                        .and_then(rfc3339_epoch)
-                        .zip(rfc3339_epoch(&r.started))
-                        .map(|(f, s)| (f - s).max(0) as f64)
-                        .unwrap_or(0.0),
-                    cluster: r.failure.as_ref().map(|f| f.key()),
-                    model_calls: Some(r.model_calls),
-                }],
+            (Layout::Single, Some(r)) => (vec![row_of(r)], 0),
+            (Layout::Index, _) => (
+                entries
+                    .iter()
+                    .map(|e| match &e.report {
+                        Some(r) => row_of(r),
+                        // A directory with a strategy and no report: the rebuild is still going, or
+                        // it ended before it could write one. `error:` sends it to `Family::Error`,
+                        // which is where an unknown belongs — ours until shown otherwise, and never
+                        // counted against the package. The purl is empty because nothing on disk
+                        // says what the target was; the directory's name is not a record of it.
+                        None => Row {
+                            purl: String::new(),
+                            label: "error:no-report".into(),
+                            seconds: 0.0,
+                            cluster: None,
+                            model_calls: None,
+                        },
+                    })
+                    .collect(),
                 0,
             ),
             _ => (rows, dropped),
@@ -442,10 +592,27 @@ impl Sweep {
             dropped,
             age,
             targets,
+            entries,
             sweep,
             status,
             live,
         }
+    }
+
+    /// What the browser tab says.
+    ///
+    /// **Every tab said `target 000`** — every run page of every layout, so three open windows were
+    /// three identical tabs and the history was a guess. The target where one is known, the work
+    /// directory where it is not, and the tool's name on the end, because a tab reading
+    /// `once@1.4.0` does not say what is looking at it.
+    fn tab_title(&self, name: Option<&str>) -> String {
+        let what = name.map(str::to_string).unwrap_or_else(|| {
+            self.work
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.work.display().to_string())
+        });
+        format!("{what} · trigon watch")
     }
 
     /// Which per-target directory a purl's evidence is in.
@@ -462,12 +629,24 @@ impl Sweep {
     fn target_dir(&self, view: &View, index: usize) -> PathBuf {
         match view.layout {
             Layout::Single => self.work.clone(),
+            // A name, not a number: these directories were named by whoever ran them. An index past
+            // the end formats to a directory that does not exist, and the run page then reports
+            // every fact as absent — which is the truth about a run that is not there.
+            Layout::Index => view
+                .entries
+                .get(index)
+                .map(|e| e.dir.clone())
+                .unwrap_or_else(|| self.work.join(format!("{index:03}"))),
             _ => self.work.join(format!("{index:03}")),
         }
     }
 
     fn dir_of(&self, view: &View, purl: &str) -> Option<(usize, bool)> {
-        if let Some(targets) = &view.targets {
+        // A targets file names a corpus. An index directory is not one — its contents are whatever
+        // was run by hand — so a position in that corpus would point at somebody else's run.
+        if view.layout != Layout::Index
+            && let Some(targets) = &view.targets
+        {
             return targets.iter().position(|t| t == purl).map(|i| (i, true));
         }
         view.rows
@@ -553,6 +732,30 @@ fn page(title: &str, live: bool, body: &str, bind: &str) -> Html<String> {
 
 /// The strip that appears on every page.
 fn state_strip(v: &View, targets_path: Option<&Path>) -> String {
+    // A shelf of independent runs has no corpus, no progress and no process: every number the sweep
+    // strip reaches for is a number about something that does not exist here. It used to print all
+    // of them anyway — "state unknown · 0 attempted, of an unknown total · no results.tsv here
+    // yet" — over a directory holding two dozen finished rebuilds.
+    if v.layout == Layout::Index {
+        let runs = v.entries.len();
+        let unreported = v.entries.iter().filter(|e| e.report.is_none()).count();
+        let note = if unreported > 0 {
+            format!(
+                "<br><span class=\"note\">{unreported} of them left no run.json: the rebuild is \
+                 still going, or it ended before it could write one. This page cannot say what \
+                 those found.</span>"
+            )
+        } else {
+            String::new()
+        };
+        return format!(
+            "<div class=\"state\"><strong>a directory of runs</strong> · {runs} rebuild(s), each \
+             in a work directory of its own{note}<br><span class=\"note\">not a sweep: nothing \
+             here was launched by one process, so there is no corpus to be a fraction of, no \
+             progress, and no sweep to be alive or dead</span></div>"
+        );
+    }
+
     // A single run has no corpus, no denominator and no `results.tsv`, so the sweep's own strip —
     // "0 attempted, of an unknown total · no results.tsv here yet" — was three sentences of the
     // wrong vocabulary about a run that had in fact completed. Its strip answers the questions a
@@ -641,6 +844,11 @@ fn state_strip(v: &View, targets_path: Option<&Path>) -> String {
 /// The sweep's state, in a word.
 fn liveness_text(v: &View) -> String {
     use crate::progress::Liveness as L;
+    // Not `Unknown`. We looked, and what is here is not the kind of thing that has a state: no
+    // process launched these runs together, so none of them can be running now.
+    if v.layout == Layout::Index {
+        return "not a sweep".into();
+    }
     match &v.live {
         L::Unknown => "state unknown".into(),
         L::Unreadable => "state unreadable".into(),
@@ -657,6 +865,14 @@ fn liveness_text(v: &View) -> String {
 fn liveness_detail(v: &View) -> String {
     use crate::progress::Liveness as L;
     let note = |s: String| format!("<br><span class=\"note\">{s}</span>");
+    if v.layout == Layout::Index {
+        return note(format!(
+            "this directory holds {} independent rebuild(s), each in a work directory of its own. \
+             There is no sweep process here to be alive or dead, and no corpus these runs are a \
+             sample of.",
+            v.entries.len()
+        ));
+    }
     match &v.live {
         // A sweep from before the heartbeat existed, or a directory that is not one. Named as
         // absent rather than reported as stopped: we did not look and find nothing, there was
@@ -967,6 +1183,152 @@ fn baseline_panel(sweep: &Sweep, v: &View) -> String {
     out
 }
 
+/// The first `n` characters, never a byte index that could land inside one.
+///
+/// A commit is hex and eight bytes is eight characters — until a `run.json` somebody edited by hand
+/// says otherwise, and then `&s[..8]` is a panic inside a request handler rather than a short
+/// string. The page renders whatever is on disk; it does not get to assume the shape of it.
+fn short_hex(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
+/// A repository, at the length a table column can hold.
+///
+/// Only one host prefix comes off, and only the host that is most of every corpus we run. A URL
+/// that is not GitHub's keeps its host, because which forge a package builds from is part of what
+/// the reader is checking.
+fn short_repo(url: &str) -> &str {
+    url.strip_prefix("https://github.com/")
+        .unwrap_or_else(|| url.strip_prefix("https://").unwrap_or(url))
+}
+
+/// The front door for a directory of independent runs.
+///
+/// Five columns, each answering something the reader has before they open anything: what was
+/// attempted, what the run concluded, **which source it was compared against**, when, and what it
+/// cost. The third is new to this page in a strong sense — `run.json`'s `source` had no reader
+/// anywhere in this file, though its own doc comment calls it "the one thing a reader has to have
+/// and did not", and `SourceDiscovery` "predicts a false result better than anything else
+/// available". A verdict is a claim about a published artifact *and a commit*, and the commit half
+/// was reaching nobody.
+///
+/// The column that is not here is how much of the artifact actually came from that commit. That is
+/// the source→artifact join, and it hashes a checkout: 19 seconds cold on the largest one in this
+/// cache. It is not a thing a page load may do, and a number that arrives 19 seconds late is not a
+/// column.
+fn index_panel(v: &View) -> String {
+    let mut body = String::from(
+        "<h2>Runs</h2><table><tr><th>target</th><th>outcome</th><th>built from</th>\
+         <th>when</th><th class=\"n\">cost</th></tr>",
+    );
+    for (i, e) in v.entries.iter().enumerate() {
+        let Some(r) = &e.report else {
+            body.push_str(&format!(
+                "<tr><td><a href=\"/run/{i}\"><code>{}</code></a></td>\
+                 <td colspan=\"4\" class=\"note\">no run.json: the rebuild is still going, or it \
+                 ended before it could write one. Nothing inside names a target — the directory's \
+                 name is whatever the caller passed to <code>--work</code>, not a record.</td></tr>",
+                esc(&e.name),
+            ));
+            continue;
+        };
+        let row = row_of(r);
+        let fam = Family::of(&row.label);
+        let name = r.purl.strip_prefix("pkg:").unwrap_or(&r.purl);
+        let outcome = format!(
+            "<span class=\"tag {}\">{}</span>{}",
+            fam.css(),
+            esc(&row.label),
+            match &row.cluster {
+                Some(c) => format!(
+                    "<br><a href=\"/cluster?key={}\"><code class=\"dim\">{}</code></a>",
+                    esc(&urlencode(c)),
+                    esc(c)
+                ),
+                None => String::new(),
+            }
+        );
+        let source = match &r.source {
+            Some(src) => format!(
+                "<code>{}</code>@<code title=\"{}\">{}</code>{}<br><span class=\"dim\">{}</span>",
+                esc(short_repo(&src.repo_url)),
+                esc(&src.commit),
+                esc(short_hex(&src.commit, 8)),
+                match &src.subdir {
+                    // Load-bearing, not decoration: Newtonsoft.Json builds from
+                    // `Src/Newtonsoft.Json`, and a reader comparing the artifact against the
+                    // repository root would be comparing against the wrong tree.
+                    Some(d) => format!(" <span class=\"dim\">{}</span>", esc(d)),
+                    None => String::new(),
+                },
+                esc(src.how.as_str()),
+            ),
+            None => "<span class=\"note\">no source resolved: nothing here was compared against a \
+                     commit</span>"
+                .to_string(),
+        };
+        let when = match r.finished.as_deref().and_then(rfc3339_age) {
+            Some(a) => ago(a),
+            None => "<span class=\"note\">no finish recorded</span>".to_string(),
+        };
+        // Absent is not zero on either half: a run whose clock this page cannot read did not take
+        // no time, and a run with no transcript did not fetch nothing.
+        let mut cost = vec![match bracket_seconds(r) {
+            Some(secs) => format!("{secs}s"),
+            None => "<span class=\"note\">no duration</span>".to_string(),
+        }];
+        if let Some(b) = r.network_bytes {
+            cost.push(human_bytes(b));
+        }
+        body.push_str(&format!(
+            "<tr><td><a href=\"/run/{i}\">{}</a></td><td>{outcome}</td><td>{source}</td>\
+             <td>{when}</td><td class=\"n\">{}</td></tr>",
+            esc(name),
+            cost.join(" · "),
+        ));
+    }
+    body.push_str("</table>");
+    body
+}
+
+/// What the colours mean, and how many of each are here.
+///
+/// **A tally, never a rate.** Six counts that add up to the number of runs, and no percentage: this
+/// directory is whatever somebody chose to run, so there is no corpus for a percentage to be of. A
+/// reproduction rate over a hand-picked shelf is the number this project exists to stop people
+/// quoting, and the sweep board's rates panel names both its denominators out loud precisely
+/// because a sweep does have one.
+///
+/// Every family is listed, including the ones at zero — unlike `ladder_svg`, which draws no band
+/// for an empty class. The difference is what the two are for: that one is a key to a picture,
+/// where an entry pointing at nothing sends the reader hunting for it, and this one is also the
+/// answer to "what could I have found here", where a zero is a finding.
+fn family_tally(rows: &[Row]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("<p class=\"legend\">");
+    for f in Family::all() {
+        out.push_str(&format!(
+            "<span class=\"key\"><i style=\"background:{}\"></i>{} {}</span>",
+            f.colour(),
+            rows.iter().filter(|r| Family::of(&r.label) == f).count(),
+            f.label(),
+        ));
+    }
+    out.push_str(
+        "</p><p class=\"note\">Counts, not a rate. These runs are whatever was launched by hand in \
+         this directory, so there is no denominator here worth dividing by — only a sweep over a \
+         named corpus has one. <strong>Ours</strong> is never counted against a package, and \
+         <strong>void</strong> and <strong>no strategy</strong> share a grey because neither is \
+         evidence either way.</p>",
+    );
+    out
+}
+
 fn board_panel(sweep: &Sweep, v: &View) -> String {
     if v.rows.is_empty() {
         return String::new();
@@ -1023,6 +1385,12 @@ fn urlencode(s: &str) -> String {
 /// answer, and a JSON zero would be a different one.
 #[derive(serde::Serialize)]
 struct ApiState {
+    /// Which shape of directory this is, in the serialized spelling of [`Layout`].
+    ///
+    /// Here because the page and the API must not answer differently: the page stops showing a
+    /// reproduction rate over a directory of hand-run rebuilds, and a script reading the rate
+    /// fields is owed the same caveat rather than a percentage with nothing attached.
+    layout: &'static str,
     state: String,
     detail: String,
     attempted: usize,
@@ -1048,6 +1416,12 @@ async fn api_state(State(sweep): State<std::sync::Arc<Sweep>>) -> Response {
     let v = sweep.read();
     let r = Rates::of(&v.rows);
     axum::Json(ApiState {
+        layout: match v.layout {
+            Layout::Sweep => "sweep",
+            Layout::Single => "single",
+            Layout::Index => "index",
+            Layout::Unknown => "unknown",
+        },
         state: liveness_text(&v),
         // The rendered sentence, stripped of its markup: a reader of the JSON gets the same
         // caveat a reader of the page does, rather than a bare word they have to interpret.
@@ -1092,18 +1466,30 @@ fn strip_tags(s: &str) -> String {
 
 async fn board(State(sweep): State<std::sync::Arc<Sweep>>) -> Response {
     let v = sweep.read();
-    let rates = Rates::of(&v.rows);
     let live = v.live.is_live();
-    let body = format!(
-        "<h1>{}</h1>{}{}{}{}",
-        esc(&sweep.work.display().to_string()),
-        state_strip(&v, sweep.targets.as_deref()),
-        rates_panel(&rates),
-        clusters_panel(&v.rows),
-        board_panel(&sweep, &v),
-    );
-    let body = format!("{body}{}", baseline_panel(&sweep, &v));
-    page("trigon watch", live, &body, &sweep.bind).into_response()
+    let body = match v.layout {
+        // No rates panel: see `family_tally`. No board panel either — its columns are seconds,
+        // cluster and model calls, which is a sweep's triage view, and this page's reader is
+        // asking a different question.
+        Layout::Index => format!(
+            "<h1>{}</h1>{}{}{}{}",
+            esc(&sweep.work.display().to_string()),
+            state_strip(&v, sweep.targets.as_deref()),
+            index_panel(&v),
+            family_tally(&v.rows),
+            clusters_panel(&v.rows),
+        ),
+        _ => format!(
+            "<h1>{}</h1>{}{}{}{}{}",
+            esc(&sweep.work.display().to_string()),
+            state_strip(&v, sweep.targets.as_deref()),
+            rates_panel(&Rates::of(&v.rows)),
+            clusters_panel(&v.rows),
+            board_panel(&sweep, &v),
+            baseline_panel(&sweep, &v),
+        ),
+    };
+    page(&sweep.tab_title(None), live, &body, &sweep.bind).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -1946,28 +2332,49 @@ async fn run(
     // The only path parameter anywhere, parsed as an integer by the extractor and re-formatted
     // before it is joined to anything, so no request string reaches the filesystem.
     let dir = sweep.target_dir(&v, index);
-    let row = v
-        .rows
-        .iter()
-        .find(|r| sweep.dir_of(&v, &r.purl).map(|(i, _)| i) == Some(index));
+    // Under `Index` the row and the directory are one position, and the round trip through `purl`
+    // would be ambiguous the moment two directories hold runs of the same target.
+    let row = match v.layout {
+        Layout::Index => v.rows.get(index),
+        _ => v
+            .rows
+            .iter()
+            .find(|r| sweep.dir_of(&v, &r.purl).map(|(i, _)| i) == Some(index)),
+    };
+    let report = read_report(&dir);
+
+    // The target where one is known, the directory's own name where it is not, and the number only
+    // when neither is true.
+    let name = match row.filter(|r| !r.purl.is_empty()) {
+        Some(r) => r.purl.strip_prefix("pkg:").unwrap_or(&r.purl).to_string(),
+        None => match v.entries.get(index) {
+            Some(e) => e.name.clone(),
+            None => format!("target {index:03}"),
+        },
+    };
 
     let mut body = format!(
         "<h1>{}</h1>{}",
-        match row {
-            Some(r) => esc(r.purl.strip_prefix("pkg:").unwrap_or(&r.purl)),
-            None => format!("target {index:03}"),
-        },
+        esc(&name),
         state_strip(&v, sweep.targets.as_deref()),
     );
 
     match row {
         Some(r) => {
             let fam = Family::of(&r.label);
+            // A run with no report has no clock either, and its synthetic row carries a `0.0` that
+            // is a placeholder rather than a measurement. Printing it would be this page's own
+            // first rule broken on the one row that exists because something is missing.
+            let duration = match (v.layout, &report) {
+                (Layout::Index, None) => {
+                    " · <span class=\"note\">no duration recorded</span>".to_string()
+                }
+                _ => format!(" · {:.0}s", r.seconds),
+            };
             body.push_str(&format!(
-                "<p><span class=\"tag {}\">{}</span> · {:.0}s{}</p>",
+                "<p><span class=\"tag {}\">{}</span>{duration}{}</p>",
                 fam.css(),
                 esc(&r.label),
-                r.seconds,
                 match &r.cluster {
                     Some(c) => format!(
                         " · cluster <a href=\"/cluster?key={}\"><code>{}</code></a>",
@@ -1978,10 +2385,30 @@ async fn run(
                 }
             ));
         }
-        None => body.push_str(
-            "<p class=\"note\">no row in results.tsv maps to this directory — it may be the target \
-             in flight, whose outcome is unknown rather than failed</p>",
+        None => body.push_str(&match v.layout {
+            Layout::Index => format!(
+                "<p class=\"note\">this directory holds {} run(s), numbered 0 to {}, and no run \
+                 {index}</p>",
+                v.entries.len(),
+                v.entries.len().saturating_sub(1),
+            ),
+            _ => "<p class=\"note\">no row in results.tsv maps to this directory — it may be the \
+                  target in flight, whose outcome is unknown rather than failed</p>"
+                .to_string(),
+        }),
+    }
+
+    // The sentence, before any panel. Everything below it is the evidence for it.
+    match (&report, v.layout) {
+        (Some(r), _) => body.push_str(&verdict_sentence(r)),
+        // The one row that exists *because* something is missing. Without this it was a bare tag
+        // over eight panels of absence, which is the shape this whole stage is about.
+        (None, Layout::Index) => body.push_str(
+            "<p><strong>This run left no report.</strong> The rebuild is still going, or it ended \
+             before it could write one — either way nothing here is a finding about the package, \
+             and the directory's name is not a record of which target it holds.</p>",
         ),
+        (None, _) => {}
     }
 
     // Each absent fact is named, together with what would have to change for it to exist. An empty
@@ -2036,7 +2463,7 @@ async fn run(
         ),
     }
 
-    body.push_str(&report_panel(&dir));
+    body.push_str(&report_panel(report.as_ref()));
     if let (Some(store), Some(r)) = (&sweep.store, row) {
         body.push_str(&store_panel(store, &r.purl).await);
     } else if sweep.store.is_none() {
@@ -2048,7 +2475,7 @@ async fn run(
     body.push_str("<p><a href=\"/\">← all targets</a></p>");
 
     page(
-        &format!("target {index:03}"),
+        &sweep.tab_title(Some(&name)),
         v.live.is_live(),
         &body,
         &sweep.bind,
@@ -2056,16 +2483,122 @@ async fn run(
     .into_response()
 }
 
+/// The run's own report, wherever this layout keeps it.
+fn read_report(dir: &Path) -> Option<crate::progress::RunReport> {
+    serde_json::from_str(&std::fs::read_to_string(dir.join("run.json")).ok()?).ok()
+}
+
+/// The one sentence that says what happened, directly under the verdict.
+///
+/// **Every fact in it was already on disk and none of them were on the page.** `declines` had no
+/// reader anywhere in this file; `error` and `void_reason` were rows in a table eight panels down,
+/// below the build log. `work/pkg-npm-semver@3.0.1` is the case that makes it plain — a
+/// `no-strategy` whose `run.json` carries the exact reason the npm rung refused, under a page that
+/// rendered eight panels of absence and never said it.
+///
+/// Precedence is the order in which one answer makes the rest beside the point: an error of ours
+/// means the run never reached a verdict; a void means it reached one that may not be counted; a
+/// decline means there was no recipe to try; otherwise the outcome, in words.
+fn verdict_sentence(r: &crate::progress::RunReport) -> String {
+    if let Some(e) = &r.error {
+        return format!(
+            "<p><strong>The run stopped on an error of ours.</strong> {}<br>\
+             <span class=\"note\">nothing below is a finding about the package</span></p>",
+            esc(e)
+        );
+    }
+    if let Some(v) = &r.void_reason {
+        return format!(
+            "<p><strong>This run is evidence of nothing.</strong> {}<br>\
+             <span class=\"note\">a void is not a failure — it is a run whose result may not be \
+             counted in either direction</span></p>",
+            esc(v)
+        );
+    }
+    if !r.declines.is_empty() {
+        let mut out = String::from(
+            "<p><strong>No rung produced a recipe.</strong> Each one that was asked said why:</p>\
+             <ul>",
+        );
+        for d in &r.declines {
+            out.push_str(&format!("<li>{}</li>", esc(d)));
+        }
+        out.push_str("</ul>");
+        return out;
+    }
+
+    let label = r.outcome.as_deref().unwrap_or("");
+    let words = if label.is_empty() {
+        "The run recorded no outcome. It ended before it reached one, and nothing it wrote says \
+         what stopped it."
+    } else {
+        match label.parse::<trigon_core::Match>() {
+            Ok(trigon_core::Match::Exact) => {
+                "The rebuilt artifact is byte for byte the published one. Nothing had to be \
+                 normalized away."
+            }
+            Ok(trigon_core::Match::Normalized) => {
+                "The rebuilt artifact matched the published one after normalization, and every \
+                 pass that fired was a built-in one at metadata risk or below."
+            }
+            // The distinction the verdict exists to carry, and the one a reader skims past: a
+            // caveated match is a match a pass could have manufactured.
+            Ok(trigon_core::Match::NormalizedWithCaveats) => {
+                "The rebuilt artifact matched the published one only after a pass that can hide a \
+                 real difference. Read the stabilizer ledger below before calling this reproduced."
+            }
+            Ok(trigon_core::Match::Divergent) => {
+                "The rebuilt artifact is not the published one. What differs is below, member by \
+                 member."
+            }
+            Err(_) => match Family::of(label) {
+                Family::BuildFailed => {
+                    "The build ran and failed. That is a finding about the package or about the \
+                     recipe, and the log below says which."
+                }
+                Family::NoStrategy => {
+                    "Nothing on the ladder produced a recipe, and no rung recorded why — this run \
+                     is older than the declines it would have written."
+                }
+                Family::Void => {
+                    "This run is evidence of nothing, and did not record why it was voided."
+                }
+                // The fault is the half of the label that matters here: `docs`' own division is
+                // that one of these is ours and the other is the registry's, and neither is the
+                // package's.
+                _ => match label.split(':').nth(1) {
+                    Some("upstream") => {
+                        "The registry or the network stopped this run before it reached a verdict. \
+                         Not a finding about the package."
+                    }
+                    _ => {
+                        "Our own infrastructure stopped this run before it reached a verdict. Not \
+                         a finding about the package."
+                    }
+                },
+            },
+        }
+    };
+
+    // Pointed at rather than repeated: an assumption is long, and a verdict read without knowing
+    // one was made is the failure mode this exists for.
+    let assumed = match r.assumptions.len() {
+        0 => String::new(),
+        n => format!(
+            "<br><span class=\"note\">read against <a href=\"#assumed\">{n} assumption(s)</a> the \
+             rung had to make to build this at all</span>"
+        ),
+    };
+    format!("<p>{words}{assumed}</p>")
+}
+
 /// What the run recorded about itself.
 ///
 /// Written on every terminal outcome, unlike the store, which records only runs that reached a
 /// comparison. Each absent fact is named together with why, because an empty panel reads as a run
 /// that produced nothing.
-fn report_panel(dir: &Path) -> String {
-    let Some(r) = std::fs::read_to_string(dir.join("run.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<crate::progress::RunReport>(&t).ok())
-    else {
+fn report_panel(r: Option<&crate::progress::RunReport>) -> String {
+    let Some(r) = r else {
         return "<h2>What the run recorded</h2><p class=\"note\">no run.json — this target ran \
                 before the record existed, or was never attempted</p>"
             .into();
@@ -2098,6 +2631,45 @@ fn report_panel(dir: &Path) -> String {
             format!("<code>{}</code>", esc(&d[..16.min(d.len())])),
         );
     }
+    // **Always a row, on every run.** A verdict is a claim about a published artifact *and* a
+    // commit, and the commit half reached nobody: this field had no reader in this file, though its
+    // own doc comment calls it "the one thing a reader has to have and did not". How it was found
+    // is part of it — `SourceDiscovery`'s doc says a fuzzy tag match on a repository with four
+    // thousand tags is a coin flip, and the verdict that follows deserves to be read differently.
+    row(
+        "built from",
+        match &r.source {
+            Some(src) => format!(
+                "<code>{}</code> at <code>{}</code>{}<br><span class=\"dim\">found by {}{}</span>{}",
+                esc(&src.repo_url),
+                esc(&src.commit),
+                match &src.subdir {
+                    Some(d) => format!(" · <code>{}</code>", esc(d)),
+                    None => String::new(),
+                },
+                esc(src.how.as_str()),
+                match &src.ref_name {
+                    Some(t) => format!(", from <code>{}</code>", esc(t)),
+                    None => String::new(),
+                },
+                match &src.declared_url {
+                    // Kept only where it differs, and shown for the same reason it is kept: a
+                    // record naming a repository the package never declared reads exactly like a
+                    // correct one.
+                    Some(u) => format!(
+                        "<br><span class=\"note\">the registry declared {}, which was trimmed to \
+                         the repository above</span>",
+                        esc(u)
+                    ),
+                    None => String::new(),
+                },
+            ),
+            None => "<span class=\"note\">no source resolved — this run was never compared \
+                     against a commit, so its verdict is a claim about an artifact and nothing \
+                     else</span>"
+                .to_string(),
+        },
+    );
     if let Some(e) = &r.egress {
         row(
             "egress",
@@ -2192,7 +2764,7 @@ fn report_panel(dir: &Path) -> String {
     }
 
     if !r.assumptions.is_empty() {
-        out.push_str("<h2>What the rung assumed</h2><ul>");
+        out.push_str("<h2 id=\"assumed\">What the rung assumed</h2><ul>");
         for a in &r.assumptions {
             out.push_str(&format!("<li>{}</li>", esc(a)));
         }
@@ -2374,7 +2946,10 @@ async fn store_panel(store: &Path, purl: &str) -> String {
             ));
         }
         if let Some(b) = c.egress_bytes {
-            parts.push(format!("{b} bytes fetched"));
+            // Through the same formatter every other byte count on these pages goes through. It was
+            // defined and unused on this one path, so the run page said `96.3 MB` and the record
+            // below it said `96255729 bytes fetched` about the same fetch.
+            parts.push(format!("{} fetched", human_bytes(b)));
         }
         if !parts.is_empty() {
             row("cost", parts.join(" · "));
@@ -2657,6 +3232,7 @@ mod tests {
         let r = Rates::of(&rows("a\tbuild-failed:deps\t1.0\tx\t0\n"));
         assert_eq!(r.reproduction(), None);
         let json = serde_json::to_string(&ApiState {
+            layout: "sweep",
             state: "running".into(),
             detail: "on a for 3s".into(),
             attempted: r.attempted,
@@ -2673,6 +3249,244 @@ mod tests {
         .unwrap();
         assert!(json.contains("\"reproduction\":null"), "{json}");
         assert!(json.contains("\"total\":null"), "{json}");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A directory of runs. Everything below reads a real directory, because the bug it is about
+    // was a directory this page could not name: `Sweep::read` decides the layout from what is on
+    // disk, so a test that hands it a `View` would be testing the half that was never wrong.
+    // -----------------------------------------------------------------------------------------
+
+    /// A fresh, empty directory named for the test that owns it.
+    fn work_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("trigon-watch-{}", std::process::id()))
+            .join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn put(path: PathBuf, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn sweep_at(work: PathBuf) -> Sweep {
+        Sweep {
+            work,
+            targets: None,
+            bind: "127.0.0.1:0".into(),
+            store: None,
+            baseline: None,
+        }
+    }
+
+    fn report(json: &str) -> crate::progress::RunReport {
+        serde_json::from_str(json).expect("a report the writer could have written")
+    }
+
+    #[test]
+    fn a_directory_of_finished_runs_is_not_a_directory_where_nothing_happened() {
+        // What `./work` is, and what it rendered as: "state unknown · 0 attempted" over two dozen
+        // finished rebuilds. The sweep's vocabulary over a directory no sweep made — this file's
+        // first rule running backwards, with presence read as absence.
+        let w = work_dir("index");
+        put(
+            w.join("pkg-npm-once@1.4.0").join("run.json"),
+            r#"{"purl":"pkg:npm/once@1.4.0","started":"2026-09-17T19:57:42Z",
+                "finished":"2026-09-17T19:58:42Z","outcome":"normalized","model_calls":0}"#,
+        );
+        put(
+            w.join("pkg-npm-semver@3.0.1").join("run.json"),
+            r#"{"purl":"pkg:npm/semver@3.0.1","started":"2026-09-17T19:57:42Z",
+                "outcome":"no-strategy","declines":["npm-heuristic: no `_nodeVersion`"],
+                "model_calls":0}"#,
+        );
+        let s = sweep_at(w);
+        let v = s.read();
+
+        assert_eq!(v.layout, Layout::Index);
+        assert_eq!(v.entries.len(), 2);
+        // Name order, so `/run/{i}` means the same directory on the next request.
+        assert_eq!(v.entries[0].name, "pkg-npm-once@1.4.0");
+        // And the row at that position is what that directory recorded, which is the join
+        // `/run/{i}` rests on.
+        assert_eq!(v.rows[0].purl, "pkg:npm/once@1.4.0");
+        assert_eq!(v.rows[1].label, "no-strategy");
+        assert_eq!(s.target_dir(&v, 1), v.entries[1].dir);
+    }
+
+    #[test]
+    fn a_run_directory_that_left_no_report_is_ours_and_never_the_packages() {
+        // `work/pkg-pypi-semver@3.0.1` is this: a strategy, an artifact, and no run.json. Either
+        // the rebuild is still going or it died before writing one, and both are unknowns of ours.
+        // Counting an unknown against the package is the direction this must never err in.
+        let w = work_dir("no-report");
+        put(
+            w.join("half-a-run").join("strategy.yaml"),
+            "id: x\nsteps: []\n",
+        );
+        let v = sweep_at(w).read();
+
+        assert_eq!(v.layout, Layout::Index);
+        assert_eq!(v.rows.len(), 1);
+        assert_eq!(Family::of(&v.rows[0].label), Family::Error);
+        assert!(!Family::of(&v.rows[0].label).is_evidence());
+        // And nothing claims to know which target it was: the directory's name is the caller's
+        // choice, not a record.
+        assert_eq!(v.rows[0].purl, "");
+    }
+
+    #[test]
+    fn a_sweep_that_has_not_written_a_result_yet_is_still_a_sweep() {
+        // It writes `sweep.json` before its first target and heartbeats into `status.json` while it
+        // runs, so both exist long before `results.tsv` does. Reading that moment as an index would
+        // replace the liveness strip — the only thing worth watching then — with a table of one.
+        let w = work_dir("young-sweep");
+        put(
+            w.join("status.json"),
+            r#"{"heartbeat":"2026-09-17T19:57:42Z","pid":1,"state":"running","done":0,"total":20}"#,
+        );
+        put(
+            w.join("000").join("run.json"),
+            r#"{"purl":"pkg:npm/a@1","started":"2026-09-17T19:57:42Z","model_calls":0}"#,
+        );
+        let v = sweep_at(w).read();
+        assert_eq!(v.layout, Layout::Sweep);
+        assert!(v.entries.is_empty(), "and it never paid for the walk");
+    }
+
+    #[test]
+    fn an_empty_directory_is_still_unknown_rather_than_an_index_of_nothing() {
+        // The third answer has to survive: a directory that is not a work directory at all is not
+        // an index with no runs in it, and the page says so in those words.
+        let v = sweep_at(work_dir("empty")).read();
+        assert_eq!(v.layout, Layout::Unknown);
+    }
+
+    #[test]
+    fn the_legend_swatch_is_the_colour_the_stylesheet_sets() {
+        // Two places holding one colour, which is the defect shape this project keeps finding. The
+        // swatch cannot take its colour from the class — `.key i` has no background — so the hex is
+        // written twice, and this is the thing that asserts they are the same hex.
+        for f in Family::all() {
+            let rule = format!(".{}{{color:{}}}", f.css(), f.colour());
+            assert!(STYLE.contains(&rule), "{rule} is not in the stylesheet");
+        }
+        // Six families, and the legend lists all six even at zero: a count of nothing is an answer
+        // to "what could I have found here".
+        let tally = family_tally(&rows("a\texact\t1.0\t\t0\n"));
+        for f in Family::all() {
+            assert!(tally.contains(f.label()), "{} is missing", f.label());
+        }
+        assert!(
+            tally.contains("1 reproduced") && tally.contains("0 divergent"),
+            "{tally}"
+        );
+        // And no percentage anywhere near it.
+        assert!(!tally.contains('%'), "{tally}");
+    }
+
+    #[test]
+    fn the_sentence_says_the_thing_that_makes_the_rest_beside_the_point() {
+        // Precedence, in the order one answer retires the others. All four facts were on disk and
+        // none of them were on the page: `declines` had no reader in this file at all.
+        let ours = verdict_sentence(&report(
+            r#"{"purl":"p","started":"s","error":"podman: no such image","outcome":"error:infra",
+                "void_reason":"never read","declines":["never read"],"model_calls":0}"#,
+        ));
+        assert!(ours.contains("error of ours"), "{ours}");
+        assert!(ours.contains("podman: no such image"), "{ours}");
+        assert!(!ours.contains("never read"), "{ours}");
+
+        let void = verdict_sentence(&report(
+            r#"{"purl":"p","started":"s","outcome":"void","void_reason":"the guard tripped",
+                "declines":["never read"],"model_calls":0}"#,
+        ));
+        assert!(void.contains("evidence of nothing"), "{void}");
+        assert!(void.contains("the guard tripped"), "{void}");
+        assert!(!void.contains("never read"), "{void}");
+
+        // `work/pkg-npm-semver@3.0.1`, which rendered eight panels of absence over the one sentence
+        // that answers the question.
+        let declined = verdict_sentence(&report(
+            r#"{"purl":"p","started":"s","outcome":"no-strategy",
+                "declines":["npm-heuristic: the registry recorded no `_nodeVersion`"],
+                "model_calls":0}"#,
+        ));
+        assert!(declined.contains("No rung produced a recipe"), "{declined}");
+        assert!(declined.contains("_nodeVersion"), "{declined}");
+    }
+
+    #[test]
+    fn a_caveated_match_does_not_read_like_an_exact_one() {
+        // The distinction the verdict exists to carry: a caveated match is one a pass could have
+        // manufactured, and the word `normalized_with_caveats` does not say so on its own.
+        let exact = verdict_sentence(&report(
+            r#"{"purl":"p","started":"s","outcome":"exact","model_calls":0}"#,
+        ));
+        assert!(exact.contains("byte for byte"), "{exact}");
+
+        let caveats = verdict_sentence(&report(
+            r#"{"purl":"p","started":"s","outcome":"normalized_with_caveats","model_calls":0}"#,
+        ));
+        assert!(caveats.contains("can hide a real difference"), "{caveats}");
+
+        // And an upstream error is the registry's, not ours and not the package's — the fault is
+        // the half of the label that says whose it was.
+        let upstream = verdict_sentence(&report(
+            r#"{"purl":"p","started":"s","outcome":"error:upstream","model_calls":0}"#,
+        ));
+        assert!(upstream.contains("registry or the network"), "{upstream}");
+        assert!(
+            upstream.contains("Not a finding about the package"),
+            "{upstream}"
+        );
+    }
+
+    #[test]
+    fn an_assumption_is_pointed_at_rather_than_left_for_the_reader_to_find() {
+        // `pkg:npm/isexe@2.0.0` reproduces under a Node the registry never recorded, and the
+        // sentence that says so is four panels below the verdict. The anchor it points at has to
+        // exist, or the link is a promise the page does not keep.
+        let r = report(
+            r#"{"purl":"p","started":"s","outcome":"normalized",
+                "assumptions":["the registry records Node 8.0.0-pre for this publish"],
+                "model_calls":0}"#,
+        );
+        assert!(verdict_sentence(&r).contains("#assumed"), "no link");
+        assert!(
+            report_panel(Some(&r)).contains("id=\"assumed\""),
+            "no anchor"
+        );
+    }
+
+    #[test]
+    fn a_tab_is_named_after_what_is_in_it() {
+        // Every tab said `target 000`, on every run page of every layout.
+        let s = sweep_at(PathBuf::from("/tmp/some-corpus"));
+        assert_eq!(s.tab_title(Some("once@1.4.0")), "once@1.4.0 · trigon watch");
+        assert_eq!(s.tab_title(None), "some-corpus · trigon watch");
+    }
+
+    #[test]
+    fn a_duration_we_cannot_compute_is_not_a_run_that_took_no_time() {
+        // A report with no `finished` is a process that died before writing one. Zero seconds is a
+        // measurement, and this is not one.
+        assert_eq!(
+            bracket_seconds(&report(
+                r#"{"purl":"p","started":"2026-09-17T19:57:42Z","model_calls":0}"#
+            )),
+            None
+        );
+        assert_eq!(
+            bracket_seconds(&report(
+                r#"{"purl":"p","started":"2026-09-17T19:57:42Z",
+                    "finished":"2026-09-17T19:58:42Z","model_calls":0}"#
+            )),
+            Some(60)
+        );
     }
 
     #[test]

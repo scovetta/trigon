@@ -508,7 +508,7 @@ The artifact guard runs either way. If the package's own published bytes — or 
 files — arrive over the network, the run is `Void`: not a pass and not a failure, because a build
 that downloads its own output reproduces it perfectly and proves nothing.
 
-## Watching a sweep
+## Watching a sweep, or reading the runs you already have
 
 `trigon sweep` prints its summary once, at the end, into the terminal that launched it. `trigon
 watch` reads the same work directory from somewhere else, while the sweep is still running:
@@ -527,6 +527,35 @@ It never talks to the sweep. It reads the files the sweep already writes, so it 
 death: every completed result stays on the page, the silence is labelled with its age, and the
 target that was in flight is reported as unknown rather than converted into a failure. Read-only —
 there is no write path, and a cluster hands you the `trigon rebuild` line to paste.
+
+Point it at a directory of runs and it reads that instead — one row per rebuild, with the verdict,
+the commit it was built from, when and what it cost:
+
+```
+$ trigon watch ./work                                              # no sweep anywhere
+```
+
+```
+a directory of runs · 24 rebuild(s), each in a work directory of its own
+1 of them left no run.json: the rebuild is still going, or it ended before it could
+write one. This page cannot say what those found.
+not a sweep: nothing here was launched by one process, so there is no corpus to be a
+fraction of, no progress, and no sweep to be alive or dead
+
+ target                       outcome      built from                                when      cost
+ npm/once@1.4.0               normalized   isaacs/once @ 0e614d9f                    61m ago   30s · 31.3 MB
+                                           registry_commit
+ npm/semver@3.0.1             no-strategy  no source resolved: nothing here was      30h ago   1s
+                                           compared against a commit
+ nuget/Newtonsoft.Json@11.0.1 divergent    JamesNK/Newtonsoft.Json @ d50b912e        33h ago   310s · 91.8 MB
+                                           Src/Newtonsoft.Json  exact_tag
+
+ 18 reproduced  1 divergent  0 build failed  1 no strategy  4 ours  0 void
+```
+
+Counts, not a rate: a directory you filled by hand has no corpus for a percentage to be of. The run
+page opens with one sentence saying what happened — the error, the void, or *why each rung declined*
+— before any panel.
 
 Loopback by default, because a work directory holds artifacts fetched from registries and build logs
 that may carry credentials. [`docs/18`](docs/18-management-ui.md) has the plan it is being built to.
@@ -588,7 +617,7 @@ scripts/                  the cross-machine verification check
 ## Build and check
 
 ```
-cargo test --workspace                      # 901 pass, 0 fail
+cargo test --workspace                      # 917 pass, 0 fail
 TRIGON_LIVE=1 cargo test --workspace        # plus the ones that need a network
 cargo run -p xtask -- policy                # the dependency policy
 cargo run -p xtask -- differential          # against the reference implementation

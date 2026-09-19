@@ -687,6 +687,115 @@ fn the_page_says_what_it_does_not_observe_even_on_a_clean_run() {
 }
 
 #[test]
+fn a_directory_of_finished_runs_is_not_a_directory_where_nothing_was_attempted() {
+    // The same seam, running backwards. This file's rule is that an absence must not render as a
+    // zero; `./work` — two dozen finished rebuilds, each in a work directory of its own, which is
+    // what `scripts/rebuild-and-attest.sh` produces every time anyone uses this tool — rendered
+    // "state unknown · 0 attempted". Presence read as absence, on the page that exists to stop
+    // absence being read as presence.
+    //
+    // Through the real binary, because every part of the claim is about what the layout decision
+    // does to the rendered page: the strip, the table, the API's account of itself and the title.
+    let d = work("directory-of-runs");
+    write(
+        &d.join("pkg-npm-once@1.4.0").join("run.json"),
+        r#"{"purl":"pkg:npm/once@1.4.0","started":"2026-01-01T00:00:00Z",
+            "finished":"2026-01-01T00:01:00Z","outcome":"normalized","network_bytes":32779762,
+            "source":{"repo_url":"https://github.com/isaacs/once",
+                      "commit":"e0e754d82e4ca1b1b1d5b1e0e2cc0f0f0a0b0c0d","how":"registry_commit"},
+            "model_calls":0}"#,
+    );
+    write(
+        &d.join("pkg-npm-semver@3.0.1").join("run.json"),
+        r#"{"purl":"pkg:npm/semver@3.0.1","started":"2026-01-01T00:00:00Z",
+            "finished":"2026-01-01T00:00:01Z","outcome":"no-strategy",
+            "declines":["npm-heuristic: the registry recorded no `_nodeVersion`/`_npmVersion`"],
+            "model_calls":0}"#,
+    );
+
+    // A third that is mid-flight, or died: a strategy, and no report. `work/pkg-pypi-semver@3.0.1`
+    // is exactly this.
+    write(
+        &d.join("zz-half-a-run").join("strategy.yaml"),
+        "id: x\nsteps: []\n",
+    );
+
+    let w = Watch::on(&d);
+    let html = w.get("/");
+    assert!(
+        html.contains("3 rebuild(s)") && html.contains("not a sweep"),
+        "a shelf of runs has to name itself as one:\n{html}"
+    );
+    assert!(
+        !html.contains("0 attempted") && !html.contains("state unknown"),
+        "two finished runs are not a directory in an unknown state:\n{html}"
+    );
+    // Both runs are on the front page, and so is the thing a verdict is half a claim about.
+    assert!(html.contains("npm/once@1.4.0"), "{html}");
+    assert!(
+        html.contains("isaacs/once") && html.contains("registry_commit"),
+        "the commit a verdict is a claim about belongs on the page:\n{html}"
+    );
+    // The bytes go through the same formatter every other byte count on these pages does.
+    assert!(html.contains("31.3 MB"), "{html}");
+    // Counts, and no rate: this directory is whatever somebody ran by hand, so there is no
+    // denominator here worth dividing by.
+    assert!(
+        html.contains("1 reproduced") && html.contains("1 no strategy"),
+        "{html}"
+    );
+    // The unknown one is ours, never the package's.
+    assert!(html.contains("1 ours"), "{html}");
+    assert!(
+        !html.contains("class=\"rate"),
+        "a reproduction rate over a hand-picked shelf is the number this project exists to stop \
+         people quoting:\n{html}"
+    );
+
+    // And the API says the same thing the page does, rather than a percentage with nothing
+    // attached to it.
+    let api = w.get("/api/state");
+    assert!(api.contains("\"layout\":\"index\""), "{api}");
+    assert!(api.contains("\"attempted\":3"), "{api}");
+    // The rate fields stay arithmetically what they are — `reproduction` is over what was
+    // compared, and this directory compared one thing. What the page withholds is the *headline*,
+    // and what the JSON carries instead is `layout` and a `detail` naming the absent corpus, so
+    // neither reader ends up with a percentage and nothing attached to it.
+    assert!(
+        api.contains("no corpus these runs are a sample of"),
+        "{api}"
+    );
+    assert!(api.contains("independent rebuild"), "{api}");
+
+    // The run page for the second directory: the sentence that explains it, and a tab that says
+    // which run it is.
+    let run = w.get("/run/1");
+    assert!(
+        run.contains("No rung produced a recipe") && run.contains("_nodeVersion"),
+        "the reason was on disk the whole time:\n{run}"
+    );
+    assert!(
+        run.contains("<title>npm/semver@3.0.1 · trigon watch</title>"),
+        "every tab used to say `target 000`:\n{run}"
+    );
+
+    // And the run that left nothing behind says so, with no number standing in for the clock it
+    // never wrote. Its synthetic row carries a `0.0` placeholder, and a `0s` on the page would be
+    // this file's own rule broken on the one row that exists because something is missing.
+    let half = w.get("/run/2");
+    assert!(half.contains("left no report"), "{half}");
+    assert!(
+        !half.contains("· 0s") && half.contains("no duration recorded"),
+        "a placeholder must not render as a measurement:\n{half}"
+    );
+    // The directory names itself, and claims nothing about which target it holds.
+    assert!(
+        half.contains("<title>zz-half-a-run · trigon watch</title>"),
+        "{half}"
+    );
+}
+
+#[test]
 fn a_comparison_with_no_artifacts_says_so_rather_than_showing_no_differences() {
     // The compare view re-derives from the two files, so a work directory that has been cleaned —
     // or a build that produced nothing — leaves it with no inputs. "0 members differ" would be the

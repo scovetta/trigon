@@ -33,7 +33,17 @@ hurry to get a web page.
    trigon sweep ──writes──▶  <work>/results.tsv         trigon watch <work>
                              <work>/status.json    ◀──reads──   (a second process,
                              <work>/NNN/…                        on this machine or not)
+
+   trigon rebuild ─────────▶  <work>/run.json            one target: <work> is its evidence dir
+   rebuild-and-attest.sh ──▶  <work>/<slug>/run.json     a shelf of them, one per invocation
 ```
+
+**Three shapes of directory, decided from what is on disk.** The third is the one everybody
+actually has: `scripts/rebuild-and-attest.sh` writes `./work/<purl-slug>` per run, so a laptop that
+has used this tool has a directory of independent rebuilds and no sweep anywhere. That read as
+`Unknown` until 2026-09-18, and `trigon watch ./work` answered *"state unknown · 0 attempted"* over
+twenty-four finished rebuilds — this file's own first rule, running backwards, with presence
+rendered as absence.
 
 **The monitor never talks to the sweep.** It reads the files the sweep already writes in order to
 survive its own death. That inversion is the whole design, and the test of it is the moment the
@@ -140,6 +150,18 @@ Each step is independently useful and none pays off only if the next three land.
    because an infrastructure fault is ours, and refuses when the two targets-file digests differ —
    a comparison across different lists is a number about the lists.
 
+8. ~~The directory everybody has, and the sentences already on disk.~~ **Done**, as stage 0 of the
+   redesign below. A third layout — a shelf of per-target work directories — with the target, the
+   verdict, **the commit it was built from**, when and what it cost, one row each, and a tally by
+   family rather than a rate: a directory somebody filled by hand has no corpus to be a percentage
+   of. Four fields that were written on every run and read by nobody now reach the page: `declines`
+   had *no reader in `watch.rs` at all*, so `work/pkg-npm-semver@3.0.1` rendered eight panels of
+   absence over the one sentence that explains it, and `source` — whose own doc comment calls it
+   "the one thing a reader has to have and did not" — had none either. Also: every browser tab said
+   `target 000`; a sweep that had not yet written a first result read as an index of its in-flight
+   directory; and the run record spelled a byte count `96255729 bytes fetched` two panels under the
+   same figure as `96.3 MB`.
+
 ## 6. What this is not, and the one risk that matters
 
 Not the lockfile check, the version ladder, the provenance-contradiction feed, or Ask — all
@@ -157,3 +179,40 @@ That warning is about this page. The honest answer is to make it falsifiable rat
 it: steps 1 and 2 are a few hundred lines of string templates with no new dependency. **If, during
 the next full sweep, the board is only ever opened by the person who started that sweep, delete
 it** — and build the TUI over the same reader, which will already exist.
+
+## 7. The redesign, and what step 8 is the first slice of
+
+The brief for this round was blunter than the original: the page has to show **how the source code
+becomes the published artifact**, visually, for somebody who is not us. The plan that came back
+picked the per-verdict spine over the sweep board, and the grounding is why: there is no
+`results.tsv`, `sweep.json` or `status.json` anywhere on this machine, and all twenty-four
+directories under `./work/` are per-target. A 5,000-target board is the right board for a scale
+nothing here has run.
+
+- **Stage 0 — done**, step 8 above. Half a day, mostly the sentences that were already on disk.
+- **Stage 1 — the centrepiece.** `/run/{index}/source`: a fidelity sentence, then two aligned
+  stacked bars sharing an x-axis — ORIGIN above, VERDICT below, the same members in the same
+  positions, so alignment does a Sankey's job with no crossings. The alarming case becomes visible
+  for the first time: red in the verdict bar under green in the origin bar is a file the maintainer
+  wrote coming back different.
+- **Stage 2** — the chain ribbon, the three-rung digest ladder, and the stabilizer ledger.
+- **Stage 3+** — the board, behind the recording that would make it honest.
+
+Two findings constrain stage 1 and are worth more than the rest of the plan:
+
+1. **Joining on the comparison blob's digests counts normalization as carriage.** `summarize`
+   applies the stabilizer set and *then* returns the archive `diff::index` hashes, so
+   `FileDiff.upstream_digest` is a **post-stabilization** digest. Join on it and Newtonsoft.Json
+   reads as carrying 1 of 23 members from its commit; join on raw bytes and it carries **0 of 24**.
+   The single hit is `LICENSE.md`, and it matches only because `nupkg-text-eol` rewrote CRLF to LF
+   first. A page saying "1 member is the commit's bytes" would be making a claim the bytes do not
+   support. The guard is three tiers, never summed, the middle one always naming the pass that made
+   it true.
+2. **The join cannot run per request.** Hashing the largest checkout in the source cache takes 19
+   seconds cold, over 52k files. A memo on `(dir, mtime, scope)` is a requirement, not an
+   optimisation.
+
+And one recording change is worth making *before* stage 1 rather than after: raw per-member digests
+in the comparison blob. Without them "carried from source" can only ever mean "carried after we
+normalized it", the distinction has to be recomputed from artifacts on disk, and the centrepiece
+dies with a pruned cache — local-only, unattestable, and not something a statement could ever carry.
