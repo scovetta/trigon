@@ -154,6 +154,158 @@ enum Family {
 /// needs `python3-venv` for ensurepip, which is not part of `python3` there and does not exist as a
 /// separate package anywhere else. Without it the venv fails with Debian's own advice to run
 /// `apt install python3.11-venv`, inside a container, which is not advice anyone can take.
+/// Which package manager's names an image speaks, from the image reference.
+///
+/// The same sniff `verify_command` does, exposed so a label can record the answer rather than
+/// leaving a reader of the image to redo it. It is a guess from a string and always has been; the
+/// probe is what decides.
+pub fn family_of(base_image: &str) -> &'static str {
+    let img = base_image.to_ascii_lowercase();
+    if img.contains("alpine") {
+        "alpine"
+    } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
+        "fedora"
+    } else {
+        "debian"
+    }
+}
+
+/// Whether automation may put a logical dependency into an image.
+///
+/// # The line, and the test that decides which side a name falls on
+///
+/// [`ADR-0012`](../../../docs/adr/0012-base-images-supply-bytes-not-decisions.md) says an image may
+/// supply **bytes** the evidence does not pin and never a **decision** it does. Automation inherits
+/// that exactly: *it may add bytes, never a decision.* The useful operational form of that, because
+/// "is a compiler a decision" is an argument nobody wins:
+///
+/// > **Does adding this to the image override something a strategy has already pinned?**
+///
+/// A strategy pins the npm the registry recorded, the Node that published, the .NET SDK, the Rust
+/// toolchain. Debian's copy of any of those shadows the pinned one, and the run then measures a
+/// toolchain nobody chose. Nothing pins `git`, `wget`, `ssh`, a C compiler or `pkg-config`: without
+/// them the build fails, with them it proceeds identically, and no version of them reaches a
+/// verdict.
+///
+/// That test is not a matter of taste and it has already cost this project a corpus.
+/// `npx.yaml`'s own comment records it in bold: Debian's `npm` drags in Node 18 plus a tree under
+/// `/usr/share/nodejs` that a system-wide `NODE_PATH` puts ahead of everything, so a pinned Node 10
+/// loads modules written for 18 and aborts with `SIGABRT` — `env/toolchain-crashed` on the M1
+/// corpus was that, not vintage. An auto-installer acting on `needs: [npm]` would reproduce it on
+/// demand.
+///
+/// # Unknown is the side that matters
+///
+/// A name with no verdict is **refused**, and told that it has no verdict. New entries land there
+/// by default, so the failure mode of forgetting to classify something is a refusal rather than an
+/// installation. `every_name_the_tree_can_ask_for_has_a_verdict` fails the build if a `needs:` or
+/// an `expand()` arm names something this table does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// Bytes. Automation may add it.
+    Bytes,
+    /// A decision, with the reason. Never added automatically, at any tier, with or without a flag.
+    Decision(&'static str),
+    /// No verdict. Refused, and said to have none.
+    Unknown,
+}
+
+impl Admission {
+    pub fn is_bytes(self) -> bool {
+        matches!(self, Admission::Bytes)
+    }
+
+    /// What to tell an operator who asked for this and cannot have it.
+    pub fn refusal(self, dep: &str) -> Option<String> {
+        match self {
+            Admission::Bytes => None,
+            Admission::Decision(why) => Some(format!(
+                "`{dep}` will not be added to an image automatically: {why} An image supplies \
+                 bytes, never a decision the evidence pins — see ADR-0012. Install it in the build \
+                 from the version the registry recorded, which is what the ecosystem's tools \
+                 already do."
+            )),
+            Admission::Unknown => Some(format!(
+                "`{dep}` has no admission verdict, so it is refused rather than installed. Add it \
+                 to `admission()` in trigon-sandbox as `Bytes` or `Decision`, with the reason. A \
+                 name nobody has classified is not a name to put in an image on a guess."
+            )),
+        }
+    }
+}
+
+/// The verdict for one logical dependency name.
+///
+/// Neutral names, the same vocabulary `needs:` and `DEFAULT_PACKAGES` speak, because the
+/// distribution package is a function of the family and the question here is not about Debian.
+pub fn admission(dep: &str) -> Admission {
+    match dep {
+        // ---- Bytes: nothing pins them, and no version of them reaches a verdict. ----
+        //
+        // Trust anchors and fetchers. A build that cannot verify a TLS certificate or retrieve a
+        // tarball fails at the boundary; neither changes what is retrieved.
+        "ca-certificates" | "wget" | "curl" => Admission::Bytes,
+        // The source is fetched by us and copied in at an enforced tier, but a build may still run
+        // `git describe` — and `hatch-vcs` and `setuptools-scm` take the version from it.
+        "git" => Admission::Bytes,
+        // npm shells out to it for a `git+ssh://` dependency. The dependency resolved is the same
+        // either way; without it the clone cannot happen at all. Two of the 125-target random
+        // sweep's five `unknown`s were this.
+        "ssh" => Admission::Bytes,
+        // A C/C++ toolchain and what an extension build looks for. Five of the M1 corpus's ten
+        // unnamed PyPI failures were a missing `gcc`. The compiler version does reach the bytes of
+        // a compiled extension — and that is already true of every image, recorded as
+        // `Environment.base_image`, rather than something automation introduces.
+        "cc" | "pkg-config" | "libatomic" | "python3-dev" => Admission::Bytes,
+        // Named in `DEFAULT_PACKAGES`' own comment as real gaps. They build; they do not resolve.
+        "meson" | "ninja" => Admission::Bytes,
+        // **The one Bytes entry that is a decision in a weaker sense**, and it is written down
+        // rather than waved past. The interpreter decides a wheel's tag and its bytecode. But
+        // `pypi/setup-venv.yaml` uses it only on the branch where the strategy pinned *no*
+        // `python_version` — "whichever one the image has", in the tool's own words — so adding it
+        // overrides nothing. Where a version is pinned, `uv` fetches that one instead. The real fix
+        // is a per-target interpreter the way npm has a per-target Node; until then this is a
+        // decision the image has always made and the record has always carried.
+        "python3" => Admission::Bytes,
+        // Not a resolver anywhere in this tree: its single use is `uv venv --python <pinned>`, the
+        // mechanism that *honours* a strategy's pin rather than one that overrides it.
+        "uv" => Admission::Bytes,
+
+        // ---- Decisions: adding them overrides a pin the strategy already made. ----
+        "npm" => Admission::Decision(
+            "Debian's npm pulls in its own Node — 18 on bookworm — plus a tree under \
+             /usr/share/nodejs that a system-wide NODE_PATH puts ahead of everything, so a pinned \
+             Node 10 loads modules written for 18 and aborts. `env/toolchain-crashed` on the M1 \
+             corpus was exactly this.",
+        ),
+        "node" | "nodejs" => Admission::Decision(
+            "the registry records the Node that published the package and the strategy installs \
+             that one; an image's Node would shadow it and the run would measure a toolchain \
+             nobody chose.",
+        ),
+        "yarn" | "pnpm" => {
+            Admission::Decision("which resolver builds the dependency tree changes the tree.")
+        }
+        "rustc" | "cargo" => Admission::Decision(
+            "the toolchain window is the whole question for a crate — see B20 — and a rustc from \
+             the distribution is not the one the crate was published with.",
+        ),
+        "dotnet" | "dotnet-sdk" => Admission::Decision(
+            "the SDK version decides the assembly, and it is not a distribution package anyway: \
+             it arrives as a different parent image.",
+        ),
+        "go" => Admission::Decision(
+            "the toolchain is recorded in the module and stamped into the binary.",
+        ),
+        "just" => Admission::Decision(
+            "a task runner whose recipes are the build: installing it decides what runs.",
+        ),
+
+        // ---- Everything else. Fail closed. ----
+        _ => Admission::Unknown,
+    }
+}
+
 fn expand(dep: &str, family: Family) -> Vec<String> {
     match (dep, family) {
         ("python3", Family::Debian) => vec!["python3".into(), "python3-venv".into()],
@@ -333,5 +485,156 @@ mod toolchain_expansion_tests {
         }
         let fedora = install_command("quay.io/fedora/fedora@sha256:a", &["cc".to_string()]);
         assert!(fedora.contains("make"), "{fedora}");
+    }
+}
+
+#[cfg(test)]
+mod admission_table {
+    use super::*;
+
+    /// Every logical name the strategy tree or `expand()` can produce must have a verdict.
+    ///
+    /// **The fail-closed side, asserted rather than hoped for.** `Unknown` refuses, so a name
+    /// nobody classified cannot be installed — but a refusal discovered by an operator mid-sweep is
+    /// a worse way to learn than a build failure here. This walks the real `needs:` lists rather
+    /// than a copy of them, because a copy is the second thing that has to agree.
+    #[test]
+    fn every_name_the_tree_can_ask_for_has_a_verdict() {
+        let tools = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/")
+            .join("trigon-strategy")
+            .join("tools");
+        assert!(tools.is_dir(), "{} is not there", tools.display());
+
+        let mut names: std::collections::BTreeSet<String> = Default::default();
+        let mut stack = vec![tools];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).expect("readable").flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                if p.extension().is_none_or(|x| x != "yaml") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).expect("readable");
+                for line in text.lines() {
+                    let t = line.trim();
+                    // A line that explains why a `needs:` is wrong is documentation, not a need.
+                    let Some(rest) = t.strip_prefix("needs:") else {
+                        continue;
+                    };
+                    if t.starts_with('#') {
+                        continue;
+                    }
+                    for n in rest.trim().trim_matches(['[', ']']).split(',') {
+                        let n = n.trim();
+                        if !n.is_empty() {
+                            names.insert(n.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            names.len() >= 5,
+            "found only {names:?} — the walk is not reading the tree"
+        );
+
+        let unclassified: Vec<&String> = names
+            .iter()
+            .filter(|n| admission(n) == Admission::Unknown)
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "these names appear in a `needs:` list and have no admission verdict: {unclassified:?}. \
+             Add each to `admission()` as `Bytes` or `Decision`, with the reason — a name nobody \
+             has classified must not reach an installer."
+        );
+    }
+
+    #[test]
+    fn the_default_package_floor_is_all_bytes() {
+        // Whatever `trigon base-image` installs with no `--packages` is what automation would also
+        // be asked for on a bare target. If any of it were a decision, `auto` would refuse the
+        // common case and the two mechanisms would disagree about the same list.
+        for dep in [
+            "ca-certificates",
+            "git",
+            "libatomic",
+            "python3",
+            "wget",
+            "cc",
+            "python3-dev",
+            "pkg-config",
+            "ssh",
+        ] {
+            assert!(
+                admission(dep).is_bytes(),
+                "{dep} is in the default floor and is not admissible"
+            );
+        }
+    }
+
+    #[test]
+    fn a_toolchain_the_registry_pinned_is_refused_with_its_reason() {
+        // The hazard `docs/21` says must be closed before any apply path exists: `needs: [npm]`
+        // appears in the tree, and an installer acting on it drags Debian's Node in behind it.
+        let npm = admission("npm");
+        assert!(matches!(npm, Admission::Decision(_)));
+        let said = npm.refusal("npm").expect("a refusal");
+        assert!(said.contains("NODE_PATH"), "{said}");
+        assert!(said.contains("ADR-0012"), "{said}");
+
+        for dep in [
+            "node", "yarn", "pnpm", "rustc", "cargo", "dotnet", "go", "just",
+        ] {
+            assert!(
+                !admission(dep).is_bytes(),
+                "{dep} would be installed automatically"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_nobody_classified_is_refused_rather_than_installed() {
+        let v = admission("libpq-dev");
+        assert_eq!(v, Admission::Unknown);
+        let said = v.refusal("libpq-dev").expect("a refusal");
+        assert!(said.contains("no admission verdict"), "{said}");
+        // And `Bytes` is the only verdict that yields no refusal, so a caller that checks for
+        // `None` cannot accidentally admit a `Decision`.
+        assert!(admission("git").refusal("git").is_none());
+    }
+}
+
+#[cfg(test)]
+mod image_labels {
+    use super::*;
+
+    #[test]
+    fn the_family_on_the_label_is_the_one_the_probe_would_use() {
+        // The label is an index and the probe is the authority, but an index that disagreed with
+        // the authority would be worse than no index — a selector would read `debian` off an
+        // Alpine image and offer `dpkg -s` names for it.
+        for (img, want) in [
+            ("docker.io/library/debian@sha256:aa", "debian"),
+            ("docker.io/library/alpine@sha256:bb", "alpine"),
+            ("quay.io/fedora/fedora@sha256:cc", "fedora"),
+            ("localhost/rocky@sha256:dd", "fedora"),
+            ("mcr.microsoft.com/dotnet/sdk@sha256:ee", "debian"),
+        ] {
+            assert_eq!(family_of(img), want, "{img}");
+            // And the probe agrees, which is the pairing that matters.
+            let probe = verify_command(img, &["cc".to_string()]);
+            let expected_query = match want {
+                "alpine" => "apk info -e",
+                "fedora" => "rpm -q",
+                _ => "dpkg -s",
+            };
+            assert!(probe.contains(expected_query), "{img}: {probe}");
+        }
     }
 }

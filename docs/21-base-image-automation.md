@@ -101,7 +101,7 @@ ADR-0012 says a base image may supply **bytes** the evidence does not pin, and m
 resolved is the same either way. `yarn` is a decision: which resolver builds the tree changes the
 tree. The classifier is the feature. The installer is a call to code that already exists.
 
-## Part 0 — make the image say what it carries
+## Part 0 — make the image say what it carries — **built**
 
 Prerequisite for everything else, and small on its own.
 
@@ -124,7 +124,7 @@ same label — and a selection mechanism that trusted it would be a second contr
 The label exists so selection does not have to start a container, and so `podman inspect` can
 answer "is this image current?" — which today nothing can.
 
-## Part 1 — learn the needs the declarations missed
+## Part 1 — learn the needs the declarations missed — *not built; `auto` made it unnecessary for now, since the required set is known at render time rather than learned from failures*
 
 The classifier already extracts the missing tool's name. `Capture::WordBefore(": not found")`
 produces `env/missing-tool:ssh`, and that capture is in every run record on disk. The demand signal
@@ -144,7 +144,7 @@ That is deliberately short of automation. The step from "propose" to "apply" is 
 should not be taken until the policy table has been exercised against a corpus and the refusals
 read correctly.
 
-## Part 2 — the policy table
+## Part 2 — the policy table — **built**
 
 A const table beside `expand()` in `dockerfile.rs`, since it shares that vocabulary. Three verdicts:
 
@@ -184,7 +184,7 @@ against the comment is a prerequisite and is small work; it is also worth doing 
 since a declaration that contradicts its file's own documentation is the "two things that had to
 agree, with nothing asserting they did" pattern again.
 
-## Part 3 — `--image auto`
+## Part 3 — `--image auto` — **built**
 
 `auto` resolves to a digest, deterministically:
 
@@ -225,6 +225,35 @@ can be *offered* the same derivation rather than only being refused.
   spending network that the egress accounting does not see is B7's shape, and B7 was closed by
   moving the image build *inside* the boundary — so this needs to be reasoned about rather than
   bolted on.
+
+## What landed, and the one correction the plan needed
+
+Parts 0, 2 and 3 are built. `trigon rebuild --image auto` classifies the strategy's `system_deps`
+through the admission table, selects a local image whose `org.trigon.packages` label is a superset,
+and derives a content-tagged one when none is. Measured: `pkg:pypi/chardet@7.4.3` reproduces
+**`exact`** from `--image auto` with nothing pinned by hand, and the second run reuses the derived
+image rather than building again.
+
+**The plan's own test — "is it bytes or a decision" — needed sharpening before it could be code.**
+Arguing about whether a compiler is a decision does not terminate. The operational form that does:
+
+> **Does adding this to the image override something a strategy has already pinned?**
+
+A strategy pins the npm the registry recorded, the Node that published, the SDK, the Rust
+toolchain; Debian's copy of any of those shadows the pinned one. Nothing pins `git`, `ssh`, `cc` or
+`pkg-config`. That line put `uv` on the bytes side — its only use in the tree is
+`uv venv --python <pinned>`, the mechanism that *honours* a pin rather than one that overrides it —
+and it made `python3` the one entry worth arguing about, which the table says out loud rather than
+waving past.
+
+**The parent is not a digest in our source.** The plan did not say where `auto` gets the image to
+build *on*, and a hardcoded digest would go stale exactly the way the one in `go.sh` did — that
+image carried `git`, `wget` and `dpkg` against a default list of nine. `auto_parent()` takes it from
+`TRIGON_BASE_PARENT`, else the `org.trigon.parent` of a base image already on the machine (a
+sibling, not a stack), else such an image itself, else refuses with the command to run.
+
+**Deriving inside an enforced boundary is refused**, as the plan requires: `apt-get` is network, and
+an image built moments earlier is bytes the transcript never saw.
 
 ## The admitted gap
 

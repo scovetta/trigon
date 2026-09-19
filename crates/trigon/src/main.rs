@@ -1544,6 +1544,30 @@ mod build {
         // recipe.
         instructions.executable()?;
 
+        // **`auto`, resolved here and nowhere earlier.** The required set is
+        // `instructions.requires.system_deps`, which only exists once the strategy has rendered —
+        // and resolving before it exists would mean guessing, or deriving an image per target from
+        // a set nobody computed. This is a pre-flight: no container has started, so a refusal
+        // costs nothing and a derivation happens once for a set rather than once per failure.
+        let image = &if image == "auto" {
+            let deps: Vec<String> = instructions.requires.system_deps.iter().cloned().collect();
+            crate::mirror::resolve_auto(
+                &crate::mirror::auto_parent()?,
+                &deps,
+                verbose,
+                // **Derivation is `apt-get`, and `apt-get` is network.** At an enforced tier the
+                // run's whole claim is that everything crossing into it was accounted for, and an
+                // image built moments earlier by fetching from a distribution archive is bytes the
+                // egress transcript never saw. Selecting an image that already carries what is
+                // needed is fine at any tier — it reads a label and starts nothing. Building one
+                // is not, and B7 is the precedent: it was closed by moving the image build *inside*
+                // the boundary rather than by letting it happen outside and not counting it.
+                !matches!(egress, trigon_sandbox::EgressTier::Open),
+            )?
+        } else {
+            image.to_string()
+        };
+
         let plan = BuildPlan::Oci(OciPlan {
             base_image: image.to_string(),
             system_deps: instructions.requires.system_deps.clone(),
@@ -4800,6 +4824,214 @@ mod mirror {
         "ssh",
     ];
 
+    /// What an image carries, in the neutral vocabulary `needs:` speaks.
+    pub const LABEL_PACKAGES: &str = "org.trigon.packages";
+    /// The image it was built from, pinned.
+    pub const LABEL_PARENT: &str = "org.trigon.parent";
+    /// Which package manager's names those are.
+    pub const LABEL_FAMILY: &str = "org.trigon.family";
+
+    /// What `--image auto` derives from, without baking a digest into this source.
+    ///
+    /// **A hardcoded parent digest is the bug we are here to fix, one level up.** The image the
+    /// random sweep used had been pinned in a shell script and never rebuilt as the tool's needs
+    /// grew, so it carried `git`, `wget` and `dpkg` against a default list of nine. A digest
+    /// written into this file would go stale the same way and would be harder to notice.
+    ///
+    /// So the parent is taken from what is already on the machine, in order:
+    ///
+    /// 1. `TRIGON_BASE_PARENT`, for an operator who has decided.
+    /// 2. The `org.trigon.parent` of a trigon base image already here — derive a **sibling** from
+    ///    the same distribution rather than stacking on our own output.
+    /// 3. A trigon base image itself, as a parent. Stacking is worse than a sibling because the
+    ///    layers accumulate, but it is much better than refusing, and it is the case that arises
+    ///    when the images predate the labels.
+    /// 4. Refuse, and say exactly what to run.
+    pub fn auto_parent() -> Result<String> {
+        if let Ok(p) = std::env::var("TRIGON_BASE_PARENT")
+            && !p.trim().is_empty()
+        {
+            return Ok(p.trim().to_string());
+        }
+        let out = std::process::Command::new("podman")
+            .args([
+                "images",
+                "--filter",
+                "reference=localhost/trigon-base",
+                "--sort",
+                "created",
+                "--format",
+                &format!("{{{{.Id}}}}\t{{{{index .Labels \"{LABEL_PARENT}\"}}}}"),
+            ])
+            .output()
+            .context("asking podman which base images are here")?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        // Newest last, which is how `--sort created` orders them.
+        let mut newest_id = None;
+        for line in text.lines().rev() {
+            let (id, parent) = line.split_once('\t').unwrap_or((line, ""));
+            if id.trim().is_empty() {
+                continue;
+            }
+            newest_id.get_or_insert_with(|| id.trim().to_string());
+            let parent = parent.trim();
+            if !parent.is_empty() && !parent.starts_with('<') {
+                return Ok(parent.to_string());
+            }
+        }
+        if let Some(id) = newest_id {
+            return Ok(id);
+        }
+        bail!(
+            "`--image auto` needs something to build on, and there is no trigon base image on \
+             this machine to take a parent from. Either name one:\n\n    \
+             TRIGON_BASE_PARENT=docker.io/library/debian@sha256:<digest> trigon rebuild …\n\n\
+             or build a base image once and `auto` will derive from its parent afterwards:\n\n    \
+             trigon base-image --from docker.io/library/debian@sha256:<digest>\n\n\
+             `podman image inspect debian:bookworm-slim --format '{{{{index .RepoDigests 0}}}}'` \
+             prints a digest for one you already have."
+        )
+    }
+
+    /// What a local image says it carries, or `None` if it says nothing.
+    ///
+    /// `None` is not "carries nothing": it is an image built before the labels existed, or by hand.
+    /// Every caller treats it as unknown and goes on to the probe rather than concluding.
+    pub fn labelled_packages(image: &str) -> Option<Vec<String>> {
+        let out = std::process::Command::new("podman")
+            .args([
+                "image",
+                "inspect",
+                image,
+                "--format",
+                &format!("{{{{index .Labels \"{LABEL_PACKAGES}\"}}}}"),
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // podman prints `<no value>` for a label that is not there.
+        if text.is_empty() || text.starts_with('<') {
+            return None;
+        }
+        Some(text.split_whitespace().map(str::to_string).collect())
+    }
+
+    /// The tag a derived image gets, from what is in it rather than from when it was made.
+    ///
+    /// Content-addressed so two runs wanting the same set find the same image instead of building a
+    /// second one, and so a changed parent or a changed list is a different image rather than a
+    /// silent overwrite.
+    fn derived_tag(parent: &str, packages: &[String]) -> String {
+        use sha2::Digest as _;
+        let mut sorted: Vec<&str> = packages.iter().map(String::as_str).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let mut h = sha2::Sha256::new();
+        h.update(parent.as_bytes());
+        h.update(b"\0");
+        h.update(sorted.join(" ").as_bytes());
+        format!("localhost/trigon-base:auto-{:.16x}", h.finalize())
+    }
+
+    /// Find or build an image carrying `required`, and return a reference a runner can use.
+    ///
+    /// **This is the whole of "on the fly", and it is a pre-flight rather than a retry.** The
+    /// required set is known at render time from the strategy's `system_deps`, so there is no
+    /// reason to spend a build discovering it — and a mechanism that only reacts to failure cannot
+    /// help the tier where the failure is most expensive.
+    ///
+    /// Four steps, in this order, because the refusal has to come before the network:
+    ///
+    /// 1. **Classify.** Any `Decision` or `Unknown` in the set refuses now, with the table's own
+    ///    reason. Nothing is derived and nothing is run. This is the gate `docs/21` says must land
+    ///    before any apply path: `needs: [npm]` exists in the tree, and installing Debian's npm
+    ///    drags Node 18 in behind it and reproduces `env/toolchain-crashed`.
+    /// 2. **Select.** An image whose label is a superset of the required set is used as it is.
+    /// 3. **Derive.** Otherwise build one, tagged by content.
+    /// 4. **Return an id**, never a `localhost/...@sha256:` reference: podman reads the
+    ///    `localhost/` prefix as a registry hostname and tries to pull over HTTPS from a registry
+    ///    nobody is running, so the operator gets `connection refused` about an image on their own
+    ///    disk. `plan.rs` notes that had already cost somebody three round trips.
+    pub fn resolve_auto(
+        parent: &str,
+        required: &[String],
+        verbose: bool,
+        enforced: bool,
+    ) -> Result<String> {
+        let refused: Vec<String> = required
+            .iter()
+            .filter_map(|d| trigon_sandbox::admission(d).refusal(d))
+            .collect();
+        if !refused.is_empty() {
+            bail!(
+                "this strategy asks for something an image may not supply automatically:\n\n  - \
+                 {}\n\nBuild an image yourself with `trigon base-image` if you have decided to, \
+                 and pass it with `--image`.",
+                refused.join("\n  - ")
+            );
+        }
+
+        if let Some(have) = labelled_packages(parent)
+            && required.iter().all(|r| have.iter().any(|h| h == r))
+        {
+            if verbose {
+                println!("  image      {parent} already carries what this strategy needs");
+            }
+            return Ok(parent.to_string());
+        }
+
+        if enforced {
+            bail!(
+                "`--image auto` would have to build an image to satisfy this strategy, and \
+                 building one means `apt-get`, which means network — at an enforced egress tier \
+                 that is bytes the run's transcript would never see. Derive it first, outside the \
+                 boundary, and then pass it:\n\n    trigon rebuild … --egress open --image auto\n\n\
+                 or build one explicitly with `trigon base-image --from {parent}` and pass its id."
+            );
+        }
+
+        // The floor plus what this strategy asked for: an image derived for one target should serve
+        // the next, and a set that is exactly one strategy's needs would build a new image per
+        // target.
+        let mut packages: Vec<String> = DEFAULT_PACKAGES.iter().map(|s| s.to_string()).collect();
+        for r in required {
+            if !packages.contains(r) {
+                packages.push(r.clone());
+            }
+        }
+        let tag = derived_tag(parent, &packages);
+
+        if std::process::Command::new("podman")
+            .args(["image", "exists", &tag])
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return image_id(&tag);
+        }
+
+        println!(
+            "  image      deriving one from {parent}, adding: {}",
+            packages.join(", ")
+        );
+        base_image(parent, &packages, &tag, false, false)?;
+        image_id(&tag)
+    }
+
+    /// The bare 64-hex id of a local image. See `resolve_auto` step 4 for why not a reference.
+    fn image_id(tag: &str) -> Result<String> {
+        let out = std::process::Command::new("podman")
+            .args(["image", "inspect", tag, "--format", "{{.Id}}"])
+            .output()
+            .context("asking podman for the derived image's id")?;
+        if !out.status.success() {
+            bail!("podman could not inspect the image just built as {tag}");
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
     /// Build a base image that carries what an enforced tier cannot install.
     /// Mono's PCL reference assemblies, fetched and unpacked rather than installed.
     ///
@@ -4838,8 +5070,24 @@ mod mirror {
         };
         // The same expansion the sandbox would have used, so the image carries exactly what the
         // setup phase would have installed rather than an operator's guess at the package names.
+        // **An index, not an authority.** `verify_command`'s probe stays and stays the thing that
+        // decides; a selection mechanism that trusted a label would be a second control that fails
+        // open, and anyone can build an image by hand carrying any label they like. The label
+        // exists so `--image auto` can answer "does this image carry what this strategy needs"
+        // without starting a container, and so `podman inspect` can answer "is this current",
+        // which today nothing can. Neutral names, because that is the vocabulary `needs:` speaks
+        // and the expansion is a function of the family — which is on the label too.
+        let mut sorted = packages.clone();
+        sorted.sort();
+        sorted.dedup();
         let mut containerfile = format!(
-            "FROM {from}\nRUN {}\n",
+            "FROM {from}\n\
+             LABEL {LABEL_PACKAGES}=\"{}\"\n\
+             LABEL {LABEL_PARENT}=\"{from}\"\n\
+             LABEL {LABEL_FAMILY}=\"{}\"\n\
+             RUN {}\n",
+            sorted.join(" "),
+            trigon_sandbox::family_of(from),
             trigon_sandbox::install_command(from, &packages)
         );
         if pcl {

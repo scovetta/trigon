@@ -1149,22 +1149,25 @@ const RULES: &[Rule] = &[
         // repository is usually reachable over HTTPS, so this is not the package's. The fix is
         // upstream of this table: rewrite `git@host:path` to `https://host/path` at the rung, which
         // is a strategy change and not something to repair in this recipe.
-        // **A dependency declared over SSH, and no ssh client in the sandbox.** Not our source URL
-        // — `src/refused-url` is that — but one the package's own dependency tree names:
+        // **A dependency declared over SSH, and no ssh client in the image.** Not our source URL —
+        // `src/refused-url` is that — but one the package's own dependency tree names:
         // `npm install` reaches `git clone --mirror git@github.com:owner/repo` and `git` cannot
         // fork an ssh it does not have.
         //
-        // The base image has no ssh client on purpose: it is a credential channel, and there is no
-        // credential to offer an anonymous clone anyway. So `Fault::Policy` — a control said no —
-        // and not `Build`, even though the dependency is the package's choice. The distinction is
-        // the one this table exists to keep: what the package declared is not the reason this run
-        // produced nothing.
+        // **`Fault::Bug`: ours, and the image is simply short.** The first version of this rule
+        // said `Policy` and explained that the sandbox carries no ssh client on purpose. That was
+        // wrong twice over, and the repository says so in two places: ADR-0012 lists `ssh` among
+        // the bytes an image may supply, and `DEFAULT_PACKAGES` has carried it since eight npm
+        // targets failed `ssh: not found` on the full corpus. The image used for the random sweep
+        // predates that entry — it holds `git`, `wget` and `dpkg` and nothing else — so this is the
+        // same finding as `env/base-image-incomplete`, arriving through a tool that reports a
+        // missing binary rather than a missing package.
         //
-        // One of five `unknown`s on the 125-target random sweep, and the only one that reached a
-        // container at all.
+        // Writing a rule whose stated reason contradicts an ADR is the defect this table exists to
+        // avoid, committed inside the table itself.
         code: "env/no-ssh-client",
         needles: &["cannot run ssh: No such file or directory"],
-        fault: Fault::Policy,
+        fault: Fault::Bug,
         retryable: false,
         repairable: false,
         capture: Capture::None,
@@ -2175,8 +2178,9 @@ mod the_random_sweep_unknowns {
              npm ERR! fatal: unable to fork\n",
         );
         assert_eq!(sig.code, "env/no-ssh-client");
-        assert_eq!(sig.fault, Fault::Policy);
-        // The dependency is the package's choice; the reason this run produced nothing is ours.
+        // Ours: `ssh` is in `DEFAULT_PACKAGES` and ADR-0012 admits it. An image without one is an
+        // image that is short, not a control that fired.
+        assert_eq!(sig.fault, Fault::Bug);
         assert!(!sig.fault.is_about_the_package());
     }
 
