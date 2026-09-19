@@ -23,6 +23,7 @@ fn request(model: &str, body: &str) -> Request {
         temperature: 0.0,
         schema: None,
         reasoning: trigon_ai::Reasoning::Default,
+        effort: None,
     }
 }
 

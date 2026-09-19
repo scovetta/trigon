@@ -44,6 +44,48 @@ pub enum Reasoning {
     Off,
 }
 
+/// How deep to think, where the provider has a dial for it.
+///
+/// **This exists because lowering it is the only lever that works, and it was not reachable.**
+/// Adaptive thinking spends what it is given, so raising `max_output_tokens` raises the reasoning
+/// with it; the depth is a separate setting. It was a constant in the Anthropic client, which meant
+/// the one thing that fixes a truncated answer could not be asked for — not by a caller, and not by
+/// a retry.
+///
+/// `None` on a [`Request`] means the provider's own default, which is what every call made before
+/// this existed asked for. Skipped when serializing for the same reason `Reasoning::Default` is: a
+/// transcript recorded before this field must still compare equal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl Effort {
+    /// The next notch down, or `None` at the bottom.
+    ///
+    /// What a retry walks after a truncated answer. Below `Low` the only remaining move is to turn
+    /// reasoning off entirely, which is [`Reasoning::Off`] and not a depth.
+    pub fn lower(self) -> Option<Effort> {
+        match self {
+            Effort::High => Some(Effort::Medium),
+            Effort::Medium => Some(Effort::Low),
+            Effort::Low => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+        }
+    }
+}
+
 impl Reasoning {
     /// For `skip_serializing_if`, so a transcript from a run that said nothing does not grow a
     /// field and stop comparing equal to the one recorded before this existed.
@@ -155,6 +197,9 @@ pub struct Request {
     /// differ only here are not the same question and a replay must be able to say so.
     #[serde(default, skip_serializing_if = "Reasoning::is_default")]
     pub reasoning: Reasoning,
+    /// How deep to think. `None` is the provider's default. See [`Effort`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 }
 
 /// What came back, and what it cost.
@@ -198,10 +243,12 @@ pub enum LlmError {
     /// The answer did not fit. Distinct from `Malformed`, which says the provider is broken: this
     /// says the budget was too small, which is ours to fix and says exactly how.
     #[error(
-        "the answer did not fit in {limit} output tokens ({thinking} of them spent on reasoning). \
-         Adaptive thinking scales to the room it is given, so raising `max_output_tokens` raises \
-         the reasoning with it: lower `output_config.effort` instead, or ask the provider for \
-         `Reasoning::Off`."
+        "the answer did not fit in {limit} output tokens ({thinking} of them spent on reasoning), \
+         at every depth down to reasoning off. Adaptive thinking scales to the room it is given, so \
+         raising `max_output_tokens` raises the reasoning with it rather than reaching the answer — \
+         which is why `propose` walks the effort down instead. Reaching here means even a \
+         no-reasoning call could not write the answer in {limit} tokens, so the prompt is asking \
+         for something too large rather than the model thinking too hard."
     )]
     Truncated { limit: u32, thinking: u64 },
     #[error("the provider refused: {0}")]
@@ -290,6 +337,14 @@ pub trait Provider: Send + Sync {
     /// when they named the endpoint, which the caller copies into the request so it is recorded.
     fn reasoning(&self) -> Reasoning {
         Reasoning::Default
+    }
+
+    /// How deep this provider is asked to think by default.
+    ///
+    /// A method rather than a constant so a retry can ask for less — which is the only thing that
+    /// fixes a truncated answer, and was reachable from nowhere when it lived in the client.
+    fn default_effort(&self) -> Effort {
+        Effort::default()
     }
 }
 
@@ -445,6 +500,7 @@ mod tests {
             temperature: 0.0,
             schema: None,
             reasoning: Reasoning::Default,
+            effort: None,
         };
         assert_eq!(p.complete(&req).unwrap().text, "first");
         let e = p.complete(&req).unwrap_err();

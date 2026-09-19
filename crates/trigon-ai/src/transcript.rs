@@ -268,6 +268,7 @@ mod tests {
             temperature: 0.0,
             schema: None,
             reasoning: Reasoning::Default,
+            effort: None,
         }
     }
 

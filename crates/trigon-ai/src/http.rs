@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::provider::{LlmError, ModelCaps, Provider, Reasoning, Request, Response, Usage};
+use crate::provider::{Effort, LlmError, ModelCaps, Provider, Reasoning, Request, Response, Usage};
 
 /// How many times a call is attempted in total.
 ///
@@ -222,6 +222,12 @@ impl OpenAiCompatible {
         if self.flavor.takes_temperature() {
             body["temperature"] = json!(req.temperature);
         }
+        if let Some(effort) = req.effort {
+            // Same three words as Anthropic's `output_config.effort`. An endpoint that does not
+            // know the field ignores it, which is the same best-effort contract the rest of this
+            // builder works on.
+            body["reasoning_effort"] = json!(effort.as_str());
+        }
         if (self.flavor, req.reasoning) == (Flavor::Ollama, Reasoning::Off) {
             body["reasoning_effort"] = json!("none");
         }
@@ -336,7 +342,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// and the diagnosis that came back from the truncated call was already correct — the reasoning was
 /// not short of depth, it was short of a stopping point. `docs/07-ai.md` §5 wants the cheaper
 /// setting wherever quality holds, and this is the dial it means.
-const ANTHROPIC_EFFORT: &str = "medium";
+const ANTHROPIC_EFFORT: Effort = Effort::Medium;
 
 /// Hosted, so ten minutes is the right bound: past that it is a fault rather than a slow model.
 const ANTHROPIC_TIMEOUT: Duration = Duration::from_secs(600);
@@ -402,7 +408,11 @@ impl Anthropic {
         };
         // Merged rather than assigned: the schema below writes into the same object, and whichever
         // ran second would otherwise drop the other.
-        body["output_config"] = json!({"effort": ANTHROPIC_EFFORT});
+        // The request's depth where it names one, this client's default otherwise. It was a bare
+        // constant, which made the one setting that fixes a truncated answer unreachable from the
+        // caller and from any retry.
+        body["output_config"] =
+            json!({"effort": req.effort.unwrap_or(ANTHROPIC_EFFORT).as_str()});
         // Sampling parameters are **removed** on the current models and answer 400, so temperature
         // is sent only where something asked for one. Zero, which is every request this system
         // makes, is what those models do anyway.
@@ -613,6 +623,7 @@ fn probe(system: &str) -> Request {
         temperature: 0.0,
         schema: Some(json!({"type": "object"})),
         reasoning: Reasoning::Default,
+        effort: None,
     }
 }
 
@@ -652,11 +663,11 @@ mod tests {
             b["thinking"]
         );
         // Depth is `effort`, and it lives *inside* `output_config` rather than at the top level.
-        assert_eq!(b["output_config"]["effort"], ANTHROPIC_EFFORT);
+        assert_eq!(b["output_config"]["effort"], ANTHROPIC_EFFORT.as_str());
         // And below the API's default, because adaptive thinking scales to the room it is given:
         // at `high` a repair spent 16,379 of 16,384 output tokens reasoning and never answered.
         assert_ne!(
-            ANTHROPIC_EFFORT, "high",
+            ANTHROPIC_EFFORT.as_str(), "high",
             "raising the ceiling is not the lever"
         );
     }
@@ -667,7 +678,7 @@ mod tests {
         // ran first, and the loss is invisible — the request stays valid and does something else.
         let b = anthropic_body(16_384, Reasoning::Default);
         assert_eq!(b["output_config"]["format"]["type"], "json_schema");
-        assert_eq!(b["output_config"]["effort"], ANTHROPIC_EFFORT);
+        assert_eq!(b["output_config"]["effort"], ANTHROPIC_EFFORT.as_str());
     }
 
     #[test]

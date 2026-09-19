@@ -23,7 +23,7 @@
 use serde::{Deserialize, Serialize};
 use trigon_core::{Ecosystem, FailureSignature};
 
-use crate::provider::{LlmError, Prompt, Provider, Request};
+use crate::provider::{Effort, LlmError, Prompt, Provider, Reasoning, Request};
 
 /// What the Builder is asked about.
 #[derive(Clone, Debug)]
@@ -197,6 +197,58 @@ pub fn prompt(task: &Task) -> Prompt {
 /// parsing, and nothing here decides whether another attempt is worth making — [`crate::RepairLoop`]
 /// does, before this is reached.
 pub fn propose(provider: &dyn Provider, model: &str, task: &Task) -> Result<Candidate, LlmError> {
+    // **Walk the depth down rather than giving up.** Adaptive thinking spends what it is given, so
+    // a truncated answer is not a budget that was too small — it is a model that thought until the
+    // budget was gone. Raising `max_output_tokens` raises the thinking with it and arrives at the
+    // same place; lowering the depth is the only move that leaves room.
+    //
+    // This was a hard failure before, and the error told the operator to lower a setting that was
+    // a constant in the Anthropic client and reachable from nowhere. Observed in the wild at
+    // `medium`: 16,382 of 16,384 output tokens spent reasoning, on a divergence repair, with the
+    // warning `the proposal produced nothing`.
+    //
+    // Each step is a real call, so this costs tokens. It is still cheaper than the alternative:
+    // the repair loop treats a failed proposal as an iteration spent, and an iteration spent on a
+    // call that produced nothing is the most expensive outcome available.
+    let mut depth = provider.default_effort();
+    loop {
+        match attempt(provider, model, task, Some(depth), provider.reasoning()) {
+            Err(LlmError::Truncated { limit, thinking }) => match depth.lower() {
+                Some(next) => {
+                    tracing::warn!(
+                        limit,
+                        thinking,
+                        from = depth.as_str(),
+                        to = next.as_str(),
+                        "the answer did not fit; asking again with less thinking"
+                    );
+                    depth = next;
+                }
+                None => {
+                    // Bottom of the depth dial. One last call with no reasoning at all, which is a
+                    // different setting rather than a lower one — and the only remaining way to
+                    // hand the whole budget to the answer.
+                    tracing::warn!(
+                        limit,
+                        thinking,
+                        "the answer did not fit at the lowest depth; asking once with reasoning off"
+                    );
+                    return attempt(provider, model, task, None, Reasoning::Off);
+                }
+            },
+            other => return other,
+        }
+    }
+}
+
+/// One call, at a stated depth.
+fn attempt(
+    provider: &dyn Provider,
+    model: &str,
+    task: &Task,
+    effort: Option<Effort>,
+    reasoning: Reasoning,
+) -> Result<Candidate, LlmError> {
     let caps = provider.caps();
     let req = Request {
         prompt: prompt(task),
@@ -206,15 +258,14 @@ pub fn propose(provider: &dyn Provider, model: &str, task: &Task) -> Result<Cand
         //
         // **Raising this is not the lever.** Adaptive thinking scales to the room it is given: at
         // 16384 the same repair spent 16,379 reasoning and was cut off again. How deeply the model
-        // thinks is `output_config.effort`, and this number only has to leave the *answer* room
-        // once the effort is right. 16k is the reference's own default for a non-streaming request,
-        // which is what this is.
+        // thinks is the effort above, and this number only has to leave the *answer* room once the
+        // effort is right. 16k is the reference's own default for a non-streaming request, which is
+        // what this is.
         max_output_tokens: 16_384,
         temperature: 0.0,
         schema: caps.structured_output.then(candidate_schema),
-        // The provider's, not this call's: whether a reasoning trace is worth its tokens is a
-        // property of the endpoint the operator named, and the same question is asked either way.
-        reasoning: provider.reasoning(),
+        reasoning,
+        effort,
     };
     parse_candidate(&provider.complete(&req)?.text)
 }
@@ -318,7 +369,7 @@ mod tests {
     use super::*;
     use crate::provider::Replay;
 
-    fn task() -> Task<'static> {
+    pub(super) fn task() -> Task<'static> {
         Task {
             purl: "pkg:pypi/demo@1.0.0",
             ecosystem: Ecosystem::PyPI,
@@ -496,5 +547,108 @@ mod tests {
                 .iter()
                 .any(|v| v == "diagnosis")
         );
+    }
+}
+
+#[cfg(test)]
+mod truncation {
+    //! What happens when the model thinks until the budget is gone.
+    //!
+    //! Observed in the wild on a divergence repair: **16,382 of 16,384 output tokens spent
+    //! reasoning**, at `medium` effort, and the run reported `the proposal produced nothing`. The
+    //! error told the operator to lower a setting that was a constant in the Anthropic client and
+    //! reachable from nowhere — not from a caller, not from a retry.
+
+    use super::*;
+    use crate::provider::{Effort, ModelCaps, Reasoning, Response, Usage};
+    use std::sync::Mutex;
+
+    /// A provider that truncates until the depth drops to `answers_at`.
+    struct Fussy {
+        answers_at: Option<Effort>,
+        seen: Mutex<Vec<(Option<Effort>, Reasoning)>>,
+    }
+
+    impl Provider for Fussy {
+        fn id(&self) -> &str {
+            "fussy"
+        }
+        fn caps(&self) -> ModelCaps {
+            ModelCaps {
+                structured_output: false,
+                tools: false,
+                prompt_cache: false,
+                context_tokens: 200_000,
+            }
+        }
+        fn complete(&self, req: &Request) -> Result<Response, LlmError> {
+            self.seen.lock().unwrap().push((req.effort, req.reasoning));
+            let deep_enough = match (req.effort, self.answers_at) {
+                // Reasoning off always leaves the whole budget for the answer.
+                (_, _) if req.reasoning == Reasoning::Off => true,
+                (Some(got), Some(want)) => got == want,
+                _ => false,
+            };
+            if !deep_enough {
+                return Err(LlmError::Truncated {
+                    limit: 16_384,
+                    thinking: 16_382,
+                });
+            }
+            Ok(Response {
+                text: "kind: flow\nschema: 1\n".into(),
+                reasoning: None,
+                usage: Usage::default(),
+                model: "m".into(),
+                stop_reason: "end_turn".into(),
+            })
+        }
+    }
+
+    fn fussy(answers_at: Option<Effort>) -> Fussy {
+        Fussy {
+            answers_at,
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_truncated_answer_is_asked_again_with_less_thinking() {
+        let p = fussy(Some(Effort::Low));
+        propose(&p, "m", &super::tests::task()).expect("the low-effort call answers");
+        let seen = p.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            vec![Some(Effort::Medium), Some(Effort::Low)],
+            "it should have walked the depth down one notch, not given up and not jumped to the \
+             bottom: each step is a real call and costs tokens"
+        );
+    }
+
+    #[test]
+    fn the_last_resort_is_no_reasoning_at_all() {
+        // Nothing satisfies it on depth alone, so the walk has to reach the one setting that hands
+        // the whole budget to the answer.
+        let p = fussy(None);
+        propose(&p, "m", &super::tests::task()).expect("the no-reasoning call answers");
+        let seen = p.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            vec![Some(Effort::Medium), Some(Effort::Low), None],
+        );
+        assert_eq!(
+            seen.last().unwrap().1,
+            Reasoning::Off,
+            "the last attempt must turn reasoning off; below `low` there is no lower depth, and \
+             a fourth call at the same depth would ask the same question again"
+        );
+    }
+
+    #[test]
+    fn a_call_that_answers_first_time_is_made_once() {
+        // The walk must cost nothing when nothing is wrong.
+        let p = fussy(Some(Effort::Medium));
+        propose(&p, "m", &super::tests::task()).expect("answers");
+        assert_eq!(p.seen.lock().unwrap().len(), 1);
     }
 }

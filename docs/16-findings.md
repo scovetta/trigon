@@ -2503,3 +2503,50 @@ beside `performed: false` is the same false statement with the other half missin
 **The shape**, shared with §3.57 and with most of what this pass found: the comment is right, the
 code is wrong, and nothing compares them. Both of these were found by a reader holding the two side
 by side — which is a thing no test in this repository does.
+
+### 3.59 The only lever that works was reachable from nowhere
+
+**Real, reported from a live run.** A divergence repair came back as:
+
+```text
+WARN the proposal produced nothing: asking about a divergence: the answer did not fit in
+     16384 output tokens (16382 of them spent on reasoning).
+```
+
+The message is right about the mechanism and wrong about what to do. It says *"lower
+`output_config.effort` instead, or ask the provider for `Reasoning::Off`"* — and
+`output_config.effort` was a `const` in the Anthropic client. No caller could set it. No retry could
+lower it. The advice named a dial nobody could turn.
+
+Worse, the dial had **already been turned**, for this exact failure. `ANTHROPIC_EFFORT` is
+`"medium"` and its doc comment explains why: *"At the API's default of `high` a repair spent 16,379
+of 16,384 output tokens reasoning and was cut off before writing anything."* The fix for the first
+occurrence was to hardcode a lower value, and the second occurrence — 16,382 of 16,384, at
+`medium` — proves that a constant is not a fix for an adaptive system. It is a guess that happens to
+hold until it does not.
+
+**And the retry was on the wrong failure.** `ask_until_it_parses` asks a second time when an answer
+*will not parse*, which is the hard case: the model produced something and it was wrong. A truncated
+answer is the easy case — the model thought until the budget was gone — and it propagated straight
+out as a hard error. The cheap fix had no path and the expensive one had two attempts.
+
+Three changes:
+
+- `Effort` is a type with `low`/`medium`/`high` and a `lower()`, carried on `Request` and skipped
+  when serializing so recorded transcripts still compare equal.
+- `Provider::default_effort()` replaces the constant, so a provider states its default and a caller
+  can ask for less.
+- `propose` walks the depth down on `Truncated` — medium, low, then one last call with reasoning
+  **off**, which is a different setting rather than a lower one and is the only thing that hands
+  the whole budget to the answer. Reaching the end now means something else is wrong, and the error
+  says so instead of naming a dial.
+
+Each step is a real call and costs tokens. It is still the cheaper outcome: the repair loop counts a
+failed proposal as an iteration spent, and an iteration spent on a call that produced nothing is the
+most expensive result available.
+
+**The shape:** a constant standing in for a policy. The value was chosen by measuring one failure,
+which makes it a fact about that failure rather than a rule — and an adaptive system will find the
+next value that does not hold. What was needed was not a better number but a response to the
+condition, which is what the error text had been describing in the imperative to a reader who had
+no way to act on it.

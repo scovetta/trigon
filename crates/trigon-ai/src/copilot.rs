@@ -402,6 +402,7 @@ mod tests {
             temperature: 0.0,
             schema: None,
             reasoning: crate::Reasoning::Default,
+            effort: None,
         }
     }
 
