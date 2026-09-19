@@ -1159,9 +1159,10 @@ const RULES: &[Rule] = &[
         // wrong twice over, and the repository says so in two places: ADR-0012 lists `ssh` among
         // the bytes an image may supply, and `DEFAULT_PACKAGES` has carried it since eight npm
         // targets failed `ssh: not found` on the full corpus. The image used for the random sweep
-        // predates that entry — it holds `git`, `wget` and `dpkg` and nothing else — so this is the
-        // same finding as `env/base-image-incomplete`, arriving through a tool that reports a
-        // missing binary rather than a missing package.
+        // predates that entry — it carries four of the nine packages `base-image` installs by
+        // default, and `openssh-client` is not among them — so this is the same finding as
+        // `env/base-image-incomplete`, arriving through a tool that reports a missing binary rather
+        // than a missing package.
         //
         // Writing a rule whose stated reason contradicts an ADR is the defect this table exists to
         // avoid, committed inside the table itself.

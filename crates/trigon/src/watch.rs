@@ -2432,6 +2432,11 @@ async fn run(
         }
     }
 
+    // The centrepiece, linked from the verdict rather than buried: a reader who has just been
+    // told a package diverged wants to know which of its files anybody wrote.
+    body.push_str(&format!(
+        "<p><a href=\"/run/{index}/source\"><strong>how the source became this artifact →</strong></a></p>"
+    ));
     body.push_str(&compare_panel(&dir, index));
     body.push_str(&network_panel(&dir, index));
 
@@ -3113,6 +3118,7 @@ pub fn serve(
         .route("/run/{index}", axum::routing::get(run))
         .route("/run/{index}/network", axum::routing::get(network))
         .route("/run/{index}/compare", axum::routing::get(compare))
+        .route("/run/{index}/source", axum::routing::get(source_page))
         .route("/api/state", axum::routing::get(api_state))
         .with_state(sweep);
 
@@ -3127,6 +3133,286 @@ pub fn serve(
         axum::serve(listener, app).await?;
         Ok(())
     })
+}
+
+/// Every member of the published artifact, with its **raw** content digest.
+///
+/// Raw: taken before any stabilizer runs, because that is the only key a join against a checkout
+/// may use. See `provenance`'s module documentation for what joining on the blob's digests does
+/// instead — it turns one normalized line ending into a file "carried from the commit".
+fn raw_members(artifact: &Path) -> Result<Vec<(String, String, u64)>, String> {
+    let format = trigon_core::Format::from_file_name(
+        &artifact.file_name().unwrap_or_default().to_string_lossy(),
+    )
+    .ok_or_else(|| "this artifact's name names no format we can parse".to_string())?;
+    let bytes = std::fs::read(artifact).map_err(|e| format!("reading the artifact: {e}"))?;
+    let mut notes = Vec::new();
+    let parsed = trigon_archive::parse(
+        bytes,
+        format,
+        &trigon_archive::Limits::default(),
+        &mut notes,
+    )
+    .map_err(|e| format!("parsing the artifact: {e}"))?;
+    let mut out = Vec::new();
+    for e in &parsed.archive.entries {
+        let body = e
+            .body_bytes()
+            .map_err(|e| format!("reading a member: {e}"))?;
+        out.push((
+            String::from_utf8_lossy(e.path.as_bytes()).into_owned(),
+            digest_hex(&body),
+            e.meta.size,
+        ));
+    }
+    Ok(out)
+}
+
+/// Two bars over one x-axis: where each member came from, and what the comparison said about it.
+///
+/// **Alignment does a Sankey's job with no crossings.** The members are sorted once, into origin
+/// order, and both bars use that order — so a band in the lower bar sits directly under the members
+/// it describes. The reading that matters is vertical: red in the verdict bar under green in the
+/// origin bar is a file the maintainer wrote coming back different, which is the alarming case and
+/// was undetectable before this page.
+fn origin_bars(
+    members: &[crate::provenance::Member],
+    verdicts: &BTreeMap<String, &'static str>,
+) -> String {
+    if members.is_empty() {
+        return String::new();
+    }
+    let total = members.len() as f64;
+    let w = 720.0;
+
+    // One order, used by both bars. Sorted by origin so the bands are contiguous; within an origin
+    // by path so the same artifact draws the same picture twice.
+    let mut sorted: Vec<&crate::provenance::Member> = members.iter().collect();
+    sorted.sort_by_key(|m| {
+        let rank = match &m.origin {
+            crate::provenance::Origin::Verbatim => 0,
+            crate::provenance::Origin::Normalized(_) => 1,
+            crate::provenance::Origin::Built => 2,
+            crate::provenance::Origin::Unknown => 3,
+        };
+        (rank, m.path.clone())
+    });
+
+    let mut origin_rects = String::new();
+    let mut verdict_rects = String::new();
+    let mut x = 0.0;
+    let step = w / total;
+    for m in &sorted {
+        origin_rects.push_str(&format!(
+            "<rect x=\"{x:.2}\" y=\"0\" width=\"{step:.2}\" height=\"26\" fill=\"{}\"><title>{}</title></rect>",
+            m.origin.colour(),
+            esc(&format!("{} — {}", m.path, m.origin.label())),
+        ));
+        let (fill, what) = match verdicts.get(&m.path).copied() {
+            Some("identical") => ("#137333", "identical as published"),
+            Some("stabilized") => ("#b26a00", "stabilized out"),
+            Some("packed") => ("#8a6d1f", "same bytes, packed differently"),
+            Some("differs") => ("#b3261e", "still differs"),
+            Some("one-side") => ("#6b4fbb", "on one side only"),
+            _ => ("#d8d8d4", "not compared"),
+        };
+        verdict_rects.push_str(&format!(
+            "<rect x=\"{x:.2}\" y=\"0\" width=\"{step:.2}\" height=\"26\" fill=\"{fill}\"><title>{}</title></rect>",
+            esc(&format!("{} — {what}", m.path)),
+        ));
+        x += step;
+    }
+
+    // The alarming case, counted rather than left for the eye: a member the commit explains whose
+    // comparison says it changed.
+    let alarming = sorted
+        .iter()
+        .filter(|m| {
+            !matches!(
+                m.origin,
+                crate::provenance::Origin::Built | crate::provenance::Origin::Unknown
+            ) && verdicts.get(&m.path).is_some_and(|v| *v == "differs")
+        })
+        .count();
+
+    format!(
+        "<p class=\"dim\" style=\"margin:.8rem 0 .2rem\">where each member came from</p>\
+         <svg viewBox=\"0 0 {w} 26\" width=\"100%\" height=\"26\" role=\"img\" \
+          aria-label=\"origin of each member\" preserveAspectRatio=\"none\">{origin_rects}</svg>\
+         <p class=\"dim\" style=\"margin:.55rem 0 .2rem\">and what the comparison said about it</p>\
+         <svg viewBox=\"0 0 {w} 26\" width=\"100%\" height=\"26\" role=\"img\" \
+          aria-label=\"comparison verdict for each member\" preserveAspectRatio=\"none\">{verdict_rects}</svg>\
+         <p class=\"note\">Same members, same order, in both bars: read it vertically. {}</p>",
+        if alarming > 0 {
+            format!(
+                "<strong>{alarming} member(s) the commit explains came back different</strong> — a \
+                 file somebody wrote, rebuilt into something else. That is the case worth opening."
+            )
+        } else {
+            "Nothing the commit explains came back different.".to_string()
+        }
+    )
+}
+
+/// The verdict each member got, keyed by path, in the vocabulary the lower bar draws.
+fn member_verdicts(diffs: &[MemberDiff]) -> BTreeMap<String, &'static str> {
+    diffs
+        .iter()
+        .map(|d| {
+            let v = if d.only_one_side() {
+                "one-side"
+            } else if d.removed_by_stabilization() {
+                "stabilized"
+            } else if d.metadata_only() {
+                "packed"
+            } else if d.content_differs() {
+                "differs"
+            } else {
+                "identical"
+            };
+            (d.path.clone(), v)
+        })
+        .collect()
+}
+
+/// How the source became the artifact.
+///
+/// The page the watch redesign exists for. A verdict is a claim about a published artifact **and a
+/// commit**, and every other view answers the first half. This one answers the second: of the
+/// members in this artifact, which are the maintainer's bytes and which did the build make.
+async fn source_page(
+    State(sweep): State<std::sync::Arc<Sweep>>,
+    UrlPath(index): UrlPath<usize>,
+) -> Response {
+    let v = sweep.read();
+    let dir = sweep.target_dir(&v, index);
+    let report = read_report(&dir);
+    let name = match &report {
+        Some(r) => r.purl.strip_prefix("pkg:").unwrap_or(&r.purl).to_string(),
+        None => format!("target {index:03}"),
+    };
+
+    let mut body = format!(
+        "<h1>{}</h1>{}<p><a href=\"/run/{index}\">← the run</a></p>",
+        esc(&name),
+        state_strip(&v, sweep.targets.as_deref()),
+    );
+
+    let Some(src) = report.as_ref().and_then(|r| r.source.as_ref()) else {
+        body.push_str(
+            "<h2>How the source became the artifact</h2><p class=\"note\">this run recorded no \
+             source, so there is no commit to compare the artifact against. A verdict without one \
+             is a claim about an artifact and nothing else.</p>",
+        );
+        return page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response();
+    };
+
+    let Some((upstream, _)) = artifact_pair(&dir) else {
+        body.push_str(
+            "<h2>How the source became the artifact</h2><p class=\"note\">the published artifact \
+             is not on disk, so its members cannot be read. This page works from bytes rather than \
+             from the comparison record, deliberately — see the note below — so a pruned work \
+             directory takes it with it.</p>",
+        );
+        return page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response();
+    };
+
+    let members = match raw_members(&upstream) {
+        Ok(m) => m,
+        Err(e) => {
+            body.push_str(&format!(
+                "<h2>How the source became the artifact</h2><p class=\"note\">{}</p>",
+                esc(&e)
+            ));
+            return page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response();
+        }
+    };
+
+    // The same cache the rungs fetch into. Read-only: `default_root` computes a path and
+    // `checkout_dir` derives a key from it; neither creates anything, which is the property this
+    // page needs — `SourceCache::new` makes the directory it is given, and a monitor that created
+    // a cache would be a monitor that changed what it observes.
+    let root = trigon_registry::SourceCache::default_root();
+    let checkout = crate::provenance::checkout_dir(&root, &src.repo_url, &src.commit);
+    let started = std::time::Instant::now();
+    let (joined, scope) = crate::provenance::join(
+        &members,
+        Some(&checkout),
+        src.subdir.as_deref(),
+        &src.commit,
+    );
+    let took = started.elapsed();
+
+    // The sentence, before the picture. Tiers reported separately and never summed: "38 are the
+    // commit's bytes and 4 the build made" is a different claim from "42 are accounted for".
+    let t = crate::provenance::tally(&joined);
+    let (verbatim, normalized, built, unknown) = (t[0].1, t[1].1, t[2].1, t[3].1);
+    body.push_str("<h2>How the source became the artifact</h2>");
+    let mut sentence = format!("<p><strong>{} member(s).</strong> ", joined.len());
+    if unknown == joined.len() {
+        sentence.push_str(&format!(
+            "Where they came from is unknown: {}.</p>",
+            esc(&scope.where_we_looked())
+        ));
+    } else {
+        sentence.push_str(&format!("{verbatim} are the commit's bytes unchanged. "));
+        if normalized > 0 {
+            sentence.push_str(&format!(
+                "{normalized} are the commit's bytes after a line-ending rewrite. "
+            ));
+        }
+        sentence.push_str(&format!(
+            "{built} the build made — meaning {}.</p>",
+            esc(&scope.where_we_looked())
+        ));
+    }
+    body.push_str(&sentence);
+
+    let verdicts = artifact_pair(&dir)
+        .and_then(|(u, r)| member_diffs(&u, &r).ok())
+        .map(|(d, _)| member_verdicts(&d))
+        .unwrap_or_default();
+    body.push_str(&origin_bars(&joined, &verdicts));
+
+    // The table, ordered so the things worth reading are at the top.
+    body.push_str(
+        "<h2>Member by member</h2><table><tr><th>member</th><th>origin</th><th>from</th>\
+         <th class=\"n\">bytes</th></tr>",
+    );
+    let mut rows: Vec<&crate::provenance::Member> = joined.iter().collect();
+    rows.sort_by_key(|m| {
+        let rank = match &m.origin {
+            crate::provenance::Origin::Unknown => 0,
+            crate::provenance::Origin::Built => 1,
+            crate::provenance::Origin::Normalized(_) => 2,
+            crate::provenance::Origin::Verbatim => 3,
+        };
+        (rank, m.path.clone())
+    });
+    for m in rows {
+        body.push_str(&format!(
+            "<tr><td><code>{}</code></td><td style=\"color:{}\">{}</td>\
+             <td><code class=\"dim\">{}</code></td><td class=\"n\">{}</td></tr>",
+            esc(&m.path),
+            m.origin.colour(),
+            esc(&m.origin.label()),
+            esc(m.source_path.as_deref().unwrap_or("")),
+            human_bytes(m.bytes),
+        ));
+    }
+    body.push_str("</table>");
+
+    body.push_str(&format!(
+        "<p class=\"note\">Joined on the artifact's <strong>raw</strong> member digests, taken \
+         before any stabilizer ran, against {} — and the comparison record's digests were not used, \
+         because they are taken <em>after</em>. Joining on those, one rewritten line ending reads as \
+         a file carried from the commit. Took {}ms; the checkout index is memoised per directory \
+         and mtime, because hashing a large one takes seconds.</p>",
+        esc(&scope.where_we_looked()),
+        took.as_millis(),
+    ));
+
+    page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response()
 }
 
 #[cfg(test)]

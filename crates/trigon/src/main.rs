@@ -810,6 +810,8 @@ fn rfc3339_from_unix(secs: u64) -> String {
 #[cfg(feature = "build")]
 mod progress;
 #[cfg(feature = "build")]
+mod provenance;
+#[cfg(feature = "build")]
 mod watch;
 
 fn main() -> Result<()> {

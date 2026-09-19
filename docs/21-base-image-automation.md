@@ -252,6 +252,14 @@ image carried `git`, `wget` and `dpkg` against a default list of nine. `auto_par
 `TRIGON_BASE_PARENT`, else the `org.trigon.parent` of a base image already on the machine (a
 sibling, not a stack), else such an image itself, else refuses with the command to run.
 
+**And a note on how the staleness was measured, because the first measurement was wrong.** Probing
+the image with `command -v` reported it as carrying `git`, `wget` and `dpkg` alone. `dpkg -s` says
+it carries `ca-certificates`, `git`, `wget` and `libatomic1` — four of the nine — and is missing
+`python3`, `build-essential`, `openssh-client`, `pkg-config` and `python3-dev`. `command -v` cannot
+see a package that ships no binary, which is the reason `verify_command`'s own comment gives for not
+using it: *"a check that silently passes for them is not a check."* The conclusion held; the number
+in it did not.
+
 **Deriving inside an enforced boundary is refused**, as the plan requires: `apt-get` is network, and
 an image built moments earlier is bytes the transcript never saw.
 

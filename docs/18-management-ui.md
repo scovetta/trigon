@@ -190,11 +190,34 @@ directories under `./work/` are per-target. A 5,000-target board is the right bo
 nothing here has run.
 
 - **Stage 0 — done**, step 8 above. Half a day, mostly the sentences that were already on disk.
-- **Stage 1 — the centrepiece.** `/run/{index}/source`: a fidelity sentence, then two aligned
+- **Stage 1 — the centrepiece, built.** `/run/{index}/source`: a fidelity sentence, then two aligned
   stacked bars sharing an x-axis — ORIGIN above, VERDICT below, the same members in the same
   positions, so alignment does a Sankey's job with no crossings. The alarming case becomes visible
   for the first time: red in the verdict bar under green in the origin bar is a file the maintainer
   wrote coming back different.
+  What landed: the fidelity sentence, the two aligned bars over one x-axis, and the member table
+  with its origin column, at `/run/{index}/source` and linked from the verdict.
+
+  **The join reads the artifact on disk, not the comparison record**, and the difference is the
+  whole of finding 1 below. Measured on `Newtonsoft.Json@11.0.1`: *"24 members. 0 are the commit's
+  bytes unchanged. 1 are the commit's bytes after a line-ending rewrite. 23 the build made — meaning
+  1090 files at d50b912e, of which the build ran in `Src/Newtonsoft.Json`."* On `once@1.4.0`: 4 of 4
+  verbatim, which is the thesis in one line.
+
+  Two things the implementation had to be corrected on, both caught by running it against real
+  artifacts rather than by reasoning:
+
+  - **Scoping the search to the build subdirectory under-reports.** Newtonsoft builds from
+    `Src/Newtonsoft.Json` and ships the repository's root `LICENSE.md`, so a scoped search called a
+    file anybody can read in the commit "the build made this". The whole checkout is searched and
+    the subtree is reported as context; the matched path is printed, so a reader can tell a hit
+    inside the built subtree from one outside it.
+  - **The CRLF index has to be a separate map.** Folding the line-ending forms in beside the raw
+    digests reported `LICENSE.md` as *carried verbatim*. Its bytes are not the commit's bytes; they
+    are the commit's bytes after a pass. That is counting normalization as carriage — the exact
+    mistake the tiers exist to prevent — committed in the lookup rather than in the join. Raw is
+    consulted first, always, and the two counts are never added.
+
 - **Stage 2** — the chain ribbon, the three-rung digest ladder, and the stabilizer ledger.
 - **Stage 3+** — the board, behind the recording that would make it honest.
 
