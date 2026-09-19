@@ -232,7 +232,13 @@ $168,000 configuration.
 ### M4. Fleet (4 weeks)
 
 **Adds:** the queue, worker classes, the API, the embedded UI, Kubernetes manifests, the dependency
-mirror, and the git cache.
+mirror, and the git cache. The mirror arrived early — M3's egress boundary needed it — so what is
+left here is the queue and what sits on it.
+
+[`20-m4-plan.md`](20-m4-plan.md) holds the plan: each criterion below checked against the code, the
+measured cost of the 5,000-target sweep, and the order. Two of its findings change what is written
+here — the fetch cache is a precondition of the first criterion rather than an optimisation, and the
+rate limiting the third criterion asks for exists on a client that carries 0.2% of the traffic.
 
 **Exit criteria:**
 
