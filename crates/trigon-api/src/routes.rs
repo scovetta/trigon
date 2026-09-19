@@ -168,6 +168,216 @@ pub async fn comparison(State(api): S, Path(id): Path<String>) -> Response {
     blob_of(&api, &id, "comparison").await
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MemberQuery {
+    /// The member's name, exactly as the comparison gave it — including the `outer!inner` form a
+    /// nested archive produces.
+    path: String,
+    /// `upstream` or `rebuild`. Only for the raw route; a diff needs both.
+    #[serde(default)]
+    side: Option<String>,
+    /// Byte offset to show in the hex view, for paging through a file that differs throughout.
+    /// Absent means the difference-centred regions, which is the right default and useless once a
+    /// reader wants byte 300,000.
+    #[serde(default)]
+    offset: Option<u64>,
+}
+
+/// Fetch a stored artifact's bytes, or say why not.
+async fn artifact_bytes(
+    api: &Api,
+    r: &trigon_store::RunRecord,
+    side: &str,
+) -> Result<(Vec<u8>, String), Response> {
+    let Some((digest, name)) = crate::member::side_digest(r, side) else {
+        return Err(refuse(
+            StatusCode::NOT_FOUND,
+            "no_such_side",
+            "there are two sides, `upstream` and `rebuild`, and a run that produced no artifact \
+             has only the first.",
+        ));
+    };
+    let stored = match side {
+        "upstream" => r.upstream.stored,
+        _ => r.rebuild.as_ref().is_some_and(|a| a.stored),
+    };
+    if !stored {
+        return Err(refuse(
+            StatusCode::NOT_FOUND,
+            "not_kept",
+            "that artifact's bytes were not kept. Retention drops them on a match and keeps them \
+             on a divergence, so the copies that could answer this question are the ones where \
+             somebody would ask it.",
+        ));
+    }
+    match api.store.blobs().get(&digest).await {
+        Ok(b) => Ok((b.to_vec(), name)),
+        Err(e) => Err(refuse(
+            StatusCode::NOT_FOUND,
+            "no_such_blob",
+            &format!("the record names an artifact the store cannot return: {e}"),
+        )),
+    }
+}
+
+/// Both sides' copies of one member, where each exists.
+async fn member_pair(
+    api: &Api,
+    r: &trigon_store::RunRecord,
+    path: &str,
+) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>, Vec<String>), Response> {
+    let mut problems = Vec::new();
+    let mut out: [Option<Vec<u8>>; 2] = [None, None];
+
+    for (i, side) in ["upstream", "rebuild"].into_iter().enumerate() {
+        // Whether this side is *supposed* to have bytes. A run with no rebuild artifact, or one
+        // whose artifacts retention dropped on a clean match, is not a failure — and neither is a
+        // member that only one side has, which is the whole reason this route exists.
+        let expected = match side {
+            "upstream" => r.upstream.stored,
+            _ => r.rebuild.as_ref().is_some_and(|a| a.stored),
+        };
+        if !expected {
+            continue;
+        }
+        match artifact_bytes(api, r, side).await {
+            Ok((bytes, name)) => match crate::member::read(bytes, &name, path) {
+                Ok(b) => out[i] = Some(b),
+                // "not in this artifact" is the normal answer for an added or deleted member.
+                // Anything else is reported rather than rendered as absence: a member that failed
+                // to read and a member that is not there look identical on a page, and only one of
+                // them is a finding about the package.
+                Err(e) if e.contains("holds no member") => {}
+                Err(e) => problems.push(format!("{side}: {e}")),
+            },
+            // The record says these bytes were kept and the store will not return them. That is
+            // our fault and it is said out loud, because the alternative is a page that reports a
+            // deleted file where there is a broken store.
+            Err(_) => problems.push(format!(
+                "{side}: the record says this artifact was kept and the store would not return it"
+            )),
+        }
+    }
+    let [up, rb] = out;
+    Ok((up, rb, problems))
+}
+
+/// `GET /v1/runs/{id}/member?path=…` — what differs inside one member.
+///
+/// The question the comparison cannot answer. It says *that* `lib/net20/Newtonsoft.Json.dll`
+/// differs and what kind of difference it is; this says what the difference is, as a line diff
+/// where the bytes are text and as a hex view centred on the differing runs where they are not.
+///
+/// **Class-gated**, unlike the rendered comparison. A census and a member list are claims about an
+/// artifact; this is the artifact's content, and `12-security.md` §5's rule covers it: we hold
+/// somebody else's bytes to check them, not to redistribute them. The bound that makes the census
+/// anonymous does not apply — a diff of a file that differs everywhere is the file.
+pub async fn member(
+    State(api): S,
+    Path(id): Path<String>,
+    UrlQuery(q): UrlQuery<MemberQuery>,
+) -> Response {
+    let Some(r) = api.index.get(&id) else {
+        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    };
+    if !admits(api.principal(), Class::Artifact) {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "class_gated",
+            Class::Artifact.refusal(),
+        );
+    }
+    let (up, rb, problems) = match member_pair(&api, &r, &q.path).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if up.is_none() && rb.is_none() {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "no_such_member",
+            &if problems.is_empty() {
+                "neither artifact holds a member by that name.".to_string()
+            } else {
+                format!("that member could not be read. {}", problems.join("; "))
+            },
+        );
+    }
+    let mut view = crate::member::view(&q.path, up, rb, q.offset);
+    if !problems.is_empty() {
+        view.unavailable = Some(problems.join("; "));
+    }
+    json(view)
+}
+
+/// `GET /v1/runs/{id}/member/raw?path=…&side=…` — one member's bytes, to read or to save.
+///
+/// The whole file rather than a diff of it, because a member present on one side only has no diff
+/// and is still the thing somebody needs to look at. Served as an attachment with the member's own
+/// base name, and always as `application/octet-stream`: these are bytes from an artifact we did not
+/// write, and a browser that decided to render them because the name ends in `.html` would be
+/// executing somebody else's content on this origin.
+pub async fn member_raw(
+    State(api): S,
+    Path(id): Path<String>,
+    UrlQuery(q): UrlQuery<MemberQuery>,
+) -> Response {
+    let Some(r) = api.index.get(&id) else {
+        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    };
+    if !admits(api.principal(), Class::Artifact) {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "class_gated",
+            Class::Artifact.refusal(),
+        );
+    }
+    let side = q.side.as_deref().unwrap_or("upstream");
+    if side != "upstream" && side != "rebuild" {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "no_such_side",
+            "`side` is `upstream` or `rebuild`",
+        );
+    }
+    let (bytes, name) = match artifact_bytes(&api, &r, side).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match crate::member::read(bytes, &name, &q.path) {
+        Ok(body) => {
+            // The base name only, quoted, with anything a header cannot carry removed. A member
+            // path is attacker-controlled and this header is parsed by the browser.
+            let base: String = q
+                .path
+                .rsplit(['/', '!'])
+                .next()
+                .unwrap_or("member")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                .take(80)
+                .collect();
+            let base = if base.is_empty() {
+                "member".into()
+            } else {
+                base
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{side}-{base}\""),
+                    ),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        Err(e) => refuse(StatusCode::NOT_FOUND, "no_such_member", &e),
+    }
+}
+
 /// The comparison, rendered: the ladder, the ledger, the census and a bounded member list.
 ///
 /// The page a reader wants, as against `/comparison`, which is the same facts as three thousand
@@ -430,6 +640,14 @@ pub const ROUTES: &[(&str, &str)] = &[
     (
         "/v1/runs/{id}/comparison",
         "The full comparison, as stored. Class-gated",
+    ),
+    (
+        "/v1/runs/{id}/member",
+        "What differs inside one member: a line diff, a hex diff, or both. Class-gated",
+    ),
+    (
+        "/v1/runs/{id}/member/raw",
+        "One member's bytes, from one side, to read or to save. Class-gated",
     ),
     (
         "/v1/runs/{id}/attestation",

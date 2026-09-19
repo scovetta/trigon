@@ -11,6 +11,10 @@ authors.workspace = true
 [dependencies]
 trigon-core.workspace = true
 trigon-store = { workspace = true, features = ["queue"] }
+# Reading one member out of a stored artifact. A judgement-half crate — sync, no runtime, no network
+# — and a *reader*: it parses archives and computes no verdict, which is the property the forbidden
+# list in `the_comparator_is_not_even_a_dependency` is actually about.
+trigon-archive.workspace = true
 trigon-attest.workspace = true
 axum.workspace = true
 tokio.workspace = true
@@ -33,5 +37,6 @@ tempfile.workspace = true
 # `[dependencies]`, because a crate linked into tests cannot be reached by a handler.
 trigon-compare.workspace = true
 trigon-stabilize.workspace = true
-trigon-archive.workspace = true
 zip.workspace = true
+tar = "0.4"
+flate2.workspace = true

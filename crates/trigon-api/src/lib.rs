@@ -17,6 +17,7 @@
 pub mod comparison;
 pub mod evidence;
 pub mod index;
+pub mod member;
 pub mod publication;
 pub mod request;
 pub mod routes;
@@ -86,6 +87,10 @@ pub fn router(api: Arc<Api>) -> axum::Router {
         // is what a reader wants and the blob is what a third party re-derives a verdict from.
         .route("/v1/runs/{id}/diff", get(routes::diff))
         .route("/v1/runs/{id}/comparison", get(routes::comparison))
+        // What differs inside one member, and the member itself. Both class-gated: a census is a
+        // claim about an artifact, and these are its content.
+        .route("/v1/runs/{id}/member", get(routes::member))
+        .route("/v1/runs/{id}/member/raw", get(routes::member_raw))
         .route("/v1/runs/{id}/attestation", get(routes::attestation))
         .route("/v1/runs/{id}/log", get(routes::build_log))
         .route("/v1/runs/{id}/network", get(routes::network))

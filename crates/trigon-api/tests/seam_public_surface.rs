@@ -275,3 +275,43 @@ async fn a_withheld_run_has_no_renderable_diff_either() {
         "an operator got the gate's refusal rather than the store's: {body}"
     );
 }
+
+/// A member's bytes and its diff are class-gated, even though the census is not.
+///
+/// The distinction the class table now turns on: a count is a claim about an artifact and a member
+/// is the artifact's content. `12-security.md` §5 covers the second — we hold somebody else's bytes
+/// to check them, not to redistribute them — and the bound that makes the rendered census
+/// anonymous does not apply here, because a diff of a file that differs everywhere is the file.
+#[tokio::test]
+async fn a_members_bytes_never_reach_the_internet() {
+    let mut r = record(
+        "1700000001-aa",
+        "pkg:npm/a@1.0.0",
+        Some("divergent"),
+        Some("k1"),
+    );
+    r.comparison = Some(Digest::from_bytes([4u8; 32]));
+    let mut confirming = r.clone();
+    confirming.id = "1700000002-ab".into();
+
+    let api = api_over(vec![r, confirming], Principal::Anonymous).await;
+    for path in [
+        "/v1/runs/1700000001-aa/member?path=lib%2Fx.dll",
+        "/v1/runs/1700000001-aa/member/raw?path=lib%2Fx.dll&side=upstream",
+    ] {
+        let (status, body) = get(api.clone(), path).await;
+        assert_eq!(status, 403, "{path} was served anonymously: {body}");
+        assert!(
+            body.contains("class_gated"),
+            "{path} refused for some other reason: {body}"
+        );
+    }
+
+    // And the rendered census of the same run *is* anonymous, so this test is about the boundary
+    // rather than about the run being withheld.
+    let (status, _) = get(api, "/v1/runs/1700000001-aa/diff").await;
+    assert_ne!(
+        status, 403,
+        "the census was gated as though it were content"
+    );
+}

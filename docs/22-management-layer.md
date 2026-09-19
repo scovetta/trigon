@@ -836,6 +836,73 @@ paint is easy to write and invisible until somebody looks at a screenshot. There
 `fillLater`, named after the rule, and the rule is stated where it will be read: **paint first,
 fetch second**; if you are awaiting something before `replaceChildren`, that is the bug.
 
+## 12.2 What actually differs inside a member
+
+The census says *that* `lib/net20/Newtonsoft.Json.dll` differs and what kind of difference it is.
+For a maintainer reading a finding about their own package that is not the question. Two routes
+answer the real one:
+
+- `GET /v1/runs/{id}/member?path=…` — both copies, as a **line diff** where the bytes are text and
+  as a **hex diff** where they are not. Both are built; the default is chosen from the bytes.
+- `GET /v1/runs/{id}/member/raw?path=…&side=…` — one copy, whole, to read or to save. A member the
+  build produced and the published artifact never had has no diff and is still the thing somebody
+  needs to look at.
+
+In the UI a differing member is a button; it opens under its row, with a text/hex toggle, download
+links for each side that has the file, and a fragment in the address bar so "look at this file" is
+something you can send someone.
+
+On `Newtonsoft.Json@11.0.1` the `.nuspec` diff is three hunks and every one is a finding: the
+rebuild drops `<owners>` and `<requireLicenseAcceptance>`, adds a `commit` attribute to
+`<repository>`, and writes `.NETPortable4.5-Profile259` where 2018's NuGet wrote
+`.NETPortable0.0-Profile259`. The DLL's hex view opens at offset 0x88 with `eb84659e` against
+`93faaab5` — the PE timestamp, which is the reproducibility problem .NET has had for fifteen years,
+sitting in a table a person can read.
+
+**Binary is decided from the bytes, not from the comparison's `kind`.** A zero byte in the first 8 KB,
+or bytes that are not valid UTF-8; and the panel says which, so a reader who disagrees knows what to
+look at. The `.nuspec` above is classified `binary` by the comparator, from its name, and opens as
+text because its bytes are XML. That disagreement is the argument for reading the bytes.
+
+**Raw, and only raw.** These are the copies as published and as built, *before any pass ran*.
+Showing the stabilized forms would need `trigon-stabilize`, which this crate does not link. It is
+also the more useful pair, but the panel says which it is, because "these two files differ" and
+"these two files differ after we rewrote both" are different claims.
+
+### Gated, unlike the census
+
+The rendered census is anonymous because its control is a bound. A member is not: a diff of a file
+that differs everywhere *is* the file, and `12-security.md` §5's rule applies unchanged — we hold
+somebody else's bytes to check them, not to redistribute them. Both member routes are
+`Class::Artifact`. That is the line the class table now draws: **a count is a claim about an
+artifact, and a member is its content.**
+
+### Bounds, each of which says what it left out
+
+256 MB of artifact parsed, 16 MB of member returned, 2 MB per side considered for a line diff, 600
+lines of unmatched middle aligned before the rest is reported as wholly replaced, 8 KB of hex across
+at most 8 regions.
+
+Two of those were wrong first. The hex view showed **the first 8 KB of the file**, which on a DLL
+with an identical header is two screens of agreement and none of the finding — so it now finds the
+differing runs, coalesces them, and shows a window around each. And the byte budget went to whichever
+region asked first, so one enormous region took all of it and `regions_omitted` reported **zero**:
+no *region* had been dropped, because one had been silently truncated instead. It reports
+`differing_bytes` against `shown_bytes` now — 469,719 against 1,264 on that DLL — and no region may
+take more than its share, so four separate differences get four windows rather than one.
+
+### Two walks that have to agree
+
+The comparison names a nested member `data.tar.gz!package/index.js`. This crate has to find it by
+that name and does not link the comparator, so it walks archives itself — two traversals of one tree
+in two crates, which is the defect this tree keeps finding. `seam_member_bytes.rs` asserts it
+against a real gem-shaped archive: build one, compare it, and demand that every path the comparison
+produced resolves here.
+
+The vacuity check in that test earned itself immediately. The first fixture was a `.tgz`, which is
+*not* nested — gzip is that format's container, so its members are named plainly and the `!` form
+never appears. The assertion that the fixture still contains a `!` failed, and said so.
+
 ## 13. What is left
 
 Three things, and each is blocked on something real rather than on time.

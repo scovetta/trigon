@@ -700,6 +700,12 @@ pass's risk and provenance, and every member with what differed about it — the
 only its archive entry. The raw blobs are still there underneath, because a page is what a reader
 wants and the bytes are what a third party re-derives a verdict from.
 
+Click a member that differs and it opens: a line diff where the bytes are text, a hex diff centred
+on the differing runs where they are not, and a download for each copy. Binaries open as hex, which
+is decided from the bytes rather than from the filename. On `Newtonsoft.Json@11.0.1` that is how
+you find out the rebuild drops `<owners>` from the `.nuspec` and that the DLLs differ at offset
+0x88 — the PE timestamp.
+
 `--public` turns on two controls at once, and there is no way to ask for half: the publication
 gate, so nothing reaches an anonymous reader until two attempts agree and the run was not built at
 an open egress tier; and the evidence class table, so no build log or network transcript leaves the

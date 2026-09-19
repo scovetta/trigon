@@ -3182,9 +3182,11 @@ name = "trigon-api"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "flate2",
  "futures",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "thiserror",
  "tokio",

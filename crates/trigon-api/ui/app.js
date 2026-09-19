@@ -152,6 +152,7 @@ const routes = [
 ];
 
 async function route() {
+  readFragment();
   const path = location.pathname;
   for (const [re, fn] of routes) {
     const m = path.match(re);
@@ -915,11 +916,30 @@ const RISK_COLOUR = {
 // Every member, most interesting first. A hundred identical members must not bury the ten that
 // differ, and a list capped at five hundred that sorted by path would cap away exactly the rows
 // somebody came to read.
-function membersPanel(d) {
-  const rows = d.members.map((m) => {
+function membersPanel(d, runId) {
+  const rows = d.members.flatMap((m) => {
     const [label, colour, why] = MEMBER_STATE[m.status] || [m.status, 'var(--dim)', ''];
-    return el('tr', {},
-      el('td', { class: 'url' }, el('code', { text: m.path })),
+    // Only a member with something to look at is openable: two identical copies have no diff and
+    // offering one would be offering an empty panel.
+    const worth = m.status !== 'identical';
+    const slot = el('td', { colspan: 6, class: 'member-slot' });
+    const open = () => {
+      // The open member goes in the fragment, so "look at this file" is a link somebody can send.
+      // A fragment rather than the path, because the page is still the run's: a reader who clears
+      // it is back where they were rather than somewhere new.
+      const f = new URLSearchParams({ member: m.path });
+      history.replaceState({}, '', `${location.pathname}#${f}`);
+      openMember(runId, m.path, slot, {});
+    };
+    // Entered on a link to this member, so open it without waiting to be clicked.
+    if (worth && OPEN_ON_LOAD && OPEN_ON_LOAD.member === m.path) {
+      const want = OPEN_ON_LOAD;
+      queueMicrotask(() => openMember(runId, m.path, slot, { view: want.view }));
+    }
+    return [el('tr', { class: worth ? 'openable' : '' },
+      el('td', { class: 'url' }, worth
+        ? el('button', { class: 'member-link', onclick: open, title: 'open this member', text: m.path })
+        : el('code', { text: m.path })),
       el('td', {}, el('span', { class: 'member-state', title: why },
         el('i', { style: [['background', colour]] }), label)),
       // What differed about it before any pass ran. The row that matters is an *identical* member
@@ -935,7 +955,9 @@ function membersPanel(d) {
         : el('span', { class: 'empty', text: '—' })),
       el('td', { class: 'opt dim', text: m.kind }),
       el('td', { class: 'n dim', text: m.upstream_bytes === null || m.upstream_bytes === undefined ? '—' : bytes(m.upstream_bytes) }),
-      el('td', { class: 'n dim', text: m.rebuild_bytes === null || m.rebuild_bytes === undefined ? '—' : bytes(m.rebuild_bytes) }));
+      el('td', { class: 'n dim', text: m.rebuild_bytes === null || m.rebuild_bytes === undefined ? '—' : bytes(m.rebuild_bytes) })),
+      worth ? el('tr', { class: 'member-row' }, slot) : null,
+    ].filter(Boolean);
   });
   return panel('Member by member', el('div', {},
     el('table', { class: 'runs members' },
@@ -983,6 +1005,206 @@ function notesPanel(d) {
     el('p', { class: 'note' },
       'A note marked ', el('span', { class: 'tag divergent', text: 'reaches a human' }),
       ' is one the type itself documents as never benign — it is shown whatever the verdict says.')));
+}
+
+/* ---- one member, opened ------------------------------------------------- */
+
+// `#member=<path>&view=hex` on a run page. Read once at navigation rather than watched, so a
+// reader who opens a second member does not find the first one reopening under them.
+let OPEN_ON_LOAD = null;
+function readFragment() {
+  try {
+    const f = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const member = f.get('member');
+    OPEN_ON_LOAD = member ? { member, view: f.get('view') || undefined } : null;
+  } catch {
+    OPEN_ON_LOAD = null;
+  }
+}
+
+
+const hx = (s, i) => s.slice(i * 2, i * 2 + 2);
+const printable = (byte) => (byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '·');
+
+// A conventional dump, two sides, with differing bytes marked on both. Rows of sixteen because
+// that is what every other hex viewer does and a reader should not have to count.
+function hexRows(region) {
+  const up = region.upstream || '';
+  const rb = region.rebuild || '';
+  const len = Math.max(up.length, rb.length) / 2;
+  const rows = [];
+  for (let r = 0; r * 16 < len; r++) {
+    const base = r * 16;
+    const cells = (src, other) => {
+      const out = [];
+      for (let i = 0; i < 16; i++) {
+        const k = base + i;
+        const a = hx(src, k);
+        const b = hx(other, k);
+        out.push(el('span', {
+          class: `hb${a && a !== b ? ' differs' : ''}${a ? '' : ' absent'}`,
+          text: a || '  ',
+        }));
+      }
+      return out;
+    };
+    const ascii = (src, other) => {
+      const out = [];
+      for (let i = 0; i < 16; i++) {
+        const k = base + i;
+        const a = hx(src, k);
+        const b = hx(other, k);
+        out.push(el('span', {
+          class: `hc${a && a !== b ? ' differs' : ''}`,
+          text: a ? printable(parseInt(a, 16)) : ' ',
+        }));
+      }
+      return out;
+    };
+    rows.push(el('div', { class: 'hex-row' },
+      el('span', { class: 'hex-off', text: (region.offset + base).toString(16).padStart(8, '0') }),
+      el('span', { class: 'hex-side' }, cells(up, rb), el('span', { class: 'hex-ascii' }, ascii(up, rb))),
+      el('span', { class: 'hex-side' }, cells(rb, up), el('span', { class: 'hex-ascii' }, ascii(rb, up)))));
+  }
+  return rows;
+}
+
+function hexView(d, reload) {
+  const h = d.hex;
+  if (!h || !h.regions.length) {
+    return el('p', { class: 'empty', text: 'Nothing to show: both copies are empty.' });
+  }
+  const shown = h.regions.reduce((a, r) => a + Math.max(r.upstream.length, r.rebuild.length) / 2, 0);
+  const last = h.regions[h.regions.length - 1];
+  const nextOffset = last.offset + Math.max(last.upstream.length, last.rebuild.length) / 2;
+  const longest = Math.max(h.upstream_bytes, h.rebuild_bytes);
+
+  return el('div', {},
+    el('p', { class: 'note' },
+      h.first_difference === null
+        ? 'Only one side has this member, so there is nothing to compare it against. '
+        : `First difference at offset ${h.first_difference} (0x${h.first_difference.toString(16)}). `,
+      h.differing_bytes
+        ? `${bytes(h.differing_bytes)} of this member differ, across ${h.differing_runs} run(s); showing ${bytes(shown)}. `
+        : 'The two copies are byte for byte the same. ',
+      h.regions_omitted ? `${h.regions_omitted} further region(s) are not shown. ` : ''),
+    el('div', { class: 'hex' },
+      el('div', { class: 'hex-head' },
+        el('span', { class: 'hex-off', text: 'offset' }),
+        el('span', { class: 'hex-side', text: 'as published' }),
+        el('span', { class: 'hex-side', text: 'as rebuilt' })),
+      h.regions.map((r, i) => [
+        i ? el('div', { class: 'hex-gap', text: `… ${bytes(r.offset - (h.regions[i - 1].offset + Math.max(h.regions[i - 1].upstream.length, h.regions[i - 1].rebuild.length) / 2))} not shown …` }) : null,
+        hexRows(r),
+      ])),
+    // Paging, because a file that differs throughout has more of it than any window can hold and
+    // the alternative is downloading both copies to look at byte 300,000.
+    longest > shown
+      ? el('p', { class: 'filters' },
+          el('button', {
+            class: 'chip',
+            onclick: () => reload({ offset: Math.max(0, last.offset - 8192) }),
+            text: '← earlier',
+          }),
+          nextOffset < longest
+            ? el('button', { class: 'chip', onclick: () => reload({ offset: nextOffset }), text: 'later →' })
+            : null,
+          el('button', { class: 'chip', onclick: () => reload({}), text: 'back to the differences' }))
+      : null);
+}
+
+function textView(d) {
+  const t = d.text;
+  if (!t) return null;
+  if (!t.hunks.length) {
+    return el('p', { class: 'note' },
+      'No line differs. The two copies are not byte for byte identical — see the hex view — so what differs is line endings, trailing whitespace, or a final newline.');
+  }
+  return el('div', {},
+    t.unaligned
+      ? el('p', { class: 'withheld-note' },
+          el('strong', { text: 'Too much changed to align line by line. ' }),
+          'Everything below is reported as removed and re-added, which is what a wholesale rewrite looks like — and also what a file we declined to align looks like. This is the second.')
+      : null,
+    t.truncated ? el('p', { class: 'note empty', text: t.truncated }) : null,
+    el('div', { class: 'diff' }, t.hunks.map((h) => [
+      el('div', { class: 'hunk-head', text: `@@ published ${h.upstream_start}, rebuilt ${h.rebuild_start} @@` }),
+      h.lines.map((l) => el('div', { class: `dl ${l.kind}` },
+        el('span', { class: 'dm', text: l.kind === 'removed' ? '−' : l.kind === 'added' ? '+' : ' ' }),
+        el('span', { class: 'dt', text: l.text || ' ' }))),
+    ])),
+    el('p', { class: 'note' },
+      el('strong', { text: '−' }), ' is the published copy, ', el('strong', { text: '+' }), ' the rebuilt one. ',
+      `${t.upstream_lines} line(s) published, ${t.rebuild_lines} rebuilt.`));
+}
+
+// Opened inline under the row rather than on its own page: a reader comparing several members is
+// comparing them, and a route change loses the table they were reading.
+async function openMember(runId, path, slot, state) {
+  slot.replaceChildren(el('p', { class: 'empty', text: 'reading both copies…' }));
+  let d;
+  try {
+    const q = new URLSearchParams({ path });
+    if (state.offset !== undefined) q.set('offset', String(state.offset));
+    d = await api(`/v1/runs/${encodeURIComponent(runId)}/member?${q}`);
+  } catch (e) {
+    slot.replaceChildren(el('div', { class: 'withheld-note' },
+      el('strong', { text: 'Not shown. ' }), el('span', { text: e.message })));
+    return;
+  }
+
+  const reload = (next) => openMember(runId, path, slot, { ...state, ...next, offset: next.offset });
+  const wantHex = state.view ? state.view === 'hex' : d.binary;
+  const raw = (side) => `/v1/runs/${encodeURIComponent(runId)}/member/raw?` +
+    new URLSearchParams({ path, side });
+
+  const tab = (label, key, enabled) => el('button', {
+    class: 'chip',
+    'aria-pressed': (key === 'hex') === wantHex,
+    disabled: !enabled,
+    onclick: () => {
+      const f = new URLSearchParams({ member: path, view: key });
+      history.replaceState({}, '', `${location.pathname}#${f}`);
+      openMember(runId, path, slot, { ...state, view: key });
+    },
+    text: label,
+  });
+
+  slot.replaceChildren(el('div', { class: 'member-open' },
+    el('div', { class: 'filters' },
+      tab('text', 'text', !!d.text),
+      tab('hex', 'hex', true),
+      el('span', { class: 'spacer' }),
+      d.in_upstream ? el('a', { class: 'chip', href: raw('upstream'), text: '↓ published' }) : null,
+      d.in_rebuild ? el('a', { class: 'chip', href: raw('rebuild'), text: '↓ rebuilt' }) : null,
+      el('button', {
+        class: 'chip',
+        onclick: () => {
+          slot.replaceChildren();
+          history.replaceState({}, '', location.pathname);
+        },
+        text: 'close',
+      })),
+
+    !d.in_upstream || !d.in_rebuild
+      ? el('p', { class: 'withheld-note' },
+          el('strong', { text: d.in_upstream ? 'Only the published artifact has this. ' : 'Only the rebuild has this. ' }),
+          d.in_upstream
+            ? 'The build did not produce it, so there is nothing to compare against — what is below is the published file itself.'
+            : 'The published artifact does not contain it, so the build produced something that was never shipped. What is below is that file.')
+      : null,
+
+    d.binary && !state.view
+      ? el('p', { class: 'note empty' },
+          `Opened as hex: ${d.binary_because}. The text view is off for this member because rendering these bytes as lines would invent structure they do not have.`)
+      : null,
+
+    d.unavailable ? el('p', { class: 'withheld-note', text: d.unavailable }) : null,
+
+    wantHex ? hexView(d, reload) : (textView(d) || hexView(d, reload)),
+
+    el('p', { class: 'note empty' },
+      'Both copies as they were published and built, before any stabilizer ran. What the passes would have done to them is in the ledger above.')));
 }
 
 /* ---- one run ------------------------------------------------------------ */
@@ -1059,7 +1281,7 @@ async function detail(id) {
         censusPanel(d),
         contentsPanel(d),
         ledgerPanel(d),
-        membersPanel(d),
+        membersPanel(d, id),
         notesPanel(d),
       ],
       () => panel('What differs', el('p', { class: 'note empty' },

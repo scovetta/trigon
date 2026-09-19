@@ -1816,3 +1816,45 @@ What closed it was not a fifth fix but a named helper and a stated rule: **paint
 second.** A view puts up a slot, hands `fillLater` the promise, and carries on. Worth recording
 because the pattern generalises past this page: *a defect that recurs after being fixed and written
 down is a defect whose fix was an instance rather than a rule.*
+
+### 3.39 A hex view that showed the wrong 8 KB, and a cap that reported nothing
+
+**Gap, in two parts, both found by pointing the thing at a real DLL.**
+
+The first version dumped the first 8 KB of each copy. On `lib/net20/Newtonsoft.Json.dll` — 513 KB,
+identical PE header — that is two screens of bytes that agree and none of the difference, which
+starts at offset 0x88. A hex view has to find the differing runs first and show a window around
+each; starting at zero is only right for a file that differs at zero.
+
+The second is worse because it looked fine. With the runs found and coalesced, the byte budget went
+to whichever region asked for it first. That DLL's 37,039 differing runs coalesce into two regions,
+the second spanning nearly the whole file, so it took the entire budget and was silently truncated
+to fit — and `regions_omitted` reported **zero**, truthfully, because no *region* had been dropped.
+The page showed 1 KB of a 470 KB difference and said nothing was missing.
+
+Two changes. `differing_bytes` beside `shown_bytes`, so the numbers carry the denominator: *469,719
+bytes differ, across 37,039 runs; showing 1,264.* And no region may take more than its share of the
+budget, so four separate differences get four windows instead of one.
+
+**The rule worth keeping:** a cap that counts only the units it happens to iterate over is a cap
+that lies about every other unit. `regions_omitted` counted regions; the thing being truncated was
+bytes.
+
+### 3.40 A `.tgz` is not a nested archive
+
+**Correction, caught by a vacuity check.** The comparison names a member inside a nested archive
+`outer!inner/path`, and `trigon-api` has to resolve that name without linking the comparator — two
+walks of one tree, so a test builds a nested archive and demands every name the comparison produced
+resolves in the other walk.
+
+The first fixture was a gzipped tar. That produces no `!` at all: gzip is the *container* of
+`Format::TarGz`, not a member of it, so its entries are named plainly. The test would have passed
+while asserting nothing about the case it exists for.
+
+It failed instead, on the line that exists for exactly this: *"the fixture is not nested any more,
+so this test asserts nothing"*. Real nesting needs an archive inside an archive — a `.gem`, whose
+members are themselves gzipped tars.
+
+**Worth recording because the vacuity check is the cheap half.** A test that builds its own fixture
+can stop testing what it claims to without failing, and the assertion that the fixture still has the
+property under test costs one line.

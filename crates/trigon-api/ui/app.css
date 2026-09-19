@@ -417,3 +417,107 @@ table.ledger .bar-track { margin: 0; }
   cursor: help;
   white-space: nowrap;
 }
+
+/* ---- one member, opened -------------------------------------------------- */
+
+tr.openable td { cursor: default; }
+.member-link {
+  all: unset;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: .84em;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+.member-link:hover { text-decoration: underline; }
+.member-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+tr.member-row td { padding: 0; border-bottom: 0; }
+td.member-slot:empty { display: none; }
+.member-open {
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  padding: .7rem .9rem 1rem;
+  margin: 0 0 .4rem;
+}
+.member-open .filters { margin: 0 0 .7rem; }
+.member-open .chip[disabled] { opacity: .4; cursor: not-allowed; }
+a.chip { text-decoration: none; }
+
+/* ---- the line diff ------------------------------------------------------- */
+
+/* Its own scroller, so a long line in somebody else's file cannot make the page scroll sideways. */
+.diff {
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.45;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow-x: auto;
+  max-height: 32rem;
+  overflow-y: auto;
+}
+.hunk-head {
+  padding: .2rem .6rem;
+  color: var(--faint);
+  background: color-mix(in srgb, var(--line) 30%, transparent);
+  border-block: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+}
+.dl { display: flex; gap: .4rem; padding: 0 .6rem; white-space: pre; }
+.dl .dm { width: .8rem; flex: none; color: var(--faint); }
+.dl .dt { flex: 1 1 auto; }
+.dl.removed { background: var(--fail-wash); }
+.dl.removed .dm { color: var(--fail); }
+.dl.added { background: var(--ok-wash); }
+.dl.added .dm { color: var(--ok); }
+
+/* ---- the hex dump -------------------------------------------------------- */
+
+.hex {
+  font-family: var(--mono);
+  font-size: .74rem;
+  line-height: 1.5;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow-x: auto;
+  max-height: 32rem;
+  overflow-y: auto;
+  padding: .3rem 0;
+}
+.hex-head, .hex-row { display: flex; gap: 1.1rem; padding: 0 .6rem; white-space: pre; }
+.hex-head {
+  color: var(--faint);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: .25rem;
+  margin-bottom: .25rem;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+.hex-off { flex: none; width: 5rem; color: var(--faint); }
+.hex-side { flex: none; display: inline-flex; gap: .3rem; align-items: baseline; }
+.hex-head .hex-side { width: 30rem; }
+.hb { display: inline-block; width: 1.1rem; }
+.hb.absent { color: var(--faint); }
+/* A differing byte, on both sides. The colour is the verdict palette's, so it means here what it
+   means everywhere else on the page. */
+.hb.differs { background: var(--fail-wash); color: var(--fail); font-weight: 600; border-radius: 2px; }
+.hex-ascii { margin-left: .5rem; color: var(--dim); }
+.hc { display: inline-block; }
+.hc.differs { background: var(--fail-wash); color: var(--fail); }
+.hex-gap {
+  padding: .3rem .6rem;
+  color: var(--faint);
+  font-style: italic;
+  border-block: 1px dashed var(--line);
+  margin: .3rem 0;
+}
+
+@media (max-width: 900px) {
+  /* Two hex panes do not fit; the scroller handles it rather than the layout collapsing. */
+  .hex { font-size: .68rem; }
+}
