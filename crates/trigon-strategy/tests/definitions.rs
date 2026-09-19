@@ -182,7 +182,22 @@ fn the_npm_override_renders_the_script_its_definition_describes() {
         i.deps
     );
     assert!(!i.deps.contains("musl"), "musl is opt-in: {}", i.deps);
-    assert!(i.deps.contains("npx --package=npm@6.4.1"), "{}", i.deps);
+    // The pinned npm reaches npx through a quoted variable rather than spliced into the word, so
+    // this checks both halves: that the version is what the registry recorded, and that it arrives
+    // as data. `_npmVersion` is publisher-controlled — `framer-motion@12.36.0` records a lerna
+    // user-agent string — and an unquoted splice made that a shell syntax error inside our own
+    // deps script.
+    assert!(
+        i.deps.contains("TRIGON_NPM_VERSION='6.4.1'"),
+        "the recorded npm version, assigned once and quoted: {}",
+        i.deps
+    );
+    assert!(
+        i.deps
+            .contains(r#"npx --package="npm@$TRIGON_NPM_VERSION""#),
+        "npx has to run under that version, and take it as a word: {}",
+        i.deps
+    );
     assert!(
         i.deps
             .contains("npm_config_registry=http://npm:2018-09-13T19:55:58Z@timewarp"),

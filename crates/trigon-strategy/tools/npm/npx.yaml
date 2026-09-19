@@ -72,6 +72,15 @@
 # CDN's timing happens to miss the window and ours lands in it. Nothing we can serve avoids it —
 # `Content-Length`, `Connection: close` and a warm, fast cache each only moved the count around.
 #
+# **The version reaches the shell once, quoted, and never as part of a word.** `_npmVersion` is
+# whatever the publishing client wrote there, and `framer-motion@12.36.0` wrote
+# `lerna/4.0.0/node@v22.14.0+arm64 (darwin)`. Spliced into `npm install -g npm@…` unquoted, the
+# parenthesis was a shell syntax error and the deps phase died inside a script of ours — reported as
+# `unknown`, which charges it to the package. The rung now refuses a value that is not a plain
+# `x.y.z`, so this is the second line rather than the first; a publisher-controlled string reaching
+# `sh` as code is worth two. It matters more here than the quoting elsewhere in this file because
+# the deps phase runs at image-build time, which holds capabilities `podman run` drops.
+#
 # Serializing fetches makes those builds slower and only those: the range is closed behind us, so
 # nothing newer than December 2021 pays for it. A fetch-concurrency knob cannot change which
 # versions resolve or which bytes get built, so this is a statement about our sandbox in exactly the
@@ -105,12 +114,13 @@ steps:
       export npm_config_registry={{ timewarp_url('npm', with.registry_time) }}
       {%- endif %}
       TRIGON_NPM_CMD='{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'
-      if [ "$({{ with.locator }}npm --version 2>/dev/null)" = "{{ with.npm_version }}" ]; then
+      TRIGON_NPM_VERSION='{{ with.npm_version }}'
+      if [ "$({{ with.locator }}npm --version 2>/dev/null)" = "$TRIGON_NPM_VERSION" ]; then
         sh -c "$TRIGON_NPM_CMD"
       elif command -v {{ with.locator }}npx >/dev/null 2>&1; then
-        {{ with.locator }}npx --package=npm@{{ with.npm_version }} -c "$TRIGON_NPM_CMD"
+        {{ with.locator }}npx --package="npm@$TRIGON_NPM_VERSION" -c "$TRIGON_NPM_CMD"
       else
-        {{ with.locator }}npm install -g npm@{{ with.npm_version }}
+        {{ with.locator }}npm install -g "npm@$TRIGON_NPM_VERSION"
         sh -c "$TRIGON_NPM_CMD"
       fi
     if: "{{ with.locator }}"
@@ -123,12 +133,13 @@ steps:
       export npm_config_registry={{ timewarp_url('npm', with.registry_time) }}
       {%- endif %}
       TRIGON_NPM_CMD='{% if with.dir and with.dir != '.' %}cd {{ with.dir }} && {% endif %}{{ with.command }}'
-      if [ "$(npm --version 2>/dev/null)" = "{{ with.npm_version }}" ]; then
+      TRIGON_NPM_VERSION='{{ with.npm_version }}'
+      if [ "$(npm --version 2>/dev/null)" = "$TRIGON_NPM_VERSION" ]; then
         sh -c "$TRIGON_NPM_CMD"
       elif command -v npx >/dev/null 2>&1; then
-        npx --package=npm@{{ with.npm_version }} -c "$TRIGON_NPM_CMD"
+        npx --package="npm@$TRIGON_NPM_VERSION" -c "$TRIGON_NPM_CMD"
       else
-        npm install -g npm@{{ with.npm_version }}
+        npm install -g "npm@$TRIGON_NPM_VERSION"
         sh -c "$TRIGON_NPM_CMD"
       fi
     if: "{% if not with.locator %}yes{% endif %}"

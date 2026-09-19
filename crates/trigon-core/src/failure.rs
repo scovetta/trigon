@@ -1018,6 +1018,24 @@ const RULES: &[Rule] = &[
         capture: Capture::None,
     },
     Rule {
+        // **npm's spelling of the same thing, and it must sit below the rule above.** The
+        // `net/unreachable` rules near the top of this table carry the shell's and libc's words;
+        // npm's fetch layer says `connect ENETUNREACH`, which matched none of them — so
+        // `marked@18.0.3`, a build reaching github.com for a tarball at `mirror-only`, came back
+        // `unknown`, which is `Fault::Build` and charges our own egress boundary to the package.
+        //
+        // Placed here rather than beside its siblings because `net/prebuilt-binary-download` above
+        // is the same string with a prefix, and a table is scanned in order: put this first and a
+        // package downloading its own prebuilt binary stops being distinguishable from any other
+        // blocked fetch. The general rule goes below the specific one.
+        code: "net/unreachable",
+        needles: &["connect ENETUNREACH"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: true,
+        capture: Capture::None,
+    },
+    Rule {
         // The recipe built a different kind of distribution from the one under test. Ours, and
         // fixable: a release publishes an sdist and a dozen platform wheels, and the run is about
         // one of them.
@@ -1092,6 +1110,51 @@ const RULES: &[Rule] = &[
         repairable: false,
         // The tool, which is the first word of the sentence and the thing to install.
         capture: Capture::WordBefore("is required to install"),
+    },
+    Rule {
+        // **A dependency form npm cannot install.** `link:` points at a path inside the repository
+        // and npm refuses it outright — `react@19.2.3` and `react-dom@19.2.3` both depend on
+        // `link:./scripts/eslint-rules` and both died here, filed as `unknown`.
+        //
+        // Named as the package's, not ours: the repository really does declare a dependency its own
+        // published package manager will not install, and the publisher used something else. What
+        // would fix it is a recipe that installs with that something else, which is a strategy
+        // change, so it is repairable rather than a wall.
+        code: "npm/unsupported-dependency-url",
+        needles: &["Unsupported URL Type"],
+        fault: Fault::Build,
+        retryable: false,
+        repairable: true,
+        // The scheme, which is what a recipe would have to handle. `"link:"` and friends.
+        capture: Capture::Between("\"", "\""),
+    },
+    Rule {
+        // **Podman's image store, not the package.** Two Trigon runs on one machine share a
+        // machine-global store, and one removing its own images pulls a layer another is still
+        // using as build cache. Measured three times across two ecosystems — twice in a
+        // `--concurrency 3` PyPI sweep, once as `send@1.2.1` in the npm corpus — and every time it
+        // classified as `unknown`, which is `Fault::Build`, so a defect of ours in the harness was
+        // counted as a package that would not build.
+        //
+        // `Fault::Infra` and retryable: nothing about the package changed, and the next run usually
+        // wins the race. Naming it does not fix it — [`B6`](../../../docs/17-backlog.md) is the fix —
+        // but it stops the loss being silent, which is the difference between a known cost and a
+        // depressed rate nobody can account for.
+        code: "env/container-store-race",
+        needles: &["getting top layer info: layer not known"],
+        fault: Fault::Infra,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        // The same race seen from the mirror's side: the container is gone before its log is read.
+        code: "env/container-store-race",
+        needles: &["no container with name or ID found"],
+        fault: Fault::Infra,
+        retryable: true,
+        repairable: false,
+        capture: Capture::None,
     },
     Rule {
         // **Cargo reaching for the index with nowhere to go.** `cargo package` resolves the whole
@@ -1804,6 +1867,51 @@ strategy needs have to be in the image already. Build one with:\n\
     /// Before: the pipeline swallowed wget's status, the phase died on gzip, and the last line a
     /// rule claimed was `ERROR 404` — filed `net/http-error` with `fault: policy`, which tells an
     /// operator to look at their egress tier for a file nodejs.org never published.
+    /// The three unknowns that triaging the `unknown` cluster turned into named failures.
+    ///
+    /// All three were `Fault::Build` before — the fallback — so all three were being charged to the
+    /// package. Two of them are not the package's at all.
+    #[test]
+    fn the_unknown_cluster_yields_three_named_failures() {
+        // `marked@18.0.3`: npm reaching github.com at `mirror-only`. The tier working, in npm's
+        // words rather than the shell's.
+        let net = classify(
+            "npm error request to https://github.com/markedjs/marked/tarball/v18.0.0 failed, \
+             reason: connect ENETUNREACH 140.82.121.4:443\n",
+        );
+        assert_eq!(net.code, "net/unreachable");
+        assert_eq!(
+            net.fault,
+            Fault::Policy,
+            "our egress boundary, not the package"
+        );
+        assert!(!net.fault.is_about_the_package());
+
+        // `react@19.2.3` and `react-dom@19.2.3`: a dependency npm will not install.
+        let link =
+            classify("npm error Unsupported URL Type \"link:\": link:./scripts/eslint-rules\n");
+        assert_eq!(link.code, "npm/unsupported-dependency-url");
+        assert_eq!(
+            link.subject.as_deref(),
+            Some("link:"),
+            "the scheme is what a recipe must handle"
+        );
+        assert!(link.repairable);
+
+        // `send@1.2.1`: podman's store, counted as a package that would not build.
+        let store = classify(
+            "Error: checking if cached image exists from a previous build: getting top layer \
+             info: layer not known\n",
+        );
+        assert_eq!(store.code, "env/container-store-race");
+        assert_eq!(store.fault, Fault::Infra, "ours, and retryable");
+        assert!(store.retryable);
+        assert!(!store.fault.is_about_the_package());
+
+        // And the shape that must still fall through, so the fallback keeps meaning something.
+        assert_eq!(classify("something nobody has ever seen\n").code, "unknown");
+    }
+
     #[test]
     fn a_toolchain_that_was_never_published_is_ours_and_names_the_version() {
         let log = "--2026-09-18 12:57:03--  http://timewarp:8129/-toolchain/nodejs.org/dist/v8.0.0-pre/node-v8.0.0-pre-linux-x64.tar.gz\n\

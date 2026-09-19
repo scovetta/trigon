@@ -159,7 +159,7 @@ defect it no longer has**.
 **Done when:** every confirmed bug is fixed or filed with a failing test, and the sweep's negative
 result is recorded so the next one starts from here rather than from nothing.
 
-## B6. ~~Two Trigon runs on one machine can disturb each other's container store~~ — closed
+## B6. Two Trigon runs on one machine can disturb each other's container store — open, and its title said otherwise
 
 Found by an intermittent sandbox test that passed in isolation. Podman's local image store is
 machine-global, and this system reaches into it in two places: `Leftovers::drop` removes a run's own
@@ -182,6 +182,17 @@ seventeen-target PyPI corpus lost two targets inside a *single* process: one to
 which is the error above verbatim, and one to `reading the mirror's log: no container with name or
 ID found`. The argument that said intra-process lanes were safe — distinct run ids give distinct
 image tags, so no lane removes another's top layer — is wrong, and one run of the corpus said so.
+
+**And a third instance, in the npm corpus.** `send@1.2.1` failed with that same
+`getting top layer info: layer not known`, and classified as `unknown` — so it was counted against
+the package. That makes three measured occurrences across two ecosystems, which is what moved this
+item's heading back to open: the body has said "narrowed, not closed" since the second one, while
+the heading said closed, and a reader scanning headings would have believed the heading.
+
+Whoever takes this should start by making it *nameable*: an unclassified podman-store error is
+indistinguishable from a package that will not build, so it lands in `Fault::Build` and depresses
+the reproduction rate by an amount nobody can see. A rule for the two strings above costs minutes
+and turns a silent loss into a counted one, ahead of any real fix to the store handling.
 
 That makes this a prerequisite rather than a nice-to-have. Both faults arrive labelled as the
 package's failure, and a reproduction rate that contains infrastructure faults is not a rate. The
