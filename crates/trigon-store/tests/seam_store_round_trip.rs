@@ -65,6 +65,13 @@ fn every_field_populated() -> RunRecord {
         // attempt, which is the value that leaves a confirmed result withheld forever.
         attempt: 3,
         cache_key: Some("babel-core-7.24.0/ab54e552/nupkg-2b104124".into()),
+        // Populated here even though a record with an `outcome` never carries a `terminal` in
+        // production: this fixture's job is that every field survives the round trip, and a field
+        // left at its default is a field the test cannot tell from one that was dropped.
+        terminal: Some("build-failed".into()),
+        declines: vec!["npm-heuristic: the registry declared no repository".into()],
+        assumptions: vec!["the commit comes from a tag rather than from the registry".into()],
+        confidence: Some("weak".into()),
         // What the log said, every field set. The SET especially: a record that carries an index
         // and an instant but loses the log's signature over them has kept the claim and dropped
         // the only thing that makes it checkable.
@@ -313,6 +320,10 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "finished",
         "attempt",
         "cache_key",
+        "terminal",
+        "declines",
+        "assumptions",
+        "confidence",
         "environment",
         "strategy",
         "strategy_digest",

@@ -198,12 +198,24 @@ function paintMode() {
 let FIRST_VIEW_SPENT = false;
 let DETAIL_BOOT_SPENT = false;
 
+// How a run ended without a verdict, in a sentence. Each is a statement about a different thing,
+// and the whole reason `terminal` is a field rather than a flag is that collapsing them makes a
+// corpus uninterpretable.
+const TERMINAL = {
+  'no-strategy': 'No rung had a recipe for this package. That is a statement about our coverage, not about the package.',
+  'build-failed': 'The build ran and did not finish. What stopped it is named below.',
+  void: 'Neither a pass nor a failure: the published artifact reached the build over the network, so whatever came out is evidence of nothing.',
+  failed: 'Our infrastructure, the registry, or a policy stopped this before the package was ever tested.',
+};
+
 const BAR_COLOUR = {
   exact: 'var(--ok)', normalized: 'var(--ok)',
   normalized_with_caveats: 'var(--caveat)',
   divergent: 'var(--fail)',
   infra: 'var(--structural)', bug: 'var(--fail)', upstream: 'var(--one-side)',
   policy: 'var(--caveat)', build: 'var(--void)', unclassified: 'var(--faint)',
+  'no-strategy': 'var(--faint)', 'build-failed': 'var(--void)',
+  void: 'var(--structural)', failed: 'var(--one-side)',
 };
 
 function bars(obj, onPick) {
@@ -407,7 +419,14 @@ function runTable(rows) {
       el('td', { class: 'opt', text: e.ecosystem }),
       el('td', {}, e.outcome
         ? verdictTag(e.outcome)
-        : el('span', { class: 'tag none', text: e.state === 'done' ? 'no verdict' : e.state })),
+        // How it ended, not the word "failed". `no-strategy` means we have no recipe for this
+        // package, which is a statement about us; a reader who sees "failed" reads it as one about
+        // the package.
+        : el('span', {
+            class: `tag ${e.terminal === 'void' ? 'void' : 'none'}`,
+            title: TERMINAL[e.terminal] || 'This run reached no verdict.',
+            text: (e.terminal || 'no verdict').replace(/-/g, ' '),
+          })),
       el('td', {}, e.failure_code
         ? el('span', { class: 'mono', title: 'the failure signature this run was classified under' }, e.failure_code)
         : el('span', { class: 'empty', text: '—' })),
@@ -444,15 +463,20 @@ async function detail(id) {
   const [, sentence] = VERDICT[entry.outcome] || [];
   const verdict = el('div', {},
     el('div', { class: 'verdict-line' },
-      verdictTag(entry.outcome),
+      entry.outcome
+        ? verdictTag(entry.outcome)
+        : el('span', {
+            class: `tag ${record.terminal === 'void' ? 'void' : 'none'}`,
+            text: (record.terminal || 'no verdict').replace(/-/g, ' '),
+          }),
       seal(entry.attested),
       entry.publication.state !== 'published'
         ? el('span', { class: 'tag void', title: withheldTitle(entry.publication), text: entry.publication.state === 'void' ? 'published as void' : 'not published' })
         : null),
     el('p', { class: 'sentence' },
-      sentence || (record.state === 'done'
-        ? 'This run finished without producing a verdict. What stopped it is below.'
-        : `This run is recorded as ${record.state} and has not produced a verdict.`)),
+      sentence
+        || TERMINAL[record.terminal]
+        || 'This run finished without producing a verdict. What stopped it is below.'),
     entry.publication.state !== 'published'
       ? el('p', { class: 'withheld-note' },
           el('strong', { text: entry.publication.state === 'void' ? 'Published as void: ' : 'Held back: ' }),
@@ -503,6 +527,19 @@ async function detail(id) {
       kv('worth retrying', record.failure.retryable ? 'yes — running it again unchanged could answer differently' : 'no — the same run reaches the same place'),
       kv('worth repairing', record.failure.repairable ? 'yes' : 'no — a repair attempt has no prospect here'),
     )) : null,
+
+    record.declines?.length ? panel('Why no rung answered', el('ul', { class: 'assumptions' },
+      record.declines.map((d) => el('li', { text: d })))) : null,
+
+    record.assumptions?.length ? panel('What this had to assume', el('div', {},
+      el('ul', { class: 'assumptions' }, record.assumptions.map((a) => el('li', { text: a }))),
+      el('p', { class: 'note empty' },
+        'A verdict reached under assumptions is a different claim from one reached under none, which is why they are listed beside it rather than folded into it.'))) : null,
+
+    record.guard_trips?.length ? panel('Why this is void', el('div', {},
+      el('ul', { class: 'assumptions' }, record.guard_trips.map((g) => el('li', { text: g }))),
+      el('p', { class: 'note empty' },
+        'The artifact under test reached the build over the network. Whatever came out may be perfectly honest and we cannot tell, which is exactly what void means.'))) : null,
 
     panel('What it cost', costs(record)),
 

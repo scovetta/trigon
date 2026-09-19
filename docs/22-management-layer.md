@@ -436,8 +436,7 @@ doctrine forbids.
 Revised per §2.1. Each stage is independently useful. **Stage 1 puts the website in front of a
 person before a single row of Postgres exists.**
 
-**Stage 0 — record every terminal outcome, and give a run an identity.** *~1 week. No new dependency,
-no database.* Move `record_run` out from behind the comparison early return so a `Void`, a build
+**Stage 0 — record every terminal outcome, and give a run an identity. BUILT (in part).** Move `record_run` out from behind the comparison early return so a `Void`, a build
 failure, a no-strategy and an infrastructure error all produce a `RunRecord` — while the attestor
 keeps refusing to sign anything that is not evidence. Fold `RunReport`'s unique fields (declines,
 assumptions, void reason, hosts, fetch cache, repairs, confidence) into the record so there is one
@@ -447,6 +446,31 @@ recording change [`18-management-ui.md`](18-management-ui.md) §5 says is worth 
 source view rather than after, and without which the aligned ORIGIN/VERDICT bars cannot exist
 outside a machine holding the checkout.
 *Unblocks everything. Nothing moves from a work directory to a corpus until this is true.*
+
+What landed: a `Recording` accumulator filled as a run learns its facts, and a wrapper around
+`run_inner` that writes a record on **every** terminal path — a `no-strategy`, a build failure, a
+tripped guard, an infrastructure error. `RunRecord` gained `attempt`, `cache_key`, `terminal`,
+`declines`, `assumptions` and `confidence`. Split into `run_inner` (the wrapper) and `run_body`
+(everything a run does, unchanged), so "on every terminal outcome" is a property of a wrapper rather
+than a rule six return statements are each expected to remember — the same shape `RunReport` already
+uses, and the reason this is an addition rather than the rewrite §2 warned about.
+
+`terminal` is a new field rather than a value in `outcome`, and both were needed. `outcome` is what
+a *comparison* produced and stays one of the four matches (ADR-0002); `failure` is a signature, and
+a `no-strategy` is a scope statement with no failure in it. Without the third field every run that
+reached no verdict was indistinguishable from every other, and the corpus page could only report
+them as `unclassified` — the word for a cause nobody named, not for one that was named and then
+dropped on the way to the store.
+
+Measured immediately: three `no-strategy` runs against random npm packages, each carrying the rung's
+own sentence (*"npm-heuristic: the registry declared no repository for this package"*) into the
+record and onto the page. The corpus went from 32 runs and zero failures to two populated columns.
+
+**Not yet:** a run that dies in `resolve` or `fetch` still records nothing, because it has no
+artifact to be a record *about* and no digest to build a run id from. Those are `Fault::Upstream`
+and `Fault::Infra` — never the package's — and they stay in the work directory, where `RunReport`
+already writes them on every path. Folding the rest of `RunReport` into the record, and the
+multi-algorithm target digests, are the remainder of this stage.
 
 **Stage 1 — the read-only site, over the store that exists. BUILT.** `trigon serve <store>` in
 `crates/trigon-api`, against `Arc<dyn ObjectStore>`: `list_runs` / `get_run` / blobs, an index built

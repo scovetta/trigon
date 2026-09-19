@@ -289,6 +289,43 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureSignature>,
 
+    /// How a run ended when it ended **without a verdict**: `no-strategy`, `build-failed`,
+    /// `void`, `failed`.
+    ///
+    /// Not `outcome`, which is what a *comparison* produced and must stay one of the four matches
+    /// ([ADR-0002]). Not `failure` either: a `no-strategy` is a scope statement and not a failure,
+    /// so it has no signature, and filing it under one would put "we do not build this ecosystem
+    /// yet" in the same column as "this package does not build".
+    ///
+    /// Without it, every run that reached no verdict was indistinguishable from every other, and a
+    /// corpus page could only report them as `unclassified` — which is the word for a failure whose
+    /// cause nobody has named, not for one that was named and then dropped on the way to the store.
+    ///
+    /// `None` exactly where `outcome` is `Some`.
+    ///
+    /// [ADR-0002]: ../../../docs/adr/0002-four-match-outcomes.md
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
+
+    /// Why each rung that could have produced a strategy did not.
+    ///
+    /// The single most useful thing about a `no-strategy`, and it lived only in the work directory.
+    /// A corpus with three thousand of these and no reasons is a corpus that can say the rate and
+    /// not what to build next.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declines: Vec<String>,
+
+    /// What the strategy had to assume to be usable at all, in the rung's own words.
+    ///
+    /// Carried because a verdict reached under three assumptions is a different claim from one
+    /// reached under none, and the assumptions were visible on a terminal and nowhere else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+
+    /// How much the derivation trusts itself: `strong`, `weak`. A provenance fact beside the claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+
     /// The model exchange this run's strategy came out of, when one did: JSON of a
     /// `trigon_ai::Transcript`, stored as an ordinary blob.
     ///
@@ -371,6 +408,10 @@ impl RunRecord {
             build_log: None,
             timings: Vec::new(),
             failure: None,
+            terminal: None,
+            declines: Vec::new(),
+            assumptions: Vec::new(),
+            confidence: None,
             transcript: None,
             network_transcript: None,
             costs: None,

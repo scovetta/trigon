@@ -3070,10 +3070,57 @@ mod rebuild {
         out
     }
 
+    /// What a terminal record needs, gathered as the run learns it.
+    ///
+    /// **`record_run` had one call site, past the early return that unwraps the comparison.** So a
+    /// `Void`, a build failure, a no-strategy and an infrastructure error all left the store
+    /// untouched, and a corpus browser over it reported a perfect reproduction rate on a corpus
+    /// where nothing had ever failed to build. Measured on this machine's store the day the browser
+    /// was first pointed at it: 32 runs, 32 of them evidence, **zero** failures — on a project whose
+    /// last random sweep reached comparison 7 times in 125.
+    ///
+    /// Filled in as the facts arrive rather than threaded through a thousand lines of orchestration,
+    /// which is what keeps this an addition rather than the rewrite `docs/22` §2 warned about.
+    #[derive(Default)]
+    struct Recording {
+        inputs: Option<RecordInputs>,
+        /// The published artifact, once it is on disk. Everything terminal *after* the fetch has
+        /// one, which is every outcome that is about a package: the fetch is the second phase.
+        upstream: Option<(PathBuf, trigon_core::Digest, u64)>,
+        /// Set by the compared path, so the wrapper below does not write a second record over the
+        /// one that has the comparison in it.
+        record_id: Option<String>,
+    }
+
     fn run_inner(
         args: Args,
         verbose: bool,
         report: &mut crate::progress::RunReport,
+    ) -> Result<Ran> {
+        let store = args.store.clone();
+        let mut rec = Recording::default();
+        let out = run_body(args, verbose, report, &mut rec);
+        if let Some(dir) = &store
+            && rec.record_id.is_none()
+            && let Err(e) = record_terminal(dir, &rec, report, &out)
+        {
+            // A failure to record does not fail the run, for the reason the compared path gives:
+            // losing the record is a thing to report, not a reason to throw the result away.
+            tracing::warn!("could not record this run: {e:#}");
+        }
+        out
+    }
+
+    /// Everything a run does, unchanged.
+    ///
+    /// Split from [`run_inner`] only so the recording above brackets it. `docs/18-management-ui.md`
+    /// records the same shape for `RunReport`: "on every terminal outcome" is a property of a
+    /// wrapper, not a rule six return statements are each expected to remember.
+    fn run_body(
+        args: Args,
+        verbose: bool,
+        report: &mut crate::progress::RunReport,
+        rec: &mut Recording,
     ) -> Result<Ran> {
         // The phases before the sandbox. The build reports its own; these are ours, and without
         // them a page watching a target sits on "not recorded" for the minute it takes to resolve
@@ -3137,6 +3184,16 @@ mod rebuild {
             Err(e) => return Ok(classify(&e).into()),
         };
         drop(file);
+        // From here on every terminal outcome is about a package and can be recorded as one. A
+        // failure before this point is a resolve or a fetch — ours or the registry's — and has no
+        // artifact to be a record *about*, which is also what the run id is built from.
+        rec.upstream = Some((
+            upstream_path.clone(),
+            upstream_digest,
+            std::fs::metadata(&upstream_path)
+                .map(|m| m.len())
+                .unwrap_or(0),
+        ));
         if verbose {
             println!("  published  sha256 {}", &upstream_digest.to_hex()[..16]);
         }
@@ -3266,7 +3323,15 @@ mod rebuild {
             inference_seconds: None,
             tokens: Vec::new(),
             timings: Vec::new(),
+            // Filled at the second construction, from the report, once the ladder has spoken.
+            declines: Vec::new(),
+            assumptions: Vec::new(),
+            confidence: None,
         };
+        // Handed to the recorder now rather than at the end: every return between here and the
+        // comparison is a terminal outcome somebody will want to read, and each one of them used to
+        // leave nothing behind.
+        rec.inputs = Some(inputs.clone());
 
         report.model = model.as_ref().map(|m| m.describe());
         if let (Some(m), true) = (&model, verbose) {
@@ -4130,14 +4195,20 @@ mod rebuild {
                     _ => Vec::new(),
                 },
                 timings: report.timings.clone(),
+                declines: report.declines.clone(),
+                assumptions: report.assumptions.clone(),
+                confidence: report.confidence.clone(),
                 // What the model was asked, where one was configured. Empty for the healthy
                 // majority of a corpus, which is the point of measuring the invocation rate.
                 transcript: model.as_ref().map(|m| m.transcript(&args.purl)),
                 ..inputs.clone()
             };
-            if let Err(e) = record_run(dir, &inputs, &upstream_path, &rebuilt, &comparison, verbose)
-            {
-                tracing::warn!("could not record this run: {e:#}");
+            match record_run(dir, &inputs, &upstream_path, &rebuilt, &comparison, verbose) {
+                // Claimed, so the wrapper in `run_inner` leaves it alone. Without this the richer
+                // record — the one with the comparison, both artifacts and the applied stabilizers
+                // in it — would be overwritten by the thinner terminal one a moment later.
+                Ok(id) => rec.record_id = Some(id),
+                Err(e) => tracing::warn!("could not record this run: {e:#}"),
             }
         }
         report.model_calls = calls(&model);
@@ -4227,6 +4298,12 @@ mod rebuild {
         /// `derivation: model_assisted` with no transcript is an assertion, and one with a
         /// transcript is evidence.
         transcript: Option<trigon_ai::Transcript>,
+        /// Why each rung that could have answered did not, what the chosen strategy had to assume,
+        /// and how far the derivation trusts itself. Lived in the work directory and nowhere the
+        /// store could see, so a corpus could report a rate and not what to build next.
+        declines: Vec<String>,
+        assumptions: Vec<String>,
+        confidence: Option<String>,
     }
 
     fn record_run(
@@ -4236,7 +4313,7 @@ mod rebuild {
         rebuilt: &Path,
         c: &trigon_compare::Comparison,
         verbose: bool,
-    ) -> Result<()> {
+    ) -> Result<String> {
         use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -4380,6 +4457,12 @@ mod rebuild {
                 artifact_bytes: Some((up_bytes.len() + rb_bytes.len()) as u64),
                 log_bytes: Some(log_bytes),
             });
+            // A verdict leaves `terminal` absent by construction: the two are exclusive, and a
+            // record carrying both would be saying it did and did not reach a comparison.
+            record.terminal = None;
+            record.declines = args.declines.clone();
+            record.assumptions = args.assumptions.clone();
+            record.confidence = args.confidence.clone();
             record.finished = Some(crate::now_rfc3339());
             store.put_run(&record).await?;
             if verbose {
@@ -4415,6 +4498,148 @@ mod rebuild {
                     println!("  cost       {}", parts.join(", "));
                 }
             }
+            anyhow::Ok(id)
+        })
+    }
+
+    /// A record for a run that never reached a comparison.
+    ///
+    /// The other three quarters of a corpus. A `no-strategy`, a build that failed, a guard that
+    /// tripped and an infrastructure error are each a different finding, and none of them reached
+    /// the store before this existed — so the store held only successes and a browse page over it
+    /// reported a rate of one.
+    ///
+    /// **Thinner than the compared record on purpose.** There is no comparison, no rebuilt
+    /// artifact and often no build log, and every one of those is recorded as absent rather than as
+    /// empty. `is_evidence()` keys on `outcome.is_some()`, so a record written here is correctly
+    /// *not* evidence about the package reproducing, whatever else it says.
+    fn record_terminal(
+        dir: &Path,
+        rec: &Recording,
+        report: &crate::progress::RunReport,
+        out: &Result<Ran>,
+    ) -> Result<()> {
+        use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
+
+        // No artifact means the run died resolving or fetching, before there was anything to be a
+        // record about — and before there was a digest to build a run id from. Those stay in the
+        // work directory, where `RunReport` already records them on every path.
+        let (Some(inputs), Some((path, digest, bytes))) = (&rec.inputs, &rec.upstream) else {
+            return Ok(());
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async move {
+            let store = Store::local(dir)?;
+            let id = format!(
+                "{}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                &digest.to_hex()[..8]
+            );
+            let mut record = RunRecord::new(
+                &id,
+                &inputs.purl,
+                ArtifactRef {
+                    name: crate::file_name(path),
+                    sha256: *digest,
+                    bytes: *bytes,
+                    // Not put in the blob store. A run with no verdict has nothing a signature
+                    // could be about, and keeping every artifact of every failed build is how a
+                    // corpus becomes a mirror of the registries.
+                    stored: false,
+                },
+                Environment {
+                    base_image: inputs.image.clone(),
+                    egress: inputs.egress.clone(),
+                    // What the runner reported, where one ran. Empty where no build happened,
+                    // which is the true value and is how a reader tells the two apart.
+                    isolation: report.isolation.clone().unwrap_or_default(),
+                    attestable: report.attestable.unwrap_or(false),
+                    registry_moment: inputs.timewarp.clone(),
+                    pin: report.pin.as_ref().map(|o| trigon_store::PinEvidence {
+                        index_requests: o.index_requests,
+                        versions_withheld: o.versions_withheld,
+                        artifact_requests: o.artifact_requests,
+                        toolchain_requests: o.toolchain_requests,
+                        rejected: o.rejected,
+                    }),
+                    guard_manifest: None,
+                    guarded_members: None,
+                },
+                &report.started,
+            );
+            record.state = RunState::Done;
+            // No outcome, ever, on this path. `outcome` is what a comparison produced and this ran
+            // without one; the story is in `failure` and in `guard_trips`.
+            record.outcome = None;
+            // From the outcome in hand, not from `report.outcome`.
+            //
+            // The report's copy is written by `run_one`, which is the *caller* of the function this
+            // recording is wrapped inside — so at this instant it is still `None` on every path, and
+            // the first version of this recorded a blank for every run. The same shape this file
+            // keeps finding: two things that had to agree, with nothing asserting they did.
+            record.terminal = Some(match out {
+                Ok(ran) => ran.outcome.label(),
+                // Ours, and it never reached an outcome to label. `Fault::Infra` by construction:
+                // a package cannot cause an error this layer returns as `Err`.
+                Err(_) => "failed".to_string(),
+            });
+            record.failure = report.failure.clone();
+            record.declines = report.declines.clone();
+            record.assumptions = report.assumptions.clone();
+            record.confidence = report.confidence.clone();
+            record.refused_artifact = report.refused_artifact.clone();
+            if let Some(r) = &report.void_reason {
+                // The artifact under test reached the build, so whatever it produced is evidence of
+                // nothing. `is_evidence` keys on this list and must keep doing so.
+                record.guard_trips.push(r.clone());
+            }
+            if let Ok(Ran {
+                outcome: Outcome::Void { reason },
+                ..
+            }) = out
+                && !record.guard_trips.iter().any(|g| g == reason)
+            {
+                record.guard_trips.push(reason.clone());
+            }
+            record.strategy_digest = report.strategy_digest.clone();
+            record.derivation = report.derivation.clone();
+            record.source = report.source.clone();
+            record.timings = report.timings.clone();
+            record.finished = Some(crate::now_rfc3339());
+            record.costs = Some(trigon_store::Costs {
+                inference_seconds: report.inference_seconds,
+                tokens: match (&report.model, report.tokens_in, report.tokens_out) {
+                    // One row per model, never summed across them. Absent where nothing was asked,
+                    // which is not the same as a model that was asked and returned nothing.
+                    (Some(m), Some(i), Some(o)) => vec![trigon_store::Tokens {
+                        input: i,
+                        cached_input: report.tokens_cached.unwrap_or(0),
+                        output: o,
+                        model: m.clone(),
+                        calls: report.model_calls,
+                    }],
+                    _ => Vec::new(),
+                },
+                // Phases with no reading are left out rather than counted as zero, so this is a
+                // floor on the true figure and never an overstatement.
+                build_seconds: {
+                    let read: Vec<f64> = report.timings.iter().filter_map(|(_, s)| *s).collect();
+                    (!read.is_empty()).then(|| read.iter().sum())
+                },
+                egress_bytes: report.network_bytes,
+                // Nothing was put in the store, and that is a measurement rather than a gap.
+                blob_bytes: Some(0),
+                artifact_bytes: Some(0),
+                log_bytes: Some(0),
+            });
+            store.put_run(&record).await?;
+            tracing::debug!(run = %id, "recorded a run that reached no verdict");
             anyhow::Ok(())
         })
     }

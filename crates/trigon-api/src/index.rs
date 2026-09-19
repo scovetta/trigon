@@ -37,6 +37,12 @@ pub struct Entry {
     pub version: String,
     pub state: String,
     pub outcome: Option<String>,
+    /// How a run that reached no verdict ended: `no-strategy`, `build-failed`, `void`, `failed`.
+    ///
+    /// **Never merged with `outcome`.** A package that did not reproduce and one we never managed
+    /// to test are different findings, and the two fields exist so no renderer has to be trusted to
+    /// keep them apart.
+    pub terminal: Option<String>,
     /// The failure's stable code, where the run failed. `env/missing-tool`, `src/no-repository`.
     pub failure_code: Option<String>,
     /// Whose fault, as the classifier decided. **Never merged with `outcome`.**
@@ -265,6 +271,10 @@ impl Index {
             } else if let Some(f) = &e.fault {
                 // The other denominator. Never added to the one above.
                 *s.by_fault.entry(f.clone()).or_default() += 1;
+            } else if let Some(t) = &e.terminal {
+                // A `no-strategy` is a scope statement with no fault attached, and filing it as
+                // `unclassified` would say nobody had named the cause when somebody had.
+                *s.by_fault.entry(t.clone()).or_default() += 1;
             } else {
                 *s.by_fault.entry("unclassified".into()).or_default() += 1;
             }
@@ -317,10 +327,11 @@ impl Query {
         }
         if let Some(x) = &self.q {
             let hay = format!(
-                "{} {} {}",
+                "{} {} {} {}",
                 e.target,
                 e.failure_code.as_deref().unwrap_or(""),
-                e.outcome.as_deref().unwrap_or("")
+                e.outcome.as_deref().unwrap_or(""),
+                e.terminal.as_deref().unwrap_or("")
             )
             .to_ascii_lowercase();
             if !hay.contains(&x.to_ascii_lowercase()) {
@@ -360,6 +371,7 @@ fn build(records: &BTreeMap<String, RunRecord>, switches: Switches) -> Vec<Entry
                 version,
                 state: format!("{:?}", r.state).to_ascii_lowercase(),
                 outcome: r.outcome.clone(),
+                terminal: r.terminal.clone(),
                 failure_code: r.failure.as_ref().map(|f| f.code.to_string()),
                 fault: r
                     .failure
