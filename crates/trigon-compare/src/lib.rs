@@ -162,8 +162,38 @@ impl Comparison {
         }
         self.applied()
             .into_iter()
-            .find(|a| a.provenance != Provenance::Builtin || a.risk > RiskTier::Metadata)
+            .find(|a| caps_normalized(a))
             .map(|a| format!("{} is {:?} at {:?} risk", a.id, a.provenance, a.risk))
+    }
+}
+
+/// Does this pass hold the verdict below [`Match::Normalized`]?
+///
+/// The provenance cap's predicate, named once so that asking the question is not the same thing as
+/// re-implementing the rule. `compare` decides the outcome with it, `cap_reason` names the pass
+/// with it, and a page that wants to show a reader *which* rows cost them a clean verdict can mark
+/// them with it rather than writing `provenance != Builtin || risk > Metadata` a fourth time.
+///
+/// See `docs/00-overview.md` §3.1 and ADR-0008: one implementation per seam.
+pub fn caps_normalized(a: &Applied) -> bool {
+    a.provenance != Provenance::Builtin || a.risk > RiskTier::Metadata
+}
+
+/// The best verdict a run using these passes could reach — before a single byte is compared.
+///
+/// Distinct from [`Comparison::cap_reason`], which is gated on an outcome that has already been
+/// capped and so says nothing about a run that diverged. This answers the question a reader of a
+/// `divergent` run actually has: *if the remaining differences were fixed, what would this get?*
+/// For a crate that is `normalized_with_caveats` and not `normalized`, because `cargo-vcs-hash`
+/// fires at `Content` risk on every crates.io artifact there has ever been.
+///
+/// [`Match::Exact`] is not among the answers and that is not an omission: identical bytes are
+/// decided before any pass runs, so no ledger of passes can put a ceiling on it.
+pub fn ceiling<'a>(applied: impl IntoIterator<Item = &'a Applied>) -> Match {
+    if applied.into_iter().any(caps_normalized) {
+        Match::NormalizedWithCaveats
+    } else {
+        Match::Normalized
     }
 }
 
@@ -188,16 +218,7 @@ pub fn compare(
     let outcome = if upstream.raw.sha256 == rebuild.raw.sha256 {
         Match::Exact
     } else if upstream.stabilized.sha256 == rebuild.stabilized.sha256 {
-        let clean = upstream
-            .applied
-            .iter()
-            .chain(&rebuild.applied)
-            .all(|a| a.provenance == Provenance::Builtin && a.risk <= RiskTier::Metadata);
-        if clean {
-            Match::Normalized
-        } else {
-            Match::NormalizedWithCaveats
-        }
+        ceiling(upstream.applied.iter().chain(&rebuild.applied))
     } else {
         Match::Divergent
     };

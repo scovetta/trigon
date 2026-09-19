@@ -95,6 +95,13 @@ Running `trigon verify` on a laptop with Podman and no network beyond the regist
 
 ## 3. HTTP API
 
+> **Superseded for the fleet case by [`22-management-layer.md`](22-management-layer.md) §5.**
+> The twenty endpoints below are the original sketch. The management-layer plan cuts them to the
+> surface a decoupled front-end actually needs, and each absence there is argued: no endpoint may
+> write an `outcome`, there is no anonymous evidence route, no worker-proxying route, and no
+> `/v1/costs` while there is no price table. Read this section for the shape and that one for the
+> contract.
+
 `axum`, OpenAPI 3.1, JSON. Token auth plus OIDC, with an optional read-only public mode.
 
 ```
@@ -122,6 +129,12 @@ GET    /v1/health  /v1/metrics
 `POST /v1/query` returns a **query** rather than prose. See §4's note on the Ask view.
 
 ## 4. Web UI
+
+> **Amended by [`22-management-layer.md`](22-management-layer.md) §9.** "Embedded, so there is no
+> separate deployment step" and "decoupled, so a public site can be deployed on its own" are in
+> direct contradiction, and drifting rather than deciding produces an embedded UI that silently
+> rots. The decision: the API is the only contract, and the embedded build is the *same* front-end
+> vendored for local mode.
 
 TypeScript, React and Vite, embedded in the binary with `rust-embed`, so `trigon serve` gives the
 full UI with no separate deployment step.

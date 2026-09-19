@@ -1833,18 +1833,31 @@ fn compare_panel(dir: &Path, index: usize) -> String {
                 "<h2>What differs</h2><p>{} member(s): <strong>{differs}</strong> differ in \
                  content, <strong>{meta_only}</strong> are byte-identical and packed differently, \
                  <strong>{removed}</strong> were stabilized out. \
-                 <a href=\"/run/{index}/compare\">Member by member →</a></p>",
+                 <a href=\"/run/{index}/compare\">The stabilizer ledger →</a></p>",
                 m.len()
             )
         }
     }
 }
 
-/// What the two artifacts differ in, and what stopped it mattering.
+/// The stabilizer ledger: every pass in the set, what it changed, and what it cost the verdict.
 ///
-/// The page the whole tool is an argument for. A verdict of `normalized` says the published bytes
-/// and the rebuilt bytes are not the same and that every way in which they differ was removed by a
-/// named, versioned pass — and until this existed, nothing showed *which* bytes those were.
+/// **Demoted from a verdict page.** This used to open with "what differs" and a census bar, which
+/// made it a second, competing answer to the question the run page now answers with the digest
+/// ladder — and a reader with two verdict pages has to work out which one to believe. The ladder is
+/// the verdict. This is the audit: which of the set's passes fired, at what risk and under whose
+/// provenance, what each one moved, and which of them hold the outcome below `normalized` however
+/// well the bytes agree.
+///
+/// Two things reach a reader here that reached one nowhere before:
+///
+/// - **Provenance.** `Applied` has carried it since the type existed and no page had ever printed
+///   it. It is half the cap rule — a `Metadata`-risk pass a model wrote caps the verdict exactly as
+///   firmly as a `Content`-risk builtin — and a ledger that showed risk alone was showing half a
+///   reason and reading as a whole one.
+/// - **The passes that did nothing.** `apply` returns only what fired, so a set member that found
+///   nothing to do was indistinguishable from one that was never configured. Those are different
+///   facts: `nupkg-signature` finding no signature to strip is evidence about the package.
 async fn compare(
     State(sweep): State<std::sync::Arc<Sweep>>,
     UrlPath(index): UrlPath<usize>,
@@ -1858,8 +1871,10 @@ async fn compare(
         .map(|r| esc(r.purl.strip_prefix("pkg:").unwrap_or(&r.purl)))
         .unwrap_or_else(|| format!("target {index:03}"));
 
-    let mut body =
-        format!("<h1>{title} · what differs</h1><p><a href=\"/run/{index}\">← the run</a></p>");
+    let mut body = format!(
+        "<h1>{title} · the stabilizer ledger</h1><p><a href=\"/run/{index}\">← the run, where the \
+         verdict is</a></p>"
+    );
 
     let Some((upstream, rebuild)) = artifact_pair(&dir) else {
         body.push_str(
@@ -1887,12 +1902,206 @@ async fn compare(
             esc(&detail)
         )),
         Ok((members, applied)) => {
+            let outcome = read_report(&dir).and_then(|r| r.outcome);
+            body.push_str(&ceiling_panel(&applied, outcome.as_deref()));
+            body.push_str(&ledger_table(&applied));
+            body.push_str(&silent_panel(&upstream, &applied));
             body.push_str(&ladder_svg(&members));
-            body.push_str(&stabilizer_svg(&applied));
             body.push_str(&member_table(&members));
         }
     }
-    page(&format!("{title} · compare"), false, &body, &sweep.bind).into_response()
+    page(&format!("{title} · stabilizers"), false, &body, &sweep.bind).into_response()
+}
+
+/// The best verdict this set of passes could reach, and what holds it there.
+///
+/// The question a reader of a `divergent` run actually has, and one no page has answered: *if the
+/// remaining differences went away, what would this get?* For a crate, never `normalized` —
+/// `cargo-vcs-hash` fires at `Content` risk on every crates.io artifact there has ever been, so a
+/// perfect crate rebuild is `normalized_with_caveats` and the caveat is structural rather than
+/// anything about that package.
+///
+/// The ceiling is asked of `trigon-compare`, not computed here. The cap rule has one home by
+/// ADR-0008, and a page re-deriving it would be a second implementation that agrees until it
+/// doesn't — the defect this file has now been bitten by twice.
+fn ceiling_panel(applied: &[trigon_stabilize::Applied], outcome: Option<&str>) -> String {
+    let ceiling = trigon_compare::ceiling(applied);
+    let holders: Vec<&trigon_stabilize::Applied> = applied
+        .iter()
+        .filter(|a| trigon_compare::caps_normalized(a))
+        .collect();
+
+    // `exact` is decided on raw bytes before a pass runs, so no ledger can put a ceiling on it.
+    let reached = match outcome {
+        Some("exact") => {
+            return "<h2>The ceiling</h2><p>This run matched on the published bytes themselves,                     before a single pass ran. No ledger below can raise or lower that: a stabilizer                     set only matters once the raw digests disagree.</p>"
+                .to_string();
+        }
+        Some(o) => o,
+        None => "unknown",
+    };
+
+    if holders.is_empty() {
+        return format!(
+            "<h2>The ceiling</h2><p>Every pass that fired is <code>Builtin</code> at              <code>Metadata</code> risk or below, so nothing in this set holds the verdict down.              Were the stabilized digests to agree, this run would read <strong>normalized</strong>              — a clean match, no caveat. It read <strong>{}</strong>.</p>",
+            esc(reached)
+        );
+    }
+
+    let mut rows = String::new();
+    for a in &holders {
+        // Which half of the rule this row trips. Both can be true, and saying only one of them
+        // would be the same half-reason the ledger used to give.
+        let why = match (
+            a.provenance != trigon_core::Provenance::Builtin,
+            a.risk > trigon_core::RiskTier::Metadata,
+        ) {
+            (true, true) => format!(
+                "{:?} provenance, and {:?} risk is above Metadata",
+                a.provenance, a.risk
+            ),
+            (true, false) => format!("{:?} provenance — not Builtin", a.provenance),
+            (false, true) => format!("{:?} risk is above Metadata", a.risk),
+            (false, false) => {
+                unreachable!("caps_normalized said this row caps and neither half does")
+            }
+        };
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td></tr>",
+            esc(a.id.as_str()),
+            esc(&why)
+        ));
+    }
+
+    format!(
+        "<h2>The ceiling</h2>         <p>This run can reach <strong>{ceiling}</strong> and no higher, whatever the bytes do.          It read <strong>{}</strong>.</p>         <table><tr><th>pass</th><th>why it caps</th></tr>{rows}</table>         <p class=\"note\">A cap is not a complaint about the package. It says the tool got there          using something it will not vouch for unconditionally — a pass that rewrites content, or          one a model or a person wrote rather than one compiled in. Both halves of that rule weigh          the same: a <code>Metadata</code>-risk pass a model proposed caps the verdict exactly as          firmly as a <code>Content</code>-risk builtin.</p>",
+        esc(reached)
+    )
+}
+
+/// Which passes did the work, how much, and under whose authority.
+///
+/// Bar length is `entries_touched`, which `docs/08` calls the triage number: "wheel-record touched
+/// 412 entries" is a diagnosis. Risk is the colour. Provenance is a column, and it is new — the
+/// field has existed as long as `Applied` has and no page had ever rendered it.
+fn ledger_table(applied: &[trigon_stabilize::Applied]) -> String {
+    if applied.is_empty() {
+        return "<h2>The ledger</h2><p class=\"note\">no pass changed anything on either side, so                 the two artifacts were compared exactly as published. The verdict, whatever it is,                 is about the bytes and owes nothing to normalization.</p>"
+            .into();
+    }
+    // Both sides fire the same set, so the same id appears twice. Summed rather than listed twice:
+    // a reader wants "tar-time touched 20 entries across the pair", not two rows of 10.
+    let mut by_id: std::collections::BTreeMap<
+        String,
+        (
+            u32,
+            u64,
+            trigon_core::RiskTier,
+            trigon_core::Provenance,
+            bool,
+        ),
+    > = Default::default();
+    for a in applied {
+        let e = by_id.entry(a.id.to_string()).or_insert((
+            0,
+            0,
+            a.risk,
+            a.provenance.clone(),
+            trigon_compare::caps_normalized(a),
+        ));
+        e.0 += a.entries_touched;
+        e.1 += a.bytes_changed;
+    }
+    let max = by_id.values().map(|v| v.0).max().unwrap_or(1).max(1) as f64;
+    let mut rows = String::new();
+    for (id, (touched, bytes, risk, provenance, caps)) in &by_id {
+        let w = 420.0 * (*touched as f64 / max);
+        let fill = match risk {
+            trigon_core::RiskTier::Structural => "#6b6b66",
+            trigon_core::RiskTier::Metadata => "#137333",
+            trigon_core::RiskTier::Content => "#b26a00",
+            trigon_core::RiskTier::Lossy => "#b3261e",
+        };
+        // The provenance a reader needs is "who stands behind this", so a `Model` row names the
+        // model and a `Human` row names the reviewer rather than both reading as "not builtin".
+        let who = match provenance {
+            trigon_core::Provenance::Builtin => "<span class=\"dim\">builtin</span>".to_string(),
+            trigon_core::Provenance::Human { reviewer } => {
+                format!("<span class=\"diff\">reviewed by {}</span>", esc(reviewer))
+            }
+            trigon_core::Provenance::Model { model_id, .. } => {
+                format!("<span class=\"diff\">proposed by {}</span>", esc(model_id))
+            }
+        };
+        let mark = if *caps {
+            " <span class=\"diff\">caps</span>"
+        } else {
+            ""
+        };
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code>{mark}</td><td class=\"n\">{touched}</td>\
+             <td style=\"width:100%\"><svg viewBox=\"0 0 420 12\" width=\"{:.0}\" height=\"12\" \
+             preserveAspectRatio=\"none\" role=\"img\" aria-label=\"{touched} entries\">\
+             <rect x=\"0\" y=\"0\" width=\"420\" height=\"12\" fill=\"{fill}\"/></svg></td>\
+             <td class=\"dim\">{:?}</td><td>{who}</td><td class=\"n dim\">{}</td></tr>",
+            esc(id),
+            w.max(2.0),
+            risk,
+            human_bytes(*bytes),
+        ));
+    }
+    format!(
+        "<h2>The ledger</h2>         <table><tr><th>pass</th><th class=\"n\">entries</th><th></th><th>risk</th>\
+         <th>provenance</th><th class=\"n\">bytes</th></tr>{rows}</table>         <p class=\"note\">Summed across both sides, which fire the same set. A row marked \
+         <span class=\"diff\">caps</span> is one of the rows in the ceiling above.</p>"
+    )
+}
+
+/// The passes that were in the set and found nothing to do.
+///
+/// `apply` returns only what fired, which left a set member that found nothing indistinguishable
+/// from one that was never configured — and those are different facts. `nupkg-signature` finding no
+/// signature to strip is a statement about the package: it was not signed. A reader who cannot see
+/// the silent rows cannot tell "this set has no signature pass" from "this set has one and the
+/// package had no signature", and only the second is evidence.
+fn silent_panel(artifact: &Path, applied: &[trigon_stabilize::Applied]) -> String {
+    let Some(format) = trigon_core::Format::from_file_name(
+        &artifact.file_name().unwrap_or_default().to_string_lossy(),
+    ) else {
+        return String::new();
+    };
+    let set = run_profile(artifact, format);
+    let fired: std::collections::BTreeSet<String> =
+        applied.iter().map(|a| a.id.to_string()).collect();
+    let silent: Vec<String> = set
+        .members
+        .iter()
+        .map(|m| m.id().to_string())
+        .filter(|id| !fired.contains(id))
+        .collect();
+
+    if silent.is_empty() {
+        return format!(
+            "<h2>What stayed silent</h2><p class=\"note\">nothing. Every one of the \
+             <code>{}</code> set's {} passes found something to do on this pair.</p>",
+            esc(set.id.as_str()),
+            set.members.len()
+        );
+    }
+    format!(
+        "<h2>What stayed silent</h2>         <p>{} of the <code>{}</code> set's {} passes ran and found nothing to change:</p>         <p class=\"legend\">{}</p>         <p class=\"note\">Listed because silence is evidence. A signature pass with nothing to \
+         strip means the package carried no signature; a timestamp pass with nothing to flatten \
+         means the archive already held none. Neither fact is visible from the ledger above, which \
+         by construction holds only the passes that moved something.</p>",
+        silent.len(),
+        esc(set.id.as_str()),
+        set.members.len(),
+        silent
+            .iter()
+            .map(|id| format!("<code>{}</code>", esc(id)))
+            .collect::<Vec<_>>()
+            .join(" · "),
+    )
 }
 
 /// The census, as a picture: what the two archives hold, and where the difference went.
@@ -1942,7 +2151,7 @@ fn ladder_svg(m: &[MemberDiff]) -> String {
     }
 
     format!(
-        "<h2>What differs</h2>\
+        "<h2>Which members the passes account for</h2>\
          <svg viewBox=\"0 0 {w} 26\" width=\"100%\" height=\"26\" role=\"img\" \
           aria-label=\"{} members: {differs} differ in content, {meta_only} same bytes packed \
           differently, {removed} stabilized out, {identical} identical, {one_side} on one side \
@@ -1950,64 +2159,12 @@ fn ladder_svg(m: &[MemberDiff]) -> String {
          <p class=\"legend\">{legend}</p>\
          <p class=\"note\">{} member(s) in total. <strong>Stabilized out</strong> is the band the \
          verdict turns on: those members' published and rebuilt bytes are not the same, and every \
-         way in which they differ was removed by a named pass below. <strong>Same bytes, packed \
-         differently</strong> is the one worth reading twice — the file is byte-for-byte what was \
-         published and its archive entry is not, so the divergence is about how it was packed and \
-         not about what anybody wrote.</p>",
+         way in which they differ was removed by one of the passes in the ledger above. \
+         <strong>Same bytes, packed differently</strong> is the one worth reading twice — the file \
+         is byte-for-byte what was published and its archive entry is not, so the divergence is \
+         about how it was packed and not about what anybody wrote.</p>",
         m.len(),
         m.len()
-    )
-}
-
-/// Which passes did the work, and how much.
-///
-/// Bar length is `entries_touched`, which `docs/08` calls the triage number: "wheel-record touched
-/// 412 entries" is a diagnosis. The risk tier is the colour, because a `Content`-risk pass caps the
-/// verdict below `normalized` and a reader should see that without reading a table.
-fn stabilizer_svg(applied: &[trigon_stabilize::Applied]) -> String {
-    if applied.is_empty() {
-        return "<h2>What the stabilizers removed</h2><p class=\"note\">no pass changed anything on \
-                either side, so the two artifacts are compared exactly as published</p>"
-            .into();
-    }
-    // Both sides fire the same set, so the same id appears twice. Summed rather than listed twice:
-    // a reader wants "tar-time touched 20 entries across the pair", not two rows of 10.
-    let mut by_id: std::collections::BTreeMap<String, (u32, u64, trigon_core::RiskTier)> =
-        Default::default();
-    for a in applied {
-        let e = by_id.entry(a.id.to_string()).or_insert((0, 0, a.risk));
-        e.0 += a.entries_touched;
-        e.1 += a.bytes_changed;
-    }
-    let max = by_id.values().map(|v| v.0).max().unwrap_or(1).max(1) as f64;
-    let mut rows = String::new();
-    for (id, (touched, bytes, risk)) in &by_id {
-        let w = 420.0 * (*touched as f64 / max);
-        let fill = match risk {
-            trigon_core::RiskTier::Structural => "#6b6b66",
-            trigon_core::RiskTier::Metadata => "#137333",
-            trigon_core::RiskTier::Content => "#b26a00",
-            trigon_core::RiskTier::Lossy => "#b3261e",
-        };
-        rows.push_str(&format!(
-            "<tr><td><code>{}</code></td><td class=\"n\">{touched}</td>\
-             <td style=\"width:100%\"><svg viewBox=\"0 0 420 12\" width=\"{:.0}\" height=\"12\" \
-             preserveAspectRatio=\"none\" role=\"img\" aria-label=\"{touched} entries\">\
-             <rect x=\"0\" y=\"0\" width=\"420\" height=\"12\" fill=\"{fill}\"/></svg></td>\
-             <td class=\"dim\">{:?}</td><td class=\"n dim\">{}</td></tr>",
-            esc(id),
-            w.max(2.0),
-            risk,
-            human_bytes(*bytes),
-        ));
-    }
-    format!(
-        "<h2>What the stabilizers removed</h2>\
-         <table><tr><th>pass</th><th class=\"n\">entries</th><th></th><th>risk</th>\
-         <th class=\"n\">bytes</th></tr>{rows}</table>\
-         <p class=\"note\">Summed across both sides, which fire the same set. Risk is why a \
-         verdict can be capped: anything above <code>Metadata</code> holds the outcome at \
-         <code>normalized_with_caveats</code> however well the digests agree.</p>"
     )
 }
 

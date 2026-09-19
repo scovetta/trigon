@@ -237,7 +237,12 @@ nothing here has run.
 
   Still to do from the original stage 2: the chain ribbon, and demoting `/compare` to the stabilizer
   ledger.
-- **Stage 3+** — the board, behind the recording that would make it honest.
+- **Stage 3+** — the board, behind the recording that would make it honest. And this is where this
+  document hands over: a board is a *corpus* view, a corpus needs a fleet, and a fleet needs the
+  control plane [`22-management-layer.md`](22-management-layer.md) plans. `watch` stays what it is —
+  local, loopback, read-only, rooted in a directory, correct when the sweep it watches has died. The
+  corpus gets a different surface with a different owner, and §2.7 there is the argument for why
+  that is one renderer rather than two.
 
 Two findings constrain stage 1 and are worth more than the rest of the plan:
 

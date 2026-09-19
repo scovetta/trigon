@@ -144,9 +144,20 @@ Doing (4) before (1) to (3) would mean describing traffic we cannot produce and 
    a failure. Re-classified from the logs on disk the sweep has **no unknowns** and nothing in
    `Fault::Build`. See [`16`](16-findings.md) §3.30, which also has the rates.
 
+**Stage A½ — the read-only site.** New, and it comes *before* the queue.
+[`22-management-layer.md`](22-management-layer.md) §2.1 is why: browse, search and run detail are
+read-only over data `trigon-store` already holds — `list_runs`, `get_run`, and content-addressed
+blobs over `Arc<dyn ObjectStore>` — so they need no Postgres, no engine split and no auth. Putting
+the schema first would have meant four to five weeks with no user-facing surface, which breaks the
+rule [`18-management-ui.md`](18-management-ui.md) §5 sets for itself: *each step is independently
+useful and none pays off only if the next three land*. It has one hard precondition, and it is the
+reason this is Stage A½ and not Stage A: the evidence tier and the publication gate
+([`22`](22-management-layer.md) §7) land with the first public byte, not after it.
+
 **Stage B — the queue and the worker classes.** The largest single piece, and the one with a written
 design already ([`10-scale.md`](10-scale.md) §3, §8;
-[`ADR-0005`](adr/0005-own-the-queue.md)). Build the state machine as `trigon-engine`, the crate the
+[`ADR-0005`](adr/0005-own-the-queue.md); and now
+[`22-management-layer.md`](22-management-layer.md) §4, §8, which is the shape it gets built in). Build the state machine as `trigon-engine`, the crate the
 architecture already names. Write the enforcement test the criterion asks for — *the build worker
 cannot fetch the upstream artifact* — **first**: it is the one control that separates a verdict from
 a tautology, and of the two rules specified for it the guard manifest carrying digests is built and
