@@ -209,9 +209,22 @@ can be *offered* the same derivation rather than only being refused.
 
 ### What `auto` must not do
 
-- **Must not choose the parent by ecosystem.** "npm target, so the Node image" is a decision, and
-  ADR-0012 forbids it. The parent is a distribution, chosen by configuration, identical across
-  ecosystems. `auto` is intelligent about *packages*, never about *toolchains*.
+- **Must not choose the parent to override a pin.** "npm target, so the Node image" is a decision:
+  the registry records `_nodeVersion` for every publish, so an image's Node wins over it and the run
+  measures a toolchain nobody chose.
+
+  **This was first written as "must not choose the parent by ecosystem", and that was too broad.**
+  It reads the npm case as a general rule, and applied to NuGet it forbids the only thing that makes
+  the ecosystem work. NuGet publishes no compiler version — the rung records that as an assumption
+  on every target — so nothing is pinned, there is no pin to override, and an image supplying an SDK
+  is the rule being followed rather than broken. Twenty-one of twenty-five NuGet targets in the
+  random sweep failed on `dotnet: not found` under the broader reading. See ADR-0012's correction of
+  2026-09-19.
+
+  So: `auto` takes the parent from `TRIGON_BASE_PARENT` where an operator named one, otherwise from
+  `mcr.microsoft.com/dotnet/sdk` for a target whose ecosystem pins no compiler, otherwise from a
+  distribution. It is intelligent about *packages* always, and about a *toolchain* only where the
+  evidence leaves the choice open and someone has to make it.
 - **Must not resolve to a tag, and must not resolve to a `localhost/...@sha256:` reference
   either.** Step 4 yields the bare 64-hex image id. `is_pinned` accepts both forms because it
   checks the *shape* of a string, but podman reads the `localhost/` prefix as a registry hostname

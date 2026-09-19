@@ -21,6 +21,36 @@ Node, npm, the .NET SDK, yarn, pnpm — all decisions. The registry records `_no
 package manager. An image carrying any of them either loses to the pin and is dead weight, or wins
 over it and silently answers a different question from the one asked.
 
+> **Correction, 2026-09-19: the .NET SDK does not belong in that list, and the reason given for it
+> was wrong.**
+>
+> The rule above is about *a decision the evidence pins*. For npm the evidence does pin one — the
+> registry records `_nodeVersion` for every publish, so an image's Node overrides it and the run
+> measures a toolchain nobody chose. That is real and the SIGABRT in `npx.yaml` is what it looks
+> like.
+>
+> NuGet is not that case. The reason given here — "a `.csproj` names its frameworks" — is true and
+> is not a pin: naming `net45` or `net10.0` constrains which SDKs *can* build a project, it does not
+> select one. The NuGet rung's own recorded assumption says as much in the run record of every
+> target: *"NuGet publishes no compiler version, so this builds with whatever .NET SDK the base
+> image carries."*
+>
+> So there is no pin for an image to override. Refusing to supply an SDK protects nothing and
+> costs the whole ecosystem: twenty-one of twenty-five NuGet targets in the 125-target random sweep
+> failed with `dotnet: not found`. `--image auto` therefore starts a NuGet target from
+> `mcr.microsoft.com/dotnet/sdk`, resolved to a digest at use time and recorded in
+> `Environment.base_image`.
+>
+> **This is the rule applied, not an exception to it.** An image may supply bytes the evidence does
+> not pin. The SDK is exactly that, and the run says which one it was. What has not changed: an
+> image must still never carry Node, npm, yarn, pnpm or a Rust toolchain, because those *are*
+> pinned, and `trigon-sandbox`'s admission table refuses every one of them.
+>
+> What this leaves open is *which* SDK. The tag is a constant today, and the SDK announces a wrong
+> guess precisely — `NETSDK1045`, named as `env/dotnet-sdk-too-old` and carrying the version it
+> wanted. Deriving it from the project's declared `TargetFramework` is the better answer and is not
+> built.
+
 ## What prompted it
 
 A 197-target npm sweep reported nine `env/missing-tool` failures. The bucket is named after the

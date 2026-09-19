@@ -1199,6 +1199,9 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             None,
             // One strategy, run by hand. There is nothing for it to share with anybody.
             None,
+            // No purl here, so no ecosystem to take a toolchain from. `--image auto` on this path
+            // derives from a distribution parent and nothing more.
+            None,
         )
         .map(|_| ()),
     }
@@ -1433,6 +1436,11 @@ mod build {
         // Where the mirror may keep upstream bytes, and which invocation its index entries
         // belong to. `None` fetches everything every time.
         fetch_cache: Option<&(PathBuf, String)>,
+        // A runtime the image has to carry because nothing in the evidence pins one — `dotnet`
+        // today, and nothing else. Passed by the caller, which knows the ecosystem; the better
+        // shape is a `toolchain:` line the tool itself declares, beside its `needs:`, which is not
+        // built because it would change the plan hash for every target.
+        toolchain: Option<&str>,
     ) -> Result<Built> {
         let egress = egress_tier(egress)?;
 
@@ -1554,7 +1562,7 @@ mod build {
         let image = &if image == "auto" {
             let deps: Vec<String> = instructions.requires.system_deps.iter().cloned().collect();
             crate::mirror::resolve_auto(
-                &crate::mirror::auto_parent()?,
+                &crate::mirror::auto_parent(toolchain)?,
                 &deps,
                 verbose,
                 // **Derivation is `apt-get`, and `apt-get` is network.** At an enforced tier the
@@ -3367,6 +3375,14 @@ mod rebuild {
                 },
                 args.source_cache.as_deref(),
                 args.fetch_cache.as_ref(),
+                // NuGet builds with whatever SDK the image carries — its own recorded assumption
+                // says so — because the registry publishes no compiler version. Nothing is pinned,
+                // so there is no pin for an image to override, and an image that supplies one is
+                // the only way this ecosystem builds at all.
+                match target.ecosystem {
+                    trigon_core::Ecosystem::NuGet => Some("dotnet"),
+                    _ => None,
+                },
             );
 
             // What the build produced, taken before the guard is consulted rather than after.
@@ -4826,6 +4842,61 @@ mod mirror {
         "ssh",
     ];
 
+    /// The .NET SDK image `auto` starts from for a NuGet target.
+    ///
+    /// **A tag, resolved to a digest before anything uses it.** The tag is here because a digest
+    /// written into this file goes stale invisibly; the resolution happens at use time and the
+    /// digest it produced is what lands in `Environment.base_image`, so the record names exact
+    /// bytes even though this constant does not.
+    ///
+    /// Which version is a real question and this is the blunt answer: the newest LTS builds every
+    /// target framework below it, and when it cannot the SDK says so precisely —
+    /// `NETSDK1045: The current .NET SDK does not support targeting .NET 10.0` — which
+    /// `env/dotnet-sdk-too-old` names and captures the wanted version from. Deriving the tag from
+    /// the project's declared `TargetFramework` is the better answer and is not built.
+    pub const DOTNET_SDK: &str = "mcr.microsoft.com/dotnet/sdk:9.0";
+
+    /// Resolve an image reference that may be a tag into one pinned by digest.
+    ///
+    /// Pulls if it is not here. `base_image` refuses anything unpinned, and rightly: a tag resolves
+    /// to different bytes on different days, which is the one thing a base image for a
+    /// reproducibility tool must not do. So the tag is turned into a digest *once*, here, and the
+    /// digest is what everything downstream sees and records.
+    fn pinned(reference: &str) -> Result<String> {
+        if trigon_sandbox::is_pinned(reference) {
+            return Ok(reference.to_string());
+        }
+        let here = std::process::Command::new("podman")
+            .args(["image", "exists", reference])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !here {
+            println!("  image      pulling {reference}");
+            let ok = std::process::Command::new("podman")
+                .args(["pull", reference])
+                .status()
+                .context("running podman pull")?;
+            if !ok.success() {
+                bail!("could not pull {reference}");
+            }
+        }
+        // A repository digest where there is one; the local id otherwise. Both are shapes
+        // `is_pinned` accepts, and both name exactly one set of bytes.
+        for fmt in ["{{index .RepoDigests 0}}", "{{.Id}}"] {
+            if let Ok(out) = std::process::Command::new("podman")
+                .args(["image", "inspect", reference, "--format", fmt])
+                .output()
+                && out.status.success()
+            {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if trigon_sandbox::is_pinned(&s) {
+                    return Ok(s);
+                }
+            }
+        }
+        bail!("podman could not give a digest or an id for {reference}")
+    }
+
     /// What an image carries, in the neutral vocabulary `needs:` speaks.
     pub const LABEL_PACKAGES: &str = "org.trigon.packages";
     /// The image it was built from, pinned.
@@ -4849,11 +4920,36 @@ mod mirror {
     ///    layers accumulate, but it is much better than refusing, and it is the case that arises
     ///    when the images predate the labels.
     /// 4. Refuse, and say exactly what to run.
-    pub fn auto_parent() -> Result<String> {
+    pub fn auto_parent(toolchain: Option<&str>) -> Result<String> {
+        // The operator's choice always wins. Naming a parent is how somebody says "build against
+        // this SDK", and a default that overrode it would make that unsayable.
         if let Ok(p) = std::env::var("TRIGON_BASE_PARENT")
             && !p.trim().is_empty()
         {
-            return Ok(p.trim().to_string());
+            return pinned(p.trim());
+        }
+
+        // **A runtime the evidence does not pin, supplied by the image, because nothing else can.**
+        //
+        // ADR-0012's rule is that an image may supply bytes the evidence does not pin and never a
+        // decision it does. For npm that forbids baking Node in: the registry records
+        // `_nodeVersion` for every publish, so an image's Node would override a pin and the run
+        // would measure a toolchain nobody chose.
+        //
+        // NuGet is the other case and the ADR's own list got it wrong. It groups the .NET SDK with
+        // Node on the grounds that "a `.csproj` names its frameworks" — but naming a target
+        // framework is not pinning an SDK, and the NuGet rung's recorded assumption says so in as
+        // many words: *"NuGet publishes no compiler version, so this builds with whatever .NET SDK
+        // the base image carries."* Nothing is pinned, so there is no pin to override; refusing to
+        // choose does not protect a decision, it just means the ecosystem cannot be verified at
+        // all. Twenty-one of twenty-five NuGet targets on the random sweep died on `dotnet: not
+        // found`.
+        //
+        // So `auto` starts from the SDK image, records the digest it resolved, and the run's
+        // assumptions already say the SDK was unrecorded upstream. That is the ADR's actual rule
+        // applied, rather than its example list repeated.
+        if toolchain == Some("dotnet") {
+            return pinned(DOTNET_SDK);
         }
         let out = std::process::Command::new("podman")
             .args([
