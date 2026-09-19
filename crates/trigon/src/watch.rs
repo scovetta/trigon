@@ -2192,7 +2192,8 @@ fn member_diffs(
     .ok_or_else(|| {
         "the upstream artifact's name names no format this build can parse".to_string()
     })?;
-    let set = trigon_stabilize::default_for(format);
+    // The run's own selection, not the format's default. See `run_profile`.
+    let set = run_profile(upstream, format);
     let limits = trigon_archive::Limits::default();
 
     // `BTreeMap<(path, occurrence), digest>` on each side, at each of the two moments. Keyed on the
@@ -2398,6 +2399,17 @@ async fn run(
         }),
     }
 
+    // The whole derivation on one line, directly under the verdict: commit, strategy, build,
+    // artifact, the stabilizer set, the outcome. Before the sentence rather than after, because a
+    // reader who has just been told a package diverged asks "from what?" first.
+    // **Parsed and compared once for the whole page.** Three panels want it — the ribbon, the
+    // ladder and the notes — and each parsing both artifacts for itself would triple the cost of
+    // the one request that is already the expensive one.
+    let recomputed = recompare(&dir);
+    if let Some(r) = &report {
+        body.push_str(&chain_ribbon(r, recomputed.as_ref()));
+    }
+
     // The sentence, before any panel. Everything below it is the evidence for it.
     match (&report, v.layout) {
         (Some(r), _) => body.push_str(&verdict_sentence(r)),
@@ -2437,10 +2449,9 @@ async fn run(
     body.push_str(&format!(
         "<p><a href=\"/run/{index}/source\"><strong>how the source became this artifact →</strong></a></p>"
     ));
-    // Parsed and compared once, then read by two panels. The ladder says why the verdict is what
-    // it is; the notes say what was observed on the way. Both are derived from the bytes on disk
-    // rather than from a stored record, so a run without `--store` still has them.
-    let recomputed = recompare(&dir);
+    // The ladder says why the verdict is what it is; the notes say what was observed on the way.
+    // Both are derived from the bytes on disk rather than from a stored record, so a run without
+    // `--store` still has them.
     if let Some(cmp) = &recomputed {
         body.push_str(&digest_ladder(cmp));
     }
@@ -3425,6 +3436,108 @@ async fn source_page(
     page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response()
 }
 
+/// A verdict's whole derivation on one line.
+///
+/// **The question no page answered: where did this come from?** A verdict is a claim about a
+/// published artifact and a commit, reached through a strategy, in an image, under a stabilizer
+/// set. Every one of those is recorded and each lived on a different part of the page, so
+/// reconstructing the chain meant scrolling and remembering. Here it is left to right, in the order
+/// the run went through it, with every digest eight characters and the whole value in `title`.
+///
+/// The arrow into the verdict is labelled with the stabilizer set, because that is the one link a
+/// reader is most likely to want and least likely to guess: two runs of the same commit under
+/// different sets are not comparable, and the set is what an attestation names.
+fn chain_ribbon(
+    r: &crate::progress::RunReport,
+    cmp: Option<&trigon_compare::Comparison>,
+) -> String {
+    let chip = |label: &str, value: String, title: &str| {
+        format!(
+            "<span class=\"tag\" title=\"{}\" style=\"padding:.25rem .5rem\">\
+             <span class=\"dim\" style=\"font-size:.72rem\">{}</span> {}</span>",
+            esc(title),
+            esc(label),
+            value
+        )
+    };
+    let short = |h: &str| esc(&h[..8.min(h.len())]).to_string();
+    let arrow = "<span class=\"dim\" style=\"margin:0 .35rem\">→</span>";
+
+    let mut parts: Vec<String> = Vec::new();
+    match &r.source {
+        Some(src) => parts.push(chip(
+            "commit",
+            format!("<code>{}</code>", short(&src.commit)),
+            &format!("{} — found by {}", src.repo_url, src.how.as_str()),
+        )),
+        // Named rather than omitted. A chain with a link missing is the interesting case: a verdict
+        // reached without a commit is a claim about an artifact and nothing else.
+        None => parts.push(chip(
+            "commit",
+            "<span class=\"note\">none</span>".into(),
+            "this run resolved no source, so the chain starts at the strategy",
+        )),
+    }
+    if let Some(d) = &r.strategy_digest {
+        parts.push(chip(
+            "strategy",
+            format!("<code>{}</code>", short(d)),
+            &format!(
+                "{}{}",
+                d,
+                r.derivation
+                    .as_deref()
+                    .map(|x| format!(" — {x}"))
+                    .unwrap_or_default()
+            ),
+        ));
+    }
+    let seconds: f64 = r.timings.iter().filter_map(|(_, s)| *s).sum();
+    if seconds > 0.0 {
+        parts.push(chip(
+            "build",
+            format!("{seconds:.0}s"),
+            "the phases this run timed",
+        ));
+    }
+    if let Some(c) = cmp {
+        parts.push(chip(
+            "artifact",
+            format!(
+                "{} members",
+                c.diff.as_ref().map(|d| d.files.len()).unwrap_or(0)
+            ),
+            "the published artifact, as parsed from the bytes on disk",
+        ));
+    }
+
+    let verdict = match r.outcome.as_deref() {
+        Some(o) => {
+            let fam = Family::of(o);
+            format!("<span class=\"tag {}\">{}</span>", fam.css(), esc(o))
+        }
+        None => "<span class=\"note\">no outcome</span>".to_string(),
+    };
+    // The set on the last arrow, because two runs of one commit under different sets are not
+    // comparable and the set is what an attestation names.
+    let set = cmp
+        .map(|c| {
+            format!(
+                "<span class=\"dim\" style=\"font-size:.72rem\" title=\"{}\">under {} {}</span>",
+                esc(&c.upstream.set.1.to_hex()),
+                esc(&c.upstream.set.0.to_string()),
+                short(&c.upstream.set.1.to_hex()),
+            )
+        })
+        .unwrap_or_default();
+
+    format!(
+        "<p style=\"display:flex;align-items:center;flex-wrap:wrap;gap:.15rem;margin:.6rem 0 1rem\">\
+         {}{arrow}{set}{arrow}{verdict}</p>",
+        parts.join(arrow)
+    )
+}
+
 /// The verdict as three questions, of which exactly one decided it.
 ///
 /// **Six digests, made readable.** A comparison produces a raw pair, a container pair and a
@@ -3549,8 +3662,28 @@ fn recompare(dir: &Path) -> Option<trigon_compare::Comparison> {
         std::fs::read(&upstream).ok()?,
         std::fs::read(&rebuild).ok()?,
     );
-    let set = trigon_stabilize::default_for(format);
+    let set = run_profile(&upstream, format);
     trigon_compare::compare_bytes(ub, rb, format, &set, &trigon_archive::Limits::default()).ok()
+}
+
+/// The stabilizer set a **run** would choose for this artifact — not the one its format implies.
+///
+/// `default_for(format)` is not how a run chooses. `resolve_profile` looks at the *file name* first
+/// (`.whl`, `.crate`, `.gem`, `.nupkg`) and only falls through to the format. A `.nupkg` is a zip,
+/// so deriving from the format alone handed this page the `zip` profile where the run used `nupkg`
+/// — six passes short, among them `nupkg-text-eol`, which decides members on exactly these
+/// packages. The ladder, the member table and the note list were all computed under a set the run
+/// never used, sitting beside a verdict computed under the set it did.
+///
+/// The chain ribbon is what exposed it: it prints the set, and the set it printed disagreed with
+/// the one in the run's own stored record. Same shape as the npm-tarball finding — two selectors
+/// for one question, nothing asserting they agree. `set_matches_the_run` now asserts it.
+fn run_profile(artifact: &Path, format: trigon_core::Format) -> trigon_stabilize::StabilizerSet {
+    crate::resolve_profile(artifact, None, format).unwrap_or_else(|_| {
+        // `resolve_profile` errors only on an explicitly requested name, and none is requested
+        // here; the format default keeps a page rendering rather than vanishing on an impossibility.
+        trigon_stabilize::default_for(format)
+    })
 }
 
 fn notes_panel(cmp: &trigon_compare::Comparison) -> String {
@@ -3610,6 +3743,57 @@ fn notes_panel(cmp: &trigon_compare::Comparison) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The page must judge under the set the run judged under.
+    ///
+    /// This is the assertion that was missing when the chain ribbon found the bug. Every artifact
+    /// kind the CLI names by *extension* is checked against what the page would choose, and the
+    /// `.nupkg` row is the one that mattered: its format is `Zip`, so a format-only derivation
+    /// answers `zip` — a different, smaller set than the run's, which the page then rendered a
+    /// ladder, a member table and a note list from.
+    ///
+    /// Written as a loop over the CLI's own table rather than a list of pairs, so a kind added
+    /// there is covered here without anyone remembering to come back.
+    #[test]
+    fn the_page_judges_under_the_set_the_run_used() {
+        for (ext, id) in crate::BY_EXTENSION {
+            let name = std::path::PathBuf::from(format!("pkg-1.0{ext}"));
+            let fmt = trigon_core::Format::from_file_name(&name.to_string_lossy())
+                .unwrap_or_else(|| panic!("`{ext}` names no format trigon can read"));
+            let chosen = super::run_profile(&name, fmt);
+            assert_eq!(
+                chosen.id.as_str(),
+                *id,
+                "a `{ext}` is compared under `{id}` by a run and `{}` by the page",
+                chosen.id
+            );
+        }
+    }
+
+    /// And the reason the test above cannot be waved off as trivially true.
+    ///
+    /// At least one kind's format-default disagrees with its run profile. If that ever stops being
+    /// so, the two selectors have converged and this test should be deleted along with the doc
+    /// comment on `run_profile` — but while it holds, reaching for `default_for` in a rendering
+    /// path is a live bug and not a stylistic preference.
+    #[test]
+    fn a_format_default_is_not_a_substitute_for_the_run_s_choice() {
+        let disagreements: Vec<_> = crate::BY_EXTENSION
+            .iter()
+            .filter_map(|(ext, id)| {
+                let name = std::path::PathBuf::from(format!("pkg-1.0{ext}"));
+                let fmt = trigon_core::Format::from_file_name(&name.to_string_lossy())?;
+                let by_format = trigon_stabilize::default_for(fmt);
+                (by_format.id.as_str() != *id).then(|| (*ext, by_format.id.to_string(), *id))
+            })
+            .collect();
+        assert!(
+            disagreements.iter().any(|(ext, ..)| *ext == ".nupkg"),
+            "a `.nupkg` used to be judged under the zip set by every page in this file; if that is \
+             no longer a way to get it wrong, say so here rather than deleting the guard"
+        );
+        assert!(!disagreements.is_empty());
+    }
+
     use super::*;
 
     fn rows(text: &str) -> Vec<Row> {
