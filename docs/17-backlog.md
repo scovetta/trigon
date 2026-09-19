@@ -486,7 +486,7 @@ Three things would, in increasing order of effort:
 **Done when:** one corpus target fails deterministically, is repaired by a model, and rebuilds — and
 the corpus says how often a repair helps at all, which no number anywhere currently says.
 
-## B28. One floor for every route, and the routes are not alike
+## B28. ~~One floor for every route, and the routes are not alike~~ — closed
 
 `trigon-politeness` spaces every request to a host by 100 ms. That number came from
 `trigon-registry::ClientConfig`, where it governed **metadata** requests — resolving a package,
@@ -507,9 +507,25 @@ index route keeping 100 ms and the artifact and toolchain routes taking somethin
 nothing. What must not happen is picking the number by how fast it makes a sweep feel, which is how
 a rate limit becomes decorative.
 
-Related, and larger: the limiter is **process-global and the mirror is per-target**, so across a
-sweep at N lanes the declared floor still multiplies by N. Within one machine a lock file beside the
-fetch cache would fix it; across a fleet it is the queue, which is M4 stage B.
+Related, and larger: the limiter was **process-global while the mirror is per-target**, so across a
+sweep at N lanes the declared floor multiplied by N. **Also closed**, by the lock file this entry
+predicted: `politeness::share_with` points the limiter at a directory, `reserve_shared` claims the
+next slot under `flock` in a file holding a wall-clock microsecond, and the mirror is handed the
+fetch cache's root — the one directory every mirror container in a sweep already shares. Wall clock
+rather than `Instant`, because two processes cannot compare theirs; that is the whole difficulty.
+
+A slot file that cannot be used sends the caller back to the in-memory queue rather than returning
+"go now", because a limiter that fails open is a control that reports success while doing nothing.
+The host is hashed into the filename: it comes from a URL a package's metadata chose, and a path
+assembled from one is a traversal.
+
+**Built:** `Route::Index` keeps the 100 ms the careful client always declared; `Route::Bytes` — an
+artifact or a toolchain at an immutable URL — takes 20 ms. One queue per host either way, because a
+registry counts requests and not categories, and two budgets would mean the declared rate is their
+sum. The numbers are conservative rather than tuned: picking them by how fast they make a sweep feel
+is how a rate limit becomes decorative.
+
+Across a fleet it is still the queue, which is M4 stage B.
 
 ## B25. ~~The fetch cache behind the mirror, in three tiers~~ — two of three built
 

@@ -2753,7 +2753,9 @@ dependencies = [
 name = "trigon-politeness"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "serde",
+ "sha2",
  "tokio",
  "tracing",
 ]

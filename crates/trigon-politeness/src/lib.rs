@@ -71,8 +71,38 @@ struct Host {
 /// `BTreeMap` so a report reads the same way twice.
 static HOSTS: Mutex<BTreeMap<String, Host>> = Mutex::new(BTreeMap::new());
 
-/// The minimum gap between two requests to the same host, in milliseconds.
-static MIN_INTERVAL_MS: AtomicU64 = AtomicU64::new(100);
+/// What kind of thing a request is asking for.
+///
+/// **The routes are not alike and one floor for all of them was wrong.** The 100 ms came from
+/// `trigon-registry::ClientConfig`, where it governs *metadata* — resolving a package, asking a
+/// forge about a tag — and where it is plainly right: an index document is a decision, it is
+/// assembled per request, and it is the thing a registry most wants asked for gently.
+///
+/// When the limiter moved to the mirror it started governing every artifact and toolchain fetch
+/// too, because that is what the mirror proxies. A build installing eight hundred dependencies then
+/// paid eighty seconds of pure spacing on tarballs alone — measured on the 125-target random sweep,
+/// where it was the dominant cost and looked like a hang.
+///
+/// A `.tgz` at an immutable URL is a CDN object, served by infrastructure built for exactly this,
+/// and the fetch cache already collapses 86.7% of the repeats. It does not want the same floor.
+///
+/// The numbers below are deliberately conservative rather than tuned: picking them by how fast they
+/// make a sweep feel is how a rate limit becomes decorative. `Index` keeps the number the careful
+/// client already used and nobody has complained about. `Bytes` is five times faster and still an
+/// order of magnitude below what a CDN serves without noticing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// A document that decides something: a packument, a simple index, a registration, a sparse
+    /// index line. Assembled per request and the expensive kind for a registry to serve.
+    Index,
+    /// Bytes at an immutable URL: an artifact, a toolchain tarball. A CDN object.
+    Bytes,
+}
+
+/// The gap between two `Index` requests to one host.
+static INDEX_INTERVAL_MS: AtomicU64 = AtomicU64::new(100);
+/// The gap between two `Bytes` requests to one host.
+static BYTES_INTERVAL_MS: AtomicU64 = AtomicU64::new(20);
 
 /// How long to wait after a 429 that carried no `Retry-After`.
 ///
@@ -81,14 +111,26 @@ static MIN_INTERVAL_MS: AtomicU64 = AtomicU64::new(100);
 /// throttling becomes a ban.
 const BLIND_BACKOFF: Duration = Duration::from_secs(30);
 
-/// The minimum gap between two requests to the same host.
-pub fn min_interval() -> Duration {
-    Duration::from_millis(MIN_INTERVAL_MS.load(Ordering::Relaxed))
+/// The gap between two requests of this kind to one host.
+pub fn min_interval_for(route: Route) -> Duration {
+    Duration::from_millis(match route {
+        Route::Index => INDEX_INTERVAL_MS.load(Ordering::Relaxed),
+        Route::Bytes => BYTES_INTERVAL_MS.load(Ordering::Relaxed),
+    })
 }
 
-/// Set the gap. Process-wide, and meant to be called once at startup.
-pub fn set_min_interval(d: Duration) {
-    MIN_INTERVAL_MS.store(d.as_millis() as u64, Ordering::Relaxed);
+/// The index gap, which is the one the careful client has always declared.
+pub fn min_interval() -> Duration {
+    min_interval_for(Route::Index)
+}
+
+/// Set a gap. Process-wide, and meant to be called once at startup.
+pub fn set_min_interval_for(route: Route, d: Duration) {
+    let ms = d.as_millis() as u64;
+    match route {
+        Route::Index => INDEX_INTERVAL_MS.store(ms, Ordering::Relaxed),
+        Route::Bytes => BYTES_INTERVAL_MS.store(ms, Ordering::Relaxed),
+    }
 }
 
 /// The User-Agent every outbound request carries, on every route.
@@ -104,9 +146,13 @@ pub fn user_agent() -> String {
     )
 }
 
-/// Wait until `host` may be asked again, and claim that slot.
-pub async fn pace(host: &str) {
-    let wait = reserve(host);
+/// Wait until `host` may be asked again for something of this kind, and claim that slot.
+///
+/// **One queue per host, whatever the route.** The two intervals say how far apart *this* request
+/// pushes the next one, not that a host has two independent budgets — a registry counts requests,
+/// not categories, and two queues would mean the declared rate is the sum of them.
+pub async fn pace(host: &str, route: Route) {
+    let wait = reserve(host, route);
     if !wait.is_zero() {
         tokio::time::sleep(wait).await;
     }
@@ -116,8 +162,17 @@ pub async fn pace(host: &str) {
 ///
 /// Separated from the sleep so it can be tested without a clock, and so the lock is never held
 /// across an await.
-fn reserve(host: &str) -> Duration {
-    let interval = min_interval();
+fn reserve(host: &str, route: Route) -> Duration {
+    let interval = min_interval_for(route);
+    // Shared where a directory was named, so every process using it queues in one line. Falls
+    // through to the in-memory queue when the file cannot be used, which is slower to notice but
+    // never faster than no limit at all.
+    if let Ok(g) = SHARED.lock()
+        && let Some(dir) = g.as_ref()
+        && let Some(wait) = reserve_shared(dir, host, interval)
+    {
+        return wait;
+    }
     let now = Instant::now();
     let Ok(mut hosts) = HOSTS.lock() else {
         // A poisoned lock means another thread panicked while holding it. Pacing is not worth
@@ -218,7 +273,11 @@ pub fn reset() {
     if let Ok(mut hosts) = HOSTS.lock() {
         hosts.clear();
     }
-    set_min_interval(Duration::from_millis(100));
+    if let Ok(mut g) = SHARED.lock() {
+        *g = None;
+    }
+    set_min_interval_for(Route::Index, Duration::from_millis(100));
+    set_min_interval_for(Route::Bytes, Duration::from_millis(20));
 }
 
 fn with(host: &str, f: impl FnOnce(&mut Host)) {
@@ -252,7 +311,7 @@ mod tests {
     /// racing it rather than exercising it.
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    fn guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn guard() -> std::sync::MutexGuard<'static, ()> {
         SERIAL.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -264,9 +323,11 @@ mod tests {
         // caller waits nine intervals, which is what a rate limit is.
         let _g = guard();
         reset();
-        set_min_interval(Duration::from_millis(50));
+        set_min_interval_for(Route::Index, Duration::from_millis(50));
 
-        let waits: Vec<Duration> = (0..4).map(|_| reserve("registry.npmjs.org")).collect();
+        let waits: Vec<Duration> = (0..4)
+            .map(|_| reserve("registry.npmjs.org", Route::Index))
+            .collect();
         assert_eq!(
             waits[0],
             Duration::ZERO,
@@ -281,7 +342,7 @@ mod tests {
             );
         }
         // And another host is not behind this one's queue.
-        assert_eq!(reserve("pypi.org"), Duration::ZERO);
+        assert_eq!(reserve("pypi.org", Route::Index), Duration::ZERO);
     }
 
     #[test]
@@ -291,9 +352,9 @@ mod tests {
         // hundred times. There is no longer anything to construct.
         let _g = guard();
         reset();
-        set_min_interval(Duration::from_millis(80));
-        assert_eq!(reserve("example.test"), Duration::ZERO);
-        let second = reserve("example.test");
+        set_min_interval_for(Route::Index, Duration::from_millis(80));
+        assert_eq!(reserve("example.test", Route::Index), Duration::ZERO);
+        let second = reserve("example.test", Route::Index);
         assert!(second > Duration::from_millis(60), "{second:?}");
     }
 
@@ -304,7 +365,7 @@ mod tests {
         let _g = guard();
         reset();
         throttled("crates.io", Some(Duration::from_secs(5)));
-        let wait = reserve("crates.io");
+        let wait = reserve("crates.io", Route::Index);
         assert!(wait > Duration::from_secs(4), "{wait:?}");
         assert_eq!(traffic()["crates.io"].throttled, 1);
     }
@@ -318,7 +379,7 @@ mod tests {
         reset();
         throttled("slow.test", Some(Duration::from_secs(30)));
         throttled("slow.test", Some(Duration::from_secs(1)));
-        assert!(reserve("slow.test") > Duration::from_secs(25));
+        assert!(reserve("slow.test", Route::Index) > Duration::from_secs(25));
     }
 
     #[test]
@@ -335,7 +396,7 @@ mod tests {
         // The defect in one line: a host that this process paced is a host it can report on.
         let _g = guard();
         reset();
-        let _ = reserve("counted.test");
+        let _ = reserve("counted.test", Route::Index);
         note_request("counted.test");
         note_failure("counted.test");
         let t = &traffic()["counted.test"];
@@ -393,5 +454,247 @@ mod tests {
         assert_eq!(host_of("https://user:pw@example.test/p"), "example.test");
         // Unparseable is still a request somebody made.
         assert_eq!(host_of("not a url"), "not a url");
+    }
+}
+
+#[cfg(test)]
+mod routes_are_not_alike {
+    use super::tests::guard;
+    use super::*;
+
+    #[test]
+    fn a_tarball_does_not_wait_as_long_as_a_packument() {
+        // The measurement behind this: on the 125-target random sweep the 100 ms floor governed
+        // every artifact fetch as well as every index one, so a build installing hundreds of
+        // dependencies paid the floor on each tarball. That was the dominant cost and it looked
+        // like a hang.
+        let _g = guard();
+        reset();
+        assert!(
+            min_interval_for(Route::Bytes) < min_interval_for(Route::Index),
+            "an immutable CDN object does not want a packument's floor"
+        );
+        // And neither is zero. A rate limit that stops applying to the bulk of the traffic is a
+        // rate limit that has been turned off for the traffic that matters.
+        assert!(min_interval_for(Route::Bytes) > Duration::ZERO);
+    }
+
+    #[test]
+    fn one_host_has_one_queue_whatever_the_route() {
+        // Two independent budgets would mean the declared rate is their sum, and a registry counts
+        // requests rather than categories. The route decides how far *this* request pushes the
+        // next one, not which queue it joins.
+        let _g = guard();
+        reset();
+        set_min_interval_for(Route::Index, Duration::from_millis(100));
+        set_min_interval_for(Route::Bytes, Duration::from_millis(10));
+
+        assert_eq!(reserve("one.test", Route::Index), Duration::ZERO);
+        // The next request waits behind the index one whatever kind it is.
+        let after = reserve("one.test", Route::Bytes);
+        assert!(after > Duration::from_millis(80), "{after:?}");
+        // And having waited an index interval, the bytes request only pushes the next one 10ms.
+        let third = reserve("one.test", Route::Index);
+        assert!(
+            third > after && third < after + Duration::from_millis(40),
+            "{after:?} then {third:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_told_us_to_slow_down_and_that_holds_for_both_routes() {
+        // A 429 is about the host, not about what was asked of it.
+        let _g = guard();
+        reset();
+        throttled("busy.test", Some(Duration::from_secs(5)));
+        assert!(reserve("busy.test", Route::Bytes) > Duration::from_secs(4));
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Sharing the queue between processes.
+// -------------------------------------------------------------------------------------------
+
+/// A directory the limiter keeps its slots in, so separate processes queue behind one another.
+///
+/// **The mirror is per-target, so process-global was never machine-global.** At an enforced tier
+/// each target gets its own mirror container, which is its own process with its own copy of the map
+/// above — so a sweep at four lanes declared one floor and kept four. A rate limit that multiplies
+/// by concurrency is the thing this crate exists to stop, and it was still doing it one level up.
+///
+/// `None` keeps everything in memory, which is right for a single process and is what a
+/// `trigon rebuild` on a laptop gets.
+static SHARED: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// Queue against every other process using `dir`.
+///
+/// The mirror is handed the fetch cache's directory, which is already a mount shared by every
+/// mirror container in a sweep. `flock` on a bind mount is the same lock in every container: one
+/// kernel, one inode.
+pub fn share_with(dir: std::path::PathBuf) {
+    if std::fs::create_dir_all(dir.join("pace")).is_err() {
+        tracing::warn!("cannot share the rate limiter through {}", dir.display());
+        return;
+    }
+    if let Ok(mut g) = SHARED.lock() {
+        *g = Some(dir);
+    }
+}
+
+/// Wall-clock microseconds. Not `Instant`: that is process-local by construction and two processes
+/// cannot compare theirs, which is the whole difficulty of sharing a slot.
+fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+/// One file per host, holding the microsecond at which it may next be asked.
+///
+/// Hashed rather than named, because a host is attacker-influenced in the sense that matters here:
+/// it comes from a URL a package's metadata chose, and a path assembled from one is a traversal
+/// waiting to happen.
+fn slot_path(dir: &std::path::Path, host: &str) -> std::path::PathBuf {
+    use sha2::Digest as _;
+    dir.join("pace")
+        .join(&format!("{:x}", sha2::Sha256::digest(host.as_bytes()))[..32])
+}
+
+/// Claim the next slot for `host` in the shared file, returning how long until it.
+///
+/// Returns `None` where the file cannot be used at all, and the caller falls back to the in-memory
+/// queue — a limiter that failed open on a permissions problem would be a control that reports
+/// success while doing nothing, which is the defect this repository keeps finding.
+fn reserve_shared(dir: &std::path::Path, host: &str, interval: Duration) -> Option<Duration> {
+    use std::io::{Read as _, Seek as _, Write as _};
+    use std::os::unix::io::AsRawFd as _;
+
+    let path = slot_path(dir, host);
+    // Made on demand as well as by `share_with`. A directory that disappeared mid-sweep — a tmpfs
+    // cleaner, a pruned cache — would otherwise silently drop every process back to its own
+    // private queue, which is the multiplication this exists to stop, returning quietly.
+    if let Some(parent) = path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return None;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .ok()?;
+
+    // Blocking, unlike the container store's lock: this is held for one read and one write of
+    // eight bytes, so a waiter is waiting microseconds. The store's lock is held for a whole build,
+    // which is why that one refuses to block.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return None;
+    }
+    let mut buf = [0u8; 8];
+    let stored = match file.read_exact(&mut buf) {
+        Ok(()) => u64::from_le_bytes(buf),
+        // A fresh file, or a torn one. Either way the honest reading is "no slot claimed yet".
+        Err(_) => 0,
+    };
+    let now = now_micros();
+    let at = stored.max(now);
+    let next = at + interval.as_micros() as u64;
+    let written = file
+        .seek(std::io::SeekFrom::Start(0))
+        .and_then(|_| file.write_all(&next.to_le_bytes()))
+        .is_ok();
+    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if !written {
+        return None;
+    }
+    Some(Duration::from_micros(at - now))
+}
+
+#[cfg(test)]
+mod shared_across_processes {
+    use super::*;
+    // The same lock the other test modules take. Everything here drives process-global state, so
+    // two locks would be two groups of tests racing rather than one group serialized.
+    use super::tests::guard;
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("trigon-pace-{}", std::process::id()))
+            .join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_second_process_queues_behind_the_first_rather_than_beside_it() {
+        // The bug this closes: at an enforced tier every target gets its own mirror container, so
+        // the "process-global" limiter was one limiter per target. Four lanes declared one floor
+        // and kept four. The file is the only thing two containers share.
+        let _g = guard();
+        reset();
+        let d = dir("two-processes");
+
+        // Two callers that share nothing but the directory — which is what two containers with the
+        // same bind mount have.
+        let first = reserve_shared(&d, "registry.npmjs.org", Duration::from_millis(100));
+        let second = reserve_shared(&d, "registry.npmjs.org", Duration::from_millis(100));
+        assert_eq!(first, Some(Duration::ZERO));
+        let second = second.expect("the slot file is usable");
+        assert!(
+            second >= Duration::from_millis(90),
+            "the second caller did not wait: {second:?}"
+        );
+
+        // A different host is a different queue, as it is in memory.
+        assert_eq!(
+            reserve_shared(&d, "pypi.org", Duration::from_millis(100)),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn the_slot_survives_the_process_that_wrote_it() {
+        // The property the in-memory map cannot have: a mirror container exits after every target,
+        // and the next one must not start from zero.
+        let _g = guard();
+        reset();
+        let d = dir("survives");
+        let _ = reserve_shared(&d, "a.test", Duration::from_secs(2));
+        // Nothing of the first caller remains except the file.
+        let again = reserve_shared(&d, "a.test", Duration::from_secs(2)).unwrap();
+        assert!(again > Duration::from_millis(1500), "{again:?}");
+    }
+
+    #[test]
+    fn a_host_from_a_package_cannot_choose_a_path() {
+        // The host comes from a URL in registry metadata, which a package controls. A file named
+        // after it would be a traversal; the name is a digest.
+        let d = dir("traversal");
+        let evil = slot_path(&d, "../../etc/passwd");
+        assert!(evil.starts_with(d.join("pace")), "{evil:?}");
+        assert!(
+            evil.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit()),
+            "{evil:?}"
+        );
+    }
+
+    #[test]
+    fn an_unusable_directory_falls_back_rather_than_failing_open() {
+        // `reserve_shared` returning `None` sends the caller to the in-memory queue. What it must
+        // never do is return `Some(ZERO)` on an error, which would be a limiter reporting success
+        // while doing nothing.
+        let missing = std::path::Path::new("/nonexistent-trigon-pace-dir");
+        assert_eq!(
+            reserve_shared(missing, "a.test", Duration::from_millis(100)),
+            None
+        );
     }
 }

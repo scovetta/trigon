@@ -483,6 +483,12 @@ impl Mirror {
         scope: String,
         max_bytes: Option<u64>,
     ) -> Result<Self, MirrorError> {
+        // **The cache directory is also where the rate limiter's slots live.** It is the one thing
+        // every mirror container in a sweep already shares — a bind mount from the host — and the
+        // limiter needs exactly that: somewhere two processes can queue in one line. Without it
+        // "process-global" means per-target, because the mirror is per-target, and a sweep at N
+        // lanes keeps N copies of the declared floor.
+        trigon_politeness::share_with(root.clone());
         let cache = crate::cache::Cache::open(root, scope).map_err(MirrorError::Cache)?;
         if let Some(max) = max_bytes {
             match cache.prune(max) {
@@ -896,6 +902,7 @@ const MAX_THROTTLE_RETRIES: u32 = 2;
 /// is consumed by `send`.
 async fn outbound(
     url: &str,
+    route: politeness::Route,
     build: impl Fn() -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, MirrorError> {
     let host = politeness::host_of(url);
@@ -903,7 +910,7 @@ async fn outbound(
     loop {
         // Waits out a backoff another lane earned, too: `throttled` below pushes this host's slot
         // out for the whole process, and this is where that is paid.
-        politeness::pace(&host).await;
+        politeness::pace(&host, route).await;
         politeness::note_request(&host);
         // One line per request that actually goes on the wire, including a retry and each hop of a
         // redirect: the host is counting what upstream saw, not what we intended.
@@ -985,7 +992,8 @@ async fn fetch_index(
         tracing::debug!(url, fetched_at = entry.fetched_at, "index from cache");
         return Ok((entry.body, true));
     }
-    let resp = outbound(url, || {
+    // An index document: assembled per request and the expensive kind for a registry to serve.
+    let resp = outbound(url, politeness::Route::Index, || {
         let mut req = mirror.client.get(url);
         for (k, v) in headers {
             req = req.header(k, *v);
@@ -1564,7 +1572,14 @@ async fn proxy(
         cache.note_miss();
     }
 
-    let resp = outbound(url, || mirror.passthrough.get(url)).await?;
+    // Whatever the proxy is carrying. `artifact` and `toolchain` are immutable objects at
+    // immutable URLs; `passthrough` is something on an index host that no filter applied to, which
+    // is closer to an index than to a tarball and is paced as one.
+    let kind = match route {
+        "artifact" | "toolchain" => politeness::Route::Bytes,
+        _ => politeness::Route::Index,
+    };
+    let resp = outbound(url, kind, || mirror.passthrough.get(url)).await?;
     // Redirects are followed here rather than passed on, because a client behind an enforced egress
     // boundary cannot follow one itself: the destination is exactly the host it has no route to.
     //
@@ -1602,7 +1617,7 @@ async fn proxy(
         }
         // Each hop is its own request to its own host, so each one is paced and counted against
         // that host rather than against the one that redirected us.
-        resp = outbound(next.as_str(), || mirror.passthrough.get(next.clone())).await?;
+        resp = outbound(next.as_str(), kind, || mirror.passthrough.get(next.clone())).await?;
     }
     if !resp.status().is_success() {
         return Err(MirrorError::Upstream {
@@ -2091,7 +2106,7 @@ mod outbound_politeness {
         let (url, server) = upstream_that_throttles(2);
 
         let started = std::time::Instant::now();
-        let resp = super::outbound(&url, || client.get(&url))
+        let resp = super::outbound(&url, trigon_politeness::Route::Index, || client.get(&url))
             .await
             .expect("the third attempt answers");
 

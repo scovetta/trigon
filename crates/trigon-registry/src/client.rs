@@ -95,7 +95,10 @@ impl Client {
         let mut attempt = 0;
 
         loop {
-            politeness::pace(&host).await;
+            // Every request this client makes is metadata: resolving a version, asking a forge
+            // about a tag, reading a packument. The artifact bytes go through the mirror, which
+            // paces them as `Bytes`.
+            politeness::pace(&host, politeness::Route::Index).await;
             tracing::debug!(url, attempt, "GET");
 
             politeness::note_request(&host);
