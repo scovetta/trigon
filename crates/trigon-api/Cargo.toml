@@ -28,3 +28,10 @@ tokio = { workspace = true }
 # logic. `axum` already depends on it; naming it here is what makes `Service::call` reachable.
 tower-service = "0.3"
 tempfile.workspace = true
+# Building a real `Comparison` to assert the projection in `comparison.rs` reads it. A
+# **dev**-dependency on purpose: `the_comparator_is_not_even_a_dependency` scopes itself to
+# `[dependencies]`, because a crate linked into tests cannot be reached by a handler.
+trigon-compare.workspace = true
+trigon-stabilize.workspace = true
+trigon-archive.workspace = true
+zip.workspace = true

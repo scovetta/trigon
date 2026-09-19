@@ -344,3 +344,76 @@ footer.site { border-top: 1px solid var(--line); margin-top: 2.5rem; padding-top
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ---- the verdict ladder -------------------------------------------------- */
+
+/* Three questions, and the one that answered. The rungs above it are greyed rather than hidden:
+   a reader's question is "why is this the verdict", and the answer is which one stopped the walk. */
+.ladder { display: flex; flex-direction: column; gap: .5rem; }
+.rung {
+  border-left: 3px solid var(--line);
+  padding: .5rem .8rem;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: color-mix(in srgb, var(--line) 14%, transparent);
+}
+.rung.spent { opacity: .5; }
+.rung.answered { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.rung-q { display: flex; gap: .55rem; align-items: baseline; font-weight: 550; }
+.rung-n {
+  font-size: .72rem; color: var(--faint); border: 1px solid var(--line);
+  border-radius: 99px; min-width: 1.3rem; text-align: center; font-weight: 600;
+}
+.rung.answered .rung-n { color: var(--accent); border-color: var(--accent); }
+.rung-digests { margin: .25rem 0 0 1.85rem; font-size: .85rem; }
+.rung-detail { margin: .2rem 0 0 1.85rem; color: var(--dim); font-size: .88rem; max-width: 72ch; }
+.ok { color: var(--ok); }
+.fail { color: var(--fail); }
+.diff { color: var(--caveat); }
+.dim { color: var(--dim); }
+
+/* ---- census and contents bars -------------------------------------------- */
+
+.census { display: flex; height: 22px; border-radius: 3px; overflow: hidden; margin: .2rem 0 .6rem; }
+.census-band { height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; font-size: .84rem; color: var(--dim); margin: 0 0 .6rem; }
+.legend .key { display: inline-flex; align-items: center; gap: .35rem; }
+.legend .key i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+/* ---- the member table ---------------------------------------------------- */
+
+table.members td.url { max-width: 30rem; overflow-wrap: anywhere; }
+/* A size is one token. "498.5 KB" broken over two lines makes a column of numbers unreadable. */
+table.members td.n { white-space: nowrap; }
+.member-state { display: inline-flex; align-items: center; gap: .35rem; font-size: .86rem; white-space: nowrap; }
+.member-state i { width: 8px; height: 8px; border-radius: 99px; display: inline-block; }
+table.runs td code { font-size: .84em; }
+table.runs td .tag { margin-left: .4rem; }
+
+/* The ledger. A stabilizer id is one token and reads as one: wrapping `nupkg-doc-member-order`
+   over three lines turns a table into a paragraph. The bar column takes what is left rather than
+   `width: 100%`, which was pushing the id column down to the width of its longest hyphen run. */
+table.ledger { table-layout: auto; }
+table.ledger td:first-child { white-space: nowrap; }
+table.ledger td:first-child code { white-space: nowrap; }
+table.ledger .bar-cell { width: 30%; min-width: 4rem; }
+table.ledger .bar-track { margin: 0; }
+
+@media (max-width: 880px) {
+  /* The bar is the least load-bearing column: the number beside it says the same thing. */
+  table.ledger .bar-cell { display: none; }
+}
+
+/* A difference rule id. Shown verbatim because it is a stable name that appears in cache keys and
+   cluster ids; the tooltip carries the sentence. */
+.rule {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 .3rem;
+  margin: 0 .2rem .15rem 0;
+  cursor: help;
+  white-space: nowrap;
+}

@@ -1768,3 +1768,51 @@ A host-budget test asserted durations and failed by five milliseconds — twice,
 and once to the database round trips themselves. A reservation is absolute, so a caller arriving
 late is correctly told to wait less. The invariant has no timing in it at all: each reservation
 advances the stored floor by exactly one interval.
+
+### 3.36 A rule that had to move down rather than be written twice
+
+**Correction.** `caps_normalized` — *does this pass hold the verdict below `normalized`* — lived in
+`trigon-compare`, which was right while the comparator was the only thing that asked. Then a page
+wanted to show a reader which passes had cost them a clean verdict, and `trigon-api` deliberately
+does not depend on the comparator: a crate that cannot reach it cannot produce a `Match`, whatever
+its handlers do, and a test asserts the absence.
+
+That left two bad options — link the comparator into a read-only HTTP surface, or write
+`provenance != Builtin || risk > Metadata` a second time — and one good one. The rule is about
+`RiskTier` and `Provenance`, both of which are `trigon-core` types, so it belongs beside them.
+`trigon-compare` now projects onto it.
+
+**Moving a seam down is how ADR-0008 survives a second caller.** The alternative, and the thing the
+first instinct reaches for, is to duplicate the predicate and promise to keep the copies in step —
+which is the defect §3.31 and §3.28 are both instances of.
+
+### 3.37 The evidence classes gated the wrong property
+
+**Correction.** The class table refused a comparison to an anonymous reader on the grounds that it
+"lists member paths taken from the artifact under test". That reasoning treats the paths as secret,
+and they are not: the same paths reach a signed `divergence/v1` statement, which is served to
+anybody who asks.
+
+What is actually dangerous about the stored blob is its **size**. D9 disclaims any bound on the size
+of a difference summary, so one anonymous request against a pathological artifact is an amplifier.
+The control is the bound.
+
+So the rendered view — counts, the digest ladder, the stabilizer ledger, and a member list capped
+at 500 with the remainder stated — is anonymous, and the unbounded blob stays gated. Getting this
+wrong in the cautious direction had a cost that is easy to miss: a public site that shows a verdict
+and cannot say what it is about is missing most of the product.
+
+### 3.38 Four first frames, and the rule that was missing
+
+**Gap.** An SPA that fetches its own data paints "Loading" into every link preview, screenshot and
+slow connection. This page did it four times: the browse view, a permalink, the queue, and the run
+page again the moment a comparison fetch was added in front of `replaceChildren`.
+
+Each fix was correct and local. None generalised, and the fourth instance landed *after* the third
+was documented. The bug is not in any view — it is that `await` before a paint is one keyword, reads
+as ordinary, and is invisible until somebody looks at a rendered screenshot.
+
+What closed it was not a fifth fix but a named helper and a stated rule: **paint first, fetch
+second.** A view puts up a slot, hands `fillLater` the promise, and carries on. Worth recording
+because the pattern generalises past this page: *a defect that recurs after being fixed and written
+down is a defect whose fix was an instance rather than a rule.*

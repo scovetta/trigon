@@ -28,6 +28,8 @@ pub use fault::{Classify, Fault, Phase};
 pub use format::{Format, UnknownFormat};
 pub use logs::{Compressed, compress};
 pub use note::{Note, NoteCode};
-pub use outcome::{Match, ProfileId, Provenance, RiskTier, StabilizerId};
+pub use outcome::{
+    Match, ProfileId, Provenance, RiskTier, StabilizerId, caps_normalized, ceiling_of,
+};
 pub use path::EntryPath;
 pub use target::{ArtifactId, ArtifactKind, Ecosystem, PurlError, Target, TargetRef};

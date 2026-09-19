@@ -31,8 +31,19 @@ pub enum Class {
     /// The stabilizer set manifest, its `.wasm`, and transform overlays. Anonymous **on purpose**:
     /// see the module note.
     Definition,
-    /// The full `Comparison`. Carries member paths taken from an attacker-controlled artifact, at a
-    /// size nothing bounds (D9).
+    /// The **rendered, bounded** comparison: counts, the digest ladder, the stabilizer ledger, and
+    /// a member list capped with the remainder stated.
+    ///
+    /// Anonymous, and that is a correction rather than a relaxation. The first version of this
+    /// table gated member paths as though they were secret. They are not: the same paths reach a
+    /// signed `divergence/v1` statement, which is served to anybody. What is dangerous about the
+    /// raw blob is its **size** — D9 disclaims any bound on a difference summary, so one request
+    /// against a pathological artifact is an amplifier. The bound is the control. Gating the
+    /// rendered view too would have meant a public site that shows a verdict and cannot say what
+    /// it is about, which is most of the product.
+    Diff,
+    /// The full `Comparison` as stored. Carries member paths taken from an attacker-controlled
+    /// artifact, at a size nothing bounds (D9).
     Comparison,
     /// A published or rebuilt artifact. Redistribution, and size.
     Artifact,
@@ -47,7 +58,7 @@ pub enum Class {
 impl Class {
     /// Whether the public internet may fetch this class.
     pub fn is_anonymous(self) -> bool {
-        matches!(self, Class::Statement | Class::Definition)
+        matches!(self, Class::Statement | Class::Definition | Class::Diff)
     }
 
     /// Why not, for the reader who asked and was refused.
@@ -57,7 +68,7 @@ impl Class {
     /// about the system, and is the kind of refusal this project would rather make.
     pub fn refusal(self) -> &'static str {
         match self {
-            Class::Statement | Class::Definition => {
+            Class::Statement | Class::Definition | Class::Diff => {
                 "this class is public; if you are reading this sentence, something asked the wrong \
                  question"
             }
@@ -86,9 +97,10 @@ impl Class {
     }
 
     /// The whole table, so a listing over it cannot silently miss a class.
-    pub const ALL: [Class; 7] = [
+    pub const ALL: [Class; 8] = [
         Class::Statement,
         Class::Definition,
+        Class::Diff,
         Class::Comparison,
         Class::Artifact,
         Class::BuildLog,
@@ -147,6 +159,12 @@ mod tests {
             .into_iter()
             .filter(|c| c.is_anonymous())
             .collect();
-        assert_eq!(anonymous, vec![Class::Statement, Class::Definition]);
+        assert_eq!(
+            anonymous,
+            vec![Class::Statement, Class::Definition, Class::Diff],
+            "the anonymous set changed. Every member of it must be either the product itself or \
+             bounded by construction. The rendered diff qualifies because it caps its member list and says \
+             how many it left out, which the raw comparison does not."
+        );
     }
 }

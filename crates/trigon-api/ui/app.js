@@ -249,6 +249,38 @@ async function me(force) {
 // did. So: paint with what is known, put the credential-dependent part in a slot, and fill the
 // slot when the answer arrives. The page is correct at both instants; it is only more useful at
 // the second.
+// **Paint first, fetch second. Always.**
+//
+// This page's first frame has been the word "Loading" four separate times: the browse view, a
+// permalink, the queue, and then the run detail again the moment a comparison fetch was added in
+// front of `replaceChildren`. Each fix was correct and none of them generalised, because the bug is
+// not in any one view — it is that `await` before a paint is easy to write and invisible until
+// somebody looks at a screenshot.
+//
+// So: a view puts up an empty slot, hands this the promise, and carries on. The slot fills when the
+// answer arrives, the frame is never blank, and a fetch that fails leaves a sentence rather than a
+// gap. If you find yourself awaiting something before `view.replaceChildren`, that is the bug.
+function fillLater(slot, promise, render, whenMissing) {
+  promise.then((data) => {
+    let parts = [];
+    try {
+      parts = data ? [render(data)].flat().filter(Boolean) : [];
+    } catch (e) {
+      // A renderer that throws would otherwise leave the placeholder up for ever — the page would
+      // read as "still loading" when it is not loading and never will. Saying so is worth more
+      // than the panel was.
+      slot.replaceChildren(el('div', { class: 'err' },
+        el('strong', { text: 'This section could not be drawn. ' }),
+        el('span', { text: e.message || String(e) }),
+        el('p', { class: 'note', text: 'The evidence it was drawn from is linked further down; a rendering that fails should cost you a panel, not the data.' })));
+      return;
+    }
+    if (parts.length) slot.replaceChildren(...parts);
+    else if (whenMissing) slot.replaceChildren(whenMissing());
+    else slot.replaceChildren();
+  });
+}
+
 function whenIdentified(slot, render) {
   if (ME) {
     slot.replaceChildren(...[render()].flat().filter(Boolean));
@@ -716,6 +748,243 @@ function runTable(rows) {
     ))));
 }
 
+/* ---- what the comparison found ------------------------------------------ */
+
+// The states a member can be in, in the words a reader needs and in the verdict palette. `watch`
+// uses the same colours for the same meanings, so somebody who has seen one surface does not have
+// to relearn the other.
+const MEMBER_STATE = {
+  differs: ['differs', 'var(--fail)', 'The two copies are not the same, and no pass accounted for it.'],
+  normalized: ['stabilized out', 'var(--caveat)', 'The two copies differed and a named pass removed every way in which they did.'],
+  identical: ['identical', 'var(--ok)', 'Byte for byte what was published.'],
+  only_upstream: ['only published', 'var(--one-side)', 'In the published artifact and not in the rebuild.'],
+  only_rebuild: ['only rebuilt', 'var(--one-side)', 'The build produced this and the published artifact does not contain it.'],
+};
+
+// What each difference rule means, for the tooltip. A rule id is stable and appears in cache keys
+// and cluster names, so it is shown verbatim rather than translated — the sentence is the gloss.
+const DIFFERENCE_RULE = {
+  body: 'The member’s own bytes differ. This is the one that is about what somebody wrote.',
+  'entry:mode': 'The archive entry’s permission bits differ. The file itself may be identical.',
+  'entry:size': 'The archive entry records a different size.',
+  'entry:mtime': 'The archive entry’s timestamp differs — usually a build clock nobody pinned.',
+  'entry:uid': 'The archive entry records a different owner id.',
+  'entry:gid': 'The archive entry records a different group id.',
+  'entry:zip.crc32': 'The zip entry’s checksum differs, which follows from any of the above.',
+  entry: 'Something about the archive entry differs, rather than the file it holds.',
+};
+
+const KIND_COLOUR = {
+  executable: 'var(--fail)', binary: 'var(--one-side)',
+  metadata: 'var(--structural)', documentation: 'var(--ok)', source: 'var(--accent)',
+};
+
+// A verdict is a walk down three questions that stops at the first one that answers. Six digests
+// are unreadable; three questions with one of them marked is the same information a person can
+// hold. The rungs above the answer are greyed rather than hidden — a reader's question is "why is
+// this the verdict", and the answer is which of the three stopped it.
+function ladderPanel(d) {
+  const rows = d.ladder.map((r, i) => {
+    const past = d.ladder.findIndex((x) => x.answered);
+    const spent = past >= 0 && i < past;
+    return el('div', { class: `rung${r.answered ? ' answered' : ''}${spent ? ' spent' : ''}` },
+      el('div', { class: 'rung-q' },
+        el('span', { class: 'rung-n', text: i + 1 }),
+        el('span', { text: r.question })),
+      r.upstream
+        ? el('div', { class: 'rung-digests mono' },
+            el('span', { class: r.equal ? 'ok' : 'fail', text: short(r.upstream) }),
+            el('span', { class: 'dim', text: r.equal ? ' = ' : ' ≠ ' }),
+            el('span', { class: r.equal ? 'ok' : 'fail', text: short(r.rebuild) }))
+        : null,
+      el('p', { class: 'rung-detail', text: r.detail }));
+  });
+  return panel('Why this is the verdict', el('div', { class: 'ladder' }, rows));
+}
+
+const short = (hex) => (hex || '').slice(0, 12);
+
+// One bar, banded, in the order a reader needs: what still differs first, because that is the
+// finding. A band of zero width is not drawn and not listed — a legend entry pointing at nothing
+// invites the reader to go looking for it.
+function censusPanel(d) {
+  const c = d.census;
+  const bands = [
+    [c.differs, 'still differ', 'var(--fail)'],
+    [c.only_upstream, 'only in the published artifact', 'var(--one-side)'],
+    [c.only_rebuild, 'only in the rebuild', 'var(--one-side)'],
+    [c.identical, 'identical as published', 'var(--ok)'],
+  ].filter(([n]) => n > 0);
+  const total = Math.max(1, bands.reduce((a, [n]) => a + n, 0));
+
+  return panel('What differs', el('div', {},
+    el('div', { class: 'census' }, bands.map(([n, , colour]) =>
+      el('div', { class: 'census-band', style: [['width', `${(n / total) * 100}%`], ['background', colour]] }))),
+    el('p', { class: 'legend' }, bands.map(([n, label, colour]) =>
+      el('span', { class: 'key' },
+        el('i', { style: [['background', colour]] }),
+        `${n} ${label}`))),
+    c.executable_differs
+      ? el('p', { class: 'withheld-note' },
+          el('strong', { text: `${c.executable_differs} of them are executables. ` }),
+          'That is never benign: a metadata file that differs is usually a timestamp somebody forgot to pin, and a differing binary is the thing this tool exists to find.')
+      : null,
+    el('p', { class: 'note' },
+      `${c.total} member(s) in total, compared under the `,
+      el('code', { text: d.set.id }),
+      ' set (',
+      el('code', { class: 'dim', text: short(d.set.digest) }),
+      '). A member that differed and was accounted for by a pass is counted as identical here, because after that pass it is.')));
+}
+
+// What the artifact holds. The question "what is in this package" has an answer and the site did
+// not give it.
+function contentsPanel(d) {
+  const entries = Object.entries(d.kinds).sort((a, b) => b[1] - a[1]);
+  const total = Math.max(1, entries.reduce((a, [, n]) => a + n, 0));
+  return panel('What the package holds', el('div', {},
+    el('div', { class: 'census' }, entries.map(([kind, n]) =>
+      el('div', {
+        class: 'census-band',
+        title: `${n} ${kind}`,
+        style: [['width', `${(n / total) * 100}%`], ['background', KIND_COLOUR[kind] || 'var(--dim)']],
+      }))),
+    el('p', { class: 'legend' }, entries.map(([kind, n]) =>
+      el('span', { class: 'key' },
+        el('i', { style: [['background', KIND_COLOUR[kind] || 'var(--dim)']] }),
+        `${n} ${kind}`))),
+    el('p', { class: 'note' },
+      'Published ', el('strong', { text: bytes(d.upstream_bytes) }),
+      ', rebuilt ', el('strong', { text: bytes(d.rebuild_bytes) }), '.')));
+}
+
+// The ledger: which passes fired, at what risk, under whose authority, and which of them hold the
+// verdict below `normalized` however well the bytes agree.
+function ledgerPanel(d) {
+  if (!d.applied.length) {
+    return panel('The stabilizers', el('p', { class: 'note' },
+      'No pass changed anything on either side, so the two artifacts were compared exactly as published. The verdict owes nothing to normalization.'));
+  }
+  const max = Math.max(...d.applied.map((p) => p.entries), 1);
+  const rows = d.applied.map((p) => el('tr', {},
+    el('td', {},
+      el('code', { text: p.id }),
+      p.caps ? el('span', { class: 'tag normalized_with_caveats', text: 'caps' }) : null),
+    el('td', { class: 'n', text: p.entries }),
+    el('td', { class: 'bar-cell' },
+      el('div', { class: 'bar-track' },
+        el('div', { class: 'bar-fill', style: [['width', `${(p.entries / max) * 100}%`], ['background', RISK_COLOUR[p.risk] || 'var(--dim)']] }))),
+    el('td', { class: 'dim', text: p.risk }),
+    el('td', {}, p.provenance === 'builtin'
+      ? el('span', { class: 'dim', text: 'builtin' })
+      : el('span', { class: 'diff', text: p.who })),
+    el('td', { class: 'n dim', text: p.bytes ? bytes(p.bytes) : '—' })));
+
+  return panel('The stabilizers', el('div', {},
+    el('p', { class: 'sentence' },
+      'This run could reach ',
+      el('strong', { text: d.ceiling.replace(/_/g, ' ') }),
+      ' and no higher, whatever the bytes did.',
+      d.caps.length ? '' : ' Nothing in this set holds it down.'),
+    d.caps.length
+      ? el('ul', { class: 'assumptions' }, d.caps.map((c) =>
+          el('li', {}, el('code', { text: c.id }), el('span', { text: ` — ${c.why}` }))))
+      : null,
+    el('table', { class: 'runs ledger' },
+      el('thead', {}, el('tr', {},
+        el('th', { text: 'pass' }),
+        el('th', { class: 'n', text: 'entries' }),
+        el('th', { text: '' }),
+        el('th', { text: 'risk' }),
+        el('th', { text: 'provenance' }),
+        el('th', { class: 'n', text: 'bytes' }))),
+      el('tbody', {}, rows)),
+    el('p', { class: 'note' },
+      'Summed across both sides, which fire the same set. A cap is not a complaint about the package: it says we got there using something we will not vouch for unconditionally — a pass that rewrites content, or one a person or a model wrote rather than one compiled in. Both halves weigh the same.'),
+    d.silent === null
+      ? el('p', { class: 'note empty' },
+          'Which passes were configured and stayed silent is not recorded. A pass finding nothing to do is evidence — an unsigned package, an archive with no timestamps — and the comparison keeps the set’s digest but not its membership, so nothing downstream can tell that from a pass that was never configured.')
+      : el('p', { class: 'note' }, `Silent: ${d.silent.join(', ') || 'none'}.`)));
+}
+
+const RISK_COLOUR = {
+  structural: 'var(--structural)', metadata: 'var(--ok)',
+  content: 'var(--caveat)', lossy: 'var(--fail)',
+};
+
+// Every member, most interesting first. A hundred identical members must not bury the ten that
+// differ, and a list capped at five hundred that sorted by path would cap away exactly the rows
+// somebody came to read.
+function membersPanel(d) {
+  const rows = d.members.map((m) => {
+    const [label, colour, why] = MEMBER_STATE[m.status] || [m.status, 'var(--dim)', ''];
+    return el('tr', {},
+      el('td', { class: 'url' }, el('code', { text: m.path })),
+      el('td', {}, el('span', { class: 'member-state', title: why },
+        el('i', { style: [['background', colour]] }), label)),
+      // What differed about it before any pass ran. The row that matters is an *identical* member
+      // with `entry:mode` here: the file is byte for byte what was published, its archive entry was
+      // not, and a pass removed the difference — so the divergence was about how it was packed
+      // rather than about what anybody wrote.
+      el('td', { class: 'opt' }, m.differences.length
+        ? m.differences.map((r) => el('span', {
+            class: 'rule',
+            title: DIFFERENCE_RULE[r] || DIFFERENCE_RULE[r.split(':')[0]] || r,
+            text: r,
+          }))
+        : el('span', { class: 'empty', text: '—' })),
+      el('td', { class: 'opt dim', text: m.kind }),
+      el('td', { class: 'n dim', text: m.upstream_bytes === null || m.upstream_bytes === undefined ? '—' : bytes(m.upstream_bytes) }),
+      el('td', { class: 'n dim', text: m.rebuild_bytes === null || m.rebuild_bytes === undefined ? '—' : bytes(m.rebuild_bytes) }));
+  });
+  return panel('Member by member', el('div', {},
+    el('table', { class: 'runs members' },
+      el('thead', {}, el('tr', {},
+        el('th', { text: 'member' }),
+        el('th', { text: 'state' }),
+        el('th', { class: 'opt', text: 'what differed' }),
+        el('th', { class: 'opt', text: 'kind' }),
+        el('th', { class: 'n', text: 'published' }),
+        el('th', { class: 'n', text: 'rebuilt' }))),
+      el('tbody', {}, rows)),
+    el('p', { class: 'note' },
+      el('strong', { text: 'What differed' }),
+      ' is what the comparator saw ',
+      el('em', { text: 'before' }),
+      ' any pass ran. A member listed as identical with an ',
+      el('code', { text: 'entry:' }),
+      ' rule beside it is the case worth reading twice: the file is byte for byte what was published and its archive entry was not, so the difference was about how it was packed and a pass removed it.'),
+    d.members_omitted
+      ? el('p', { class: 'withheld-note', text: `${d.members_omitted} further member(s) are not listed. The list is capped so one request against a very large artifact cannot become a very large response; the full comparison is linked below.` })
+      : null));
+}
+
+// What the comparison noticed, whether or not it changed the verdict. `ExecutableContentDiffers`
+// carries the doc comment "Never benign" and `is_noteworthy` says such a note "should reach a human
+// even when the verdict is a clean match" — so it reaches one here rather than living in a blob.
+function notesPanel(d) {
+  if (!d.notes.length) {
+    return panel('What the comparison noticed', el('p', { class: 'note' },
+      'Nothing beyond the verdict. Not an empty section by accident: parse limits, malformed entries and executables whose content differs all leave a note here, and none did.'));
+  }
+  return panel('What the comparison noticed', el('div', {},
+    el('table', { class: 'runs' },
+      el('thead', {}, el('tr', {},
+        el('th', { text: 'what' }),
+        el('th', { class: 'n', text: 'count' }),
+        el('th', { text: 'where' }))),
+      el('tbody', {}, d.notes.map((n) => el('tr', {},
+        el('td', {},
+          el('code', { text: n.code }),
+          n.noteworthy ? el('span', { class: 'tag divergent', text: 'reaches a human' }) : null),
+        el('td', { class: 'n', text: n.count }),
+        el('td', { class: 'url dim' },
+          el('code', { text: n.paths.length ? n.paths.slice(0, 3).join(', ') + (n.paths.length > 3 ? ` +${n.paths.length - 3}` : '') : '—' })))))),
+    el('p', { class: 'note' },
+      'A note marked ', el('span', { class: 'tag divergent', text: 'reaches a human' }),
+      ' is one the type itself documents as never benign — it is shown whatever the verdict says.')));
+}
+
 /* ---- one run ------------------------------------------------------------ */
 
 async function detail(id) {
@@ -776,7 +1045,31 @@ async function detail(id) {
     entry.outcome ? [el('span', { text: 'verdict ' }), el('b', { text: entry.outcome.replace(/_/g, ' ') })] : null,
   ].filter(Boolean).flatMap((bit, i) => i ? [el('span', { class: 'arrow', text: '→' }), ...bit] : bit));
 
+  // The comparison goes in a slot rather than in front of the paint. See `fillLater`.
+  const comparison = el('div', {});
+  if (entry.has.comparison) {
+    comparison.replaceChildren(
+      panel('What differs', el('p', { class: 'empty', text: 'reading the comparison…' })),
+    );
+    fillLater(
+      comparison,
+      api(`/v1/runs/${encodeURIComponent(id)}/diff`).catch(() => null),
+      (d) => [
+        ladderPanel(d),
+        censusPanel(d),
+        contentsPanel(d),
+        ledgerPanel(d),
+        membersPanel(d),
+        notesPanel(d),
+      ],
+      () => panel('What differs', el('p', { class: 'note empty' },
+        'The comparison could not be rendered. The raw blob is still linked below — a rendering that fails should cost you a page, not the evidence.')),
+    );
+  }
+
   const panels = [
+    comparison,
+
     panel('What ran', el('dl', { class: 'kv' },
       kv('base image', el('span', { class: 'mono', text: record.environment.base_image })),
       // An empty string here is a field nobody wrote, not an isolation mechanism named "". The
@@ -823,12 +1116,21 @@ async function detail(id) {
 
     panel('What it cost', costs(record)),
 
-    panel('The evidence', el('div', { class: 'evidence' },
+    panel('The evidence, as stored', el('div', {},
+      el('p', { class: 'note' },
+        // A run that reached no verdict has no panels above this one, so the sentence that
+        // describes them would be describing nothing.
+        entry.has.comparison
+          ? 'The bytes the panels above were rendered from. A third party re-derives a verdict from these, not from a page: '
+          : 'What this run left behind. A third party re-derives a verdict from these rather than from a page: ',
+        el('code', { text: 'trigon verify-attestation --rerun-comparison' }),
+        '.'),
+      el('div', { class: 'evidence' },
       evidenceLink('the comparison', `/v1/runs/${id}/comparison`, entry.has.comparison, 'The full member-by-member comparison, with every stabilizer that fired.'),
       evidenceLink('the build log', `/v1/runs/${id}/log`, entry.has.build_log, 'Unredacted, so it is served to a principal and not to the internet.'),
       evidenceLink('what crossed the network', `/v1/runs/${id}/network`, entry.has.network_transcript, 'Every request the build made, as the mirror saw it.'),
       evidenceLink('the signed statement', `/v1/runs/${id}/attestation`, entry.attested, 'The product: a claim re-derived from the bytes before it was signed.'),
-    )),
+      ))),
 
     panel('Timings', record.timings?.length
       ? el('dl', { class: 'kv' }, record.timings.map(([phase, s]) => kv(phase, orAbsent(s, (x) => secs(x)))))

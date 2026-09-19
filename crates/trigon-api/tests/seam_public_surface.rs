@@ -240,3 +240,38 @@ async fn the_contract_describes_the_router_that_exists() {
         assert_eq!(status, 200, "{path} is in the contract and does not answer");
     }
 }
+
+/// The rendered diff is gated by the publication gate, like the run it describes.
+///
+/// It is anonymous *as a class* — the bound is its control, not secrecy — but that says nothing
+/// about whether this particular run may be shown. A withheld divergence whose member list was
+/// served because the route was "anonymous" would publish the accusation the gate is holding back,
+/// in more detail than the verdict would have.
+#[tokio::test]
+async fn a_withheld_run_has_no_renderable_diff_either() {
+    let mut r = record(
+        "1700000001-aa",
+        "pkg:npm/accused@1.0.0",
+        Some("divergent"),
+        Some("k1"),
+    );
+    r.comparison = Some(Digest::from_bytes([4u8; 32]));
+
+    let api = api_over(vec![r.clone()], Principal::Anonymous).await;
+    let (status, body) = get(api, "/v1/runs/1700000001-aa/diff").await;
+    assert_eq!(status, 404, "a withheld run's diff was served: {body}");
+    assert!(
+        !body.contains("accused"),
+        "the refusal named the package it was refusing to name"
+    );
+
+    // An operator reading their own store gets past the gate and then fails on the missing blob,
+    // which is a different refusal and says so.
+    let api = api_over(vec![r], Principal::Operator).await;
+    let (status, body) = get(api, "/v1/runs/1700000001-aa/diff").await;
+    assert_eq!(status, 404);
+    assert!(
+        body.contains("no_such_blob"),
+        "an operator got the gate's refusal rather than the store's: {body}"
+    );
+}

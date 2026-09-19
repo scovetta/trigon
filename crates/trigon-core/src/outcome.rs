@@ -94,6 +94,38 @@ impl Provenance {
     }
 }
 
+/// Does a pass with this risk and this provenance hold a verdict below [`Match::Normalized`]?
+///
+/// The provenance cap's predicate. **It lives here because both its operands do** — [`RiskTier`]
+/// and [`Provenance`] are core types, and a rule about two core types belongs beside them rather
+/// than inside whichever crate happened to need it first.
+///
+/// It was in `trigon-compare`, which was right while the comparator was the only thing that asked.
+/// Then a page wanted to show a reader *which* passes had cost them a clean verdict, and the choice
+/// was between linking the comparator into a read-only surface or writing
+/// `provenance != Builtin || risk > Metadata` a second time. [ADR-0008] is one implementation per
+/// seam; moving the seam down is how you get that without either.
+///
+/// Both halves weigh the same, and that is the point: a `Metadata`-risk pass a model proposed caps
+/// a verdict exactly as firmly as a `Content`-risk builtin. See `docs/00-overview.md` §3.1.
+///
+/// [ADR-0008]: ../../../docs/adr/0008-one-implementation-per-seam.md
+pub fn caps_normalized(risk: RiskTier, provenance: &Provenance) -> bool {
+    !provenance.is_builtin() || risk > RiskTier::Metadata
+}
+
+/// The best verdict a set of passes could reach, before a single byte is compared.
+///
+/// [`Match::Exact`] is not among the answers and that is not an omission: identical bytes are
+/// decided before any pass runs, so no ledger of passes can put a ceiling on it.
+pub fn ceiling_of<'a>(passes: impl IntoIterator<Item = (RiskTier, &'a Provenance)>) -> Match {
+    if passes.into_iter().any(|(r, p)| caps_normalized(r, p)) {
+        Match::NormalizedWithCaveats
+    } else {
+        Match::Normalized
+    }
+}
+
 /// A stable stabilizer name. Appears verbatim in every attestation, so it never changes.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 #[serde(transparent)]

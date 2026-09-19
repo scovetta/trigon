@@ -3190,9 +3190,13 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
+ "trigon-archive",
  "trigon-attest",
+ "trigon-compare",
  "trigon-core",
+ "trigon-stabilize",
  "trigon-store",
+ "zip",
 ]
 
 [[package]]

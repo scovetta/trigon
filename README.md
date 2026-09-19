@@ -694,6 +694,12 @@ serving 2 run(s) on http://127.0.0.1:8100  (public: an unauthenticated reader se
 publication gate released, and no unredacted bytes)
 ```
 
+A run's page is the comparison, rendered: why this is the verdict (the three questions, with the
+one that answered marked), what differs, what the package holds, the stabilizer ledger with each
+pass's risk and provenance, and every member with what differed about it — the file's own bytes, or
+only its archive entry. The raw blobs are still there underneath, because a page is what a reader
+wants and the bytes are what a third party re-derives a verdict from.
+
 `--public` turns on two controls at once, and there is no way to ask for half: the publication
 gate, so nothing reaches an anonymous reader until two attempts agree and the run was not built at
 an open egress tier; and the evidence class table, so no build log or network transcript leaves the

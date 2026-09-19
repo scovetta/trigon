@@ -14,6 +14,7 @@
 //!
 //! [`docs/22-management-layer.md`]: ../../../docs/22-management-layer.md
 
+pub mod comparison;
 pub mod evidence;
 pub mod index;
 pub mod publication;
@@ -81,6 +82,9 @@ pub fn router(api: Arc<Api>) -> axum::Router {
         .route("/v1/stats", get(routes::stats))
         .route("/v1/runs", get(routes::runs))
         .route("/v1/runs/{id}", get(routes::run))
+        // The rendered comparison, and the bytes it was rendered from. Both, deliberately: a page
+        // is what a reader wants and the blob is what a third party re-derives a verdict from.
+        .route("/v1/runs/{id}/diff", get(routes::diff))
         .route("/v1/runs/{id}/comparison", get(routes::comparison))
         .route("/v1/runs/{id}/attestation", get(routes::attestation))
         .route("/v1/runs/{id}/log", get(routes::build_log))

@@ -772,6 +772,70 @@ The second row is stage 0. The third is the engine's confirmation attempt, and i
 thing this project has ever published under ADR-0010's safeguards rather than in spite of their
 absence.
 
+## 12.1 The comparison, rendered
+
+The first version of stage 1 served the corpus and linked the evidence: `/v1/runs/{id}/comparison`
+gave you the stored blob and nothing read it for you. Honest, and also asking somebody to read three
+thousand lines of JSON to learn that ten members of a NuGet package differ.
+
+`GET /v1/runs/{id}/diff` renders it, and the run page shows six panels built from it:
+
+- **Why this is the verdict** — the three questions a verdict is, with the one that answered marked
+  and the ones above it greyed. Six digests are unreadable; three questions with one of them marked
+  is the same information a person can hold.
+- **What differs** — one banded bar, the finding first, and the executable count called out
+  separately because `ExecutableContentDiffers` carries the doc comment *"Never benign"*.
+- **What the package holds** — the contents, by kind. The question "what is in this package" had an
+  answer the site did not give.
+- **The stabilizers** — the ceiling, which passes hold it there and why, and a ledger with risk and
+  provenance.
+- **Member by member** — every member with its state, kind and both sizes, the finding sorted
+  first, capped at 500 with the remainder stated.
+- **What the comparison noticed** — the notes, with the ones the type documents as never benign
+  marked as reaching a human.
+
+**The raw routes stay.** A rendering is what a reader wants; the blob is what a third party
+re-derives a verdict from, and no page replaces `trigon verify-attestation --rerun-comparison`.
+
+Three decisions worth recording.
+
+**The cap predicate moved to `trigon-core`.** Showing a reader *which* passes cost them a clean
+verdict needs the rule, and the API deliberately does not link `trigon-compare`. The choice was
+between linking the comparator into a read-only surface or writing
+`provenance != Builtin || risk > Metadata` a second time. Neither: the rule is about two core types
+and now lives beside them, with `trigon-compare` projecting onto it. Moving a seam down is how
+ADR-0008 is kept when two crates need one rule.
+
+**The rendered diff is anonymous, and that is a correction.** The evidence class table gated member
+paths as though they were secret. They are not — the same paths reach a signed `divergence/v1`
+statement served to anybody. What is dangerous about the raw blob is its **size**: D9 disclaims any
+bound on a difference summary, so one request against a pathological artifact is an amplifier. The
+bound is the control. Gating the rendered view too would have meant a public site that shows a
+verdict and cannot say what it is about.
+
+**The projection is a second description of one shape**, which is the defect this tree keeps
+finding, so it has the assertion that was missing the other times:
+`the_projection_reads_a_real_comparison` builds a genuine `Comparison` through a dev-dependency,
+serializes it, and asserts every field the page claims to read comes back populated. A field renamed
+upstream fails that test rather than silently rendering a blank.
+
+And one thing the record cannot answer: **which passes were configured and stayed silent.** `apply`
+returns only what fired, and the comparison keeps the set's id and digest but not its membership, so
+nothing downstream can tell a pass that found nothing from one that was never configured. That
+difference is evidence — `nupkg-signature` finding no signature says the package was unsigned — and
+the view reports it as *unknown* rather than as an empty list. `trigon watch` can show it only
+because it re-derives the set locally. Putting the set's membership in the comparison would fix it
+everywhere.
+
+### What a first frame costs, a fourth time
+
+Adding the comparison fetch in front of `view.replaceChildren` put the word "Loading" back into the
+run page's first frame — the fourth time, after browse, a permalink and the queue. Each earlier fix
+was correct and none generalised, because the bug is not in any view: it is that `await` before a
+paint is easy to write and invisible until somebody looks at a screenshot. There is now one helper,
+`fillLater`, named after the rule, and the rule is stated where it will be read: **paint first,
+fetch second**; if you are awaiting something before `replaceChildren`, that is the bug.
+
 ## 13. What is left
 
 Three things, and each is blocked on something real rather than on time.
@@ -790,6 +854,15 @@ boundary to cross. A fleet does not change that, because the fleet's unit of wor
 whole run. Splitting it is what turns the invariant into something a test can assert, and the
 enforcement test waits on the split rather than the other way around. Until then the threat model
 should keep saying collocation.
+
+**The set's membership in the comparison blob.** One recording change, and it closes a gap
+everywhere at once. `apply` returns only the passes that fired; the comparison keeps the set's id
+and digest but not its members, so nothing downstream can tell a pass that found nothing from one
+that was never configured. That distinction is evidence — a signature pass with nothing to strip
+means the package was unsigned — and today only `trigon watch` can show it, by re-deriving the set
+locally from a crate the API deliberately does not link. The same shape as §5's raw per-member
+digests: a fact that exists at run time, is not written down, and therefore cannot be shown by
+anything that was not there.
 
 **The §4 tables, and D7.** `run` is the pointers-and-scalars row the outbox needs, not
 `10-scale.md` §4's `runs`/`verdicts`/`rollups`. The API still reads the object store, which is

@@ -19,9 +19,7 @@ pub use signature::{matches, signature};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256, Sha512 as Sha512Hasher};
 use trigon_archive::{ArchiveError, Limits, parse, serialize};
-use trigon_core::{
-    Digest, Format, Match, MultiDigest, Note, NoteCode, ProfileId, Provenance, RiskTier, Sha512,
-};
+use trigon_core::{Digest, Format, Match, MultiDigest, Note, NoteCode, ProfileId, Sha512};
 use trigon_stabilize::{Applied, StabilizerSet, apply};
 
 #[derive(Debug, thiserror::Error)]
@@ -169,14 +167,12 @@ impl Comparison {
 
 /// Does this pass hold the verdict below [`Match::Normalized`]?
 ///
-/// The provenance cap's predicate, named once so that asking the question is not the same thing as
-/// re-implementing the rule. `compare` decides the outcome with it, `cap_reason` names the pass
-/// with it, and a page that wants to show a reader *which* rows cost them a clean verdict can mark
-/// them with it rather than writing `provenance != Builtin || risk > Metadata` a fourth time.
-///
-/// See `docs/00-overview.md` §3.1 and ADR-0008: one implementation per seam.
+/// The [`Applied`]-shaped spelling of [`trigon_core::caps_normalized`], which is where the rule
+/// itself lives — see that function for why it moved down to the crate holding its operands. This
+/// is a projection, not a second implementation: if the two ever disagree it is because somebody
+/// edited this line, which is why there is nothing here to edit.
 pub fn caps_normalized(a: &Applied) -> bool {
-    a.provenance != Provenance::Builtin || a.risk > RiskTier::Metadata
+    trigon_core::caps_normalized(a.risk, &a.provenance)
 }
 
 /// The best verdict a run using these passes could reach — before a single byte is compared.
@@ -190,11 +186,7 @@ pub fn caps_normalized(a: &Applied) -> bool {
 /// [`Match::Exact`] is not among the answers and that is not an omission: identical bytes are
 /// decided before any pass runs, so no ledger of passes can put a ceiling on it.
 pub fn ceiling<'a>(applied: impl IntoIterator<Item = &'a Applied>) -> Match {
-    if applied.into_iter().any(caps_normalized) {
-        Match::NormalizedWithCaveats
-    } else {
-        Match::Normalized
-    }
+    trigon_core::ceiling_of(applied.into_iter().map(|a| (a.risk, &a.provenance)))
 }
 
 /// Compare two summaries.

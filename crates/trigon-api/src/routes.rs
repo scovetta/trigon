@@ -155,7 +155,9 @@ async fn blob_of(api: &Api, id: &str, what: &str) -> Response {
 
 fn content_type(c: Class) -> &'static str {
     match c {
-        Class::Comparison | Class::Statement | Class::Definition => "application/json",
+        Class::Comparison | Class::Statement | Class::Definition | Class::Diff => {
+            "application/json"
+        }
         Class::Transcript => "application/x-ndjson",
         Class::BuildLog | Class::ModelTranscript => "text/plain; charset=utf-8",
         Class::Artifact => "application/octet-stream",
@@ -164,6 +166,64 @@ fn content_type(c: Class) -> &'static str {
 
 pub async fn comparison(State(api): S, Path(id): Path<String>) -> Response {
     blob_of(&api, &id, "comparison").await
+}
+
+/// The comparison, rendered: the ladder, the ledger, the census and a bounded member list.
+///
+/// The page a reader wants, as against `/comparison`, which is the same facts as three thousand
+/// lines of JSON. Both exist on purpose — the raw blob is what a third party re-derives a verdict
+/// from, and no rendering replaces that.
+///
+/// Anonymous, unlike the blob. See [`Class::Diff`]: the control on a difference summary is its
+/// bound, not its secrecy, and the same member paths already reach a signed statement served to
+/// anybody.
+pub async fn diff(State(api): S, Path(id): Path<String>) -> Response {
+    let Some(r) = api.index.get(&id) else {
+        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    };
+    if api.principal() == Principal::Anonymous
+        && !api
+            .index
+            .entry(&id)
+            .is_some_and(|e| e.publication.is_public())
+    {
+        // 404, matching `/v1/runs/{id}`: a 403 confirms the run exists, which for a withheld
+        // divergence is most of the accusation the gate is holding back.
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "no_such_run",
+            "no run by that id is published",
+        );
+    }
+    let Some(digest) = r.comparison else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "not_recorded",
+            "this run reached no comparison, so there is nothing to render. A run that produced no \
+             verdict says why on its own page.",
+        );
+    };
+    let bytes = match api.store.blobs().get(&digest).await {
+        Ok(b) => b,
+        Err(e) => {
+            return refuse(
+                StatusCode::NOT_FOUND,
+                "no_such_blob",
+                &format!("the record names a comparison the store cannot return: {e}"),
+            );
+        }
+    };
+    // `None`: the set's membership is not in the record, so nothing here can tell a pass that found
+    // nothing from one that was never configured. See `comparison::View::silent`.
+    match crate::comparison::render(&bytes, None) {
+        Some(view) => json(view),
+        None => refuse(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unreadable_comparison",
+            "the stored comparison is not one this build can read. That is our fault rather than \
+             the run's, and the raw blob is still served, so nothing is lost but the rendering.",
+        ),
+    }
 }
 
 pub async fn build_log(State(api): S, Path(id): Path<String>) -> Response {
@@ -364,8 +424,12 @@ pub const ROUTES: &[(&str, &str)] = &[
         "One run: the stored record and the publication decision",
     ),
     (
+        "/v1/runs/{id}/diff",
+        "The comparison rendered: ladder, ledger, census, members. Anonymous, bounded",
+    ),
+    (
         "/v1/runs/{id}/comparison",
-        "The full comparison. Class-gated",
+        "The full comparison, as stored. Class-gated",
     ),
     (
         "/v1/runs/{id}/attestation",
