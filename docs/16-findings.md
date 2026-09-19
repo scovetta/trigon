@@ -1495,6 +1495,37 @@ so the list shrinks deliberately and never grows by accident.
 
 ---
 
+### 3.29 The image could be labelled from source it was not built from
+
+`trigon mirror-image` labels the image it builds with a digest of the workspace, and
+`warn_if_stale` compares that label against the running binary's. The warning fires on every
+command that uses the mirror, and it has been right every time it fired.
+
+It could have been wrong in the direction that matters. The Containerfile mounts a cache at
+`/src/target` — without it a one-line change recompiles ~180 dependency crates against musl, which
+is most of why this image goes stale and stays stale — and `COPY . .` writes the context's files
+with normalized timestamps. Cargo decides whether to recompile from those timestamps. So a crate of
+**ours** whose source changed could look unchanged to cargo and be served from the cached rlib of an
+earlier build, while the label was computed from the current tree.
+
+Found the loud way, three times in a row: the build failed on `note_remote`, a function that was in
+the tree and not in the compiled library. The quiet way is the same mechanism with the arms
+reversed — a removed function, a changed constant, a rule deleted from the failure table — producing
+an image that carries older behaviour, labelled as current, with the staleness check comparing
+labels and saying so. `--egress mirror-only` is enforced by that image; a mirror serving the routes
+it was built with is the failure mode the warning exists for, and this would have made the warning
+lie.
+
+The fix is one line before the build: `find crates -name '*.rs' -exec touch {} +`. It invalidates
+our seven crates and leaves the dependency rlibs cached, which is the split the cache mount was
+there for in the first place.
+
+**The shape, again.** Two things that had to agree — what the label describes and what the binary
+contains — with nothing asserting they did. The label was derived from the context and the binary
+from cargo's opinion of the context, and the two have different definitions of "changed".
+
+---
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher
