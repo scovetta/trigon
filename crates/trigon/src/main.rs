@@ -501,6 +501,18 @@ enum Cmd {
         /// from last Tuesday. See `docs/adr/0013-a-cache-supplies-bytes-never-decisions.md`.
         #[arg(long)]
         cache: Option<PathBuf>,
+        /// Stop after this many targets fail the same way with none succeeding between them.
+        ///
+        /// **A wall is a claim about the corpus, not only about the run.** Ten identical failures
+        /// in a row on a corpus chosen because every target has a `gitHead` means something broke —
+        /// throttling, a full disk, a stopped daemon — and spending the night proving it is waste.
+        /// On a corpus sampled at random from a registry, ten `no-strategy` in a row is the
+        /// finding: most of what is published declares no repository. The first sweep of
+        /// `corpora/random-125.txt` stopped after ten targets for exactly that reason.
+        ///
+        /// `0` turns it off, for a corpus whose answer is expected to be homogeneous.
+        #[arg(long, default_value_t = 10)]
+        wall: u32,
     },
     /// Watch a sweep's work directory, from a browser, while it runs.
     ///
@@ -1056,6 +1068,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             concurrency,
             source_cache,
             cache,
+            wall,
         } => sweep::run(sweep::Args {
             targets,
             image,
@@ -1074,6 +1087,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             // that were 18% of one sweep's egress were spread across its targets. A resumed sweep
             // is a new invocation and gets a new scope, which is the conservative answer.
             fetch_cache: cache.map(|c| (c, format!("sweep-{}", std::process::id()))),
+            wall,
         }),
         Cmd::Keygen { out, public_out } => keygen(&out, public_out.as_deref()),
         Cmd::PublicKey { key, pem } => {
@@ -5156,6 +5170,8 @@ mod sweep {
         pub source_cache: Option<PathBuf>,
         /// Where the mirror may keep upstream bytes, shared by every target in this sweep.
         pub fetch_cache: Option<(PathBuf, String)>,
+        /// Identical consecutive failures that mean a wall rather than a set of findings. `0` is off.
+        pub wall: u32,
         /// Targets built at once.
         ///
         /// **Defaults to 1, which is what a sweep did before this existed.** Raising it is the
@@ -5313,9 +5329,13 @@ mod sweep {
             }
         }
 
-        // How many identical consecutive failures mean a wall rather than a set of findings, how
-        // often to check the disk, and how little free space is too little to keep going.
-        const WALL: u32 = 10;
+        // How often to check the disk, and how little free space is too little to keep going.
+        //
+        // The wall itself is `args.wall`, because how many identical failures mean "something
+        // broke" is a property of the corpus rather than of the code: on a curated corpus it is
+        // ten, and on one sampled at random from a registry ten `no-strategy` in a row is the
+        // answer rather than a fault.
+        let wall = args.wall;
         const REAP_EVERY: usize = 20;
         const FLOOR: u64 = 20 * 1_000_000_000;
         // Each lane holds a build container and a mirror container. Below this there is not room
@@ -5401,15 +5421,16 @@ mod sweep {
                 }
                 rows.push((purl, outcome, secs));
 
-                if consecutive >= WALL {
+                if wall > 0 && consecutive >= wall {
                     let key = repeated.clone().unwrap_or_default();
                     tracing::error!(
                         cluster = %key,
-                        "{WALL} targets in a row failed the same way and none succeeded between \
-                         them. That is a wall rather than {WALL} findings — throttling, a full \
+                        "{wall} targets in a row failed the same way and none succeeded between \
+                         them. That is a wall rather than {wall} findings — throttling, a full \
                          disk, a stopped daemon — so the sweep is stopping instead of spending the \
                          night proving it. Every row so far is written; re-run the same command to \
-                         resume once the cause is fixed."
+                         resume once the cause is fixed, or pass `--wall 0` if this corpus is \
+                         expected to answer the same way this often."
                     );
                     stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     break;

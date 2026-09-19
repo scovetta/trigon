@@ -486,6 +486,31 @@ Three things would, in increasing order of effort:
 **Done when:** one corpus target fails deterministically, is repaired by a model, and rebuilds — and
 the corpus says how often a repair helps at all, which no number anywhere currently says.
 
+## B28. One floor for every route, and the routes are not alike
+
+`trigon-politeness` spaces every request to a host by 100 ms. That number came from
+`trigon-registry::ClientConfig`, where it governed **metadata** requests — resolving a package,
+asking a forge about a tag — and where it is plainly right.
+
+It now also governs every artifact and toolchain fetch, because those are what the mirror proxies
+and the mirror is where the limiter went. A build installing eight hundred dependencies therefore
+pays eighty seconds of pure spacing on tarballs alone, before anything is downloaded or unpacked.
+Measured in the 125-target random sweep: targets with a large dependency tree went from tens of
+seconds to minutes, and the spacing is the difference.
+
+The two routes are not alike. An index document is a decision and the thing a registry most wants
+us to ask for gently. A `.tgz` at an immutable URL is a CDN object, served by infrastructure built
+for exactly this, and the cache collapses the repeats anyway — the measured 86.7% of them.
+
+**The shape of the answer**, not yet chosen: a per-route floor rather than a per-host one, with the
+index route keeping 100 ms and the artifact and toolchain routes taking something much smaller or
+nothing. What must not happen is picking the number by how fast it makes a sweep feel, which is how
+a rate limit becomes decorative.
+
+Related, and larger: the limiter is **process-global and the mirror is per-target**, so across a
+sweep at N lanes the declared floor still multiplies by N. Within one machine a lock file beside the
+fetch cache would fix it; across a fleet it is the queue, which is M4 stage B.
+
 ## B25. ~~The fetch cache behind the mirror, in three tiers~~ — two of three built
 
 [ADR-0013](adr/0013-a-cache-supplies-bytes-never-decisions.md) decides the shape; this is the work.
