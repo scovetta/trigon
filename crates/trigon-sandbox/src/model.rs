@@ -48,6 +48,44 @@ pub enum IsolationClass {
     Vm,
 }
 
+impl IsolationClass {
+    /// The wire spelling, which is the serde one and not `Debug`'s.
+    ///
+    /// This string goes into a signed `buildObservation` predicate. `Debug` would write `UserNs`
+    /// where the schema and every serialized record say `user_ns` — the same trap
+    /// `SourceProvenance::how` carries a note about, and a test below holds the two equal so they
+    /// cannot drift.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IsolationClass::Process => "process",
+            IsolationClass::Container => "container",
+            IsolationClass::UserNs => "user_ns",
+            IsolationClass::Gvisor => "gvisor",
+            IsolationClass::Kata => "kata",
+            IsolationClass::Vm => "vm",
+        }
+    }
+}
+
+#[cfg(test)]
+mod isolation_spelling {
+    use super::IsolationClass::*;
+
+    /// `as_str` and serde must agree, because one of them ends up in a signed document.
+    #[test]
+    fn the_stable_name_is_the_serialized_name() {
+        for c in [Process, Container, UserNs, Gvisor, Kata, Vm] {
+            let json = serde_json::to_string(&c).expect("serializes");
+            assert_eq!(
+                json.trim_matches('"'),
+                c.as_str(),
+                "{c:?} serializes as {json} but as_str says {}",
+                c.as_str()
+            );
+        }
+    }
+}
+
 /// How much of what the build did we can see afterwards.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -23,3 +23,6 @@ futures.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# Only for the test that holds `IsolationClass::as_str` equal to its serde spelling — the string
+# that ends up in a signed predicate.
+serde_json.workspace = true

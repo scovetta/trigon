@@ -229,6 +229,8 @@ async fn store_with_a_run(root: &Path) -> String {
             base_image: "docker.io/library/debian@sha256:aa".into(),
             egress: "mirror-only".into(),
             isolation: "UserNs".into(),
+            guard_manifest: None,
+            guarded_members: None,
             attestable: false,
             registry_moment: None,
             pin: None,

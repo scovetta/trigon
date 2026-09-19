@@ -71,6 +71,21 @@ pub struct Environment {
     /// `None` where no mirror was configured, which is a third state and not a failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<PinEvidence>,
+    /// The digest of the guard manifest the mirror was armed with, where it was armed.
+    ///
+    /// **`None` means nobody looked, and that is why it is recorded rather than inferred.** The
+    /// signed `artifactHashCheck` block derives `performed` from this field being present, so a
+    /// record that omits it says the artifact guard never ran — which is what nineteen signed
+    /// statements said about runs where it had. The predicate renderer was right and tested both
+    /// ways; nothing asserted that a real run supplied the input, and it did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_manifest: Option<String>,
+    /// How many of the artifact's members the guard was watching for.
+    ///
+    /// Zero is a real answer and not the same as `None`: every member was too small, too common,
+    /// or also present in the source, so the guard watched the artifact alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guarded_members: Option<u64>,
 }
 
 /// What the mirror saw, recorded beside the moment the build claimed to be pinned to.

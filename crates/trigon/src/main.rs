@@ -1259,6 +1259,13 @@ mod build {
     pub struct Built {
         /// Exactly `transcript.is_some()`; see [`trigon_sandbox::BuildOutcome::attestable`].
         pub attestable: bool,
+        /// The boundary the runner actually achieved, in its serde spelling.
+        ///
+        /// Carried because the signed predicate has a field for it and was writing `""`: the value
+        /// reached a `println!` and stopped there, so nineteen statements described an unbounded
+        /// build. What the runner reports, never what the flag asked for — the same rule
+        /// `attestable` above is under.
+        pub isolation: String,
         /// The complete account of what crossed into the build, or `None` when none exists. An
         /// empty `Some` means nothing crossed and must never be flattened into `None`.
         pub transcript: Option<Vec<trigon_mirror::Exchange>>,
@@ -1703,6 +1710,7 @@ mod build {
             }
             Ok(Built {
                 attestable: outcome.attestable,
+                isolation: outcome.isolation.as_str().to_string(),
                 transcript: outcome.transcript,
                 pin: outcome.pin,
                 refused_artifact: outcome.refused_artifact,
@@ -2672,7 +2680,14 @@ mod rebuild {
 
         // Taken before the ladder consumes `args`, so the record can be written at the end without
         // keeping the whole argument struct alive.
+        //
+        // The three run-derived fields below are empty here and filled at the second construction,
+        // which is the one that writes: nothing has been built or armed at this point, so an empty
+        // value is the true one rather than a placeholder.
         let inputs = RecordInputs {
+            isolation: String::new(),
+            guard_manifest: None,
+            guarded_members: None,
             purl: args.purl.clone(),
             work: args.work.clone(),
             image: args.image.clone(),
@@ -2855,7 +2870,20 @@ mod rebuild {
         // one. The mirror runs in a container with no route to this process, so a file is how the
         // manifest gets there.
         let guard_file = args.work.join("guard.json");
-        std::fs::write(&guard_file, serde_json::to_vec_pretty(&guard)?)?;
+        let guard_bytes = serde_json::to_vec_pretty(&guard)?;
+        std::fs::write(&guard_file, &guard_bytes)?;
+        // **Taken here, where the guard is armed, because this is the only place that knows.** The
+        // signed `artifactHashCheck` block derives `performed` from the presence of this digest, so
+        // a run that does not carry it forward signs a statement saying nobody looked. Nineteen
+        // statements said exactly that about runs where the guard was armed and reported its member
+        // count to the terminal in the same breath.
+        let guard_manifest = Some(
+            trigon_core::Digest::from_bytes(<[u8; 32]>::from(
+                <sha2::Sha256 as sha2::Digest>::digest(&guard_bytes),
+            ))
+            .to_hex(),
+        );
+        let guarded_members = Some(guard.members.len() as u64);
 
         // Evidence the registry pin bound something, filled in once the mirror is torn down.
         let mut pin: Option<trigon_mirror::Observed> = None;
@@ -3444,6 +3472,15 @@ mod rebuild {
                 // instead was worse still: that stamped `attestable: true` on runs whose
                 // image-build phases were outside the boundary entirely.
                 attestable: built.as_ref().is_ok_and(|b| b.attestable),
+                // From the runner, and from the site that armed the guard. These three are why the
+                // signed `artifactHashCheck` block said `performed: false` on every run where it
+                // had been performed: the values existed, and nothing carried them this far.
+                isolation: built
+                    .as_ref()
+                    .map(|b| b.isolation.clone())
+                    .unwrap_or_default(),
+                guard_manifest: guard_manifest.clone(),
+                guarded_members,
                 network_transcript: built.as_ref().ok().and_then(|b| b.transcript.clone()),
                 // What the run's own counters say, not what a budget allowed. `docs/03` §3 puts
                 // costs beside the timings for one reason: the number that decides where money
@@ -3537,6 +3574,15 @@ mod rebuild {
         pin: Option<trigon_mirror::Observed>,
         /// What the runner reported about its own enforcement, never what the flag asked for.
         attestable: bool,
+        /// The boundary the runner achieved, in its serde spelling. Empty only where no build ran.
+        isolation: String,
+        /// Digest of the guard manifest the mirror was armed with, and how many members it watched.
+        ///
+        /// `None` means the guard did not run, and the signed `artifactHashCheck` block says so by
+        /// deriving `performed` from the first of these. They are carried rather than re-derived
+        /// because only the arming site knows them, and it is eight hundred lines from here.
+        guard_manifest: Option<String>,
+        guarded_members: Option<u64>,
         /// Everything that crossed the network into the build, or `None` where no complete account
         /// exists. An empty `Some` is stored as an empty blob and means nothing crossed; flattening
         /// it to `None` would turn "we looked and it was clean" into "we never looked".
@@ -3650,7 +3696,11 @@ mod rebuild {
                 Environment {
                     base_image: args.image.clone(),
                     egress: args.egress.clone(),
-                    isolation: String::new(),
+                    // From the runner, not from a flag, and no longer the empty string it was for
+                    // nineteen signed statements.
+                    isolation: args.isolation.clone(),
+                    guard_manifest: args.guard_manifest.clone(),
+                    guarded_members: args.guarded_members,
                     // What the runner reported, not what the flag asked for. Deriving this from
                     // `--egress` stamped `attestable: true` on runs whose image-build phases were
                     // outside the boundary entirely. A claim about enforcement has to come from
@@ -6765,8 +6815,11 @@ mod attestor {
             stabilizer_set: None,
             guard_trips: &r.guard_trips,
             refused_artifact: &r.refused_artifact,
-            guard_manifest: None,
-            guarded_members: None,
+            // The two fields that made nineteen signed statements say nobody looked. They are read
+            // from the record now rather than hardcoded, and a test below builds a record the way a
+            // run does and asserts the predicate comes out `performed: true`.
+            guard_manifest: r.environment.guard_manifest.as_deref(),
+            guarded_members: r.environment.guarded_members,
         }
     }
 
@@ -6812,6 +6865,89 @@ mod attestor {
             }
             Ok(())
         })
+    }
+
+    #[cfg(test)]
+    mod guard_facts_reach_the_statement {
+        use super::*;
+        use trigon_store::{ArtifactRef, Environment, RunRecord};
+
+        fn record(guard: Option<&str>, members: Option<u64>, isolation: &str) -> RunRecord {
+            let d = trigon_core::Digest::from_bytes([7u8; 32]);
+            let mut r = RunRecord::new(
+                "1789753859-cf51460b",
+                "pkg:npm/once@1.4.0",
+                ArtifactRef {
+                    name: "once-1.4.0.tgz".into(),
+                    sha256: d,
+                    bytes: 1979,
+                    stored: true,
+                },
+                Environment {
+                    base_image: "localhost/trigon-base@sha256:7cdd".into(),
+                    egress: "mirror-only".into(),
+                    isolation: isolation.into(),
+                    attestable: true,
+                    registry_moment: None,
+                    pin: None,
+                    guard_manifest: guard.map(str::to_string),
+                    guarded_members: members,
+                },
+                "2026-09-18T00:00:00Z",
+            );
+            r.outcome = Some("exact".into());
+            r
+        }
+
+        /// The regression that signed nineteen false statements.
+        ///
+        /// `Statement::build_observation` renders `performed` from `guard_manifest.is_some()`, and
+        /// its own tests prove both branches. What nothing proved was that a record built the way a
+        /// run builds one supplies the field — and none did, so every statement said the artifact
+        /// guard had not run on runs where it had, beside an `egressTier` that was correct.
+        ///
+        /// This asserts the join rather than either half.
+        #[test]
+        fn a_record_from_an_armed_run_says_the_guard_ran() {
+            let r = record(Some(&"ab".repeat(32)), Some(1), "user_ns");
+            let hex = Hex {
+                network_transcript: None,
+                build_log: None,
+                instructions: None,
+            };
+            let f = facts(&r, &hex);
+            let s = trigon_attest::Statement::build_observation(
+                "once-1.4.0.tgz",
+                &trigon_core::Digest::from_bytes([7u8; 32]),
+                &f,
+            );
+            let check = &s.predicate["artifactHashCheck"];
+            assert_eq!(check["performed"], true, "the guard was armed: {check}");
+            assert_eq!(check["guardedMembers"], 1);
+            assert_eq!(check["guardManifest"]["sha256"], "ab".repeat(32));
+            assert_eq!(
+                s.predicate["isolation"], "user_ns",
+                "the runner's boundary, not an empty string: {}",
+                s.predicate
+            );
+        }
+
+        /// And the other direction still works, so the field keeps meaning something.
+        #[test]
+        fn a_record_from_an_unarmed_run_still_says_nobody_looked() {
+            let r = record(None, None, "");
+            let hex = Hex {
+                network_transcript: None,
+                build_log: None,
+                instructions: None,
+            };
+            let s = trigon_attest::Statement::build_observation(
+                "once-1.4.0.tgz",
+                &trigon_core::Digest::from_bytes([7u8; 32]),
+                &facts(&r, &hex),
+            );
+            assert_eq!(s.predicate["artifactHashCheck"]["performed"], false);
+        }
     }
 }
 

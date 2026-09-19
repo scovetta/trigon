@@ -8,6 +8,8 @@ fn env() -> Environment {
         base_image: "docker.io/library/debian@sha256:aa".into(),
         egress: "mirror-only".into(),
         isolation: "UserNs".into(),
+        guard_manifest: None,
+        guarded_members: None,
         attestable: true,
         registry_moment: Some("2018-04-09T01:10:45Z".into()),
         pin: None,
