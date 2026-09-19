@@ -152,7 +152,7 @@ const routes = [
 ];
 
 async function route() {
-  readFragment();
+  readOpenRequest();
   const path = location.pathname;
   for (const [re, fn] of routes) {
     const m = path.match(re);
@@ -300,6 +300,7 @@ const mayRequest = () => !!ME?.scopes?.includes('request');
 let FIRST_VIEW_SPENT = false;
 let DETAIL_BOOT_SPENT = false;
 let QUEUE_BOOT_SPENT = false;
+let DIFF_BOOT_SPENT = false;
 
 // How a run ended without a verdict, in a sentence. Each is a statement about a different thing,
 // and the whole reason `terminal` is a field rather than a flag is that collapsing them makes a
@@ -924,17 +925,21 @@ function membersPanel(d, runId) {
     const worth = m.status !== 'identical';
     const slot = el('td', { colspan: 6, class: 'member-slot' });
     const open = () => {
-      // The open member goes in the fragment, so "look at this file" is a link somebody can send.
-      // A fragment rather than the path, because the page is still the run's: a reader who clears
-      // it is back where they were rather than somewhere new.
-      const f = new URLSearchParams({ member: m.path });
-      history.replaceState({}, '', `${location.pathname}#${f}`);
+      rememberOpen(m.path);
       openMember(runId, m.path, slot, {});
     };
-    // Entered on a link to this member, so open it without waiting to be clicked.
+    // Entered on a link to this member. The server has usually already put the panel in the
+    // document, in which case it is drawn here with no request at all — see `BOOT.member`. Where it
+    // has not (an anonymous reader, whose principal may not see a member's bytes; or a copy served
+    // from a CDN), this falls through to the fetch and the refusal explains itself.
     if (worth && OPEN_ON_LOAD && OPEN_ON_LOAD.member === m.path) {
       const want = OPEN_ON_LOAD;
-      queueMicrotask(() => openMember(runId, m.path, slot, { view: want.view }));
+      const booted = BOOT?.member && BOOT.member.member?.path === m.path;
+      if (booted) {
+        drawMember(runId, m.path, slot, { view: want.view || BOOT.member.view || undefined }, BOOT.member.member);
+      } else {
+        queueMicrotask(() => openMember(runId, m.path, slot, { view: want.view }));
+      }
     }
     return [el('tr', { class: worth ? 'openable' : '' },
       el('td', { class: 'url' }, worth
@@ -1009,17 +1014,33 @@ function notesPanel(d) {
 
 /* ---- one member, opened ------------------------------------------------- */
 
-// `#member=<path>&view=hex` on a run page. Read once at navigation rather than watched, so a
+// `?member=<path>&view=hex` on a run page. Read once at navigation rather than watched, so a
 // reader who opens a second member does not find the first one reopening under them.
+//
+// **A query, not a fragment.** It was a fragment, which is the natural home for in-page state and
+// exactly wrong for a link somebody sends: a fragment never reaches the server, so the one thing a
+// deep link most wants rendered was the one thing the document could not carry. The old form is
+// still read, because links to it exist and a link that silently does nothing is worse than one
+// extra line here.
 let OPEN_ON_LOAD = null;
-function readFragment() {
+function readOpenRequest() {
   try {
+    const q = new URLSearchParams(location.search);
     const f = new URLSearchParams(location.hash.replace(/^#/, ''));
-    const member = f.get('member');
-    OPEN_ON_LOAD = member ? { member, view: f.get('view') || undefined } : null;
+    const member = q.get('member') || f.get('member');
+    OPEN_ON_LOAD = member
+      ? { member, view: q.get('view') || f.get('view') || undefined }
+      : null;
   } catch {
     OPEN_ON_LOAD = null;
   }
+}
+
+// Put the open member in the address bar, where the server will see it next time.
+function rememberOpen(path, view) {
+  const q = new URLSearchParams({ member: path });
+  if (view) q.set('view', view);
+  history.replaceState({}, '', `${location.pathname}?${q}`);
 }
 
 
@@ -1152,7 +1173,13 @@ async function openMember(runId, path, slot, state) {
       el('strong', { text: 'Not shown. ' }), el('span', { text: e.message })));
     return;
   }
+  drawMember(runId, path, slot, state, d);
+}
 
+// The rendering half, separate from the fetching half, so a panel the server already put in the
+// document is drawn with no request at all. Paging and the view toggle go back through
+// `openMember`, because those ask for something the boot did not carry.
+function drawMember(runId, path, slot, state, d) {
   const reload = (next) => openMember(runId, path, slot, { ...state, ...next, offset: next.offset });
   const wantHex = state.view ? state.view === 'hex' : d.binary;
   const raw = (side) => `/v1/runs/${encodeURIComponent(runId)}/member/raw?` +
@@ -1163,8 +1190,7 @@ async function openMember(runId, path, slot, state) {
     'aria-pressed': (key === 'hex') === wantHex,
     disabled: !enabled,
     onclick: () => {
-      const f = new URLSearchParams({ member: path, view: key });
-      history.replaceState({}, '', `${location.pathname}#${f}`);
+      rememberOpen(path, key);
       openMember(runId, path, slot, { ...state, view: key });
     },
     text: label,
@@ -1273,9 +1299,16 @@ async function detail(id) {
     comparison.replaceChildren(
       panel('What differs', el('p', { class: 'empty', text: 'reading the comparison…' })),
     );
+    // The server puts the comparison in the document when the page is entered directly and it is
+    // small enough to be worth carrying. Spent once: a second run reached by clicking is a fetch,
+    // because the island describes the entry point and nothing else.
+    const bootedDiff = BOOT?.diff && !DIFF_BOOT_SPENT;
+    DIFF_BOOT_SPENT = true;
     fillLater(
       comparison,
-      api(`/v1/runs/${encodeURIComponent(id)}/diff`).catch(() => null),
+      bootedDiff
+        ? Promise.resolve(BOOT.diff)
+        : api(`/v1/runs/${encodeURIComponent(id)}/diff`).catch(() => null),
       (d) => [
         ladderPanel(d),
         censusPanel(d),

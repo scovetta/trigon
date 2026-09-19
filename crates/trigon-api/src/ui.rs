@@ -13,10 +13,12 @@
 //! rule that picked Postgres over a search service: a toolchain is a dependency, a dependency is a
 //! supply chain, and this project's whole subject is supply chains.
 
+use crate::evidence::{Class, admits};
 use crate::{Api, Principal};
-use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{Path, Query, State};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use std::sync::Arc;
 
 /// Every file the site is made of, with its media type.
@@ -53,11 +55,40 @@ const ASSETS: &[(&str, &str, &str)] = &[
 /// The fix keeps the file deployable on its own: the document carries a `<!--BOOT-->` marker, these
 /// handlers replace it with a JSON island, and the script uses the island when it is there and
 /// fetches when it is not. A CDN copy still works; a served copy paints something true immediately.
-pub async fn index_html(State(api): State<Arc<Api>>) -> Response {
-    document(&api, None).await
+/// What the document can be asked to arrive with.
+///
+/// **A query rather than a fragment.** The member used to live in `#member=…`, which is correct for
+/// in-page state and useless for booting: a fragment is never sent to the server, so the one thing
+/// a deep link most needs rendered was the one thing the document could not carry. Moving it to the
+/// query keeps the page the run's — clearing it returns a reader where they were — and lets the
+/// server fill it.
+#[derive(Debug, Default, Deserialize)]
+pub struct DocQuery {
+    #[serde(default)]
+    pub member: Option<String>,
+    /// `text` or `hex`. Absent lets the bytes decide, which is the right default.
+    #[serde(default)]
+    pub view: Option<String>,
+    #[serde(default)]
+    pub offset: Option<u64>,
 }
 
-pub async fn asset(State(api): State<Arc<Api>>, Path(path): Path<String>) -> Response {
+pub async fn index_html(State(api): State<Arc<Api>>, uri: Uri) -> Response {
+    document(&api, None, query_of(&uri)).await
+}
+
+/// The document's query, or nothing.
+///
+/// Parsed from the `Uri` rather than extracted, so a stray or malformed parameter costs a *boot*
+/// rather than the page: `Query<T>` as an extractor rejects the request, and a document that 400s
+/// because somebody appended `?utm_source=` is a document nobody can share.
+fn query_of(uri: &Uri) -> DocQuery {
+    Query::<DocQuery>::try_from_uri(uri)
+        .map(|Query(q)| q)
+        .unwrap_or_default()
+}
+
+pub async fn asset(State(api): State<Arc<Api>>, Path(path): Path<String>, uri: Uri) -> Response {
     // Everything unknown falls back to the document, because the front-end owns its own routes:
     // `/runs/1700-abc` is a page, not a file, and a reader who pastes a permalink must land on it
     // rather than on a 404 that tells them the link they were given is broken.
@@ -68,18 +99,18 @@ pub async fn asset(State(api): State<Arc<Api>>, Path(path): Path<String>) -> Res
             axum::Json(serde_json::json!({"error": "no_such_route"})),
         )
             .into_response(),
-        None => document(&api, Some(&path)).await,
+        None => document(&api, Some(&path), query_of(&uri)).await,
     }
 }
 
 /// `path` is the front-end route being entered directly, `runs/<id>` for a permalink.
-async fn document(api: &Api, path: Option<&str>) -> Response {
+async fn document(api: &Api, path: Option<&str>, q: DocQuery) -> Response {
     let public = api.principal() == Principal::Anonymous;
     // Every route a reader can arrive on directly gets a first frame with content in it. A route
     // missing from here still works — the script falls through to a fetch — but it paints the word
     // "Loading" into every preview of itself, which is how this was noticed twice.
     let boot = match path {
-        Some(p) if p.starts_with("runs/") => run_boot(api, &p[5..], public),
+        Some(p) if p.starts_with("runs/") => run_boot(api, &p[5..], public, &q).await,
         Some("queue") => queue_boot(api, public).await,
         // A job page is a live view by definition: its content is what has happened in the last
         // few seconds, so there is nothing worth freezing into the document.
@@ -164,7 +195,7 @@ fn browse_boot(api: &Api, public: bool) -> serde_json::Value {
 /// The publication gate is asked here as well, rather than trusted to the fetch that would
 /// otherwise follow. Injecting a withheld run into the document and relying on the front-end not to
 /// draw it would put the accusation in the page source, which is the one place a gate cannot reach.
-fn run_boot(api: &Api, id: &str, public: bool) -> serde_json::Value {
+async fn run_boot(api: &Api, id: &str, public: bool, q: &DocQuery) -> serde_json::Value {
     let (Some(entry), Some(record)) = (api.index.entry(id), api.index.get(id)) else {
         return serde_json::json!({ "health": health_boot(api, public) });
     };
@@ -174,6 +205,87 @@ fn run_boot(api: &Api, id: &str, public: bool) -> serde_json::Value {
     serde_json::json!({
         "health": health_boot(api, public),
         "run": { "entry": entry, "record": record },
+        "diff": diff_boot(api, &record).await,
+        "member": member_boot(api, &record, q).await,
+    })
+}
+
+/// How large a rendered comparison may be before the document stops carrying it.
+///
+/// A comparison is bounded at 500 members, and a big one serializes to something like a hundred
+/// kilobytes. That is worth sending for a page whose whole content it is, and not worth sending on
+/// every run page regardless — so it is capped, and past the cap the script fetches it, which is
+/// what it did before this existed. The number is a judgement, not a measurement.
+const MAX_BOOTED_DIFF: usize = 192 << 10;
+
+/// The rendered comparison, so a run page's first frame is the page.
+///
+/// Booted *because* the member panel is: the panel is drawn inside the member table, which this
+/// produces, so booting one without the other saves a request and still leaves a reader watching a
+/// placeholder. A deep link that paints everything is the thing being asked for; half of it is not
+/// obviously better than none.
+async fn diff_boot(api: &Api, record: &trigon_store::RunRecord) -> serde_json::Value {
+    let Some(digest) = record.comparison else {
+        return serde_json::Value::Null;
+    };
+    let Ok(bytes) = api.store.blobs().get(&digest).await else {
+        return serde_json::Value::Null;
+    };
+    let Some(view) = crate::comparison::render(&bytes, None) else {
+        return serde_json::Value::Null;
+    };
+    let value = serde_json::to_value(&view).unwrap_or(serde_json::Value::Null);
+    // Measured after rendering rather than guessed from the member count, because the members are
+    // not the only thing that varies — a comparison with ten thousand notes is large too.
+    if serde_json::to_string(&value)
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX)
+        > MAX_BOOTED_DIFF
+    {
+        return serde_json::Value::Null;
+    }
+    value
+}
+
+/// The member panel a deep link asked for, where this principal may see it.
+///
+/// **The gate is asked here and not delegated to the script.** A member's bytes are
+/// `Class::Artifact`: somebody else's content, which `12-security.md` §5 says we hold to check and
+/// not to redistribute. Putting it in the document and trusting the front-end not to draw it would
+/// put the content in `view-source:`, which is the one place a front-end cannot gate — the same
+/// reasoning that made `run_boot` re-ask the publication gate.
+///
+/// `null` for an anonymous reader, and that is not a failure: the script falls through to
+/// `/v1/runs/{id}/member`, which refuses with a sentence saying a principal is needed. A reader
+/// signed in with a bearer token also lands here, because the browser sends a token on an XHR and
+/// not on a document request — identity cannot be booted, which is the same limit `/v1/me` has.
+async fn member_boot(
+    api: &Api,
+    record: &trigon_store::RunRecord,
+    q: &DocQuery,
+) -> serde_json::Value {
+    let Some(path) = q.member.as_deref() else {
+        return serde_json::Value::Null;
+    };
+    if !admits(api.principal(), Class::Artifact) {
+        return serde_json::Value::Null;
+    }
+    let Ok(pair) = crate::routes::member_pair(api, record, path).await else {
+        return serde_json::Value::Null;
+    };
+    if pair.found_nothing() {
+        // Nothing to draw. The script asks and gets a refusal that says *which* of the three
+        // reasons it is — better than a document that boots an empty panel and leaves a reader
+        // wondering whether the member is missing or the page is broken.
+        return serde_json::Value::Null;
+    }
+    let mut view = crate::member::view(path, pair.upstream, pair.rebuild, q.offset);
+    if !pair.problems.is_empty() {
+        view.unavailable = Some(pair.problems.join("; "));
+    }
+    serde_json::json!({
+        "view": q.view,
+        "member": view,
     })
 }
 

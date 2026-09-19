@@ -903,6 +903,42 @@ The vacuity check in that test earned itself immediately. The first fixture was 
 *not* nested — gzip is that format's container, so its members are named plainly and the `!` form
 never appears. The assertion that the fixture still contains a `!` failed, and said so.
 
+### The deep link boots server-side
+
+The member lived in `#member=…`. A fragment is the natural home for in-page state and exactly wrong
+for a link somebody sends: **it never reaches the server**, so the one thing a deep link most wants
+rendered was the one thing the document could not carry. It is `?member=…` now, and the run
+document carries the panel. The old form is still read, because links to it exist and a link that
+silently does nothing is worse than three lines of compatibility.
+
+**The gate is asked at document-render time**, not delegated to the script. A member's bytes are
+`Class::Artifact`, and putting them in the page for a reader who may not fetch them would move the
+content from a route that refuses to a page source that cannot — the same reasoning that makes
+`run_boot` re-ask the publication gate. An anonymous reader gets `"member": null` and the script
+falls through to the route, whose refusal explains itself. A reader signed in with a bearer token
+lands there too: a browser sends a token on an XHR and not on a document request, so identity
+cannot be booted, which is the limit `/v1/me` already has.
+
+**The comparison is booted with it, and that is not scope creep.** The member panel is drawn inside
+the member table, which the comparison produces, so booting one without the other saves a request
+and still leaves a reader watching a placeholder. Bounded at 192 KB of rendered comparison — past
+that the script fetches, which is what it did before — and measured after rendering rather than
+guessed from the member count, because members are not the only thing that varies.
+
+Measured: a deep link to the `.nuspec` diff on `Newtonsoft.Json@11.0.1` now makes **no requests at
+all**. The document is 19.8 KB and carries the verdict, the ladder, the census, the ledger, all 23
+members and the open diff. Without the member it is 12.4 KB; the browse page is 19.2 KB.
+
+**Three reasons a member has no bytes, and three messages.** Retention dropped the artifacts;
+the artifacts are there and the member is not; the member would not read. The first is our policy,
+the second a fact about the package, the third a fault — and they were one message until the route
+was pointed at a run that had reproduced, where the bytes are dropped by design.
+
+And one test had to exist before any of this could: `a_members_content_cannot_close_the_island`.
+Until now the island held package names and counts. It now holds **the bytes of a file somebody
+else published**, which is the most attacker-controlled thing on the page — a member whose content
+is `</script><script>…` would be executing on this origin before the first paint.
+
 ## 13. What is left
 
 Three things, and each is blocked on something real rather than on time.

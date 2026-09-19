@@ -1858,3 +1858,50 @@ members are themselves gzipped tars.
 **Worth recording because the vacuity check is the cheap half.** A test that builds its own fixture
 can stop testing what it claims to without failing, and the assertion that the fixture still has the
 property under test costs one line.
+
+### 3.41 A fragment is the wrong place for anything a server should render
+
+**Correction.** The open member lived in `#member=…`. That is the natural home for in-page state and
+exactly the wrong home for a link somebody sends: **a fragment is never transmitted to the server**,
+so the one thing a deep link most wants rendered was the one thing the document could not carry.
+
+Moving it to `?member=…` let the run document boot the panel. Two consequences worth stating:
+
+**The gate has to be asked at document-render time.** A member's bytes are `Class::Artifact`.
+Putting them in the page for a reader who may not fetch them would move the content from a route
+that refuses to a page source that cannot — the same reasoning that already made the publication
+gate re-run while filling the island. An anonymous reader gets `"member": null`; so does a reader
+signed in with a bearer token, because a browser sends a token on an XHR and not on a document
+request. Identity cannot be booted, which is the limit `/v1/me` has had since it existed.
+
+**Booting half of it is not obviously better than none.** The member panel is drawn *inside* the
+member table, which the rendered comparison produces — so booting the member alone saved a request
+and still left a reader watching a placeholder. Both are booted, the comparison bounded at 192 KB
+and measured after rendering rather than guessed from a member count.
+
+Measured: a deep link to a member diff now makes **no requests at all**. 19.8 KB of document
+carrying the verdict, the ladder, the census, the ledger, 23 members and the open diff.
+
+And the test that had to exist first. Until this, the boot island held package names and counts. It
+now holds the bytes of a file somebody else published — the most attacker-controlled thing on the
+page — so a member whose content is `</script><script>…` would be executing on this origin before
+the first paint. `a_members_content_cannot_close_the_island` asserts it isn't.
+
+### 3.42 Three reasons a file has no bytes, reported as one
+
+**Gap, found by pointing the new route at a run that reproduced.** "This member has no bytes" has
+three causes and they were one message:
+
+- **Retention dropped the artifacts.** Bytes are kept on a divergence and dropped on a match, so
+  this is the normal state for most of a corpus.
+- **The artifacts are there and the member is not.** A fact about the package.
+- **The member would not read.** A fault.
+
+The route said *"neither artifact holds a member by that name"* for all three. A reader told that
+about a clean match — where the bytes were simply never kept — would go looking for a member that
+is there.
+
+The fix is a `Pair` that carries `kept` per side rather than collapsing "not kept" into "not
+found", and three refusals with three codes. **The shape is the one this document keeps recording:**
+two states that a reader must distinguish, merged at the point where the code found it convenient
+to treat them alike.

@@ -184,7 +184,11 @@ pub struct MemberQuery {
 }
 
 /// Fetch a stored artifact's bytes, or say why not.
-async fn artifact_bytes(
+///
+/// `pub(crate)` because the document handler boots a member panel with it. **One implementation,
+/// two callers** — a second copy here would be a second set of size caps and a second answer to
+/// "was this artifact kept", which is the shape this tree keeps finding.
+pub(crate) async fn artifact_bytes(
     api: &Api,
     r: &trigon_store::RunRecord,
     side: &str,
@@ -220,12 +224,40 @@ async fn artifact_bytes(
     }
 }
 
-/// Both sides' copies of one member, where each exists.
-async fn member_pair(
+/// Both sides' copies of one member, and what stopped either from being there.
+#[derive(Debug, Default)]
+pub(crate) struct Pair {
+    pub upstream: Option<Vec<u8>>,
+    pub rebuild: Option<Vec<u8>>,
+    /// Whether the run's *artifacts* were kept at all, per side.
+    ///
+    /// **The distinction a reader needs and the first version lost.** Retention drops artifact
+    /// bytes on a clean match and keeps them on a divergence, so "we never kept the bytes" is the
+    /// normal state for most of a corpus — and it is not "neither artifact holds a member by that
+    /// name", which is what the caller said when both sides came back empty. One of those is about
+    /// the package and the other is about our retention policy.
+    pub kept: (bool, bool),
+    /// Things that went wrong, as against things that are simply absent.
+    pub problems: Vec<String>,
+}
+
+impl Pair {
+    pub fn found_nothing(&self) -> bool {
+        self.upstream.is_none() && self.rebuild.is_none()
+    }
+
+    pub fn nothing_was_kept(&self) -> bool {
+        !self.kept.0 && !self.kept.1
+    }
+}
+
+/// Read one member from both sides.
+pub(crate) async fn member_pair(
     api: &Api,
     r: &trigon_store::RunRecord,
     path: &str,
-) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>, Vec<String>), Response> {
+) -> Result<Pair, Response> {
+    let mut pair = Pair::default();
     let mut problems = Vec::new();
     let mut out: [Option<Vec<u8>>; 2] = [None, None];
 
@@ -237,6 +269,11 @@ async fn member_pair(
             "upstream" => r.upstream.stored,
             _ => r.rebuild.as_ref().is_some_and(|a| a.stored),
         };
+        if i == 0 {
+            pair.kept.0 = expected;
+        } else {
+            pair.kept.1 = expected;
+        }
         if !expected {
             continue;
         }
@@ -259,7 +296,10 @@ async fn member_pair(
         }
     }
     let [up, rb] = out;
-    Ok((up, rb, problems))
+    pair.upstream = up;
+    pair.rebuild = rb;
+    pair.problems = problems;
+    Ok(pair)
 }
 
 /// `GET /v1/runs/{id}/member?path=…` — what differs inside one member.
@@ -287,24 +327,42 @@ pub async fn member(
             Class::Artifact.refusal(),
         );
     }
-    let (up, rb, problems) = match member_pair(&api, &r, &q.path).await {
+    let pair = match member_pair(&api, &r, &q.path).await {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if up.is_none() && rb.is_none() {
-        return refuse(
-            StatusCode::NOT_FOUND,
-            "no_such_member",
-            &if problems.is_empty() {
-                "neither artifact holds a member by that name.".to_string()
-            } else {
-                format!("that member could not be read. {}", problems.join("; "))
-            },
-        );
+    if pair.found_nothing() {
+        // Three different answers, and they were one message. A reader told "neither artifact holds
+        // a member by that name" about a run whose bytes were dropped on a clean match would go
+        // looking for a member that is there.
+        return if pair.nothing_was_kept() {
+            refuse(
+                StatusCode::NOT_FOUND,
+                "not_kept",
+                "this run's artifacts were not kept, so there are no member bytes to read. \
+                 Retention drops them on a match and keeps them on a divergence — the copies that \
+                 could answer this are the ones where somebody would ask.",
+            )
+        } else if pair.problems.is_empty() {
+            refuse(
+                StatusCode::NOT_FOUND,
+                "no_such_member",
+                "neither artifact holds a member by that name.",
+            )
+        } else {
+            refuse(
+                StatusCode::NOT_FOUND,
+                "unreadable_member",
+                &format!(
+                    "that member could not be read. {}",
+                    pair.problems.join("; ")
+                ),
+            )
+        };
     }
-    let mut view = crate::member::view(&q.path, up, rb, q.offset);
-    if !problems.is_empty() {
-        view.unavailable = Some(problems.join("; "));
+    let mut view = crate::member::view(&q.path, pair.upstream, pair.rebuild, q.offset);
+    if !pair.problems.is_empty() {
+        view.unavailable = Some(pair.problems.join("; "));
     }
     json(view)
 }

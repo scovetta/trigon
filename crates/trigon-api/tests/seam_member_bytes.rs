@@ -153,3 +153,108 @@ fn the_diff_of_a_text_member_names_what_changed() {
     // Unchanged lines are context, not noise: a diff with no context is a diff nobody can place.
     assert!(lines.contains(&("same", "a")), "{lines:?}");
 }
+
+/// Three reasons a member has no bytes, and they are three different messages.
+///
+/// "We never kept this run's artifacts" is our retention policy; "neither artifact holds a member
+/// by that name" is a fact about the package; "that member could not be read" is a fault. They were
+/// one message, and a reader told the second about a run that was really the first would go looking
+/// for a member that is there.
+#[tokio::test]
+async fn a_member_with_no_bytes_says_which_of_the_three_reasons_it_is() {
+    use std::sync::Arc;
+    use trigon_core::Digest;
+    use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
+
+    async fn ask(r: RunRecord, store: Arc<Store>) -> String {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower_service::Service as _;
+
+        store.put_run(&r).await.unwrap();
+        let index = trigon_api::Index::new();
+        index
+            .refresh(&store, trigon_api::Switches::default())
+            .await
+            .unwrap();
+        let api = Arc::new(trigon_api::Api {
+            store,
+            queue: None,
+            index,
+            switches: trigon_api::Switches::default(),
+            unauthenticated: trigon_api::Principal::Operator,
+        });
+        let mut router = trigon_api::router(api);
+        let res = router
+            .call(
+                Request::builder()
+                    .uri(format!("/v1/runs/{}/member?path=package%2Findex.js", r.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let b = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&b).into_owned()
+    }
+
+    fn base(id: &str, stored: bool, sha: Digest) -> RunRecord {
+        let mut r = RunRecord::new(
+            id,
+            "pkg:npm/a@1.0.0",
+            ArtifactRef {
+                name: "pkg.gem".into(),
+                sha256: sha,
+                bytes: 1,
+                stored,
+            },
+            Environment {
+                base_image: "x@sha256:0".into(),
+                egress: "mirror".into(),
+                isolation: "podman".into(),
+                attestable: true,
+                registry_moment: None,
+                pin: None,
+                guard_manifest: None,
+                guarded_members: None,
+            },
+            "2026-01-01T00:00:00Z",
+        );
+        r.state = RunState::Done;
+        r.outcome = Some("exact".into());
+        r
+    }
+
+    // 1. Retention dropped the bytes.
+    let store = Arc::new(Store::in_memory());
+    let body = ask(
+        base("1700000001-aa", false, Digest::from_bytes([0u8; 32])),
+        store,
+    )
+    .await;
+    assert!(body.contains("not_kept"), "{body}");
+    assert!(body.contains("Retention drops them on a match"), "{body}");
+
+    // 2. The bytes are there and the member is not.
+    let store = Arc::new(Store::in_memory());
+    let art = nested(b"x\n");
+    let d = store.blobs().put(art).await.unwrap();
+    let body = ask(base("1700000002-bb", true, d), store).await;
+    assert!(body.contains("no_such_member"), "{body}");
+    assert!(
+        !body.contains("not_kept"),
+        "a present artifact was reported as dropped: {body}"
+    );
+
+    // 3. The bytes are there and will not parse as the format their name claims.
+    let store = Arc::new(Store::in_memory());
+    let d = store.blobs().put(vec![0u8; 64]).await.unwrap();
+    let body = ask(base("1700000003-cc", true, d), store).await;
+    assert!(
+        body.contains("unreadable_member") || body.contains("no_such_member"),
+        "{body}"
+    );
+    assert!(!body.contains("not_kept"), "{body}");
+}

@@ -315,3 +315,130 @@ async fn a_members_bytes_never_reach_the_internet() {
         "the census was gated as though it were content"
     );
 }
+
+/// Build a zip holding one member, and put it in a store.
+async fn artifact_with(store: &Store, name: &str, body: &[u8]) -> Digest {
+    let mut buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        use std::io::Write as _;
+        w.start_file(name, opts).unwrap();
+        w.write_all(body).unwrap();
+        w.finish().unwrap();
+    }
+    store.blobs().put(buf).await.expect("put artifact")
+}
+
+/// A member's **content** cannot close the script tag the boot island lives in.
+///
+/// This is the assertion that had to exist before the document could carry a member panel. Until
+/// then the island held package names and counts; now it holds the bytes of a file somebody else
+/// published, which is the most attacker-controlled thing on the page. A member whose content is
+/// `</script><script>…` would be executing on this origin before the first paint.
+#[tokio::test]
+async fn a_members_content_cannot_close_the_island() {
+    let hostile = b"before\n</script><script>alert(1)</script>\nafter\n";
+    let store = Arc::new(Store::in_memory());
+    let up = artifact_with(&store, "package/index.js", hostile).await;
+    let rb = artifact_with(&store, "package/index.js", b"before\nharmless\nafter\n").await;
+
+    let mut r = record("1700000001-aa", "pkg:npm/a@1.0.0", Some("divergent"), None);
+    r.upstream = ArtifactRef {
+        name: "pkg.zip".into(),
+        sha256: up,
+        bytes: 1,
+        stored: true,
+    };
+    r.rebuild = Some(ArtifactRef {
+        name: "pkg.zip".into(),
+        sha256: rb,
+        bytes: 1,
+        stored: true,
+    });
+    store.put_run(&r).await.unwrap();
+
+    let index = Index::new();
+    index.refresh(&store, Switches::default()).await.unwrap();
+    let api = Arc::new(Api {
+        store,
+        queue: None,
+        index,
+        switches: Switches::default(),
+        // Operator, because that is the principal the member panel is booted for at all.
+        unauthenticated: Principal::Operator,
+    });
+
+    let (status, body) = get(api, "/runs/1700000001-aa?member=package%2Findex.js").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("\\u003c/script"),
+        "the island did not escape a member's content"
+    );
+    // One closing tag for the island, one for the module script, and nothing the file put there.
+    assert_eq!(
+        body.matches("</script>").count(),
+        2,
+        "a member's content closed a script tag"
+    );
+    // And the panel really was booted, so this is not passing because nothing was rendered.
+    assert!(
+        body.contains("package/index.js"),
+        "the member was not booted at all, so the escaping is untested"
+    );
+}
+
+/// The boot asks the same gate the route does.
+///
+/// A member's bytes are `Class::Artifact`. Putting them in the document for a reader who may not
+/// fetch them would move the content from a route that refuses to a page source that cannot.
+#[tokio::test]
+async fn an_anonymous_reader_gets_no_member_in_the_page_source() {
+    let secret = b"a line nobody outside should read\n";
+    let store = Arc::new(Store::in_memory());
+    let up = artifact_with(&store, "package/index.js", secret).await;
+    let rb = artifact_with(&store, "package/index.js", b"different\n").await;
+
+    // Two agreeing attempts, so the *run* is published and this test is about the member alone.
+    for (id, key) in [("1700000001-aa", "k1"), ("1700000002-ab", "k1")] {
+        let mut r = record(id, "pkg:npm/a@1.0.0", Some("divergent"), Some(key));
+        r.upstream = ArtifactRef {
+            name: "pkg.zip".into(),
+            sha256: up,
+            bytes: 1,
+            stored: true,
+        };
+        r.rebuild = Some(ArtifactRef {
+            name: "pkg.zip".into(),
+            sha256: rb,
+            bytes: 1,
+            stored: true,
+        });
+        store.put_run(&r).await.unwrap();
+    }
+
+    let index = Index::new();
+    index.refresh(&store, Switches::default()).await.unwrap();
+    let api = Arc::new(Api {
+        store,
+        queue: None,
+        index,
+        switches: Switches::default(),
+        unauthenticated: Principal::Anonymous,
+    });
+
+    let (status, body) = get(api.clone(), "/runs/1700000001-aa?member=package%2Findex.js").await;
+    assert_eq!(status, 200, "the page itself should still render");
+    assert!(
+        !body.contains("a line nobody outside should read"),
+        "a member's content reached an anonymous reader's page source"
+    );
+    assert!(
+        body.contains("\"member\":null"),
+        "the boot did not say plainly that there is no member here: {}",
+        &body[..body.len().min(400)]
+    );
+    // The run is published, so the page is not empty — the member alone was withheld.
+    assert!(body.contains("divergent"));
+}
