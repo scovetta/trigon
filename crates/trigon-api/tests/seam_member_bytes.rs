@@ -446,3 +446,78 @@ fn a_new_file_too_large_to_render_is_bounded_the_same_way() {
         "shown plus omitted must account for the whole file"
     );
 }
+
+/// A small artifact that opens into a huge one is refused, and told the truth about why.
+///
+/// `MAX_ARTIFACT` bounds the *stored* blob at 256 MiB. Nothing bounded what it opened into except
+/// `Limits::default().total_expanded_bytes`, 4 GiB — a budget sized for a rebuild, not for an HTTP
+/// handler serving four of them at once. Measured against the real reader: a 19.5 MB tarball of
+/// zeros expanding to 4095 MiB held 8213 MB resident and returned `Ok`. Sharing the container
+/// buffer (see `trigon-archive/tests/seam_one_buffer.rs`) halved that; this is the other half.
+#[test]
+fn an_artifact_that_expands_past_the_serving_budget_is_refused() {
+    use std::io::{Read, Write};
+
+    // 1200 MiB of zeros, which compresses to about a megabyte. Nothing here is large on disk.
+    struct Zeros {
+        left: u64,
+    }
+    impl Read for Zeros {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            let n = b.len().min(self.left as usize);
+            b[..n].fill(0);
+            self.left -= n as u64;
+            Ok(n)
+        }
+    }
+
+    let expand: u64 = 1200 << 20;
+    let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut b = tar::Builder::new(enc);
+    let mut h = tar::Header::new_ustar();
+    h.set_path("big").unwrap();
+    h.set_size(expand);
+    h.set_mode(0o644);
+    h.set_mtime(0);
+    h.set_cksum();
+    b.append(&h, Zeros { left: expand }).unwrap();
+    let mut h2 = tar::Header::new_ustar();
+    h2.set_path("small").unwrap();
+    h2.set_size(6);
+    h2.set_mode(0o644);
+    h2.set_mtime(0);
+    h2.set_cksum();
+    b.append(&h2, &b"hello\n"[..]).unwrap();
+    let tgz = b.into_inner().unwrap().finish().unwrap();
+
+    assert!(
+        tgz.len() < (16 << 20),
+        "the fixture is meant to be small on disk and large when opened; it is {} bytes",
+        tgz.len()
+    );
+
+    let e = trigon_api::member::read(tgz, "pkg-1.0.0.tgz", "small")
+        .expect_err("1200 MiB expanded is past the serving budget");
+
+    assert!(
+        e.contains("expands to"),
+        "the refusal must name expansion as the reason: {e}"
+    );
+    assert!(
+        !e.contains("would not parse"),
+        "a limit is not a parse failure, and saying so sends the reader to look at a package that \
+         is perfectly fine: {e}"
+    );
+    assert!(
+        e.contains("still downloadable"),
+        "refusing to open it does not stop us handing over the bytes: {e}"
+    );
+}
+
+/// The same budget applies to listing, which had no cap on the stored blob at all.
+#[test]
+fn listing_an_oversized_artifact_is_refused_too() {
+    let e = trigon_api::member::names(vec![0u8; (256 << 20) + 1], "pkg.tgz")
+        .expect_err("over MAX_ARTIFACT");
+    assert!(e.contains("will not parse anything over"), "{e}");
+}

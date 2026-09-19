@@ -10,11 +10,22 @@ use trigon_core::{Format, Note};
 use trigon_stabilize::{apply, profile};
 
 fuzz_target!(|data: &[u8]| {
+    // Every profile `all_profiles()` answers to, with the format its artifacts arrive in. Kept in
+    // step with that list by `trigon-stabilize/tests/every_profile.rs`, which reads this file: a
+    // profile added to the build and not to this table is a profile nothing fuzzes, which is how
+    // `nupkg` — seven passes, and an ordering hazard its own source comments warn about — came to
+    // have no coverage here at all.
     for (format, prof) in [
-        (Format::Tar, "gem"),
+        (Format::Tar, "tar"),
+        (Format::TarGz, "tar-gzip"),
+        (Format::Zip, "zip"),
+        (Format::Gzip, "gzip"),
         (Format::TarGz, "npm-tarball"),
         (Format::TarGz, "crate"),
+        (Format::Tar, "gem"),
         (Format::Zip, "wheel"),
+        (Format::Zip, "nupkg"),
+        (Format::Raw, "raw"),
     ] {
         let set = profile(prof).unwrap();
         let mut notes: Vec<Note> = Vec::new();

@@ -335,7 +335,7 @@ fn a_gzip_payload_of_exactly_the_budget_inflates_and_one_byte_more_does_not() {
     };
     let p = parse(bytes.clone(), Format::Gzip, &exact, &mut Vec::new())
         .expect("a budget of N must inflate N");
-    assert_eq!(p.container.as_ref().map(Vec::len), Some(N));
+    assert_eq!(p.container_bytes().map(<[u8]>::len), Some(N));
 
     let tight = Limits {
         total_expanded_bytes: (N - 1) as u64,

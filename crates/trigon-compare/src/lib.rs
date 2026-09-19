@@ -77,7 +77,7 @@ pub fn summarize(
 
     let mut notes = Vec::new();
     let mut parsed = parse(bytes, format, limits, &mut notes)?;
-    let container = parsed.container.as_deref().map(|c| multi_digest(c, false));
+    let container = parsed.container_bytes().map(|c| multi_digest(c, false));
 
     let applied = apply(set, &mut parsed.archive);
     // `store_only`: the stabilized stream never passes through a deflate encoder, so no encoder's

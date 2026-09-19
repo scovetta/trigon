@@ -167,6 +167,46 @@ pub struct HexRegion {
 
 // --------------------------------------------------------------------------
 
+/// What this process will let one request expand an artifact into.
+///
+/// `Limits::default()` allows 4 GiB, which is the right budget for a *rebuild*: one at a time, on a
+/// machine sized for it, doing the work the tool exists to do. It is the wrong budget for an HTTP
+/// handler. `MAX_ARTIFACT` bounds the stored blob at 256 MiB, and a 19.5 MB tarball of compressible
+/// content reaches the 4 GiB ceiling without going anywhere near it — measured at 4.1 GB resident
+/// for a single member read, times the four concurrent reads `member_reads` permits.
+///
+/// A gigabyte still serves every artifact this has been pointed at, large ML wheels included, and
+/// bounds the process at four of them.
+fn serving_limits() -> Limits {
+    Limits {
+        total_expanded_bytes: MAX_EXPANDED,
+        ..Limits::default()
+    }
+}
+
+/// How large an artifact may expand to while serving one member of it. See [`serving_limits`].
+const MAX_EXPANDED: u64 = 1 << 30;
+
+/// The refusal for an artifact that is within [`MAX_ARTIFACT`] compressed and past
+/// [`MAX_EXPANDED`] once opened.
+///
+/// A limit is not a parse failure, and saying "the artifact would not parse" about a perfectly good
+/// tarball sends the reader to look at the package. Same rule as everywhere else here: name the
+/// reason that actually applied.
+fn parse_refusal(e: &trigon_archive::ArchiveError) -> String {
+    match e {
+        trigon_archive::ArchiveError::LimitExceeded {
+            actual, allowed, ..
+        } => format!(
+            "that artifact expands to {} and this will not expand more than {} to serve one member \
+             of it. The whole artifact is still downloadable.",
+            human(*actual),
+            human(*allowed)
+        ),
+        _ => format!("the artifact would not parse: {e}"),
+    }
+}
+
 /// Read one member's bytes out of a stored artifact.
 ///
 /// `None` where the artifact will not parse, the member is not in it, or either is over a cap. The
@@ -183,8 +223,8 @@ pub fn read(bytes: Vec<u8>, name: &str, path: &str) -> Result<Vec<u8>, String> {
     let format = Format::from_file_name(name)
         .ok_or_else(|| format!("`{name}` names no format this build can parse"))?;
     let mut notes = Vec::new();
-    let parsed = trigon_archive::parse(bytes, format, &Limits::default(), &mut notes)
-        .map_err(|e| format!("the artifact would not parse: {e}"))?;
+    let parsed = trigon_archive::parse(bytes, format, &serving_limits(), &mut notes)
+        .map_err(|e| parse_refusal(&e))?;
 
     let want = path.as_bytes();
     let mut found: Option<Vec<u8>> = None;
@@ -244,11 +284,21 @@ fn walk(a: &Archive, f: &mut impl FnMut(&Entry, &[u8])) {
 
 /// Every member's name, for a listing that does not need their bytes.
 pub fn names(bytes: Vec<u8>, name: &str) -> Result<BTreeMap<String, u64>, String> {
+    // Same ceiling as `read`. This has no caller outside tests today, and a cap that is missing
+    // because nothing currently calls the function is a cap that is missing on the day something
+    // does.
+    if bytes.len() > MAX_ARTIFACT {
+        return Err(format!(
+            "that artifact is {} and this will not parse anything over {} to list it.",
+            human(bytes.len() as u64),
+            human(MAX_ARTIFACT as u64)
+        ));
+    }
     let format = Format::from_file_name(name)
         .ok_or_else(|| format!("`{name}` names no format this build can parse"))?;
     let mut notes = Vec::new();
-    let parsed = trigon_archive::parse(bytes, format, &Limits::default(), &mut notes)
-        .map_err(|e| format!("the artifact would not parse: {e}"))?;
+    let parsed = trigon_archive::parse(bytes, format, &serving_limits(), &mut notes)
+        .map_err(|e| parse_refusal(&e))?;
     let mut out = BTreeMap::new();
     walk(&parsed.archive, &mut |e, prefix| {
         let mut full = prefix.to_vec();

@@ -168,7 +168,7 @@ fn container_bytes_are_exposed_for_compressed_formats() {
     let mut notes: Vec<Note> = Vec::new();
     let p = parse(gzipped, Format::TarGz, &Limits::default(), &mut notes).unwrap();
     assert_eq!(
-        p.container.as_deref(),
+        p.container_bytes(),
         Some(&raw_tar[..]),
         "container digest source must be the tar"
     );

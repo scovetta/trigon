@@ -24,7 +24,21 @@ use crate::{gzip, tar, zip};
 #[derive(Debug)]
 pub struct Parsed {
     pub archive: Archive,
-    pub container: Option<Vec<u8>>,
+    /// The decompressed container, for whoever wants to digest it — **shared with the archive's
+    /// own bodies, not a second copy of them.**
+    ///
+    /// It used to be a `Vec<u8>` cloned out of the same buffer the reader was handed, so a
+    /// `.tar.gz` sat in memory twice for as long as the `Parsed` lived. Measured: a 19.5 MB
+    /// tarball expanding to 4095 MiB peaked at 8213 MB of RSS, 2.006x the decompressed size, for a
+    /// single request. Its one real consumer hashes it and drops it.
+    pub container: Option<Arc<SourceMap>>,
+}
+
+impl Parsed {
+    /// The container's bytes, if this format has one.
+    pub fn container_bytes(&self) -> Option<&[u8]> {
+        self.container.as_ref().map(|s| s.as_slice())
+    }
 }
 
 /// Parse an artifact.
@@ -91,21 +105,26 @@ fn parse_inner(
         }
         Format::TarGz => {
             let (header, inner) = gzip::read(&bytes, limits.total_expanded_bytes)?;
-            let mut a = tar::read(Arc::new(SourceMap::owned(inner.clone())), limits, notes)?;
+            // One buffer, two owners. `tar::read` keeps entry bodies as offsets into this map
+            // rather than copying them, so sharing the `Arc` is the whole cost of keeping the
+            // container around — where cloning the `Vec` doubled the artifact.
+            let src = Arc::new(SourceMap::owned(inner));
+            let mut a = tar::read(src.clone(), limits, notes)?;
             a.format = Format::TarGz;
             a.trailer = Trailer::Gzip(header);
             descend(&mut a, limits, notes, 1);
             Ok(Parsed {
                 archive: a,
-                container: Some(inner),
+                container: Some(src),
             })
         }
         Format::Gzip => {
             let (header, inner) = gzip::read(&bytes, limits.total_expanded_bytes)?;
-            let a = single_member(header.clone(), inner.clone());
+            let src = Arc::new(SourceMap::owned(inner));
+            let a = single_member(header, src.clone());
             Ok(Parsed {
                 archive: a,
-                container: Some(inner),
+                container: Some(src),
             })
         }
         Format::Raw => Ok(Parsed {
@@ -116,20 +135,28 @@ fn parse_inner(
 }
 
 /// A gzip member wrapping something that is not a tar: one entry, named by the gzip header.
-fn single_member(header: GzipHeader, payload: Vec<u8>) -> Archive {
+///
+/// The body is a window onto `payload` rather than a copy of it, so this entry and `Parsed`'s
+/// container are one allocation.
+fn single_member(header: GzipHeader, payload: Arc<SourceMap>) -> Archive {
     let name = header.name.clone().unwrap_or_else(|| b"payload".to_vec());
+    let len = payload.as_slice().len() as u64;
     let mut a = Archive::new(Format::Gzip, Trailer::Gzip(header));
     a.entries.push(Entry {
         path: EntryPath::new(name),
         ordinal: 0,
         kind: EntryKind::Regular,
         meta: Meta {
-            size: payload.len() as u64,
+            size: len,
             mtime: None,
             mode: 0o644,
         },
         raw: RawMeta::Tar(TarRaw::default()),
-        body: Body::Inline(payload),
+        body: Body::Original {
+            src: payload,
+            off: 0,
+            len,
+        },
         dirty: false,
     });
     a
@@ -201,7 +228,7 @@ fn parse_nested(body: &[u8], limits: &Limits, notes: &mut Vec<Note>, depth: u8) 
         descend(&mut a, limits, notes, depth + 1);
         Ok(a)
     } else {
-        Ok(single_member(header, inner))
+        Ok(single_member(header, Arc::new(SourceMap::owned(inner))))
     }
 }
 

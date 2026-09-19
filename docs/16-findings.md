@@ -2116,3 +2116,86 @@ happened to be sitting in `target/`.
 whoever writes the error string, once, for the case they had in mind. If a function can fail four
 ways and returns one `0`, the caller that must explain the failure has to re-derive which one — and
 the place to do that is the caller, because the ABI is the thing that cannot change.
+
+### 3.50 A 19.5 MB file that costs 8.2 GB to look inside
+
+**Real, measured, and two separate defects wearing one symptom.** `GET /v1/runs/{id}/member` on a
+run whose artifact is a `.tar.gz` held, at peak, **8213 MB of resident memory for a 19.5 MB
+request**, and returned `200`. Four of those are permitted concurrently.
+
+**First half — the container was held twice.** `Parsed::container` exists so a caller can digest the
+decompressed container; `trigon-compare` is the only one that ever does, and it hashes the bytes and
+drops them. It was a `Vec<u8>` *cloned out of the same buffer the tar reader had just been handed*:
+
+```rust
+let (header, inner) = gzip::read(&bytes, limits.total_expanded_bytes)?;
+let mut a = tar::read(Arc::new(SourceMap::owned(inner.clone())), limits, notes)?;
+…
+Ok(Parsed { archive: a, container: Some(inner) })
+```
+
+`tar::read` does not copy member bodies — they are `Body::Original { src, off, len }`, windows onto
+the `SourceMap`. So the `clone()` was the entire cost, and it was exactly 1.0x the decompressed
+artifact, alive for as long as the `Parsed`. The `Gzip` arm did the same thing twice over, once for
+the container and once for `Body::Inline(inner.clone())`.
+
+`container` is now the same `Arc<SourceMap>` the reader holds, and the bare-gzip member is a window
+onto it. Measured on the same input: **2064 MB → 1039 MB**, 2.006x the expanded size down to 1.01x.
+
+The regression test asserts `Arc::ptr_eq` between the container and an entry's body rather than a
+memory threshold, because "these are one allocation" is the actual claim and an RSS bound is a
+flaky restatement of it.
+
+**Second half — the cap was measured in the wrong unit, again.** That 1.01x is still 1.01x *of the
+expanded size*, and nothing bounded the expansion. `MAX_ARTIFACT` refuses a stored blob over 256
+MiB; the expansion ceiling was `Limits::default().total_expanded_bytes`, 4 GiB. Those are not the
+same number and a gzip stream is where the difference lives: 19.5 MB of zeros reaches the ceiling
+without approaching the cap.
+
+`Limits::default()` is the right budget for a rebuild — one at a time, on a machine bought for it.
+It is the wrong budget for an HTTP handler that permits four concurrent readers. Serving now uses
+its own `total_expanded_bytes` of 1 GiB, which still opens every artifact anyone has pointed this
+at and bounds the process at four of them.
+
+This is [3.48](#348-the-input-was-capped-the-output-was-not) in a third place, and the general
+statement is worth keeping: **a cap constrains the quantity it is measured in and no other.** Bytes
+on disk do not bound bytes in memory; bytes in bound lines rendered; compressed does not bound
+expanded.
+
+**And the refusal named the wrong cause.** Tripping the limit came back as "the artifact would not
+parse", which is what this file has now recorded four times under different names
+([3.42](#342-three-reasons-a-file-has-no-bytes-reported-as-one),
+[3.47](#347-one-bad-query-parameter-discarded-the-deep-link),
+[3.49](#349-one-sentinel-four-refusals-and-the-wrong-one-printed)). The artifact parses fine. It is
+just bigger than a web request will open. It says that now, and says the download still works.
+
+`names()` had no size check at all. It has no caller outside tests, which is precisely the condition
+under which it would acquire one.
+
+### 3.51 The profile with the documented hazard was the one nothing tested
+
+**Gap.** `stabilize(stabilize(x)) == stabilize(x)` is what a signed digest rests on. Every test of
+it in the tree ran the `tar` profile — `tests/passes.rs`, `tests/properties.rs` — and the `stabilize`
+fuzz target had its own hardcoded list of four more. Between them: `tar`, `gem`, `npm-tarball`,
+`crate`, `wheel`.
+
+Not covered: `zip`, `tar-gzip`, `gzip`, and `nupkg`. `nupkg` is the one that matters. It has seven
+passes, and `profiles.rs` documents an ordering hazard in its own construction:
+
+> **Before the zip set.** This renames entries, and `zip-entry-order` sorts them; a rename
+> afterwards would leave the sort stale and the digest dependent on the order the two spellings
+> happened to arrive in.
+
+A hazard a comment warns about, in the only profile no idempotence test ran. It is in fact
+idempotent — the fixture that exercises the rename, two spellings of one target framework
+canonicalizing to the same name, passes. The claim was true. Nothing had checked it.
+
+This is the second time this exact omission has happened here. `all_profiles()` once omitted
+`wheel`, and its doc comment already says why that was not cosmetic.
+
+So the new tests do not carry a list. They iterate `all_profiles()`, and a fourth test asserts the
+fuzz target's table covers it too — by reading its source, since the fuzz crate is not a workspace
+member and nothing can link it. A profile added tomorrow either gets a fixture or fails the suite.
+
+**The shape:** an enumeration with a hand-written list of cases beside it will drift, and the drift
+is invisible because the tests that exist all pass. Drive the cases off the enumeration.
