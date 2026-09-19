@@ -808,6 +808,8 @@ fn rfc3339_from_unix(secs: u64) -> String {
 }
 
 #[cfg(feature = "build")]
+mod dotnet;
+#[cfg(feature = "build")]
 mod progress;
 #[cfg(feature = "build")]
 mod provenance;
@@ -1202,6 +1204,7 @@ fn dispatch(cmd: Cmd) -> Result<()> {
             // No purl here, so no ecosystem to take a toolchain from. `--image auto` on this path
             // derives from a distribution parent and nothing more.
             None,
+            None,
         )
         .map(|_| ()),
     }
@@ -1388,6 +1391,13 @@ mod build {
         pub refused_artifact: Vec<String>,
         /// Every time an upstream host told the mirror to slow down during this build.
         pub throttled: Vec<trigon_mirror::Throttled>,
+        /// Why this SDK, where the run had to choose one.
+        ///
+        /// **Carried out to the report's assumptions.** A compiled ecosystem's divergence is as
+        /// likely to be the toolchain as the source — the NuGet rung's own assumption says exactly
+        /// that — and a reader who cannot see which SDK was chosen, or why, cannot tell the two
+        /// apart. `Environment.base_image` names the bytes; this names the reasoning.
+        pub sdk_choice: Option<String>,
         /// Where each body the mirror served came from: the network, or its own disk.
         pub asked: Vec<trigon_mirror::Asked>,
         /// Guarded members that arrived over the network and are **not** in the rebuilt artifact.
@@ -1441,6 +1451,14 @@ mod build {
         // shape is a `toolchain:` line the tool itself declares, beside its `needs:`, which is not
         // built because it would change the plan hash for every target.
         toolchain: Option<&str>,
+        // When the registry says this version was published.
+        //
+        // **From the resolution, not from the strategy's `registry_time`.** The first version read
+        // that timewarp parameter, which only exists when a run is timewarping — so at
+        // `--egress open` there was no instant at all, and the SDK choice fell through to "the
+        // newest this tool knows of, and a guess". The publish time is a fact about the package
+        // that the resolver already holds either way.
+        published: Option<&str>,
     ) -> Result<Built> {
         let egress = egress_tier(egress)?;
 
@@ -1554,6 +1572,45 @@ mod build {
         // recipe.
         instructions.executable()?;
 
+        // **Which SDK, from the evidence rather than from a constant.** Two things narrow it and
+        // neither is a guess: the project's declared `TargetFramework` is a floor — an older SDK
+        // cannot build it, and says so as `NETSDK1045` — and the publish instant is a ceiling,
+        // because an SDK that shipped afterwards cannot have made these bytes. `registry_time` is
+        // already in the strategy, put there for the dependency timewarp; this is the same
+        // evidence applied to the toolchain.
+        //
+        // Both are best effort. A checkout that is not on disk yields no floor and a strategy with
+        // no moment yields no ceiling, and `choose` says which of them it had.
+        let sdk_major = (toolchain == Some("dotnet")).then(|| {
+            // The host-side checkout where there is one, and the source cache otherwise. At
+            // `--egress open` nothing is fetched host-side — the clone happens in the container —
+            // but a rung that read the repository to find a commit will have left one here, and a
+            // project file is a project file wherever it is read from.
+            let from_cache = || {
+                let dir = crate::provenance::checkout_dir(
+                    &trigon_registry::SourceCache::default_root(),
+                    &instructions.location.repo,
+                    &instructions.location.commit,
+                );
+                dir.is_dir()
+                    .then(|| {
+                        crate::dotnet_project_text(&dir, instructions.location.subdir.as_deref())
+                    })
+                    .flatten()
+            };
+            let project = source_tree
+                .as_deref()
+                .and_then(|root| {
+                    crate::dotnet_project_text(root, instructions.location.subdir.as_deref())
+                })
+                .or_else(from_cache);
+            let (major, why) = crate::dotnet::choose(project.as_deref(), published);
+            println!("  sdk        .NET {major}: {why}");
+            (major, why)
+        });
+        let sdk_why = sdk_major.as_ref().map(|(_, w)| w.clone());
+        let sdk_major = sdk_major.map(|(m, _)| m);
+
         // **`auto`, resolved here and nowhere earlier.** The required set is
         // `instructions.requires.system_deps`, which only exists once the strategy has rendered —
         // and resolving before it exists would mean guessing, or deriving an image per target from
@@ -1562,7 +1619,7 @@ mod build {
         let image = &if image == "auto" {
             let deps: Vec<String> = instructions.requires.system_deps.iter().cloned().collect();
             crate::mirror::resolve_auto(
-                &crate::mirror::auto_parent(toolchain)?,
+                &crate::mirror::auto_parent(sdk_major)?,
                 &deps,
                 verbose,
                 // **Derivation is `apt-get`, and `apt-get` is network.** At an enforced tier the
@@ -1858,6 +1915,7 @@ mod build {
                 refused_artifact: outcome.refused_artifact,
                 throttled: outcome.throttled,
                 asked: outcome.asked,
+                sdk_choice: sdk_why.clone(),
                 guard_notes,
                 artifact: outcome.artifact,
             })
@@ -3383,6 +3441,7 @@ mod rebuild {
                     trigon_core::Ecosystem::NuGet => Some("dotnet"),
                     _ => None,
                 },
+                resolved.intrinsics.publish_time.as_deref(),
             );
 
             // What the build produced, taken before the guard is consulted rather than after.
@@ -3700,6 +3759,15 @@ mod rebuild {
             .ok()
             .and_then(|b| b.transcript.as_ref())
             .map(|t| t.iter().map(|e| e.bytes).sum());
+        // Beside the rung's own assumptions rather than in a field of its own. The rung already
+        // records "NuGet publishes no compiler version, so this builds with whatever .NET SDK the
+        // base image carries"; this is the sentence that says which one it carried and why, and the
+        // two belong in one list because a reader weighing a divergence reads them together.
+        if let Ok(b) = built.as_ref()
+            && let Some(why) = &b.sdk_choice
+        {
+            report.assumptions.push(why.clone());
+        }
         // **The mirror's share, derived from what crossed rather than read off a counter.** At an
         // enforced tier the mirror runs inside the build's network namespace in its own process,
         // so its counters die with the container — the same constraint that put `Withheld` in the
@@ -4842,20 +4910,6 @@ mod mirror {
         "ssh",
     ];
 
-    /// The .NET SDK image `auto` starts from for a NuGet target.
-    ///
-    /// **A tag, resolved to a digest before anything uses it.** The tag is here because a digest
-    /// written into this file goes stale invisibly; the resolution happens at use time and the
-    /// digest it produced is what lands in `Environment.base_image`, so the record names exact
-    /// bytes even though this constant does not.
-    ///
-    /// Which version is a real question and this is the blunt answer: the newest LTS builds every
-    /// target framework below it, and when it cannot the SDK says so precisely —
-    /// `NETSDK1045: The current .NET SDK does not support targeting .NET 10.0` — which
-    /// `env/dotnet-sdk-too-old` names and captures the wanted version from. Deriving the tag from
-    /// the project's declared `TargetFramework` is the better answer and is not built.
-    pub const DOTNET_SDK: &str = "mcr.microsoft.com/dotnet/sdk:9.0";
-
     /// Resolve an image reference that may be a tag into one pinned by digest.
     ///
     /// Pulls if it is not here. `base_image` refuses anything unpinned, and rightly: a tag resolves
@@ -4877,7 +4931,15 @@ mod mirror {
                 .status()
                 .context("running podman pull")?;
             if !ok.success() {
-                bail!("could not pull {reference}");
+                // Named rather than left as podman's `manifest unknown`. A derived SDK version
+                // that has no published image is a gap in this tool's table, not something an
+                // operator did, and the next thing they need is a reference that does exist.
+                bail!(
+                    "could not pull {reference}. If this is a .NET SDK, the version was chosen \
+                     from the project's target framework and the package's publish date — see the \
+                     `sdk` line above — and the tag it produced does not exist. Name one that \
+                     does:\n\n    TRIGON_BASE_PARENT=<an image id> trigon rebuild …"
+                );
             }
         }
         // A repository digest where there is one; the local id otherwise. Both are shapes
@@ -4920,7 +4982,7 @@ mod mirror {
     ///    layers accumulate, but it is much better than refusing, and it is the case that arises
     ///    when the images predate the labels.
     /// 4. Refuse, and say exactly what to run.
-    pub fn auto_parent(toolchain: Option<&str>) -> Result<String> {
+    pub fn auto_parent(dotnet_sdk_major: Option<u32>) -> Result<String> {
         // The operator's choice always wins. Naming a parent is how somebody says "build against
         // this SDK", and a default that overrode it would make that unsayable.
         if let Ok(p) = std::env::var("TRIGON_BASE_PARENT")
@@ -4948,8 +5010,8 @@ mod mirror {
         // So `auto` starts from the SDK image, records the digest it resolved, and the run's
         // assumptions already say the SDK was unrecorded upstream. That is the ADR's actual rule
         // applied, rather than its example list repeated.
-        if toolchain == Some("dotnet") {
-            return pinned(DOTNET_SDK);
+        if let Some(major) = dotnet_sdk_major {
+            return pinned(&crate::dotnet::image_for(major));
         }
         let out = std::process::Command::new("podman")
             .args([
@@ -5081,6 +5143,23 @@ mod mirror {
             return Ok(parent.to_string());
         }
 
+        // **Ask the image, where the label cannot answer.** A label is an index and only our own
+        // images carry one; `mcr.microsoft.com/dotnet/sdk` has none, so without this every NuGet
+        // run derived a child of it — and derived the *wrong* child, adding the npm and PyPI floor
+        // to an image that needs none of it. On the .NET 3.1 SDK that is fatal rather than merely
+        // wasteful: its base is Debian buster, whose archive has moved, so `apt-get update` exits
+        // 100 and a package published in 2019 cannot be built at all.
+        //
+        // The probe is `verify_command`'s, run in a throwaway container, so the question asked here
+        // is the same one the build asks later and the two cannot disagree.
+        let missing = missing_from(parent, required);
+        if missing.is_empty() {
+            if verbose {
+                println!("  image      {parent} already carries what this strategy needs");
+            }
+            return Ok(parent.to_string());
+        }
+
         if enforced {
             bail!(
                 "`--image auto` would have to build an image to satisfy this strategy, and \
@@ -5091,10 +5170,20 @@ mod mirror {
             );
         }
 
-        // The floor plus what this strategy asked for: an image derived for one target should serve
-        // the next, and a set that is exactly one strategy's needs would build a new image per
-        // target.
-        let mut packages: Vec<String> = DEFAULT_PACKAGES.iter().map(|s| s.to_string()).collect();
+        // **What is missing, and for a distribution parent the floor as well.**
+        //
+        // The floor exists so an image derived for one target serves the next: a set that is
+        // exactly one strategy's needs would build a new image per target on a machine doing npm
+        // and PyPI work. That reasoning holds for a distribution parent and not for a toolchain
+        // image, which is already specialised — nothing else is going to reuse a .NET SDK image
+        // with `build-essential` bolted on, and installing it there is how a 2019 package met an
+        // archived Debian.
+        let toolchain_parent = parent.contains("dotnet");
+        let mut packages: Vec<String> = if toolchain_parent {
+            missing.clone()
+        } else {
+            DEFAULT_PACKAGES.iter().map(|s| s.to_string()).collect()
+        };
         for r in required {
             if !packages.contains(r) {
                 packages.push(r.clone());
@@ -5116,6 +5205,46 @@ mod mirror {
         );
         base_image(parent, &packages, &tag, false, false)?;
         image_id(&tag)
+    }
+
+    /// Which of `required` this image does not have, asked of the image itself.
+    ///
+    /// The same probe `verify_command` renders for the build, run now instead of later. A failure
+    /// to run it answers "everything is missing" rather than "nothing is": deriving an image that
+    /// turns out to be redundant costs a build, and skipping one that was needed costs the run.
+    fn missing_from(image: &str, required: &[String]) -> Vec<String> {
+        if required.is_empty() {
+            return Vec::new();
+        }
+        let script = trigon_sandbox::verify_command(image, required);
+        let out = std::process::Command::new("podman")
+            .args([
+                "run",
+                "--rm",
+                "--entrypoint",
+                "",
+                image,
+                "sh",
+                "-c",
+                &script,
+            ])
+            .output();
+        match out {
+            // The probe prints `this base image is missing: a b c` and exits non-zero.
+            Ok(o) if !o.status.success() => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                text.lines()
+                    .find_map(|l| l.split_once("this base image is missing:"))
+                    .map(|(_, rest)| {
+                        rest.split_whitespace()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| required.to_vec())
+            }
+            Ok(_) => Vec::new(),
+            Err(_) => required.to_vec(),
+        }
     }
 
     /// The bare 64-hex id of a local image. See `resolve_auto` step 4 for why not a reference.
@@ -7907,4 +8036,50 @@ output_dir: trigon-pack
         let good = trigon_strategy::from_yaml(USES_THE_PARAMETER_IT_DECLARES).unwrap();
         super::usable(&good).expect("`dir` is what the tool declares");
     }
+}
+
+/// The text of the project file a .NET build would compile, from a checkout on disk.
+///
+/// Best effort, and the caller treats absence as "no floor" rather than as an answer. Searched
+/// under the strategy's `subdir` where it names one, because a monorepo's other projects target
+/// whatever they like and the one being packed is the only one whose framework matters.
+///
+/// The first `.csproj` in sorted order rather than a search for the right one: the strategy already
+/// chose which project to build, and re-deriving that here would be a second answer to a question
+/// `nuget_project` settled. Where a directory holds several, their target frameworks are almost
+/// always the same, and `choose` takes the highest anyway.
+#[cfg(feature = "build")]
+fn dotnet_project_text(root: &Path, subdir: Option<&str>) -> Option<String> {
+    let start = match subdir {
+        Some(d) => root.join(d),
+        None => root.to_path_buf(),
+    };
+    let mut found: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![start];
+    // Bounded: a deep tree should not turn a pre-flight into a walk of the whole repository.
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n == ".git") {
+                    continue;
+                }
+                stack.push(p);
+                continue;
+            }
+            seen += 1;
+            if seen > 20_000 {
+                break;
+            }
+            if p.extension().is_some_and(|x| x == "csproj") {
+                found.push(p);
+            }
+        }
+    }
+    found.sort();
+    std::fs::read_to_string(found.first()?).ok()
 }

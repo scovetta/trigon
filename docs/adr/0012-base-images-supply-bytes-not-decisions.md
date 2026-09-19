@@ -46,10 +46,24 @@ over it and silently answers a different question from the one asked.
 > image must still never carry Node, npm, yarn, pnpm or a Rust toolchain, because those *are*
 > pinned, and `trigon-sandbox`'s admission table refuses every one of them.
 >
-> What this leaves open is *which* SDK. The tag is a constant today, and the SDK announces a wrong
-> guess precisely — `NETSDK1045`, named as `env/dotnet-sdk-too-old` and carrying the version it
-> wanted. Deriving it from the project's declared `TargetFramework` is the better answer and is not
-> built.
+> **Which SDK is derived from the evidence**, not chosen by a constant — `crates/trigon/src/dotnet.rs`.
+> Two things narrow it and neither is a guess:
+>
+> - the project's declared `<TargetFramework>` is a **floor**, because an older SDK cannot build it
+>   and says so as `NETSDK1045`; and
+> - the registry's publish instant is a **ceiling**, because an SDK released afterwards cannot have
+>   made those bytes. That is the dependency timewarp's own evidence applied to the toolchain
+>   instead of to the index.
+>
+> Where the two disagree — a project declaring a framework newer than anything that existed when it
+> was published — the floor wins, because nothing older can build the project, and the run says so:
+> the publisher used a preview SDK, or the recorded publish instant is not when the bytes were made.
+> Silently preferring one would hide that. Whatever is chosen lands in the report's assumptions with
+> its reason, beside the rung's own "NuGet publishes no compiler version", because a divergence in a
+> compiled assembly is as likely to be the toolchain as the source and a reader has to be able to
+> see which one was used.
+>
+> Measured: `AsyncEnumerator@4.0.2`, published in 2019, builds on .NET 3 rather than on 9.
 
 ## What prompted it
 

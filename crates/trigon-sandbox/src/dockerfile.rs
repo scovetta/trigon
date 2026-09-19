@@ -116,6 +116,49 @@ pub fn verify_command(base_image: &str, deps: &[String]) -> String {
 ///
 /// Public because an enforced tier refuses to run it and has to tell the operator what to put in a
 /// base image instead. The refusal is only actionable if it prints the line.
+/// Install only what is not already there.
+///
+/// The same names `install_command` would install and the same query `verify_command` would ask,
+/// composed: collect the missing ones, and run the installer only if the list is non-empty. A
+/// separate function rather than a flag on either, because both of those are used elsewhere for
+/// their own reasons — `base-image` installs unconditionally on purpose, since it is building an
+/// image *to* carry them.
+pub fn install_missing_command(base_image: &str, deps: &[String]) -> String {
+    let img = base_image.to_ascii_lowercase();
+    let (family, query, install) = if img.contains("alpine") {
+        (Family::Alpine, "apk info -e", "apk add --no-cache")
+    } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
+        (Family::Fedora, "rpm -q", "dnf install -y")
+    } else {
+        (
+            Family::Debian,
+            "dpkg -s",
+            "apt-get update && apt-get install -y --no-install-recommends",
+        )
+    };
+    let mut names: Vec<String> = Vec::new();
+    for d in deps {
+        for n in expand(d, family) {
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+    }
+    let list = names.join(" ");
+    format!(
+        "missing=\"\"\n\
+         for p in {list}; do\n\
+        \x20 {query} \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"\n\
+         done\n\
+         if [ -n \"$missing\" ]; then\n\
+        \x20 echo \"installing:$missing\"\n\
+        \x20 {install}$missing\n\
+         else\n\
+        \x20 echo \"this image already carries every package this build needs\"\n\
+         fi\n"
+    )
+}
+
 pub fn install_command(base_image: &str, deps: &[String]) -> String {
     let img = base_image.to_ascii_lowercase();
     let (family, install) = if img.contains("alpine") {
@@ -374,8 +417,17 @@ pub fn render(plan: &OciPlan, defer_deps: bool) -> BuildContext {
         // tier has no network in the image build — that is what makes the tier mean what it says —
         // so the setup phase stops being an installation and becomes the check that somebody
         // already did it.
+        // Install where there is a network to install from, verify where there is not — and at
+        // `open`, **check before installing**, which is not the same thing as installing anyway.
+        //
+        // `apt-get update` is not free and on some images it is not possible: the .NET Core 3.1
+        // SDK is built on Debian buster, whose archive has moved, so `update` exits 100. A package
+        // published in 2019 therefore could not be built on the SDK that existed when it was
+        // published — with every package it needed already in the image. Running the installer
+        // only for what is genuinely absent costs one `dpkg -s` per name and removes that whole
+        // class.
         let script = if plan.egress == crate::EgressTier::Open {
-            install_command(&plan.base_image, &deps)
+            install_missing_command(&plan.base_image, &deps)
         } else {
             verify_command(&plan.base_image, &deps)
         };
@@ -636,5 +688,52 @@ mod image_labels {
             };
             assert!(probe.contains(expected_query), "{img}: {probe}");
         }
+    }
+}
+
+#[cfg(test)]
+mod installing_only_what_is_absent {
+    use super::*;
+
+    /// At `open` egress the setup phase used to `apt-get update` whatever the image held.
+    ///
+    /// That is not merely wasteful. The .NET Core 3.1 SDK image — which a package published in
+    /// 2019 correctly resolves to — is built on Debian buster, whose archive has moved, so
+    /// `apt-get update` exits 100. The build failed with every package it needed already present.
+    #[test]
+    fn a_package_that_is_already_there_is_not_installed() {
+        let script = install_missing_command(
+            "docker.io/library/debian@sha256:aa",
+            &["git".to_string(), "cc".to_string()],
+        );
+        // The check comes first and the installer is inside the branch, so an image that has
+        // everything never reaches a package manager at all.
+        let check_at = script.find("dpkg -s").expect("a check");
+        let install_at = script.find("apt-get update").expect("an installer");
+        assert!(check_at < install_at, "{script}");
+        assert!(script.contains("if [ -n \"$missing\" ]"), "{script}");
+        assert!(
+            script.contains("already carries every package this build needs"),
+            "{script}"
+        );
+        // The same expansion `install_command` would use, so the two cannot disagree about what a
+        // logical name means.
+        assert!(script.contains("build-essential"), "{script}");
+    }
+
+    #[test]
+    fn the_family_decides_both_the_query_and_the_installer() {
+        let alpine = install_missing_command("x/alpine@sha256:bb", &["cc".to_string()]);
+        assert!(
+            alpine.contains("apk info -e") && alpine.contains("apk add"),
+            "{alpine}"
+        );
+        assert!(alpine.contains("build-base"), "{alpine}");
+
+        let fedora = install_missing_command("x/fedora@sha256:cc", &["cc".to_string()]);
+        assert!(
+            fedora.contains("rpm -q") && fedora.contains("dnf install"),
+            "{fedora}"
+        );
     }
 }
