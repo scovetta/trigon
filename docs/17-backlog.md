@@ -1434,3 +1434,32 @@ without any code inferring one.
 **The shape**, for the third time in this backlog: a definition written in a doc comment and an
 implementation that does something narrower, with nothing asserting they match. Both of these were
 found by reading the two together, which is a thing no test does.
+
+### Measured, on the corpus, afterwards
+
+Six runs of `pkg:nuget/Newtonsoft.Json@11.0.1` now sit in the store — three of them run
+deliberately, back to back, in separate work directories with `TRIGON_NO_BUILD_CACHE=1`:
+
+| run | nupkg set | rebuild raw | rebuild stabilized | members |
+| --- | --- | --- | --- | --- |
+| 1789639923 | `e9693d25…` | `80c43c03011a` | `fc0b2ded67e7` | 0 identical, 23 differ |
+| 1789652664 | `e9693d25…` | `caf48c7573be` | `fc0b2ded67e7` | 0 identical, 23 differ |
+| 1789662444 | `2b104124…` | `0f46106ca6d1` | `50edec6be3ea` | 13 identical, 10 differ |
+| 1789854306 | `2b104124…` | `11d6eca504b3` | `50edec6be3ea` | 13 identical, 10 differ |
+| 1789855248 | `2b104124…` | `9fcfad967450` | `50edec6be3ea` | 13 identical, 10 differ |
+| 1789855363 | `2b104124…` | `9b44753b0414` | `50edec6be3ea` | 13 identical, 10 differ |
+
+**Six builds, six distinct artifacts, one stabilized digest per stabilizer set.** That is this
+project's whole claim, measured rather than asserted: the build is not bit-reproducible, and it is
+semantically reproducible. It also settles two of the three parts above with data rather than
+argument.
+
+*Four genuine corroborating attempts exist and the gate counts none of them.* All six carry
+`cache_key: None`, so `agreeing_attempts` is 0 for every one and all six are withheld as
+`awaiting_confirmation`. Safeguard 1 is unmet here not because the evidence is missing but because
+nothing can record that it is evidence.
+
+*And the stabilizer set has to be in the key.* The two sets produce **different stabilized
+digests** — `fc0b2ded67e7` against `50edec6be3ea` — and different member verdicts, 0 identical
+against 13. Two attempts straddling that boundary answered measurably different questions, and
+under today's key, which is the purl twice, they would share a key and be counted as agreeing.
