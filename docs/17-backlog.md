@@ -159,7 +159,7 @@ defect it no longer has**.
 **Done when:** every confirmed bug is fixed or filed with a failing test, and the sweep's negative
 result is recorded so the next one starts from here rather than from nothing.
 
-## B6. Two Trigon runs on one machine can disturb each other's container store — open, and its title said otherwise
+## B6. ~~Two Trigon runs on one machine can disturb each other's container store~~ — closed, and its title has now been wrong in both directions
 
 Found by an intermittent sandbox test that passed in isolation. Podman's local image store is
 machine-global, and this system reaches into it in two places: `Leftovers::drop` removes a run's own
@@ -250,6 +250,17 @@ Found by the test audit, not by the test.
 2.4× rather than 4×, because per-target time rises 42s to 55s under contention — the lanes compete
 for CPU and IO, not for the lock. The comparison is per target and not only in aggregate: two
 different sets of failures can sum to the same table.
+
+**Re-verified before M4 stage A moved on.** Four npm targets at `--concurrency 4`, `mirror-only`:
+four of four reproduced, 122s wall clock, and not one `env/container-store-race` in any log. The
+rule that names the race is still in the table and still `Fault::Infra`, which is where it belongs
+whether or not the race fires again — a control whose near-misses are invisible cannot be told from
+one that never fires.
+
+The heading said **open** while the body described a lock, an ownership fix, a deferred-removal
+backlog and a measured four-lane run. It said **closed** for a while when the body said "narrowed,
+not closed". Both times the body was right and a reader scanning headings was not, which is the
+only reason this paragraph exists.
 
 ## B7. ~~The image build is outside the egress boundary at `mirror-only`~~ — closed
 

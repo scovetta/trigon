@@ -194,18 +194,23 @@ pub fn since(before: &BTreeMap<String, HostTraffic>) -> BTreeMap<String, HostTra
         .collect()
 }
 
-/// Add one table into another, host by host.
+/// Requests another of our processes made on our behalf, after the fact.
 ///
-/// For a caller assembling a run's account from more than one source: this process's own requests
-/// and, at an enforced tier, the mirror's — which run in a different process inside the build's
-/// network namespace and cannot hand a counter back.
-pub fn merge(into: &mut BTreeMap<String, HostTraffic>, other: BTreeMap<String, HostTraffic>) {
-    for (host, t) in other {
-        let e = into.entry(host).or_default();
-        e.requests += t.requests;
-        e.throttled += t.throttled;
-        e.failed += t.failed;
-    }
+/// **A rate limit is about us, not about our process tree.** At an enforced tier the mirror runs
+/// inside the build's network namespace, in its own process, and every byte a build fetches goes
+/// through it — so a table that held only what *this* process asked for reported 3 requests for a
+/// run that made 399. The mirror cannot hand a counter back across the island, but its transcript
+/// names the upstream URL of every body that crossed, and its 429s come out through its log.
+///
+/// Counted, never paced: that traffic has already happened, and the process that made it did its
+/// own pacing. Adding it here is what makes [`traffic`] the whole account, so a sweep's summary and
+/// the number in the mail to a registry come from one place.
+pub fn note_remote(host: &str, t: &HostTraffic) {
+    with(host, |h| {
+        h.traffic.requests += t.requests;
+        h.traffic.throttled += t.throttled;
+        h.traffic.failed += t.failed;
+    });
 }
 
 /// Forget everything. For tests, which share a process and would otherwise share a limiter.
@@ -356,6 +361,26 @@ mod tests {
         // A host that saw nothing in the interval is absent, not a row of zeroes.
         assert_eq!(mine.len(), 2);
         assert!(!since(&traffic()).contains_key("github.com"));
+    }
+
+    #[test]
+    fn traffic_another_process_made_on_our_behalf_is_still_ours() {
+        // The mirror runs inside the build's network namespace in its own process, and every byte
+        // a build fetches goes through it. A table holding only this process's requests said 3 for
+        // a run that made 399 — and a rate limit is about us, not about our process tree.
+        let _g = guard();
+        reset();
+        note_request("registry.npmjs.org");
+        note_remote(
+            "registry.npmjs.org",
+            &HostTraffic {
+                requests: 395,
+                throttled: 1,
+                failed: 0,
+            },
+        );
+        let t = &traffic()["registry.npmjs.org"];
+        assert_eq!((t.requests, t.throttled), (396, 1));
     }
 
     #[test]

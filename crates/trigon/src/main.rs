@@ -2773,11 +2773,12 @@ mod rebuild {
         // anything resolves: the first thing a run does is ask a registry.
         let before = trigon_politeness::traffic();
         let out = run_inner(args, verbose, &mut report);
-        // Added to what `run_inner` derived from the mirror's transcript, never replacing it: this
-        // process resolves and fetches, and the mirror inside the island does the rest. A table
-        // holding one of those would be a complete-looking account of a fraction of the traffic —
-        // which is what it was, reading 3 requests for a run that made 399.
-        trigon_politeness::merge(&mut report.hosts, trigon_politeness::since(&before));
+        // Both halves: what this process asked while resolving and fetching, and what the mirror
+        // inside the island asked on the build's behalf, which `run_inner` hands to the same table
+        // before returning. A record holding one of those would be a complete-looking account of a
+        // fraction of the traffic — which is what it was, reading 3 requests for a run that made
+        // 399.
+        report.hosts = trigon_politeness::since(&before);
         match &out {
             Ok(ran) => report.outcome = Some(ran.outcome.label()),
             // Our own error, not the package's. Recorded as such rather than left absent, because
@@ -3560,22 +3561,31 @@ mod rebuild {
         // so its counters die with the container — the same constraint that put `Withheld` in the
         // transcript instead of in `Observed`. The transcript names the upstream URL of every body
         // that crossed, which is the request count; the 429s that carried no body come out through
-        // the log as `Throttled`. `run_one` adds this process's own requests to it afterwards.
+        // the log as `Throttled`.
+        //
+        // Handed to the process table rather than written straight into the report, so that one
+        // table is the whole account: a sweep's summary then covers the traffic its builds made
+        // without summing anything, and `run_one`'s bracket picks this run's share up with the
+        // rest.
         if let Ok(b) = built.as_ref() {
+            let mut remote: std::collections::BTreeMap<String, trigon_politeness::HostTraffic> =
+                Default::default();
             for e in b.transcript.iter().flatten() {
-                report
-                    .hosts
+                remote
                     .entry(trigon_politeness::host_of(&e.url))
                     .or_default()
                     .requests += 1;
             }
             for t in &b.throttled {
-                let h = report.hosts.entry(t.host.clone()).or_default();
+                let h = remote.entry(t.host.clone()).or_default();
                 h.throttled += 1;
                 // A give-up is a request that failed, and it failed because of our request rate.
                 if t.gave_up {
                     h.failed += 1;
                 }
+            }
+            for (host, t) in &remote {
+                trigon_politeness::note_remote(host, t);
             }
         }
         report.inference_seconds = model.as_ref().and_then(|m| m.inference_seconds());
@@ -5598,7 +5608,11 @@ mod sweep {
         // going, every later target came back `no-strategy`, and the run reported that Trigon
         // cannot infer strategies for most of PyPI. That is a statement about our request budget
         // wearing the costume of a finding about packages.
-        let traffic = trigon_registry::traffic();
+        // The whole account, including what the mirrors inside the islands asked on the builds'
+        // behalf: `run_one` hands each run's transcript-derived counts to this same table. Before
+        // that it covered resolution only, which on an npm sweep is three requests per target out
+        // of about eight hundred — a number that looked like a budget and was 0.4% of one.
+        let traffic = trigon_politeness::traffic();
         let throttled: u64 = traffic.values().map(|t| t.throttled).sum();
         if !traffic.is_empty() {
             println!("\n  upstream");

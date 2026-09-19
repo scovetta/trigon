@@ -121,10 +121,12 @@ Doing (4) before (1) to (3) would mean describing traffic we cannot produce and 
 
 **Stage A — preconditions. Not M4 work; M4 cannot be honest without them.**
 
-1. **[`B6`][b6], the container-store race.** Measured three times across two ecosystems. A fleet is
-   concurrency by definition, and today concurrency silently loses targets. It is now at least
-   *named* as `env/container-store-race` rather than charged to packages, which makes the loss
-   measurable but does not make it stop.
+1. ~~**[`B6`][b6], the container-store race.**~~ **Closed**, and it was closed before this plan was
+   written — the backlog heading said otherwise and the body did not. A `flock` on a per-uid file
+   covers lanes and separate processes alike, and `prune_orphans` no longer force-removes a
+   container whose owner is alive. Re-verified at four lanes on four npm targets: four of four
+   reproduced, no race in any log. The rule naming it stays, because a control whose near-misses
+   are invisible cannot be told from one that never fires.
 2. **[`B25`][b25], the fetch cache.** §2. [`B24`][b24] is its toolchain tier and lands first; the
    artifact tier is digest-verified and safe; the index tier is the one carrying a correctness
    question, and [`ADR-0013`](adr/0013-a-cache-supplies-bytes-never-decisions.md) has the rule.
