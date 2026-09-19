@@ -1489,3 +1489,79 @@ process holds no upstream bytes at any point (not merely its container), and the
 carries is write-only and run-scoped as §2.6 specifies. The last of those is the piece with no
 implementation anywhere: where a blob store cannot express write-only access, §2.6 calls for a
 sidecar that holds the credential and exposes an append-only endpoint.
+
+## B33. Maven, and why it should jump the queue in M5
+
+[`13-roadmap.md`](13-roadmap.md) §4 defers Maven with one sentence — *"the seam supports them, the
+effort does not fit"* — and M5 orders breadth as crates.io, RubyGems, GitHub, then NuGet. That
+ordering was written before NuGet was done, and NuGet turned out to teach the lesson that changes
+it.
+
+**Maven records the toolchain, and that is the thing PyPI does not.** M1's own exit criteria say
+why PyPI is the weak half: *"no commit is recorded, so the rung resolves a tag and assumes the
+build requirements, and it declines when no tag matches."* A jar carries `Build-Jdk-Spec` and
+`Created-By` in `META-INF/MANIFEST.MF`, and the POM carries `<scm>`. That is more inference signal
+than PyPI gives, not less — the heuristic rung would be transcribing rather than guessing, which is
+what makes npm the strong half today.
+
+**A jar is a zip, and the non-determinism is already enumerated.** `trigon-archive` reads it and the
+`zip` stabilizer set applies. What differs between two builds of one jar — entry order, entry
+timestamps, `Created-By`, `Build-Jdk-Spec` — is the same shape as the `nupkg` profile's packaging
+bookkeeping, and the Maven community has already written the list down in `maven-artifact-plugin`.
+This is a profile, not a research project.
+
+**There is a ground-truth corpus, which is the thing M1 is short of.** Reproducible Central
+publishes verified-reproducible Maven artifacts alongside the recipes that reproduce them. For npm
+and PyPI this project had to build its own corpus and label it, and that is still an unmet M1 exit
+criterion. For Maven a labelled corpus already exists, which inverts the usual cost: the expensive
+half is done.
+
+**What is genuinely hard.** `javac` output varies across JDK patch releases, so the toolchain has to
+be pinned exactly and the base-image story needs many JDKs. That is the same problem the .NET SDK
+posed, and this tree solved it once — see the SDK-version inference in the Newtonsoft.Json runs and
+[B16](#b16-system-libraries-are-the-one-input-a-rebuild-does-not-pin), which this would make more
+urgent rather than less.
+
+**Not before M1's rate is quotable.** [`13-roadmap.md`](13-roadmap.md) §1's sequencing principle is
+depth before breadth, and adding a fifth ecosystem while the first two cannot be quoted from would
+be exactly the trade it warns against.
+
+**Done when:** `Ecosystem::Maven` is more than an enum variant — a registry client that resolves a
+coordinate to its artifact and its `<scm>`, a `maven` stabilizer profile, a heuristic rung that
+reads `Build-Jdk-Spec`, and a first rate quoted against a sample of Reproducible Central where the
+answer is known in advance. The `1 maven` entry in `definitions/` that is currently *refused by
+name* is the smallest possible first target.
+
+## B34. The C and C++ opportunity is inside the ecosystems we already have
+
+There is no C or C++ registry in the sense this tool needs. The model compares **a published
+artifact** against a rebuild, and C and C++ overwhelmingly do not publish binaries — vcpkg and Conan
+distribute source and build on the user's machine, so there is nothing to verify. That is worth
+writing down because it looks like a gap in coverage and is actually a mismatch in kind.
+
+Where compiled C and C++ *is* published, it is published inside ecosystems already supported:
+
+- **PyPI platform wheels.** `m1-pypi-common.txt` already reserves a stratum for them — *"20 maturin
+  or a C extension: a platform wheel, not py3-none-any"* — and they are the stratum most likely to
+  diverge and least likely to be checked by anyone else. A `.so` inside a wheel is a C artifact with
+  a published hash and a named source repository, which is precisely the shape this tool wants.
+- **npm prebuilt binaries**, shipped by `node-gyp` and `prebuildify` as `.node` files.
+- **NuGet native runtime packs**, which carry `.so` and `.dll` per RID.
+
+**This is where the interesting divergences are**, and it is the reason the corpus stratifies at
+all: an aggregate rate that hides a bad native-extension number is what stratification exists to
+prevent, and today that stratum has quotas but no quoted rate.
+
+**One real new ecosystem is worth considering: conda-forge.** It is the closest thing to a C and C++
+registry that publishes binaries — a declarative `meta.yaml` recipe, a pinned compiler toolchain, and
+every recipe in one git organization with a one-to-one mapping from package to source. That last
+property is what npm gets from `gitHead` and PyPI lacks, and it would make the heuristic rung a
+transcription again.
+
+**Debian and Fedora are the wrong target**, despite being the obvious one: Reproducible Builds has
+been measuring Debian for over a decade and reports high nineties. Re-measuring it would duplicate a
+mature effort and tell nobody anything new.
+
+**Done when:** the native-extension stratum has a quoted rate of its own in M1's report, separate
+from the pure-Python one — and then, separately, a decision on conda-forge taken on evidence rather
+than on the feeling that C and C++ are missing.
