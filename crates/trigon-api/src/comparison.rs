@@ -118,6 +118,16 @@ struct StoredFile {
     upstream_bytes: Option<u64>,
     #[serde(default)]
     rebuild_bytes: Option<u64>,
+    /// The name each side's artifact carries, where a stabilizer renamed this member.
+    ///
+    /// `path` is the *stabilized* name — what the two sides agree to call one file — and it is
+    /// correct for the comparison and wrong for anyone going back to the bytes. Absent for every
+    /// member no pass renamed, and absent from every comparison written before this field existed,
+    /// which is what the defaults are for.
+    #[serde(default)]
+    upstream_raw_path: Option<Vec<u8>>,
+    #[serde(default)]
+    rebuild_raw_path: Option<Vec<u8>>,
 }
 
 // --------------------------------------------------------------------------
@@ -239,6 +249,22 @@ pub struct NoteGroup {
 ///
 /// `None` where the bytes are not a comparison at all, which a corrupt or truncated blob would be.
 /// The caller reports that rather than rendering an empty page that looks like a clean result.
+/// The name one side's artifact carries for a member the comparison calls `path`.
+///
+/// `None` where the comparison does not know the member, or knows it under the same name the
+/// artifact does — which is every member of every artifact no renaming pass touched. Only two
+/// passes rename, both in the `nupkg` profile, so a caller reaches this on a handful of members of
+/// one ecosystem and never otherwise.
+pub fn raw_name(bytes: &[u8], path: &str, side: &str) -> Option<String> {
+    let c: Stored = serde_json::from_slice(bytes).ok()?;
+    let f = c.diff.files.into_iter().find(|f| path_of(&f.path) == path)?;
+    let raw = match side {
+        "upstream" => f.upstream_raw_path,
+        _ => f.rebuild_raw_path,
+    }?;
+    Some(String::from_utf8_lossy(&raw).into_owned())
+}
+
 pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
     let c: Stored = serde_json::from_slice(bytes).ok()?;
 

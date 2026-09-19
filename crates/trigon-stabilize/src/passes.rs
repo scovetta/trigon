@@ -974,8 +974,10 @@ archive_pass!(
         let mut touched = Touched::NONE;
         for e in a.entries.iter_mut() {
             if is_psmdcp(e.path.as_bytes()) && e.path.as_bytes() != PSMDCP_CANONICAL {
-                e.path = trigon_core::EntryPath::new(PSMDCP_CANONICAL.to_vec());
-                e.mark_dirty();
+                // `rename_to`, not a bare assignment: the comparison names members from the
+                // stabilized archive, and anything that goes back to the bytes on disk needs the
+                // spelling they are actually under.
+                e.rename_to(trigon_core::EntryPath::new(PSMDCP_CANONICAL.to_vec()));
                 touched.entries += 1;
             }
             if e.path.as_bytes() == b"_rels/.rels" {
@@ -1095,8 +1097,8 @@ entry_pass!(
         let mut next = b"lib/".to_vec();
         next.extend_from_slice(&canonical);
         next.extend_from_slice(&rest[slash..]);
-        e.path = trigon_core::EntryPath::new(next);
-        e.mark_dirty();
+        // See `nupkg-packaging-names`: renaming has to leave the original recoverable.
+        e.rename_to(trigon_core::EntryPath::new(next));
         Touched {
             entries: 1,
             bytes: 0,

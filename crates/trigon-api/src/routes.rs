@@ -6,6 +6,7 @@
 
 use crate::evidence::{Class, admits};
 use crate::index::Query;
+use crate::publication::Publication;
 use crate::{Api, Principal};
 use axum::extract::{Path, Query as UrlQuery, State};
 use axum::http::{StatusCode, header};
@@ -273,6 +274,22 @@ impl Pair {
     }
 }
 
+/// What one side's artifact calls a member the comparison named after stabilization.
+///
+/// `None` unless a renaming pass ran, which is the overwhelmingly common case and costs one
+/// `Option` check. The blob is only fetched when a member was not found under the comparison's own
+/// name for it.
+async fn raw_name_for(
+    api: &Api,
+    r: &trigon_store::RunRecord,
+    path: &str,
+    side: &str,
+) -> Option<String> {
+    let digest = r.comparison?;
+    let bytes = api.store.blobs().get(&digest).await.ok()?;
+    crate::comparison::raw_name(&bytes, path, side)
+}
+
 /// Read one member from both sides.
 pub(crate) async fn member_pair(
     api: &Api,
@@ -300,13 +317,24 @@ pub(crate) async fn member_pair(
             continue;
         }
         match artifact_bytes(api, r, side).await {
-            Ok((bytes, name)) => match crate::member::read(bytes, &name, path) {
+            Ok((bytes, name)) => match crate::member::read(bytes.clone(), &name, path) {
                 Ok(b) => out[i] = Some(b),
-                // "not in this artifact" is the normal answer for an added or deleted member.
-                // Anything else is reported rather than rendered as absence: a member that failed
-                // to read and a member that is not there look identical on a page, and only one of
-                // them is a finding about the package.
-                Err(e) if e.contains("holds no member") => {}
+                // Not there under the name the *comparison* uses. That name is the stabilized one,
+                // and two passes rename, so for a handful of `nupkg` members the artifact spells it
+                // differently — `lib/portable-net45%2Bwin8…` against the canonical
+                // `lib/portable-net45+win8…`. The comparison recorded both; ask it, and try again
+                // under the name the bytes are actually under.
+                //
+                // Only on a miss, because loading the comparison blob is not free and this is a
+                // handful of members of one ecosystem. Measured before this existed: 5 of 23
+                // members on one real NuGet divergence page were dead links.
+                Err(e) if e.contains("holds no member") => {
+                    if let Some(raw) = raw_name_for(api, r, path, side).await
+                        && let Ok(b) = crate::member::read(bytes, &name, &raw)
+                    {
+                        out[i] = Some(b);
+                    }
+                }
                 Err(e) => problems.push(format!("{side}: {e}")),
             },
             // The record says these bytes were kept and the store will not return them. That is
@@ -427,7 +455,16 @@ pub async fn member_raw(
         Ok(v) => v,
         Err(e) => return e,
     };
-    match crate::member::read(bytes, &name, &q.path) {
+    // Same fallback as `member_pair`: the comparison names members after stabilization, and two
+    // passes rename. Without this the download link beside a renamed member 404s while the diff
+    // above it renders.
+    let mut read = crate::member::read(bytes.clone(), &name, &q.path);
+    if read.as_ref().is_err_and(|e| e.contains("holds no member"))
+        && let Some(raw) = raw_name_for(&api, &r, &q.path, side).await
+    {
+        read = crate::member::read(bytes, &name, &raw);
+    }
+    match read {
         Ok(body) => {
             // The base name only, quoted, with anything a header cannot carry removed. A member
             // path is attacker-controlled and this header is parsed by the browser.
@@ -532,10 +569,36 @@ pub async fn network(State(api): S, Path(id): Path<String>) -> Response {
 ///
 /// `11-interfaces.md` wants exactly this: the statement, not the log. It is the product — the thing
 /// a third party can check without trusting us or asking our permission.
+///
+/// **Anonymous, for a run the gate published.** Attestations are written at attest time, before
+/// anything knows whether a second attempt will agree, so a first-attempt divergence is signed and
+/// on disk while `decide` still says `Withheld { AwaitingConfirmation }`. Every other route on that
+/// run refuses an anonymous reader — the record 404s, the comparison and the log are class-gated —
+/// and this one served 13 KB of signed statement asserting the divergence. Observed against a real
+/// run in a real store, not reasoned about: see `seam_public_surface.rs`.
+///
+/// `Void` is refused too, and that is not over-caution. Safeguard 2 says such a run is shown *as a
+/// void and never as a divergence*; a signed statement asserting one is that divergence in its most
+/// quotable form, and it would contradict the page it sits behind.
 pub async fn attestation(State(api): S, Path(id): Path<String>) -> Response {
     let Some(r) = api.index.get(&id) else {
         return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
     };
+    if api.principal() == Principal::Anonymous {
+        let published = api
+            .index
+            .entry(&id)
+            .is_some_and(|e| e.publication == Publication::Published);
+        if !published {
+            // 404 rather than 403, for the reason `run` gives: confirming the run exists is most
+            // of the accusation the gate is holding back.
+            return refuse(
+                StatusCode::NOT_FOUND,
+                "no_such_run",
+                "no run by that id has a published statement",
+            );
+        }
+    }
     if r.attestations.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,

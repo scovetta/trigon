@@ -504,3 +504,81 @@ async fn a_bad_parameter_does_not_discard_the_rest_of_the_query() {
         );
     }
 }
+
+/// The signed statement is gated by the publication gate, like everything else about a run.
+///
+/// Attestations are written at attest time. Nothing there knows whether a second attempt will
+/// agree, so a first-attempt divergence is signed and on disk while `decide` still returns
+/// `Withheld { AwaitingConfirmation }` — ADR-0010 safeguard 1, holding back an accusation until
+/// something corroborates it.
+///
+/// Observed on a real store before this test existed, against a real `divergent` run whose entry
+/// read `{"state":"withheld","because":"awaiting_confirmation"}`, through a `--public` server:
+///
+/// ```text
+///   /v1/runs/{id}              -> 404
+///   /v1/runs/{id}/diff         -> 404
+///   /v1/runs/{id}/strategy     -> 404
+///   /v1/runs/{id}/comparison   -> 403
+///   /v1/runs/{id}/log          -> 403
+///   /v1/runs/{id}/attestation  -> 200   13,536 bytes
+/// ```
+///
+/// Every route held except the one that serves the claim in signed, quotable, independently
+/// verifiable form — which is the version of it that does the most damage if it is wrong, and
+/// safeguard 1 exists precisely because a one-attempt divergence may be wrong.
+#[tokio::test]
+async fn an_unconfirmed_divergence_has_no_public_statement() {
+    let mut r = record("1700000010-dd", "pkg:npm/x@1.0.0", Some("divergent"), None);
+    r.attestations = vec!["attestations/x/statement.json".into()];
+
+    let anon = api_over(vec![r.clone()], Principal::Anonymous).await;
+    let (status, body) = get(anon.clone(), "/v1/runs/1700000010-dd/attestation").await;
+    assert_eq!(
+        status, 404,
+        "a withheld divergence must not serve its signed statement; got {status}: {body}"
+    );
+    assert!(
+        !body.contains("statement.json"),
+        "and the refusal must not name what it is withholding: {body}"
+    );
+
+    // The gate, not the route, is what changed: an operator gets past it. Otherwise this test
+    // would pass just as well if the route had been deleted.
+    //
+    // Asserted on the *reason*, not the status. This store holds no blob at that path, so the
+    // operator's request 404s too — as `unreadable`, which is a different fact from `no_such_run`
+    // and the distinction this whole file is about.
+    let op = api_over(vec![r.clone()], Principal::Operator).await;
+    let (_, body) = get(op, "/v1/runs/1700000010-dd/attestation").await;
+    assert!(
+        !body.contains("no_such_run"),
+        "an operator must get past the gate; the gate is about anonymous readers: {body}"
+    );
+
+    // And the same 404 the record gives, so the two cannot be used against each other: a 403 here
+    // beside a 404 there would confirm the run exists, which is most of the accusation.
+    let (record_status, _) = get(anon, "/v1/runs/1700000010-dd").await;
+    assert_eq!(
+        record_status, 404,
+        "the record route is the one this is meant to agree with"
+    );
+}
+
+/// A published run still serves its statement anonymously. That is the point of the route.
+#[tokio::test]
+async fn a_confirmed_run_still_publishes_its_statement() {
+    // Two attempts at one cache key, agreeing, which is what safeguard 1 asks for.
+    let mut a = record("1700000020-ee", "pkg:npm/y@1.0.0", Some("divergent"), Some("k"));
+    a.attestations = vec!["attestations/y/statement.json".into()];
+    let mut b = record("1700000021-ee", "pkg:npm/y@1.0.0", Some("divergent"), Some("k"));
+    b.attestations = vec!["attestations/y/statement.json".into()];
+
+    let anon = api_over(vec![a, b], Principal::Anonymous).await;
+    let (_, body) = get(anon, "/v1/runs/1700000020-ee/attestation").await;
+    assert!(
+        !body.contains("no_such_run"),
+        "a corroborated divergence is exactly what this route exists to publish, and the gate \
+         refused it: {body}"
+    );
+}

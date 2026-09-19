@@ -202,3 +202,144 @@ fn a_clean_match_is_not_described_as_a_normalized_one() {
     );
     assert_eq!(v.census.differs, 0);
 }
+
+/// A member a stabilizer renamed is still reachable in the artifact it came from.
+///
+/// The comparison names members from the **stabilized** archives — it has to, because that is what
+/// makes `lib/portable-net45%2Bwin8%2Bwp8%2Bwpa81/x.dll` on the published side and
+/// `lib/portable45-net45+win8+wp8+wpa81/x.dll` on the rebuilt side the same file. `member::read`
+/// walks the **raw** artifact, where neither of those names exists any more.
+///
+/// Observed on a real NuGet divergence before this was fixed — Newtonsoft.Json 11.0.1, published
+/// against a `dotnet pack` of its own source. The diff listed 23 members and 5 of them answered:
+///
+/// ```text
+/// {"detail":"neither artifact holds a member by that name.","error":"no_such_member"}
+/// ```
+///
+/// Four from `nupkg-portable-folder-name` and one from `nupkg-packaging-names`, the only two passes
+/// in the tree that rename. The refusal blamed the artifacts for a name this project had invented.
+///
+/// The comparison now records, per side, the name that side's artifact carries, and the API asks
+/// for it on a miss. This test drives the real comparator rather than a hand-built report, because
+/// the property is that the two halves agree and a fixture proves only that the fixture does.
+#[test]
+fn a_renamed_member_resolves_in_the_artifact_it_came_from() {
+    fn nupkg(portable: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+            let opts: zip::write::FileOptions<'_, ()> =
+                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            for (name, body) in [
+                (format!("lib/{portable}/x.dll"), &b"MZ\x90\x00payload"[..]),
+                ("x.nuspec".into(), b"<package/>"),
+            ] {
+                use std::io::Write as _;
+                w.start_file(name, opts).unwrap();
+                w.write_all(body).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        out
+    }
+
+    // The two spellings a real pair carries, straight from `nupkg_portable_tests`.
+    let up = nupkg("portable-net45%2Bwin8%2Bwp8%2Bwpa81");
+    let rb = nupkg("portable45-net45+win8+wp8+wpa81");
+
+    let set = trigon_stabilize::profile("nupkg").expect("the nupkg profile");
+    let c = compare_bytes(up.clone(), rb.clone(), Format::Zip, &set, &Limits::default())
+        .expect("compare");
+
+    let diff = c.diff.as_ref().expect("a diff report");
+    let member = diff
+        .files
+        .iter()
+        .find(|f| f.path.to_lossy().contains("x.dll"))
+        .expect("the renamed member is in the report");
+
+    let canonical = member.path.to_lossy().into_owned();
+    assert_eq!(
+        canonical, "lib/portable-net45+win8+wp8+wpa81/x.dll",
+        "the comparison must name it canonically; that is what makes the two sides one file"
+    );
+
+    // Neither artifact has a member under that name. This is the whole defect in one assertion.
+    assert!(
+        trigon_api::member::read(up.clone(), "x.nupkg", &canonical).is_err(),
+        "if the published artifact did hold this name, there was never anything to fix"
+    );
+
+    // So the comparison has to have recorded what each side does call it.
+    let u_raw = member
+        .upstream_raw_path
+        .as_ref()
+        .expect("upstream's own name for a renamed member")
+        .to_lossy()
+        .into_owned();
+    let r_raw = member
+        .rebuild_raw_path
+        .as_ref()
+        .expect("the rebuild's own name")
+        .to_lossy()
+        .into_owned();
+    assert_eq!(u_raw, "lib/portable-net45%2Bwin8%2Bwp8%2Bwpa81/x.dll");
+    assert_eq!(r_raw, "lib/portable45-net45+win8+wp8+wpa81/x.dll");
+
+    // And each side's bytes are reachable under that side's name.
+    assert_eq!(
+        trigon_api::member::read(up, "x.nupkg", &u_raw).expect("upstream member"),
+        b"MZ\x90\x00payload"
+    );
+    assert_eq!(
+        trigon_api::member::read(rb, "x.nupkg", &r_raw).expect("rebuild member"),
+        b"MZ\x90\x00payload"
+    );
+
+    // The other half of the seam: the API reads the comparison back out of a stored blob with its
+    // own mirror of the format, so recording the name is only useful if that mirror carries it.
+    let blob = serde_json::to_vec(&c).expect("serialize");
+    assert_eq!(
+        trigon_api::comparison::raw_name(&blob, &canonical, "upstream").as_deref(),
+        Some(u_raw.as_str()),
+        "the API's projection dropped the field the comparator wrote"
+    );
+    assert_eq!(
+        trigon_api::comparison::raw_name(&blob, &canonical, "rebuild").as_deref(),
+        Some(r_raw.as_str())
+    );
+
+    // A comparison written before the field existed must read back as "no second name" rather than
+    // as a parse failure, or every stored blob in the corpus becomes unrenderable.
+    let mut v: serde_json::Value = serde_json::from_slice(&blob).expect("json");
+    for f in v["diff"]["files"].as_array_mut().expect("files") {
+        f.as_object_mut().unwrap().remove("upstream_raw_path");
+        f.as_object_mut().unwrap().remove("rebuild_raw_path");
+    }
+    let old = serde_json::to_vec(&v).expect("serialize");
+    assert!(
+        trigon_api::comparison::raw_name(&old, &canonical, "upstream").is_none(),
+        "an old comparison has no second name and must say so quietly"
+    );
+    assert!(
+        trigon_api::comparison::render(&old, None).is_some(),
+        "and must still render"
+    );
+}
+
+/// A member nothing renamed records no raw name, so an old comparison reads back unchanged.
+#[test]
+fn an_unrenamed_member_carries_no_second_name() {
+    let (up, rb) = pair();
+    let set = trigon_stabilize::profile("zip").expect("profile");
+    let c = compare_bytes(up, rb, Format::Zip, &set, &Limits::default()).expect("compare");
+    for f in &c.diff.as_ref().expect("diff").files {
+        assert!(
+            f.upstream_raw_path.is_none() && f.rebuild_raw_path.is_none(),
+            "`{}` recorded a raw name although no pass renames in the `zip` profile; that is \
+             bytes in every stored comparison for nothing",
+            f.path.to_lossy()
+        );
+    }
+}

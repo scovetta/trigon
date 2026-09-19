@@ -61,6 +61,22 @@ pub struct FileDiff {
     pub upstream_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rebuild_bytes: Option<u64>,
+    /// The name this member has **in the published artifact**, when a stabilizer renamed it.
+    ///
+    /// `path` is the stabilized name, which is the one a comparison should report: it is what the
+    /// two sides agree to call the same file. It is not the name either artifact carries, and a
+    /// reader who wants the bytes — the management UI's member view, chiefly — has to ask the
+    /// archive for the name the archive uses.
+    ///
+    /// Absent where nothing renamed it, which is almost always. Measured before it existed: 5 of
+    /// 23 members on one NuGet divergence page were dead links, and the refusal said "neither
+    /// artifact holds a member by that name", which blamed the artifacts for a name this crate
+    /// had invented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_raw_path: Option<EntryPath>,
+    /// As [`Self::upstream_raw_path`], for the rebuilt side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuild_raw_path: Option<EntryPath>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,37 +122,26 @@ pub fn report(upstream: &Archive, rebuild: &Archive) -> DiffReport {
     for key in keys {
         let (path, _) = &key;
         let kind = ContentKind::classify(path);
-        let (status, ud, rd, ub, rb) = match (u.get(&key), r.get(&key)) {
-            (Some(a), Some(b)) if a.0 == b.0 => {
+        let (us, rs) = (u.get(&key), r.get(&key));
+        let status = match (us, rs) {
+            (Some(a), Some(b)) if a.digest == b.digest => {
                 counts.0 += 1;
-                (
-                    FileStatus::Identical,
-                    Some(a.0),
-                    Some(b.0),
-                    Some(a.1),
-                    Some(b.1),
-                )
+                FileStatus::Identical
             }
-            (Some(a), Some(b)) => {
+            (Some(_), Some(_)) => {
                 counts.1 += 1;
                 if kind == ContentKind::Executable {
                     counts.4 += 1;
                 }
-                (
-                    FileStatus::Differs,
-                    Some(a.0),
-                    Some(b.0),
-                    Some(a.1),
-                    Some(b.1),
-                )
+                FileStatus::Differs
             }
-            (Some(a), None) => {
+            (Some(_), None) => {
                 counts.2 += 1;
-                (FileStatus::OnlyUpstream, Some(a.0), None, Some(a.1), None)
+                FileStatus::OnlyUpstream
             }
-            (None, Some(b)) => {
+            (None, Some(_)) => {
                 counts.3 += 1;
-                (FileStatus::OnlyRebuild, None, Some(b.0), None, Some(b.1))
+                FileStatus::OnlyRebuild
             }
             (None, None) => unreachable!("key came from one of the two maps"),
         };
@@ -144,10 +149,15 @@ pub fn report(upstream: &Archive, rebuild: &Archive) -> DiffReport {
             path: path.clone(),
             status,
             kind,
-            upstream_digest: ud,
-            rebuild_digest: rd,
-            upstream_bytes: ub,
-            rebuild_bytes: rb,
+            upstream_digest: us.map(|m| m.digest),
+            rebuild_digest: rs.map(|m| m.digest),
+            upstream_bytes: us.map(|m| m.bytes),
+            rebuild_bytes: rs.map(|m| m.bytes),
+            // Each side separately: a package published with `%2B` and rebuilt with `portable45-`
+            // canonicalize to one name from two different spellings, and going back to either
+            // side's bytes needs that side's.
+            upstream_raw_path: us.and_then(|m| m.raw.clone()),
+            rebuild_raw_path: rs.and_then(|m| m.raw.clone()),
         });
     }
 
@@ -164,44 +174,67 @@ pub fn report(upstream: &Archive, rebuild: &Archive) -> DiffReport {
 
 type Key = (EntryPath, u32);
 
-fn index(a: &Archive) -> BTreeMap<Key, (Digest, u64)> {
+/// One side, keyed by the stabilized name, carrying the raw name beside the bytes.
+fn index(a: &Archive) -> BTreeMap<Key, Member> {
     let mut seen: BTreeMap<EntryPath, u32> = BTreeMap::new();
     let mut out = BTreeMap::new();
-    walk(a, &mut |e, prefix| {
+    walk(a, &mut |e, prefix, raw_prefix| {
         let mut path = prefix.to_vec();
         path.extend_from_slice(e.path.as_bytes());
         let path = EntryPath::new(path);
+        let mut raw = raw_prefix.to_vec();
+        raw.extend_from_slice(e.raw_path().as_bytes());
+        let raw = EntryPath::new(raw);
         let n = seen.entry(path.clone()).or_insert(0);
-        let key = (path, *n);
+        let key = (path.clone(), *n);
         *n += 1;
         if let Ok(b) = e.body_bytes() {
             out.insert(
                 key,
-                (
-                    Digest::from_bytes(Sha256::digest(&b).into()),
-                    b.len() as u64,
-                ),
+                Member {
+                    digest: Digest::from_bytes(Sha256::digest(&b).into()),
+                    bytes: b.len() as u64,
+                    // Recorded only where it differs, so the common case costs nothing in the
+                    // stored blob and an old comparison reads back identically.
+                    raw: (raw != path).then_some(raw),
+                },
             );
         }
     });
     out
 }
 
+/// One member of one side, as `index` sees it.
+struct Member {
+    digest: Digest,
+    bytes: u64,
+    /// The name in the artifact, where a stabilizer renamed it away from the key.
+    raw: Option<EntryPath>,
+}
+
 /// Depth-first over members, flattening nested archives into `outer.gz!inner/path` keys so a
 /// difference inside a `.gem` names the file rather than the container.
-fn walk(a: &Archive, f: &mut impl FnMut(&Entry, &[u8])) {
-    fn go(a: &Archive, prefix: &[u8], f: &mut impl FnMut(&Entry, &[u8])) {
+///
+/// Two prefixes are carried, not one. The stabilized prefix names the member as the comparison
+/// reports it; the raw prefix names it as the artifact on disk spells it, which is what anyone
+/// going back to the bytes has to ask for. They are the same string until a renaming pass runs,
+/// and a container that was itself renamed makes them differ for everything inside it too.
+fn walk(a: &Archive, f: &mut impl FnMut(&Entry, &[u8], &[u8])) {
+    fn go(a: &Archive, prefix: &[u8], raw_prefix: &[u8], f: &mut impl FnMut(&Entry, &[u8], &[u8])) {
         for e in &a.entries {
             match &e.body {
                 Body::Nested { inner, .. } => {
                     let mut p = prefix.to_vec();
                     p.extend_from_slice(e.path.as_bytes());
                     p.push(b'!');
-                    go(inner, &p, f);
+                    let mut rp = raw_prefix.to_vec();
+                    rp.extend_from_slice(e.raw_path().as_bytes());
+                    rp.push(b'!');
+                    go(inner, &p, &rp, f);
                 }
-                _ => f(e, prefix),
+                _ => f(e, prefix, raw_prefix),
             }
         }
     }
-    go(a, &[], f);
+    go(a, &[], &[], f);
 }

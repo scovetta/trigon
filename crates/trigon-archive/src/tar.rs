@@ -165,6 +165,7 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
             raw: RawMeta::Tar(raw),
             body,
             dirty: false,
+            renamed_from: None,
         });
     }
 

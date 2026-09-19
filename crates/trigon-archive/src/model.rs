@@ -49,6 +49,44 @@ pub struct Entry {
     pub raw: RawMeta,
     pub body: Body,
     pub(crate) dirty: bool,
+    /// The name this entry carried in the artifact, when a stabilizer has since renamed it.
+    ///
+    /// Two passes rename — `nupkg-portable-folder-name` and `nupkg-packaging-names` — and the
+    /// comparison names its members from the *stabilized* archive. Anything that has to go back to
+    /// the bytes on disk, which is every member the management UI links to, needs the name the
+    /// bytes are actually under. Without it those links resolve to nothing: measured at 5 dead
+    /// links out of 23 members on one real NuGet divergence page.
+    pub(crate) renamed_from: Option<EntryPath>,
+}
+
+impl Entry {
+    /// Rename, remembering the name the artifact on disk carries.
+    ///
+    /// The *first* name wins: two renames of one entry leave the original recorded, not the
+    /// intermediate, because what a caller needs is the spelling in the bytes and never a step
+    /// along the way.
+    pub fn rename_to(&mut self, next: EntryPath) {
+        if next == self.path {
+            return;
+        }
+        if self.renamed_from.is_none() {
+            self.renamed_from = Some(std::mem::replace(&mut self.path, next));
+        } else {
+            self.path = next;
+        }
+        self.mark_dirty();
+    }
+
+    /// The name in the artifact: the pre-stabilization one where a pass renamed this entry, and
+    /// the current one otherwise.
+    pub fn raw_path(&self) -> &EntryPath {
+        self.renamed_from.as_ref().unwrap_or(&self.path)
+    }
+
+    /// Whether a stabilizer renamed this entry.
+    pub fn was_renamed(&self) -> bool {
+        self.renamed_from.is_some()
+    }
 }
 
 /// What an entry *is*. Decides which stabilizers apply and what the writer must emit.

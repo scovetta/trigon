@@ -2199,3 +2199,63 @@ member and nothing can link it. A profile added tomorrow either gets a fixture o
 
 **The shape:** an enumeration with a hand-written list of cases beside it will drift, and the drift
 is invisible because the tests that exist all pass. Drive the cases off the enumeration.
+
+### 3.52 The page named members the artifacts had never heard of
+
+**Real, observed on a live server against a real divergence, and the worst instance of the
+recurring defect this file keeps recording.** On the Newtonsoft.Json 11.0.1 NuGet comparison —
+published against a `dotnet pack` of its own source — **5 of the 23 members listed on the page were
+dead links**. Clicking one gave:
+
+```json
+{"detail":"neither artifact holds a member by that name.","error":"no_such_member"}
+```
+
+The artifacts were fine. The name was ours.
+
+**The mechanism.** `trigon-compare` names members from the **stabilized** archives, which is
+correct and necessary: `lib/portable-net45%2Bwin8%2Bwp8%2Bwpa81/x.dll` on the published side and
+`lib/portable45-net45+win8+wp8+wpa81/x.dll` on the rebuilt side are the same file, and only the
+canonical name `lib/portable-net45+win8+wp8+wpa81/x.dll` says so. `trigon-api::member::read` walks
+the **raw** artifact, where that canonical name has never existed on either side.
+
+Two passes rename, both in `nupkg`: `nupkg-portable-folder-name` and `nupkg-packaging-names`. Four
+dead links came from the first and one from the second — and the second is the instructive one,
+because the `.psmdcp` part is named after a per-pack GUID:
+
+```
+canonical  package/services/metadata/core-properties/core.psmdcp
+upstream   package/services/metadata/core-properties/096d3ae4d1ce45b083321775ef909fbc.psmdcp
+rebuild    package/services/metadata/core-properties/4717a6a29ddb447e9aadfb4762f08a31.psmdcp
+```
+
+There is no single "real" name to fall back to. Each side has its own, and that is why the record
+is per side rather than one field.
+
+**Why it could not be fixed in the API.** The obvious repair — stabilize before walking — is
+forbidden: `the_comparator_is_not_even_a_dependency` asserts that `trigon-stabilize` and
+`trigon-compare` are not runtime dependencies of `trigon-api`, because the read path renders what a
+run decided and must not be able to decide one. Re-implementing the canonicalization in the API
+would be a *second copy of the renaming rule*, which is the same ADR-0008 defect one layer down.
+
+So the seam moved down, which is how ADR-0008 conflicts have been resolved here twice before.
+`Entry` gained `renamed_from`, set through a new `Entry::rename_to` rather than by assigning
+`e.path`; `trigon-compare`'s `walk` carries a raw prefix beside the stabilized one, so a renamed
+*container* also fixes up everything inside it; and `FileDiff` records `upstream_raw_path` /
+`rebuild_raw_path`, present only where they differ. The API asks for them **only when a member was
+not found under the comparison's own name**, so the common path costs nothing and the comparison
+blob does not grow for the ecosystems where no pass renames.
+
+Measured end to end, through the real server, on the real artifacts: **5 dead links of 23 → 0 of
+23**, with both raw downloads and the hex view resolving.
+
+**Two things this had that should have caught it.** The first is a test named
+`a_nested_member_resolves_by_the_name_the_comparison_gave_it`, written for exactly this seam. It
+passes, and always did: its fixture is a nested tar, and no pass renames a tar member. The second
+is a manual sweep of every member of every run in the store, run earlier in the same session, which
+reported no failures — against a store whose runs were all npm and PyPI at the time.
+
+**The shape:** two implementations of one seam again, and the test guarding it was written against
+the one input where the two implementations happen to agree. A seam test needs a fixture that
+*exercises the difference*, not one that merely crosses the seam. Where a transformation exists,
+the fixture has to be one the transformation changes.

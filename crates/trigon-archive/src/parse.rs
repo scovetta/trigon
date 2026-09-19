@@ -158,6 +158,7 @@ fn single_member(header: GzipHeader, payload: Arc<SourceMap>) -> Archive {
             len,
         },
         dirty: false,
+        renamed_from: None,
     });
     a
 }
@@ -176,6 +177,7 @@ fn raw(bytes: Vec<u8>) -> Archive {
         raw: RawMeta::Tar(TarRaw::default()),
         body: Body::Inline(bytes),
         dirty: false,
+        renamed_from: None,
     });
     a
 }
@@ -344,6 +346,7 @@ fn flatten(a: &Archive, store_only: bool) -> Result<Archive> {
             raw: e.raw.clone(),
             body,
             dirty: e.dirty,
+            renamed_from: None,
         });
     }
     Ok(out)

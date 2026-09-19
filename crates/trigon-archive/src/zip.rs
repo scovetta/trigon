@@ -201,6 +201,7 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
             }),
             body: Body::Inline(data),
             dirty: false,
+            renamed_from: None,
         });
     }
 
