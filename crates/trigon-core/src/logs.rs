@@ -104,6 +104,49 @@ fn is_progress(line: &str) -> bool {
     line.contains("..........")
 }
 
+
+/// What [`compress`] will actually emit, in bytes, for a given chosen set.
+///
+/// **Including the elision markers**, which is the whole point: their number depends on which
+/// lines were chosen, so the greedy pass that chooses them cannot price them, and something has to
+/// before the emit loop runs. Mirrors that loop exactly — a marker before each chosen line that
+/// follows a gap, one more if the log ends in a gap, and the truncation notice.
+fn rendered_len(
+    cleaned: &[String],
+    chosen: &std::collections::BTreeSet<usize>,
+    truncated: bool,
+) -> usize {
+    let mut used = 0usize;
+    let mut skipped = 0usize;
+    for (i, line) in cleaned.iter().enumerate() {
+        if !chosen.contains(&i) {
+            skipped += 1;
+            continue;
+        }
+        if skipped > 0 {
+            used += marker_len(skipped);
+            skipped = 0;
+        }
+        used += line.len() + 1;
+    }
+    if skipped > 0 {
+        used += marker_len(skipped);
+    }
+    // `truncated`, not "ends in a gap". A log can lose a line from the middle and end on a kept
+    // one, and the notice is pushed for either — pricing only the trailing case left the output 59
+    // bytes over a 4096 budget, which is the notice, unpaid.
+    if truncated {
+        used += NOTICE.len() + 1;
+    }
+    used
+}
+
+fn marker_len(skipped: usize) -> usize {
+    format!("… {skipped} lines omitted …").len() + 1
+}
+
+const NOTICE: &str = "… compressed to fit; the full log is in the run record …";
+
 /// Cut a log down to roughly `budget` bytes.
 ///
 /// What survives, in order of claim on the budget: every line that looks like an error, with a
@@ -185,8 +228,10 @@ pub fn compress(log: &str, budget: usize) -> Compressed {
     // Take best-first rather than dropping worst-first: one sort and one pass, where the removal
     // loop it replaced was quadratic and took 47 seconds on a 300 KB log.
     //
-    // A third of the budget is reserved for the highest-priority lines before anything else is
-    // considered, so a log whose head is enormous cannot crowd out the error at the end.
+    // The sort is what stops a huge head crowding out the error at the end: the highest-priority
+    // lines get first claim on the *whole* budget, which is a stronger guarantee than reserving a
+    // fraction of it. (An earlier version of this comment claimed a third of the budget was
+    // reserved. No reservation existed, and none was needed.)
     let mut order: Vec<usize> = (0..n).filter(|i| keep[*i]).collect();
     order.sort_by_key(|i| (std::cmp::Reverse(priority(*i)), std::cmp::Reverse(*i)));
 
@@ -201,6 +246,35 @@ pub fn compress(log: &str, budget: usize) -> Compressed {
         } else {
             truncated = true;
         }
+    }
+
+    // **Now pay for the elision markers, which the pass above does not price.**
+    //
+    // A marker costs bytes and its count is a function of *which* lines were chosen, so it cannot
+    // be known until the set is. Left unpaid, the emit loop below discovers the shortfall and
+    // resolves it by stopping — and it walks in file order, so the lines it drops are the last
+    // ones in the log. That is where the error is, and where the priority sort had deliberately
+    // spent the budget.
+    //
+    // Measured on a 4,000-line build log with scattered warnings, at both shipped budgets (4096 in
+    // the rebuild path, 8192 in the repair path): the final `fatal error: Python.h` line was never
+    // emitted, `classify` returned `unknown` on the compressed text and `cc/missing-header` on the
+    // raw, and since that signature is the repair cache key the same failure keyed two ways
+    // depending on how much the build printed. The comment at the top of this function describes
+    // that exact regression as already fixed; it was reintroduced one loop later.
+    //
+    // So eviction happens here, by priority, which is what the loop below only claimed to do.
+    // `truncated` feeds back in: the first eviction makes it true, which adds the notice's cost,
+    // which may require another. The loop settles because every pass removes a line.
+    while rendered_len(&cleaned, &chosen, truncated) > budget {
+        let Some(&victim) = chosen
+            .iter()
+            .min_by_key(|i| (priority(**i), **i))
+        else {
+            break;
+        };
+        chosen.remove(&victim);
+        truncated = true;
     }
 
     let mut out: Vec<String> = Vec::new();
@@ -219,12 +293,13 @@ pub fn compress(log: &str, budget: usize) -> Compressed {
             out.push(marker);
             skipped = 0;
         }
-        if used + line.len() + 1 > budget {
-            // The markers cost budget too, and they are not priced above. Stopping here keeps the
-            // promise that the output fits; the lines lost are the lowest-priority ones already.
-            truncated = true;
-            break;
-        }
+        // No budget check here any more. The eviction above already made the whole rendering fit,
+        // and a check in this loop can only ever resolve an overrun in file order — which is the
+        // defect. If this ever did overrun, dropping the tail would be the wrong repair.
+        debug_assert!(
+            used + line.len() < budget,
+            "the eviction pass should have made this fit"
+        );
         used += line.len() + 1;
         kept_lines += 1;
         out.push(line.clone());
@@ -234,7 +309,7 @@ pub fn compress(log: &str, budget: usize) -> Compressed {
     }
     if truncated {
         // Said outright. A model given a silently cut log reasons about a build it cannot see.
-        out.push("… compressed to fit; the full log is in the run record …".to_string());
+        out.push(NOTICE.to_string());
     }
 
     Compressed {
@@ -472,5 +547,86 @@ mod tests {
         let after = crate::classify(&compress(&log, 4096).text);
         assert_eq!(before.key(), after.key());
         assert_eq!(before.key(), "env/node-too-old");
+    }
+}
+
+#[cfg(test)]
+mod the_error_at_the_end {
+    //! The last line of a build log is where the error is, and it must survive compression.
+    //!
+    //! `the_classifier_still_names_the_failure_in_the_compressed_form` above asserts this already,
+    //! and passed throughout — its npm fixture has a *contiguous* chosen set, so it never reaches
+    //! the emit loop's budget check. These use a fragmented one, which is what a real build log
+    //! with scattered warnings looks like.
+
+    use super::compress;
+
+    /// 4,000 lines of noise with a warning every eighth, then the line that matters.
+    fn fragmented(lines: usize, gap: usize) -> String {
+        let mut out = Vec::with_capacity(lines + 1);
+        for i in 0..lines {
+            if i % gap == 0 {
+                out.push(format!(
+                    "src/mod{i}.c:12:5: warning: cannot find prototype decl {i}"
+                ));
+            } else {
+                out.push(format!(
+                    "compiling translation unit number {i} of the project"
+                ));
+            }
+        }
+        out.push(
+            "yarl/_quoting_c.c:6:10: fatal error: Python.h: No such file or directory".to_string(),
+        );
+        out.join("\n")
+    }
+
+    #[test]
+    fn a_fragmented_log_still_carries_its_last_line() {
+        // Both shipped budgets: 4096 in the rebuild path, 8192 in the repair path.
+        for budget in [4096usize, 8192] {
+            for gap in [3usize, 5, 8, 12, 20, 40] {
+                let raw = fragmented(4000, gap);
+                let c = compress(&raw, budget);
+                assert!(
+                    c.text.contains("fatal error: Python.h"),
+                    "budget {budget}, gap {gap}: the error at the end was dropped. The priority \
+                     sort chose it and the emit loop threw it away in file order."
+                );
+            }
+        }
+    }
+
+    /// The consequence, which is what makes it more than cosmetic.
+    #[test]
+    fn the_signature_does_not_depend_on_how_much_the_build_printed() {
+        let raw = fragmented(4000, 8);
+        let from_raw = crate::classify(&raw);
+        for budget in [4096usize, 8192] {
+            let c = compress(&raw, budget);
+            let from_compressed = crate::classify(&c.text);
+            assert_eq!(
+                from_raw.key(),
+                from_compressed.key(),
+                "budget {budget}: the same failure keyed two ways. That key is the repair cache \
+                 key, so a noisy build and a quiet one with the same cause miss each other."
+            );
+        }
+    }
+
+    /// And the promise the old comment made and could not keep.
+    #[test]
+    fn the_output_fits_the_budget_it_was_given() {
+        for budget in [512usize, 1024, 4096, 8192] {
+            for gap in [3usize, 8, 40] {
+                let c = compress(&fragmented(2000, gap), budget);
+                assert!(
+                    c.text.len() <= budget,
+                    "budget {budget}, gap {gap}: emitted {} bytes. The elision markers cost budget \
+                     and were not priced.",
+                    c.text.len()
+                );
+            }
+        }
     }
 }

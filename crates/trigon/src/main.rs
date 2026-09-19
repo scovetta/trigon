@@ -371,6 +371,29 @@ enum Cmd {
         #[arg(long, requires = "baseline")]
         fail_on_regression: bool,
     },
+    /// Check a lockfile or SBOM against what a store holds, with an explicit *never checked* row.
+    ///
+    /// The one view that starts from something you already have. Everything else assumes you care
+    /// about a package we happen to have scanned.
+    ///
+    /// Reads `package-lock.json`, `npm-shrinkwrap.json`, `requirements.txt` and SPDX JSON, chosen
+    /// by file name rather than sniffed, so a file pointed at by mistake is refused instead of
+    /// reported as zero packages.
+    ///
+    /// **Five rows, never four.** `unsupported` counts runs that reached no verdict and
+    /// `never checked` counts packages with no run; neither is a statement about the package, and
+    /// neither is summed with the three verdicts above them. No overall percentage is printed,
+    /// because a single rate needs one denominator and there are three here.
+    #[cfg(feature = "build")]
+    Check {
+        /// The lockfile or SBOM.
+        file: PathBuf,
+        /// `text` for a terminal, `json` for a script, `sarif` for a code-scanning UI.
+        #[arg(long, default_value = "text", value_parser = ["text", "json", "sarif"])]
+        format: String,
+        #[arg(long, default_value = "./trigon-store")]
+        store: PathBuf,
+    },
     /// List the runs a store holds.
     #[cfg(feature = "build")]
     Runs {
@@ -951,6 +974,9 @@ mod watch;
 #[cfg(feature = "build")]
 mod worker;
 
+#[cfg(feature = "build")]
+mod check;
+
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
     let cli = Cli::parse();
@@ -1356,6 +1382,12 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             tier,
             migrate,
         } => enqueue_targets(&queue, &targets, &tier, migrate),
+        #[cfg(feature = "build")]
+        Cmd::Check {
+            file,
+            format,
+            store,
+        } => check::run(&file, &store, &format),
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
         #[cfg(feature = "build")]
@@ -2779,6 +2811,35 @@ fn list_profiles_cmd() -> Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, feature = "build"))]
+mod guard_arming {
+    //! Whether a signed statement may say the artifact-hash check was performed.
+    //!
+    //! The manifest is built for every run, because building it is how we learn what we *would*
+    //! watch. Arming it is a separate event, and only an armed guard is a fact about the run.
+
+    #[test]
+    fn only_an_armed_guard_is_a_fact_about_the_run() {
+        // `mirror-only`: the manifest goes to the mirror inside the build's network island.
+        assert!(super::guard_was_armed(true, false));
+        // `--egress open --timewarp auto`: a host mirror is reserved and built `.with_guard(...)`.
+        assert!(super::guard_was_armed(false, true));
+        assert!(super::guard_was_armed(true, true));
+
+        // **The default configuration.** `--egress open`, no `--timewarp`, so no mirror exists at
+        // all and the guard file is never handed to anything. Carrying the manifest anyway signed
+        // `artifactHashCheck: { performed: true, guardedMembers: 34, trips: [] }` about a run where
+        // nothing had looked at anything — which is precisely what
+        // `trigon-attest/src/rebuild.rs`'s own comment says must not happen: "A guard that could
+        // not run is not a guard that found nothing, and collapsing the two is how an unchecked run
+        // comes to be read as a clean one."
+        assert!(
+            !super::guard_was_armed(false, false),
+            "a run with no mirror and no enforcement armed no guard, and must not sign that it did"
+        );
+    }
+}
+
 #[cfg(test)]
 mod profile_listing {
     use super::*;
@@ -3031,6 +3092,23 @@ fn strategy_render(
         }
     }
     Ok(())
+}
+
+
+/// Whether the artifact-hash guard was actually armed, and so whether the manifest is a fact about
+/// this run rather than a description of what we would have watched.
+///
+/// Two things arm it, and a run needs only one of them: `mirror-only` hands the manifest to the
+/// mirror inside the build's network island, and a reserved host mirror is built `.with_guard(...)`.
+/// The default configuration does neither — `--egress open` with no `--timewarp` starts no mirror
+/// at all — and carrying the manifest anyway signed `artifactHashCheck.performed: true` about runs
+/// where nothing looked.
+///
+/// A named function with a test rather than an inline `||`, because the signed claim downstream is
+/// derived from it and an inline boolean is where the last version of this rule went wrong.
+#[cfg(feature = "build")]
+const fn guard_was_armed(enforced: bool, host_mirror: bool) -> bool {
+    enforced || host_mirror
 }
 
 fn strategy_tools() -> Result<()> {
@@ -3598,6 +3676,11 @@ mod rebuild {
             Some("auto") => Some(rt.block_on(trigon_mirror::reserve(0))?),
             _ => None,
         };
+
+        // **Whether anything will be armed with the guard**, captured here because `reserved` is
+        // moved into the mirror handle a hundred lines down and the answer is needed after that.
+        // See [`guard_was_armed`] for why this is a named function rather than an inline `||`.
+        let armed = guard_was_armed(enforced, reserved.is_some());
         let timewarp_host = crate::timewarp_host_for(
             enforced,
             reserved
@@ -3817,13 +3900,25 @@ mod rebuild {
         // a run that does not carry it forward signs a statement saying nobody looked. Nineteen
         // statements said exactly that about runs where the guard was armed and reported its member
         // count to the terminal in the same breath.
-        let guard_manifest = Some(
+        //
+        // **And only where it was armed**, which is the other half of the same rule and was missing.
+        // The manifest is built for every run, because building it is how we learn what we would
+        // have watched; arming it is a different event. Carried unconditionally, the default
+        // configuration — `--egress open`, no `--timewarp`, so no mirror at all — signed
+        // `artifactHashCheck: { performed: true, guardedMembers: 34, trips: [] }` about a run where
+        // nothing had looked at anything. That is the failure the comment three lines above
+        // `"performed"` in `trigon-attest/src/rebuild.rs` names exactly: a guard that could not run
+        // is not a guard that found nothing.
+        //
+        // Both fields move together. `guardedMembers: 34` beside `performed: false` is the same
+        // false statement with the other half missing.
+        let guard_manifest = armed.then(|| {
             trigon_core::Digest::from_bytes(<[u8; 32]>::from(
                 <sha2::Sha256 as sha2::Digest>::digest(&guard_bytes),
             ))
-            .to_hex(),
-        );
-        let guarded_members = Some(guard.members.len() as u64);
+            .to_hex()
+        });
+        let guarded_members = armed.then_some(guard.members.len() as u64);
 
         // Evidence the registry pin bound something, filled in once the mirror is torn down.
         let mut pin: Option<trigon_mirror::Observed> = None;

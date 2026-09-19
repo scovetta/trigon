@@ -2403,3 +2403,103 @@ This is [3.50](#350-a-19-5-mb-file-that-costs-8-2-gb-to-look-inside)'s rule a th
 constrains the quantity it is measured in and no other.** Here the quantity was right and the
 *scope* was wrong — per member rather than per artifact — which is the same mistake wearing a
 different hat.
+
+### 3.57 The compressor threw away the line the whole log was about
+
+**Real, measured at both shipped budgets, and a reintroduction of a fix this file already records.**
+
+`compress` cuts a build log to what a model can read. It picks lines best-first — highest priority
+claims the budget — and then walks the *file* emitting the chosen ones. The emit loop had a budget
+check, because the elision markers (`… 41 lines omitted …`) cost bytes and the selection pass never
+priced them. On overrun it did this:
+
+```rust
+if used + line.len() + 1 > budget {
+    // The markers cost budget too, and they are not priced above. Stopping here keeps the
+    // promise that the output fits; the lines lost are the lowest-priority ones already.
+    truncated = true;
+    break;
+}
+```
+
+Both sentences are false. It walks in file order, so the lines lost are the **last ones in the
+log** — which is where the error is, and where the priority sort had deliberately spent the budget.
+And the markers pushed after the break are unpriced, so the output did not fit either: 4,164 bytes
+against a 4,096 budget.
+
+Measured on a 4,000-line build log with a compiler warning every eighth line — which fragments the
+chosen set into runs, each costing a marker — at **4096** (the rebuild path) and **8192** (the
+repair path), for gap spacings of 3, 5, 8, 12, 20 and 40:
+
+```text
+classify(raw)        → cc/missing-header:python.h
+classify(compressed) → unknown
+```
+
+**That signature is the repair cache key.** So the same failure keyed two ways depending on how
+much the build printed, and a noisy build and a quiet one with the same cause missed each other in
+the cache. The comment at the top of this very function describes that regression as already fixed:
+*"a long log spent its whole budget on the head and never reached the end … `classify` then returned
+`unknown`, and since that signature is the repair cache key, the same failure keyed two ways
+depending on how much the build printed."* It was reintroduced one loop later.
+
+The markers are now priced, before the emit loop runs, by a `rendered_len` that models exactly what
+will be emitted. When the total does not fit, lines are evicted **by priority** — which is what the
+old comment claimed the `break` was doing. The emit loop no longer has a budget check at all, only
+a `debug_assert`, because a check there can only ever resolve an overrun in file order.
+
+The existing test `the_classifier_still_names_the_failure_in_the_compressed_form` asserts this
+property and passed throughout: its npm fixture has a *contiguous* chosen set, so it never reaches
+the break. Same shape as [3.52](#352-the-page-named-members-the-artifacts-had-never-heard-of) — a
+test written for the right property, with a fixture that cannot exercise it.
+
+**Also corrected, one line up:** *"A third of the budget is reserved for the highest-priority lines
+before anything else is considered."* No reservation existed. The sort is what provides the
+guarantee, and it is a stronger one — the highest-priority lines get first claim on the whole
+budget, not a third of it. Here the comment was wrong and the code was right.
+
+### 3.58 A signed statement that the check had been performed, on runs where nothing looked
+
+**Real, and it is a false claim inside a signature, in the default configuration.**
+
+`RecordInputs::guard_manifest` documents itself:
+
+> `None` means the guard did not run, and the signed `artifactHashCheck` block says so by deriving
+> `performed` from the first of these.
+
+It was built unconditionally:
+
+```rust
+let guard_manifest = Some(Digest::from_bytes(…digest(&guard_bytes)…).to_hex());
+let guarded_members = Some(guard.members.len() as u64);
+```
+
+The manifest is built for every run, because building it is how we learn what we *would* watch.
+Arming it is a separate event, and two things do it: `--egress mirror-only` hands it to the mirror
+inside the build's network island, and `--timewarp auto` reserves a host mirror built
+`.with_guard(…)`. **The shipped default does neither** — `--egress` defaults to `open` for both
+`rebuild` and `sweep`, and without `--timewarp` no mirror is started at all.
+
+So a default `trigon rebuild` signed:
+
+```json
+"artifactHashCheck": { "performed": true, "matched": false, "guardedMembers": 34, "trips": [] }
+```
+
+about a run where nothing had looked at anything. `trigon-attest/src/rebuild.rs` states the rule
+being broken three lines above the field that breaks it: *"A guard that could not run is not a guard
+that found nothing, and collapsing the two is how an unchecked run comes to be read as a clean
+one."*
+
+The cause is visible in the comment above the assignment, which explains a fix in the **opposite**
+direction — nineteen statements once said the guard had not run when it had. The correction went
+past the target and made the field unconditional.
+
+Both fields now hang off one named predicate, `guard_was_armed(enforced, host_mirror)`, with its own
+test. A function rather than an inline `||`, because a signed claim is derived from it and an inline
+boolean is where the last version of this rule went wrong. They move together: `guardedMembers: 34`
+beside `performed: false` is the same false statement with the other half missing.
+
+**The shape**, shared with §3.57 and with most of what this pass found: the comment is right, the
+code is wrong, and nothing compares them. Both of these were found by a reader holding the two side
+by side — which is a thing no test in this repository does.
