@@ -185,6 +185,7 @@ fn every_field_populated() -> RunRecord {
             artifact_bytes: Some(2_469_134),
             log_bytes: Some(65_536),
         }),
+        non_builtin_stabilizer: Some(true),
         attestations: vec![
             "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/equivalence.intoto.json".into(),
             "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/rebuild.intoto.json".into(),
@@ -342,6 +343,7 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "network_transcript",
         "costs",
         "attestations",
+        "non_builtin_stabilizer",
     ]
     .into_iter()
     .collect();

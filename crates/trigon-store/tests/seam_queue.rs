@@ -434,3 +434,97 @@ async fn the_url_picks_the_dialect() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(queue(&dir, "dialect").await.backend(), Backend::Sqlite);
 }
+
+/// Two people asking for a rebuild at the same moment both get an answer.
+///
+/// **The same defect `lease` was rewritten for, in the function next door.** `Pool::begin()` is
+/// `BEGIN DEFERRED` on SQLite: the transaction takes a read lock on its first `SELECT` and tries
+/// to upgrade on its first `INSERT`. `request_rebuild` counts the day's requests, looks for an
+/// existing job, and only then inserts — so two concurrent callers each hold a read snapshot and
+/// neither can upgrade. `PRAGMA busy_timeout` does not help, because SQLite returns `SQLITE_BUSY`
+/// at once rather than waiting: waiting cannot resolve a deadlock where both sides must give up a
+/// snapshot.
+///
+/// What a user saw was `POST /v1/runs` returning 500 with "the queue could not be reached", which
+/// names the wrong thing — the queue was reached, and it was us.
+///
+/// Distinct targets on purpose. The idempotent-on-target path would let two callers collide
+/// harmlessly on a shared row; this is the case where both really do have work to insert.
+#[tokio::test]
+async fn concurrent_requests_do_not_deadlock_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "requests").await;
+    q.migrate_identity().await.expect("identity");
+    q.add_principal("p1", "one", &["request"], 100, "tok-1")
+        .await
+        .expect("principal");
+    let who = q
+        .principal_for("tok-1")
+        .await
+        .expect("principal_for")
+        .expect("a principal");
+
+    const N: usize = 8;
+    let mut tasks = Vec::new();
+    for i in 0..N {
+        let q = q.clone();
+        let who = who.clone();
+        tasks.push(tokio::spawn(async move {
+            q.request_rebuild(&who, &format!("pkg:npm/p{i}@1.0.0"), "2026-09-19")
+                .await
+        }));
+    }
+
+    let mut queued = 0;
+    let mut errors = Vec::new();
+    for t in tasks {
+        match t.await.expect("join") {
+            Ok(_) => queued += 1,
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    assert!(
+        errors.is_empty(),
+        "{} of {N} concurrent requests failed, and a person clicking a button is what produces \
+         them: {errors:?}",
+        errors.len()
+    );
+    assert_eq!(queued, N, "every distinct target should have been queued");
+
+    let depth = q.depth().await.expect("depth");
+    let ready: i64 = depth
+        .iter()
+        .filter(|(state, _)| state == "ready")
+        .map(|(_, n)| *n)
+        .sum();
+    assert_eq!(ready as usize, N, "not every request produced a job: {depth:?}");
+}
+
+/// The same, for the host reservation, which reads a floor and then writes it back.
+#[tokio::test]
+async fn concurrent_host_reservations_do_not_deadlock_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "reservations").await;
+
+    const N: usize = 8;
+    let mut tasks = Vec::new();
+    for _ in 0..N {
+        let q = q.clone();
+        tasks.push(tokio::spawn(async move {
+            q.reserve_host("registry.npmjs.org", Duration::from_millis(10))
+                .await
+        }));
+    }
+
+    let mut errors = Vec::new();
+    for t in tasks {
+        if let Err(e) = t.await.expect("join") {
+            errors.push(e.to_string());
+        }
+    }
+    assert!(
+        errors.is_empty(),
+        "{} of {N} concurrent reservations failed: {errors:?}",
+        errors.len()
+    );
+}

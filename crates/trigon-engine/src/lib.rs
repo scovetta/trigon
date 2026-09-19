@@ -92,6 +92,17 @@ impl Progress {
             .unwrap_or(false)
     }
 
+    /// Renew the lease without claiming to have reached a new phase.
+    ///
+    /// What the loop calls while a job is in flight. `phase` would overwrite the phase the worker
+    /// last set, so a build would report "running" instead of "rebuild" for its whole life.
+    async fn renew(&self) -> bool {
+        self.queue
+            .heartbeat(self.job, &self.worker, self.lease, None)
+            .await
+            .unwrap_or(false)
+    }
+
     pub async fn note(&self, phase: &str, detail: &str) {
         let _ = self.queue.event(self.job, phase, Some(detail)).await;
     }
@@ -188,6 +199,64 @@ impl Engine {
         Ok(n)
     }
 
+    /// Run the job, renewing its lease for as long as it takes.
+    ///
+    /// **Without this, a job longer than one lease is done twice, and then again, and again.**
+    /// `Progress::phase` renews, so the lease survives exactly as long as a worker keeps calling
+    /// it — and the builder calls it once, at the top, then hands the whole build to
+    /// `spawn_blocking`. A 300-second lease against a build allowed 1800 seconds means the job is
+    /// re-leased about six times, six workers build the same package, and `finish` throws away all
+    /// but the last because a worker may not record under an expired lease.
+    ///
+    /// That last part is the tell: the loop below already logged `"lease expired before this
+    /// finished; the work was done twice"` and carried on. The condition was detected, named, and
+    /// left in place.
+    ///
+    /// It belongs here rather than in the builder because every `Work` has the same problem and
+    /// only one of them would have remembered.
+    async fn run_with_heartbeat(
+        &self,
+        work: &dyn Work,
+        job: &Job,
+        progress: &Progress,
+    ) -> Result<Done, Failed> {
+        let run = work.run(job, progress);
+        tokio::pin!(run);
+
+        // A third of the lease, so two consecutive missed renewals still leave margin.
+        //
+        // **The floor must stay well under the lease.** This was first written with a one-second
+        // floor, on the reasoning that an absurdly short lease should not become a busy loop —
+        // which against a 300 ms lease renews for the first time at one second, 700 ms after the
+        // job has already been taken by somebody else. A floor that can exceed the thing it is
+        // renewing disables the renewal entirely, and silently, since everything still compiles
+        // and the common configuration still works. Ten milliseconds only exists because
+        // `interval` panics on a zero duration.
+        let every = (self.cfg.lease / 3).max(Duration::from_millis(10));
+        let mut tick = tokio::time::interval(every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await; // fires immediately; the lease was just taken
+
+        loop {
+            tokio::select! {
+                done = &mut run => return done,
+                _ = tick.tick() => {
+                    if !progress.renew().await {
+                        // Keep going rather than abandoning: the work is already in flight, often
+                        // in a container this future cannot cancel, and `finish` refuses to record
+                        // under a lost lease anyway. Saying so is what turns a silent duplicate
+                        // into something an operator can find.
+                        tracing::warn!(
+                            job = job.id,
+                            worker = %self.cfg.worker,
+                            "lost the lease while still working; another worker now holds this job"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     async fn one(&self, work: &dyn Work, job: Job) -> Result<(), EngineError> {
         let progress = Progress {
             queue: self.queue.clone(),
@@ -197,7 +266,7 @@ impl Engine {
         };
         progress.phase("leased").await;
 
-        match work.run(&job, &progress).await {
+        match self.run_with_heartbeat(work, &job, &progress).await {
             Ok(done) => {
                 // Belt and braces. The cap is computed in `trigon-compare` and nowhere else; this
                 // asserts that it was, on the one path where being wrong means publishing a

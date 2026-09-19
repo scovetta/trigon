@@ -360,6 +360,17 @@ pub struct RunRecord {
     /// discard the bytes a signature is about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attestations: Vec<String>,
+    /// Whether any stabilizer that actually fired carried non-`Builtin` provenance.
+    ///
+    /// ADR-0010 safeguard 2's provenance clause needs this, and the fact lives in the comparison
+    /// blob — which the publication gate's index does not fetch, and should not have to for every
+    /// run on every refresh. So the run path, which has the `Comparison` in hand, writes the one
+    /// bit down here.
+    ///
+    /// `None` is a record written before this field existed, and means **not known**, never "no".
+    /// The gate treats it as an unevaluated safeguard rather than a cleared one.
+    #[serde(default)]
+    pub non_builtin_stabilizer: Option<bool>,
 
     /// What a transparency log said about this run's equivalence statement, where one was asked.
     ///
@@ -416,6 +427,7 @@ impl RunRecord {
             network_transcript: None,
             costs: None,
             attestations: Vec::new(),
+            non_builtin_stabilizer: None,
             transparency: None,
         }
     }

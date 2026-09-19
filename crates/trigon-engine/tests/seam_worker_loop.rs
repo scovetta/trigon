@@ -444,3 +444,152 @@ async fn a_worker_leases_only_its_own_kinds() {
     assert_eq!(e.tick(work.as_ref()).await.unwrap(), 0);
     assert_eq!(work.ran.load(Ordering::SeqCst), 0);
 }
+
+/// A worker that sleeps in `Work::run` keeps its lease, because the loop renews it.
+///
+/// **The defect this asserts against.** `Progress::phase` renews the lease, so the lease lives
+/// exactly as long as a worker keeps calling it. The real builder calls it once, at the top, and
+/// then hands the whole build to `spawn_blocking`. With the shipped defaults — a 300-second lease
+/// and a build allowed 1800 seconds — the job is re-leased roughly six times, six workers build
+/// the same package, and `finish` discards every result but the last, because a worker may not
+/// record under an expired lease.
+///
+/// The loop already knew: it logged `"lease expired before this finished; the work was done
+/// twice"` and carried on. The condition was detected, named, and left in place.
+///
+/// Here the work sleeps for well over a lease without saying anything, which is exactly what a
+/// build does. It must still be able to record.
+struct Sleepy {
+    for_ms: u64,
+    heartbeats_seen: AtomicUsize,
+}
+
+#[async_trait]
+impl Work for Sleepy {
+    fn kinds(&self) -> Vec<String> {
+        vec!["rebuild".into()]
+    }
+
+    async fn run(&self, job: &Job, _progress: &Progress) -> Result<Done, Failed> {
+        // Deliberately silent. A `Work` that never calls `phase` is the case that broke.
+        tokio::time::sleep(Duration::from_millis(self.for_ms)).await;
+        self.heartbeats_seen.fetch_add(1, Ordering::SeqCst);
+        Ok(Done {
+            record: record(
+                &format!("run-{}", job.id),
+                &job.target,
+                Some("exact"),
+                &job.cache_key,
+            ),
+            record_ref: "00".repeat(32),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_second_worker_cannot_take_a_job_that_is_still_being_worked_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "longjob").await;
+    let cfg = Config {
+        worker: "slow".into(),
+        // The renewal interval is a third of this, so a 900 ms job spans three leases and about
+        // nine renewals. The same ratio as the shipped 300 s lease against an 1800 s build.
+        lease: Duration::from_millis(300),
+        ..Default::default()
+    };
+    let e = engine(q.clone(), cfg);
+    let id = q
+        .enqueue(&NewJob::rebuild("pkg:npm/slow@1", "k-slow", Tier::Bulk))
+        .await
+        .unwrap();
+
+    let work = Arc::new(Sleepy {
+        for_ms: 900,
+        heartbeats_seen: AtomicUsize::new(0),
+    });
+    let w = work.clone();
+    let running = tokio::spawn(async move { e.tick(w.as_ref()).await });
+
+    // Well past one lease, and still inside the job.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let stolen = q
+        .lease("thief", &["rebuild"], 5, Duration::from_millis(300))
+        .await
+        .expect("lease");
+    assert!(
+        stolen.is_empty(),
+        "a second worker took a job that is still being worked on: {:?}. Both will build the same \
+         package, and `finish` will throw away whichever finishes first.",
+        stolen.iter().map(|j| j.id).collect::<Vec<_>>()
+    );
+
+    running.await.expect("join").expect("tick");
+    assert_eq!(work.heartbeats_seen.load(Ordering::SeqCst), 1);
+
+    // `job_for` finds attempt 1 by cache key. The confirmation attempt this verdict enqueues is a
+    // second row and is meant to be `ready`, so this names the job that ran rather than the queue.
+    let (got_id, state) = q
+        .job_for("k-slow")
+        .await
+        .expect("job_for")
+        .expect("the job that ran");
+    assert_eq!(got_id, id);
+    assert_eq!(state, "done", "the worker that did the work could not record it");
+}
+
+/// And the renewal does not overwrite the phase the worker last reported.
+///
+/// `phase` both renews and sets a name. A loop that renewed by calling `phase("running")` would
+/// keep the lease and destroy the only signal an operator has about where a long build has got to
+/// — which is the field `trigon watch` renders.
+#[tokio::test]
+async fn renewing_a_lease_does_not_erase_the_phase() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "phasekeep").await;
+    let e = engine(
+        q.clone(),
+        Config {
+            worker: "slow".into(),
+            lease: Duration::from_millis(300),
+            ..Default::default()
+        },
+    );
+    let id = q
+        .enqueue(&NewJob::rebuild("pkg:npm/p@1", "k-p", Tier::Bulk))
+        .await
+        .unwrap();
+
+    struct Named;
+    #[async_trait]
+    impl Work for Named {
+        fn kinds(&self) -> Vec<String> {
+            vec!["rebuild".into()]
+        }
+        async fn run(&self, job: &Job, progress: &Progress) -> Result<Done, Failed> {
+            progress.phase("rebuild").await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            Ok(Done {
+                record: record(
+                    &format!("run-{}", job.id),
+                    &job.target,
+                    Some("exact"),
+                    &job.cache_key,
+                ),
+                record_ref: "00".repeat(32),
+            })
+        }
+    }
+
+    e.tick(&Named).await.unwrap();
+
+    let events = q.events(id).await.expect("events");
+    let phases: Vec<String> = events.iter().map(|(_, phase, _)| phase.clone()).collect();
+    assert!(
+        phases.iter().any(|p| p == "rebuild"),
+        "the worker's own phase is missing: {phases:?}"
+    );
+    assert!(
+        !phases.iter().any(|p| p == "running"),
+        "the loop invented a phase of its own and buried the worker's: {phases:?}"
+    );
+}

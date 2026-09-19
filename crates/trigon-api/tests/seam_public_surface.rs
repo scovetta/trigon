@@ -38,6 +38,10 @@ fn record(id: &str, target: &str, outcome: Option<&str>, key: Option<&str>) -> R
     r.state = RunState::Done;
     r.outcome = outcome.map(str::to_string);
     r.cache_key = key.map(str::to_string);
+    // Every pass that fired was built in, which is what the run path writes for an ordinary
+    // rebuild. `None` here would mean a record from before the field existed, and the gate treats
+    // that as a safeguard it could not evaluate — correct, and not what these fixtures are about.
+    r.non_builtin_stabilizer = Some(false);
     r
 }
 

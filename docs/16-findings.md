@@ -2259,3 +2259,75 @@ reported no failures — against a store whose runs were all npm and PyPI at the
 the one input where the two implementations happen to agree. A seam test needs a fixture that
 *exercises the difference*, not one that merely crosses the seam. Where a transformation exists,
 the fixture has to be one the transformation changes.
+
+### 3.53 Every long build was done six times
+
+**Real, and the loop already said so.** `Progress::phase` renews a job's lease, so the lease lives
+exactly as long as a worker keeps calling it. The builder calls it once, at the top, and then hands
+the entire build to `spawn_blocking`:
+
+```rust
+progress.phase("rebuild").await;
+…
+let ran = tokio::task::spawn_blocking(move || crate::rebuild::run_one(args, verbose)).await
+```
+
+The shipped lease is 300 seconds. A build is allowed 1800. So the job is re-leased about six times
+while the first worker is still building it, six workers build the same package, and `finish`
+discards every result but the last — a worker may not record under a lease it no longer holds.
+
+The tell is that the engine already knew:
+
+```rust
+tracing::warn!(job = job.id, "lease expired before this finished; the work was done twice");
+```
+
+The condition was detected, given a sentence, and left in place. That is worth stating as its own
+observation: **a warning is not a fix, and a warning about an invariant violation is a bug report
+the code is filing against itself.**
+
+The renewal went into the engine's loop rather than into the builder, because every `Work`
+implementation has the same problem and only one of them would have remembered. While a job runs,
+the loop renews at a third of the lease, using a new `Progress::renew` that does *not* set a phase —
+`phase` both renews and names, and renewing through it would overwrite the worker's own phase with
+a meaningless "running" for the whole build, destroying the only signal `trigon watch` has about
+where a long build has got to.
+
+**A second defect inside the first fix, caught by the test.** The renewal interval was written as
+`(lease / 3).max(Duration::from_secs(1))` — a floor, so that an absurdly short lease could not
+become a busy loop against the database. Against a 300 ms lease that floor *is* the interval, and
+the first renewal lands 700 ms after the job has already been taken. A floor that can exceed the
+thing it is renewing disables the renewal, silently, while compiling and while working fine on the
+default configuration. The floor is now 10 ms, which exists only because `interval` panics on zero.
+
+The test asserts what actually matters, which took two attempts to get right. The first version
+asserted that a long job still records — and it passed with the heartbeat disabled, because
+`finish` checks *ownership* (`leased_by = $1 AND state = 'leased'`), not expiry, so an expired
+lease nobody else has taken still records perfectly well. The property is therefore about the other
+worker: **while a job is being worked on, a second worker must not be able to lease it.** That
+version fails without the renewal and passes with it.
+
+### 3.54 The transaction that deadlocked, in the function next door
+
+**Real, and a recurrence.** `Queue::lease` was rewritten once already because a deferred SQLite
+transaction that reads before it writes cannot upgrade. Two functions in the same file still did
+it: `request_rebuild` counts the day's requests, looks for an existing job, and only then inserts;
+`reserve_host` reads a host's floor and writes it back.
+
+`Pool::begin()` is `BEGIN DEFERRED` on SQLite. Two such transactions each take a read lock and then
+both try to upgrade, and neither can. `PRAGMA busy_timeout = 5000` — which this pool sets — does not
+help, because SQLite returns `SQLITE_BUSY` *immediately* rather than waiting: waiting cannot resolve
+a deadlock in which both sides would have to abandon a snapshot.
+
+Measured: eight concurrent `request_rebuild` calls for eight distinct targets, **seven fail** with
+`database is locked`. Eight concurrent `reserve_host` calls, same. What a user sees is `POST
+/v1/runs` returning 500 with "the queue could not be reached", which names the wrong party — the
+queue was reached, and the fault is ours.
+
+Both now go through one `begin_write()` that issues `BEGIN IMMEDIATE` on SQLite and an ordinary
+`begin()` on Postgres, which takes row locks as it goes and has no deferred-upgrade problem.
+
+**The shape:** a fix applied to the function where the bug was found, rather than to the property
+the bug was about. "How this transaction begins decides what it may do later" is a fact about every
+transaction in the file, and it was recorded in one of them as a comment. It is now a function, so
+there is one place to be right.

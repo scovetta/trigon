@@ -4768,6 +4768,12 @@ mod rebuild {
                 stored: true,
             });
             record.comparison = Some(comparison);
+            // ADR-0010 safeguard 2's provenance clause, written down where the gate can reach it.
+            // `applied()` is only the passes that actually changed something, which is the same
+            // set the provenance cap and the attestation use — a pass that was configured and did
+            // no work has no bearing on whether the normalization was somebody's judgement call.
+            record.non_builtin_stabilizer =
+                Some(c.applied().iter().any(|a| !a.provenance.is_builtin()));
             record.build_log = build_log;
             record.transcript = transcript;
             record.network_transcript = network_transcript;

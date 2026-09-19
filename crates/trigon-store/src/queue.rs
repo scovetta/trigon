@@ -407,6 +407,29 @@ impl Queue {
     /// `record_ref` is the digest of the full [`RunRecord`] in blob storage, which the caller has
     /// already written: blobs are content-addressed and idempotent, so writing them outside the
     /// transaction is safe in a way writing the row would not be.
+    /// Begin a transaction that is going to write, having read first.
+    ///
+    /// `Pool::begin()` issues `BEGIN DEFERRED` on SQLite. A deferred transaction takes a read lock
+    /// on its first `SELECT` and tries to upgrade to a write lock on its first `INSERT`, and two of
+    /// them that both read before writing deadlock on that upgrade. `PRAGMA busy_timeout` does not
+    /// save it: SQLite returns `SQLITE_BUSY` *immediately* rather than waiting, because waiting
+    /// cannot resolve it — the other transaction holds a read snapshot it would have to abandon,
+    /// and neither side will.
+    ///
+    /// `BEGIN IMMEDIATE` takes the write lock at the start, so two callers serialize instead.
+    ///
+    /// **This is the same defect `lease` was already rewritten for once**, in this file, and it
+    /// survived in the two functions that happen to `SELECT` first. How a transaction begins
+    /// decides what it can do later, so there is now one place that decides it.
+    async fn begin_write(&self) -> Result<sqlx::Transaction<'_, sqlx::Any>, StoreError> {
+        let tx = match self.backend {
+            Backend::Sqlite => self.pool.begin_with("BEGIN IMMEDIATE").await,
+            // Postgres takes row locks as it goes and has no deferred-upgrade problem.
+            Backend::Postgres => self.pool.begin().await,
+        };
+        tx.map_err(|e| StoreError::Malformed(format!("starting a transaction: {e}")))
+    }
+
     pub async fn finish(
         &self,
         job: i64,
@@ -506,11 +529,7 @@ impl Queue {
     ) -> Result<Duration, StoreError> {
         let interval_us = interval.as_micros() as i64;
         let now_us = now_ms() * 1000;
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| StoreError::Malformed(format!("reserving a slot: {e}")))?;
+        let mut tx = self.begin_write().await?;
 
         let existing: Option<i64> =
             sqlx::query("SELECT next_at_us FROM host_budget WHERE host = $1")
@@ -909,11 +928,7 @@ impl Queue {
         day: &str,
     ) -> Result<Requested, StoreError> {
         let now = now_ms();
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| StoreError::Malformed(format!("starting a request: {e}")))?;
+        let mut tx = self.begin_write().await?;
 
         let spent: i64 =
             sqlx::query("SELECT COUNT(*) AS n FROM request WHERE principal = $1 AND day = $2")

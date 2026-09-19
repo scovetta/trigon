@@ -45,6 +45,13 @@ pub enum Withheld {
     /// Safeguard 2, provenance clause. A non-`Builtin` stabilizer was applied, so the normalization
     /// itself is something a human or a model chose.
     NonBuiltinStabilizer,
+    /// Safeguard 2, provenance clause, **unevaluated**. The record does not say whether a
+    /// non-`Builtin` stabilizer applied, so the clause can be neither cleared nor fired.
+    ///
+    /// Distinct from [`Self::NonBuiltinStabilizer`] on purpose: "a person wrote the normalization"
+    /// and "we do not know who wrote the normalization" are different sentences, and a reader who
+    /// is shown the first when the second is true has been told something nobody established.
+    ProvenanceUnknown,
     /// Safeguard 5. An operator stopped divergence publication.
     KillSwitch,
     /// Not a safeguard: the run never reached an outcome, so there is nothing to publish.
@@ -65,6 +72,7 @@ impl Withheld {
             Withheld::GuardTripped => "guard_tripped",
             Withheld::NonBuiltinStabilizer => "non_builtin_stabilizer",
             Withheld::KillSwitch => "kill_switch",
+            Withheld::ProvenanceUnknown => "provenance_unknown",
             Withheld::NoOutcome => "no_outcome",
         }
     }
@@ -95,6 +103,11 @@ impl Withheld {
             Withheld::NonBuiltinStabilizer => {
                 "a stabilizer a person or a model wrote was applied, so the normalization is itself \
                  a judgement call and this publishes as void rather than as a divergence."
+            }
+            Withheld::ProvenanceUnknown => {
+                "this record does not say whether a hand-written or model-written stabilizer was \
+                 applied, so one of the five safeguards cannot be checked. An accusation is not \
+                 published on a safeguard nobody evaluated."
             }
             Withheld::KillSwitch => {
                 "divergence publication is stopped while the false-mismatch rate is reviewed."
@@ -154,8 +167,17 @@ pub struct Corroboration {
     pub agreeing_attempts: u32,
     /// Terminal attempts at the same `cache_key` that reached a *different* outcome.
     pub disagreeing_attempts: u32,
-    /// Whether any applied stabilizer carried non-`Builtin` provenance, read from the comparison.
-    pub non_builtin_stabilizer: bool,
+    /// Whether any applied stabilizer carried non-`Builtin` provenance.
+    ///
+    /// **`Option`, and the reason is this project's own rule.** This was a `bool` hard-wired to
+    /// `false` at its one call site, under a comment saying the gate was "told nothing rather than
+    /// told no" — which a `bool` cannot do. `false` is told "no": it is the positive claim that
+    /// every applied pass was built in, made by an index that had not looked. Safeguard 2's
+    /// provenance clause therefore could not fire, and absent had become zero in the one place
+    /// this codebase is most insistent that it must not.
+    ///
+    /// `None` is now genuinely "not known", and [`decide`] refuses to clear a safeguard on it.
+    pub non_builtin_stabilizer: Option<bool>,
 }
 
 /// The five safeguards, in the order they can each stop a row, for one run.
@@ -184,7 +206,7 @@ pub fn decide(r: &RunRecord, c: Corroboration, s: Switches) -> Publication {
             because: Withheld::OpenEgress,
         };
     }
-    if c.non_builtin_stabilizer {
+    if c.non_builtin_stabilizer == Some(true) {
         return Publication::Void {
             because: Withheld::NonBuiltinStabilizer,
         };
@@ -203,11 +225,28 @@ pub fn decide(r: &RunRecord, c: Corroboration, s: Switches) -> Publication {
         };
     }
 
-    // Safeguard 5. Last, because it is a deliberate operator intervention and the page should say
+    // Safeguard 5. Late, because it is a deliberate operator intervention and the page should say
     // *that* rather than whichever structural reason happened to be checked first.
     if accusatory && s.stop_divergences {
         return Publication::Withheld {
             because: Withheld::KillSwitch,
+        };
+    }
+
+    // Safeguard 2's provenance clause, unevaluated. **Last of all**, and only for an accusation.
+    //
+    // Last because every reason above is more informative: an operator pulled the lever, two
+    // attempts disagreed, this is not confirmed yet. Each of those tells a reader something about
+    // the run; this tells them something about the record, and only matters once nothing else
+    // stands in the way. What is left when it does fire is exactly the dangerous case — a
+    // confirmed, guard-clean, mirror-only accusation about to be published on a safeguard nobody
+    // evaluated.
+    //
+    // Only for an accusation because that is what safeguard 2 is for. A match published without
+    // knowing who wrote the normalization is not an allegation against anyone.
+    if accusatory && c.non_builtin_stabilizer.is_none() {
+        return Publication::Withheld {
+            because: Withheld::ProvenanceUnknown,
         };
     }
 
@@ -302,13 +341,112 @@ mod tests {
                     .push("the build fetched its own artifact".into());
             }
             let c = Corroboration {
-                non_builtin_stabilizer: non_builtin,
+                non_builtin_stabilizer: Some(non_builtin),
                 ..confirmed()
             };
             let d = decide(&r, c, Switches::default());
             assert_eq!(d, Publication::Void { because: expect });
             assert!(d.is_public(), "a void is shown, not hidden");
         }
+    }
+
+    /// A safeguard nobody evaluated does not clear.
+    ///
+    /// `Corroboration::non_builtin_stabilizer` was a `bool` hard-wired to `false` at its only call
+    /// site, under a comment saying the gate was "told nothing rather than told no". A `bool`
+    /// cannot be told nothing. `false` is the positive claim that every applied pass was built in,
+    /// asserted by an index that never looked — so safeguard 2's provenance clause could not fire,
+    /// and this tree's own "absent is not zero" rule was broken inside the safeguard code.
+    #[test]
+    fn an_unevaluated_provenance_clause_withholds_an_accusation() {
+        let r = record(Some("divergent"), "mirror");
+        let unknown = Corroboration {
+            non_builtin_stabilizer: None,
+            ..confirmed()
+        };
+        assert_eq!(
+            decide(&r, unknown, Switches::default()),
+            Publication::Withheld {
+                because: Withheld::ProvenanceUnknown
+            },
+            "a confirmed, guard-clean, mirror-only divergence whose record does not carry the \
+             provenance fact must not publish on a clause nobody checked"
+        );
+
+        // Knowing it is the point. The same run, with the fact recorded, publishes.
+        let known = Corroboration {
+            non_builtin_stabilizer: Some(false),
+            ..confirmed()
+        };
+        assert_eq!(decide(&r, known, Switches::default()), Publication::Published);
+    }
+
+    /// And only an accusation. A match is not an allegation against anyone.
+    #[test]
+    fn an_unevaluated_provenance_clause_does_not_withhold_a_match() {
+        for outcome in ["exact", "normalized", "normalized_with_caveats"] {
+            let r = record(Some(outcome), "mirror");
+            let unknown = Corroboration {
+                non_builtin_stabilizer: None,
+                ..confirmed()
+            };
+            assert_eq!(
+                decide(&r, unknown, Switches::default()),
+                Publication::Published,
+                "`{outcome}` is not an accusation, and safeguard 2 exists to stop accusations"
+            );
+        }
+    }
+
+    /// Every reason above it is more informative, so it is checked last.
+    ///
+    /// A reader told "the provenance is unknown" about a run whose two attempts disagreed, or
+    /// whose operator pulled the kill switch, has been handed the least useful of the true things.
+    #[test]
+    fn a_more_informative_reason_wins_over_an_unknown_provenance() {
+        let r = record(Some("divergent"), "mirror");
+        let unknown = |extra: Corroboration| Corroboration {
+            non_builtin_stabilizer: None,
+            ..extra
+        };
+
+        assert_eq!(
+            decide(
+                &r,
+                unknown(Corroboration {
+                    agreeing_attempts: 1,
+                    disagreeing_attempts: 1,
+                    ..Default::default()
+                }),
+                Switches::default()
+            ),
+            Publication::Withheld {
+                because: Withheld::AttemptsDisagree
+            },
+            "the disagreement is the finding"
+        );
+
+        assert_eq!(
+            decide(&r, unknown(Default::default()), Switches::default()),
+            Publication::Withheld {
+                because: Withheld::AwaitingConfirmation
+            },
+            "and waiting for a second attempt is the ordinary state, which re-running also fixes"
+        );
+
+        assert_eq!(
+            decide(
+                &r,
+                unknown(confirmed()),
+                Switches {
+                    stop_divergences: true
+                }
+            ),
+            Publication::Withheld {
+                because: Withheld::KillSwitch
+            },
+            "an operator pulled the lever and the page must say so"
+        );
     }
 
     #[test]

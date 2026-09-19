@@ -439,10 +439,11 @@ fn corroboration(r: &RunRecord, attempts: &BTreeMap<&str, BTreeMap<&str, u32>>) 
             .filter(|(other, _)| **other != o)
             .map(|(_, n)| *n)
             .sum(),
-        // Read from the comparison blob, which the index does not fetch. Stage 2 folds the flag
-        // into the record; until then the gate is told nothing rather than told "no", and it is
-        // told so here in one place rather than assumed in several.
-        non_builtin_stabilizer: false,
+        // From the record, where the run path writes it: the fact lives in the comparison blob
+        // and the index does not fetch blobs. `None` on a record written before the field existed
+        // reaches the gate as `None` and is treated as an unevaluated safeguard — which is what
+        // the previous `false` claimed to mean and could not, being a `bool`.
+        non_builtin_stabilizer: r.non_builtin_stabilizer,
     }
 }
 
