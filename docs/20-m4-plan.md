@@ -136,9 +136,13 @@ Doing (4) before (1) to (3) would mean describing traffic we cannot produce and 
 3. **§3 items 1 to 3**: the limiter on the mirror, the limiter made process-global, and the count
    in the run record. All small, and the sweep in criterion 1 should not be running at 219 req/s
    while we wait for the queue to be able to carry the fourth.
-4. **Classification honesty.** A fleet publishes a rate. `unknown` was the largest single cause of a
-   lost npm target and is `Fault::Build`, so it is charged to packages. Seven of fourteen are now
-   named; the rest should be before a number goes out with five thousand targets behind it.
+4. ~~**Classification honesty.**~~ **Done, against better evidence than the item asked for.** The
+   fourteen `unknown`s it referred to were from a work directory that no longer exists, so instead:
+   125 targets drawn uniformly at random from npm, PyPI and NuGet. Five `unknown`s, two causes,
+   three new rules — `src/refused-url`, `src/fetch-failed`, `env/no-ssh-client` — and one fix to
+   the evidence itself, because npm's four-line trailer was being recorded as the whole account of
+   a failure. Re-classified from the logs on disk the sweep has **no unknowns** and nothing in
+   `Fault::Build`. See [`16`](16-findings.md) §3.30, which also has the rates.
 
 **Stage B — the queue and the worker classes.** The largest single piece, and the one with a written
 design already ([`10-scale.md`](10-scale.md) §3, §8;

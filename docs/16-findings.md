@@ -1526,6 +1526,75 @@ from cargo's opinion of the context, and the two have different definitions of "
 
 ---
 
+### 3.30 What the tool does with a corpus nobody chose
+
+Every rate this project has published came from a corpus assembled on purpose: targets picked
+because they record a `gitHead`, stratified by build system, chosen to exercise a path. That is the
+right way to measure a pipeline and the wrong way to find out what the pipeline meets. So: 125
+targets drawn uniformly at random — 50 npm, 50 PyPI, 25 NuGet — at `mirror-only`, four lanes.
+
+| | reproduced | divergent | build-failed | no-strategy | ours | total |
+|---|---:|---:|---:|---:|---:|---:|
+| npm | 3 | 4 | 5 | 37 | 1 | 50 |
+| pypi | 0 | 0 | 10 | 38 | 2 | 50 |
+| nuget | 0 | 0 | 21 | 4 | 0 | 25 |
+| **all** | **3** | **4** | **36** | **79** | **3** | **125** |
+
+**Seven of 125 reached a comparison at all.** Three of those seven reproduced. Both numbers are
+about the corpus rather than about the tool, and that is the finding: **63% of a random sample
+declares no repository**, so there is nothing to build from and nothing to compare. The reproduction
+rate of a random package is not a number this tool can produce, because the question does not arise
+for two thirds of them.
+
+The decline reasons, which reach the record because `declines` now has a reader:
+
+```
+  30  npm-heuristic: the registry declared no repository for this package
+  16  pypi-heuristic: the registry declared no repository for this package
+   3  nuget-heuristic: the registry declared no repository for this package
+   8  … the package declares X and no tag there matches version Y
+```
+
+**Three quarters of the build failures are one missing tool.** `env/missing-tool:dotnet` took 21
+targets and `env/base-image-incomplete` another 10 — 31 of 36. NuGet is 21 of its 25 targets, which
+is `docs/21-base-image-automation.md`'s premise with a number attached: the base image is chosen
+before the strategy is known, and a corpus that is not npm-and-PyPI-shaped finds that out
+immediately.
+
+**Five `unknown`s, and `unknown` is `Fault::Build`.** All five were charged to packages and none was
+about one. Two causes, and neither was what the build logs suggested at a glance:
+
+- `src/refused-url` — `ssh://git@gitlab.com/…`, which we decline to hand to `git` because an ssh
+  client in a build is a credential channel. `Fault::Policy`.
+- `src/fetch-failed` — `git fetch` failed on the host before anything built. `Fault::Upstream` and
+  retryable; two of the three were `github.com`, which is ordinarily reachable.
+- `env/no-ssh-client` — the one that reached a container: `npm install` cloning a `git@github.com:`
+  *dependency*. The dependency is the package's choice; the reason the run produced nothing is ours.
+
+The first attempt at these rules matched `cannot run ssh` and `Could not resolve host` — the strings
+in the build logs. Four of the five runs never reached a container, and `classify` had been handed
+**our own error message** instead. The rules were written against text that was never classified.
+Reading what the record actually holds, rather than what the logs nearby happen to contain, is the
+lesson; the tests carry the recorded evidence verbatim.
+
+**And one of the five had no evidence at all.** npm prints four lines after a failure telling you
+where to report it, so `last_interesting` — the last line long enough to be interesting — returned
+`npm ERR!     /src/npm-debug.log`. That string was the recorded evidence, the cluster key, and what
+a model would have been shown, for a failure whose cause was six lines above and had a rule. Trailers
+are now skipped.
+
+Re-classified from the logs on disk, the sweep has **no unknowns**: 21 `env/missing-tool`, 10
+`env/base-image-incomplete`, 3 `net/unreachable`, 2 `env/no-ssh-client`. Not one is `Fault::Build`.
+
+**Two things the sweep broke that were not about packages.** The wall detector stopped the first
+attempt after ten targets, because ten `no-strategy` in a row is a wall on a curated corpus and the
+answer on a random one; it is now `--wall <n>`. And the run that looked like a hang was one target
+paying the cold-cache cost for all 125 — 239 fetches, 95 MB, including the 22 MB `npm` packument
+ADR-0013 named as 18% of a sweep's egress. Every target after it read those off disk: **27% of all
+bodies served came from cache**, against 3,537 bodies and 9,354 upstream requests for the whole run.
+
+---
+
 ## 4. A stabilizer the reference does not have
 
 `wheel-metadata-eol` normalizes CRLF to LF in the four files a wheel builder *generates*. A publisher

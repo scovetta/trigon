@@ -1140,6 +1140,60 @@ const RULES: &[Rule] = &[
         // wins the race. Naming it does not fix it — [`B6`](../../../docs/17-backlog.md) is the fix —
         // but it stops the loss being silent, which is the difference between a known cost and a
         // depressed rate nobody can account for.
+        // **A repository URL we will not hand to `git`.** `ssh://git@host/path` and
+        // `git@host:path` need an ssh client and a credential, and the sandbox has neither on
+        // purpose: an ssh client inside a build is a credential channel. `SourceRefused` says so
+        // and says it the same way every time, which is what makes it a rule rather than a guess.
+        //
+        // `Fault::Policy` — a control said no. Declaring an SSH remote is ordinary and the same
+        // repository is usually reachable over HTTPS, so this is not the package's. The fix is
+        // upstream of this table: rewrite `git@host:path` to `https://host/path` at the rung, which
+        // is a strategy change and not something to repair in this recipe.
+        // **A dependency declared over SSH, and no ssh client in the sandbox.** Not our source URL
+        // — `src/refused-url` is that — but one the package's own dependency tree names:
+        // `npm install` reaches `git clone --mirror git@github.com:owner/repo` and `git` cannot
+        // fork an ssh it does not have.
+        //
+        // The base image has no ssh client on purpose: it is a credential channel, and there is no
+        // credential to offer an anonymous clone anyway. So `Fault::Policy` — a control said no —
+        // and not `Build`, even though the dependency is the package's choice. The distinction is
+        // the one this table exists to keep: what the package declared is not the reason this run
+        // produced nothing.
+        //
+        // One of five `unknown`s on the 125-target random sweep, and the only one that reached a
+        // container at all.
+        code: "env/no-ssh-client",
+        needles: &["cannot run ssh: No such file or directory"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: false,
+        capture: Capture::None,
+    },
+    Rule {
+        code: "src/refused-url",
+        needles: &["refusing to read the source at"],
+        fault: Fault::Policy,
+        retryable: false,
+        repairable: false,
+        capture: Capture::Between("`", "`"),
+    },
+    Rule {
+        // **The source could not be fetched, on the host, before anything built.** `git fetch`
+        // failed: a name that does not resolve, a repository that is gone, a ref that is not there.
+        //
+        // `Fault::Upstream` and retryable. Not `Build`: no build ran, so nothing here is evidence
+        // about the package — and `unknown` made it evidence, because `unknown` is `Fault::Build`.
+        // Three of the five `unknown`s on the 125-target random sweep were this, two of them
+        // reaching `github.com`, which is ordinarily reachable and so is a transient worth trying
+        // again rather than a verdict.
+        code: "src/fetch-failed",
+        needles: &["could not read the source at"],
+        fault: Fault::Upstream,
+        retryable: true,
+        repairable: false,
+        capture: Capture::WordAfter("could not read the source at"),
+    },
+    Rule {
         code: "env/container-store-race",
         needles: &["getting top layer info: layer not known"],
         fault: Fault::Infra,
@@ -1336,6 +1390,26 @@ fn normalize_subject(s: &str) -> String {
 /// Bounded and stripped of control characters. A build script can print anything, including text
 /// shaped like our own output, and this string reaches a model.
 fn last_interesting(lines: &[&str]) -> String {
+    // **Trailers that say nothing, from tools that print several of them after the error.** npm
+    // ends every failure with four lines telling you where to report it and which file to attach,
+    // so "the last line long enough to be interesting" was reliably the path to a debug log — and
+    // that string became the recorded evidence, the cluster key, and what a model was shown.
+    //
+    // Found on the 125-target random sweep: one target recorded
+    // `npm ERR!     /src/npm-debug.log` as its whole account of a failure whose actual cause,
+    // `cannot run ssh`, was six lines above and has a rule. The signature said `unknown`, which is
+    // `Fault::Build`, so the package wore it.
+    //
+    // Substrings rather than a pattern, and a short list on purpose: every entry here is a line a
+    // real tool prints *after* saying what went wrong, and the cost of being wrong is skipping a
+    // line that mattered. Anything that is only sometimes noise stays.
+    const TRAILERS: &[&str] = &[
+        "npm-debug.log",
+        "report this error at",
+        "include the following file",
+        "A complete log of this run can be found in",
+        "Full log at",
+    ];
     // Stripped for the same reason `classify_line` strips: this becomes the evidence on an
     // `unknown` signature, and an evidence string that differs only by colour clusters as two
     // failures in the UI that a human would read as one.
@@ -1343,7 +1417,7 @@ fn last_interesting(lines: &[&str]) -> String {
         .iter()
         .rev()
         .map(|l| strip_controls(l).trim().to_string())
-        .find(|l| !l.is_empty() && l.len() > 8)
+        .find(|l| !l.is_empty() && l.len() > 8 && !TRAILERS.iter().any(|t| l.contains(t)))
         .unwrap_or_default()
 }
 
@@ -2044,5 +2118,112 @@ strategy needs have to be in the image already. Build one with:\n\
                 r.code
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod the_random_sweep_unknowns {
+    use super::*;
+
+    /// The five `unknown`s from the 125-target uniform random sweep, in the exact words the run
+    /// recorded.
+    ///
+    /// **`unknown` is `Fault::Build`**, so each of these was charged to a package. None of them is
+    /// about a package: two are a URL we decline to hand to `git`, and three are a fetch that
+    /// failed on the host before any build ran.
+    ///
+    /// The first attempt at these rules matched what the *container* printed — `cannot run ssh`,
+    /// `Could not resolve host` — and both were wrong, because the run never reached a container.
+    /// `classify` was handed our own error, and the evidence in the record says so. Reading what
+    /// was actually recorded, rather than what the logs nearby happened to contain, is the whole
+    /// lesson.
+    #[test]
+    fn a_url_we_decline_to_fetch_is_a_control_and_not_the_packages_fault() {
+        let sig = classify(
+            "refusing to read the source at `ssh://git@gitlab.com/YouHan26/lz-comps`: not an \
+             https URL. A repository URL comes from the registry, and handing an arbitrary one to \
+             `git` is a command injection with extra steps.",
+        );
+        assert_eq!(sig.code, "src/refused-url");
+        assert_eq!(sig.fault, Fault::Policy);
+        assert!(!sig.fault.is_about_the_package());
+        // The repository name, not the URL: `normalize_subject` keeps the last path component so
+        // that two refusals of the same forge cluster together instead of becoming a cluster each.
+        assert_eq!(sig.subject.as_deref(), Some("lz-comps"));
+    }
+
+    #[test]
+    fn a_source_that_would_not_fetch_is_upstreams_and_worth_retrying() {
+        let sig = classify(
+            "could not read the source at https://github.com/AnasInno/uk-curriculum-mcp: git \
+             fetch failed: fatal: could not read Username for 'https://github.com'",
+        );
+        assert_eq!(sig.code, "src/fetch-failed");
+        assert_eq!(sig.fault, Fault::Upstream);
+        assert!(sig.retryable, "github.com is ordinarily reachable");
+        assert!(!sig.fault.is_about_the_package());
+        assert_eq!(sig.subject.as_deref(), Some("uk-curriculum-mcp"));
+    }
+
+    #[test]
+    fn a_dependency_declared_over_ssh_is_the_sandbox_saying_no() {
+        // The one of the five that reached a container. `npm install` cloned a `git@github.com:`
+        // dependency and `git` could not fork an ssh client the image does not carry.
+        let sig = classify(
+            "npm ERR! Command failed: git clone --mirror git@github.com:sunebear/base64\n\
+             npm ERR! error: cannot run ssh: No such file or directory\n\
+             npm ERR! fatal: unable to fork\n",
+        );
+        assert_eq!(sig.code, "env/no-ssh-client");
+        assert_eq!(sig.fault, Fault::Policy);
+        // The dependency is the package's choice; the reason this run produced nothing is ours.
+        assert!(!sig.fault.is_about_the_package());
+    }
+
+    #[test]
+    fn the_two_are_told_apart_because_they_want_different_handling() {
+        // A fetch that broke may work next time; a URL we declined will be declined every time.
+        // `RegistryError` keeps them as separate variants for exactly that reason, and a table
+        // that folded them back together would undo it.
+        let refused = classify("refusing to read the source at `git@host:x/y`: not an https URL");
+        let failed = classify("could not read the source at https://host/x: git fetch failed");
+        assert_ne!(refused.code, failed.code);
+        assert!(!refused.retryable && failed.retryable);
+    }
+}
+
+#[cfg(test)]
+mod evidence_that_says_nothing {
+    use super::*;
+
+    #[test]
+    fn a_tools_trailer_is_not_the_evidence_for_its_failure() {
+        // npm prints four lines after the error telling you where to report it. The last one is a
+        // path to a debug log, and it was becoming the recorded evidence, the cluster key, and the
+        // text a model was shown — for a failure whose cause was six lines above and has a rule.
+        let log = "npm ERR! error: cannot run ssh: No such file or directory\n\
+                   npm ERR! fatal: unable to fork\n\
+                   npm ERR! If you need help, you may report this error at:\n\
+                   npm ERR!     <https://github.com/npm/npm/issues>\n\
+                   npm ERR! Please include the following file with any support request:\n\
+                   npm ERR!     /src/npm-debug.log\n";
+        let sig = classify(log);
+        assert_eq!(sig.code, "env/no-ssh-client", "evidence: {}", sig.evidence);
+        assert!(!sig.evidence.contains("npm-debug.log"), "{}", sig.evidence);
+    }
+
+    #[test]
+    fn an_unnamed_failure_still_gets_the_last_line_that_says_something() {
+        // The skip list must not eat the diagnosis when the tool says nothing else afterwards.
+        let sig = classify(
+            "Compiling frobnicator v2\n\
+             the frobnicator exploded in an unprecedented way\n\
+             A complete log of this run can be found in /tmp/x.log\n",
+        );
+        assert_eq!(sig.code, "unknown");
+        assert_eq!(
+            sig.evidence,
+            "the frobnicator exploded in an unprecedented way"
+        );
     }
 }
