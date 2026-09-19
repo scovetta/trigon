@@ -1377,3 +1377,60 @@ rather than silently comparing nothing. Whether `attest` should also store what 
 narrower question inside this one, and it is worth answering carefully: making the record agree with
 what was signed is the point of that command, and a subcommand that rewrites a record mid-attestation
 is not obviously safe.
+
+## B31. "Two agreeing attempts" is agreement on a four-letter string
+
+ADR-0010's first safeguard is that nothing publishes until two attempts at the same work agree.
+Three things have to be true for that to mean anything: the two runs must be attempts at the same
+question, they must have agreed about something substantive, and a deliberate pair must be able to
+say so. None of the three currently holds.
+
+**The key is the target alone.** `RunRecord::cache_key` documents itself as
+
+> The target, the strategy digest and the stabilizer set: change any of them and the second run is
+> a different question, not a confirmation of the first.
+
+`trigon enqueue` constructs it as `NewJob::rebuild(t.clone(), t.clone(), tier)` — the purl, twice.
+Neither the strategy digest nor the stabilizer set is in it. So two attempts straddling a change to
+either share a key and are treated as attempts at one question.
+
+This is not hypothetical for this corpus. The three `Newtonsoft.Json@11.0.1` runs in the store span
+two nupkg sets, `e9693d25…` (8 passes) and `2b104124…` (10), and re-rendering an old run under the
+new set moves **13 members from `differs` to `identical`**. Two attempts straddling that change
+could reach `divergent` for entirely different reasons. Strategy drift does the same: this target
+resolves by `ExactTag`, and the tool prints its own warning that "a tag is mutable: this is where it
+points today, not necessarily what was published".
+
+**The agreement is on the outcome string.** `Corroboration::agreeing_attempts` documents itself as
+
+> Terminal attempts at the same `cache_key` whose outcome **and comparison digest** match this
+> one's.
+
+`index::build` counts `cache_key -> (outcome -> count)` and the gate never reads a comparison digest
+— `grep comparison` over `publication.rs` returns only the doc comments. So two runs corroborate
+each other by both landing on the five letters `divergent`, whatever they found. A divergence in the
+nuspec and a divergence in every DLL confirm one another.
+
+**And a deliberate pair cannot say it is one.** `trigon rebuild` sets `cache_key: None`, with a
+rationale that is right as far as it goes:
+
+> **No key, deliberately.** A `trigon rebuild` is one person asking one question, and inventing a
+> key here would make two unrelated local runs look to the publication gate like a confirmed pair.
+
+Refusing to *infer* a key is correct. There is no way to *assert* one: `rebuild::Args` carries the
+field and the CLI exposes no flag for it. Two runs of this target, hours apart, in separate work
+directories with `TRIGON_NO_BUILD_CACHE=1`, produced different raw artifacts (`0f46106ca6d1…`,
+`11d6eca504b3…`) and the **same stabilized digest** `50edec6be3ea…`, the same outcome and the same
+difference codes on all 23 members. That is a real corroboration, and the system has no way to
+record it.
+
+**Done when:** the cache key is computed from the target, the strategy digest and the stabilizer set
+— by one function, called by everything that makes one — and a run whose key cannot be computed
+gets `None` rather than a partial key. Corroboration compares comparison digests, not outcome
+strings, and `Corroboration`'s doc and `index::build` are asserted to agree by a test rather than by
+reading. And `trigon rebuild` takes an explicit `--cache-key`, so a deliberate pair can be declared
+without any code inferring one.
+
+**The shape**, for the third time in this backlog: a definition written in a doc comment and an
+implementation that does something narrower, with nothing asserting they match. Both of these were
+found by reading the two together, which is a thing no test does.
