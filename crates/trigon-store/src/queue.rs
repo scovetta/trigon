@@ -1019,6 +1019,35 @@ impl Queue {
     }
 
     /// What is on the queue right now, for a status page.
+    /// Which workers hold leases right now, and how stale each one's is.
+    ///
+    /// The fleet-health question is not "how many workers are configured" — nothing knows that —
+    /// but "which processes are currently holding work, and is any of them about to lose it". A
+    /// worker whose lease is nearly expired is either very slow or dead, and the two look
+    /// identical from here until it renews.
+    ///
+    /// Returns `(worker, jobs_held, earliest_lease_expiry_ms)`.
+    pub async fn workers(&self) -> Result<Vec<(String, i64, i64)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT leased_by, COUNT(*) AS n, MIN(leased_until) AS soonest FROM job \
+             WHERE state = 'leased' AND leased_by IS NOT NULL \
+             GROUP BY leased_by ORDER BY leased_by",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StoreError::Malformed(format!("reading workers: {e}")))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("leased_by"),
+                    r.get::<i64, _>("n"),
+                    r.get::<i64, _>("soonest"),
+                )
+            })
+            .collect())
+    }
+
     pub async fn in_flight(
         &self,
         limit: i64,

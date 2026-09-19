@@ -217,6 +217,29 @@ impl Index {
             .cloned()
     }
 
+    /// Every record, cloned.
+    ///
+    /// For the views that fold over the whole corpus rather than paging it — the failure clusters,
+    /// chiefly. Cloned rather than handed out behind the lock, because a caller holding the read
+    /// guard while it does its own work is how a refresh comes to block on a page render.
+    pub fn records(&self) -> Vec<RunRecord> {
+        self.read_or_recover().records.values().cloned().collect()
+    }
+
+    /// The newest run for one target, or `None` where there is no run at all.
+    ///
+    /// Newest wins because a later run was made under a later stabilizer set and is the current
+    /// answer. `None` is "never checked", which is a different thing from every status a record
+    /// can carry and is why this returns an `Option` rather than a default.
+    pub fn newest_for(&self, target: &str) -> Option<RunRecord> {
+        self.read_or_recover()
+            .records
+            .values()
+            .filter(|r| r.target == target)
+            .max_by(|a, b| a.started.cmp(&b.started))
+            .cloned()
+    }
+
     pub fn len(&self) -> usize {
         self.read_or_recover().entries.len()
     }

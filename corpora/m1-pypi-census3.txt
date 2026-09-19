@@ -1,0 +1,162 @@
+# M1 Census III corpus — pypi
+#
+# 100 targets from TWO DIFFERENT SOURCES, in two blocks that must not be merged. The first 69 are
+# Census III. The last 31 are not. The two halves answer different questions, so anyone computing a
+# rate over this file has to be able to split it back apart. To split it mechanically: the file
+# contains exactly one line matching the anchored pattern ^#@@ , and it is the first line of the
+# second block's header. Everything above it is Census III; everything below it is not.
+#
+# ---------------------------------------------------------------------------------------------
+# BLOCK 1 of 2 — 69 targets — Census III (entries 1-69, immediately below this header)
+# ---------------------------------------------------------------------------------------------
+#
+# Census III of Free and Open Source Software (Linux Foundation Research, OpenSSF and the Laboratory
+# for Innovation Science at Harvard, December 2024), from the report's own published dataset, the
+# eight appendix CSVs deposited on Zenodo at DOI 10.5281/zenodo.21110566.
+#
+# It is 69 and not 100 because 69 is all Census III has. That is a property of the source, not of
+# the sampling. PyPI gets no top-500 table of its own: npm has four appendices to itself and
+# everything else shares the four "Non-npm" tables with Maven, Go, NuGet and the rest, so the PyPI
+# rows have to be pulled out of those four:
+#
+#   Appendix B  Top 500 Non-npm, Direct, Version Agnostic        108 pypi rows ->  56 kept
+#   Appendix D  Top 500 Non-npm, Indirect & Direct, Version Ag.   45 pypi rows ->   0 new
+#   Appendix F  Top 500 Non-npm, Direct, Versioned               118 pypi rows ->  12 kept
+#   Appendix H  Top 500 Non-npm, Indirect & Direct, Versioned     78 pypi rows ->   1 kept
+#
+# Those four tables overlap almost completely: 349 PyPI rows collapse to 127 distinct package names,
+# and 58 of the 127 are already in m1-pypi-common.txt. 127 - 58 = 69, and all 69 are here. There is
+# no 70th census name to take. Taken in that appendix order, each appendix in census rank order,
+# deduplicated by PEP 503 normalised name.
+#
+# The versions are NOT the census's versions. Appendices F and H record the exact versions the scans
+# observed (six 1.16.0, pyyaml 6, requests 2.25.1) and those are years stale; a rebuild corpus wants
+# a release current tooling can still resolve and build. Names from the census, versions from the
+# registry.
+
+pkg:pypi/requests@2.34.2
+pkg:pypi/six@1.17.0
+pkg:pypi/certifi@2026.7.22
+pkg:pypi/packaging@26.3
+pkg:pypi/idna@3.20
+pkg:pypi/pyparsing@3.3.2
+pkg:pypi/python-dateutil@2.9.0.post0
+pkg:pypi/setuptools@84.0.0
+pkg:pypi/typing-extensions@4.16.0
+pkg:pypi/attrs@26.1.0
+pkg:pypi/pip@26.2.1
+pkg:pypi/zipp@4.1.0
+pkg:pypi/grpcio@1.84.0
+pkg:pypi/charset-normalizer@3.5.1
+pkg:pypi/resolvelib@1.2.1
+pkg:pypi/rsa@4.9.1
+pkg:pypi/chardet@7.6.0
+pkg:pypi/coverage@7.16.1
+pkg:pypi/pycparser@3.0
+pkg:pypi/psycopg2-binary@2.9.13
+pkg:pypi/sqlalchemy@2.0.54
+pkg:pypi/pytest-cov@7.1.0
+pkg:pypi/oscrypto@1.3.0
+pkg:pypi/backports-ssl-match-hostname@3.7.0.1
+pkg:pypi/parameterized@0.9.0
+pkg:pypi/scipy@1.18.1
+pkg:pypi/redis@8.1.0
+pkg:pypi/paramiko@5.0.0
+pkg:pypi/pynacl@1.6.2
+pkg:pypi/tomli@2.4.1
+pkg:pypi/platformdirs@4.11.11
+pkg:pypi/pyrsistent@0.20.0
+pkg:pypi/pep517@0.13.1
+pkg:pypi/selenium@4.49.0
+pkg:pypi/filelock@4.0.1
+pkg:pypi/appdirs@1.4.4
+pkg:pypi/tenacity@9.1.4
+pkg:pypi/tensorflow@2.21.0
+pkg:pypi/scikit-learn@1.9.1
+pkg:pypi/matplotlib@3.11.2
+pkg:pypi/pybind11@3.1.0
+pkg:pypi/flatbuffers@25.12.19
+pkg:pypi/wrapt@2.4.1
+pkg:pypi/google-api-core@2.38.0
+pkg:pypi/idlsave@1.0.0
+pkg:pypi/wcwidth@0.8.4
+pkg:pypi/smhasher@0.150.1
+pkg:pypi/pyarrow@25.0.1
+pkg:pypi/iniconfig@2.3.0
+pkg:pypi/ipython@9.17.1
+pkg:pypi/async-timeout@5.0.1
+pkg:pypi/tensorboard@2.21.0
+pkg:pypi/splunk-sdk@3.0.1
+pkg:pypi/distlib@0.4.3
+pkg:pypi/docutils@0.23
+pkg:pypi/awscli@1.46.1
+pkg:pypi/toml@0.10.2
+pkg:pypi/pexpect@4.9.0
+pkg:pypi/sortedcontainers@2.4.0
+pkg:pypi/neo4j@6.3.1
+pkg:pypi/cfgv@3.5.0
+pkg:pypi/marshmallow-enum@1.5.1
+pkg:pypi/pyasn1-modules@0.4.2
+pkg:pypi/termcolor@3.3.0
+pkg:pypi/pickleshare@0.7.5
+pkg:pypi/progress@1.6.1
+pkg:pypi/nodeenv@1.10.0
+pkg:pypi/kiwisolver@1.5.1
+pkg:pypi/exceptiongroup@1.3.1
+
+#@@ SECOND SOURCE — NOT CENSUS III — BLOCK 2 BEGINS HERE — split the file on this line @@
+# =============================================================================================
+#
+# BLOCK 2 of 2 — 31 targets — most-downloaded PyPI packages (entries 70-100, below this header)
+#
+# These 31 exist to bring the file to 100 runnable targets. They are **not** Census III data and
+# must not be quoted as such. Source: the top-pypi-packages dataset,
+# https://hugovk.github.io/top-pypi-packages/top-pypi-packages.min.json, snapshot last_update
+# 2026-09-01, which ranks projects by PyPI download counts over the trailing 30 days.
+#
+# The two blocks answer different questions and will not agree. Census III measures what the SCA
+# vendors observed real codebases declaring a dependency on — closer to "what is deployed". Download
+# counts measure what CI fetched this month, which over-weights whatever is pulled transitively on
+# every build and whatever is currently fashionable. That shows: this block is visibly 2026 (litellm,
+# openai, huggingface-hub, fastapi, the OpenTelemetry family) in a way the census block, whose data
+# was collected for a December 2024 report, is not. Keep them separable and report them separately.
+#
+# Sampled by walking the download ranking from rank 1 and keeping the first 31 names present in
+# neither m1-pypi-common.txt nor the census block above. That runs to **downloads rank 119**.
+#
+# **Every entry was resolved against the registry on 2026-09-19**, taking info.version from
+# pypi.org/pypi/<name>/json. Two names were skipped for having a PEP 440 pre-release as their
+# current release — opentelemetry-semantic-conventions and opentelemetry-instrumentation, both
+# 0.65b0 — and the walk continued past them. Nothing else was dropped: no 404s, nothing yanked.
+
+pkg:pypi/aiobotocore@3.9.1
+pkg:pypi/h11@0.16.0
+pkg:pypi/grpcio-status@1.84.0
+pkg:pypi/litellm@1.101.0
+pkg:pypi/yarl@1.25.1
+pkg:pypi/multidict@6.9.0
+pkg:pypi/propcache@0.5.4
+pkg:pypi/s3fs@2026.9.0
+pkg:pypi/fastapi@0.141.1
+pkg:pypi/frozenlist@1.8.0
+pkg:pypi/websockets@17.1
+pkg:pypi/aiosignal@1.4.0
+pkg:pypi/googleapis-common-protos@1.75.3
+pkg:pypi/sniffio@1.3.1
+pkg:pypi/trove-classifiers@2026.6.1.19
+pkg:pypi/annotated-doc@0.0.5
+pkg:pypi/hatchling@1.32.3
+pkg:pypi/pydantic-settings@2.15.0
+pkg:pypi/tzdata@2026.4
+pkg:pypi/ghapi@2.1.3
+pkg:pypi/opentelemetry-api@1.44.0
+pkg:pypi/huggingface-hub@1.32.0
+pkg:pypi/opentelemetry-sdk@1.44.0
+pkg:pypi/python-multipart@0.0.32
+pkg:pypi/openai@3.16.2
+pkg:pypi/distro@1.9.0
+pkg:pypi/opentelemetry-proto@1.44.0
+pkg:pypi/shellingham@1.5.4
+pkg:pypi/typer@0.27.2
+pkg:pypi/opentelemetry-exporter-otlp-proto-http@1.44.0
+pkg:pypi/proto-plus@1.28.4

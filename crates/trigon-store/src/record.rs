@@ -388,6 +388,59 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
+    /// What this run says about the package, in the vocabulary a lockfile check reports.
+    ///
+    /// **A guard trip outranks the comparison.** A build that reached the published artifact over
+    /// the network may have reproduced it by copying it, so whatever the comparison concluded is
+    /// not evidence — the run is unsupported, not divergent, and calling it divergent would be an
+    /// accusation nobody established.
+    ///
+    /// Returns the reason alongside, because "we could not run this" is only useful with the
+    /// because.
+    pub fn status(&self) -> (trigon_core::Status, Option<String>) {
+        use trigon_core::Status;
+        if !self.guard_trips.is_empty() {
+            return (
+                Status::Unsupported,
+                Some(format!(
+                    "the build reached the published artifact over the network ({} trip(s)), so \
+                     nothing it produced is evidence about the package",
+                    self.guard_trips.len()
+                )),
+            );
+        }
+        match self.outcome.as_deref() {
+            Some("exact") => (Status::Reproduced, Some("byte for byte".into())),
+            Some("normalized") => (
+                Status::Reproduced,
+                Some("identical after stabilization".into()),
+            ),
+            Some("normalized_with_caveats") => (
+                Status::Caveats,
+                Some("identical after a stabilizer that is a judgement call".into()),
+            ),
+            Some("divergent") => (
+                Status::Divergent,
+                self.failure
+                    .as_ref()
+                    .map(|f| f.key())
+                    .or_else(|| Some("the rebuild differs from what was published".into())),
+            ),
+            Some(other) => (Status::Unsupported, Some(other.to_string())),
+            None => (
+                Status::Unsupported,
+                Some(
+                    self.failure
+                        .as_ref()
+                        .map(|f| f.key())
+                        .unwrap_or_else(|| "the run reached no verdict".into()),
+                ),
+            ),
+        }
+    }
+}
+
+impl RunRecord {
     /// A minimal record for a run that has just started.
     pub fn new(
         id: impl Into<String>,

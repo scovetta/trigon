@@ -22,7 +22,7 @@ type S = State<Arc<Api>>;
 ///
 /// `(status, code, sentence)`. The code is stable and machine-readable; the sentence is for the
 /// person. A 403 with neither teaches a reader that the site is arbitrary.
-fn refuse(status: StatusCode, code: &str, sentence: &str) -> Response {
+pub(crate) fn refuse(status: StatusCode, code: &str, sentence: &str) -> Response {
     (
         status,
         axum::Json(serde_json::json!({ "error": code, "detail": sentence })),
@@ -30,7 +30,7 @@ fn refuse(status: StatusCode, code: &str, sentence: &str) -> Response {
         .into_response()
 }
 
-fn json<T: serde::Serialize>(v: T) -> Response {
+pub(crate) fn json<T: serde::Serialize>(v: T) -> Response {
     axum::Json(v).into_response()
 }
 
@@ -732,11 +732,11 @@ pub async fn evidence_blob(State(api): S, Path(digest): Path<String>) -> Respons
 /// than document.
 pub async fn openapi(State(api): S) -> Response {
     let mut paths = BTreeMap::new();
-    for (path, summary) in ROUTES {
+    for (path, verb, summary) in ROUTES {
         paths.insert(
             path.to_string(),
             serde_json::json!({
-                "get": {
+                (*verb): {
                     "summary": summary,
                     "responses": { "200": { "description": "ok" } }
                 }
@@ -763,64 +763,99 @@ pub async fn openapi(State(api): S) -> Response {
 ///
 /// One table, read by `openapi` and asserted by `every_route_is_described`, so a route added to the
 /// router without a description fails the build rather than appearing in the contract as a blank.
-pub const ROUTES: &[(&str, &str)] = &[
+/// The public surface, as a contract: path, HTTP verb, and what it is for.
+///
+/// **The verb is in the table.** It was not, and every entry was rendered into the OpenAPI
+/// document as a `get` — so the first route that was not one made the contract describe something
+/// the router does not have. A contract that has to be true of the router is not the place to
+/// assume a shape.
+pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/health",
+        "get",
         "Liveness, corpus size, and which gate the site is behind",
     ),
     (
         "/v1/stats",
+        "get",
         "Counts by outcome and by fault, never summed together",
     ),
     (
         "/v1/runs",
+        "post",
         "Browse and search. Filter by ecosystem, outcome, fault or text",
     ),
     (
         "/v1/runs/{id}",
+        "get",
         "One run: the stored record and the publication decision",
     ),
     (
         "/v1/runs/{id}/diff",
+        "get",
         "The comparison rendered: ladder, ledger, census, members. Anonymous, bounded",
     ),
     (
         "/v1/runs/{id}/comparison",
+        "get",
         "The full comparison, as stored. Class-gated",
     ),
     (
         "/v1/runs/{id}/member",
+        "get",
         "What differs inside one member: a line diff, a hex diff, or both. Class-gated",
     ),
     (
         "/v1/runs/{id}/member/raw",
+        "get",
         "One member's bytes, from one side, to read or to save. Class-gated",
     ),
     (
         "/v1/runs/{id}/attestation",
+        "get",
         "The signed statement. Anonymous",
     ),
     (
         "/v1/runs/{id}/log",
+        "get",
         "The build log. Class-gated: unredacted",
     ),
     (
         "/v1/runs/{id}/network",
+        "get",
         "What crossed into the build. Class-gated: unredacted",
     ),
     (
+        "/v1/check",
+        "post",
+        "A lockfile or SBOM in, a verdict table out, with an explicit never-checked row",
+    ),
+    (
+        "/v1/clusters",
+        "get",
+        "Failed runs grouped by failure signature, biggest first. Class-gated",
+    ),
+    (
+        "/v1/fleet",
+        "get",
+        "Queue depth, who holds a lease, and the corpus's two denominators",
+    ),
+    (
         "/v1/artifacts/{digest}",
+        "get",
         "Lookup by published artifact digest, needing no naming authority",
     ),
     (
         "/v1/targets/{purl}",
+        "get",
         "Every run against one package, newest first",
     ),
     (
         "/v1/evidence/{digest}",
+        "get",
         "A blob by digest, for a principal who may read its class",
     ),
-    ("/v1/openapi.json", "This contract"),
+    ("/v1/openapi.json", "get", "This contract"),
 ];
 
 #[cfg(test)]
@@ -859,7 +894,7 @@ mod tests {
 
     #[test]
     fn every_route_is_described() {
-        for (p, s) in ROUTES {
+        for (p, _verb, s) in ROUTES {
             assert!(!s.is_empty(), "{p} appears in the contract as a blank");
             assert!(
                 p.starts_with("/v1/"),
@@ -887,12 +922,28 @@ mod tests {
                  would have to be argued for in docs/22 §5.4 first"
             );
         }
-        // And exactly one write route, so a second one cannot appear without this line changing.
+        // And the `POST` routes are these two and no others, so a third cannot appear without
+        // this line changing. Named rather than counted: a count says a route appeared, and what
+        // a reader needs to know is *which*.
+        //
+        // Neither writes. `/v1/runs` enqueues a job — a request for work, not a verdict. `/v1/check`
+        // reads: it takes a lockfile in the body because a lockfile does not fit in a query string,
+        // stores nothing, and returns verdicts that were already in the index. A `POST` that is a
+        // read is a shape this rule has to allow for, or the next one gets argued into being a
+        // `GET` with a 40,000-package query string.
+        let posts: std::collections::BTreeSet<&str> = ["/v1/runs", "/v1/check"].into_iter().collect();
         assert_eq!(
             src.matches("post(").count(),
-            1,
-            "a second write route appeared"
+            posts.len(),
+            "a POST route appeared that this test does not know about. If it writes, it needs an \
+             argument in docs/22 §5.4; if it reads, add it here and say why it takes a body."
         );
+        for p in &posts {
+            assert!(
+                src.contains(&format!("\"{p}\"")),
+                "{p} is listed here as a POST route and the router does not declare it"
+            );
+        }
     }
 
     #[test]

@@ -233,12 +233,25 @@ async fn the_contract_describes_the_router_that_exists() {
     let paths = doc["paths"].as_object().expect("paths");
     for (path, spec) in paths {
         let ops: Vec<&String> = spec.as_object().expect("operations").keys().collect();
-        assert_eq!(ops, vec!["get"], "{path} declares a verb that is not `get`");
+        assert_eq!(ops.len(), 1, "{path} declares more than one verb");
+        let declared = ops[0].as_str();
+        let expected = trigon_api::routes::ROUTES
+            .iter()
+            .find(|(p, ..)| p == path)
+            .map(|(_, verb, _)| *verb)
+            .unwrap_or("get");
+        assert_eq!(
+            declared, expected,
+            "{path} is rendered as `{declared}` and the table says `{expected}`"
+        );
     }
     // And every concrete route actually answers rather than 404ing, which is what makes the
     // contract a description rather than a wish.
-    for (path, ..) in trigon_api::routes::ROUTES {
-        if path.contains('{') {
+    for (path, verb, _) in trigon_api::routes::ROUTES {
+        // A templated path has no concrete instance to call here, and a `POST` route is not
+        // answerable by a `GET` — asserting it were is how `/v1/check` came to be described as
+        // something the router does not have.
+        if path.contains('{') || *verb != "get" {
             continue;
         }
         let (status, _) = get(api.clone(), path).await;

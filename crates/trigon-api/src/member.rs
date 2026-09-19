@@ -780,7 +780,7 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-fn human(b: u64) -> String {
+pub(crate) fn human(b: u64) -> String {
     match b {
         0..=1023 => format!("{b} B"),
         1024..=1_048_575 => format!("{:.1} KB", b as f64 / 1024.0),

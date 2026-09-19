@@ -521,3 +521,20 @@ a.chip { text-decoration: none; }
   /* Two hex panes do not fit; the scroller handles it rather than the layout collapsing. */
   .hex { font-size: .68rem; }
 }
+
+/* The lockfile check's input. Monospace because what goes in it is a file, and a file pasted into
+   a proportional box is a file you cannot see the shape of. */
+.lockbox {
+  width: 100%;
+  font: inherit;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: .82rem;
+  line-height: 1.45;
+  padding: .7rem .8rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  resize: vertical;
+}
+.lockbox::placeholder { color: var(--faint); }

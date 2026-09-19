@@ -74,11 +74,16 @@ const api = async (path, opts = {}) => {
   const headers = { accept: 'application/json', ...(opts.headers || {}) };
   const token = TOKEN.get();
   if (token) headers.authorization = `Bearer ${token}`;
-  if (opts.body !== undefined) headers['content-type'] = 'application/json';
+  // `raw` sends the body as-is. A lockfile is not JSON — `requirements.txt` certainly is not —
+  // and JSON-encoding one would hand the server a quoted string to unwrap before it could parse it.
+  if (opts.body !== undefined) {
+    headers['content-type'] = opts.raw ? 'text/plain' : 'application/json';
+  }
   const r = await fetch(path, {
     method: opts.method || 'GET',
     headers,
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    body: opts.body === undefined ? undefined
+      : (opts.raw ? opts.body : JSON.stringify(opts.body)),
   });
   const body = await r.json().catch(() => ({ error: 'unreadable', detail: r.statusText }));
   if (!r.ok) throw Object.assign(new Error(body.detail || r.statusText), { body, status: r.status });
@@ -149,6 +154,9 @@ const routes = [
   [/^\/queue$/, () => queueView()],
   [/^\/jobs\/(\d+)$/, (m) => jobView(Number(m[1]))],
   [/^\/account$/, () => accountView()],
+  [/^\/check$/, () => checkView()],
+  [/^\/clusters$/, () => clustersView()],
+  [/^\/fleet$/, () => fleetView()],
 ];
 
 async function route() {
@@ -229,6 +237,9 @@ function paintMode() {
   const nav = document.getElementById?.('nav');
   if (nav) {
     nav.replaceChildren(
+      el('a', { href: '/check', text: 'check a lockfile' }),
+      el('a', { href: '/clusters', text: 'clusters' }),
+      el('a', { href: '/fleet', text: 'fleet' }),
       el('a', { href: '/queue', text: 'queue' }),
       el('a', { href: '/account', text: ME?.principal ? ME.principal : 'sign in' }),
     );
@@ -1471,3 +1482,218 @@ function evidenceLink(label, href, present, why) {
 }
 
 route();
+
+/* ---- the lockfile check, the clusters, and the fleet -------------------- */
+
+/// The five statuses, in the order the summary prints them and with the glyph each carries.
+/// `never checked` last and never omitted: a blank row reads as green.
+const CHECK_COLOUR = {
+  reproduced: 'var(--ok)',
+  caveats: 'var(--caveat)',
+  divergent: 'var(--divergent, var(--one-side))',
+  unsupported: 'var(--void)',
+  // Deliberately not a neutral wash. The whole point of the row is that it must not read as fine.
+  'never checked': 'var(--faint)',
+};
+
+const CHECK_ROWS = [
+  ['reproduced', '✔', 'reproduced'],
+  ['caveats', '◐', 'normalized_with_caveats'],
+  ['divergent', '✖', 'divergent'],
+  ['unsupported', '⊘', 'none'],
+  ['never checked', '?', 'none'],
+];
+
+async function checkView() {
+  await health();
+  document.title = 'Check a lockfile — Trigon';
+
+  const out = el('div', {});
+  const box = el('textarea', {
+    class: 'lockbox',
+    rows: '10',
+    spellcheck: 'false',
+    placeholder:
+      'Paste a package-lock.json, a requirements.txt, or an SPDX SBOM.\n'
+      + 'Nothing is stored: the file is read, matched against the corpus, and forgotten.',
+  });
+
+  async function run() {
+    const body = box.value.trim();
+    if (!body) {
+      out.replaceChildren(el('p', { class: 'empty', text: 'Nothing pasted yet.' }));
+      return;
+    }
+    // Paint the wait, because this one really is a round trip the reader asked for by clicking.
+    out.replaceChildren(el('p', { class: 'empty', text: 'reading it…' }));
+    let d;
+    try {
+      d = await api('/v1/check', { method: 'POST', body, raw: true });
+    } catch (e) {
+      out.replaceChildren(el('div', { class: 'withheld-note' },
+        el('strong', { text: 'Not read. ' }), el('span', { text: e.message })));
+      return;
+    }
+    drawCheck(out, d);
+  }
+
+  view.replaceChildren(
+    el('p', {}, el('a', { href: '/', text: '← the corpus' })),
+    el('div', { class: 'verdict-head' },
+      el('h1', { text: 'Check a lockfile' }),
+      el('p', { class: 'purl', text: 'The one view that starts from something you already have.' })),
+    el('section', { class: 'panel' }, box,
+      el('p', {}, el('button', { class: 'chip', onclick: run, text: 'check it' }))),
+    out,
+  );
+}
+
+function drawCheck(slot, d) {
+  const total = d.packages || 0;
+  const summary = CHECK_ROWS.map(([key, glyph, tag]) => {
+    const n = d.tally[key] || 0;
+    const share = total ? Math.round((n * 100) / total) : 0;
+    return el('tr', {},
+      el('td', { text: glyph }),
+      el('td', {}, el('span', { class: `tag ${tag}`, text: key })),
+      el('td', { class: 'n', text: String(n) }),
+      el('td', {}, bar(share, CHECK_COLOUR[key])));
+  });
+
+  // Everything that is not a clean reproduction, which is what somebody came here to find.
+  const notable = d.results.filter((r) => r.status !== 'reproduced');
+  slot.replaceChildren(
+    el('section', { class: 'panel' },
+      el('h2', { text: `${total} package(s)` }),
+      el('table', { class: 'runs' }, el('tbody', {}, summary)),
+      el('p', { class: 'note' },
+        el('strong', { text: 'never checked' }), ' counts packages with no run, and ',
+        el('strong', { text: 'unsupported' }), ' runs that reached no verdict. Neither is a '
+        + 'statement about the package, and neither is summed with the three above them — which '
+        + 'is why there is no single percentage here.')),
+    notable.length
+      ? el('table', { class: 'runs' },
+          el('thead', {}, el('tr', {},
+            el('th', { text: 'package' }),
+            el('th', { class: 'opt', text: 'version' }),
+            el('th', { text: 'status' }),
+            el('th', { text: 'why' }))),
+          el('tbody', {}, notable.map((r) => el('tr', {},
+            el('td', { class: 'pkg' }, r.run
+              ? el('a', { href: `/runs/${encodeURIComponent(r.run)}`, text: r.name })
+              : el('span', { text: r.name })),
+            el('td', { class: 'opt', text: r.version }),
+            el('td', {}, el('span', {
+              class: `tag ${CHECK_ROWS.find(([k]) => k === r.status)?.[2] || 'none'}`,
+              text: r.status,
+            })),
+            el('td', { class: 'note', text: r.detail || '' })))))
+      : el('p', { class: 'empty', text: 'Every package in this file reproduced.' }),
+  );
+}
+
+/// One share bar, using the same track and fill the corpus bars use.
+///
+/// `style` goes through `el`'s array form, which sets properties through the CSSOM: the page's own
+/// CSP is `style-src 'self'`, and that blocks the `style` *attribute*, not just a stylesheet.
+function bar(pct, colour) {
+  return el('div', { class: 'bar-track' },
+    el('div', {
+      class: 'bar-fill',
+      style: [['width', `${pct}%`], ['background', colour || 'var(--dim)']],
+    }));
+}
+
+async function clustersView() {
+  await health();
+  document.title = 'Failure clusters — Trigon';
+  let d;
+  try {
+    d = await api('/v1/clusters');
+  } catch (e) {
+    view.replaceChildren(
+      el('p', {}, el('a', { href: '/', text: '← the corpus' })),
+      el('div', { class: 'verdict-head' }, el('h1', { text: 'Failure clusters' })),
+      el('div', { class: 'withheld-note' },
+        el('strong', { text: 'Not shown. ' }), el('span', { text: e.message })));
+    return;
+  }
+
+  const rows = d.clusters.map((c) => el('tr', {},
+    el('td', { class: 'n', text: String(c.count) }),
+    el('td', { class: 'pkg', text: c.key }),
+    el('td', { class: 'opt', text: c.ecosystems.join(', ') }),
+    el('td', { class: 'opt', text: (c.last_seen || '').slice(0, 10) }),
+    el('td', {}, ...c.runs.slice(0, 3).map((id, i) => el('span', {},
+      i ? ', ' : '',
+      el('a', { href: `/runs/${encodeURIComponent(id)}`, text: id.slice(-8) })))),
+  ));
+
+  view.replaceChildren(
+    el('p', {}, el('a', { href: '/', text: '← the corpus' })),
+    el('div', { class: 'verdict-head' },
+      el('h1', { text: 'Failure clusters' }),
+      el('p', { class: 'purl', text: 'Grouped by the signature that keys the repair cache, so a cluster is the set of runs one fix would move.' })),
+    rows.length
+      ? el('table', { class: 'runs' },
+          el('thead', {}, el('tr', {},
+            el('th', { class: 'n', text: 'runs' }),
+            el('th', { text: 'signature' }),
+            el('th', { class: 'opt', text: 'ecosystems' }),
+            el('th', { class: 'opt', text: 'last seen' }),
+            el('th', { text: 'examples' }))),
+          el('tbody', {}, rows))
+      : el('p', { class: 'empty', text: 'No run in this corpus carries a failure signature.' }),
+  );
+}
+
+async function fleetView() {
+  await health();
+  document.title = 'Fleet — Trigon';
+  const d = await api('/v1/fleet');
+
+  const q = d.queue;
+  const workers = (q && q.workers) || [];
+  const queuePanel = !q
+    ? el('p', { class: 'empty', text: 'This instance serves a corpus read from storage and has no queue.' })
+    : el('div', {},
+        el('h2', { text: 'Depth' }),
+        bars(q.depth || {}),
+        workers.length
+          ? el('table', { class: 'runs' },
+              el('thead', {}, el('tr', {},
+                el('th', { text: 'worker' }),
+                el('th', { class: 'n', text: 'holding' }),
+                el('th', { text: 'lease' }))),
+              el('tbody', {}, workers.map((w) => el('tr', {},
+                el('td', { class: 'pkg', text: w.worker }),
+                el('td', { class: 'n', text: String(w.jobs_held) }),
+                el('td', {}, el('span', {
+                  class: `tag ${w.lease_expires_in_seconds < 0 ? 'divergent' : 'normalized'}`,
+                  text: w.lease_expires_in_seconds < 0
+                    ? `lapsed ${-w.lease_expires_in_seconds}s ago`
+                    : `${w.lease_expires_in_seconds}s left`,
+                }))))))
+          : el('p', { class: 'empty', text: 'No worker is holding a lease.' }));
+
+  view.replaceChildren(
+    el('p', {}, el('a', { href: '/', text: '← the corpus' })),
+    el('div', { class: 'verdict-head' },
+      el('h1', { text: 'Fleet' }),
+      el('p', { class: 'purl', text: 'Whether the thing is running, and whether anything is stuck.' })),
+    el('section', { class: 'panel' }, queuePanel),
+    el('section', { class: 'panel' },
+      el('h2', { text: 'What the corpus has reached' }),
+      bars(d.corpus.by_outcome || {}),
+      el('p', { class: 'note' },
+        `${d.corpus.evidence} of ${d.corpus.runs} runs are evidence about a package.`)),
+    el('section', { class: 'panel' },
+      el('h2', { text: 'Runs we could not complete' }),
+      Object.keys(d.corpus.by_fault || {}).length
+        ? bars(d.corpus.by_fault)
+        : el('p', { class: 'empty', text: 'None.' }),
+      el('p', { class: 'note' },
+        'A separate denominator. A build we could not run is not a package that failed to '
+        + 'reproduce, and adding the two would answer neither question.')),
+  );
+}

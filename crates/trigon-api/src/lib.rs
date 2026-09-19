@@ -16,6 +16,7 @@
 
 pub mod comparison;
 pub mod evidence;
+pub mod fleet;
 pub mod index;
 pub mod member;
 pub mod publication;
@@ -121,6 +122,10 @@ pub fn router(api: Arc<Api>) -> axum::Router {
         .route("/v1/openapi.json", get(routes::openapi))
         .route("/v1/me", get(request::me))
         .route("/v1/queue", get(request::queue_state))
+        // The three views docs/11-interfaces.md §3 asks for that the corpus browser lacked.
+        .route("/v1/check", axum::routing::post(fleet::check))
+        .route("/v1/clusters", get(fleet::clusters))
+        .route("/v1/fleet", get(fleet::fleet))
         .route("/v1/jobs/{id}/events", get(request::job_events))
         // The one write route. It enqueues a job; it cannot express an outcome, so it cannot
         // launder one. See `request`'s module documentation and `docs/22` §5.4.

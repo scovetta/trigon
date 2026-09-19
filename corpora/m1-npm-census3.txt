@@ -1,0 +1,140 @@
+# M1 Census III corpus — npm
+#
+# 100 targets whose NAMES come from Census III of Free and Open Source Software (Linux Foundation
+# Research, OpenSSF and the Laboratory for Innovation Science at Harvard, December 2024), Appendix
+# A: Top 500 npm, Direct, Version Agnostic Packages. Taken from the report's own published dataset,
+# the eight appendix CSVs deposited on Zenodo at DOI 10.5281/zenodo.21110566 — not from the PDF and
+# not from a downloads chart. Census III ranks by what the SCA vendors (FOSSA, Snyk, Sonatype, Black
+# Duck) observed real codebases depending on, which is a different population from "what npm serves
+# the most tarballs for".
+#
+# This corpus answers a different question from m1-npm-common.txt. That one is stratified by build
+# system so that a bad rate on one kind of package cannot hide inside an aggregate. This one is a
+# popularity list, and popularity does not distribute itself evenly across build systems.
+#
+# SAMPLING — the census rank order was modified, and here is exactly how:
+#
+#   Walk Appendix A in census rank order. Keep a name if m1-npm-common.txt does not already have it
+#   (matched on name, not version). **Cap each npm scope at 5 targets**; unscoped packages are
+#   uncapped. Stop at 100. That runs from rank 7 to **rank 191** of 500 and skips 43 names that hit
+#   the cap: 40 @jupyterlab/* and 3 @angular/*.
+#
+# The cap is not cosmetic and the file would mislead without it. Uncapped, the first 100 new names
+# include 32 @jupyterlab/* packages, clustered at ranks 82-141 on identical z-scores, because the
+# scans see one JupyterLab install as several dozen separate direct dependencies. Thirty-two
+# packages out of one monorepo are one toolchain and one build config: if it reproduces we book 32
+# successes, if it does not we book 32 failures, and the headline rate swings 32 points on one
+# project. That is one data point counted 32 times, not 32 measurements — exactly the failure mode
+# m1-npm-common.txt's build-system stratification exists to prevent. Capping at 5 keeps the signal
+# that JupyterLab is heavily depended upon without letting it set the rate.
+#
+# Scopes at or near the cap after sampling: @jupyterlab 5, @angular 5, @types 3, @testing-library 3,
+# @emotion 2, @salesforce-ux 2. Anyone quoting a rate off this file should know the ordering was
+# modified; an undocumented cap would be worse than the concentration it fixes.
+#
+# **Every entry was resolved against the registry on 2026-09-19**, taking dist-tags.latest from
+# registry.npmjs.org. A version that does not exist is not a failing target, it is a permanently
+# depressed rate with no way to tell: the run reports it as unresolvable for ever and nobody
+# rechecks a corpus. Across ranks 7-191 no name was unknown to the registry, none had been
+# unpublished, and none had a pre-release latest, so nothing was dropped between census and file.
+
+pkg:npm/aws-sdk@2.1693.0
+pkg:npm/react-router-dom@7.18.4
+pkg:npm/oboe@2.1.7
+pkg:npm/moment@2.31.0
+pkg:npm/d3-flame-graph@5.0.0
+pkg:npm/typescript@7.0.2
+pkg:npm/jquery@4.0.0
+pkg:npm/kind-of@6.0.3
+pkg:npm/tslib@2.8.1
+pkg:npm/react-redux@9.3.0
+pkg:npm/supports-color@11.0.0
+pkg:npm/core-js@3.50.0
+pkg:npm/bootstrap@5.3.8
+pkg:npm/winston@3.19.0
+pkg:npm/is-fullwidth-code-point@5.1.0
+pkg:npm/eslint@10.11.0
+pkg:npm/debug@4.4.3
+pkg:npm/prettier@3.9.8
+pkg:npm/@angular/platform-browser@22.1.7
+pkg:npm/@angular/common@22.1.7
+pkg:npm/@angular/platform-browser-dynamic@22.1.7
+pkg:npm/@angular/router@22.1.7
+pkg:npm/@angular/compiler@22.1.7
+pkg:npm/@salesforce-ux/icons@10.17.0
+pkg:npm/cliui@9.0.1
+pkg:npm/type-fest@5.10.0
+pkg:npm/readable-stream@4.7.0
+pkg:npm/source-map@0.8.0
+pkg:npm/@types/react@19.3.0
+pkg:npm/ansi-regex@6.3.0
+pkg:npm/@types/react-dom@19.3.0
+pkg:npm/config@5.0.1
+pkg:npm/d3-selection@3.0.0
+pkg:npm/moment-timezone@0.6.4
+pkg:npm/is-number@7.0.0
+pkg:npm/get-stream@9.0.1
+pkg:npm/react-scripts@5.0.1
+pkg:npm/emoji-regex@11.0.0
+pkg:npm/styled-components@6.5.3
+pkg:npm/ws-non-native@0.4.31
+pkg:npm/mime-db@1.54.0
+pkg:npm/zone.js@0.16.3
+pkg:npm/setprototypeof@1.2.0
+pkg:npm/jest@30.5.2
+pkg:npm/prop-types@15.8.1
+pkg:npm/graphql@17.0.2
+pkg:npm/pg@8.23.0
+pkg:npm/define-property@2.0.2
+pkg:npm/webidl-conversions@8.0.1
+pkg:npm/@jupyterlab/application@4.6.3
+pkg:npm/@jupyterlab/coreutils@6.6.3
+pkg:npm/@jupyterlab/theme-dark-extension@4.6.3
+pkg:npm/@jupyterlab/theme-light-extension@4.6.3
+pkg:npm/@jupyterlab/pdf-extension@4.6.3
+pkg:npm/@emotion/react@11.14.0
+pkg:npm/helmet@8.3.0
+pkg:npm/@testing-library/react@16.3.3
+pkg:npm/cors@2.8.6
+pkg:npm/@emotion/styled@11.14.1
+pkg:npm/punycode@2.3.1
+pkg:npm/@types/jest@30.0.0
+pkg:npm/pkg-dir@9.0.0
+pkg:npm/request@2.88.2
+pkg:npm/@testing-library/jest-dom@7.0.1
+pkg:npm/webpack@5.111.1
+pkg:npm/strip-bom@5.0.0
+pkg:npm/y18n@5.0.8
+pkg:npm/strip-ansi@7.2.0
+pkg:npm/compression@1.8.2
+pkg:npm/anymatch@3.1.3
+pkg:npm/ignore@7.0.9
+pkg:npm/child-process-promise@2.2.1
+pkg:npm/balanced-match@4.0.4
+pkg:npm/cookie-parser@1.4.7
+pkg:npm/stats-lite@2.2.0
+pkg:npm/file-exists@5.0.1
+pkg:npm/cli-progress-bar@1.0.1
+pkg:npm/tracium@0.2.1
+pkg:npm/@testing-library/user-event@14.6.7
+pkg:npm/js-yaml@5.4.2
+pkg:npm/eslint-config-prettier@10.1.8
+pkg:npm/please-upgrade-node@3.2.0
+pkg:npm/postcss@8.5.28
+pkg:npm/@salesforce-ux/design-system@2.264.1
+pkg:npm/has-flag@5.0.1
+pkg:npm/classnames@2.5.1
+pkg:npm/@salesforce/design-system-react@0.10.65
+pkg:npm/minimist@1.2.8
+pkg:npm/schema-utils@4.5.0
+pkg:npm/@typescript-eslint/eslint-plugin@8.70.0
+pkg:npm/babel-loader@10.1.1
+pkg:npm/camelcase@9.0.0
+pkg:npm/dont-sniff-mimetype@1.1.0
+pkg:npm/web-vitals@6.2.2
+pkg:npm/p-try@3.0.0
+pkg:npm/@sentry/node@10.75.0
+pkg:npm/isobject@4.1.1
+pkg:npm/array-flatten@3.0.0
+pkg:npm/react-router@8.4.0
+pkg:npm/eslint-plugin-import@2.32.0
