@@ -603,7 +603,8 @@ crates/trigon-strategy    the strategy schema, the flow DSL, the tool registry, 
 crates/trigon-attest      in-toto statements, DSSE, signing, re-derivation
 crates/trigon-registry    registry clients, source discovery, strategy inference
 crates/trigon-sandbox     the build runner, egress islands, isolation
-crates/trigon-mirror      the time-filtered index and the artifact guard
+crates/trigon-mirror      the time-filtered index, the artifact guard and the fetch cache
+crates/trigon-politeness  what we ask of an upstream host, and how fast: one limiter, one counter
 crates/trigon-store       content-addressed blobs and run records
 crates/trigon-ai          the provider seam, the Builder, budgets and admission control
 crates/trigon-stabilize-wasm  a stabilizer set archived as a WebAssembly module, and its host
@@ -617,7 +618,7 @@ scripts/                  the cross-machine verification check
 ## Build and check
 
 ```
-cargo test --workspace                      # 917 pass, 0 fail
+cargo test --workspace                      # 939 pass, 0 fail
 TRIGON_LIVE=1 cargo test --workspace        # plus the ones that need a network
 cargo run -p xtask -- policy                # the dependency policy
 cargo run -p xtask -- differential          # against the reference implementation
