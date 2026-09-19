@@ -2331,3 +2331,75 @@ Both now go through one `begin_write()` that issues `BEGIN IMMEDIATE` on SQLite 
 the bug was about. "How this transaction begins decides what it may do later" is a fact about every
 transaction in the file, and it was recorded in one of them as a comment. It is now a function, so
 there is one place to be right.
+
+### 3.55 Two false matches, which is the failure this project cannot have
+
+A verifier that reports a divergence where there is none wastes somebody's afternoon. One that
+reports a **match** where there is a difference is worse than nothing, because it is the answer
+people act on. Two passes were doing that.
+
+**A `.sig` the package ships is not the gem's signature.** A `.gem` is a tar holding `metadata.gz`,
+`checksums.yaml.gz`, `data.tar.gz` and the signing artifacts `*.sig`. `gem-exclude-signatures`
+dropped every entry ending `.sig` and `gem-exclude-checksums` every `checksums.yaml.gz` — and
+`apply` runs the whole set at every archive depth, so both also fired *inside* `data.tar.gz`, which
+is the payload. A gem shipping a certificate, a test fixture, or a detached signature had it
+deleted from both sides before they were compared, and a real difference in it became no
+difference.
+
+Measured: two gems differing only in `lib/trusted-cert.sig` stabilized to identical bytes.
+
+The vocabulary to say this correctly already existed. `has_gzip` is written as `… && (cx.at_depth(0)
+|| is_structural(cx))`, and `is_structural` names the three gem members by hand. These two passes
+were the ones that did not ask, and they are now gated on `is_gem_envelope` — the gem's own tar, at
+depth 0, which is where a gem's signing envelope lives.
+
+**A symlink is not a regular file.** `zip-versions` set `raw.external_attrs = 0` to normalize the
+unix mode, because 0644 against 0664 says nothing about a package. That field also carries the
+**file-type** bits, and the zip writer emits `raw.external_attrs` and never consults `Entry::kind`,
+which the reader had set correctly from those same bits. So after one `Metadata`-tier pass, a
+symlink and a regular file with the same bytes were the same archive.
+
+Measured through the CLI, on two 228-byte zips whose `pkg/x.py` was a symlink to `/etc/passwd` on
+one side and a file containing that text on the other:
+
+```text
+✔ normalized
+               upstream           rebuild
+  stabilized   b60c55d03b98…      b60c55d03b98…      =
+```
+
+A published wheel that replaced a file with a symlink would have been reported as reproduced. And
+because the only pass that fired was `Builtin` at `RiskTier::Metadata`, `caps_normalized` does not
+cap it — the provenance cap is not a backstop here, by design.
+
+The type bits now come from `Entry::kind` rather than from the raw word, so a zip written by a tool
+that records no unix mode still agrees with one that records `0100644` — which is what zeroing the
+field was for — while a symlink stays distinct. After: `✖ divergent`, and two identical regular-file
+zips still report `✔ exact`.
+
+**The shape, common to both:** a rule stated over the wrong domain. "Exclude `*.sig`" is true of a
+gem's envelope and false of its contents; "the mode is noise" is true of permissions and false of
+the type. Each was written as the broader claim because the broader claim was easier to express,
+and in both cases the narrowing vocabulary was already sitting in the same file.
+
+### 3.56 A ceiling that was multiplied by the member count
+
+**Real, and the other reader already had the answer.** `Limits::total_expanded_bytes` is documented
+as "a hard ceiling on everything one artifact expands to". `descend` passed the whole `Limits` to
+every nested `.gz` member it found, and every inflated body was retained at once in `Body::Nested`.
+
+Measured: a 70 KB tar of eight `.gz` members, each inflating to 8 MiB, parsed under a **16 MiB**
+ceiling — returns `Ok`, holds **64 MiB**, and emits no note. It scales linearly in member count,
+bounded only by `max_entries` (one million). A `.gem` is an outer tar of `.gz` members, so the shape
+is entirely ordinary.
+
+`zip::read` already threaded a running total: `let remaining =
+limits.total_expanded_bytes.saturating_sub(expanded)`. The tar-and-gzip descent now does the same,
+and a member that would exceed what is left is left inline with a note naming the limit — which is
+the right failure, because the outer comparison still works and the member is digested as the bytes
+we could not open.
+
+This is [3.50](#350-a-19-5-mb-file-that-costs-8-2-gb-to-look-inside)'s rule a third time: **a cap
+constrains the quantity it is measured in and no other.** Here the quantity was right and the
+*scope* was wrong — per member rather than per artifact — which is the same mistake wearing a
+different hat.

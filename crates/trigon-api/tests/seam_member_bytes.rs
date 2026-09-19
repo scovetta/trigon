@@ -456,7 +456,7 @@ fn a_new_file_too_large_to_render_is_bounded_the_same_way() {
 /// buffer (see `trigon-archive/tests/seam_one_buffer.rs`) halved that; this is the other half.
 #[test]
 fn an_artifact_that_expands_past_the_serving_budget_is_refused() {
-    use std::io::{Read, Write};
+    use std::io::Read;
 
     // 1200 MiB of zeros, which compresses to about a megabyte. Nothing here is large on disk.
     struct Zeros {

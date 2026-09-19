@@ -294,20 +294,43 @@ impl Checkout {
     /// repository has a handful of them. The size cap is what stops a generated lockfile from
     /// becoming most of a prompt.
     pub fn read(&self, names: &[&str], max_bytes: usize) -> Vec<(String, String)> {
+        // Resolved once, because the containment check below compares against it and the checkout
+        // may itself sit under a symlink — `/tmp` is one on several systems, and comparing a
+        // resolved path against an unresolved root would reject everything.
+        let Ok(root) = self.path.canonicalize() else {
+            return Vec::new();
+        };
+
         let mut out = Vec::new();
         for name in names {
             // Only within the checkout. A name with `..` in it would otherwise read the host.
             if name.contains("..") || Path::new(name).is_absolute() {
                 continue;
             }
-            let p = self.path.join(name);
-            let Ok(meta) = std::fs::metadata(&p) else {
+
+            // **Containment, not spelling.** The check above is about the *name*, and the name is
+            // ours — `MANIFESTS` is a fixed list. What an attacker controls is the repository, and
+            // git stores symlinks and checks them out as symlinks. A repo containing
+            // `package.json -> /etc/passwd` has a name with no `..` in it that is nonetheless the
+            // host's file, and `std::fs::metadata` follows links, so it read as a perfectly
+            // ordinary manifest — into a model prompt, which leaves the machine.
+            //
+            // `canonicalize` resolves every component, so this also covers a symlinked *directory*
+            // in the middle of the path, which no examination of the final name could catch.
+            let Ok(real) = self.path.join(name).canonicalize() else {
+                continue;
+            };
+            if !real.starts_with(&root) {
+                continue;
+            }
+
+            let Ok(meta) = std::fs::metadata(&real) else {
                 continue;
             };
             if !meta.is_file() || meta.len() as usize > max_bytes {
                 continue;
             }
-            if let Ok(text) = std::fs::read_to_string(&p) {
+            if let Ok(text) = std::fs::read_to_string(&real) {
                 out.push(((*name).to_string(), text));
             }
         }

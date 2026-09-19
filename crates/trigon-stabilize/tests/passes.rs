@@ -433,3 +433,195 @@ fn the_manifest_names_what_the_digest_covers_and_no_more() {
 fn profile_of(name: &str) -> StabilizerSet {
     profile(name).unwrap_or_else(|| panic!("no profile `{name}`"))
 }
+
+/// A `.sig` the package ships is not the gem's signature.
+///
+/// **This produced false matches, which is the worst thing this project can do.** A `.gem` is a
+/// tar holding `metadata.gz`, `checksums.yaml.gz`, `data.tar.gz` and the signing artifacts
+/// `*.sig`. `gem-exclude-signatures` drops every entry ending `.sig` and `gem-exclude-checksums`
+/// drops every `checksums.yaml.gz` — and `apply` runs the whole set at every archive depth, so
+/// both also fired inside `data.tar.gz`, which is the payload.
+///
+/// A gem that ships a certificate, a test fixture, or a detached signature under any name ending
+/// `.sig` therefore had that file deleted from *both* sides before they were compared. A real
+/// difference in it became no difference at all, and the run reported a match.
+///
+/// The vocabulary to say this correctly already existed: `has_gzip` is written as
+/// `… && (cx.at_depth(0) || is_structural(cx))`, and `is_structural` even names the three gem
+/// members by hand. These two passes were the ones that did not ask.
+fn gem_with(payload_sig: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    fn tar_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut b = ::tar::Builder::new(Vec::new());
+        for (name, body) in entries {
+            let mut h = ::tar::Header::new_ustar();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_mtime(1_700_000_000);
+            h.set_cksum();
+            b.append_data(&mut h, name, *body).unwrap();
+        }
+        b.into_inner().unwrap()
+    }
+    fn gz(b: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut e = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+        e.write_all(b).unwrap();
+        e.finish().unwrap();
+        out
+    }
+
+    // The payload, one level down, carrying a file the package itself ships.
+    let data = gz(&tar_of(&[
+        ("lib/thing.rb", b"THING = 1\n"),
+        ("lib/trusted-cert.sig", payload_sig),
+        ("lib/checksums.yaml.gz", &gz(b"a file the package ships\n")),
+    ]));
+
+    // The gem's own envelope, at depth 0, which is what the two passes are actually for.
+    tar_of(&[
+        ("metadata.gz", &gz(b"--- !ruby/object:Gem::Specification\n")),
+        ("checksums.yaml.gz", &gz(b"---\nSHA256:\n")),
+        ("data.tar.gz", &data),
+        ("metadata.gz.sig", b"the gem's signature"),
+        ("data.tar.gz.sig", b"the gem's other signature"),
+    ])
+}
+
+#[test]
+fn a_gem_payloads_own_sig_survives_the_signature_exclusion() {
+    let (a, _) = stabilize(gem_with(b"CERTIFICATE ONE"), Format::Tar, "gem");
+    let (b, _) = stabilize(gem_with(b"CERTIFICATE TWO"), Format::Tar, "gem");
+
+    assert_ne!(
+        a, b,
+        "two gems whose payloads carry different `lib/trusted-cert.sig` stabilized to identical \
+         bytes. The comparison that follows reports a match for a package that changed."
+    );
+
+    // And the exclusion is still doing its job, or the fix has simply turned the passes off and
+    // this test would pass against a set that stabilizes nothing at all.
+    let (c, applied) = stabilize(gem_with(b"SAME"), Format::Tar, "gem");
+    let (d, _) = stabilize(gem_with(b"SAME"), Format::Tar, "gem");
+    assert_eq!(c, d, "the same gem twice must stabilize the same");
+    assert!(
+        applied
+            .iter()
+            .any(|x| x.id.as_str() == "gem-exclude-signatures"),
+        "the exclusion did not fire at all, so this test proves nothing: {applied:?}"
+    );
+}
+
+/// The envelope's own signatures and checksums are still dropped.
+#[test]
+fn the_gems_own_envelope_is_still_excluded() {
+    use trigon_archive::{Limits, parse};
+    let (out, _) = stabilize(gem_with(b"SAME"), Format::Tar, "gem");
+    let mut notes = Vec::new();
+    let p = parse(out, Format::Tar, &Limits::default(), &mut notes).unwrap();
+    let names: Vec<String> = p
+        .archive
+        .entries
+        .iter()
+        .map(|e| e.path.to_lossy().into_owned())
+        .collect();
+
+    for gone in ["metadata.gz.sig", "data.tar.gz.sig", "checksums.yaml.gz"] {
+        assert!(
+            !names.contains(&gone.to_string()),
+            "`{gone}` is the gem's own signing envelope and should still be excluded: {names:?}"
+        );
+    }
+    assert!(
+        names.contains(&"data.tar.gz".to_string()),
+        "the payload went missing: {names:?}"
+    );
+}
+
+/// A symlink member does not stabilize into a regular file.
+///
+/// **A false match with a supply-chain consequence.** `zip-versions` zeroed `external_attrs` to
+/// normalize the unix mode — 0644 against 0664 is packaging noise — and the whole field includes
+/// the **file-type** bits. The zip writer emits `raw.external_attrs` and never consults
+/// `Entry::kind`, which the reader had set correctly, so once the pass ran a symlink and a regular
+/// file with the same bytes were the same archive.
+///
+/// Measured through the CLI on two 228-byte zips whose `pkg/x.py` was a symlink to `/etc/passwd`
+/// on one side and a file containing that text on the other:
+///
+/// ```text
+/// ✔ normalized
+///   stabilized   b60c55d03b98…      b60c55d03b98…      =
+/// ```
+///
+/// A published wheel that replaced a file with a symlink would have been reported as reproduced.
+#[test]
+fn a_symlink_does_not_stabilize_into_a_regular_file() {
+    use trigon_archive::{EntryKind, RawMeta};
+
+    /// The fixture, built through the archive model because no zip writer here can be made to
+    /// emit `S_IFLNK` reliably across versions. The reader's own `kind` is what the pass must
+    /// consult, so setting it is exactly the state a real symlinked member arrives in.
+    fn zip_with(symlink: bool) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut w = zip_crate::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts: zip_crate::write::FileOptions<'_, ()> = zip_crate::write::FileOptions::default()
+            .compression_method(zip_crate::CompressionMethod::Stored);
+        for (name, body) in [("pkg/x.py", &b"/etc/passwd"[..]), ("pkg/ok.py", b"print(1)\n")] {
+            w.start_file(name, opts).unwrap();
+            w.write_all(body).unwrap();
+        }
+        let bytes = w.finish().unwrap().into_inner();
+
+        let mut notes: Vec<Note> = Vec::new();
+        let mut p = parse(bytes, Format::Zip, &Limits::default(), &mut notes).unwrap();
+        if symlink {
+            let e = p
+                .archive
+                .entries
+                .iter_mut()
+                .find(|e| e.path.to_lossy().ends_with("x.py"))
+                .expect("the member");
+            e.kind = EntryKind::Symlink {
+                target: b"/etc/passwd".to_vec(),
+            };
+            if let RawMeta::Zip(raw) = &mut e.raw {
+                raw.external_attrs = 0o120777 << 16;
+            }
+        }
+        serialize(&p.archive, true).unwrap()
+    }
+
+    let (sym, _) = stabilize(zip_with(true), Format::Zip, "zip");
+    let (reg, _) = stabilize(zip_with(false), Format::Zip, "zip");
+
+    assert_ne!(
+        sym, reg,
+        "a symlink to /etc/passwd and a regular file containing that text stabilized to the same \
+         bytes. `trigon verify` reports this pair as reproduced."
+    );
+
+    // And the normalization it was written for still works: the mode bits that really are noise
+    // must still come out the same, or this fix has traded a false match for a false divergence.
+    let a = zip_with(false);
+    let b = {
+        let mut notes: Vec<Note> = Vec::new();
+        let mut p = parse(a.clone(), Format::Zip, &Limits::default(), &mut notes).unwrap();
+        for e in p.archive.entries.iter_mut() {
+            if let RawMeta::Zip(raw) = &mut e.raw {
+                // One side written by a tool that records a mode, the other by one that does not.
+                raw.external_attrs = 0o100664 << 16;
+                raw.creator_version = 0x031e;
+            }
+            e.mark_dirty();
+        }
+        serialize(&p.archive, true).unwrap()
+    };
+    let (sa, _) = stabilize(a, Format::Zip, "zip");
+    let (sb, _) = stabilize(b, Format::Zip, "zip");
+    assert_eq!(
+        sa, sb,
+        "two zips differing only in recorded permissions must still agree; that is what zeroing \
+         the field was for"
+    );
+}

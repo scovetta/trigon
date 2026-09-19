@@ -242,3 +242,79 @@ fn a_commit_no_tag_names_reports_no_tags_rather_than_failing() {
         "and the checkout still works"
     );
 }
+
+/// A manifest that is a symlink out of the checkout reads nothing.
+///
+/// **The vector the `..` guard does not cover.** `Checkout::read` rejects a *caller-supplied* name
+/// containing `..` or an absolute path, and the test above asserts that. The name it is handed is
+/// not the attacker's input — `MANIFESTS` is a fixed list — so that guard was never the interesting
+/// one. What an attacker controls is the *repository*, and git stores symlinks (mode 120000) and
+/// checks them out as symlinks.
+///
+/// So a package whose source repo contains `package.json -> /etc/passwd` passes the guard (the name
+/// has no `..` and is relative), and `std::fs::metadata` follows the link, so `is_file()` is true
+/// of the target and `read_to_string` reads it. From `trigon/src/inferrer.rs` those manifests go
+/// straight into the model prompt, which leaves the machine.
+///
+/// The fix is containment rather than another spelling check: canonicalize and require the result
+/// to be inside the checkout, which also covers a symlinked *directory* component that no
+/// examination of the final name could catch.
+#[test]
+#[cfg(unix)]
+fn a_manifest_that_is_a_symlink_out_of_the_checkout_is_not_read() {
+    let d = tmpdir("symlink");
+    let repo = d.join("origin");
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+
+    // A file outside the repository, standing in for anything the build user can read.
+    let secret = d.join("host-secret.txt");
+    std::fs::write(&secret, "PRIVATE KEY MATERIAL\n").unwrap();
+
+    // The attack, committed the way git really stores it.
+    std::os::unix::fs::symlink(&secret, repo.join("package.json")).unwrap();
+    // And the same through a symlinked directory component, which inspecting the final name
+    // cannot catch.
+    std::os::unix::fs::symlink(d.join(""), repo.join("sub").join("up")).unwrap();
+    std::fs::write(repo.join("pyproject.toml"), "[project]\nname='real'\n").unwrap();
+
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "--quiet", "-m", "one"]);
+    let out = Command::new("git")
+        .current_dir(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let c = SourceCache::new(d.join("cache"))
+        .trusting_local_paths()
+        .checkout(repo.to_str().unwrap(), &head)
+        .unwrap();
+
+    // Sanity: git really did check the symlink out as a symlink, or this test proves nothing.
+    let link = c.path.join("package.json");
+    assert!(
+        std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+        "the fixture is not exercising a symlink; git checked out a regular file"
+    );
+
+    let got = c.read(&["package.json", "sub/up/host-secret.txt", "pyproject.toml"], 1 << 20);
+    let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
+
+    assert!(
+        !got.iter().any(|(_, body)| body.contains("PRIVATE KEY MATERIAL")),
+        "a file outside the checkout was read into what becomes a model prompt: {names:?}"
+    );
+    assert!(
+        !names.contains(&"package.json"),
+        "the symlinked manifest should be skipped entirely, not read as empty"
+    );
+
+    // And the real file beside it is still read, so the fix is containment and not a refusal to
+    // read anything at all.
+    assert!(
+        names.contains(&"pyproject.toml"),
+        "the ordinary manifest stopped being read: {names:?}"
+    );
+}

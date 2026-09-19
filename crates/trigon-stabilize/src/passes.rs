@@ -59,6 +59,20 @@ fn has_gzip(cx: &Cx) -> bool {
 /// are both gzip members of an outer tar. The difference is that the gem format mandates the first
 /// and the second is a deliverable, so normalizing its header rewrites content rather than a
 /// container. The profile is what knows, and this is the list.
+/// The `.gem` container itself, and not the payload inside it.
+///
+/// A `.gem` is a tar holding `metadata.gz`, `checksums.yaml.gz`, `data.tar.gz` and the signing
+/// artifacts `*.sig`. The two exclusions below are about that envelope. `apply` runs the whole set
+/// at every archive depth, so written as plain `is_tar` they also fired inside `data.tar.gz` — and
+/// a gem that ships a certificate, a test fixture, or anything else named `*.sig` had it deleted
+/// from *both* sides before they were compared. A real difference became no difference, and the
+/// run reported a match.
+///
+/// Measured: two gems differing only in `lib/trusted-cert.sig` stabilized to identical bytes.
+fn is_gem_envelope(cx: &Cx) -> bool {
+    is_tar(cx) && cx.at_depth(0)
+}
+
 fn is_structural(cx: &Cx) -> bool {
     const GEM_MEMBERS: [&[u8]; 3] = [b"data.tar.gz", b"metadata.gz", b"checksums.yaml.gz"];
     cx.at_depth(1)
@@ -224,15 +238,30 @@ entry_pass!(
     RiskTier::Metadata,
     is_zip,
     |e| {
+        // **The file-type bits are not metadata.** Permissions are packaging noise — 0644 against
+        // 0664 says nothing about a package — but *what the entry is* does, and zeroing the whole
+        // field erased it along with them. A zip member that is a symlink and one that is a
+        // regular file with the same bytes stabilized to identical output, so `trigon verify`
+        // answered `normalized` for a pair whose `pkg/x.py` was a symlink to `/etc/passwd` on one
+        // side and a file containing that text on the other. Measured: both stabilized to
+        // `b60c55d03b98…`.
+        //
+        // Taken from `kind`, which is the reader's own finding, rather than from the raw bits —
+        // so a zip written by a tool that records no unix mode at all still agrees with one that
+        // records `0100644`, which is what zeroing the field was for.
+        let type_bits: u32 = match &e.kind {
+            EntryKind::Symlink { .. } => 0o120000 << 16,
+            _ => 0,
+        };
         let RawMeta::Zip(raw) = &mut e.raw else {
             return Touched::NONE;
         };
-        if raw.creator_version == 0 && raw.reader_version == 0 && raw.external_attrs == 0 {
+        if raw.creator_version == 0 && raw.reader_version == 0 && raw.external_attrs == type_bits {
             return Touched::NONE;
         }
         raw.creator_version = 0;
         raw.reader_version = 0;
-        raw.external_attrs = 0;
+        raw.external_attrs = type_bits;
         e.mark_dirty();
         Touched::entry()
     }
@@ -403,7 +432,7 @@ archive_pass!(
     GemExcludeChecksums,
     "gem-exclude-checksums",
     RiskTier::Structural,
-    is_tar,
+    is_gem_envelope,
     |a| {
         let before = a.entries.len();
         a.entries
@@ -422,7 +451,7 @@ archive_pass!(
     GemExcludeSignatures,
     "gem-exclude-signatures",
     RiskTier::Structural,
-    is_tar,
+    is_gem_envelope,
     |a| {
         let before = a.entries.len();
         a.entries.retain(|e| !e.path.ends_with(b".sig"));

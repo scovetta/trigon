@@ -127,3 +127,84 @@ fn the_container_is_still_the_bytes_that_get_digested() {
         "the container must still be the uncompressed tar, byte for byte"
     );
 }
+
+/// Every nested member is charged against one budget, not handed its own copy of it.
+///
+/// **`total_expanded_bytes` is documented as "a hard ceiling on everything one artifact expands
+/// to".** It was a ceiling per nested member: `descend` passed the whole `Limits` to each `.gz` it
+/// found, and every inflated body was retained at once in `Body::Nested`. Measured before the fix —
+/// a 70 KB tar of eight `.gz` members, each inflating to 8 MiB, under a **16 MiB** ceiling — parsed
+/// `Ok`, held **64 MiB**, and emitted no note at all.
+///
+/// A `.gem` is an outer tar of `.gz` members, so nothing about this shape is exotic.
+///
+/// `zip::read` already threaded a running total. This is the same idea in the other reader.
+#[test]
+fn nested_members_share_one_expansion_budget() {
+    use std::io::Write as _;
+
+    fn gz_of_zeros(n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut e = flate2::write::GzEncoder::new(&mut out, flate2::Compression::best());
+        e.write_all(&vec![0u8; n]).unwrap();
+        e.finish().unwrap();
+        out
+    }
+
+    const MEMBER: usize = 8 << 20;
+    const MEMBERS: usize = 8;
+    let one = gz_of_zeros(MEMBER);
+    let entries: Vec<(String, Vec<u8>)> = (0..MEMBERS)
+        .map(|i| (format!("m{i}.gz"), one.clone()))
+        .collect();
+
+    let mut b = ::tar::Builder::new(Vec::new());
+    for (name, body) in &entries {
+        let mut h = ::tar::Header::new_ustar();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_mtime(0);
+        h.set_cksum();
+        b.append_data(&mut h, name, &body[..]).unwrap();
+    }
+    let outer = b.into_inner().unwrap();
+    assert!(
+        outer.len() < (1 << 20),
+        "the fixture is meant to be small on disk: {} bytes",
+        outer.len()
+    );
+
+    // A ceiling of two members' worth. Eight members must not all open.
+    let limits = Limits {
+        total_expanded_bytes: (2 * MEMBER) as u64,
+        ..Limits::default()
+    };
+    let mut notes: Vec<Note> = Vec::new();
+    let p = parse(outer, Format::Tar, &limits, &mut notes).expect("the outer tar still parses");
+
+    let opened = p
+        .archive
+        .entries
+        .iter()
+        .filter(|e| matches!(e.body, Body::Nested { .. }))
+        .count();
+    assert!(
+        opened <= 2,
+        "{opened} of {MEMBERS} members were opened under a ceiling that allows 2; the budget is \
+         being handed out per member rather than shared"
+    );
+
+    // And the ones it could not open are *said*, not silently left closed. A member reported as
+    // opaque bytes with no reason is indistinguishable from one that really is opaque.
+    assert!(
+        !notes.is_empty(),
+        "members were left unopened and nothing said why"
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.detail.contains("total_expanded_bytes")),
+        "the note should name the limit that stopped it: {:?}",
+        notes.iter().map(|n| &n.detail).collect::<Vec<_>>()
+    );
+}
