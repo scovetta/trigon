@@ -3850,6 +3850,7 @@ mod rebuild {
             // Filled in from the build below, which is the only thing that knows. See the
             // override in the compared path.
             derived_image: None,
+            diff_opinion: None,
             egress: args.egress.clone(),
             cache_key: args.cache_key.clone(),
             attempt: args.attempt,
@@ -4817,6 +4818,39 @@ mod rebuild {
             println!();
             print_text(&comparison, false);
         }
+        // **A reading of the diff, where a model is on hand to give one.** After the loop, once,
+        // about the comparison the run is going to report — not per attempt, where it would be
+        // paid for and superseded. The header's promise is "asked only where nothing
+        // deterministic answers", and whether a twelve-byte difference in a generated bundle
+        // *matters* is exactly such a question.
+        //
+        // The answer changes nothing. The outcome above is already final, the publication gate
+        // does not read the field (`trigon-api` asserts that), and a failed ask is a `WARN` and
+        // an absent field — a replayed transcript recorded before this question existed lands
+        // there, by design.
+        let diff_opinion = match &model {
+            Some(cfg) if comparison.outcome == trigon_core::Match::Divergent => {
+                diff_for_opinion(&upstream_path, &rebuilt, &comparison).and_then(
+                    |(text, shown, of)| match cfg.opinion_on_diff(&text, shown, of) {
+                        Ok(o) => Some(o),
+                        Err(e) => {
+                            tracing::warn!("no reading of the diff: {e:#}");
+                            None
+                        }
+                    },
+                )
+            }
+            _ => None,
+        };
+        if verbose && let Some(o) = &diff_opinion {
+            println!("\n  opinion   likely {} — {}", o.verdict.as_str(), o.reason);
+            println!(
+                "            a model's reading of the diff, not part of the verdict ({}, {} of \
+                 {} differing member(s) shown)",
+                o.model, o.members_shown, o.members_differing
+            );
+        }
+        report.diff_opinion = diff_opinion.clone();
         // Reached only by a run that got this far, which is the point: every path that voids a run —
         // a tripped artifact guard above all — returns before here, so no statement can be written
         // about a run that is evidence of nothing. That is a property of the control flow rather
@@ -4837,6 +4871,7 @@ mod rebuild {
                 strategy_digest: strategy_digest.clone(),
                 derivation: Some(derivation.clone()),
                 source: report.source.clone(),
+                diff_opinion: report.diff_opinion.clone(),
                 pin,
                 // From the run itself. This used to build a *fresh* `PodmanRunner` — with no
                 // mirror image, so not the runner that ran anything — and read its advertised
@@ -4965,6 +5000,8 @@ mod rebuild {
         derivation: Option<String>,
         /// What was built, and which rung found it. See `RunReport::source`.
         source: Option<trigon_core::SourceProvenance>,
+        /// What a model made of the final diff, where one was asked. See the field on `RunRecord`.
+        diff_opinion: Option<trigon_core::DiffOpinion>,
         pin: Option<trigon_mirror::Observed>,
         /// What the runner reported about its own enforcement, never what the flag asked for.
         attestable: bool,
@@ -5146,6 +5183,9 @@ mod rebuild {
             // no work has no bearing on whether the normalization was somebody's judgement call.
             record.non_builtin_stabilizer =
                 Some(c.applied().iter().any(|a| !a.provenance.is_builtin()));
+            // The reading, where one was asked. Beside `non_builtin_stabilizer` because they are
+            // the same shape of fact: written by the run path, absent meaning unevaluated.
+            record.diff_opinion = args.diff_opinion.clone();
             record.build_log = build_log;
             record.transcript = transcript;
             record.network_transcript = network_transcript;
@@ -5491,6 +5531,252 @@ mod rebuild {
     /// Named files here, unlike the signature: the signature is a cluster key and this is the
     /// evidence. A model that is told "four members differ" can do nothing; one told
     /// `dist/index.js` is only in the published artifact can infer a build step.
+    /// Render the differing members for a model to read, bounded in bytes.
+    ///
+    /// Returns the text and `(shown, differing)` — how many members made it in, of how many
+    /// there are. The pair travels with the opinion because it is the condition the opinion was
+    /// formed under, and `docs/16-findings.md` §3.62's lesson applies to the budget: it is
+    /// measured on the rendered string, in bytes, because that is what a prompt is billed in —
+    /// a line cap let one long line blow the window.
+    ///
+    /// The diff machinery is `trigon_api::member`'s — the same `read` and `view` the management
+    /// UI serves, budget and binary-sniff included, because a second diff implementation is how
+    /// the page and the prompt would come to disagree about what changed (B42 wants this same
+    /// renderer for the repair brief).
+    fn diff_for_opinion(
+        upstream: &Path,
+        rebuilt: &Path,
+        c: &trigon_compare::Comparison,
+    ) -> Option<(String, u32, u32)> {
+        const MAX_BYTES: usize = 48 * 1024;
+        const MAX_MEMBERS: usize = 8;
+
+        let d = c.diff.as_ref()?;
+        let differing: Vec<&trigon_compare::FileDiff> = d
+            .files
+            .iter()
+            .filter(|f| f.status != trigon_compare::FileStatus::Identical)
+            .collect();
+        if differing.is_empty() {
+            return None;
+        }
+        let up_bytes = std::fs::read(upstream).ok()?;
+        let rb_bytes = std::fs::read(rebuilt).ok()?;
+        let up_name = crate::file_name(upstream);
+        let rb_name = crate::file_name(rebuilt);
+
+        let mut out = String::from(
+            "`-` lines are the published artifact, `+` lines are the rebuild.\n",
+        );
+        let mut shown = 0u32;
+        for f in differing.iter().take(MAX_MEMBERS) {
+            if out.len() >= MAX_BYTES {
+                break;
+            }
+            let path = String::from_utf8_lossy(f.path.as_bytes()).into_owned();
+            // Each side by the name it has in its own container: a stabilizer may have renamed
+            // the member, and `member::read` walks the raw archive.
+            let up_path = f.upstream_raw_path.as_ref().unwrap_or(&f.path);
+            let rb_path = f.rebuild_raw_path.as_ref().unwrap_or(&f.path);
+            use trigon_compare::FileStatus as St;
+            let up = (f.status != St::OnlyRebuild)
+                .then(|| {
+                    trigon_api::member::read(
+                        up_bytes.clone(),
+                        &up_name,
+                        &String::from_utf8_lossy(up_path.as_bytes()),
+                    )
+                    .ok()
+                })
+                .flatten();
+            let rb = (f.status != St::OnlyUpstream)
+                .then(|| {
+                    trigon_api::member::read(
+                        rb_bytes.clone(),
+                        &rb_name,
+                        &String::from_utf8_lossy(rb_path.as_bytes()),
+                    )
+                    .ok()
+                })
+                .flatten();
+            if up.is_none() && rb.is_none() {
+                // Neither side readable — a nested member the serving limits refused, say. Name
+                // it rather than skip it: the census says it differs and silence would misstate
+                // what the model was shown.
+                out.push_str(&format!("\n=== {path} — differs; contents unavailable ===\n"));
+                shown += 1;
+                continue;
+            }
+            let view = trigon_api::member::view(&path, up, rb, None);
+            render_member(&mut out, &view, MAX_BYTES);
+            shown += 1;
+        }
+        let differing = differing.len() as u32;
+        if shown < differing {
+            out.push_str(&format!(
+                "\n… and {} more differing member(s) not shown.\n",
+                differing - shown
+            ));
+        }
+        Some((out, shown, differing))
+    }
+
+    /// One member of the diff, appended up to `budget` bytes of the whole rendering.
+    fn render_member(out: &mut String, v: &trigon_api::member::MemberView, budget: usize) {
+        let sides = match (v.in_upstream, v.in_rebuild) {
+            (true, true) => "in both".to_string(),
+            (true, false) => "only in the published artifact".to_string(),
+            (false, true) => "only in the rebuild".to_string(),
+            (false, false) => "in neither".to_string(),
+        };
+        let size = |b: Option<u64>| b.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+        out.push_str(&format!(
+            "\n=== {} — {sides}; {} bytes published, {} rebuilt ===\n",
+            v.path,
+            size(v.upstream_bytes),
+            size(v.rebuild_bytes)
+        ));
+        if let Some(why) = &v.binary_because {
+            out.push_str(&format!("(binary: {why}; no text diff)\n"));
+            return;
+        }
+        let Some(t) = &v.text else {
+            out.push_str("(no text diff available)\n");
+            return;
+        };
+        if let Some(note) = &t.truncated {
+            out.push_str(&format!("(diff truncated: {note})\n"));
+        }
+        if t.unaligned {
+            // The distinction the field exists for, handed to the model in words: "every line
+            // changed" and "we did not align it" are different claims.
+            out.push_str(
+                "(the changed middle was too large to align line by line; it is rendered as \
+                 wholly replaced)\n",
+            );
+        }
+        'hunks: for h in &t.hunks {
+            out.push_str(&format!(
+                "@@ published:{} rebuild:{} @@\n",
+                h.upstream_start, h.rebuild_start
+            ));
+            for l in &h.lines {
+                if out.len() >= budget {
+                    out.push_str("(cut here: the byte budget for this prompt is spent)\n");
+                    break 'hunks;
+                }
+                let mark = match l.kind {
+                    "removed" => '-',
+                    "added" => '+',
+                    _ => ' ',
+                };
+                out.push(mark);
+                out.push_str(&l.text);
+                out.push('\n');
+            }
+        }
+        if t.lines_omitted > 0 {
+            out.push_str(&format!("({} diff line(s) omitted)\n", t.lines_omitted));
+        }
+    }
+
+    #[cfg(test)]
+    mod diff_opinion_render_tests {
+        use trigon_api::member::{Hunk, Line, MemberView, TextDiff};
+
+        fn text_view(lines: Vec<Line>) -> MemberView {
+            MemberView {
+                path: "package/index.js".into(),
+                in_upstream: true,
+                in_rebuild: true,
+                upstream_bytes: Some(100),
+                rebuild_bytes: Some(101),
+                binary: false,
+                binary_because: None,
+                text: Some(TextDiff {
+                    lines_shown: lines.len(),
+                    lines_omitted: 0,
+                    hunks: vec![Hunk {
+                        upstream_start: 5,
+                        rebuild_start: 5,
+                        lines,
+                    }],
+                    upstream_lines: 10,
+                    rebuild_lines: 10,
+                    truncated: None,
+                    unaligned: false,
+                }),
+                hex: None,
+                unavailable: None,
+            }
+        }
+
+        fn line(kind: &'static str, text: &str) -> Line {
+            Line {
+                kind,
+                text: text.into(),
+            }
+        }
+
+        #[test]
+        fn a_text_member_renders_as_marked_lines_with_both_names_for_the_sides() {
+            let mut out = String::new();
+            super::render_member(
+                &mut out,
+                &text_view(vec![
+                    line("same", "a"),
+                    line("removed", "old"),
+                    line("added", "new"),
+                ]),
+                1 << 20,
+            );
+            assert!(out.contains("=== package/index.js — in both; 100 bytes published, 101 rebuilt ==="), "{out}");
+            assert!(out.contains("@@ published:5 rebuild:5 @@"), "{out}");
+            assert!(out.contains("\n-old\n+new\n"), "{out}");
+        }
+
+        #[test]
+        fn the_byte_budget_cuts_the_rendering_and_says_so() {
+            // §3.62's rule: the cap is measured on the rendered string, in bytes, because that is
+            // what a prompt is billed in. A line cap over these ten would pass and a single long
+            // line would blow the window.
+            let lines: Vec<_> = (0..10).map(|_| line("added", &"y".repeat(200))).collect();
+            let mut out = String::new();
+            super::render_member(&mut out, &text_view(lines), 600);
+            assert!(out.contains("the byte budget for this prompt is spent"), "{out}");
+            assert!(out.len() < 1_200, "the cut did not hold: {} bytes", out.len());
+        }
+
+        #[test]
+        fn a_binary_member_is_named_and_never_dumped() {
+            let mut v = text_view(Vec::new());
+            v.binary = true;
+            v.binary_because = Some("a NUL in the first kilobyte".into());
+            v.text = None;
+            let mut out = String::new();
+            super::render_member(&mut out, &v, 1 << 20);
+            assert!(out.contains("(binary: a NUL in the first kilobyte; no text diff)"), "{out}");
+        }
+
+        #[test]
+        fn what_the_diff_machinery_hedged_travels_to_the_model_in_words() {
+            // `truncated` and `unaligned` exist because "every line changed" and "we did not
+            // look" are different claims. An opinion formed without being told which would be a
+            // claim about a diff the model was not shown.
+            let mut v = text_view(vec![line("added", "x")]);
+            if let Some(t) = &mut v.text {
+                t.truncated = Some("only the first 512 KiB of each side was read.".into());
+                t.unaligned = true;
+                t.lines_omitted = 7;
+            }
+            let mut out = String::new();
+            super::render_member(&mut out, &v, 1 << 20);
+            assert!(out.contains("(diff truncated: only the first 512 KiB"), "{out}");
+            assert!(out.contains("too large to align"), "{out}");
+            assert!(out.contains("(7 diff line(s) omitted)"), "{out}");
+        }
+    }
+
     fn divergence_brief(c: &trigon_compare::Comparison) -> String {
         let mut out = String::new();
         let Some(d) = &c.diff else {

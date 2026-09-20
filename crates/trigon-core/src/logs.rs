@@ -374,7 +374,11 @@ fn dedup(lines: Vec<String>) -> Vec<String> {
 }
 
 /// Drop control characters and ANSI escape sequences, keeping tabs.
-fn strip_controls(line: &str) -> String {
+///
+/// `pub` because it is the one implementation of P12's little sibling — "text reaching a model is
+/// bounded and control-stripped" (threat-model P7) — and the diff-opinion prompt needs the same
+/// scrub this compressor gives build logs. A second copy is how the two would come to disagree.
+pub fn strip_controls(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {

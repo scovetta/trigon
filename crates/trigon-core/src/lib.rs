@@ -15,6 +15,7 @@ pub mod jcs;
 mod lockfile;
 mod logs;
 mod note;
+mod opinion;
 mod outcome;
 mod path;
 mod target;
@@ -28,8 +29,9 @@ pub use failure::{FailureSignature, classify, classify_line};
 pub use fault::{Classify, Fault, Phase};
 pub use format::{Format, UnknownFormat};
 pub use lockfile::{Kind, LockfileError, Package, Status, parse as parse_lockfile, read as read_lockfile};
-pub use logs::{Compressed, compress};
+pub use logs::{Compressed, compress, strip_controls};
 pub use note::{Note, NoteCode};
+pub use opinion::{DiffOpinion, DiffVerdict};
 pub use outcome::{
     Match, ProfileId, Provenance, RiskTier, StabilizerId, caps_normalized, ceiling_of,
 };

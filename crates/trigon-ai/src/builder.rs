@@ -346,7 +346,7 @@ fn clean(mut c: Candidate) -> Candidate {
 /// Where there is no fence at all, the last resort is to drop leading prose: a strategy document
 /// starts with `kind:` or `schema:` at column 0, and nothing that precedes such a line at column 0
 /// can be part of it.
-fn strip_fence(s: &str) -> &str {
+pub(crate) fn strip_fence(s: &str) -> &str {
     let s = s.trim();
     if let Some(open) = s.find("```") {
         let rest = &s[open + 3..];

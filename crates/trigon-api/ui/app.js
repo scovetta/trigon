@@ -1377,6 +1377,16 @@ async function detail(id) {
     record.declines?.length ? panel('Why no rung answered', el('ul', { class: 'assumptions' },
       record.declines.map((d) => el('li', { text: d })))) : null,
 
+    record.diff_opinion ? panel('What a model made of the diff', el('div', {},
+      el('dl', { class: 'kv' },
+        kv('its reading', el('span', { class: 'tag', text: record.diff_opinion.verdict })),
+        kv('because', record.diff_opinion.reason || '—'),
+        kv('who read it', el('span', { class: 'mono', text: record.diff_opinion.model })),
+        kv('shown', `${record.diff_opinion.members_shown} of ${record.diff_opinion.members_differing} differing member(s)`),
+      ),
+      el('p', { class: 'note empty' },
+        'An opinion, not part of the verdict. The comparison above was decided from bytes alone; this row exists so a reader triaging divergences knows which ones a model thought were semantic noise.'))) : null,
+
     record.assumptions?.length ? panel('What this had to assume', el('div', {},
       el('ul', { class: 'assumptions' }, record.assumptions.map((a) => el('li', { text: a }))),
       el('p', { class: 'note empty' },

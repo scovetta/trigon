@@ -539,6 +539,14 @@ pub struct RunReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assumptions: Vec<String>,
 
+    /// What a model made of the final diff, where one was configured and asked.
+    ///
+    /// An opinion, with its author named — never an input to the outcome above it. Kept in
+    /// `run.json` because this file is what a sweep without `--store` has, and the reader
+    /// triaging its divergences is exactly who the opinion is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_opinion: Option<trigon_core::DiffOpinion>,
+
     /// Per-phase durations in seconds. `None` means no data, never zero, and the convention
     /// survives the wire.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

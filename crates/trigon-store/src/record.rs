@@ -405,6 +405,18 @@ pub struct RunRecord {
     #[serde(default)]
     pub non_builtin_stabilizer: Option<bool>,
 
+    /// What a model made of the diff, where one was configured and there was a diff to read.
+    ///
+    /// **An opinion, never a verdict** — the full rule is on [`trigon_core::DiffOpinion`]. The
+    /// comparison outcome does not read it, the publication gate does not read it (`trigon-api`
+    /// has the test), and it enters no signed statement. It exists for the reader triaging a
+    /// corpus of divergences: "likely a banner timestamp" and "likely different logic" deserve
+    /// different afternoons.
+    ///
+    /// `None` means no model, nothing to show, or the ask failed — never "the diff is fine".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_opinion: Option<trigon_core::DiffOpinion>,
+
     /// What a transparency log said about this run's equivalence statement, where one was asked.
     ///
     /// The log index, the UUID, the instant, and the log's signature over all three. Kept on the
@@ -514,6 +526,7 @@ impl RunRecord {
             costs: None,
             attestations: Vec::new(),
             non_builtin_stabilizer: None,
+            diff_opinion: None,
             transparency: None,
         }
     }

@@ -12,6 +12,7 @@
 #![warn(missing_debug_implementations)]
 
 mod builder;
+mod opinion;
 mod copilot;
 mod eval;
 mod http;
@@ -23,6 +24,7 @@ pub use builder::{Candidate, Task, candidate_schema, parse_candidate, prompt, pr
 pub use copilot::Copilot;
 pub use eval::{Capability, Change, Flips, Labelled, Observation, Rate, Scorecard, flips, score};
 pub use http::{Anthropic, Flavor, OpenAiCompatible};
+pub use opinion::on_diff as opinion_on_diff;
 pub use provider::{
     LlmError, ModelCaps, Part, Prompt, Provider, Reasoning, Replay, Request, Response, Usage,
 };

@@ -3136,3 +3136,36 @@ that is about *our record* rather than about the reader's package rendered as th
 A test now asserts every variant has a row. Existence, not wording — the sentences are written twice,
 in `Withheld::sentence` and in the page, and a test pinning the text would be a third copy. The
 duplication is [B41](17-backlog.md).
+
+### 3.74 The record could say two members differ, and not whether it matters
+
+Asked for directly: *"when we perform a diff, if a model is available, let's ask the model its
+opinion about the diff — whether it's likely substantive or semantically equivalent."*
+
+A run that ends divergent now renders its differing members — through `trigon_api::member`'s
+`read` and `view`, the same bounded diff the management UI serves, because a second diff
+implementation is how the page and the prompt would come to disagree — and asks the configured
+model for a reading: `substantive`, `equivalent`, or `unclear`. The rendering is capped in bytes
+(§3.62's rule: a prompt is billed in bytes, and a line cap lets one long line blow the window),
+control-stripped at the request boundary with the same `strip_controls` the log compressor uses
+(threat-model P7), and every hedge the diff machinery makes travels to the model in words —
+`truncated`, `unaligned`, lines omitted — because an opinion formed on a partial diff must not
+read as one formed on the whole.
+
+**The rule that shaped everything: an opinion, never a verdict.** ADR-0013 gives caches the rule
+"bytes, never decisions"; models get "opinions, never verdicts". The outcome is final before the
+question is asked. The publication gate does not read the field, and `trigon-api` now asserts
+that in both directions — `equivalent` must not soften a divergence out of publication and
+`substantive` must not harden one in. No signed statement carries it. The record carries it with
+the model's name and the condition it was formed under (`members_shown` of `members_differing`),
+which is the `artifactHashCheck.performed` lesson applied in advance: a reading of 3 of 300
+members is a different claim from a reading of 3 of 3.
+
+`unclear` is load-bearing. A classifier forced to two answers turns "I was shown a truncated
+diff" into one of them, and the parse refuses to guess a verdict out of prose for the same
+reason: pulling the word "equivalent" out of a paragraph would be this code deciding and the
+model taking the blame.
+
+This closes half of [B42](17-backlog.md): the bounded member-diff renderer now exists. The other
+half — reusing it in the *repair* brief so the model proposing a fix can see what it is fixing —
+remains open.

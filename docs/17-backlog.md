@@ -1719,6 +1719,10 @@ variations twice — 292 seconds of inference and two ~75-second builds — unti
 stopped it. Shown the diff, it could at least have said what the difference *is*, and at best said
 "no strategy change produces a stale file".
 
+**Half done** (§3.74): `diff_for_opinion` in the rebuild path now renders differing members —
+bounded in bytes, binary named, hedges carried — for the diff-opinion question. The repair brief
+does not use it yet; wiring it in is what remains, plus the decline channel below.
+
 The pieces exist: `trigon-api`'s member view already computes a bounded `TextDiff` with
 `MAX_DIFF_LINES` and refusal messages for what does not fit. The brief should reuse that shape —
 small text members only, hard cap on lines and bytes, binary members stay a name and a size — and

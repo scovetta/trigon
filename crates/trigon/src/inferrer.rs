@@ -593,6 +593,27 @@ impl Configured {
         Ok(Inputs::read(&checkout, target)?)
     }
 
+    /// Ask what the model makes of a rendered diff: substantive, or semantically equivalent?
+    ///
+    /// The third question this type can ask, and the only one whose answer nothing executes —
+    /// `trigon_core::opinion` states the rule: an opinion, recorded with its author's name,
+    /// touching neither the verdict nor the gate nor any signed statement.
+    pub fn opinion_on_diff(
+        &self,
+        diff: &str,
+        members_shown: u32,
+        members_differing: u32,
+    ) -> Result<trigon_core::DiffOpinion> {
+        trigon_ai::opinion_on_diff(
+            self.provider.as_ref(),
+            &self.model,
+            diff,
+            members_shown,
+            members_differing,
+        )
+        .context("asking for a reading of the diff")
+    }
+
     /// Ask for a repair after a divergence: the recipe that ran, and how what it built differs.
     ///
     /// Separate from [`Self::repair`] because it is a different question. A build failure says the

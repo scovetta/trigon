@@ -208,6 +208,16 @@ fn every_field_populated() -> RunRecord {
             log_bytes: Some(65_536),
         }),
         non_builtin_stabilizer: Some(true),
+        // Populated with the awkward member of each field: `unclear` is the verdict a dropped
+        // serde attribute would most plausibly corrupt into an absent field, and absent must go
+        // on meaning "nobody asked".
+        diff_opinion: Some(trigon_core::DiffOpinion {
+            verdict: trigon_core::DiffVerdict::Unclear,
+            reason: "the one differing member is binary".into(),
+            model: "claude-sonnet-5".into(),
+            members_shown: 1,
+            members_differing: 3,
+        }),
         attestations: vec![
             "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/equivalence.intoto.json".into(),
             "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/rebuild.intoto.json".into(),
@@ -366,6 +376,7 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "costs",
         "attestations",
         "non_builtin_stabilizer",
+        "diff_opinion",
     ]
     .into_iter()
     .collect();

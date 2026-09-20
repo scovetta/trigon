@@ -391,6 +391,34 @@ mod tests {
     }
 
     #[test]
+    fn a_model_opinion_about_the_diff_never_moves_the_gate() {
+        // `trigon_core::opinion`'s rule, asserted where it could break: a model supplies
+        // opinions, never verdicts. "Equivalent" must not soften a divergence out of publication,
+        // and "substantive" must not harden one in — in either direction, an opinion moving the
+        // gate would be a model deciding what Trigon publishes.
+        for (outcome, verdict) in [
+            ("divergent", trigon_core::DiffVerdict::Equivalent),
+            ("divergent", trigon_core::DiffVerdict::Substantive),
+            ("exact", trigon_core::DiffVerdict::Substantive),
+        ] {
+            let mut with = record(Some(outcome), "mirror-only");
+            with.diff_opinion = Some(trigon_core::DiffOpinion {
+                verdict,
+                reason: "a reading".into(),
+                model: "m".into(),
+                members_shown: 1,
+                members_differing: 1,
+            });
+            let without = record(Some(outcome), "mirror-only");
+            assert_eq!(
+                decide(&with, confirmed_and_evaluated(), Switches::default()),
+                decide(&without, confirmed_and_evaluated(), Switches::default()),
+                "the gate read the opinion on a {outcome}/{verdict:?} record"
+            );
+        }
+    }
+
+    #[test]
     fn a_single_attempt_publishes_nothing_even_when_it_matched() {
         // The ADR's word is "alike": safeguard 1 is not a divergence-only rule. A false
         // `Reproduced` from one lucky build is still a false claim, and the corpus this ships

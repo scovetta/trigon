@@ -400,6 +400,10 @@ impl fmt::Debug for dyn Provider {
 pub struct Replay {
     answers: Vec<Response>,
     at: std::sync::atomic::AtomicUsize,
+    /// Every request this provider was handed, in order. What a test reads to assert what
+    /// actually reached the wire — the properties worth asserting here (control-stripping, part
+    /// ordering, the model named) are invisible in the answer.
+    asked: std::sync::Mutex<Vec<Request>>,
 }
 
 impl Replay {
@@ -407,7 +411,13 @@ impl Replay {
         Replay {
             answers,
             at: std::sync::atomic::AtomicUsize::new(0),
+            asked: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// What this provider has been asked so far, cloned.
+    pub fn asked(&self) -> Vec<Request> {
+        self.asked.lock().expect("no panics hold this").clone()
     }
 
     /// A canned answer, for tests that care about the loop rather than the model.
@@ -436,7 +446,8 @@ impl Provider for Replay {
         }
     }
 
-    fn complete(&self, _req: &Request) -> Result<Response, LlmError> {
+    fn complete(&self, req: &Request) -> Result<Response, LlmError> {
+        self.asked.lock().expect("no panics hold this").push(req.clone());
         let i = self.at.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.answers.get(i).cloned().ok_or_else(|| {
             // Running off the end means the recording and the code have diverged, which is the one
