@@ -1584,3 +1584,73 @@ always lands in tells a reader nothing, and invites them to think those rows are
 the profile's ceiling" reads as the ordinary result it is rather than as a qualification. And the
 npm and PyPI rates are never added, for the same reason the two denominators are never added: at the
 top of the range they are counting different things.
+
+## B36. `crates/trigon` has no lib target, so 80% is the ceiling on workspace coverage
+
+Measured with `cargo llvm-cov --workspace --ignore-filename-regex '(tests?/|/tests\.rs)'`.
+
+The workspace sits at **67.9%** of regions covered. That number is three very different
+populations added together, and the sum is the least useful form of it:
+
+| | regions | missed | covered |
+|---|---|---|---|
+| the eleven library crates | 34,996 | 6,297 | **82.0%** |
+| `crates/trigon` (the binary) | 14,573 | 8,565 | **41.2%** |
+| `xtask` (dev tooling) | 2,219 | 1,750 | **21.1%** |
+| workspace | 51,788 | 16,612 | 67.9% |
+
+`crates/trigon/Cargo.toml` declares a `[[bin]]` and no `[lib]`. A binary crate exports nothing, so
+the seven files in `crates/trigon/tests/` cannot call a single function in it — they spawn the
+built binary and assert on its output. That works, and it is why `main.rs` reads 41% rather than
+zero, but it is the most expensive form of test there is: a process per case, no way to reach a
+branch that needs a fixture the CLI has no flag for, and no way to assert anything but stdout,
+stderr and an exit code.
+
+**The arithmetic is worth stating plainly, because it decides whether "raise coverage" is even the
+right instruction.** Covering every library crate to 100% — all 6,297 remaining regions in all
+eleven, which nobody is going to do — would take the workspace to **80.1%**. A 95% target needs
+14,022 more regions covered and is therefore not reachable by writing more library tests at all. It is reachable only by making the binary's 14,573
+regions callable, and the two files that dominate it are `main.rs` (7,787 regions, 41%) and
+`watch.rs` (4,406, 27%).
+
+This is the same seam the `yarn.rs` move hit in a small way: that module had to be lifted into
+`trigon-strategy` before `tests/e2e_prop_types.rs` could reach it, and the move was a file rename
+with no behaviour change. The general fix is the same one, once:
+
+1. Add `src/lib.rs` to `crates/trigon` exporting the modules that are already libraries in
+   everything but declaration — `check`, `inferrer`, `provenance`, `progress`, `dotnet`, and the
+   request/render halves of `watch`.
+2. Reduce `main.rs` to argument parsing and dispatch onto them.
+3. Leave the process-spawning tests in place. They assert the wiring, which is a real thing to
+   assert and not what unit tests would replace.
+
+**Do not do (1) and (2) as one change.** `main.rs` holds `run_body`, which is [B37](#b37-run_body-is-1221-lines)
+and is the rebuild path; it took five consecutive fixes to stabilise and the e2e test that now
+covers it needs podman, a network and a model.
+
+**Done when:** a coverage number is reported per crate rather than as one workspace figure — the
+81% and the 41% are answers to different questions and averaging them answers neither — and the
+binary's testable logic is behind a lib target. Then a target is worth setting.
+
+## B37. `run_body` is 1,221 lines
+
+`crates/trigon/src/main.rs:3542`. The next longest function in the file is `run_with` at 495
+(`main.rs:1701`), and the median across the file's 136 functions is under 20.
+
+It would not pass review anywhere, and the reason to record it rather than fix it is specific: it
+*is* the rebuild path. Resolve, infer, render, build, stabilize, compare, repair, record. The five
+fixes that made the prop-types repair chain work all landed inside it, and the end-to-end test that
+now guards it (`crates/trigon/tests/e2e_prop_types.rs`) covers the parse-and-render half; the rest
+needs podman, egress and a model to exercise. Splitting it blind is how a sixth layer gets shipped.
+
+The decomposition is legible from the existing comments, which already mark the phases. Each should
+come out on its own, with the e2e suite run against a real package between each one:
+
+- resolve and artifact selection → already mostly `trigon-registry`, this is the calling half
+- strategy acquisition, including the repair loop → the part with five fixes in it, take it last
+- the build → `trigon-sandbox` owns it, this is the argument assembly
+- stabilize and compare → pure, and the easiest to lift first
+- recording → `record_run` and `record_terminal` already exist beside it
+
+**Done when:** no function in `main.rs` exceeds ~150 lines, and each extraction was a separate
+commit with the e2e suite green between them.
