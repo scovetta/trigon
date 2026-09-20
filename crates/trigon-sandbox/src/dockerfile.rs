@@ -48,11 +48,6 @@ impl BuildContext {
     }
 }
 
-/// The package manager for a base image, chosen by what the image name says it is.
-///
-/// A guess, and it is allowed to be: a wrong guess fails in the setup phase with the package
-/// manager's own error, which is a legible failure. Silently skipping the install is not, because
-/// the build then fails later for a reason that looks like the package's fault.
 /// The command that checks these packages are already present, without a network.
 ///
 /// What the setup phase becomes at an enforced tier. The image build has no network there, so
@@ -98,10 +93,6 @@ pub fn verify_command(base_image: &str, deps: &[String]) -> String {
     )
 }
 
-/// The command that installs these packages on this base image's distribution.
-///
-/// Public because an enforced tier refuses to run it and has to tell the operator what to put in a
-/// base image instead. The refusal is only actionable if it prints the line.
 /// Install only what is not already there.
 ///
 /// The same names `install_command` would install and the same query `verify_command` would ask,
@@ -127,12 +118,21 @@ pub fn install_missing_command(base_image: &str, deps: &[String]) -> String {
     )
 }
 
+/// The command that installs these packages on this base image's distribution.
+///
+/// Public because an enforced tier refuses to run it and has to tell the operator what to put in a
+/// base image instead. The refusal is only actionable if it prints the line.
 pub fn install_command(base_image: &str, deps: &[String]) -> String {
     let family = Family::of(base_image);
     let install = family.install();
     format!("{install} {}", family.packages(deps).join(" "))
 }
 
+/// The package manager for a base image, chosen by what the image name says it is.
+///
+/// A guess, and it is allowed to be: a wrong guess fails in the setup phase with the package
+/// manager's own error, which is a legible failure. Silently skipping the install is not, because
+/// the build then fails later for a reason that looks like the package's fault.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Family {
     Debian,
@@ -180,6 +180,7 @@ impl Family {
         }
     }
 
+    /// The family's own name, for a label on the built image.
     fn name(self) -> &'static str {
         match self {
             Family::Alpine => "alpine",
@@ -205,14 +206,6 @@ impl Family {
     }
 }
 
-/// A strategy's logical system dependency, as this base image's packages.
-///
-/// A strategy names what it needs, not what a particular distribution calls it, because a strategy
-/// that named Debian packages would be a strategy that only builds on Debian. The mapping is small
-/// and only covers the cases where a logical name is not one package: `python3 -m venv` on Debian
-/// needs `python3-venv` for ensurepip, which is not part of `python3` there and does not exist as a
-/// separate package anywhere else. Without it the venv fails with Debian's own advice to run
-/// `apt install python3.11-venv`, inside a container, which is not advice anyone can take.
 /// Which package manager's names an image speaks, from the image reference.
 ///
 /// The same sniff `verify_command` does, exposed so a label can record the answer rather than
@@ -358,6 +351,14 @@ pub fn admission(dep: &str) -> Admission {
     }
 }
 
+/// A strategy's logical system dependency, as this base image's packages.
+///
+/// A strategy names what it needs, not what a particular distribution calls it, because a strategy
+/// that named Debian packages would be a strategy that only builds on Debian. The mapping is small
+/// and only covers the cases where a logical name is not one package: `python3 -m venv` on Debian
+/// needs `python3-venv` for ensurepip, which is not part of `python3` there and does not exist as a
+/// separate package anywhere else. Without it the venv fails with Debian's own advice to run
+/// `apt install python3.11-venv`, inside a container, which is not advice anyone can take.
 fn expand(dep: &str, family: Family) -> Vec<String> {
     match (dep, family) {
         ("python3", Family::Debian) => vec!["python3".into(), "python3-venv".into()],
