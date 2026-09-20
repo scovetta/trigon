@@ -633,8 +633,21 @@ impl Configured {
     ) -> Result<trigon_strategy::Strategy> {
         let first =
             trigon_ai::propose(self.provider.as_ref(), &self.model, task).context(asking)?;
-        let why = match trigon_strategy::from_yaml(&first.strategy) {
-            Ok(s) => return Ok(s),
+        // **The longest prefix that parses**, not the whole string. A model that stops answering
+        // and keeps generating appends something no heuristic enumerates — prose at column zero,
+        // prose indented one space, a second document, commentary on the end of a good line — and
+        // the parser is the only oracle for where the document stopped that is not a guess.
+        let why = match trigon_strategy::from_yaml_longest_prefix(&first.strategy) {
+            Ok((s, 0)) => return Ok(s),
+            Ok((s, dropped)) => {
+                // Said, with the count. Salvaging quietly would hide a model that has stopped
+                // answering the question, and the size is the signal.
+                tracing::warn!(
+                    dropped,
+                    "the recipe did not parse to its last line; used the longest prefix that did"
+                );
+                return Ok(s);
+            }
             Err(e) => e.to_string(),
         };
         tracing::debug!("the answer did not parse, asking again with the reason: {why}");
@@ -643,7 +656,9 @@ impl Configured {
         again.rejected = Some(&why);
         let second =
             trigon_ai::propose(self.provider.as_ref(), &self.model, &again).context(asking)?;
-        trigon_strategy::from_yaml(&second.strategy).with_context(|| {
+        trigon_strategy::from_yaml_longest_prefix(&second.strategy)
+            .map(|(s, _)| s)
+            .with_context(|| {
             format!(
                 "the proposal did not parse as a strategy, twice. The model said: {}",
                 first_line(&second.diagnosis)

@@ -102,3 +102,35 @@ pub fn to_yaml(s: &Strategy) -> Result<String, StrategyError> {
     let body = serde_yaml_ng::to_string(s)?;
     Ok(format!("schema: {CURRENT_SCHEMA}\n{body}"))
 }
+
+/// Parse, and where the tail will not parse, parse the longest prefix that does.
+///
+/// **The parser is the oracle.** A model can stop answering and keep generating, and the shapes it
+/// produces are not enumerable: recorded from one package's repairs alone, the drift has arrived as
+/// a column-zero line of prose, as prose indented by one space, as a second strategy document
+/// appended to the first, and as commentary tacked onto the end of a line that was otherwise a
+/// valid `key: value`. Every heuristic that recognised one of those missed the next.
+///
+/// So the rule stops being "what does junk look like" and becomes "where does the document stop
+/// parsing" — which is a question the parser already answers, and the only one whose answer is not
+/// a guess. Returns the strategy and the number of trailing lines dropped, so the caller can say
+/// what it did rather than salvaging silently.
+///
+/// The *longest* prefix, counting down: a shorter one can parse while meaning something else, and
+/// a document that has lost its `build:` phase parses perfectly well and builds nothing.
+pub fn from_yaml_longest_prefix(src: &str) -> Result<(Strategy, usize), StrategyError> {
+    let first = match from_yaml(src) {
+        Ok(s) => return Ok((s, 0)),
+        Err(e) => e,
+    };
+    let lines: Vec<&str> = src.lines().collect();
+    for keep in (1..lines.len()).rev() {
+        let prefix = lines[..keep].join("\n");
+        if let Ok(s) = from_yaml(&prefix) {
+            return Ok((s, lines.len() - keep));
+        }
+    }
+    // Nothing parses. The first error is the useful one: it is about the document the model meant
+    // to write, not about a prefix this function invented.
+    Err(first)
+}

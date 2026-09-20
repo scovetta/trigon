@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use trigon_strategy::{Step, StepBody, Strategy};
+use crate::{Step, StepBody, Strategy};
 
 /// How far an expansion will follow one script into another.
 ///
@@ -39,7 +39,7 @@ const MAX_DEPTH: u8 = 3;
 /// The **checkout's**, not the published artifact's: the failing command came from the repository
 /// the build ran in, and the two can differ. Empty where there is no manifest, no `scripts`, or
 /// nothing readable — all of which mean the same thing here, that there is nothing to rewrite with.
-pub fn scripts(checkout: &Path) -> BTreeMap<String, String> {
+pub fn scripts_from_checkout(checkout: &Path) -> BTreeMap<String, String> {
     let Ok(text) = std::fs::read_to_string(checkout.join("package.json")) else {
         return BTreeMap::new();
     };
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn a_strategy_is_rewritten_phase_by_phase() {
-        use trigon_strategy::{FlowStrategy, Location, Step, StepBody};
+        use crate::{FlowStrategy, Location, StepBody};
         let flow = FlowStrategy {
             location: Location {
                 repo: "https://example.invalid/x".into(),
@@ -312,7 +312,7 @@ mod tests {
     fn nothing_to_rewrite_is_none_rather_than_an_identical_strategy() {
         // The caller uses `Some` to mean "try this instead". Returning an unchanged strategy would
         // make the repair loop spend an iteration rebuilding exactly what just failed.
-        use trigon_strategy::{FlowStrategy, Location, Step, StepBody};
+        use crate::{FlowStrategy, Location, StepBody};
         let flow = FlowStrategy {
             location: Location {
                 repo: "https://example.invalid/x".into(),

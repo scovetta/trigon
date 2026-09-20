@@ -2840,3 +2840,53 @@ rather than a spelling or a distance.
 **The shape:** a rule that generalised from the hard case. Yarn-as-resolver really is unsupported,
 and the table wrote that down as "yarn is unsupported" — which is a larger claim, and the larger
 claim is what the code enforced.
+
+### 3.66 Five fixes, four of them shipped to the user to discover
+
+**A process finding, and the worst one in this file.**
+
+The chain from a model's answer to a usable recipe broke five times for one package. Each fix was
+real, each was verified, and four of them were verified against a unit test shaped like the failure
+that had just been *reported by the user* — so the next run found the next break, and the loop ran
+four times:
+
+| | what broke | how it was found |
+| --- | --- | --- |
+| [3.59](#359-the-only-lever-that-works-was-reachable-from-nowhere) | the output budget went to reasoning | reported |
+| [3.60](#360-the-answer-was-fine-nothing-took-it-out-of-its-wrapper) | `strip_fence` never touched the `strategy` field | reported |
+| [3.62](#362-the-model-answered-correctly-and-then-kept-talking) | drift past the end of the document | reported |
+| [3.63](#363-the-guard-rendered-the-repair-in-a-world-the-build-does-not-live-in) | validation ran without the run's mirror | reported |
+| [3.64](#364-a-failed-repair-threw-away-the-verdict-the-run-had-already-reached) | a failed repair discarded the verdict | reported |
+
+Every one of those was a layer of the same path, and every fix moved the failure one layer down. A
+test of the *path* would have found them together; five tests of five symptoms found them one at a
+time, in production, over four days.
+
+`crates/trigon/tests/e2e_prop_types.rs` is that test. Every answer the model has ever returned for
+this package — eight of them, across four runs — is a verbatim fixture, and the assertion runs the
+whole chain: unwrap the answer, parse the recipe, render it in the run's context, and ask whether
+there is anything to execute.
+
+**Its load-bearing assertion is about whose fault a refusal is.** Seven of the eight answers yield a
+working recipe. The eighth is refused with *"uses `runs`, which is not a registered tool"* — a
+genuine mistake by the model, and refusing it is right. What the test forbids is a refusal
+containing `not valid YAML`, `no mirror is configured`, or `did not fit`: each of those strings was
+a defect in this repository, and each appeared to the user as though the model had failed.
+
+Reverting any of the five fixes fails it. Two checked explicitly: dropping the longest-prefix
+salvage refuses four of eight with `not valid YAML`; emptying `timewarp_base` refuses on the mirror.
+
+**And the last fix is different in kind from the four before it.** Those were heuristics — recognise
+a fence, recognise a column-zero line, recognise a trailing marker — and the recorded drift defeated
+each in turn: prose at column zero, prose indented one space, a second document appended to the
+first, commentary tacked onto the end of a valid `key: value` line. The shapes are not enumerable
+because they are whatever a model does after it stops answering.
+
+So the rule stopped being *"what does junk look like"* and became *"where does the document stop
+parsing"* — `from_yaml_longest_prefix`, which counts down from the whole string and returns the
+longest prefix the parser accepts, along with how many lines it dropped so the run can say so. The
+parser was always the only oracle whose answer was not a guess.
+
+**The shape:** four consecutive fixes that each generalised from one observed failure, when the
+failure had no generalisable form. The tell was that every fix held until the next run, which is
+what a heuristic does and what a rule does not.

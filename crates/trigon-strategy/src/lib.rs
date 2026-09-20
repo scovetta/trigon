@@ -9,6 +9,7 @@
 //!
 //! This crate is pure: no network, no clock, no filesystem beyond what a caller hands it.
 
+mod yarn;
 mod compat;
 mod context;
 mod digest;
@@ -19,6 +20,7 @@ mod parse;
 mod render;
 mod tool;
 
+pub use yarn::{scripts_from_checkout, without_yarn};
 pub use compat::{CustomStabilizer, Imported, import};
 pub use context::{Context, EnvCtx, IntrinsicsCtx, LocationCtx, TargetCtx};
 pub use digest::{canonical, strategy_digest};
@@ -28,6 +30,6 @@ pub use model::{
     CURRENT_SCHEMA, FlowStrategy, Location, LocationHint, ManualStrategy, PrebuiltStrategy, Step,
     StepBody, StepRaw, Strategy,
 };
-pub use parse::{from_yaml, to_yaml};
+pub use parse::{from_yaml, from_yaml_longest_prefix, to_yaml};
 pub use render::render;
 pub use tool::{Tool, ToolParam, ToolRegistry, VENV};

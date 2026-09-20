@@ -988,8 +988,6 @@ mod worker;
 #[cfg(feature = "build")]
 mod check;
 
-#[cfg(feature = "build")]
-mod yarn;
 
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
@@ -4263,7 +4261,7 @@ mod rebuild {
             if failure.code == "npm/unsupported-package-manager"
                 && failure.subject.as_deref() == Some("yarn")
                 && let Some(dir) = checkout.as_deref()
-                && let Some(next) = crate::yarn::without_yarn(&strategy, &crate::yarn::scripts(dir))
+                && let Some(next) = trigon_strategy::without_yarn(&strategy, &trigon_strategy::scripts_from_checkout(dir))
                 && usable(&next, timewarp).is_ok()
                 && changes_anything(&next, &strategy_digest)
             {
