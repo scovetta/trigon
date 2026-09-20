@@ -6,6 +6,7 @@ use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store, StoreEr
 fn env() -> Environment {
     Environment {
         base_image: "docker.io/library/debian@sha256:aa".into(),
+        derived_image: None,
         egress: "mirror-only".into(),
         isolation: "UserNs".into(),
         guard_manifest: None,

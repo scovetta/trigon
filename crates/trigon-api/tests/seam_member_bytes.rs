@@ -213,6 +213,7 @@ async fn a_member_with_no_bytes_says_which_of_the_three_reasons_it_is() {
             },
             Environment {
                 base_image: "x@sha256:0".into(),
+                derived_image: None,
                 egress: "mirror".into(),
                 isolation: "podman".into(),
                 attestable: true,
@@ -291,6 +292,7 @@ async fn an_artifact_too_large_is_refused_without_reading_it() {
         },
         Environment {
             base_image: "x@sha256:0".into(),
+            derived_image: None,
             egress: "mirror".into(),
             isolation: "podman".into(),
             attestable: true,

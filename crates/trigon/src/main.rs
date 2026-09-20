@@ -206,7 +206,13 @@ enum Cmd {
         /// Which file, when the version publishes more than one.
         #[arg(long)]
         artifact: Option<String>,
-        /// Base image, pinned by digest.
+        /// Base image: a digest, `auto`, or `derive`.
+        ///
+        /// `auto` uses a local image that already carries what the strategy needs, and builds one
+        /// where none does — but not at an enforced egress tier, because building one means `apt-get`
+        /// and that is network the run's transcript would never see. `derive` builds it anyway and
+        /// records that it did: the parent, what was installed, and whether these bytes were built by
+        /// this run. The build itself still runs at the tier you asked for.
         #[arg(long)]
         image: String,
         /// Working directory for the fetched and rebuilt artifacts.
@@ -485,6 +491,10 @@ enum Cmd {
     Sweep {
         /// A file of package URLs, one per line. `#` comments and blank lines are skipped.
         targets: PathBuf,
+        /// Base image: a digest, `auto`, or `derive`.
+        ///
+        /// One image for every target in the sweep. `derive` may build one, with network, before
+        /// a build — recorded on each run that derived, not once in the sweep's header.
         #[arg(long)]
         image: String,
         #[arg(long, default_value = "./trigon-sweep")]
@@ -641,7 +651,13 @@ enum Cmd {
     Worker {
         /// `sqlite:///var/lib/trigon/queue.db` or `postgres://…`.
         queue: String,
-        /// A pinned base image, or `auto`.
+        /// Base image: a digest, `auto`, or `derive`.
+        ///
+        /// `auto` uses a local image that already carries what the strategy needs, and builds one
+        /// where none does — but not at an enforced egress tier, because building one means `apt-get`
+        /// and that is network the run's transcript would never see. `derive` builds it anyway and
+        /// records that it did: the parent, what was installed, and whether these bytes were built by
+        /// this run. The build itself still runs at the tier you asked for.
         #[arg(long)]
         image: String,
         /// Where builds happen. One directory per job and attempt underneath.
@@ -741,8 +757,16 @@ enum Cmd {
         file: PathBuf,
         #[arg(long)]
         import: bool,
-        /// Base image, pinned by digest. A tag is refused: it resolves to different bytes on
-        /// different days, which makes the run unreproducible.
+        /// Base image: a digest, `auto`, or `derive`.
+        ///
+        /// `auto` uses a local image that already carries what the strategy needs, and builds one
+        /// where none does — but not at an enforced egress tier, because building one means `apt-get`
+        /// and that is network the run's transcript would never see. `derive` builds it anyway and
+        /// records that it did: the parent, what was installed, and whether these bytes were built by
+        /// this run. The build itself still runs at the tier you asked for.
+        ///
+        /// A tag is refused: it resolves to different bytes on different days, which makes the
+        /// run unreproducible.
         #[arg(long)]
         image: String,
         /// Where the built artifact lands.
@@ -1678,6 +1702,22 @@ mod build {
         /// — so the run stands. Carried anyway, and for the same reason as `refused_artifact`: a
         /// control whose near-misses are invisible cannot be told from one that never fires.
         pub guard_notes: Vec<String>,
+        /// What this run built its base image from, where it built one. See
+        /// [`trigon_store::DerivedImage`]; `None` means this run derived nothing.
+        pub derived_image: Option<trigon_store::DerivedImage>,
+        /// The image the build actually ran on, resolved.
+        ///
+        /// **Carried because `Environment.base_image` was recording the flag.** `--image auto`
+        /// resolves at render time, inside this function, into a binding that never escaped it —
+        /// so every `auto` run wrote the literal word `auto` where the record says "pinned by
+        /// digest. A tag would make the record unreproducible by anyone else." Measured on this
+        /// machine's store: **205 records name no image at all.**
+        ///
+        /// `sdk_choice` above already says "`Environment.base_image` names the bytes; this names
+        /// the reasoning" — the intent was written down and the value never travelled. Same shape
+        /// as `isolation` two fields up, which reached a `println!` and stopped there while
+        /// nineteen signed statements described an unbounded build.
+        pub base_image: String,
         /// Where the runner collected the rebuilt artifact, when it collected exactly one.
         ///
         /// The runner knows this — it mounted the directory the build wrote into — and the caller
@@ -1883,29 +1923,46 @@ mod build {
         let sdk_why = sdk_major.as_ref().map(|(_, w)| w.clone());
         let sdk_major = sdk_major.map(|(m, _)| m);
 
-        // **`auto`, resolved here and nowhere earlier.** The required set is
+        // **`auto` and `derive`, resolved here and nowhere earlier.** The required set is
         // `instructions.requires.system_deps`, which only exists once the strategy has rendered —
         // and resolving before it exists would mean guessing, or deriving an image per target from
         // a set nobody computed. This is a pre-flight: no container has started, so a refusal
         // costs nothing and a derivation happens once for a set rather than once per failure.
-        let image = &if image == "auto" {
+        //
+        // The two values differ in one thing only, and it is the thing below.
+        let resolved = if image == "auto" || image == "derive" {
             let deps: Vec<String> = instructions.requires.system_deps.iter().cloned().collect();
+            // **Derivation is `apt-get`, and `apt-get` is network.** At an enforced tier the run's
+            // whole claim is that everything crossing into it was accounted for, and an image
+            // built moments earlier by fetching from a distribution archive is bytes the egress
+            // transcript never saw. B7 is the precedent: it was closed by moving the image build
+            // *inside* the boundary rather than by letting it happen outside and not counting it.
+            //
+            // `--image derive` is the operator saying they want it anyway. That is a real choice
+            // and not a loophole, because the alternative every operator already takes is worse:
+            // `scripts/rebuild-and-attest.sh` derives an image by hand, at `mirror-only`, and
+            // records nothing anywhere. Doing it inside the run is what makes it recordable —
+            // `Environment.derived_image` carries the parent, the packages and whether these
+            // bytes were built here, and the publication gate withholds on it.
+            //
+            // What it is *not* is a wider egress tier. The build still runs at `mirror-only`; only
+            // the image that precedes it is built with a route out, and that fact is now on the
+            // record rather than in somebody's shell history.
             crate::mirror::resolve_auto(
                 &crate::mirror::auto_parent(sdk_major)?,
                 &deps,
                 verbose,
-                // **Derivation is `apt-get`, and `apt-get` is network.** At an enforced tier the
-                // run's whole claim is that everything crossing into it was accounted for, and an
-                // image built moments earlier by fetching from a distribution archive is bytes the
-                // egress transcript never saw. Selecting an image that already carries what is
-                // needed is fine at any tier — it reads a label and starts nothing. Building one
-                // is not, and B7 is the precedent: it was closed by moving the image build *inside*
-                // the boundary rather than by letting it happen outside and not counting it.
-                !matches!(egress, trigon_sandbox::EgressTier::Open),
+                crate::may_derive(image, egress),
             )?
         } else {
-            image.to_string()
+            // An image the operator named. Whatever is in it, they put it there, and this run
+            // derived nothing.
+            crate::mirror::Resolved {
+                image: image.to_string(),
+                derived: None,
+            }
         };
+        let image = &resolved.image;
 
         let plan = BuildPlan::Oci(OciPlan {
             base_image: image.to_string(),
@@ -2186,6 +2243,9 @@ mod build {
             }
             Ok(Built {
                 attestable: outcome.attestable,
+                // The resolved one, which for `--image auto` is not the string the caller passed.
+                base_image: image.to_string(),
+                derived_image: resolved.derived.clone(),
                 isolation: outcome.isolation.as_str().to_string(),
                 transcript: outcome.transcript,
                 pin: outcome.pin,
@@ -3137,6 +3197,59 @@ const fn guard_was_armed(enforced: bool, host_mirror: bool) -> bool {
     enforced || host_mirror
 }
 
+/// Whether this run may *build* a base image, as opposed to only selecting one.
+///
+/// The whole of what separates `--image auto` from `--image derive`, in one place and testable
+/// without a container. Two inputs and one answer: `auto` may build only where the tier already
+/// admits unaccounted network, `derive` may build anywhere because the operator asked and the run
+/// records that it did.
+///
+/// A pinned image reaches here as `IfNeeded` and never uses it — nothing is resolved for an image
+/// the operator named — so the answer for that case is arbitrary rather than wrong. Taking `image`
+/// rather than a pre-computed bool is what keeps the two values' difference visible at the one
+/// site that cares.
+#[cfg(feature = "build")]
+fn may_derive(image: &str, egress: trigon_sandbox::EgressTier) -> crate::mirror::Derive {
+    if image == "derive" || matches!(egress, trigon_sandbox::EgressTier::Open) {
+        crate::mirror::Derive::IfNeeded
+    } else {
+        crate::mirror::Derive::NotAtThisTier
+    }
+}
+
+#[cfg(all(test, feature = "build"))]
+mod may_derive_tests {
+    use crate::mirror::Derive;
+    use trigon_sandbox::EgressTier;
+
+    #[test]
+    fn auto_never_builds_an_image_inside_an_enforced_boundary() {
+        // Deriving is `apt-get`, which is network, and at `mirror-only` the run's whole claim is
+        // that its transcript is a complete account of what crossed into it. This is the refusal
+        // that cost 73 of 89 PyPI targets on the M1 sweep — correct, and expensive.
+        for tier in [EgressTier::MirrorOnly, EgressTier::DenyAll] {
+            assert_eq!(super::may_derive("auto", tier), Derive::NotAtThisTier);
+        }
+    }
+
+    #[test]
+    fn auto_builds_freely_where_the_tier_already_admits_the_network() {
+        // At `open` there is no account to keep complete, so there is nothing for the refusal to
+        // protect and refusing would only cost the run.
+        assert_eq!(super::may_derive("auto", EgressTier::Open), Derive::IfNeeded);
+    }
+
+    #[test]
+    fn derive_builds_at_every_tier_because_that_is_the_whole_of_the_difference() {
+        // The one thing the flag changes. Everything else — selection, the admission table, the
+        // content tag — is `auto`'s, unchanged. What `derive` does *not* change is the build's own
+        // egress: the tier passed here is still the tier the build runs at.
+        for tier in [EgressTier::Open, EgressTier::MirrorOnly, EgressTier::DenyAll] {
+            assert_eq!(super::may_derive("derive", tier), Derive::IfNeeded);
+        }
+    }
+}
+
 fn strategy_tools() -> Result<()> {
     let tools = trigon_strategy::ToolRegistry::builtin()?;
     let ids: Vec<&str> = tools.ids().collect();
@@ -3734,6 +3847,9 @@ mod rebuild {
             purl: args.purl.clone(),
             work: args.work.clone(),
             image: args.image.clone(),
+            // Filled in from the build below, which is the only thing that knows. See the
+            // override in the compared path.
+            derived_image: None,
             egress: args.egress.clone(),
             cache_key: args.cache_key.clone(),
             attempt: args.attempt,
@@ -3987,6 +4103,26 @@ mod rebuild {
         // early `break` fails to compile rather than silently voiding against a stale `None`.
         let mut produced: Option<PathBuf>;
         let (mut built, strategy_digest) = loop {
+            // **The verdict's bytes have to outlive the attempt that follows it.**
+            //
+            // `judged` is deliberately carried across an iteration so a failed repair still
+            // reports the divergence the run had already established — and the wipe on the next
+            // line deletes the file it names. A path and the bytes under it with different
+            // lifetimes and nothing asserting it: `record_run` read a file the loop had just
+            // removed, and the run was lost to `could not record this run: No such file or
+            // directory` with no file name in the message to say which.
+            //
+            // Observed on `prop-types@15.8.1`, which is the third defect this one target has
+            // found on this exact seam: the run built, compared, confirmed two missing UMD
+            // bundles, kept the verdict correctly — and then recorded nothing.
+            //
+            // Here rather than at each of the eight `judged =` sites, because this is the line
+            // that causes it, and a rule enforced next to its cause cannot be forgotten by a
+            // site added later. It costs a copy only on an iteration that actually goes round
+            // again, which is a repair; the common run never reaches it twice.
+            if let Some((path, _)) = &mut judged {
+                *path = keep_judged(&args.work, path);
+            }
             // A fresh directory every attempt, including the first. Without clearing it before
             // the first, a `--work` directory reused across targets hands the *previous run's*
             // artifact to the comparison: `newest_file` takes the last path in sort order, which
@@ -4709,6 +4845,17 @@ mod rebuild {
                 // instead was worse still: that stamped `attestable: true` on runs whose
                 // image-build phases were outside the boundary entirely.
                 attestable: built.as_ref().is_ok_and(|b| b.attestable),
+                // **The image the build ran on, not the word the caller typed.** `--image auto`
+                // resolves inside `build::run_with`, and the resolved value used to stop there:
+                // 205 records in this machine's store name `"auto"` as the base image of a run
+                // whose record says the field is "pinned by digest". Where no build ran there is
+                // no resolved image and the flag is the honest answer, which is what the
+                // `unwrap_or_else` says.
+                image: built
+                    .as_ref()
+                    .map(|b| b.base_image.clone())
+                    .unwrap_or_else(|_| inputs.image.clone()),
+                derived_image: built.as_ref().ok().and_then(|b| b.derived_image.clone()),
                 // From the runner, and from the site that armed the guard. These three are why the
                 // signed `artifactHashCheck` block said `performed: false` on every run where it
                 // had been performed: the values existed, and nothing carried them this far.
@@ -4809,6 +4956,9 @@ mod rebuild {
         purl: String,
         work: PathBuf,
         image: String,
+        /// What this run built its base image from, where it built one. `None` on a run that
+        /// derived nothing, and on one that never got as far as resolving an image.
+        derived_image: Option<trigon_store::DerivedImage>,
         egress: String,
         timewarp: Option<String>,
         strategy_digest: Option<String>,
@@ -4873,8 +5023,14 @@ mod rebuild {
             .build()?;
         rt.block_on(async move {
             let store = Store::local(dir)?;
-            let up_bytes = std::fs::read(upstream_path)?;
-            let rb_bytes = std::fs::read(rebuilt)?;
+            // **Named, because the bare `?` said only `No such file or directory`.** Two reads
+            // in one function and neither said which file, so a run lost to a deleted rebuild
+            // artifact and one lost to a fetch that left nothing behind produced the same eight
+            // words. Naming the path is what turned the first of those into a fixable bug.
+            let up_bytes = std::fs::read(upstream_path)
+                .with_context(|| format!("reading the published artifact at {}", upstream_path.display()))?;
+            let rb_bytes = std::fs::read(rebuilt)
+                .with_context(|| format!("reading the rebuilt artifact at {}", rebuilt.display()))?;
             let up = store.blobs().put(up_bytes.clone()).await?;
             let rb = store.blobs().put(rb_bytes.clone()).await?;
             // Everything this run adds to the store, counted as each blob goes in rather than
@@ -4949,6 +5105,7 @@ mod rebuild {
                 },
                 Environment {
                     base_image: args.image.clone(),
+                    derived_image: args.derived_image.clone(),
                     egress: args.egress.clone(),
                     // From the runner, not from a flag, and no longer the empty string it was for
                     // nineteen signed statements.
@@ -5115,6 +5272,7 @@ mod rebuild {
                 },
                 Environment {
                     base_image: inputs.image.clone(),
+                    derived_image: inputs.derived_image.clone(),
                     egress: inputs.egress.clone(),
                     // What the runner reported, where one ran. Empty where no build happened,
                     // which is the true value and is how a reader tells the two apart.
@@ -5625,6 +5783,48 @@ mod rebuild {
     /// package knows. `ln -s ../../evil-1.2.3.tgz /out/zzz.tgz` would otherwise make the published
     /// bytes the "rebuild", compare them against themselves, and sign `Exact`. That is
     /// `docs/12-security.md` §1.1 with no network needed at all.
+    /// Copy a judged artifact out of the directory the next attempt clears.
+    ///
+    /// `<work>/rebuild` is wiped at the top of every iteration of the build loop, and a verdict
+    /// kept across a repair names a file inside it. Returns where the bytes now are, which is
+    /// what the record must read.
+    ///
+    /// **Copied, not moved.** `rebuild/<strategy>-<pid>/<name>` is where
+    /// `scripts/rebuild-and-attest.sh` tells the operator to look for the rebuilt artifact, and
+    /// it is still the right place for every run that does not repair. This adds a second copy
+    /// that outlives the wipe; it does not relocate the first.
+    ///
+    /// The build log goes with it, to `<work>/build.log` — the path `record_run` already falls
+    /// back to when `rebuild/build.log` is gone, so the fallback that existed for another layout
+    /// turns out to be exactly the one this needs.
+    ///
+    /// **On failure the original path is returned rather than a silent substitute.** A copy that
+    /// did not happen means the record is about to fail to read the artifact, and it should fail
+    /// naming the file that is missing rather than one that was never written.
+    pub(crate) fn keep_judged(work: &Path, artifact: &Path) -> PathBuf {
+        // Its own name, under `kept/` rather than at the top of the work directory: npm
+        // publishes `<name>-<version>.tgz` and the *upstream* copy already sits up there under
+        // exactly that name, so writing beside it would overwrite the thing being compared
+        // against with the thing being compared.
+        let dir = work.join("kept");
+        let to = dir.join(crate::file_name(artifact));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(dir = %dir.display(), "could not keep the judged artifact: {e}");
+            return artifact.to_path_buf();
+        }
+        if let Err(e) = std::fs::copy(artifact, &to) {
+            tracing::warn!(from = %artifact.display(), "could not keep the judged artifact: {e}");
+            return artifact.to_path_buf();
+        }
+        // Best effort, and separately: losing the log costs a field of the record, losing the
+        // artifact costs the record.
+        let log = work.join("rebuild").join("build.log");
+        if log.exists() {
+            let _ = std::fs::copy(&log, work.join("build.log"));
+        }
+        to
+    }
+
     pub(crate) fn newest_file(dir: &Path) -> Option<PathBuf> {
         let mut found: Vec<PathBuf> = Vec::new();
         let mut stack = vec![dir.to_path_buf()];
@@ -5971,6 +6171,37 @@ mod mirror {
         format!("localhost/trigon-base:auto-{:.16x}", h.finalize())
     }
 
+    /// Whether this run may *build* an image, and the reason where it may not.
+    ///
+    /// **A decision, computed once by the caller, not a tier re-read here.** It was `enforced:
+    /// bool`, which meant this function held half the rule — "enforced implies no derivation" —
+    /// while the caller held the other half. `--image derive` makes the tier no longer sufficient
+    /// to decide, and two places deciding one thing is how they come to disagree.
+    ///
+    /// The variant travels so the refusal can name the way through it. A message that says only
+    /// "not here" is a message that has to be rewritten every time the condition changes.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Derive {
+        /// Build one when nothing local carries what the strategy needs.
+        IfNeeded,
+        /// Refuse instead: the tier is enforced and nobody asked for the derivation.
+        NotAtThisTier,
+    }
+
+    /// What [`resolve_auto`] settled on, and how it got there.
+    ///
+    /// The image alone was not enough once `derive` existed: a reference says which bytes ran the
+    /// build and says nothing about whether this run fetched them into being. That second fact is
+    /// the one the record has to disclose, so it travels with the first rather than being
+    /// reconstructed from the tier later.
+    pub struct Resolved {
+        /// A reference a runner can use. Never a `localhost/...@sha256:` one — see step 4.
+        pub image: String,
+        /// What this run derived, or `None` where an image already on the machine carried what
+        /// the strategy needed. `None` is "nothing was built", not "no image".
+        pub derived: Option<trigon_store::DerivedImage>,
+    }
+
     /// Find or build an image carrying `required`, and return a reference a runner can use.
     ///
     /// **This is the whole of "on the fly", and it is a pre-flight rather than a retry.** The
@@ -5994,19 +6225,12 @@ mod mirror {
         parent: &str,
         required: &[String],
         verbose: bool,
-        enforced: bool,
-    ) -> Result<String> {
-        let refused: Vec<String> = required
-            .iter()
-            .filter_map(|d| trigon_sandbox::admission(d).refusal(d))
-            .collect();
-        if !refused.is_empty() {
-            bail!(
-                "this strategy asks for something an image may not supply automatically:\n\n  - \
-                 {}\n\nBuild an image yourself with `trigon base-image` if you have decided to, \
-                 and pass it with `--image`.",
-                refused.join("\n  - ")
-            );
+        derive: Derive,
+    ) -> Result<Resolved> {
+        // The same call the repair gate makes, so a proposal cannot pass validation and be
+        // refused here. See `trigon_sandbox::inadmissible`.
+        if let Some(why) = trigon_sandbox::inadmissible(required.iter().map(String::as_str)) {
+            bail!(why);
         }
 
         if let Some(have) = labelled_packages(parent)
@@ -6015,7 +6239,7 @@ mod mirror {
             if verbose {
                 println!("  image      {parent} already carries what this strategy needs");
             }
-            return Ok(parent.to_string());
+            return Ok(Resolved { image: parent.to_string(), derived: None });
         }
 
         // **Ask the image, where the label cannot answer.** A label is an index and only our own
@@ -6032,16 +6256,19 @@ mod mirror {
             if verbose {
                 println!("  image      {parent} already carries what this strategy needs");
             }
-            return Ok(parent.to_string());
+            return Ok(Resolved { image: parent.to_string(), derived: None });
         }
 
-        if enforced {
+        if derive == Derive::NotAtThisTier {
             bail!(
                 "`--image auto` would have to build an image to satisfy this strategy, and \
                  building one means `apt-get`, which means network — at an enforced egress tier \
-                 that is bytes the run's transcript would never see. Derive it first, outside the \
-                 boundary, and then pass it:\n\n    trigon rebuild … --egress open --image auto\n\n\
-                 or build one explicitly with `trigon base-image --from {parent}` and pass its id."
+                 that is bytes the run's transcript would never see.\n\n\
+                 `--image derive` does it anyway and records that it did, which is the honest \
+                 form of what most operators were already doing by hand:\n\n    \
+                 trigon rebuild … --egress mirror-only --image derive\n\n\
+                 Or keep the derivation outside the run entirely and pass the id:\n\n    \
+                 trigon base-image --from {parent}"
             );
         }
 
@@ -6065,13 +6292,29 @@ mod mirror {
             }
         }
         let tag = derived_tag(parent, &packages);
+        // Sorted, because this is what the record shows a reader and two runs that installed the
+        // same set should not look different for having computed it in a different order.
+        let mut recorded = packages.clone();
+        recorded.sort();
+        recorded.dedup();
 
         if std::process::Command::new("podman")
             .args(["image", "exists", &tag])
             .status()
             .is_ok_and(|s| s.success())
         {
-            return image_id(&tag);
+            // **Derived, and not by this run.** A cache hit spends no network now; an earlier run
+            // spent it, possibly without recording anything. Saying `built_here: false` rather
+            // than `derived: None` is the difference between "this image was assembled" and "this
+            // image came with the machine", and only the first needs a reader's attention.
+            return Ok(Resolved {
+                image: image_id(&tag)?,
+                derived: Some(trigon_store::DerivedImage {
+                    parent: parent.to_string(),
+                    packages: recorded,
+                    built_here: false,
+                }),
+            });
         }
 
         println!(
@@ -6079,7 +6322,14 @@ mod mirror {
             packages.join(", ")
         );
         base_image(parent, &packages, &tag, false, false)?;
-        image_id(&tag)
+        Ok(Resolved {
+            image: image_id(&tag)?,
+            derived: Some(trigon_store::DerivedImage {
+                parent: parent.to_string(),
+                packages: recorded,
+                built_here: true,
+            }),
+        })
     }
 
     /// Which of `required` this image does not have, asked of the image itself.
@@ -6096,6 +6346,14 @@ mod mirror {
             .args([
                 "run",
                 "--rm",
+                // **`--network none`, because the probe needs none and P11 says so.** This runs
+                // `command -v` against an image; it fetches nothing. It had podman's default
+                // networking, and it runs at every tier — before the enforced-tier refusal below
+                // it, so `--egress mirror-only` started a container with a route out and the
+                // egress accounting never saw it. Threat-model P11 is "at every tier but `open`
+                // no phase reaches the network", and this was a phase that could.
+                "--network",
+                "none",
                 "--entrypoint",
                 "",
                 image,
@@ -7400,9 +7658,22 @@ fn usable(strategy: &trigon_strategy::Strategy, timewarp_base: &str) -> Result<(
     // here, replaced the strategy, and died on the next iteration with an error that was not a
     // `BuildFailure`. The run was filed `error:infra` with no failure code — the repair having
     // cost us exactly the answer the comment at its call site says it must never cost.
-    trigon_strategy::render(strategy, &cx, &tools)
-        .map_err(|e| e.to_string())
-        .and_then(|i| i.executable().map_err(|e| e.to_string()))
+    let rendered = trigon_strategy::render(strategy, &cx, &tools).map_err(|e| e.to_string())?;
+    rendered.executable().map_err(|e| e.to_string())?;
+    // **And admissible, because the build asks that too.** The two checks above are the ones the
+    // executor makes; `resolve_auto` makes a third before any container starts, and this gate did
+    // not. So a repair proposing `needs: [npm]` — which Debian answers with its own Node 18, the
+    // `env/toolchain-crashed` the admission table exists to prevent — rendered, executed cleanly
+    // on paper, replaced a working strategy, and was refused three steps later where the refusal
+    // could no longer become another attempt.
+    //
+    // Observed on `prop-types@15.8.1`: a divergence found, compared and confirmed, then thrown
+    // away by a proposal this function had already approved. The rule and its wording live in
+    // `trigon_sandbox::inadmissible` so that the answer here and the answer there cannot differ.
+    match trigon_sandbox::inadmissible(rendered.requires.system_deps.iter().map(String::as_str)) {
+        Some(why) => Err(why),
+        None => Ok(()),
+    }
 }
 
 /// Where a statement goes and who signs it. Grouped because they are one decision — whether this
@@ -8721,6 +8992,7 @@ mod attestor {
                 },
                 Environment {
                     base_image: "localhost/trigon-base@sha256:7cdd".into(),
+                    derived_image: None,
                     egress: "mirror-only".into(),
                     isolation: isolation.into(),
                     attestable: true,
@@ -8923,6 +9195,78 @@ output_dir: trigon-pack
         assert!(
             !src.contains(propagates),
             "a validation failure must discard the proposal, not end the run"
+        );
+    }
+
+    #[test]
+    fn a_proposal_asking_for_what_no_image_may_supply_is_refused_by_the_gate() {
+        // The model's answer on `prop-types@15.8.1`, reduced to the line that mattered: a build
+        // step declaring `needs: [npm]`. It renders. It is executable. Both checks this gate used
+        // to make pass it — and `resolve_auto` refuses it three steps later, by which time the
+        // repair has replaced a strategy that worked and the run has discarded a divergence it
+        // spent two minutes establishing.
+        //
+        // Debian's npm is the table's own worked example: it brings its own Node, 18 on bookworm,
+        // and a pinned Node 10 then loads modules written for 18 and aborts.
+        let yaml = r#"
+schema: 1
+kind: flow
+location:
+  repo: https://example.invalid/r
+  ref: abc
+src:
+- uses: git-checkout
+build:
+- runs: npm run build
+  needs: [npm]
+output_path: '*.tgz'
+"#;
+        let s = trigon_strategy::from_yaml(yaml).expect("the proposal itself is valid YAML");
+        let e = super::usable(&s, "http://mirror.invalid")
+            .expect_err("a recipe needing `npm` in the image must not pass the repair gate");
+        assert!(e.contains("npm"), "the refusal should name the dependency: {e}");
+        assert!(e.contains("ADR-0012"), "and say which rule refuses it: {e}");
+    }
+
+    #[test]
+    fn the_admission_rule_is_asked_in_one_place() {
+        // ADR-0008. The gate and the image resolver both have to answer "may an image supply
+        // this?", and they answered it separately: the resolver ran the filter, the gate did not
+        // run it at all. Re-implementing the filter here is how they drift back apart — and the
+        // *wording* counts too, because a refusal phrased differently in the two places is the
+        // same defect one level down.
+        //
+        // Split so this test's own source does not contain the pattern it forbids.
+        let src = include_str!("main.rs");
+        let filter = concat!("admission(d)", ".refusal(d)");
+        assert!(
+            !src.contains(filter),
+            "the admission filter is re-implemented here; call \
+             `trigon_sandbox::inadmissible` so the two sites cannot disagree"
+        );
+    }
+
+    #[test]
+    fn the_verdicts_bytes_are_moved_out_of_reach_before_the_loop_clears_the_directory() {
+        // The wipe at the top of the build loop deletes `<work>/rebuild`, and `judged` is
+        // deliberately carried across it so a failed repair still reports the divergence the run
+        // had already found. The path outlived the bytes, and nothing said so: the record read a
+        // file the loop had just removed and the run was lost.
+        //
+        // Anchored on the wipe rather than on a byte window, because the comment between the two
+        // is long and a window wide enough to hold it is wide enough to catch something else.
+        // Split so this test's own source does not satisfy the check.
+        let src = include_str!("main.rs");
+        let wipe = concat!("let _ = std::fs::remove_dir_all(", "&out);");
+        let at = src
+            .find(wipe)
+            .expect("the build loop still clears the output directory");
+        let keep = concat!("*path = keep_judged(", "&args.work, path);");
+        assert!(
+            src[..at].contains(keep),
+            "the build loop clears `<work>/rebuild` without first moving the judged artifact out \
+             of it. A repair that goes round again would delete the bytes the kept verdict names, \
+             and the run would end with no record at all."
         );
     }
 

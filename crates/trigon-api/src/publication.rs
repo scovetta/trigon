@@ -52,6 +52,17 @@ pub enum Withheld {
     /// and "we do not know who wrote the normalization" are different sentences, and a reader who
     /// is shown the first when the second is true has been told something nobody established.
     ProvenanceUnknown,
+    /// Safeguard 2, egress clause, the half that happens before the build.
+    ///
+    /// This run built its own base image, which means `apt-get`, which means network — spent
+    /// outside the boundary the transcript accounts for. The build itself still ran at the tier
+    /// it claims; what is unaccounted is the environment it ran *in*.
+    ///
+    /// Accusations only. A match from a derived image is still evidence — the mirror and the
+    /// guard both ran, and reproducing an artifact is not made easier by an image carrying
+    /// `build-essential`. A divergence is an accusation, and an accusation is not published on a
+    /// step nobody accounted for.
+    ImageDerivedOutsideBoundary,
     /// Safeguard 5. An operator stopped divergence publication.
     KillSwitch,
     /// Not a safeguard: the run never reached an outcome, so there is nothing to publish.
@@ -71,6 +82,7 @@ impl Withheld {
             Withheld::OpenEgress => "open_egress",
             Withheld::GuardTripped => "guard_tripped",
             Withheld::NonBuiltinStabilizer => "non_builtin_stabilizer",
+            Withheld::ImageDerivedOutsideBoundary => "image_derived_outside_boundary",
             Withheld::KillSwitch => "kill_switch",
             Withheld::ProvenanceUnknown => "provenance_unknown",
             Withheld::NoOutcome => "no_outcome",
@@ -103,6 +115,12 @@ impl Withheld {
             Withheld::NonBuiltinStabilizer => {
                 "a stabilizer a person or a model wrote was applied, so the normalization is itself \
                  a judgement call and this publishes as void rather than as a divergence."
+            }
+            Withheld::ImageDerivedOutsideBoundary => {
+                "this run built its own base image, which spends network outside the boundary the \
+                 rest of the run accounts for. The build ran at the tier it claims; the \
+                 environment it ran in was assembled without that account, and an accusation is \
+                 not published on a step nobody measured."
             }
             Withheld::ProvenanceUnknown => {
                 "this record does not say whether a hand-written or model-written stabilizer was \
@@ -233,6 +251,23 @@ pub fn decide(r: &RunRecord, c: Corroboration, s: Switches) -> Publication {
         };
     }
 
+    // Safeguard 2's egress clause, the half that happens before the build starts.
+    //
+    // `--image derive` builds a base image with network, then runs the build at `mirror-only`.
+    // The transcript is still a complete account of what crossed into the *build*; it is not an
+    // account of what went into the image the build ran on. Before this existed the gate read
+    // `environment.egress` and nothing else about the boundary, so such a run was indistinguishable
+    // from a clean one and published as a divergence — which is an accusation.
+    //
+    // Accusations only, and that is a judgement rather than an oversight: a *match* from a derived
+    // image is still evidence, because the mirror and the artifact guard both ran and reproducing
+    // a published artifact is not made easier by an image that carries `build-essential`.
+    if accusatory && r.environment.derived_image.is_some() {
+        return Publication::Withheld {
+            because: Withheld::ImageDerivedOutsideBoundary,
+        };
+    }
+
     // Safeguard 2's provenance clause, unevaluated. **Last of all**, and only for an accusation.
     //
     // Last because every reason above is more informative: an operator pulled the lever, two
@@ -261,6 +296,7 @@ mod tests {
     fn env(egress: &str) -> Environment {
         Environment {
             base_image: "example@sha256:00".into(),
+            derived_image: None,
             egress: egress.into(),
             isolation: "podman".into(),
             attestable: true,
@@ -293,6 +329,65 @@ mod tests {
             agreeing_attempts: 2,
             ..Default::default()
         }
+    }
+
+    /// Confirmed, with the provenance clause answered, so these tests isolate the one clause
+    /// they are about rather than tripping `ProvenanceUnknown` first.
+    fn confirmed_and_evaluated() -> Corroboration {
+        Corroboration {
+            non_builtin_stabilizer: Some(false),
+            ..confirmed()
+        }
+    }
+
+    fn derived() -> trigon_store::DerivedImage {
+        trigon_store::DerivedImage {
+            parent: "docker.io/library/debian@sha256:aa".into(),
+            packages: vec!["build-essential".into()],
+            built_here: true,
+        }
+    }
+
+    #[test]
+    fn an_accusation_is_not_published_from_a_run_that_built_its_own_image() {
+        // `--image derive` spends network before the build, outside the account the transcript
+        // gives. The gate read `environment.egress` and nothing else about the boundary, so such
+        // a run looked exactly like a clean one — and a divergence is an accusation.
+        let mut r = record(Some("divergent"), "mirror-only");
+        r.environment.derived_image = Some(derived());
+        assert_eq!(
+            decide(&r, confirmed_and_evaluated(), Switches::default()),
+            Publication::Withheld {
+                because: Withheld::ImageDerivedOutsideBoundary
+            }
+        );
+    }
+
+    #[test]
+    fn a_match_from_a_derived_image_still_publishes() {
+        // Deliberately not symmetric with the test above, and the asymmetry is the claim. The
+        // mirror and the artifact guard both ran; reproducing a published artifact byte for byte
+        // is not made easier by an image that carries `build-essential`. Voiding a match here
+        // would discard real evidence to be seen to be careful, which is its own kind of wrong
+        // answer.
+        let mut r = record(Some("exact"), "mirror-only");
+        r.environment.derived_image = Some(derived());
+        assert_eq!(
+            decide(&r, confirmed_and_evaluated(), Switches::default()),
+            Publication::Published
+        );
+    }
+
+    #[test]
+    fn a_run_that_derived_nothing_is_unaffected() {
+        // `None` is the common case — an operator named an image, or one already on the machine
+        // carried what the strategy needed — and it must not be read as "we do not know".
+        let r = record(Some("divergent"), "mirror-only");
+        assert_eq!(r.environment.derived_image, None);
+        assert_eq!(
+            decide(&r, confirmed_and_evaluated(), Switches::default()),
+            Publication::Published
+        );
     }
 
     #[test]
@@ -508,6 +603,45 @@ mod tests {
             assert!(
                 s.chars().next().is_some_and(|c| c.is_lowercase()),
                 "{w:?} reads as a heading, not as a sentence completing 'held back because …'"
+            );
+        }
+    }
+
+    /// Every reason the gate can give has a row in the page that renders it.
+    ///
+    /// `key()`'s own doc warns about "a legend ending up with a row nothing ever matches"; this is
+    /// the other direction, and it had already happened. `provenance_unknown` was added to the
+    /// enum and never to `app.js`, so a reader whose accusation was withheld for the one reason
+    /// that is about *our record* rather than about their package got the generic fallback
+    /// sentence instead.
+    ///
+    /// Existence, not wording: the sentences are written twice — [`Withheld::sentence`] and the
+    /// `withheldTitle` table — and a test that pinned the text would just be a third copy. The
+    /// duplication itself is filed; this stops the two from losing a row.
+    #[test]
+    fn every_withheld_reason_has_a_row_in_the_page_that_renders_it() {
+        let js = include_str!("../ui/app.js");
+        let table = js
+            .split_once("const withheldTitle")
+            .expect("the page still renders a reason for a withheld row")
+            .1;
+        let table = &table[..table.find("}[pub.because]").expect("the table is an object literal")];
+        for w in [
+            Withheld::AwaitingConfirmation,
+            Withheld::AttemptsDisagree,
+            Withheld::OpenEgress,
+            Withheld::GuardTripped,
+            Withheld::NonBuiltinStabilizer,
+            Withheld::ImageDerivedOutsideBoundary,
+            Withheld::ProvenanceUnknown,
+            Withheld::KillSwitch,
+            Withheld::NoOutcome,
+        ] {
+            assert!(
+                table.contains(&format!("{}:", w.key())),
+                "`{}` is a reason the gate can give and the page has no row for it; a reader \
+                 would be shown the fallback sentence instead of why their finding was held back",
+                w.key()
             );
         }
     }

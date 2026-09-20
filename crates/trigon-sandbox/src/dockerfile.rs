@@ -283,6 +283,33 @@ impl Admission {
 ///
 /// Neutral names, the same vocabulary `needs:` and `DEFAULT_PACKAGES` speak, because the
 /// distribution package is a function of the family and the question here is not about Debian.
+/// Why an image may not be derived for this set, or `None` if it may.
+///
+/// **One implementation, because there were two and only one of them ran in time.** `resolve_auto`
+/// asked this question at image-resolution time, which is after a repair proposal has already been
+/// accepted and the previous attempt's evidence discarded. The repair gate asked whether a proposal
+/// *renders* and whether it is *executable* and never whether an image may supply what it needs —
+/// so a model answer of `needs: [npm]` passed the gate, replaced a working strategy, and refused
+/// three steps later where the refusal could no longer be turned into another attempt.
+///
+/// The message is here too, not just the rule. A refusal worded at one call site and re-worded at
+/// the other is the same defect one level down.
+pub fn inadmissible<'a>(deps: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let refused: Vec<String> = deps
+        .into_iter()
+        .filter_map(|d| admission(d).refusal(d))
+        .collect();
+    if refused.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "this strategy asks for something an image may not supply automatically:\n\n  - {}\n\n\
+         Build an image yourself with `trigon base-image` if you have decided to, and pass it \
+         with `--image`.",
+        refused.join("\n  - ")
+    ))
+}
+
 pub fn admission(dep: &str) -> Admission {
     match dep {
         // ---- Bytes: nothing pins them, and no version of them reaches a verdict. ----

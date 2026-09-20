@@ -36,6 +36,7 @@ fn record(id: &str, target: &str, outcome: Option<&str>, key: &str) -> RunRecord
         },
         Environment {
             base_image: "x@sha256:0".into(),
+            derived_image: None,
             egress: "mirror".into(),
             isolation: "podman".into(),
             attestable: true,

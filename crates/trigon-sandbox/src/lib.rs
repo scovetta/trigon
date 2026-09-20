@@ -14,7 +14,9 @@ mod podman;
 mod runner;
 mod store_lock;
 
-pub use dockerfile::{Admission, admission, family_of, install_command, verify_command};
+pub use dockerfile::{
+    Admission, admission, family_of, inadmissible, install_command, verify_command,
+};
 pub use dockerfile::{BuildContext, DEPS_DONE, render as render_context};
 pub use error::SandboxError;
 pub use model::{

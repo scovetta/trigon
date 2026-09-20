@@ -2988,3 +2988,136 @@ call*, and the terminal rendered it as `no strategy change fixes this one`. The 
 printed that line and then repaired the build two lines later. The flag gates the model, not the
 world; it now reads `not one to ask the model about`, and the field's doc comment says which of the
 two it is.
+
+### 3.69 The loop deleted the bytes the verdict named, and a signed statement said the guard never ran
+
+Reported as *"JFYI, this still fails"*, with a run that printed `✖ divergent`, a member census, and
+then `WARN could not record this run: No such file or directory (os error 2)`. Eight words, no file
+name, and both `std::fs::read` calls in `record_run` were a bare `?`.
+
+The mechanism is one line. The build loop clears `<work>/rebuild` at the top of every iteration,
+and [3.64](#364-a-failed-repair-threw-away-the-verdict-the-run-had-already-reached) had just taught
+it to carry `judged` *across* an iteration so a failed repair still reports the divergence the run
+already established. So the path and the bytes under it had different lifetimes, and nothing
+asserted it:
+
+```
+attempt 1 builds  → judged = Some((rebuild/5a792f5778cd-…/prop-types-15.8.1.tgz, comparison))
+repair accepted   → continue
+                  → remove_dir_all("<work>/rebuild")      ← the file judged names
+repair refused    → keep the verdict, record it
+                  → std::fs::read(that path)              ← ENOENT
+```
+
+**And it did not stop at a lost record.** `run_inner` falls back to the thin terminal record when
+the rich one fails, so the store got a record with no comparison, no rebuilt artifact,
+`attestable: false`, `isolation: ""` and no guard manifest — and `trigon attest` then signed a
+`buildobservation` predicate from it:
+
+```json
+{"artifactHashCheck":{"guardManifest":null,"guardedMembers":null,"performed":false,"matched":false},
+ "egressTier":"mirror-only","isolation":"","networkTranscript":null,"tier":0}
+```
+
+The terminal, ninety seconds earlier, had printed `guarding the artifact and 1 of its members` and
+`network 1039 responses crossed into the build, 563 opened and checked`. The run's outcome is
+absent from the store entirely; the screen said `divergent`.
+
+This is §3.13's nineteen false `artifactHashCheck` statements arriving through a different door.
+That was fixed by making sure the value *reaches* the record. The renderer still reads
+`"performed": f.guard_manifest.is_some()`, three lines under a comment that says *"a guard that
+could not run is not a guard that found nothing, and collapsing the two is how an unchecked run
+comes to be read as a clean one."* Any future path that loses the field recreates the false
+statement. Filed as [B38](17-backlog.md); the fix here is the cause, not the second line of defence.
+
+The relocation sits immediately above the wipe rather than at each of the eight `judged =` sites,
+because a rule enforced next to its cause cannot be forgotten by a site added later, and a tripwire
+anchors on the wipe.
+
+### 3.70 The gate asked whether a proposal renders; the build also asks whether it is admissible
+
+Same run, one step earlier. The model's repair declared a build step with `needs: [npm]`, which is
+the admission table's own worked example — Debian's npm brings its own Node, 18 on bookworm, and a
+pinned Node 10 then loads modules written for 18 and aborts.
+
+`usable` checks that a proposal renders and that it is executable, because those are the two checks
+the executor makes. It is the function whose doc comment says *"a guard that only renders accepts a
+proposal the build will then reject. That is the gap this function exists to close."* There was a
+third check — `resolve_auto`'s admission filter — and `usable` did not make it. So the proposal
+passed, replaced a strategy that worked, and was refused three steps later where a refusal can no
+longer become another attempt.
+
+The rule and its wording now live in one place, `trigon_sandbox::inadmissible`, because a refusal
+phrased at one call site and re-phrased at the other is the same defect one level down.
+
+### 3.71 Two hundred and five signed records name no base image
+
+`Environment.base_image` is documented *"pinned by digest. A tag would make the record
+unreproducible by anyone else."* `--image auto` resolves inside `build::run_with` into a binding
+that never escaped it, and `RecordInputs.image` was the raw flag. Counted on this machine's store:
+
+```
+205  "base_image": "auto"
+ 99  "base_image": "localhost/trigon-python@sha256:fdaef2ba9caea…"
+ 24  "base_image": "localhost/trigon-base@sha256:7cdddce4868e731…"
+```
+
+`Built::sdk_choice` says, in the file, *"`Environment.base_image` names the bytes; this names the
+reasoning."* The intent was written down and the value never travelled — the same shape as
+`isolation`, two fields above it, which reached a `println!` and stopped there while nineteen
+statements described an unbounded build.
+
+It matters here beyond tidiness: `--image derive` exists to disclose how an image came to be, and a
+disclosure attached to a record that cannot name the image is not a disclosure. The identity and the
+disclosure travel the same wire.
+
+Still the flag on a run that produced no build, which is honest — no image was resolved — and still
+the flag on a build that ran and failed, which is not. [B39](17-backlog.md).
+
+### 3.72 `--image derive`, and a security property that was already false
+
+`--image auto` refuses at an enforced tier because deriving an image means `apt-get` and that is
+network the run's transcript would never see. The refusal was correct and the cost was hidden: on
+the PyPI leg of the M1 sweep, **73 of 89 targets** produced nothing because of it, and the
+prescribed remedy — derive by hand at `--egress open`, then re-run pinned — is not something anyone
+does inside a sweep.
+
+`--image derive` does it inside the run and records that it did: `Environment.derived_image` carries
+the parent, the sorted package list, and whether *these bytes* were built by this run.
+`built_here: false` is a hit on the content tag, and its doc says what it does not mean — not "no
+network was spent", but "not by this run", because an earlier run spent it and may have recorded
+nothing. That is the `artifactHashCheck.performed` trap, refused in advance.
+
+The gate withholds an **accusation** from such a run and publishes a **match**. The asymmetry is the
+claim: the mirror and the artifact guard both ran, and reproducing a published artifact byte for
+byte is not made easier by an image that carries `build-essential`. Voiding the match would discard
+real evidence in order to look careful.
+
+**Threat-model P11 said something that was already untrue.** *"At every tier but `open` no phase
+reaches the network — the image build takes `--network none` too."* Two phases did:
+
+- `missing_from` — the probe that asks an image what it carries — ran `podman run` with **no
+  `--network` flag**, at every tier, *before* the enforced-tier refusal. It runs `command -v`. It
+  needed no network and had one. Fixed: `--network none`.
+- `auto_parent` resolves through `pinned`, which runs `podman pull` when the reference is not local
+  — reachable via `TRIGON_BASE_PARENT` or any .NET target, also before the refusal. Real network,
+  genuinely needed, recorded nowhere. [B40](17-backlog.md).
+
+P11 now names the exception instead of being quietly falsified by it, and the sidecar was
+regenerated from the prose.
+
+**The reframing the work produced:** `scripts/rebuild-and-attest.sh` — the supported entry point,
+the one `goauto.sh` calls — already runs `trigon base-image` itself, at `--egress mirror-only`,
+immediately before the run, and records nothing anywhere. Nobody owned this obligation. `derive`
+closes that hole rather than opening one.
+
+### 3.73 A legend with a row nothing matches, and the other direction
+
+`Withheld::key`'s doc comment warns that a page keyed on one name while reading another is *"how a
+legend ends up with a row nothing ever matches."* The live defect was the mirror image:
+`ProvenanceUnknown` had been added to the enum and never to `app.js`, so the one withholding reason
+that is about *our record* rather than about the reader's package rendered as the generic fallback.
+
+A test now asserts every variant has a row. Existence, not wording — the sentences are written twice,
+in `Withheld::sentence` and in the page, and a test pinning the text would be a third copy. The
+duplication is [B41](17-backlog.md).

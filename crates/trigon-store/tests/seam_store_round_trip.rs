@@ -115,10 +115,32 @@ fn every_field_populated() -> RunRecord {
         finished: Some("2026-09-11T19:04:11Z".into()),
         environment: Environment {
             base_image: "docker.io/library/debian@sha256:aa".into(),
+            // Populated, because this fixture's whole job is that every field is. `None` here
+            // would mean `--image derive`'s disclosure never round-trips in a test, which is the
+            // shape this file exists to prevent.
+            derived_image: Some(trigon_store::DerivedImage {
+                parent: "docker.io/library/debian@sha256:aa".into(),
+                packages: vec!["build-essential".into(), "git".into()],
+                built_here: true,
+            }),
             egress: "mirror-only".into(),
             isolation: "UserNs".into(),
-            guard_manifest: None,
-            guarded_members: None,
+            // **These two were `None`, and they are the two that matter most.**
+            //
+            // The signed `artifactHashCheck` block derives `performed` from `guard_manifest`
+            // being present, and nineteen statements said the guard never ran on runs where it
+            // had — because the value existed and nothing carried it into the record. The guard
+            // against that regression is this file, and it was not exercising either field: they
+            // serialize with `skip_serializing_if`, so `None` kept them out of the pinned key set
+            // below and out of the round trip entirely.
+            //
+            // That is this test's own stated failure mode ("every existing test still passes
+            // because none of them set it") sitting inside the test, on the two fields it was
+            // written for.
+            guard_manifest: Some("631678f4fbb61e055f3f8db33ca1c38d8b69ed64fe3fbd3f12bc4abe758f0ece".into()),
+            // Zero is a real answer and not `None`: every member was too small, too common, or
+            // also in the source, so the guard watched the artifact alone.
+            guarded_members: Some(0),
             // `false` is the interesting value: it is the one that keeps a run out of a full-trust
             // statement, so it is the one a dropped field would silently convert to `true`.
             attestable: false,
@@ -358,11 +380,14 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         env_keys,
         [
             "base_image",
+            "derived_image",
             "egress",
             "isolation",
             "attestable",
             "registry_moment",
-            "pin"
+            "pin",
+            "guard_manifest",
+            "guarded_members"
         ]
         .into_iter()
         .collect::<BTreeSet<&str>>(),
@@ -429,6 +454,7 @@ async fn a_record_with_nothing_optional_in_it_reads_back_as_nothing_rather_than_
         },
         Environment {
             base_image: "docker.io/library/debian@sha256:aa".into(),
+            derived_image: None,
             egress: "none".into(),
             isolation: "UserNs".into(),
             guard_manifest: None,
@@ -778,6 +804,7 @@ async fn no_such_run_is_a_different_answer_from_a_run_that_recorded_nothing() {
         },
         Environment {
             base_image: "i@sha256:aa".into(),
+            derived_image: None,
             egress: "none".into(),
             isolation: "UserNs".into(),
             guard_manifest: None,
@@ -835,6 +862,7 @@ async fn a_record_is_read_back_without_being_checked_against_anything_but_json()
         },
         Environment {
             base_image: "i@sha256:aa".into(),
+            derived_image: None,
             egress: "open".into(),
             isolation: "None".into(),
             guard_manifest: None,
@@ -1012,6 +1040,7 @@ async fn every_id_the_listing_reports_is_one_get_run_can_fetch() {
             },
             Environment {
                 base_image: "i@sha256:aa".into(),
+                derived_image: None,
                 egress: "none".into(),
                 isolation: "UserNs".into(),
                 guard_manifest: None,
@@ -1067,6 +1096,7 @@ async fn every_id_the_listing_reports_is_one_get_run_can_fetch() {
             },
             Environment {
                 base_image: "i@sha256:aa".into(),
+                derived_image: None,
                 egress: "none".into(),
                 isolation: "UserNs".into(),
                 guard_manifest: None,

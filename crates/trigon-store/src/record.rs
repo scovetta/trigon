@@ -80,12 +80,45 @@ pub struct Environment {
     /// ways; nothing asserted that a real run supplied the input, and it did not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_manifest: Option<String>,
+    /// What this run built its base image from, where it built one.
+    ///
+    /// **`None` means this run derived nothing** — the operator named an image, or one already on
+    /// the machine carried what the strategy needed. It is not "no image".
+    ///
+    /// This exists because `--image derive` spends network *outside* the boundary the rest of the
+    /// record accounts for. At `mirror-only` the run's whole claim is that `network_transcript`
+    /// is a complete account of what crossed into the build; an image `apt-get`-ed into existence
+    /// ninety seconds earlier is bytes that account never saw. Recording it is what keeps the
+    /// claim true — and what lets [`crate::publication`]'s gate withhold rather than publish a
+    /// divergence, which is an accusation, from a run with an undisclosed step in it.
+    ///
+    /// Modelled on `non_builtin_stabilizer` below: a typed fact the run path writes down because
+    /// the publication gate needs it and cannot compute it from anything else it holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_image: Option<DerivedImage>,
     /// How many of the artifact's members the guard was watching for.
     ///
     /// Zero is a real answer and not the same as `None`: every member was too small, too common,
     /// or also present in the source, so the guard watched the artifact alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guarded_members: Option<u64>,
+}
+
+/// A base image this run built, and what went into it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedImage {
+    /// The image it was built on, pinned.
+    pub parent: String,
+    /// What was installed onto the parent, sorted. The reader's answer to "why do these bytes
+    /// differ from a stock distribution image".
+    pub packages: Vec<String>,
+    /// Whether **these bytes** were built by this run.
+    ///
+    /// `false` is a hit on the content-addressed tag: an earlier run derived the same parent and
+    /// package set, and this one reused it. It does **not** say no network was spent — it says
+    /// not by this run, and the earlier one may have recorded nothing at all. Anyone who needs
+    /// the difference has `parent` and `packages` here, which are the tag's whole input.
+    pub built_here: bool,
 }
 
 /// What the mirror saw, recorded beside the moment the build claimed to be pinned to.

@@ -1424,6 +1424,8 @@ const withheldTitle = (pub) => ({
   guard_tripped: 'the build reached the published artifact over the network, so a match would prove only that it downloaded it.',
   non_builtin_stabilizer: 'a stabilizer a person or a model wrote was applied, so this publishes as void rather than as a divergence.',
   kill_switch: 'divergence publication is stopped while the false-mismatch rate is reviewed.',
+  provenance_unknown: 'this record does not say whether a hand-written or model-written stabilizer was applied, so one of the five safeguards cannot be checked. An accusation is not published on a safeguard nobody evaluated.',
+  image_derived_outside_boundary: 'this run built its own base image, which spends network outside the boundary the rest of the run accounts for. The build ran at the tier it claims; the environment it ran in was assembled without that account.',
   no_outcome: 'this run never reached a verdict, so there is nothing to publish.',
 }[pub.because] || 'the publication gate has not released this.');
 

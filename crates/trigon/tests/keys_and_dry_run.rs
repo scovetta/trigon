@@ -227,6 +227,7 @@ async fn store_with_a_run(root: &Path) -> String {
         },
         Environment {
             base_image: "docker.io/library/debian@sha256:aa".into(),
+            derived_image: None,
             egress: "mirror-only".into(),
             isolation: "UserNs".into(),
             guard_manifest: None,

@@ -499,6 +499,7 @@ mod tests {
             },
             Environment {
                 base_image: "x@sha256:0".into(),
+                derived_image: None,
                 egress: "mirror".into(),
                 isolation: "podman".into(),
                 attestable: true,

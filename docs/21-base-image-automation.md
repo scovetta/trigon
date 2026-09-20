@@ -239,6 +239,21 @@ can be *offered* the same derivation rather than only being refused.
   moving the image build *inside* the boundary — so this needs to be reasoned about rather than
   bolted on.
 
+  **Built, as `--image derive`.** `auto` still refuses at an enforced tier and its refusal now
+  names `derive` as the way through. `derive` selects exactly as `auto` does and derives where
+  `auto` would refuse, writing `Environment.derived_image` — the parent, the sorted package list,
+  and whether *these bytes* were built by this run rather than found under the content tag from an
+  earlier one. The publication gate withholds any **accusation** from such a run
+  (`Withheld::ImageDerivedOutsideBoundary`) and publishes a **match**, because the mirror and the
+  artifact guard both ran and reproducing a published artifact is not made easier by an image
+  carrying `build-essential`. Threat-model P11 names the exception rather than being quietly
+  falsified by it.
+
+  What the reasoning turned up is that nobody had owned this obligation in the first place:
+  `scripts/rebuild-and-attest.sh` already derives an image by hand, at `mirror-only`, immediately
+  before the run, and records nothing anywhere. `derive` is the closing of that hole, not the
+  opening of one.
+
 ## What landed, and the one correction the plan needed
 
 Parts 0, 2 and 3 are built. `trigon rebuild --image auto` classifies the strategy's `system_deps`

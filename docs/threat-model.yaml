@@ -11,7 +11,7 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:8db61cd885bd089568c11c54a2752bd77c499613290f9846f03fa0edc2a3673e
+prose_version: docs/threat-model.md@sha256:762aa2e06694a8dbee8dd8059be516dc924fbe2cc60d918c8e1b51b5eb3e3aea
 model_status: unratified-draft
 triage_policy: strict
 confidence:
@@ -1826,11 +1826,15 @@ properties_claimed:
   conditions: podman honours its flags
   violation_symptoms:
   - a run recorded as enforced that was not
-  statement: A runner refuses an egress tier it cannot enforce rather than downgrading it, and at every
-    tier but open no phase reaches the network — the image build takes --network none too
+  - a derivation that happened and was not recorded
+  statement: 'A runner refuses an egress tier it cannot enforce rather than downgrading it, and at every
+    tier but open no phase of the run reaches the network — the image build takes --network none too,
+    and so does the probe that asks an image what it carries. The one exception is --image derive, which
+    builds a base image with network before the build: it is opt-in, never reached by auto, recorded on
+    the run as'
   provenance:
     kind: documented
-    source: docs/16-findings.md §3.13
+    source: docs/16-findings.md §3.13, §3.69
 - id: P12
   kind: integrity
   components:
@@ -2500,9 +2504,10 @@ downstream_responsibilities:
     source: docs/threat-model.md §1.13
 - id: dr-2
   component: multiple
-  statement: Check the signing identity against your own policy, and check Rekor inclusion if the bundle
-    carries it. Without --public-key the tool still re-derives and tells you the signature was present
-    and unchecked
+  statement: Check the signing identity against your own policy with --public-key <hex> (trigon public-key
+    <keyfile> prints it). Without it the tool still re-derives and tells you the signature was present
+    and unchecked, which is a different answer from unsigned. Where the run was logged, --transparency
+    <entry.j
   enforces: []
   provenance:
     kind: documented

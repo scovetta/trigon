@@ -281,6 +281,7 @@ mod tests {
                 },
                 Environment {
                     base_image: "i".into(),
+                    derived_image: None,
                     egress: "mirror-only".into(),
                     isolation: "podman".into(),
                     attestable: true,

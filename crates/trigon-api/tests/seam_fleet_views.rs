@@ -16,6 +16,7 @@ use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
 fn env() -> Environment {
     Environment {
         base_image: "example@sha256:0".into(),
+        derived_image: None,
         egress: "mirror".into(),
         isolation: "podman".into(),
         attestable: true,

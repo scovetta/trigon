@@ -1654,3 +1654,57 @@ come out on its own, with the e2e suite run against a real package between each 
 
 **Done when:** no function in `main.rs` exceeds ~150 lines, and each extraction was a separate
 commit with the e2e suite green between them.
+
+## B38. `artifactHashCheck.performed` still reads `None` as `false`
+
+`crates/trigon-attest/src/rebuild.rs` renders `"performed": f.guard_manifest.is_some()`, directly
+under a comment that says *"a guard that could not run is not a guard that found nothing, and
+collapsing the two is how an unchecked run comes to be read as a clean one."* The code collapses
+exactly those two.
+
+`guard_manifest: None` means **nobody looked** — the guard was not armed, or the value did not reach
+the record. `docs/16-findings.md` §3.13 fixed the input for the case that produced nineteen false
+statements; §3.69 produced a twentieth through a different door, because the *renderer* was never
+made to honour the distinction. Any future path that loses the field recreates it.
+
+The fix is a tri-state on the wire — `performed: null` where the record does not know — which
+changes what a consumer reads, so it is a schema decision and not a patch. The alternative,
+refusing to emit the block at all from a record with no build facts, is also defensible and loses
+the `egressTier`/`isolation` fields a reader may still want.
+
+**Test to write first:** a record with `guard_manifest: None` and `attestable: false` must not
+produce a statement that reads as a clean unchecked run.
+
+## B39. A build that ran and failed still records the flag as its base image
+
+§3.71 moved the resolved image onto `Built`, which exists only on success. A run whose build
+resolved an image and then failed still records `"auto"`. No comparison is signed from such a run,
+which is why this is B-list rather than part of that fix — but the failure clusters a corpus is
+triaged by are keyed on an environment the record then describes wrongly.
+
+`build::run_with` already takes twenty arguments under `#[allow(clippy::too_many_arguments)]`, so
+the answer is probably a small struct carrying the resolution out of both arms rather than a
+twenty-first.
+
+## B40. `auto_parent` can pull an image over the network at an enforced tier
+
+`pinned()` runs `podman pull` when the reference is not already local, reached from `auto_parent`
+via `TRIGON_BASE_PARENT` or any .NET target — at every tier, and *before* the enforced-tier refusal
+in `resolve_auto`. Real network, genuinely needed, recorded nowhere. §3.72 fixed the sibling case
+(the capability probe, which needed no network and had one) and named this one.
+
+Two plausible shapes: refuse to pull at an enforced tier and tell the operator to pull first, or
+record it the way §3.72 records a derivation. The second is more useful and needs the pull to be
+distinguishable from the derivation in the record, since one is "we fetched a parent" and the other
+is "we assembled a child".
+
+## B41. `Withheld::sentence` is written twice
+
+Once in `crates/trigon-api/src/publication.rs`, where its doc explains that *"a claim about our own
+process belongs with the code that makes it rather than in a translation table somebody edits
+later"*, and once in `crates/trigon-api/ui/app.js` as `withheldTitle` — which is that translation
+table. §3.73 added a test that every variant has a row in both; nothing asserts the two sentences
+agree, and a test pinning the text would be a third copy.
+
+The real fix is for the API to send the sentence beside the key so the page has nothing to
+translate. That is a wire change, and the page would need a fallback for an older server.
