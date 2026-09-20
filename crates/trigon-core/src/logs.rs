@@ -377,22 +377,26 @@ fn dedup(lines: Vec<String>) -> Vec<String> {
 ///
 /// `pub` because it is the one implementation of P12's little sibling — "text reaching a model is
 /// bounded and control-stripped" (threat-model P7) — and the diff-opinion prompt needs the same
-/// scrub this compressor gives build logs. A second copy is how the two would come to disagree.
+/// scrub this compressor gives build logs. A second copy is how the two would come to disagree:
+/// there *was* one, private in `failure.rs`, and the two already disagreed on where a CSI
+/// sequence ends. It ends on any final byte in `@..=~` — `ESC[4~` is a complete sequence — and
+/// this copy read only a letter as final, so it kept consuming legitimate text until it found
+/// one. The stricter rule is now here and `failure.rs` calls this.
 pub fn strip_controls(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\u{1b}' {
-            // CSI and the handful of other escapes a build tool emits. Consume up to the final
-            // byte rather than leaving the parameters behind as text.
+            // CSI: `ESC [`, then parameter and intermediate bytes, ended by a byte in `@`..=`~`.
             if chars.peek() == Some(&'[') {
                 chars.next();
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
+                for t in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&t) {
                         break;
                     }
                 }
             } else {
+                // A two-character escape. Drop the pair.
                 chars.next();
             }
             continue;

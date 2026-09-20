@@ -1730,3 +1730,19 @@ the cap needs the §3.62 lesson applied: measure it in rendered prompt bytes, no
 
 Worth pairing with a way for the answer to *decline*: today a model that believes nothing will fix
 a divergence can only restate, and the loop needs two paid attempts to read restating as "stop".
+
+## B43. The opinion's diff shows raw bytes for a census taken after normalization
+
+`diff_for_opinion` renders the raw published and rebuilt members; the comparison that called them
+different ran over the *stabilized* archives. So the model can be shown noise the verdict already
+discounted — timestamps, ordering, modes, exactly the rubric's "equivalent" list — on top of the
+difference that survived, and under the byte budget the noise can displace it. Today the prompt
+says so (the preamble names the applied passes and the moment mismatch), which makes the opinion
+honest and leaves it blunter than it could be.
+
+The fix is to hand the renderer stabilized members. The bytes exist in memory inside
+`trigon_compare::compare` and are gone by the time the opinion is asked; either the comparison
+keeps the stabilized pair for the differing members (bounded — it already caps what it reports),
+or the renderer re-runs the recorded stabilizer set the way `verify-attestation
+--rerun-comparison` does. The second re-derives; the first remembers. ADR-0013 prefers remembering
+bytes to re-deriving decisions, and the diff of record should be the diff the verdict saw.

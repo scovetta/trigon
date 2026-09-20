@@ -1346,31 +1346,10 @@ pub fn classify_line(line: &str) -> Option<FailureSignature> {
 /// ANSI SGR is `ESC [ ... m`, and the parameters in between are ordinary printable characters, so
 /// dropping control characters alone leaves `[1;31m` behind — which is still not what the build
 /// printed. The whole sequence goes.
-fn strip_controls(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            // CSI: `ESC [` then parameter and intermediate bytes, ended by a byte in `@`..=`~`.
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for t in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&t) {
-                        break;
-                    }
-                }
-            } else {
-                // A two-character escape. Drop the pair.
-                chars.next();
-            }
-            continue;
-        }
-        if !c.is_control() || c == '\t' {
-            out.push(c);
-        }
-    }
-    out
-}
+// One scrubber, and it lives in `logs` — see the note on [`crate::strip_controls`]. This file
+// held its own private copy, and the two disagreed on where a CSI sequence ends; the correct rule
+// (any final byte in `@..=~`) moved there and this alias remains so the call sites read the same.
+use crate::logs::strip_controls;
 
 fn capture(line: &str, how: Capture) -> Option<String> {
     match how {

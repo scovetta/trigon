@@ -396,25 +396,42 @@ mod tests {
         // opinions, never verdicts. "Equivalent" must not soften a divergence out of publication,
         // and "substantive" must not harden one in — in either direction, an opinion moving the
         // gate would be a model deciding what Trigon publishes.
-        for (outcome, verdict) in [
-            ("divergent", trigon_core::DiffVerdict::Equivalent),
-            ("divergent", trigon_core::DiffVerdict::Substantive),
-            ("exact", trigon_core::DiffVerdict::Substantive),
-        ] {
-            let mut with = record(Some(outcome), "mirror-only");
-            with.diff_opinion = Some(trigon_core::DiffOpinion {
-                verdict,
-                reason: "a reading".into(),
-                model: "m".into(),
-                members_shown: 1,
-                members_differing: 1,
-            });
-            let without = record(Some(outcome), "mirror-only");
-            assert_eq!(
-                decide(&with, confirmed_and_evaluated(), Switches::default()),
-                decide(&without, confirmed_and_evaluated(), Switches::default()),
-                "the gate read the opinion on a {outcome}/{verdict:?} record"
-            );
+        // Every published baseline catches softening (Published → anything trips the
+        // assert_eq); catching *hardening* needs a baseline the gate already holds back, or a
+        // `decide` that gained `if substantive { publish }` would pass every row. The first
+        // draft of this test had only published baselines, which is half a test wearing the
+        // name of a whole one.
+        let corroborations = [
+            ("confirmed", confirmed_and_evaluated()),
+            (
+                "awaiting confirmation",
+                Corroboration {
+                    agreeing_attempts: 1,
+                    ..confirmed_and_evaluated()
+                },
+            ),
+        ];
+        for (baseline, c) in corroborations {
+            for (outcome, verdict) in [
+                ("divergent", trigon_core::DiffVerdict::Equivalent),
+                ("divergent", trigon_core::DiffVerdict::Substantive),
+                ("exact", trigon_core::DiffVerdict::Substantive),
+            ] {
+                let mut with = record(Some(outcome), "mirror-only");
+                with.diff_opinion = Some(trigon_core::DiffOpinion {
+                    verdict,
+                    reason: "a reading".into(),
+                    model: "m".into(),
+                    members_shown: 1,
+                    members_differing: 1,
+                });
+                let without = record(Some(outcome), "mirror-only");
+                assert_eq!(
+                    decide(&with, c, Switches::default()),
+                    decide(&without, c, Switches::default()),
+                    "the gate read the opinion on a {outcome}/{verdict:?} record ({baseline})"
+                );
+            }
         }
     }
 

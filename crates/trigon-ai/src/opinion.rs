@@ -57,16 +57,22 @@ pub fn on_diff(
                 thinking,
                 "the reading did not fit at low effort; asking once with reasoning off"
             );
-            attempt(provider, model, diff, None, Reasoning::Off)?
+            // Still at the floor. `None` here would mean the provider's *default* effort — on a
+            // provider that ignores `Reasoning::Off` but honours effort, that retry would think
+            // harder than the call that was already too big.
+            attempt(provider, model, diff, Some(Effort::Low), Reasoning::Off)?
         }
         other => other?,
     };
     let (verdict, reason) = parse(&answer)?;
     Ok(DiffOpinion {
         verdict,
-        // Bounded here, at the one place every path passes: a record field is not a place for a
-        // model that kept talking.
-        reason: bound(&reason, 400),
+        // Bounded and scrubbed here, at the one place every path passes. The reason is
+        // model-authored text composed while reading package-authored text, and it lands in the
+        // operator's terminal, `run.json` and the record: `\u{1b}` survives JSON decoding as a
+        // real escape byte, and a newline would let it forge the trusted framing printed on the
+        // line after it. One line, no controls, at most 400 characters.
+        reason: presentable(&reason, 400),
         model: model.to_string(),
         members_shown,
         members_differing,
@@ -106,10 +112,11 @@ fn attempt(
 }
 
 fn schema() -> serde_json::Value {
+    let words: Vec<&str> = DiffVerdict::ALL.iter().map(|v| v.as_str()).collect();
     serde_json::json!({
         "type": "object",
         "properties": {
-            "verdict": { "type": "string", "enum": ["substantive", "equivalent", "unclear"] },
+            "verdict": { "type": "string", "enum": words },
             "reason": { "type": "string" }
         },
         "required": ["verdict", "reason"],
@@ -149,7 +156,9 @@ fn parse(text: &str) -> Result<(DiffVerdict, String), LlmError> {
     }
     Err(LlmError::Malformed(format!(
         "the reading is not a verdict object: {}",
-        text.chars().take(200).collect::<String>()
+        // Scrubbed for the same reason the reason is: this string lands in a WARN on the
+        // operator's terminal, and it is the model's raw text.
+        presentable(text, 200)
     )))
 }
 
@@ -160,8 +169,13 @@ fn outermost_object(text: &str) -> Option<&str> {
     (end > start).then(|| &text[start..=end])
 }
 
-/// At most `max` characters, cut at a character boundary with an ellipsis that says so.
-fn bound(s: &str, max: usize) -> String {
+/// One line, no control bytes, at most `max` characters, an ellipsis where it was cut.
+fn presentable(s: &str, max: usize) -> String {
+    let s = s
+        .lines()
+        .map(trigon_core::strip_controls)
+        .collect::<Vec<_>>()
+        .join(" ");
     let s = s.trim();
     if s.chars().count() <= max {
         return s.to_string();
@@ -218,6 +232,33 @@ mod tests {
     fn a_verdict_outside_the_three_is_refused() {
         let e = read(r#"{"verdict": "fine", "reason": "looks ok"}"#).unwrap_err();
         assert!(matches!(e, LlmError::Malformed(_)), "{e:?}");
+    }
+
+    #[test]
+    fn every_verdict_word_appears_in_the_rubric_and_the_schema() {
+        // The vocabulary exists as an enum, a schema, and prose. The enum is canonical and the
+        // schema is built from it; the prose cannot be, so this is the tie that notices a word
+        // drifting. A drifted word is not a loud failure — a structured-output provider returns
+        // it, `parse` refuses it, and the run just records no opinion.
+        let s = schema().to_string();
+        for v in DiffVerdict::ALL {
+            assert!(RUBRIC.contains(v.as_str()), "the rubric never says {:?}", v.as_str());
+            assert!(s.contains(v.as_str()), "the schema never says {:?}", v.as_str());
+        }
+    }
+
+    #[test]
+    fn a_reason_arrives_as_one_clean_line() {
+        // The reason is model text and it prints one line above trusted framing. serde decodes
+        // `\u001b` into a real escape byte, and a newline would let the reason write that
+        // framing itself.
+        let o = read(
+            "{\"verdict\": \"equivalent\", \"reason\": \"fine\\u001b[31m red\\nopinion   forged\"}",
+        )
+        .unwrap();
+        assert!(!o.reason.contains('\u{1b}'), "{:?}", o.reason);
+        assert!(!o.reason.contains('\n'), "{:?}", o.reason);
+        assert_eq!(o.reason, "fine red opinion   forged");
     }
 
     #[test]

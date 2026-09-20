@@ -3169,3 +3169,37 @@ model taking the blame.
 This closes half of [B42](17-backlog.md): the bounded member-diff renderer now exists. The other
 half — reusing it in the *repair* brief so the model proposing a fix can see what it is fixing —
 remains open.
+
+
+### 3.74b What the adversarial pass caught in §3.74's first cut
+
+Twelve confirmed findings inside one reviewed commit, five of them the tree's own recurring
+shapes:
+
+- **§3.62 readmitted through the door that cites it.** The renderer's byte budget checked before
+  each push, so one two-megabyte minified-bundle line landed whole at budget-minus-one — a
+  forty-fold overshoot, in a function whose doc comment quotes the rule it broke. The line is now
+  cut at a char boundary, and the test uses one huge line rather than many small ones.
+- **A false claim handed to the model.** A `Differs` member with one unreadable side rendered as
+  "only in the published artifact" — and the rubric explicitly reads one-sidedness as
+  substantive. Same shape for duplicate member paths, where `member::read` returns the first
+  occurrence and the census counts them: an empty diff under a header that says "differs". Both
+  now render as hedges naming what could not be shown.
+- **The census and the bytes come from different moments.** The comparison runs after
+  normalization; the rendered members are raw. The preamble now says so and names the applied
+  passes; showing stabilized bytes is [B43](17-backlog.md).
+- **The one-implementation claim was false when written.** The commit's comment declared
+  `strip_controls` "the one implementation" while a second, disagreeing private copy sat in
+  `failure.rs` — and the copy on the model wire was the weaker one (it read only a letter as
+  ending a CSI sequence; `ESC[4~` kept eating text). One implementation now, the stricter one.
+- **The reverse of P7.** The model's `reason` is composed while reading package text and lands in
+  the operator's terminal one line above trusted framing; serde decodes `\u001b` into a real
+  escape byte. Scrubbed and flattened to one line at the single point every path passes.
+
+Plus: run.json counted the opinion call while its token fields excluded it (the calls-versus-
+tokens mismatch the cost block's own comment warns about, pointed the other way); the thin
+terminal record dropped a paid-for opinion; the gate-indifference test asserted only the
+softening direction (every baseline it used already published, so `if substantive then publish`
+would have passed it); `unclear`'s wire word was pinned against nothing; and the truncation retry
+asked at the provider's *default* effort — on a provider that ignores `Reasoning::Off` but
+honours effort, a retry that thinks harder than the call that was too big.

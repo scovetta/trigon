@@ -47,6 +47,11 @@ pub enum DiffVerdict {
 }
 
 impl DiffVerdict {
+    /// The whole vocabulary, in one place, so the prompt's schema and rubric can be built from it
+    /// rather than restating it. Five spellings of three words is how one of them drifts.
+    pub const ALL: [DiffVerdict; 3] =
+        [DiffVerdict::Substantive, DiffVerdict::Equivalent, DiffVerdict::Unclear];
+
     pub fn as_str(self) -> &'static str {
         match self {
             DiffVerdict::Substantive => "substantive",
@@ -71,12 +76,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_verdict_is_a_word_on_the_wire() {
-        // ADR-0002. A record holding `2` means nothing to a reader without this exact enum at
-        // this exact version.
-        assert_eq!(serde_json::to_string(&DiffVerdict::Equivalent).unwrap(), "\"equivalent\"");
-        let back: DiffVerdict = serde_json::from_str("\"substantive\"").unwrap();
-        assert_eq!(back, DiffVerdict::Substantive);
+    fn a_verdict_is_a_word_on_the_wire_and_the_same_word_everywhere() {
+        // ADR-0002 gives the first half: a record holding `2` means nothing to a reader without
+        // this exact enum at this exact version. The second half is the tie: `as_str` feeds the
+        // terminal and the serde name feeds the record, and the first draft of this test pinned
+        // two of the three variants against literals — `unclear`'s wire word was pinned against
+        // nothing at all.
+        for v in DiffVerdict::ALL {
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{}\"", v.as_str()),
+                "the record and the terminal spell {v:?} differently"
+            );
+            let back: DiffVerdict =
+                serde_json::from_str(&format!("\"{}\"", v.as_str())).unwrap();
+            assert_eq!(back, v);
+        }
     }
 
     #[test]

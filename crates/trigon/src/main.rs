@@ -4851,6 +4851,19 @@ mod rebuild {
             );
         }
         report.diff_opinion = diff_opinion.clone();
+        // **Re-read every counter the ask moved, not just the one.** The cost block above ran
+        // before the opinion existed; `model_calls` alone was refreshed at the end of this
+        // function, so `run.json` counted the opinion call while its token and inference-seconds
+        // fields excluded it — and a divergent run whose only model call was the opinion recorded
+        // `model_calls: 1` with no token fields at all, the calls-versus-tokens mismatch the cost
+        // block's own comment recounts, pointed the other way.
+        report.inference_seconds = model.as_ref().and_then(|m| m.inference_seconds());
+        if calls(&model) > 0 {
+            let u = model.as_ref().map(|m| m.spent()).unwrap_or_default();
+            report.tokens_in = Some(u.input);
+            report.tokens_out = Some(u.output);
+            report.tokens_cached = Some(u.cached_input);
+        }
         // Reached only by a run that got this far, which is the point: every path that voids a run —
         // a tripped artifact guard above all — returns before here, so no statement can be written
         // about a run that is evidence of nothing. That is a property of the control flow rather
@@ -5353,6 +5366,10 @@ mod rebuild {
             record.declines = report.declines.clone();
             record.assumptions = report.assumptions.clone();
             record.confidence = report.confidence.clone();
+            // Paid for and in hand; this is the degraded path, not a reason to drop it. The
+            // sibling fields above travel, and an opinion that survived only in `run.json` when
+            // `record_run` failed would be the §3.69 shape at a smaller scale.
+            record.diff_opinion = report.diff_opinion.clone();
             record.refused_artifact = report.refused_artifact.clone();
             if let Some(r) = &report.void_reason {
                 // The artifact under test reached the build, so whatever it produced is evidence of
@@ -5568,6 +5585,25 @@ mod rebuild {
         let mut out = String::from(
             "`-` lines are the published artifact, `+` lines are the rebuild.\n",
         );
+        {
+            // **The census and the bytes are taken at different moments, and the model is told.**
+            // The comparison that called these members different ran *after* normalization; the
+            // bytes below are the raw published and rebuilt members, *before* it. So the diff can
+            // show noise — timestamps, ordering, modes — that the verdict already discounted, and
+            // an opinion of "equivalent — just a timestamp" about a member the stabilized
+            // comparison still flags would be answering the wrong question. Saying which passes
+            // ran is the cheap honest half; diffing stabilized bytes is B43.
+            let applied: Vec<String> =
+                c.applied().iter().map(|a| a.id.to_string()).collect();
+            if !applied.is_empty() {
+                out.push_str(&format!(
+                    "The comparison that found these differences ran after normalization \
+                     ({}); the members are shown before it, so some visible noise may already \
+                     be discounted.\n",
+                    applied.join(", ")
+                ));
+            }
+        }
         let mut shown = 0u32;
         for f in differing.iter().take(MAX_MEMBERS) {
             if out.len() >= MAX_BYTES {
@@ -5607,7 +5643,35 @@ mod rebuild {
                 shown += 1;
                 continue;
             }
+            if f.status == St::Differs && (up.is_none() || rb.is_none()) {
+                // One side readable, and the census says both exist. Handing the pair to `view`
+                // would render "only in the published artifact" — a false claim, and one the
+                // rubric explicitly reads as substantive ("code present on one side only"). A
+                // member over the serving limits on one side of a `Differs` pair is enough to
+                // get here; the hedge is the truth.
+                out.push_str(&format!(
+                    "\n=== {path} — differs; only one side was readable, so no diff is shown \
+                     ===\n"
+                ));
+                shown += 1;
+                continue;
+            }
             let view = trigon_api::member::view(&path, up, rb, None);
+            if f.status == St::Differs
+                && !view.binary
+                && view.text.as_ref().is_some_and(|t| t.hunks.is_empty() && t.truncated.is_none())
+            {
+                // Both sides read, text, no truncation — and no difference visible. The archives
+                // hold more than one member at this path and `member::read` returns the first,
+                // while the census counts occurrences; showing an empty diff under a header that
+                // says "differs" would invite "equivalent" about bytes the model never saw.
+                out.push_str(&format!(
+                    "\n=== {path} — differs; the archives hold more than one member at this \
+                     path and the differing occurrence could not be shown ===\n"
+                ));
+                shown += 1;
+                continue;
+            }
             render_member(&mut out, &view, MAX_BYTES);
             shown += 1;
         }
@@ -5619,6 +5683,18 @@ mod rebuild {
             ));
         }
         Some((out, shown, differing))
+    }
+
+    /// The longest prefix of `s` that is at most `max` bytes and ends on a char boundary.
+    fn prefix_at_char_boundary(s: &str, max: usize) -> &str {
+        if s.len() <= max {
+            return s;
+        }
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
     }
 
     /// One member of the diff, appended up to `budget` bytes of the whole rendering.
@@ -5661,16 +5737,26 @@ mod rebuild {
                 h.upstream_start, h.rebuild_start
             ));
             for l in &h.lines {
-                if out.len() >= budget {
-                    out.push_str("(cut here: the byte budget for this prompt is spent)\n");
-                    break 'hunks;
-                }
                 let mark = match l.kind {
                     "removed" => '-',
                     "added" => '+',
                     _ => ' ',
                 };
+                // The budget is measured *including* the line about to land, not before it —
+                // checked before the push, a minified bundle that is one two-megabyte line
+                // sailed through at budget-minus-one and blew the window forty-fold, which is
+                // §3.62's exact failure mode readmitted through the door that cites it.
+                let room = budget.saturating_sub(out.len());
+                if room < 2 {
+                    out.push_str("(cut here: the byte budget for this prompt is spent)\n");
+                    break 'hunks;
+                }
                 out.push(mark);
+                if l.text.len() + 1 > room {
+                    out.push_str(prefix_at_char_boundary(&l.text, room - 1));
+                    out.push_str("\n(cut mid-line: the byte budget for this prompt is spent)\n");
+                    break 'hunks;
+                }
                 out.push_str(&l.text);
                 out.push('\n');
             }
@@ -5745,6 +5831,56 @@ mod rebuild {
             super::render_member(&mut out, &text_view(lines), 600);
             assert!(out.contains("the byte budget for this prompt is spent"), "{out}");
             assert!(out.len() < 1_200, "the cut did not hold: {} bytes", out.len());
+        }
+
+        #[test]
+        fn one_line_bigger_than_the_whole_budget_cannot_blow_it() {
+            // §3.62's exact failure mode, readmitted once already through the door that cites
+            // it: the check ran before the push, so at budget-minus-one a single two-megabyte
+            // minified-bundle line landed whole — a forty-fold overshoot. The budget is a
+            // budget: the line is cut at a char boundary and the cut says so.
+            let lines = vec![line("added", &"y".repeat(2 << 20))];
+            let mut out = String::new();
+            super::render_member(&mut out, &text_view(lines), 600);
+            assert!(out.len() < 800, "one line blew the budget: {} bytes", out.len());
+            assert!(out.contains("cut mid-line"), "{}", &out[..out.len().min(200)]);
+        }
+
+        #[test]
+        fn the_cut_lands_on_a_char_boundary() {
+            let lines = vec![line("added", &"é".repeat(4_000))];
+            let mut out = String::new();
+            // An odd budget, so a naive byte slice would land mid-`é` and panic.
+            super::render_member(&mut out, &text_view(lines), 601);
+            assert!(out.len() < 800, "{}", out.len());
+        }
+
+        #[test]
+        fn the_line_vocabulary_here_is_the_one_member_view_actually_speaks() {
+            // `render_member` matches `Line.kind` by string and falls back to a context mark, so
+            // a renamed kind in `trigon_api::member` would silently render every change as
+            // unchanged text. Ask the real machinery for a real diff and assert the words.
+            let v = trigon_api::member::view(
+                "f.txt",
+                Some(b"same\nold\n".to_vec()),
+                Some(b"same\nnew\n".to_vec()),
+                None,
+            );
+            let kinds: std::collections::BTreeSet<&str> = v
+                .text
+                .expect("two small text files diff")
+                .hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .map(|l| l.kind)
+                .collect();
+            for k in &kinds {
+                assert!(
+                    ["same", "removed", "added"].contains(k),
+                    "member::view now speaks `{k}`, which render_member would draw as context"
+                );
+            }
+            assert!(kinds.contains("removed") && kinds.contains("added"), "{kinds:?}");
         }
 
         #[test]
