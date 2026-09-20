@@ -103,12 +103,29 @@ impl StrategyInferrer for Rung {
     }
 }
 
+/// What one rung was asked, readable after `climb` has taken the boxes by value.
+struct Counts {
+    infers: Arc<AtomicUsize>,
+    why_nots: Arc<AtomicUsize>,
+}
+
+impl Counts {
+    fn infers(&self) -> usize {
+        self.infers.load(Ordering::SeqCst)
+    }
+    fn why_nots(&self) -> usize {
+        self.why_nots.load(Ordering::SeqCst)
+    }
+}
+
 /// The rungs, plus a handle on each one's counters, since `climb` takes the boxes by value.
-fn ladder(rungs: Vec<Rung>) -> (Vec<Box<dyn StrategyInferrer>>, Vec<(Arc<AtomicUsize>, Arc<AtomicUsize>)>)
-{
+fn ladder(rungs: Vec<Rung>) -> (Vec<Box<dyn StrategyInferrer>>, Vec<Counts>) {
     let counts = rungs
         .iter()
-        .map(|r| (Arc::clone(&r.infers), Arc::clone(&r.why_nots)))
+        .map(|r| Counts {
+            infers: Arc::clone(&r.infers),
+            why_nots: Arc::clone(&r.why_nots),
+        })
         .collect();
     let boxed = rungs
         .into_iter()
@@ -152,7 +169,7 @@ async fn the_first_rung_with_an_answer_ends_the_climb() {
 
     assert!(out.candidate.is_some(), "the second rung answered");
     assert_eq!(
-        counts[2].0.load(Ordering::SeqCst),
+        counts[2].infers(),
         0,
         "the third rung was asked although the second had already answered"
     );
@@ -166,7 +183,7 @@ async fn a_rung_that_answers_is_never_asked_why_not() {
     let out = climb(&rungs, &target(&["widget-1.2.3.tar.gz"])).await;
 
     assert!(out.candidate.is_some());
-    assert_eq!(counts[0].1.load(Ordering::SeqCst), 0, "why_not was asked of a rung that answered");
+    assert_eq!(counts[0].why_nots(), 0, "why_not was asked of a rung that answered");
     assert!(out.declines.is_empty(), "a climb that ended in an answer recorded declines");
 }
 
@@ -218,7 +235,7 @@ async fn a_rung_that_breaks_is_written_down_and_the_next_one_still_runs() {
     let out = climb(&rungs, &target(&["widget-1.2.3.tar.gz"])).await;
 
     assert!(out.candidate.is_some(), "the rung after the broken one was not asked");
-    assert_eq!(counts[1].0.load(Ordering::SeqCst), 1);
+    assert_eq!(counts[1].infers(), 1);
     assert_eq!(out.declines.len(), 1);
     assert_eq!(out.declines[0].0, "ci");
     assert!(

@@ -528,8 +528,18 @@ async fn a_build_prunes_leftovers_from_runs_that_were_killed() {
     //
     // Pid 1 is alive, so its context must survive: a prune that disturbed a concurrent run would be
     // worse than the leak.
-    let dead = std::env::temp_dir().join("trigon-ctx-deadbeef1234-4294967290");
-    let live = std::env::temp_dir().join("trigon-ctx-deadbeef1234-1");
+    // Per-process, for the reason the sibling assertion above records: a fixture on a fixed path
+    // in the shared temp directory is shared state, and this one is *deleted* at the end of the
+    // test. Two of these running at once — `cargo test --workspace`, or simply two checkouts on
+    // one machine — and the first to finish removes the second's `live` out from under its
+    // assertion. Every other temp path in this repo already carries the pid; this one did not.
+    //
+    // The trailing component still has to parse as a process id, because that is the whole
+    // property under test: `-1` is pid 1, which is always alive, and the other is a pid no Linux
+    // will issue.
+    let me = std::process::id();
+    let dead = std::env::temp_dir().join(format!("trigon-ctx-{me}-dead-4294967290"));
+    let live = std::env::temp_dir().join(format!("trigon-ctx-{me}-live-1"));
     for d in [&dead, &live] {
         std::fs::create_dir_all(d).unwrap();
         // Backdated past the age floor, which exists because process ids get reused.
