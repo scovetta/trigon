@@ -2595,3 +2595,39 @@ salvage reached for only when it says no.
 **The shape:** a cleaning step applied where the answer arrives and not where the answer is *used*.
 The top-level parse was careful and the field it produced was handed on untouched, so every
 improvement to the outer unwrapping missed the inner one entirely.
+
+### 3.61 Every wheel that is not byte-identical is a caveat, so the tier says nothing
+
+**Not a defect — a reporting problem, found by running 100 PyPI targets and reading the breakdown.**
+
+The Census III PyPI sweep reproduced 47 of 61 compared targets. The breakdown:
+
+| | npm | PyPI |
+| --- | ---: | ---: |
+| `exact` | 32 | 13 |
+| `normalized` | 11 | 2 |
+| `normalized_with_caveats` | 0 | **32** |
+
+Two thirds of PyPI's reproductions are at the weakest tier and none of npm's are. That is not a
+fact about the packages. The `wheel` profile contains `zip-entry-order` and `zip-compression` at
+`Structural` risk and `wheel-record` at `Content`, and `caps_normalized` holds any run above
+`Metadata` at `NormalizedWithCaveats`. Every applied pass was `Builtin`; the tier comes from the
+*risk*, not from anyone's judgement.
+
+So a wheel has exactly two reachable outcomes above divergent: **byte-identical, or caveats**.
+`Normalized` is unreachable for any wheel whose zip framing differs at all, which is almost all of
+them — the two PyPI runs that reached it were `.tar.gz` sdists, where the `tar` profile's passes are
+all `Metadata`.
+
+The cap is doing its job: a structural rewrite is a weaker claim than a metadata one, and ADR-0002's
+four outcomes are meant to carry that. The problem is downstream, in what a reader takes from it. A
+tier that everything lands in carries no information, and "32 reproduced with caveats" invites the
+reading that those 32 are the interesting ones. They are not — they are every wheel that reproduced.
+
+**It also makes the two ecosystems' rates not directly comparable**, which matters because M1
+reports one per ecosystem and somebody will eventually add them. npm's 70% and PyPI's 77% are
+counting different things at the top of the range.
+
+Recorded rather than fixed: changing the risk tiers to make `normalized` reachable for wheels would
+be weakening a control to improve a chart, which is the wrong direction. The fix belongs in how the
+rate is presented — see [B35](17-backlog.md).

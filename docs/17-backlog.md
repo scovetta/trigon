@@ -1565,3 +1565,22 @@ mature effort and tell nobody anything new.
 **Done when:** the native-extension stratum has a quoted rate of its own in M1's report, separate
 from the pure-Python one — and then, separately, a decision on conda-forge taken on evidence rather
 than on the feeling that C and C++ are missing.
+
+## B35. Report the caveats tier per ecosystem, or stop reporting it as a tier
+
+[§3.61](16-findings.md#361-every-wheel-that-is-not-byte-identical-is-a-caveat-so-the-tier-says-nothing):
+every wheel that is not byte-identical lands in `normalized_with_caveats`, because the `wheel`
+profile carries `Structural` and `Content` passes and the provenance cap holds anything above
+`Metadata` there. npm's `tar` profile is all `Metadata`, so npm reaches `normalized` and PyPI cannot.
+
+Measured on the Census III corpora: npm 32 exact / 11 normalized / 0 caveats; PyPI 13 exact / 2
+normalized / 32 caveats.
+
+The cap is right and should not move — making `normalized` reachable for wheels means lowering a
+risk tier to improve a chart. What is wrong is the presentation: a tier that an entire ecosystem
+always lands in tells a reader nothing, and invites them to think those rows are unusual.
+
+**Done when:** a rate is reported with the ceiling its profile allows, so "47 of 61, of which 32 at
+the profile's ceiling" reads as the ordinary result it is rather than as a qualification. And the
+npm and PyPI rates are never added, for the same reason the two denominators are never added: at the
+top of the range they are counting different things.
