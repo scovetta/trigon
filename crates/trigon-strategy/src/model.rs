@@ -191,6 +191,49 @@ impl TryFrom<StepRaw> for Step {
                 }
                 StepBody::Runs(runs)
             }
+            // **`uses: runs` means a `runs` step.** A model writes it repeatedly — four of eight
+            // recorded answers for one package — as
+            //
+            // ```yaml
+            // - uses: runs
+            //   with:
+            //     script: |
+            //       NODE_ENV=development browserify …
+            // ```
+            //
+            // and it is unambiguous: `runs` is a step kind and can never be a registered tool, so
+            // there is no other thing this could mean. Refusing it cost a correct repair on every
+            // run that produced it, with an error naming nineteen tools the model was not asking
+            // for.
+            //
+            // Accepted here rather than prompted away, because a schema a reader can get wrong in
+            // one obvious direction is better read than re-explained.
+            (None, Some(uses)) if uses == "runs" => {
+                let mut with = r.with;
+                // The parameter it puts the script under. One of these and no other; two would be
+                // a step saying two different things.
+                let named: Vec<&str> = ["script", "run", "cmd", "command"]
+                    .into_iter()
+                    .filter(|k| with.contains_key(*k))
+                    .collect();
+                match named.as_slice() {
+                    [one] => StepBody::Runs(with.remove(*one).expect("just found")),
+                    [] => {
+                        return Err(
+                            "`uses: runs` is read as a `runs` step, and it carries no script. \
+                             Give it one under `script`, or write `runs:` directly."
+                                .into(),
+                        );
+                    }
+                    many => {
+                        return Err(format!(
+                            "`uses: runs` carries {} scripts ({}). A step runs one thing.",
+                            many.len(),
+                            many.join(", ")
+                        ));
+                    }
+                }
+            }
             (None, Some(uses)) => StepBody::Uses {
                 tool: uses,
                 with: r.with,

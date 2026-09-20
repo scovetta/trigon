@@ -49,10 +49,14 @@ pub struct FailureSignature {
     pub fault: Fault,
     /// Whether running this again unchanged could reach a different answer.
     pub retryable: bool,
-    /// Whether a repair attempt has any prospect at all.
+    /// Whether asking the model for a new strategy has any prospect at all.
     ///
     /// `false` is the admission-control short circuit: a build killed for running out of memory is
     /// not a strategy problem, and a model iterating on it spends money to reach the same place.
+    ///
+    /// It gates the model, not the world. A deterministic rung can still repair a `false` failure
+    /// — `yarn: not found` is exactly that case — so nothing reading this flag may report that no
+    /// strategy change exists, only that none will be bought.
     pub repairable: bool,
     /// The line that produced the classification, verbatim and bounded. For a human reading a
     /// cluster, not part of the key.
@@ -170,7 +174,9 @@ const RULES: &[Rule] = &[
         needles: &["yarn: not found"],
         fault: Fault::Build,
         retryable: false,
-        // A different recipe cannot conjure support for a package manager. Builder work, not repair.
+        // Nothing the model can write installs a package manager the mirror does not carry, so
+        // do not spend a call asking. `without_yarn` repairs this one deterministically, and runs
+        // ahead of this gate rather than behind it — see the rung in `trigon::main`.
         repairable: false,
         capture: Capture::WordBefore(": not found"),
     },
@@ -179,7 +185,7 @@ const RULES: &[Rule] = &[
         needles: &["pnpm: not found"],
         fault: Fault::Build,
         retryable: false,
-        // A different recipe cannot conjure support for a package manager. Builder work, not repair.
+        // Nothing the model can write installs a package manager the mirror does not carry.
         repairable: false,
         capture: Capture::WordBefore(": not found"),
     },
@@ -188,15 +194,7 @@ const RULES: &[Rule] = &[
         needles: &["bun: not found"],
         fault: Fault::Build,
         retryable: false,
-        // A different recipe cannot conjure support for a package manager. Builder work, not repair.
-        repairable: false,
-        capture: Capture::WordBefore(": not found"),
-    },
-    Rule {
-        code: "npm/unsupported-package-manager",
-        needles: &["yarn: not found"],
-        fault: Fault::Build,
-        retryable: false,
+        // Nothing the model can write installs a package manager the mirror does not carry.
         repairable: false,
         capture: Capture::WordBefore(": not found"),
     },
@@ -210,27 +208,11 @@ const RULES: &[Rule] = &[
     },
     Rule {
         code: "npm/unsupported-package-manager",
-        needles: &["pnpm: not found"],
-        fault: Fault::Build,
-        retryable: false,
-        repairable: false,
-        capture: Capture::WordBefore(": not found"),
-    },
-    Rule {
-        code: "npm/unsupported-package-manager",
         needles: &["pnpm: command not found"],
         fault: Fault::Build,
         retryable: false,
         repairable: false,
         capture: Capture::WordBefore(": command not found"),
-    },
-    Rule {
-        code: "npm/unsupported-package-manager",
-        needles: &["bun: not found"],
-        fault: Fault::Build,
-        retryable: false,
-        repairable: false,
-        capture: Capture::WordBefore(": not found"),
     },
     Rule {
         code: "npm/unsupported-package-manager",
@@ -2151,6 +2133,28 @@ strategy needs have to be in the image already. Build one with:\n\
         let after: FailureSignature = serde_json::from_str(&json).unwrap();
         assert_eq!(before, after);
         assert_eq!(after.key(), "cc/missing-header:python.h");
+    }
+
+    #[test]
+    fn no_rule_sits_behind_one_that_already_claims_its_lines() {
+        // The table is first-match-wins, so a rule whose needles are already claimed by an earlier
+        // rule never runs. Three of them had accumulated — `yarn`, `pnpm` and `bun: not found`
+        // each appeared twice, the second copy dead. Identical copies are harmless until someone
+        // edits one of them and cannot work out why the change does nothing.
+        //
+        // Exact needle equality, not subsumption: two rules can legitimately share a substring
+        // (`: not found` and `command not found` both match a missing `yarn`) and the order
+        // between them is the point, not a mistake.
+        let mut seen: Vec<&[&str]> = Vec::new();
+        for r in RULES {
+            assert!(
+                !seen.contains(&r.needles),
+                "`{}` repeats needles {:?} that an earlier rule already claims",
+                r.code,
+                r.needles
+            );
+            seen.push(r.needles);
+        }
     }
 
     #[test]

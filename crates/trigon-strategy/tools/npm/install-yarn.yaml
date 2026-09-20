@@ -1,0 +1,54 @@
+# Install yarn, from the registry, at the moment the package was published.
+#
+# **This is what answers the "some yarn" objection.** `trigon-core`'s rule table refuses a build
+# that calls yarn, reasoning that putting yarn in a base image "would run it with *some* yarn and
+# produce a verdict about a build the publisher never did". That is right about a base image and
+# wrong as a general rule, because yarn is itself an npm package: installed through the mirror it is
+# resolved at `registry_time` like every other dependency, so what arrives is the yarn that was
+# current when the package was published rather than the yarn that is current now.
+#
+# Two situations need it, and they are different:
+#
+#   - **yarn as a resolver.** `yarn install` against a `yarn.lock` resolves differently from npm,
+#     and no rewrite reproduces that. Either yarn runs or the build is not the publisher's.
+#   - **fidelity.** Even where `yarn <script>` is only a task runner — and
+#     `trigon_strategy::without_yarn` rewrites those to `npm run <script>`, same binaries, same
+#     versions — running what the publisher ran is the stronger claim.
+#
+# `yarn_version` is optional because the common case has nothing to pin it to. A package.json with a
+# `packageManager` field states it exactly and should be passed through; most published packages
+# predate corepack and say nothing, and then the honest reconstruction is whatever the registry
+# called `latest` at `registry_time`, which is what omitting the parameter asks the mirror for.
+#
+# Yarn 2 and later ("berry") are not this: they ship in-repo via `.yarn/releases` and a
+# `packageManager` field, and a global install is not how a project gets one. A build needing berry
+# has it in the tree already, and this tool would be answering a question nobody asked.
+id: npm/install-yarn
+params:
+  npm_version:
+    required: true
+  registry_time:
+    required: false
+  yarn_version:
+    required: false
+    doc: >-
+      The exact version, from a `packageManager` field where the package has one. Omitted, the
+      mirror resolves `latest` as of `registry_time`, which is the yarn the publisher would have
+      got.
+steps:
+  # The image's own yarn first, on the same reasoning `npm/install-node` gives: a base image built
+  # for this ecosystem may already carry it, and a skipped download is one less hop through the
+  # mirror's toolchain route.
+  #
+  # `-g` writes into the Node prefix, which is `/usr/local` here — the same place `install-node`
+  # unpacks to, so the two compose without either knowing about the other.
+  - uses: npm/npx
+    with:
+      command: >-
+        sh -c 'if yarn --version >/dev/null 2>&1;
+        then echo "trigon: the image already has yarn $(yarn --version)";
+        else npm install -g --force --no-audit --no-fund
+        yarn{% if with.yarn_version %}@{{ with.yarn_version }}{% endif %}; fi'
+      registry_time: "{{ with.registry_time }}"
+      npm_version: "{{ with.npm_version }}"
+      dir: "{{ location.subdir }}"

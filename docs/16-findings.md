@@ -2890,3 +2890,101 @@ parser was always the only oracle whose answer was not a guess.
 **The shape:** four consecutive fixes that each generalised from one observed failure, when the
 failure had no generalisable form. The tell was that every fix held until the next run, which is
 what a heuristic does and what a rule does not.
+
+### 3.67 Two ways to run yarn, and the code had neither
+
+Reported as *"you didn't fix yarn at all"*, and correctly: the run still ended `divergent` with the
+repair discarded. Two separate things were wrong, and the e2e test from
+[3.66](#366-five-fixes-four-of-them-shipped-to-the-user-to-discover) had already recorded one of
+them as acceptable.
+
+**`uses: runs` is a `runs` step.** Four of the eight recorded answers write the build step as
+
+```yaml
+- uses: runs
+  with:
+    cmd: npm run build
+```
+
+`runs` is a step kind and can never be a registered tool, so there is exactly one thing this can
+mean. It was refused with a message listing nineteen tools the model had not asked for, and that
+refusal cost a correct repair on every run that produced it. The e2e test recorded it as *the
+model's mistake, correctly refused* — which was true of the schema and false about what to do,
+because a schema readers get wrong in one obvious direction is better read than re-explained. With
+the alias, eight of eight recorded answers yield a working recipe.
+
+**And `npm/install-yarn` should have existed.** The rule table refuses a yarn build because
+*"putting yarn in a base image would run it with some yarn and produce a verdict about a build the
+publisher never did"*. That is right about a base image and wrong as a general rule: **yarn is an
+npm package**, so installed through the mirror it resolves at `registry_time` like every other
+dependency. What arrives is the yarn that was current when the package was published — the same
+mechanism `npm/install-node` already uses for the toolchain, and the same reason `--timewarp`
+exists.
+
+So there are two fixes and they are for different situations:
+
+| | |
+| --- | --- |
+| `yarn <script>` — a task runner | rewrite to `npm run <script>`: same binaries, same pinned versions, nothing installed |
+| `yarn install` against a `yarn.lock` — a resolver | install yarn; no rewrite reproduces yarn's resolution |
+| fidelity to what the publisher ran | install yarn, even where the rewrite would work |
+
+`yarn_version` is optional because most published packages have nothing to pin it to. A
+`packageManager` field states it exactly and is passed through where present; `prop-types` predates
+corepack and says nothing, and then the honest reconstruction is whatever the registry called
+`latest` at `registry_time`. Yarn 2 and later are deliberately out of scope: berry ships in-repo via
+`.yarn/releases` and is not installed globally.
+
+**The shape:** a rule that generalised from its hard case, twice over. Yarn-as-resolver really is
+unsupported and that became "yarn is unsupported"; `runs` really is not a tool and that became "this
+document is wrong". Both times the narrower true statement was available and the broader one was
+what the code enforced.
+
+**What it bought.** `pkg:npm/prop-types@15.8.1`, replayed against the exact model transcript that
+had failed, now runs three builds: the first diverges on two missing members, the repair rewrites
+`yarn umd && yarn umd-min` to `npm run umd && npm run umd-min` with no model call, and the third
+build produces both bundles. The member census moves from **2 upstream-only** to **11 identical, 1
+differ, 0 upstream-only, 0 rebuild-only**, and `prop-types.min.js` is byte-identical.
+
+The one member that still differs is [3.67b](#367b-a-tarball-that-disagrees-with-itself), and it is
+not ours.
+
+### 3.67b A tarball that disagrees with itself
+
+`package/prop-types.js` in the published 15.8.1 differs from the rebuild by twelve bytes, on one
+line:
+
+```
+-  if (checkerResult.data.hasOwnProperty('expectedType')) {
++  if (checkerResult.data && has(checkerResult.data, 'expectedType')) {
+```
+
+`prop-types.js` is the UMD bundle of `factoryWithTypeCheckers.js`, and **both files ship in the same
+tarball**. The published `factoryWithTypeCheckers.js` carries the second form; the published bundle
+of it carries the first. No source tree produces that tarball: the bundle was built from an earlier
+checkout than the CommonJS files packed beside it.
+
+The rebuild reproduces `factoryWithTypeCheckers.js` byte-for-byte, and `prop-types.min.js`
+byte-for-byte (the production UMD bundles `factoryWithThrowingShims.js`, which never reaches that
+line). It builds the development bundle from the same source the tarball ships, and so disagrees
+with the tarball.
+
+This is the first divergence in this corpus that is **internally checkable** — it needs no reference
+build, no timewarp and no trust in Trigon. Two files in one published artifact contradict each
+other, and anyone can unpack it and see. It is the case the project exists for, and it arrived as
+soon as the plumbing stopped failing first.
+
+### 3.68 Three rules that could never match
+
+Removing the yarn refusal meant reading the rule table, which is first-match-wins, and three rules
+were exact duplicates of earlier ones: `yarn`, `pnpm` and `bun: not found` each appeared twice, the
+second copy unreachable. Harmless until someone edits the dead copy and cannot work out why nothing
+changes. A test now rejects a rule whose needles an earlier rule already claims — exact equality,
+not subsumption, because `: not found` and `: command not found` legitimately overlap and their
+order is the point.
+
+The same read found a line that had gone false. `repairable: false` means *do not spend a model
+call*, and the terminal rendered it as `no strategy change fixes this one`. The prop-types run
+printed that line and then repaired the build two lines later. The flag gates the model, not the
+world; it now reads `not one to ask the model about`, and the field's doc comment says which of the
+two it is.

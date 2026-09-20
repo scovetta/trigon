@@ -3175,6 +3175,7 @@ dependencies = [
  "tracing",
  "trigon-core",
  "trigon-politeness",
+ "trigon-strategy",
 ]
 
 [[package]]
@@ -3322,6 +3323,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

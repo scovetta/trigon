@@ -222,6 +222,7 @@ const BUILTIN_TOOLS: &[&str] = &[
     include_str!("../tools/pypi/deps-basic.yaml"),
     include_str!("../tools/pypi/build-wheel.yaml"),
     include_str!("../tools/npm/install-node.yaml"),
+    include_str!("../tools/npm/install-yarn.yaml"),
     include_str!("../tools/npm/setup-registry.yaml"),
     include_str!("../tools/npm/npx.yaml"),
     include_str!("../tools/npm/version-override.yaml"),

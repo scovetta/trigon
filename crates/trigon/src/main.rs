@@ -2167,8 +2167,13 @@ mod build {
                     let short = trigon_core::compress(&outcome.log_tail, 4096);
                     eprintln!("\n{}", short.text);
                     println!("\n  failure   {signature}");
+                    // What the flag gates, not a claim about the world. It said `no strategy
+                    // change fixes this one` until a run printed that line and then repaired the
+                    // build two lines later: `yarn: not found` is `repairable: false` because no
+                    // model call is worth making, and the deterministic rung below rewrites it
+                    // anyway.
                     if !signature.repairable {
-                        println!("            no strategy change fixes this one");
+                        println!("            not one to ask the model about");
                     }
                     println!("  log       {}", log_path.display());
                 }
