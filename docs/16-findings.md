@@ -2550,3 +2550,48 @@ which makes it a fact about that failure rather than a rule — and an adaptive 
 next value that does not hold. What was needed was not a better number but a response to the
 condition, which is what the error text had been describing in the imperative to a reader who had
 no way to act on it.
+
+### 3.60 The answer was fine; nothing took it out of its wrapper
+
+**Real, reported from the run that followed [3.59](#359-the-only-lever-that-works-was-reachable-from-nowhere).** The
+depth walk fired exactly as designed and the repair still failed:
+
+```text
+WARN the answer did not fit; asking again with less thinking limit=16384 thinking=3134 from="medium" to="low"
+WARN the proposal produced nothing: the proposal did not parse as a strategy, twice.
+     The model said: The previous recipe built successfully but is missing prop-types.js …
+     : not valid YAML: could not find expected ':' at line 21 column 1242
+```
+
+Two things are worth reading carefully there.
+
+**`thinking=3134`, not 16,382.** Only a fifth of the budget went to reasoning, so the *answer* was
+around thirteen thousand tokens. §3.59's walk is the right response to a model that thinks until the
+budget is gone, and this was a model writing an essay. The walk still helped — at `low` it produced
+something instead of nothing — but the diagnosis behind it was narrower than the failure.
+
+**`column 1242` is a sentence.** The candidate parsed, carried a correct diagnosis, and its
+`strategy` field was prose. `strip_fence` had two defects and the second is the one that bit:
+
+1. It was `s.strip_prefix("```")`, so it only found a fence at byte 0. An answer shaped *prose, then
+   a fenced block* was returned whole. Found by the doc-comment pass before this was reported and
+   not yet acted on.
+2. **It was never applied to `candidate.strategy` at all.** A provider honouring the schema returns
+   `{diagnosis, strategy}`, and nothing said the `strategy` string would be a bare document. Models
+   put a fence inside it, or a paragraph in front of it. Cleaned at the top level only, a perfectly
+   well-formed candidate carried a strategy that was prose — and the caller met it two calls later
+   as `not valid YAML`, with the diagnosis printed where the cause should have been.
+
+`strip_fence` now finds a fence anywhere, and where there is none, drops anything before the first
+line beginning `kind:` or `schema:` **at column 0** — indented, those are fields inside a mapping,
+and cutting there would take the tail of a document and return it as the whole thing.
+
+**And fixing it introduced a regression the tests caught immediately.** Making `strip_fence` find a
+fence anywhere broke the JSON path: a candidate object's `strategy` field routinely *contains* a
+fence, so stripping the whole answer first cut the JSON open at a fence inside the payload. The
+order is now raw JSON, then fenced JSON, then bare document — the strict parser asked first and the
+salvage reached for only when it says no.
+
+**The shape:** a cleaning step applied where the answer arrives and not where the answer is *used*.
+The top-level parse was careful and the field it produced was handed on untouched, so every
+improvement to the outer unwrapping missed the inner one entirely.

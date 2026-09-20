@@ -276,9 +276,19 @@ fn attempt(
 /// could only run against providers which support it would not be a sweep anyone can run locally,
 /// which `docs/07-ai.md` §7 treats as a requirement rather than a preference.
 pub fn parse_candidate(text: &str) -> Result<Candidate, LlmError> {
-    let cleaned = strip_fence(text.trim());
+    let text = text.trim();
+
+    // **Raw JSON first, before anything strips anything.** A candidate object's `strategy` field
+    // routinely *contains* a fence, and `strip_fence` now finds one anywhere — so running it first
+    // cuts the answer open at a fence inside the payload and destroys the JSON around it. Ask the
+    // stricter parser first and only reach for the salvage when it says no.
+    if let Ok(c) = serde_json::from_str::<Candidate>(text) {
+        return Ok(clean(c));
+    }
+    // A fenced JSON object: ```json { … } ```.
+    let cleaned = strip_fence(text);
     if let Ok(c) = serde_json::from_str::<Candidate>(cleaned) {
-        return Ok(c);
+        return Ok(clean(c));
     }
     // Not JSON. Accept a bare strategy document and say the diagnosis was missing rather than
     // failing the iteration: a usable recipe with no explanation is worth more than neither.
@@ -295,18 +305,70 @@ pub fn parse_candidate(text: &str) -> Result<Candidate, LlmError> {
     )))
 }
 
-/// Drop a markdown fence if one is present.
+/// The same unwrapping the whole answer gets, applied to the field that has to be a document.
 ///
-/// The prior art spends a model call on this. It is nine lines.
+/// A provider honouring the schema returns `{diagnosis, strategy}`, and nothing ever said the
+/// `strategy` string would be bare YAML — models put a fence inside it, or a paragraph in front of
+/// it. Cleaned only at the top level, a perfectly well-formed candidate could still carry a
+/// strategy that was prose, and the caller met it two calls later as `not valid YAML` with the
+/// diagnosis printed where the cause should have been.
+fn clean(mut c: Candidate) -> Candidate {
+    let unwrapped = strip_fence(&c.strategy);
+    // **Only where there was something to unwrap.** An answer that was already a bare document is
+    // returned byte for byte, including its trailing newline: normalizing a field that was fine
+    // means a transcript no longer round-trips and a replay stops comparing equal, for no gain.
+    if unwrapped != c.strategy.trim() {
+        c.strategy = unwrapped.to_string();
+    }
+    c
+}
+
+/// The document inside an answer, whatever the model wrapped it in.
+///
+/// **A fence anywhere, not only at byte 0.** This took `s.strip_prefix("```")`, so an answer shaped
+/// `prose, then a fenced block` was returned whole — and a strategy document with two paragraphs of
+/// explanation in front of it is not YAML. Observed on a real repair: `not valid YAML: could not
+/// find expected ':' at line 21 column 1242`, which is a sentence, not a mapping.
+///
+/// Where there is no fence at all, the last resort is to drop leading prose: a strategy document
+/// starts with `kind:` or `schema:` at column 0, and nothing that precedes such a line at column 0
+/// can be part of it.
 fn strip_fence(s: &str) -> &str {
-    let Some(rest) = s.strip_prefix("```") else {
-        return s;
-    };
-    let rest = rest.split_once('\n').map(|(_, r)| r).unwrap_or(rest);
-    rest.rsplit_once("```")
-        .map(|(body, _)| body)
-        .unwrap_or(rest)
-        .trim()
+    let s = s.trim();
+    if let Some(open) = s.find("```") {
+        let rest = &s[open + 3..];
+        // The opening fence may carry a language tag: ```yaml. Everything to the newline is the
+        // tag, not the document.
+        let rest = rest.split_once('\n').map(|(_, r)| r).unwrap_or(rest);
+        if let Some((body, _)) = rest.rsplit_once("```") {
+            return body.trim();
+        }
+        // An opening fence and no closing one. Everything after it is the best guess, and better
+        // than returning the prose in front of it.
+        return rest.trim();
+    }
+    // No fence. Drop anything before the first line that starts a document.
+    for marker in ["kind:", "schema:"] {
+        if let Some(at) = document_start(s, marker) {
+            return s[at..].trim();
+        }
+    }
+    s
+}
+
+/// Where a line beginning with `marker` starts, at column 0. `None` when there is no such line.
+///
+/// Column 0 matters: `kind:` indented is a *field inside* the document, and cutting there would
+/// take the tail of a mapping and call it the whole thing.
+fn document_start(s: &str, marker: &str) -> Option<usize> {
+    let mut at = 0usize;
+    for line in s.split_inclusive('\n') {
+        if line.starts_with(marker) {
+            return Some(at);
+        }
+        at += line.len();
+    }
+    None
 }
 
 /// What a strategy document looks like. Stable across every target, so it is cached.
@@ -650,5 +712,75 @@ mod truncation {
         let p = fussy(Some(Effort::Medium));
         propose(&p, "m", &super::tests::task()).expect("answers");
         assert_eq!(p.seen.lock().unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod wrapping {
+    //! What the model wraps its answer in, and getting the document out of it.
+    //!
+    //! From a real divergence repair on `prop-types`: the answer parsed as a candidate, carried a
+    //! correct diagnosis, and its `strategy` field was prose. The caller reported
+    //! `not valid YAML: could not find expected ':' at line 21 column 1242` — column 1242 being a
+    //! sentence — and printed the diagnosis where the cause should have been.
+
+    use super::{parse_candidate, strip_fence};
+
+    const DOC: &str = "kind: flow\nschema: 1\nsteps: []";
+
+    #[test]
+    fn a_fence_after_prose_is_still_a_fence() {
+        // `strip_prefix("```")` missed this, which is the whole finding.
+        let answer = format!("Here is what I think went wrong.\n\nAnd the recipe:\n\n```yaml\n{DOC}\n```\n");
+        assert_eq!(strip_fence(&answer), DOC);
+    }
+
+    #[test]
+    fn a_fence_at_the_start_still_works() {
+        assert_eq!(strip_fence(&format!("```yaml\n{DOC}\n```")), DOC);
+        assert_eq!(strip_fence(&format!("```\n{DOC}\n```")), DOC);
+    }
+
+    #[test]
+    fn prose_with_no_fence_is_cut_at_the_document() {
+        let answer = format!("The previous recipe built successfully but is missing two files.\n\n{DOC}");
+        assert_eq!(strip_fence(&answer), DOC);
+    }
+
+    #[test]
+    fn an_indented_kind_is_not_a_document_start() {
+        // `kind:` inside a mapping is a field. Cutting there would take the tail of a document and
+        // return it as the whole thing, which parses and means something else.
+        let doc = "schema: 1\nsteps:\n  - kind: run\n    cmd: make";
+        assert_eq!(strip_fence(doc), doc);
+    }
+
+    #[test]
+    fn a_bare_document_is_left_alone() {
+        assert_eq!(strip_fence(DOC), DOC);
+    }
+
+    #[test]
+    fn a_strategy_field_gets_the_same_treatment_as_the_answer() {
+        // The observed shape: a well-formed candidate whose `strategy` is not a bare document.
+        // Nothing cleaned it, so `from_yaml` met a fence and the caller blamed the model.
+        let json = serde_json::json!({
+            "diagnosis": "The previous recipe built successfully but is missing prop-types.js.",
+            "strategy": format!("```yaml\n{DOC}\n```"),
+        })
+        .to_string();
+        let c = parse_candidate(&json).expect("parses");
+        assert_eq!(c.strategy, DOC, "the fence survived into the strategy field");
+        assert!(c.diagnosis.starts_with("The previous recipe"));
+    }
+
+    #[test]
+    fn a_strategy_field_of_prose_then_yaml_is_cut_too() {
+        let json = serde_json::json!({
+            "diagnosis": "d",
+            "strategy": format!("These are generated at publish time by the build script.\n\n{DOC}"),
+        })
+        .to_string();
+        assert_eq!(parse_candidate(&json).expect("parses").strategy, DOC);
     }
 }
