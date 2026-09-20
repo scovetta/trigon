@@ -24,7 +24,14 @@ use crate::{Api, Principal};
 /// A lockfile is a body somebody else composed, and every cap in this crate exists because one of
 /// them was measured in the wrong unit. Eight MiB is a 40,000-package `package-lock.json` with
 /// room over; the parse holds the text and one `Package` per entry, both linear in it.
-const MAX_LOCKFILE: usize = 8 << 20;
+///
+/// **The route's transport limit is derived from this and not written down twice.** It was: axum
+/// caps a buffered body at 2 MiB by default, so the eight documented here was never the number
+/// that applied. A 3 MiB lockfile — well inside what this claims to read — was refused by the
+/// framework before the handler saw it, with a plain-text `length limit exceeded` instead of the
+/// `{error, detail}` every other refusal in this crate produces. Two caps on one quantity, one of
+/// them invisible, disagreeing: see [`crate::BODY_LIMIT`].
+pub(crate) const MAX_LOCKFILE: usize = 8 << 20;
 
 /// `POST /v1/check` — a lockfile in, a verdict table out.
 ///

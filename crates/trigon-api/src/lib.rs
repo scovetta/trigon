@@ -93,6 +93,18 @@ impl Api {
     }
 }
 
+/// How much body `POST /v1/check` will buffer, one byte above the cap the handler enforces.
+///
+/// The extra byte is the whole point: at exactly `MAX_LOCKFILE + 1` the request still reaches the
+/// handler, which refuses it by its own rule and says what the cap is and how far over the body
+/// went. Without it the framework refuses first, and its rejection is plain text with no `error`
+/// code — a client that reads `error` to decide what to tell the user gets nothing.
+///
+/// Anything beyond this is still stopped here, which is what a transport limit is for: the handler
+/// cannot decline a body that has already been buffered into memory to be measured.
+const BODY_LIMIT: axum::extract::DefaultBodyLimit =
+    axum::extract::DefaultBodyLimit::max(fleet::MAX_LOCKFILE + 1);
+
 /// The routes.
 ///
 /// One of them is a `POST`, and it enqueues. The rule this crate keeps is not "no writes" — that
@@ -123,7 +135,10 @@ pub fn router(api: Arc<Api>) -> axum::Router {
         .route("/v1/me", get(request::me))
         .route("/v1/queue", get(request::queue_state))
         // The three views docs/11-interfaces.md §3 asks for that the corpus browser lacked.
-        .route("/v1/check", axum::routing::post(fleet::check))
+        .route(
+            "/v1/check",
+            axum::routing::post(fleet::check).layer(BODY_LIMIT),
+        )
         .route("/v1/clusters", get(fleet::clusters))
         .route("/v1/fleet", get(fleet::fleet))
         .route("/v1/jobs/{id}/events", get(request::job_events))
