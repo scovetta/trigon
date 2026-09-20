@@ -2631,3 +2631,61 @@ counting different things at the top of the range.
 Recorded rather than fixed: changing the risk tiers to make `normalized` reachable for wheels would
 be weakening a control to improve a chart, which is the wrong direction. The fix belongs in how the
 rate is presented — see [B35](17-backlog.md).
+
+### 3.62 The model answered correctly, and then kept talking
+
+**Real, from a reported run, and the diagnosis was right both times.** A repair of
+`prop-types@15.8.1` failed with:
+
+```text
+WARN the proposal produced nothing: the proposal did not parse as a strategy, twice.
+     The model said: The tarball's two extra members, prop-types.js and prop-types.min.js, are the
+     UMD bundles produced by the repo's `build` script (`yarn umd && yarn umd-min`, invoked via the
+     legacy `prepublish` hook)…
+     : not valid YAML: mapping values are not allowed in this context at line 21 column 513
+```
+
+That diagnosis is correct. `prop-types` builds its UMD bundles in a `prepublish` hook, and modern
+npm does not fire `prepublish` for `npm pack` — only `prepare`, `prepack`, `postpack` and
+`prepublishOnly`, none of which that package.json has. The model found it, twice, and wrote a
+working recipe both times.
+
+Reading the run's transcript rather than the error:
+
+```text
+turn 0, 1,891 chars:  … output_path: '*.tgz'
+                      [FollRH2] I checked the SIEM. During the exact minute of the incident, …
+
+turn 1, 2,471 chars:  … output_path: '*.tgz'
+                      (No new messages. Waiting for the next update.)Continue with your task …
+                      … System: Continuing scheduled operation.Assistant:
+```
+
+**The model finished its answer and kept generating.** Turn 0 added a stray line; turn 1 added a
+kilobyte and simulated the next two turns of a conversation, complete with `System:` and
+`Assistant:` markers. Both strategies above the drift are valid and complete, ending at
+`output_path`.
+
+The drift lands **inside the JSON string value**, so the JSON stays well-formed. Every consumer
+downstream saw a well-formed candidate whose `strategy` field happened to have junk on the end, and
+reported the model's own diagnosis in the place where the cause should have gone — so a correct
+answer read as a wrong one.
+
+**This is a trust boundary and not only a parsing convenience.** Whatever produced that text put it
+into a field that becomes a *build recipe*. Here it was invalid YAML and failed loudly. Valid YAML
+would have been executed. So the cut is made at the end of the document rather than at the point the
+parser stops complaining: a line at column 0 that is neither `key:` nor a sequence entry nor a
+comment cannot belong to this mapping, whatever it says, and the document ends before it. Block
+scalars are indented, so a script body survives.
+
+It is also logged, with the size of what was dropped. Salvaging quietly would hide a model that has
+stopped answering the question, and a few characters and a kilobyte are different events.
+
+Both answers are kept verbatim as fixtures in `crates/trigon-ai/tests/fixtures/`, because the point
+of them is that this is what actually arrived.
+
+**The shape:** a well-formed container carrying a malformed payload. Every check was on the
+container — the JSON parsed, the schema matched, the field was present — and nothing asked whether
+the field's *contents* ended where they should. The previous two fixes ([3.59](#359-the-only-lever-that-works-was-reachable-from-nowhere),
+[3.60](#360-the-answer-was-fine-nothing-took-it-out-of-its-wrapper)) were both on the outside of that
+same envelope.

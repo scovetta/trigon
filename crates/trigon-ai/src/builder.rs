@@ -314,6 +314,19 @@ pub fn parse_candidate(text: &str) -> Result<Candidate, LlmError> {
 /// diagnosis printed where the cause should have been.
 fn clean(mut c: Candidate) -> Candidate {
     let unwrapped = strip_fence(&c.strategy);
+    let kept = &unwrapped[..document_end(unwrapped)];
+    let dropped = unwrapped.len() - kept.len();
+    if dropped > 0 {
+        // Said out loud. Salvaging quietly would hide a model that is no longer answering the
+        // question, and the size is the signal: a few characters is a stray line, a kilobyte is
+        // something else.
+        tracing::warn!(
+            dropped,
+            tail = %unwrapped[kept.len()..].chars().take(80).collect::<String>(),
+            "the answer continued past the end of the document; the remainder was not used"
+        );
+    }
+    let unwrapped = kept.trim_end();
     // **Only where there was something to unwrap.** An answer that was already a bare document is
     // returned byte for byte, including its trailing newline: normalizing a field that was fine
     // means a transcript no longer round-trips and a replay stops comparing equal, for no gain.
@@ -354,6 +367,62 @@ fn strip_fence(s: &str) -> &str {
         }
     }
     s
+}
+
+/// Where the document stops.
+///
+/// **A model can keep generating past the end of its answer**, and when it does so inside a JSON
+/// string value the JSON stays well-formed — so every consumer downstream sees the drift as part of
+/// the strategy. Observed twice in one repair of `prop-types@15.8.1`, on a correct diagnosis and a
+/// correct recipe:
+///
+/// ```text
+/// output_path: '*.tgz'
+/// [FollRH2] I checked the SIEM. During the exact minute of the incident, your login was …
+/// ```
+///
+/// and, on the retry, a kilobyte ending `System: Continuing scheduled operation.Assistant:` —
+/// the model simulating a conversation past its own answer.
+///
+/// A line at column 0 that is neither `key:` nor a sequence entry cannot belong to a YAML mapping,
+/// whatever it says, so the document ends before it. Block-scalar bodies are indented and a comment
+/// is a comment, so both survive.
+///
+/// **This is a trust boundary, not only a parsing convenience.** Whatever produced that text put it
+/// in a field that becomes a build recipe. Here it was invalid YAML and failed loudly; valid YAML
+/// would have been executed. Cutting at the document's end is what makes the failure mode "the
+/// recipe stops where the model stopped answering" rather than "the recipe includes whatever came
+/// after".
+fn document_end(s: &str) -> usize {
+    let mut at = 0usize;
+    for line in s.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let starts_at_column_zero =
+            !body.is_empty() && !body.starts_with(' ') && !body.starts_with('\t');
+        if starts_at_column_zero && !belongs_to_a_mapping(body) {
+            return at;
+        }
+        at += line.len();
+    }
+    at
+}
+
+/// Whether a column-zero line can be part of the document: a key, a sequence entry, a comment, or
+/// one of YAML's own document markers.
+fn belongs_to_a_mapping(line: &str) -> bool {
+    if line.starts_with('#') || line.starts_with("- ") || line == "---" || line == "..." {
+        return true;
+    }
+    // `key:` or `key: value`, where a key is an identifier. Deliberately tighter than YAML allows —
+    // a plain scalar with a colon somewhere in it is legal YAML and is not what this schema emits,
+    // and the whole point here is to be strict about what counts as the document.
+    let Some((key, _)) = line.split_once(':') else {
+        return false;
+    };
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// Where a line beginning with `marker` starts, at column 0. `None` when there is no such line.

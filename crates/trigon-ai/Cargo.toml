@@ -17,3 +17,8 @@ thiserror.workspace = true
 sha2.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 tracing.workspace = true
+
+[dev-dependencies]
+# The drift fixtures assert that a salvaged recipe still parses as a strategy, which only the
+# strategy parser can say. A dev-dependency, so nothing in the shipped crate links it.
+trigon-strategy.workspace = true
