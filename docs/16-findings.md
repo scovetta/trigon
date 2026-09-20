@@ -2783,3 +2783,60 @@ satisfied by the neighbouring arm's keep.
 
 **The shape:** a fallback that was never needed until the happy path stopped being happy. The arm
 was correct for every run where the repair worked, which is every run anyone tested it on.
+
+### 3.65 `yarn <script>` is `npm run <script>`, and the rule table said otherwise
+
+**A deterministic rung, and a correction to a rule that was half right.**
+
+`trigon-core`'s failure table classifies `yarn: not found` as `npm/unsupported-package-manager`,
+`repairable: false`, on this reasoning:
+
+> Putting yarn in a base image would run it with *some* yarn and produce a verdict about a build the
+> publisher never did.
+>
+> A different recipe cannot conjure support for a package manager. Builder work, not repair.
+
+The first sentence is right and the second is not. What matters is **what yarn is being asked to
+do.** As a resolver — `yarn install`, `yarn add`, anything reading a `yarn.lock` — it is genuinely
+unsupported, and installing some yarn would answer a question nobody asked. As a *task runner* it is
+`npm run` spelled differently, and a different recipe does not need to conjure anything.
+
+`prop-types@15.8.1`, from the published artifact's own `package.json`:
+
+```text
+umd        NODE_ENV=development browserify index.js -t loose-envify --standalone PropTypes -o prop-types.js
+umd-min    NODE_ENV=production  browserify index.js -t loose-envify -t uglifyify --standalone PropTypes …
+build      yarn umd && yarn umd-min
+prepublish not-in-publish || yarn build
+```
+
+The work is browserify, pinned in `devDependencies` and resolved through the mirror at the published
+moment. yarn resolves nothing here; it invokes two scripts. `npm run umd && npm run umd-min` runs
+the same binaries at the same versions.
+
+So the rewrite is deterministic, and it runs **before the model and without needing one** — which is
+what M3 means by a rung that lowers the model-invocation rate. Three properties it has to have:
+
+- **It refuses `yarn install`, `yarn add`, `yarn --version` and a bare `yarn`.** Returning `None`
+  rather than a partial rewrite: a recipe that both installs and runs needs yarn, and rewriting half
+  of it produces something that fails later and looks like a different problem.
+- **`yarn build` is not `npm run build`.** `build` is itself `yarn umd && yarn umd-min`, so handing
+  it to npm finds yarn again one level down. A script that reaches yarn is *expanded* into what it
+  would have run; one that does not is called directly.
+- **It terminates on a cycle.** `a: yarn b`, `b: yarn a` is a package somebody can publish.
+
+The case that actually fires is the third shape: `prop-types`'s strategy never mentions yarn at all.
+It runs `npm run build`, and `build` is where yarn appears — two levels below anything the recipe
+says.
+
+**And a tripwire had to be rewritten twice to keep up.** `every_place_a_proposal_is_accepted_
+validates_it_first` counted `match usable(…)` against acceptances, which held while every site was a
+`match` — the new rung guards with `usable(…).is_ok()` in an `&&` chain, so a correctly-guarded site
+counted as unguarded. Replacing the count with a byte window then failed on *correct* code, because
+a comment added above one acceptance pushed its guard 2,800 bytes away. It is anchored on where the
+proposal is bound now: validated between `Ok(next)` and `strategy = next`, which is the rule itself
+rather than a spelling or a distance.
+
+**The shape:** a rule that generalised from the hard case. Yarn-as-resolver really is unsupported,
+and the table wrote that down as "yarn is unsupported" — which is a larger claim, and the larger
+claim is what the code enforced.

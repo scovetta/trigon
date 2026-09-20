@@ -988,6 +988,9 @@ mod worker;
 #[cfg(feature = "build")]
 mod check;
 
+#[cfg(feature = "build")]
+mod yarn;
+
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
     let cli = Cli::parse();
@@ -4240,6 +4243,40 @@ mod rebuild {
             let Some(failure) = this_failure else {
                 break (built, strategy_digest);
             };
+
+            // **The deterministic rung, before the model and without needing one.**
+            //
+            // `yarn <script>` where `<script>` is a key in the checkout's `package.json` is
+            // `npm run <script>` by another name: same script, same binaries from the same pinned
+            // dependency tree. The rule table is right that installing *some* yarn would produce a
+            // verdict about a build the publisher never did — and wrong that "a different recipe
+            // cannot conjure support for a package manager", because when yarn is a task runner a
+            // different recipe does not need to.
+            //
+            // `prop-types@15.8.1` is the case: its strategy never mentions yarn, and `npm run
+            // build` reaches `yarn umd && yarn umd-min` two levels down.
+            //
+            // Tried here rather than after the model because `docs/13-roadmap.md`'s M3 asks for
+            // exactly this — a rule that answers a failure outright, before any provider is
+            // configured and without spending a token. It refuses on `yarn install` and friends,
+            // where yarn is resolving rather than running.
+            if failure.code == "npm/unsupported-package-manager"
+                && failure.subject.as_deref() == Some("yarn")
+                && let Some(dir) = checkout.as_deref()
+                && let Some(next) = crate::yarn::without_yarn(&strategy, &crate::yarn::scripts(dir))
+                && usable(&next, timewarp).is_ok()
+                && changes_anything(&next, &strategy_digest)
+            {
+                if verbose {
+                    println!("  repair     rewrote yarn as npm run; no model needed");
+                }
+                report
+                    .repairs
+                    .push("deterministic: yarn <script> -> npm run <script>".into());
+                strategy = next;
+                continue;
+            }
+
             let Some(cfg) = &model else {
                 break (built, strategy_digest);
             };
@@ -8808,17 +8845,37 @@ output_dir: trigon-pack
         // happen is a *third* acceptance site added without the check. A behavioural test on the
         // two that exist would pass on the day someone adds one.
         let src = include_str!("main.rs");
-        let accepts = src.matches("strategy = next;").count();
+        // **The property, not one spelling of it.** This counted `match usable(&next, timewarp)`
+        // against acceptances, which held while every site was a `match` — and then the
+        // deterministic yarn rung arrived, guarding with `usable(&next, timewarp).is_ok()` in an
+        // `&&` chain. Counting one form made a correctly-guarded site look unguarded.
+        //
+        // So: every acceptance must have a validation somewhere above it in the same block.
+        let accept = concat!("strategy = ", "next;");
+        let guard = concat!("usable(&next,", " timewarp)");
+        let sites: Vec<usize> = src.match_indices(accept).map(|(i, _)| i).collect();
         assert!(
-            accepts >= 2,
+            sites.len() >= 2,
             "the acceptance sites moved; this test needs rewriting"
         );
-        let guards = src.matches("match usable(&next, timewarp)").count();
-        assert_eq!(
-            accepts, guards,
-            "{accepts} place(s) accept a repair proposal and {guards} validate it first. An \
-             unvalidated one can abort a run that already has an answer."
-        );
+        for at in sites {
+            // **Anchored on where `next` is bound, not on a byte count.** A window was the first
+            // attempt and had to keep growing: a comment added above one acceptance pushed its
+            // guard 2,800 bytes away and the check started failing on correct code. The rule is
+            // that the proposal is validated between being bound and being accepted, so those are
+            // the two ends to measure between.
+            let bound = ["Ok(next)", "Some(next)"]
+                .iter()
+                .filter_map(|b| src[..at].rfind(b))
+                .max()
+                .expect("an acceptance names a proposal that was bound somewhere above it");
+            assert!(
+                src[bound..at].contains(guard),
+                "a repair proposal bound at byte {bound} is accepted at byte {at} without \
+                 `{guard}` in between. An unvalidated one can abort a run that already has an \
+                 answer."
+            );
+        }
         // And each guard must keep the run's result rather than propagate. Both paths break with
         // the state they had; neither may use `?` on the proposal.
         // Split so this test's own source does not contain the pattern it forbids — it reads
