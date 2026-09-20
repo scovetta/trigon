@@ -2737,3 +2737,49 @@ is guarded scans for the new call shape.
 **The shape:** a validator that reconstructs the world instead of being handed it. `Default` is a
 reasonable value for a field nobody has an opinion about and a wrong one for a field the caller
 knows — and the difference is invisible, because both produce a `Context` that renders.
+
+### 3.64 A failed repair threw away the verdict the run had already reached
+
+**Real, reported, and listed in [B29](17-backlog.md) unactioned since the whole-tree review.**
+
+`prop-types@15.8.1` built, compared, and diverged — two UMD bundles missing, exactly as established
+in [3.62](#362-the-model-answered-correctly-and-then-kept-talking). The loop then accepted a repair,
+the repaired recipe called `yarn` on an image without it, and the run recorded:
+
+```text
+outcome: None      terminal: build-failed:build      comparison: None
+```
+
+The divergence was computed, confirmed, and discarded — and the run signed a build observation and
+nothing else. The finding it had was replaced by an error about the *suggestion for improving it*.
+
+The repair site's own comment says this must not happen:
+
+> Both arms below keep `judged`, so the run reports the divergence it found rather than an error
+> about the suggestion for improving it.
+
+There are **three** arms. The two terminal ones keep it. The middle one — accept the repair and go
+round again — did not, because at that point nothing has gone wrong yet and the next iteration was
+expected to produce a better answer. When the next iteration failed instead, there was nothing to
+fall back to.
+
+Two changes, because keeping the comparison alone is not enough:
+
+- The accept arm keeps `judged`, and a later iteration that reaches a comparison overwrites it, so
+  the last real answer always wins.
+- **And the build it came from.** Three fields of the record are read off `built` — `attestable`,
+  `isolation`, and the network transcript — and describing the run by the attempt that failed would
+  report no isolation and no transcript, which reads as *no build ran* rather than *the second one
+  did not*. `judged_built` carries the successful build beside its comparison.
+
+A `Void` still outranks both: a tripped guard means the artifact under test reached the build, so
+nothing the run produced is evidence, including a comparison made before the trip.
+
+The tripwire that already asserts every acceptance site validates its proposal now also asserts
+this one keeps its comparison — pinned as a *pair*, anchored on the stash, and scoped to the arm's
+own `Ok(()) => {`. A count would not do: there are two accept arms and only one has a verdict to
+keep, and a window wide enough to span the comment between the two lines is wide enough to be
+satisfied by the neighbouring arm's keep.
+
+**The shape:** a fallback that was never needed until the happy path stopped being happy. The arm
+was correct for every run where the repair worked, which is every run anyone tested it on.

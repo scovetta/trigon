@@ -1634,6 +1634,7 @@ mod build {
     /// on the floor, so the record was filled in from a *freshly constructed, mirror-less* runner's
     /// advertised capabilities. That is a different object than the one that ran, and it answered a
     /// different question.
+    #[derive(Clone)]
     pub struct Built {
         /// Exactly `transcript.is_some()`; see [`trigon_sandbox::BuildOutcome::attestable`].
         pub attestable: bool,
@@ -3970,13 +3971,16 @@ mod rebuild {
         // than returned from inside it, because the mirror is torn down after the loop and an
         // early return would leave it running.
         let mut judged: Option<(PathBuf, trigon_compare::Comparison)> = None;
+        // The build that produced `judged`, kept so a later failed repair does not describe the
+        // run by the attempt that failed. See the fallback below the loop.
+        let mut judged_built: Option<crate::build::Built> = None;
         let mut compare_error: Option<Outcome> = None;
         // What the last attempt built, carried out of the loop because the guard is read again
         // after it and asks a question only this file can answer. Uninitialized on purpose: every
         // path out of the loop runs the assignment below first, and saying so here means a future
         // early `break` fails to compile rather than silently voiding against a stale `None`.
         let mut produced: Option<PathBuf>;
-        let (built, strategy_digest) = loop {
+        let (mut built, strategy_digest) = loop {
             // A fresh directory every attempt, including the first. Without clearing it before
             // the first, a `--work` directory reused across targets hands the *previous run's*
             // artifact to the comparison: `newest_file` takes the last path in sort order, which
@@ -4169,6 +4173,29 @@ mod rebuild {
                                     break (built, strategy_digest);
                                 }
                                 Ok(()) => {
+                                    // **Keep it here too.** The comment above says both arms keep
+                                    // `judged`; there are three, and this one — the arm that
+                                    // accepts a repair and goes round again — did not. So a
+                                    // divergence found on the first pass was dropped the moment
+                                    // the *repaired* recipe failed to build, and the run reported
+                                    // `build-failed` about the suggestion instead of the
+                                    // divergence it had already established.
+                                    //
+                                    // Observed on `prop-types@15.8.1`: two UMD bundles missing,
+                                    // compared and confirmed, then a repaired recipe that called
+                                    // `yarn` on an image without it — and the run recorded no
+                                    // outcome at all.
+                                    //
+                                    // A later iteration that reaches a comparison overwrites this,
+                                    // so the last real answer always wins.
+                                    judged = Some((rebuilt, comparison));
+                                    // And the build it came from. Three fields of the record are
+                                    // read off `built` — `attestable`, `isolation` and the network
+                                    // transcript — and the *failed* repair attempt would answer all
+                                    // three about a build that never finished: no isolation, no
+                                    // transcript, which reads as "no build ran" rather than "the
+                                    // second one did not".
+                                    judged_built = built.as_ref().ok().cloned();
                                     strategy = next;
                                     continue;
                                 }
@@ -4535,8 +4562,16 @@ mod rebuild {
                 });
             }
         }
-        if let Err(e) = built {
+        // **A failed repair must not cost the answer.** `judged` holds a comparison only when an
+        // earlier iteration produced one, so reaching here with it set means: the package was
+        // built, compared, and found to diverge, and then an *attempt to improve the recipe*
+        // failed. The divergence is the finding; the failed attempt is a note about our own
+        // suggestion. Reporting the second and discarding the first is what the repair loop's own
+        // comments say must never happen, and it happened.
+        if let Err(e) = &built {
             let text = e.to_string();
+            // A void outranks everything: the artifact under test reached the build, so nothing
+            // this run produced is evidence, including any comparison made before the trip.
             if let Some(reason) = text.strip_prefix("void: ") {
                 report.void_reason = Some(reason.to_string());
                 return Ok(Ran {
@@ -4547,11 +4582,32 @@ mod rebuild {
                     record_id: None,
                 });
             }
-            return Ok(Ran {
-                outcome: build_outcome(&e),
-                model_calls: calls(&model),
-                record_id: None,
-            });
+            if judged.is_none() {
+                return Ok(Ran {
+                    outcome: build_outcome(e),
+                    model_calls: calls(&model),
+                    record_id: None,
+                });
+            }
+            // Otherwise fall through to the comparison below. Reaching here with `judged` set
+            // means the package was built, compared, and found to diverge — and then an *attempt
+            // to improve the recipe* failed to build. The divergence is the finding; the failed
+            // attempt is a note about our own suggestion, and reporting the second while
+            // discarding the first is what the repair loop's own comments say must never happen.
+            if verbose {
+                println!("  repair     the repaired recipe did not build; keeping the divergence");
+            }
+            report
+                .repair_stopped
+                .get_or_insert(format!("the repaired recipe did not build: {text}"));
+            tracing::warn!(
+                "a repair attempt failed to build; reporting the divergence found before it: {text}"
+            );
+        }
+        // Describe the run by the build the comparison came from, not by the attempt that failed
+        // after it.
+        if let Some(b) = judged_built {
+            built = Ok(b);
         }
 
         mark("judge");
@@ -8767,6 +8823,42 @@ output_dir: trigon-pack
         // the state they had; neither may use `?` on the proposal.
         // Split so this test's own source does not contain the pattern it forbids — it reads
         // `main.rs`, and `main.rs` is where this assertion lives.
+        // **Every arm keeps the answer, including the one that goes round again.**
+        //
+        // The comment at the divergence site says "both arms below keep `judged`" — and there are
+        // three. The middle one accepts the repair and continues, and did not. So a divergence
+        // that had been built, compared and confirmed was dropped the moment the *repaired* recipe
+        // failed to build: `prop-types@15.8.1` reported no outcome at all, having established two
+        // minutes earlier that two UMD bundles were missing.
+        //
+        // Pinned as a *pair*, not as a count. There are two accept arms and only one of them has
+        // a comparison to keep: the build-failure path has no verdict yet, so requiring one there
+        // would be wrong. The divergence arm is the one that stashes the build, so that assignment
+        // is the anchor — and the keep must sit immediately before it.
+        //
+        // Split, so this test's own source does not satisfy the check it is making, which is the
+        // same trap the assertion above documents.
+        let stash = concat!("judged_built = built", ".as_ref().ok().cloned();");
+        let keep = concat!("judged = Some((rebuilt,", " comparison));");
+        assert_eq!(
+            src.matches(stash).count(),
+            1,
+            "the divergence accept arm moved or was duplicated; this check needs rewriting"
+        );
+        let at = src.find(stash).expect("checked just above");
+        // Scoped to this arm, from its own `Ok(()) => {` — a fixed window would either be too
+        // small for the comment between the two lines or wide enough to catch the *previous*
+        // arm's keep, and a check satisfied by the neighbour checks nothing.
+        let arm = src[..at]
+            .rfind("Ok(()) => {")
+            .expect("the stash sits inside a match arm");
+        assert!(
+            src[arm..at].contains(keep),
+            "the arm that accepts a repair after a divergence stashes the build without keeping \
+             the comparison. A repaired recipe that then fails to build would lose a verdict the \
+             run had already established and report `build-failed` instead."
+        );
+
         let propagates = concat!("usable(&next, timewarp)", "?");
         assert!(
             !src.contains(propagates),
