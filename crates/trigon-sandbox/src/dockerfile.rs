@@ -73,23 +73,9 @@ impl BuildContext {
 /// `command -v` would not do. `ca-certificates` and `libatomic1` provide no binary, and a check
 /// that silently passes for them is not a check.
 pub fn verify_command(base_image: &str, deps: &[String]) -> String {
-    let img = base_image.to_ascii_lowercase();
-    let (family, query) = if img.contains("alpine") {
-        (Family::Alpine, "apk info -e")
-    } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
-        (Family::Fedora, "rpm -q")
-    } else {
-        (Family::Debian, "dpkg -s")
-    };
-    let mut names: Vec<String> = Vec::new();
-    for d in deps {
-        for n in expand(d, family) {
-            if !names.contains(&n) {
-                names.push(n);
-            }
-        }
-    }
-    let list = names.join(" ");
+    let family = Family::of(base_image);
+    let query = family.query();
+    let list = family.packages(deps).join(" ");
     // The real reference, not a placeholder. This printed the literal `<this image>`, so the one
     // command a reader needs at the moment they need it was the one thing they had to go and
     // assemble by hand — from a digest scrolled off the top of the same output. `is_pinned` has
@@ -124,27 +110,9 @@ pub fn verify_command(base_image: &str, deps: &[String]) -> String {
 /// their own reasons — `base-image` installs unconditionally on purpose, since it is building an
 /// image *to* carry them.
 pub fn install_missing_command(base_image: &str, deps: &[String]) -> String {
-    let img = base_image.to_ascii_lowercase();
-    let (family, query, install) = if img.contains("alpine") {
-        (Family::Alpine, "apk info -e", "apk add --no-cache")
-    } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
-        (Family::Fedora, "rpm -q", "dnf install -y")
-    } else {
-        (
-            Family::Debian,
-            "dpkg -s",
-            "apt-get update && apt-get install -y --no-install-recommends",
-        )
-    };
-    let mut names: Vec<String> = Vec::new();
-    for d in deps {
-        for n in expand(d, family) {
-            if !names.contains(&n) {
-                names.push(n);
-            }
-        }
-    }
-    let list = names.join(" ");
+    let family = Family::of(base_image);
+    let (query, install) = (family.query(), family.install());
+    let list = family.packages(deps).join(" ");
     format!(
         "missing=\"\"\n\
          for p in {list}; do\n\
@@ -160,26 +128,9 @@ pub fn install_missing_command(base_image: &str, deps: &[String]) -> String {
 }
 
 pub fn install_command(base_image: &str, deps: &[String]) -> String {
-    let img = base_image.to_ascii_lowercase();
-    let (family, install) = if img.contains("alpine") {
-        (Family::Alpine, "apk add --no-cache")
-    } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
-        (Family::Fedora, "dnf install -y")
-    } else {
-        (
-            Family::Debian,
-            "apt-get update && apt-get install -y --no-install-recommends",
-        )
-    };
-    let mut names: Vec<String> = Vec::new();
-    for d in deps {
-        for n in expand(d, family) {
-            if !names.contains(&n) {
-                names.push(n);
-            }
-        }
-    }
-    format!("{install} {}", names.join(" "))
+    let family = Family::of(base_image);
+    let install = family.install();
+    format!("{install} {}", family.packages(deps).join(" "))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -187,6 +138,71 @@ enum Family {
     Debian,
     Alpine,
     Fedora,
+}
+
+impl Family {
+    /// Which package manager's names an image speaks, from the image reference.
+    ///
+    /// **One sniff.** This test lived in four places — the three command builders and the public
+    /// `family_of` — each with its own copy of the same `contains` chain and its own payload
+    /// beside it. Four readings of one string is four chances for them to disagree about an image,
+    /// and the disagreement would show up as a build installing Debian names on Fedora rather than
+    /// as anything that looks like a bug here.
+    ///
+    /// It is a guess from a string and always has been; the probe each command builds is what
+    /// decides.
+    fn of(base_image: &str) -> Family {
+        let img = base_image.to_ascii_lowercase();
+        if img.contains("alpine") {
+            Family::Alpine
+        } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
+            Family::Fedora
+        } else {
+            Family::Debian
+        }
+    }
+
+    /// Ask whether one package is present. Exit status is the answer.
+    fn query(self) -> &'static str {
+        match self {
+            Family::Alpine => "apk info -e",
+            Family::Fedora => "rpm -q",
+            Family::Debian => "dpkg -s",
+        }
+    }
+
+    /// Install the packages named after it, with no prompt and no recommendations.
+    fn install(self) -> &'static str {
+        match self {
+            Family::Alpine => "apk add --no-cache",
+            Family::Fedora => "dnf install -y",
+            Family::Debian => "apt-get update && apt-get install -y --no-install-recommends",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Family::Alpine => "alpine",
+            Family::Fedora => "fedora",
+            Family::Debian => "debian",
+        }
+    }
+
+    /// Every distribution package these logical dependencies expand to, in order, without repeats.
+    ///
+    /// Order matters and a `HashSet` would lose it: the list reaches a shell command, and a command
+    /// whose arguments reorder between runs makes an image layer that will not cache.
+    fn packages(self, deps: &[String]) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for d in deps {
+            for n in expand(d, self) {
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+        names
+    }
 }
 
 /// A strategy's logical system dependency, as this base image's packages.
@@ -203,14 +219,7 @@ enum Family {
 /// leaving a reader of the image to redo it. It is a guess from a string and always has been; the
 /// probe is what decides.
 pub fn family_of(base_image: &str) -> &'static str {
-    let img = base_image.to_ascii_lowercase();
-    if img.contains("alpine") {
-        "alpine"
-    } else if img.contains("fedora") || img.contains("rocky") || img.contains("almalinux") {
-        "fedora"
-    } else {
-        "debian"
-    }
+    Family::of(base_image).name()
 }
 
 /// Whether automation may put a logical dependency into an image.
@@ -735,5 +744,71 @@ mod installing_only_what_is_absent {
             fedora.contains("rpm -q") && fedora.contains("dnf install"),
             "{fedora}"
         );
+    }
+}
+
+#[cfg(test)]
+mod one_sniff {
+    //! The distribution is read from the image reference once.
+    //!
+    //! It used to be read in four places — `verify_command`, `install_missing_command`,
+    //! `install_command` and the public `family_of` — each carrying its own copy of the same
+    //! `contains` chain with a different payload beside it. Four readings of one string is four
+    //! chances to disagree, and a disagreement would surface as a build installing Debian package
+    //! names on Fedora rather than as anything that looks like a bug in this file.
+
+    use super::*;
+
+    const IMAGES: &[(&str, &str)] = &[
+        ("docker.io/library/alpine@sha256:aa", "alpine"),
+        ("registry.fedoraproject.org/fedora:41", "fedora"),
+        ("docker.io/rockylinux/rockylinux:9", "fedora"),
+        ("quay.io/almalinux/almalinux:9", "fedora"),
+        ("docker.io/library/debian:bookworm", "debian"),
+        ("mcr.microsoft.com/dotnet/sdk:8.0", "debian"),
+    ];
+
+    #[test]
+    fn every_builder_reads_the_same_family_from_one_image() {
+        let deps = vec!["cc".to_string()];
+        for (image, want) in IMAGES {
+            assert_eq!(family_of(image), *want, "{image}");
+
+            // Each builder emits its family's own package manager, so the command text is a
+            // readable proxy for which family it decided on.
+            let family = Family::of(image);
+            let (query, install) = (family.query(), family.install());
+
+            let verify = verify_command(image, &deps);
+            assert!(verify.contains(query), "{image}: verify used another query");
+
+            let missing = install_missing_command(image, &deps);
+            assert!(missing.contains(query), "{image}: probe disagreed");
+            assert!(missing.contains(install), "{image}: install disagreed");
+
+            assert!(
+                install_command(image, &deps).contains(install),
+                "{image}: install_command disagreed"
+            );
+        }
+    }
+
+    /// An unrecognised image is Debian, and that is a decision rather than an accident.
+    #[test]
+    fn an_image_nobody_recognises_is_debian() {
+        assert_eq!(family_of("example.invalid/something:1"), "debian");
+    }
+
+    /// The expansion keeps its order and drops repeats.
+    ///
+    /// Order is load-bearing: the list becomes a shell command, and arguments that reorder between
+    /// runs produce an image layer that will not cache.
+    #[test]
+    fn packages_are_deduplicated_and_keep_their_order() {
+        let family = Family::of("docker.io/library/debian:bookworm");
+        let once = family.packages(&["cc".to_string()]);
+        let twice = family.packages(&["cc".to_string(), "cc".to_string()]);
+        assert_eq!(once, twice, "a repeated dependency added a repeated package");
+        assert!(!once.is_empty(), "`cc` should expand to something on Debian");
     }
 }

@@ -110,6 +110,27 @@ async fn commit_for(
 }
 
 /// The sentence a mutable tag deserves beside a verdict built on it.
+/// The opening shared by every rung that has to *find* a commit.
+///
+/// PyPI, crates.io and NuGet all reach for a tag, because none of their registries records a
+/// commit of its own. npm does not share this: it publishes `gitHead`, so its rung asks a
+/// different question and keeps its own opening.
+///
+/// `None` means there is nothing to infer from — no declared repository, or no commit findable —
+/// which is the one empty candidate list all three callers already returned for either case.
+///
+/// The tag assumption travels with the commit because it is a fact about *how* the commit was
+/// found: a tag can be moved or deleted after a release, so this is where it points today rather
+/// than what the registry recorded at publish time.
+async fn found_commit(
+    target: &ResolvedTarget,
+) -> Option<(&trigon_core::SourceProvenance, String, SourceDiscovery, Vec<String>)> {
+    let source = target.source.as_ref()?;
+    let (commit, how, tag) = commit_for(target, false).await.ok()?;
+    let assumptions = tag.map(|t| vec![from_a_tag(&t)]).unwrap_or_default();
+    Some((source, commit, how, assumptions))
+}
+
 fn from_a_tag(tag: &str) -> String {
     format!(
         "the commit comes from tag `{tag}` rather than from the registry, and a tag is mutable: \
@@ -590,24 +611,12 @@ impl StrategyInferrer for PyPiInferrer {
     }
 
     async fn infer(&self, target: &ResolvedTarget) -> Result<Vec<Candidate>, RegistryError> {
-        let Some(source) = &target.source else {
-            return Ok(Vec::new());
-        };
-
-        let mut assumptions = Vec::new();
-
         // PyPI records no commit, so one has to be found. A tag is the cheap rung and it is right
-        // for most projects that tag releases at all.
-        // Named as mutable, not merely as "from a tag". A tag can be moved or deleted after a
-        // release — `pad-left 2.1.0` in the corpus is a package whose recorded commit was
-        // force-pushed away — so this is the commit the tag points at today, which is a good
-        // approximation and not the same claim as a commit the registry recorded at publish time.
-        let Ok((commit, how, tag)) = commit_for(target, false).await else {
+        // for most projects that tag releases at all — see [`found_commit`] for what that costs in
+        // certainty.
+        let Some((source, commit, how, mut assumptions)) = found_commit(target).await else {
             return Ok(Vec::new());
         };
-        if let Some(tag) = tag {
-            assumptions.push(from_a_tag(&tag));
-        }
 
         // Where in the repository the project is. A declared subdirectory wins — npm has a field
         // for it and a PyPI `tree/<ref>/<path>` link says it in passing — and where nothing
@@ -836,20 +845,12 @@ impl StrategyInferrer for CratesIoInferrer {
     }
 
     async fn infer(&self, target: &ResolvedTarget) -> Result<Vec<Candidate>, RegistryError> {
-        let Some(source) = &target.source else {
-            return Ok(Vec::new());
-        };
-        let mut assumptions = Vec::new();
-
         // `.cargo_vcs_info.json` inside the published `.crate` gives the commit exactly, and the
         // run reads it before inference — so unlike PyPI this rung usually has one already and the
         // tag ladder is the fallback rather than the rule.
-        let Ok((commit, how, tag)) = commit_for(target, false).await else {
+        let Some((source, commit, how, mut assumptions)) = found_commit(target).await else {
             return Ok(Vec::new());
         };
-        if let Some(tag) = tag {
-            assumptions.push(from_a_tag(&tag));
-        }
 
         // The toolchain, from the edition floor the resolver recorded. A floor is not a version, so
         // this says which it is: the lowest Cargo that could have packaged this edition, which is
@@ -1317,17 +1318,9 @@ impl StrategyInferrer for NuGetInferrer {
     }
 
     async fn infer(&self, target: &ResolvedTarget) -> Result<Vec<Candidate>, RegistryError> {
-        let Some(source) = &target.source else {
+        let Some((source, commit, how, mut assumptions)) = found_commit(target).await else {
             return Ok(Vec::new());
         };
-        let mut assumptions = Vec::new();
-
-        let Ok((commit, how, tag)) = commit_for(target, false).await else {
-            return Ok(Vec::new());
-        };
-        if let Some(tag) = tag {
-            assumptions.push(from_a_tag(&tag));
-        }
 
         // Where the project is. Declared subdirectory first; otherwise the repository is asked,
         // exactly as the PyPI rung does for a `setup.py` that is not at the root.
