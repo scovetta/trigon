@@ -2974,6 +2974,21 @@ build, no timewarp and no trust in Trigon. Two files in one published artifact c
 other, and anyone can unpack it and see. It is the case the project exists for, and it arrived as
 soon as the plumbing stopped failing first.
 
+**Corroborated, three times over.** Three separate runs — one replaying the failed transcript, one
+under `--image derive`, one fully live with three model calls — produced a rebuild that is
+**byte-identical across all three**: raw `sha256 7ac49bd035c6…`, against the published
+`1c739eb05d8a…`. Two of the three arrived there through *different* strategies (`1d4883ca47c8`,
+which runs `npm run build`, and `ac1619e568de`, which runs `npm run umd` and `npm run umd-min`
+separately) and still built the same bytes. The rebuild is deterministic to the byte; the
+published artifact is the outlier. The live run's verdict is signed:
+`attestations/npm/prop-types/15.8.1/…/divergence.intoto.json`, run `1789917709-1c739eb0`.
+
+The live run also spent 292 seconds of inference and two more 75-second builds re-asking the model
+about this divergence before the restating rule stopped it — because the brief names the member
+that differs and never shows the difference. A model that could see the twelve bytes would have
+had a chance to say what they mean; one shown `body,entry:size` can only guess at build flags.
+That is [B42](17-backlog.md).
+
 ### 3.68 Three rules that could never match
 
 Removing the yarn refusal meant reading the rule table, which is first-match-wins, and three rules

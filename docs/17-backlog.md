@@ -1708,3 +1708,21 @@ agree, and a test pinning the text would be a third copy.
 
 The real fix is for the API to send the sentence beside the key so the page has nothing to
 translate. That is a wire change, and the page would need a fallback for an older server.
+
+## B42. The divergence brief names the member that differs and never shows the difference
+
+`divergence_brief` gives the model the census, the difference codes and up to forty member names —
+and no content. On `prop-types@15.8.1` the whole divergence is twelve bytes on one line of one
+generated file, and it is unfixable: the published bundle was packed stale, from an older source
+than the CommonJS files beside it (§3.67b). Shown `body,entry:size`, the model proposed build-flag
+variations twice — 292 seconds of inference and two ~75-second builds — until the restating rule
+stopped it. Shown the diff, it could at least have said what the difference *is*, and at best said
+"no strategy change produces a stale file".
+
+The pieces exist: `trigon-api`'s member view already computes a bounded `TextDiff` with
+`MAX_DIFF_LINES` and refusal messages for what does not fit. The brief should reuse that shape —
+small text members only, hard cap on lines and bytes, binary members stay a name and a size — and
+the cap needs the §3.62 lesson applied: measure it in rendered prompt bytes, not in lines.
+
+Worth pairing with a way for the answer to *decline*: today a model that believes nothing will fix
+a divergence can only restate, and the loop needs two paid attempts to read restating as "stop".
