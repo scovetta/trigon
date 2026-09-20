@@ -2689,3 +2689,51 @@ container — the JSON parsed, the schema matched, the field was present — and
 the field's *contents* ended where they should. The previous two fixes ([3.59](#359-the-only-lever-that-works-was-reachable-from-nowhere),
 [3.60](#360-the-answer-was-fine-nothing-took-it-out-of-its-wrapper)) were both on the outside of that
 same envelope.
+
+### 3.63 The guard rendered the repair in a world the build does not live in
+
+**Real, reported, and the mirror image of the defect `usable` was written to close.**
+
+With [3.62](#362-the-model-answered-correctly-and-then-kept-talking) fixed, the repair loop reached
+the next step and threw the recipe away:
+
+```text
+repair  discarded: deps.[0].npm/deps/custom.[1].npm/install.[0].npm/npx.[0]: template:
+        invalid operation: timewarp_url was called but no mirror is configured for this run.
+        A build that pins a registry moment needs one, or it resolves against the live index.
+        — in `export npm_config_registry={{ timewarp_url('npm', with.registry_time) }}`
+```
+
+The message is correct and was asked in the wrong place. `usable` renders a proposal to decide
+whether to accept it, and built its `Context` like this:
+
+```rust
+env: trigon_strategy::EnvCtx {
+    arch: "x86_64".into(),
+    platform: "linux".into(),
+    has_repo: true,
+    ..Default::default()          // ← timewarp_base: String::new()
+},
+```
+
+`timewarp_base` empty means *no mirror*, so any recipe pinning a registry moment renders
+`timewarp_url(…)` and is refused. The run this happened in was at `--egress mirror-only`, with a
+mirror inside the build's network island — the tool printed *"mirror inside the build's network
+island, which is its only route out"* nine lines earlier. The model had asked for the published
+moment, which is exactly right for a reproduction, and the guard discarded it for depending on
+something the run had.
+
+**`usable` exists because of this defect in the other direction.** Its own comment records the
+first half: a guard that only rendered *accepted* a proposal the build then rejected, a repair for
+`xstate@4.38.3` replaced the strategy and died on the next iteration, and the run was filed
+`error:infra` with no failure code. The fix added an executability check. What neither half noticed
+is that **the context itself was a guess** — and a guard that validates in a world the build does
+not live in will reject what the build accepts as surely as it accepts what the build rejects.
+
+`usable` now takes the run's mirror, and the value is bound once so the build call and the two
+validation calls provably use the same one. The source tripwire that asserts every acceptance site
+is guarded scans for the new call shape.
+
+**The shape:** a validator that reconstructs the world instead of being handed it. `Default` is a
+reasonable value for a field nobody has an opinion about and a wrong one for a field the caller
+knows — and the difference is invisible, because both produce a `Context` that renders.

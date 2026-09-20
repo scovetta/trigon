@@ -3708,6 +3708,11 @@ mod rebuild {
                 .map(|a| a.port()),
             args.timewarp.as_deref(),
         );
+        // **One value, used by the build and by the validation.** The repair guard renders a
+        // proposal to decide whether to accept it, and rendering with a different mirror than the
+        // build will use makes that guard answer a different question. Bound here so the two
+        // cannot drift.
+        let timewarp = timewarp_host.as_deref().unwrap_or("timewarp");
 
         // Taken before the ladder consumes `args`, so the record can be written at the end without
         // keeping the whole argument struct alive.
@@ -3994,7 +3999,7 @@ mod rebuild {
                 &args.egress,
                 args.timeout,
                 false,
-                timewarp_host.as_deref().unwrap_or("timewarp"),
+                timewarp,
                 mirror_addr.as_deref(),
                 Some(args.mirror_image.as_str()),
                 verbose,
@@ -4150,7 +4155,7 @@ mod rebuild {
                             //
                             // Both arms below keep `judged`, so the run reports the divergence it
                             // found rather than an error about the suggestion for improving it.
-                            Ok(next) => match usable(&next) {
+                            Ok(next) => match usable(&next, timewarp) {
                                 Ok(()) if !changes_anything(&next, &strategy_digest) => {
                                     if verbose {
                                         println!(
@@ -4289,7 +4294,7 @@ mod rebuild {
                         //
                         // A repair is an attempt to do better than an answer we already have. It
                         // must never be able to cost us that answer.
-                        Ok(next) => match usable(&next) {
+                        Ok(next) => match usable(&next, timewarp) {
                             Ok(()) if !changes_anything(&next, &strategy_digest) => {
                                 if verbose {
                                     println!(
@@ -7264,7 +7269,7 @@ fn changes_anything(next: &trigon_strategy::Strategy, current: &Option<String>) 
 }
 
 #[cfg(feature = "build")]
-fn usable(strategy: &trigon_strategy::Strategy) -> Result<(), String> {
+fn usable(strategy: &trigon_strategy::Strategy, timewarp_base: &str) -> Result<(), String> {
     let tools = trigon_strategy::ToolRegistry::builtin().map_err(|e| e.to_string())?;
     let loc = strategy.location().cloned().unwrap_or_default();
     let cx = trigon_strategy::Context {
@@ -7277,6 +7282,16 @@ fn usable(strategy: &trigon_strategy::Strategy) -> Result<(), String> {
             arch: "x86_64".into(),
             platform: "linux".into(),
             has_repo: true,
+            // **The run's, not a default.** This was `..Default::default()`, which leaves
+            // `timewarp_base` empty — and a recipe that pins a registry moment renders
+            // `timewarp_url(…)`, which refuses when no mirror is configured. So a repair that
+            // correctly asked for the published moment was discarded as unrenderable, in a run
+            // whose mirror was sitting inside the build's network island the whole time.
+            //
+            // That is the same defect the note below describes, pointed the other way: a guard
+            // that validates in a context the build does not use will reject what the build would
+            // have accepted, as surely as it accepts what the build will reject.
+            timewarp_base: timewarp_base.to_string(),
             ..Default::default()
         },
         ..Default::default()
@@ -8718,7 +8733,7 @@ output_dir: trigon-pack
         // cost a run that had already computed a complete comparison: the rejection happened inside
         // the *next* build, where it was a fatal error rather than a discarded suggestion.
         let bad = trigon_strategy::from_yaml(NAMES_A_PARAMETER_THAT_DOES_NOT_EXIST).unwrap();
-        let why = super::usable(&bad).expect_err("`project` is not a parameter of this tool");
+        let why = super::usable(&bad, "timewarp:8129").expect_err("`project` is not a parameter of this tool");
         assert!(why.contains("has no parameter"), "{why}");
         assert!(why.contains("project"), "{why}");
         // And it names what the tool does take, so the operator reading the line can tell whether
@@ -8742,7 +8757,7 @@ output_dir: trigon-pack
             accepts >= 2,
             "the acceptance sites moved; this test needs rewriting"
         );
-        let guards = src.matches("match usable(&next)").count();
+        let guards = src.matches("match usable(&next, timewarp)").count();
         assert_eq!(
             accepts, guards,
             "{accepts} place(s) accept a repair proposal and {guards} validate it first. An \
@@ -8752,7 +8767,7 @@ output_dir: trigon-pack
         // the state they had; neither may use `?` on the proposal.
         // Split so this test's own source does not contain the pattern it forbids — it reads
         // `main.rs`, and `main.rs` is where this assertion lives.
-        let propagates = concat!("usable(&next)", "?");
+        let propagates = concat!("usable(&next, timewarp)", "?");
         assert!(
             !src.contains(propagates),
             "a validation failure must discard the proposal, not end the run"
@@ -8800,7 +8815,7 @@ output_dir: trigon-pack
              output_path: '*.tgz'\n",
         )
         .expect("this parses; that is the point");
-        let why = super::usable(&empty).expect_err("a recipe that builds nothing is not usable");
+        let why = super::usable(&empty, "timewarp:8129").expect_err("a recipe that builds nothing is not usable");
         assert!(
             why.contains("empty build phase"),
             "the rejection has to say what is wrong with it: {why}"
@@ -8812,7 +8827,53 @@ output_dir: trigon-pack
         // The other half. A check that rejected everything would discard working repairs as
         // readily as broken ones, and would look identical from the outside.
         let good = trigon_strategy::from_yaml(USES_THE_PARAMETER_IT_DECLARES).unwrap();
-        super::usable(&good).expect("`dir` is what the tool declares");
+        super::usable(&good, "timewarp:8129").expect("`dir` is what the tool declares");
+    }
+
+    /// A repair that pins the registry moment is not unrenderable.
+    ///
+    /// **The guard validated in a context the build does not use.** `usable` built its `Context`
+    /// with `..Default::default()`, leaving `timewarp_base` empty — and a recipe that pins a
+    /// publish moment renders `timewarp_url(…)`, which refuses when no mirror is configured. So a
+    /// correct repair was discarded as unrenderable:
+    ///
+    /// ```text
+    /// repair  discarded: deps.[0].npm/deps/custom.[1].npm/install.[0].npm/npx.[0]: template:
+    ///         invalid operation: timewarp_url was called but no mirror is configured for this run
+    /// ```
+    ///
+    /// — in a run whose mirror was inside the build's network island the whole time. The comment
+    /// on `usable` already describes this defect pointed the other way: a guard that renders in a
+    /// context the build does not use will reject what the build accepts as surely as it accepts
+    /// what the build rejects.
+    #[test]
+    fn a_recipe_that_pins_the_registry_moment_renders_under_a_mirror() {
+        let yaml = "schema: 1\n\
+                    kind: flow\n\
+                    location:\n  repo: https://example.invalid/x\n  ref: aa\n\
+                    src:\n  - uses: git-checkout\n\
+                    deps:\n  - uses: npm/deps/custom\n    with:\n\
+                    \x20     node_version: 17.3.0\n\
+                    \x20     npm_version: 8.3.0\n\
+                    \x20     registry_time: 2022-01-05T00:08:33.458Z\n\
+                    build:\n  - uses: npm/build/pack\n    with:\n\
+                    \x20     npm_version: 8.3.0\n\
+                    \x20     registry_time: 2022-01-05T00:08:33.458Z\n\
+                    output_dir: .\n\
+                    output_path: '*.tgz'\n";
+        let s = trigon_strategy::from_yaml(yaml).expect("the fixture parses");
+
+        // With the mirror the run actually has.
+        super::usable(&s, "timewarp:8129")
+            .expect("a recipe pinning the registry moment must validate under a mirror");
+
+        // And without one it is genuinely unrenderable, which is the message the operator saw —
+        // correct there, and asked in the wrong context here.
+        let why = super::usable(&s, "").expect_err("no mirror, no timewarp_url");
+        assert!(
+            why.contains("no mirror is configured"),
+            "the refusal should still name the cause: {why}"
+        );
     }
 }
 
