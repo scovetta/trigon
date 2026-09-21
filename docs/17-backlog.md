@@ -1746,3 +1746,32 @@ keeps the stabilized pair for the differing members (bounded — it already caps
 or the renderer re-runs the recorded stabilizer set the way `verify-attestation
 --rerun-comparison` does. The second re-derives; the first remembers. ADR-0013 prefers remembering
 bytes to re-deriving decisions, and the diff of record should be the diff the verdict saw.
+
+## B44. `-p:Version` is defeated by a project that derives its version from its own property
+
+`castle.core@5.1.1` builds once [3.75](16-findings.md)'s two pack fixes land, and comes out
+`Castle.Core.0.0.0.nupkg`. `common.props` sets `<BuildVersion>0.0.0</BuildVersion>` (overridden
+only by `APPVEYOR_BUILD_VERSION` at CI publish) and then `<PackageVersion>$(BuildVersion)</...>`,
+`<VersionPrefix>$(BuildVersion)</...>`, `<AssemblyVersion>$(BuildVersionMajor).0.0</...>`. Because
+`PackageVersion` and `VersionPrefix` are set explicitly, MSBuild's `Version` — which `nuget/build/pack`
+passes as `-p:Version=` — is a fallback that never applies. The package is misnamed, and worse, the
+compiled assemblies carry `AssemblyVersion 0.0.0` where the published ones carry `5.x`, so every
+member diverges.
+
+`-p:PackageVersion=<v>` as a global property fixes the nupkg name and nuspec (verified: it produces
+`Castle.Core.5.1.1.nupkg`), but not the embedded assembly version, which here is a *transform* of a
+project-named property (`BuildVersion` → major.0.0) that trigon cannot know the name or the shape
+of. The general problem — reconstruct a CI-publish-time version into whatever property a project
+threads it through — is the third instance of 3.75's shape (a project built the way its CI builds
+it), and wants its own design:
+
+  * The cheap, partial move: pass `-p:PackageVersion=` and `-p:VersionPrefix=` alongside `-p:Version=`.
+    Fixes the package identity for the common case; leaves a project with a custom root property
+    (Castle) still diverging on assembly version.
+  * The faithful move: read the version from the *published* package's assembly metadata and drive
+    the specific properties that reproduce it, or detect the project's version-property indirection.
+    This is inference, and belongs with the model rung rather than the tool.
+
+Until then, a NuGet package that threads its version through a custom property reproduces its build
+but not its bytes, and the divergence is the version attributes rather than the code — which the
+diff-opinion ask ([3.74](16-findings.md)) should now say out loud.

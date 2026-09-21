@@ -103,6 +103,21 @@ steps:
       #    property, so an unguarded override breaks the four targets that work for free.
       {%- set proj = with.dir if with.dir else location.subdir %}
       PROJECT_DIR="{% if proj and proj != '.' %}{{ proj }}{% else %}.{% endif %}"
+      # **`$(SolutionDir)`, because a bare `dotnet pack <csproj>` leaves it unset.** A project may
+      # name a pack asset relative to the solution — Castle.Core's package icon is
+      # `$(SolutionDir)docs/images/castle-logo.png` — and with no solution in the build the property
+      # is empty, so the path resolves under the *project* directory instead and pack dies with
+      # `Could not find a part of the path '.../src/Castle.Core/docs/images'`. A solution build would
+      # have set it to the directory holding the `.sln`; reconstruct that by walking up from the
+      # project to the nearest `.sln`, and fall back to the checkout root, which is where a
+      # repository's solution almost always sits and is a harmless value for a project that never
+      # reads it.
+      SOLUTION_DIR="$PWD"
+      d="$PROJECT_DIR"
+      while [ "$d" != "." ] && [ "$d" != "/" ]; do
+        if ls "$d"/*.sln >/dev/null 2>&1; then SOLUTION_DIR="$PWD/$d"; break; fi
+        d="$(dirname "$d")"
+      done
       PCL_ROOT=/opt/pcl-reference-assemblies/usr/lib/mono/xbuild-frameworks
       if [ -d "$PCL_ROOT/.NETPortable" ]; then
         echo "vendored PCL reference assemblies found; enabling .NETPortable targets"
@@ -149,6 +164,16 @@ steps:
       fi
       set -- pack --no-restore -c {{ with.configuration }} -o {{ with.output_dir }}
       set -- "$@" -p:ContinuousIntegrationBuild=true
+      # **`GeneratePackageOnBuild=false`, or `dotnet pack` packs an empty `bin/`.** When a project
+      # sets `<GeneratePackageOnBuild>true</GeneratePackageOnBuild>` — Castle.Core does — the `Pack`
+      # target stops depending on `Build`, because the package is meant to fall out of the build.
+      # So `dotnet pack` runs `Pack` against a directory nothing built and fails
+      # `NU5026: ... Castle.Core.dll ... was not found on disk`, naming the first target framework
+      # it looks for as though the compile were the problem. It is not: the compile never ran. This
+      # is Microsoft's own guidance — the setting and an explicit `pack` do not combine — and it is
+      # a no-op for the projects that do not set it.
+      set -- "$@" -p:GeneratePackageOnBuild=false
+      set -- "$@" -p:SolutionDir="$SOLUTION_DIR/"
       [ -n "$CSHARP_TARGETS" ] && set -- "$@" -p:LanguageTargets="$CSHARP_TARGETS"
       {%- if with.version %}
       set -- "$@" -p:Version={{ with.version }}

@@ -3203,3 +3203,48 @@ softening direction (every baseline it used already published, so `if substantiv
 would have passed it); `unclear`'s wire word was pinned against nothing; and the truncation retry
 asked at the provider's *default* effort — on a provider that ignores `Reasoning::Off` but
 honours effort, a retry that thinks harder than the call that was too big.
+
+### 3.75 Why `castle.core@5.1.1` did not build: two properties a solution build supplies and a project build does not
+
+Reported as a build failure: `dotnet pack` on `src/Castle.Core/Castle.Core.csproj` ended
+`NU5026: The file '.../bin/Release/net462/Castle.Core.dll' to be packed was not found on disk`,
+naming the first target framework it looked for as though the compile had failed. It had not — it
+never ran. Two independent causes, reproduced in the .NET 6 SDK image against the real checkout and
+fixed together in `nuget/build/pack`.
+
+**A false lead first, ruled out.** The generated script injects
+`-p:LanguageTargets=<sdk>/Microsoft.CSharp.targets` unconditionally, and it was the obvious suspect
+— a global property override on a cross-targeting build. Removing it changed nothing: the minimal
+`netstandard2.0;net6.0` project packs with or without it, and so does Castle.Core once the two
+real causes are fixed. The override is innocent here, and the PCL stratum it exists for (`docs/03-ecosystems.md` §"MSB4057") still needs it. Worth
+the two builds it took to clear, because a plausible cause left unrefuted is where the next hour
+goes.
+
+**Cause 1 — `GeneratePackageOnBuild=true` makes `dotnet pack` build nothing.** The project sets it,
+which unhooks the `Pack` target from `Build`: the package is meant to fall out of a build, so an
+explicit `dotnet pack` runs `Pack` against a `bin/` nothing compiled and fails NU5026. Confirmed by
+the full output — `dotnet pack` goes straight to the error with no `Determining projects`, no
+compile, no per-TFM output — while a plain `dotnet build` produces all four DLLs (net462 included:
+the cross-targeting build is fine). Microsoft's own guidance is that the setting and an explicit
+`pack` do not combine. Fix: `-p:GeneratePackageOnBuild=false`, a no-op for projects that never set
+it.
+
+**Cause 2 — `$(SolutionDir)` is empty without a solution.** With cause 1 fixed, the build produces
+the DLLs and then pack dies `Could not find a part of the path '.../src/Castle.Core/docs/images'`.
+`common.props` names the package icon `$(SolutionDir)docs/images/castle-logo.png`, and
+`$(SolutionDir)` is set only by a solution build. Building the `.csproj` directly leaves it empty,
+so the path resolves under the *project* directory rather than the repository root where
+`docs/images/` actually is. Fix: reconstruct what a solution build would have set by finding the
+nearest `.sln` walking up from the project — `Castle.Core.sln` sits at the checkout root — and
+falling back to the checkout root.
+
+With both, the trigon-generated build script produces `Castle.Core.nupkg` from the real source,
+offline, exit 0.
+
+**The shape:** neither is a defect in the tree's logic; both are facts about a project that assumes
+it is built the way its CI builds it — through a solution, with a version injected — and trigon
+builds the one thing the verdict is about, the project. The reconstruction has to supply what the
+solution would have. The third such fact is the version, and it is not yet supplied — see
+[B44](17-backlog.md): the package still comes out `0.0.0` because the project derives its version
+from a custom `BuildVersion` property that `-p:Version` does not reach, so this reproduces the
+*build* and not yet the *bytes*.
