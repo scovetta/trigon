@@ -3248,3 +3248,40 @@ solution would have. The third such fact is the version, and it is not yet suppl
 [B44](17-backlog.md): the package still comes out `0.0.0` because the project derives its version
 from a custom `BuildVersion` property that `-p:Version` does not reach, so this reproduces the
 *build* and not yet the *bytes*.
+
+### 3.76 Why `castle.core@5.1.1` still diverges once it builds, peeled apart
+
+With [3.75](#375-why-castlecore511-did-not-build-two-properties-a-solution-build-supplies-and-a-project-build-does-not)'s two fixes it builds, and the outcome is a divergence — the layer 3.75 predicted. The diff-opinion ask ([3.74](#374-the-record-could-say-two-members-differ-and-not-whether-it-matters)) read it correctly on the first live run: *"version 0.0.0 instead of 5.1.1, differing copyright year, extra PDB files, binary differences in all DLLs."* Reproduced against the real source in the .NET 6 SDK image, it is three causes stacked, and they come apart cleanly:
+
+**1. A second package nobody asked to compare against.** `common.props` sets
+`<IncludeSymbols>true</IncludeSymbols>`, so pack writes `Castle.Core.<v>.nupkg` **and**
+`Castle.Core.<v>.symbols.nupkg`. `output_path: trigon-pack/*.nupkg` matches both — the run's
+`collected no single artifact` warning — and the symbols copy carries the four `.pdb` the main
+package does not, which is where `onlyrebuild lib/*/Castle.Core.pdb` came from. The published
+artifact is the main package; the symbols one is a separate feed. Fixed in the tool with
+`-p:IncludeSymbols=false`, a no-op where it was never set: pack now emits exactly one package.
+
+**2. Two values the publisher's CI set, that a checkout does not carry.** `<BuildVersion>` defaults
+to `0.0.0` (the CI overrode it from `APPVEYOR_BUILD_VERSION`), and `PackageVersion`, `VersionPrefix`,
+`FileVersion` and `AssemblyVersion` all derive from it — so `-p:Version=5.1.1` is ignored and the
+package comes out `0.0.0`. And `<CurrentYear>$([System.DateTime]::Now.ToString("yyyy"))</CurrentYear>`
+reads the build machine's clock into the `<Copyright>` string, so the rebuild says 2026 where the
+publish said 2022. Reconstructing both — `-p:BuildVersion=5.1.1`, `-p:CurrentYear=2022` from the
+registry publish date — makes the four DLLs **the exact same size as published**, byte-for-byte on
+length. This is [B44](17-backlog.md): the values are reconstructable (the version from the purl, the
+year from `registry_time`), but the *property names* are the project's own and Trigon cannot guess
+them; the faithful source is the published assembly's own version fields.
+
+**3. What is left is the compiler.** With version, year, symbols and `ContinuousIntegrationBuild`
+all matched, each DLL still differs — **3,690 of 385,024 bytes on the net6.0 assembly, scattered
+from offset 137 to the end, at identical size.** Not a localized MVID or timestamp; the spread and
+the equal length are the fingerprint of a different Roslyn. The build used SDK 6.0.428 (2024); the
+package was compiled 2022-12-30 with whatever 6.0.4xx was current then. This is exactly what the
+strategy's own assumption line warns: *"a divergence here is as likely to be the toolchain as the
+source."* The `.NET 6`-by-major SDK selection is too coarse — byte reproduction needs the SDK build
+current at `registry_time`, which is [B45](17-backlog.md).
+
+**The shape, three times over:** a project builds the way its CI builds it — through a solution,
+with a version and a year injected, with a compiler pinned by the calendar — and Trigon builds the
+project. Each layer is Trigon being handed less than the CI had and having to reconstruct the rest;
+1 it can do from the project, 2 from the publish metadata, 3 only from a historical toolchain index.

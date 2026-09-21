@@ -126,6 +126,11 @@ fn dotnet_pack_forces_the_properties_a_bare_csproj_pack_lacks() {
         "pack must set SolutionDir for $(SolutionDir)-relative pack assets: {}",
         i.build
     );
+    assert!(
+        i.build.contains("-p:IncludeSymbols=false"),
+        "pack must suppress the symbols package or the *.nupkg glob matches two files: {}",
+        i.build
+    );
     // The finder walks up from the project to the nearest .sln, so the checkout root's solution is
     // found even though the project sits two levels down.
     assert!(

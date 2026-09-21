@@ -1775,3 +1775,35 @@ it), and wants its own design:
 Until then, a NuGet package that threads its version through a custom property reproduces its build
 but not its bytes, and the divergence is the version attributes rather than the code — which the
 diff-opinion ask ([3.74](16-findings.md)) should now say out loud.
+
+**Update from [3.76](16-findings.md).** The problem is broader than the version: `castle.core`
+also reads `<CurrentYear>` from the build clock into its copyright. Both are publish-time
+environment values threaded through project-named properties (`BuildVersion`, `CurrentYear`), and
+reconstructing both — version from the purl, year from `registry_time` — makes the DLLs the exact
+published size. So the reconstruction is real and the values are known; what is missing is the
+binding from a value to the property a given project reads it through. Two shapes, as before: pass
+a battery of standard version properties (fixes the common case, not a custom root property), or
+read the published assembly's version fields and drive the specific properties (faithful, and
+inference — the model rung). The year generalises the same way: `registry_time` is the honest
+source for any `DateTime.Now`-derived stamp.
+
+## B45. The SDK is selected by target-framework major, not by the toolchain current at publish time
+
+[3.76](16-findings.md) peeled `castle.core@5.1.1` down to its last layer: with version, year and
+symbols all reconciled, each assembly still differs by ~1% of its bytes, scattered, at identical
+size — a different Roslyn. The build used SDK 6.0.428 (2024); the package was compiled 2022-12-30.
+`dotnet::choose` picks the SDK by the declared target framework's major version and the publish
+date's *era* ("published when .NET 7 was newest, so build with 6"), which lands the right major and
+the wrong patch.
+
+Byte reproduction of a compiled assembly needs the compiler that produced it, and for the SDK that
+means the exact build current at `registry_time`, not merely the matching major. This is the
+compiled-language frontier the roadmap names: an index from date to SDK build (Microsoft publishes
+the release history), a base image per SDK patch rather than per major, and the honest admission
+that where the exact toolchain cannot be had, the verdict is "toolchain-divergent" rather than a
+claim about the source. The strategy's assumption line already tells a reader this; the tooling does
+not yet act on it.
+
+The diff-opinion ask is the near-term mitigation: a run that diverges only in compiler codegen, with
+version and copyright matched, is one a reader can be told is *likely toolchain, not source* — which
+is precisely the reading [3.74](16-findings.md) exists to record.

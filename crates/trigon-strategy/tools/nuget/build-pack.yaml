@@ -174,6 +174,15 @@ steps:
       # a no-op for the projects that do not set it.
       set -- "$@" -p:GeneratePackageOnBuild=false
       set -- "$@" -p:SolutionDir="$SOLUTION_DIR/"
+      # **`IncludeSymbols=false`, so pack emits one package and not two.** A project may ask for a
+      # symbols package — `<IncludeSymbols>true</IncludeSymbols>`, Castle.Core does — and then pack
+      # writes `<id>.<v>.nupkg` *and* `<id>.<v>.symbols.nupkg` beside it. The strategy's
+      # `output_path` is a glob, `*.nupkg` matches both, and collection cannot say which is the
+      # artifact — the run warns `collected no single artifact` and the symbols copy, which carries
+      # the `.pdb` the main package does not, then shows up as members only the rebuild has. The
+      # published artifact is the main package; the symbols one is a separate feed. Suppressing it
+      # is a no-op for the projects that never asked for it.
+      set -- "$@" -p:IncludeSymbols=false
       [ -n "$CSHARP_TARGETS" ] && set -- "$@" -p:LanguageTargets="$CSHARP_TARGETS"
       {%- if with.version %}
       set -- "$@" -p:Version={{ with.version }}
