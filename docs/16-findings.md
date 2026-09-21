@@ -3389,3 +3389,38 @@ version gap (set `APPVEYOR_BUILD_VERSION`, or the property the config threads a 
 inform the SDK choice. Filed against B44 and B45 rather than built here, because reading a CI config
 for its version and toolchain scheme is inference and belongs with the model rung, not a hardcoded
 reading of one project's `appveyor.yml`.
+
+### 3.80 Pre-computing the decompilation, and horizontal scroll for long lines
+
+Two asks after [3.78](#378-the-decompiled-diff-in-trigon-serve-as-well-as-in-the-models-prompt) put
+the C# diff in `trigon serve`.
+
+**Pre-compute it — yes, and here is why.** The member view decompiled at serve time, which needs
+podman on the serving machine and a container per view. That is wrong for the surface `trigon-api`
+targets: a read replica over a bucket has no podman and no reason to. So the run, which has both,
+now does it once. `record_run`, on a divergence, decompiles each *differing* managed-assembly member
+— the interesting few — and stores the C# keyed by the assembly's own digest. `trigon serve` reads
+the store first and falls back to a live decompile only on a miss. Measured: a member that used to
+cost a ~5-second container returns in **47 ms**, and a divergent `castle.core` run with **no model
+at all** leaves eight `decompiled/sha256/*.cs` in the store — the pre-compute is a property of the
+run, not of the opinion.
+
+Content-addressed by the assembly, so a re-run of the same target and two sides that share bytes
+resolve to one object; best effort, so a machine without podman records the run and leaves the
+reader the hex view; and a reading aid, so nothing reads it to decide an outcome. It runs **after** the record
+is persisted and every container call it makes is wall-clock bounded, so a cold image build that
+stalls on the network costs the aid, never the divergence finding it decorates — a review of this
+change caught that the pre-compute had sat on the critical path to `put_run`. The store key is
+sharded two characters like the blob store, and the "is this an assembly" predicate is one function
+in `trigon-core` that both the decompiler and the serve cache-probe read, so a `.txt` member costs
+no store lookup. The cost is real
+and bounded: a decompile per differing assembly on a divergent compiled-language run, the minority
+of a corpus, and skipped where the digest is already cached. The one case it does not cover is a
+model-less divergence served from a podman-free replica where the run itself could not decompile —
+there the reader still gets hex, and an eager sweep-time pass would be the fix if it matters.
+
+**Horizontal scroll.** A decompiled line can be long — an `InternalsVisibleTo` with a full public
+key runs past 500 characters — and the diff rows are flex at the container width, so a long line was
+clipped rather than scrolled. Each row is now `width: max-content` with `min-width: 100%`, so the
+widest line sets the scroll region and the container's `overflow-x` becomes a real horizontal
+scrollbar while a short line still fills the width for its highlight.

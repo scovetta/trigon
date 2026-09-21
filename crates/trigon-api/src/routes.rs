@@ -420,14 +420,33 @@ pub async fn member(
     // in the binary, so the hook is asked about every member and answers `None` for the ones it
     // does not handle — a cheap rejection, no container. Only where both sides are present, since
     // a diff needs both.
-    let decompiled = match (&api.decompiler, &pair.upstream, &pair.rebuild) {
-        (Some(dec), Some(up), Some(rb)) => {
-            let (dec, path, up, rb) = (dec.clone(), q.path.clone(), up.clone(), rb.clone());
-            // Off the async runtime: the decompiler blocks on a container.
-            tokio::task::spawn_blocking(move || dec(&path, &up, &rb))
-                .await
-                .ok()
-                .flatten()
+    let decompiled = match (&pair.upstream, &pair.rebuild) {
+        (Some(up), Some(rb)) if trigon_core::is_managed_assembly(&q.path) => {
+            // **The store first, which needs no container.** A divergent run pre-computes the C#
+            // for its differing assemblies and stores it keyed by the assembly's digest, so a read
+            // replica over a bucket — no podman — serves the source diff from bytes. Only on a
+            // miss (an old run, a member the run did not reach) does the live decompiler run, and
+            // only where the binary supplied one.
+            let (ad, bd) = (trigon_store::digest_of(up), trigon_store::digest_of(rb));
+            let cached = match (
+                api.store.get_decompiled(&ad).await,
+                api.store.get_decompiled(&bd).await,
+            ) {
+                (Ok(Some(a)), Ok(Some(b))) => Some((a, b)),
+                _ => None,
+            };
+            match (cached, &api.decompiler) {
+                (Some(pair), _) => Some(pair),
+                (None, Some(dec)) => {
+                    let (dec, path, up, rb) = (dec.clone(), q.path.clone(), up.clone(), rb.clone());
+                    // Off the async runtime: the live decompiler blocks on a container.
+                    tokio::task::spawn_blocking(move || dec(&path, &up, &rb))
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                (None, None) => None,
+            }
         }
         _ => None,
     };

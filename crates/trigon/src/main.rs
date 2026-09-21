@@ -5093,6 +5093,7 @@ mod rebuild {
                 .with_context(|| format!("reading the rebuilt artifact at {}", rebuilt.display()))?;
             let up = store.blobs().put(up_bytes.clone()).await?;
             let rb = store.blobs().put(rb_bytes.clone()).await?;
+
             // Everything this run adds to the store, counted as each blob goes in rather than
             // estimated afterwards. `docs/10-scale.md` §1 budgets ~3 MB a run and ~270 GB a sweep,
             // and a budget with nothing measuring it is a wish.
@@ -5245,6 +5246,63 @@ mod rebuild {
             record.confidence = args.confidence.clone();
             record.finished = Some(crate::now_rfc3339());
             store.put_run(&record).await?;
+
+            // **Pre-compute the decompiled C# for the members a reader will want it for.** A
+            // managed assembly's byte diff is unreadable, so the member view decompiles it — and
+            // doing that at serve time needs podman on the serving machine and a container per
+            // view. A read replica over a bucket has neither. So the run, which has both, does it
+            // once: for each *differing* assembly member (the interesting few, only on a
+            // divergence), decompile both sides and store the C# keyed by the assembly's digest.
+            // `trigon serve` then reads it without a container. Best effort — a decompile that
+            // cannot run leaves the reader the hex view, exactly as before — and content-addressed,
+            // so a re-run of the same target rewrites nothing.
+            //
+            // **After the record is persisted, never before.** This is an aid, and the record is
+            // the result; a decompile that stalled — a cold image build reaching the network — must
+            // not be able to lose the divergence finding. The container calls it makes are
+            // wall-clock bounded (see `decompile`), so this cannot hang the run either, only cost
+            // the aid on a bad day. Not counted into `blob_bytes`: the cache is its own namespace
+            // and the run's storage budget is about the run.
+            if c.outcome == trigon_core::Match::Divergent
+                && let Some(diff) = &c.diff
+            {
+                let up_name = crate::file_name(upstream_path);
+                let rb_name = crate::file_name(rebuilt);
+                for f in diff
+                    .files
+                    .iter()
+                    .filter(|f| f.status == trigon_compare::FileStatus::Differs)
+                {
+                    let path = String::from_utf8_lossy(f.path.as_bytes()).into_owned();
+                    if !crate::decompile::looks_like_assembly(&path) {
+                        continue;
+                    }
+                    let up_raw =
+                        String::from_utf8_lossy(f.upstream_raw_path.as_ref().unwrap_or(&f.path).as_bytes())
+                            .into_owned();
+                    let rb_raw =
+                        String::from_utf8_lossy(f.rebuild_raw_path.as_ref().unwrap_or(&f.path).as_bytes())
+                            .into_owned();
+                    let (Ok(a), Ok(b)) = (
+                        trigon_api::member::read(up_bytes.clone(), &up_name, &up_raw),
+                        trigon_api::member::read(rb_bytes.clone(), &rb_name, &rb_raw),
+                    ) else {
+                        continue;
+                    };
+                    let (ad, bd) = (trigon_store::digest_of(&a), trigon_store::digest_of(&b));
+                    // Both already cached — a re-run, or an earlier view — so nothing to do.
+                    if matches!(store.get_decompiled(&ad).await, Ok(Some(_)))
+                        && matches!(store.get_decompiled(&bd).await, Ok(Some(_)))
+                    {
+                        continue;
+                    }
+                    if let Some((a_cs, b_cs)) = crate::decompile::sources(&a, &b) {
+                        let _ = store.put_decompiled(&ad, &a_cs).await;
+                        let _ = store.put_decompiled(&bd, &b_cs).await;
+                    }
+                }
+            }
+
             if verbose {
                 println!("\n  recorded   run {id} in {}", dir.display());
                 if let Some(c) = &record.costs {

@@ -32,6 +32,14 @@ pub struct Blobs {
     inner: Arc<dyn ObjectStore>,
 }
 
+/// The content digest of some bytes, the way [`Blobs::put`] computes it.
+///
+/// Public so a caller that needs to *address* bytes without storing them — the member view asking
+/// "is there decompiled C# for this assembly?" — computes the same key the store did.
+pub fn digest_of(bytes: &[u8]) -> Digest {
+    Digest::from_bytes(Sha256::digest(bytes).into())
+}
+
 impl Blobs {
     pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
         Blobs { inner }

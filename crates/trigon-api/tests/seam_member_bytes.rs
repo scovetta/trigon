@@ -534,7 +534,7 @@ fn listing_an_oversized_artifact_is_refused_too() {
 /// `decompiled`; and with no hook the same member stays a binary/hex view, so the C# is an
 /// addition and never a silent replacement of the bytes.
 #[tokio::test]
-async fn a_dll_member_is_served_as_decompiled_csharp_when_a_decompiler_is_present() {
+async fn a_dll_member_is_served_as_decompiled_csharp_from_the_hook_or_the_precomputed_cache() {
     use std::sync::Arc;
     use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
 
@@ -618,7 +618,49 @@ async fn a_dll_member_is_served_as_decompiled_csharp_when_a_decompiler_is_presen
     let text = with["text"].to_string();
     assert!(text.contains("int v = 10") && text.contains("int v = 20"), "the C# diff: {text}");
 
-    // Without the hook: the same member is a binary/hex view, no phantom text, not decompiled.
+    // The pre-computed path: with the C# already in the store keyed by each side's assembly
+    // digest, the view is decompiled **without any hook at all** — the read-replica case, no
+    // podman. The member bytes inside the tar are `[0, 1, 2, byte]`.
+    let store2 = Arc::new(Store::in_memory());
+    let up2 = tar_with_dll(10);
+    let rb2 = tar_with_dll(20);
+    let up2_d = store2.blobs().put(up2).await.unwrap();
+    let rb2_d = store2.blobs().put(rb2).await.unwrap();
+    store2
+        .put_decompiled(&trigon_store::digest_of(&[0, 1, 2, 10]), "class A { int v = 10; }\n")
+        .await
+        .unwrap();
+    store2
+        .put_decompiled(&trigon_store::digest_of(&[0, 1, 2, 20]), "class A { int v = 20; }\n")
+        .await
+        .unwrap();
+    let mut r2 = RunRecord::new(
+        "1700000010-ee",
+        "pkg:nuget/a@1.0.0",
+        ArtifactRef { name: "a.tar".into(), sha256: up2_d, bytes: 4, stored: true },
+        Environment {
+            base_image: "x@sha256:0".into(),
+            derived_image: None,
+            egress: "mirror".into(),
+            isolation: "podman".into(),
+            attestable: true,
+            registry_moment: None,
+            pin: None,
+            guard_manifest: None,
+            guarded_members: None,
+        },
+        "2026-01-01T00:00:00Z",
+    );
+    r2.rebuild = Some(ArtifactRef { name: "a.tar".into(), sha256: rb2_d, bytes: 4, stored: true });
+    r2.state = RunState::Done;
+    r2.outcome = Some("divergent".into());
+    store2.put_run(&r2).await.unwrap();
+    let precomputed = view(store2, "1700000010-ee", None).await;
+    assert_eq!(precomputed["decompiled"], serde_json::json!(true), "{precomputed}");
+    let text = precomputed["text"].to_string();
+    assert!(text.contains("int v = 10") && text.contains("int v = 20"), "cached C#: {text}");
+
+    // Without the hook and without a cache: the same member is a binary/hex view, no phantom text.
     let without = view(store, "1700000009-dd", None).await;
     assert_eq!(without["decompiled"], serde_json::json!(false), "{without}");
     assert_eq!(without["text"], serde_json::Value::Null, "no text view without a decompiler: {without}");

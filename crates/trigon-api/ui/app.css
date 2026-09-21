@@ -465,8 +465,15 @@ a.chip { text-decoration: none; }
   border-block: 1px solid var(--line);
   position: sticky;
   top: 0;
+  /* Span the scrolled width, not just the viewport, so the header stays with the rows a long
+     decompiled line pushes to the right rather than ending mid-line. */
+  min-width: max-content;
 }
-.dl { display: flex; gap: .4rem; padding: 0 .6rem; white-space: pre; }
+/* Each row is as wide as its own longest line, at least the full container. That is what turns
+   the container's `overflow-x: auto` into a real horizontal scrollbar: a decompiled `.dll` line —
+   an `InternalsVisibleTo` with a full public key runs past 500 characters — extends the scroll
+   region rather than being clipped, and a short line still fills the width so its highlight does. */
+.dl { display: flex; gap: .4rem; padding: 0 .6rem; white-space: pre; width: max-content; min-width: 100%; }
 .dl .dm { width: .8rem; flex: none; color: var(--faint); }
 .dl .dt { flex: 1 1 auto; }
 .dl.removed { background: var(--fail-wash); }

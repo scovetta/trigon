@@ -31,7 +31,7 @@ mod blobs;
 pub mod queue;
 mod record;
 
-pub use blobs::Blobs;
+pub use blobs::{Blobs, digest_of};
 #[cfg(feature = "queue")]
 pub use queue::{Backend, HostBudget, Job, JobState, NewJob, Principal, Queue, Requested, Tier};
 pub use record::{
@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use futures::TryStreamExt as _;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutPayload, path::Path as ObjPath};
-use trigon_core::{Classify, Fault};
+use trigon_core::{Classify, Digest, Fault};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -351,6 +351,41 @@ impl Store {
             });
         }
         Ok(m)
+    }
+
+    /// Sharded two-character like the blob store, and for the same reason: a flat prefix of a
+    /// hundred thousand `.cs` is slow to list and a hot key on object storage.
+    fn decompiled_path(assembly: &Digest) -> ObjPath {
+        let hex = assembly.to_hex();
+        ObjPath::from(format!("decompiled/sha256/{}/{hex}.cs", &hex[..2]))
+    }
+
+    /// Store the C# decompiled from one managed assembly, keyed by the **assembly's** own digest.
+    ///
+    /// Pre-computed during a divergent run so `trigon serve` shows the source diff without podman
+    /// — a read replica over a bucket has neither the container tool nor a reason to hold one, and
+    /// this is the only way the decompiled view reaches it. Content-addressed by the assembly, so
+    /// a re-run of the same target and the two sides that happen to share bytes all resolve to one
+    /// object. A reading aid, never a verdict: `trigon-core::opinion`'s rule holds here too, and
+    /// nothing reads this to decide an outcome.
+    pub async fn put_decompiled(&self, assembly: &Digest, csharp: &str) -> Result<(), StoreError> {
+        let path = Self::decompiled_path(assembly);
+        self.inner
+            .put(&path, PutPayload::from(csharp.as_bytes().to_vec()))
+            .await?;
+        Ok(())
+    }
+
+    /// The decompiled C# for an assembly, or `None` if it was never computed.
+    ///
+    /// `None` is "not pre-computed", never "the sources match" — the caller falls back to a live
+    /// decompile where it can and to the hex view where it cannot.
+    pub async fn get_decompiled(&self, assembly: &Digest) -> Result<Option<String>, StoreError> {
+        match self.inner.get(&Self::decompiled_path(assembly)).await {
+            Ok(r) => Ok(Some(String::from_utf8_lossy(&r.bytes().await?).into_owned())),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn get_attestation(&self, path: &str) -> Result<trigon_attest::Envelope, StoreError> {

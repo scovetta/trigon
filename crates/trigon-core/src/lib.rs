@@ -32,6 +32,17 @@ pub use lockfile::{Kind, LockfileError, Package, Status, parse as parse_lockfile
 pub use logs::{Compressed, compress, strip_controls};
 pub use note::{Note, NoteCode};
 pub use opinion::{DiffOpinion, DiffVerdict};
+
+/// Whether a member name is a .NET managed assembly worth trying to decompile.
+///
+/// One place, because two ask: the binary's decompiler gates on it, and the serve member view
+/// gates its cache probe on it so a `.txt` member does not cost two object-store lookups on the
+/// way to a hex view. By extension, and best effort past it — a native `.dll` reaches the
+/// decompiler, produces nothing, and falls back, which costs one attempt and never a wrong answer.
+pub fn is_managed_assembly(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".dll") || lower.ends_with(".exe")
+}
 pub use outcome::{
     Match, ProfileId, Provenance, RiskTier, StabilizerId, caps_normalized, ceiling_of,
 };

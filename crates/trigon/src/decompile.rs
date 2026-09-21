@@ -38,6 +38,21 @@ fn image_tag() -> String {
     format!("localhost/trigon-ilspy:{ILSPY_VERSION}")
 }
 
+/// A `podman` command wrapped in a host-side wall-clock bound.
+///
+/// **Because the decompile is best effort on the run's critical path.** The `timeout` inside the
+/// decompile container bounds `ilspycmd`, but not `podman build` reaching the network for a cold
+/// image, nor a `podman run` that stalls before the entrypoint. Those are host processes, so a host
+/// `timeout` bounds them; without it a stalled pull could hang a run whose record is an aid this
+/// step only decorates. `timeout` is coreutils and present wherever podman runs; if it is somehow
+/// absent the command fails to spawn and the caller falls back, which is the same best-effort path
+/// as no podman at all.
+fn podman(secs: u32) -> std::process::Command {
+    let mut c = std::process::Command::new("timeout");
+    c.arg("-k").arg("5").arg(secs.to_string()).arg("podman");
+    c
+}
+
 /// Decompile two assemblies to C# through one container, or `None` if either cannot be read.
 ///
 /// Both-or-nothing: the caller wants a *diff*, and a diff needs both sides. One container for the
@@ -59,7 +74,7 @@ pub fn sources(a: &[u8], b: &[u8]) -> Option<(String, String)> {
         // `timeout` around each `ilspycmd` caps a decompiler that spins; `--memory`/`--pids-limit`
         // cap one that allocates or forks. `&&`, not `;`, so a first side that times out or fails
         // does not leave a truncated `a.cs` for the second side's exit code to paper over.
-        let out = std::process::Command::new("podman")
+        let out = podman(180)
             .args([
                 "run",
                 "--rm",
@@ -135,7 +150,7 @@ fn build_image(tag: &str) {
         let mut f = std::fs::File::create(dir.join("Containerfile")).ok()?;
         f.write_all(containerfile.as_bytes()).ok()?;
         tracing::info!(%tag, "building the decompiler image (once)");
-        let status = std::process::Command::new("podman")
+        let status = podman(600)
             .args(["build", "--tag", tag, "--file"])
             .arg(dir.join("Containerfile"))
             .arg(&dir)
@@ -166,8 +181,7 @@ fn scratch_dir() -> Option<PathBuf> {
 /// By extension, and best effort past it: a native `.dll` gets a container that produces nothing
 /// and falls back, which costs one decompile attempt and never a wrong answer.
 pub fn looks_like_assembly(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.ends_with(".dll") || lower.ends_with(".exe")
+    trigon_core::is_managed_assembly(name)
 }
 
 #[cfg(test)]
