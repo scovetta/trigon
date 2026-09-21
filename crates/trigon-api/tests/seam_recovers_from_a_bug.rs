@@ -39,6 +39,7 @@ fn api() -> Arc<Api> {
         index: Index::new(),
         switches: Switches::default(),
         unauthenticated: Principal::Operator,
+        decompiler: None,
         member_reads: trigon_api::default_member_permits(),
     })
 }

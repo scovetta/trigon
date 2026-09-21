@@ -97,6 +97,11 @@ pub struct MemberView {
     /// Why it was called binary, so a reader who disagrees knows what to look at.
     pub binary_because: Option<String>,
     pub text: Option<TextDiff>,
+    /// Set when `text` is C# decompiled from a managed assembly rather than the member's own
+    /// bytes — the bytes are still binary and still in `hex`. A reader (and the page) must say so:
+    /// the diff is a reading of the assembly, not the assembly.
+    #[serde(default)]
+    pub decompiled: bool,
     pub hex: Option<HexDiff>,
     /// Set when a member could not be read or was too large, with the reason.
     pub unavailable: Option<String>,
@@ -364,6 +369,7 @@ pub fn view(
         // should not have to make another request to say so, and the cost is bounded by the caps
         // above rather than by the file.
         text: (!binary).then(|| text_diff(upstream.as_deref(), rebuild.as_deref())),
+        decompiled: false,
         hex: Some(match at {
             Some(off) => hex_window(upstream.as_deref(), rebuild.as_deref(), off),
             None => hex_diff(upstream.as_deref(), rebuild.as_deref()),

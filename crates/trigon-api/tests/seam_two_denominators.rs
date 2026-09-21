@@ -49,6 +49,7 @@ async fn stats_over(records: Vec<RunRecord>) -> trigon_api::index::Stats {
         index,
         switches: Switches::default(),
         unauthenticated: Principal::Operator,
+        decompiler: None,
         member_reads: trigon_api::default_member_permits(),
     });
     api.index.stats(false)

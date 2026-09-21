@@ -74,6 +74,7 @@ async fn api_over(records: Vec<RunRecord>, who: Principal) -> Arc<Api> {
         index,
         switches: Switches::default(),
         unauthenticated: who,
+        decompiler: None,
         member_reads: trigon_api::default_member_permits(),
     })
 }

@@ -64,6 +64,7 @@ async fn api_over(records: Vec<RunRecord>, who: Principal) -> Arc<Api> {
         index,
         switches: Switches::default(),
         unauthenticated: who,
+        decompiler: None,
         member_reads: trigon_api::default_member_permits(),
     })
 }
@@ -387,6 +388,7 @@ async fn a_members_content_cannot_close_the_island() {
         switches: Switches::default(),
         // Operator, because that is the principal the member panel is booted for at all.
         unauthenticated: Principal::Operator,
+        decompiler: None,
         member_reads: trigon_api::default_member_permits(),
     });
 
@@ -446,6 +448,7 @@ async fn an_anonymous_reader_gets_no_member_in_the_page_source() {
         index,
         switches: Switches::default(),
         unauthenticated: Principal::Anonymous,
+        decompiler: None,
         member_reads: trigon_api::default_member_permits(),
     });
 
@@ -498,6 +501,7 @@ async fn a_bad_parameter_does_not_discard_the_rest_of_the_query() {
         index,
         switches: Switches::default(),
         unauthenticated: Principal::Operator,
+        decompiler: None,
         member_reads: trigon_api::default_member_permits(),
     });
 

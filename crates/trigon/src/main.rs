@@ -2622,6 +2622,14 @@ fn serve_corpus(
         switches: trigon_api::Switches { stop_divergences },
         refresh_seconds,
         queue,
+        // The decompiler the member view uses for managed assemblies. The predicate for *which*
+        // members are assemblies lives here with the decompiler, so the API asks about every
+        // member and gets `None` for the ones ILSpy does not handle — a hex view, as before.
+        decompiler: Some(std::sync::Arc::new(|name: &str, a: &[u8], b: &[u8]| {
+            crate::decompile::looks_like_assembly(name)
+                .then(|| crate::decompile::sources(a, b))
+                .flatten()
+        })),
     };
     // Loudly, not in a doc comment nobody reads at three in the morning. A store bound to a
     // routable address without `--public` serves build logs that were never redacted, and D14 says
@@ -5817,6 +5825,7 @@ mod rebuild {
                 rebuild_bytes: Some(101),
                 binary: false,
                 binary_because: None,
+                decompiled: false,
                 text: Some(TextDiff {
                     lines_shown: lines.len(),
                     lines_omitted: 0,

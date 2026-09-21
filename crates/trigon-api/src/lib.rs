@@ -47,9 +47,22 @@ pub enum Principal {
     Operator,
 }
 
+/// Turns two managed-assembly member byte-strings into their decompiled C#, or `None`.
+///
+/// **Injected, so this crate never mentions the decompiler.** ILSpy runs in a container, which is
+/// the binary's world and not the serving layer's — so `trigon serve` hands this in and a
+/// deployment without it (or without podman) simply serves the hex view, exactly as before. The
+/// same rule the opinion path is under: a decompilation is a reading aid, never a verdict, and the
+/// member route treats a `None` here as "no C# available", never as "the sources match".
+pub type Decompiler =
+    Arc<dyn Fn(&str, &[u8], &[u8]) -> Option<(String, String)> + Send + Sync>;
+
 /// Everything a handler can reach.
 pub struct Api {
     pub store: Arc<trigon_store::Store>,
+    /// Decompiles a managed assembly to C# for the member view, where the binary supplied one.
+    /// `None` on a reader with no such tool, and on every path but `trigon serve`.
+    pub decompiler: Option<Decompiler>,
     /// The queue, where one is configured.
     ///
     /// `None` is a reader over a corpus in object storage and nothing else — the shape stage 1

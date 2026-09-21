@@ -413,7 +413,34 @@ pub async fn member(
             )
         };
     }
+    // **A managed assembly is decompiled here too, not only for the model.** For a `.dll` the
+    // text view is empty and the reader gets a hex window; the injected decompiler (from
+    // `trigon serve`, see [`crate::Decompiler`]) turns both sides into C#, and the text view
+    // becomes the diff of that. The predicate for "is this an assembly" lives with the decompiler
+    // in the binary, so the hook is asked about every member and answers `None` for the ones it
+    // does not handle — a cheap rejection, no container. Only where both sides are present, since
+    // a diff needs both.
+    let decompiled = match (&api.decompiler, &pair.upstream, &pair.rebuild) {
+        (Some(dec), Some(up), Some(rb)) => {
+            let (dec, path, up, rb) = (dec.clone(), q.path.clone(), up.clone(), rb.clone());
+            // Off the async runtime: the decompiler blocks on a container.
+            tokio::task::spawn_blocking(move || dec(&path, &up, &rb))
+                .await
+                .ok()
+                .flatten()
+        }
+        _ => None,
+    };
     let mut view = crate::member::view(&q.path, pair.upstream, pair.rebuild, q.offset);
+    if let Some((up_cs, rb_cs)) = decompiled {
+        // The C# diff replaces the (absent) text view; the hex view stays, so a reader can still
+        // see the bytes. `decompiled` marks it so the page says the diff is a reading of the
+        // assembly and not the assembly.
+        let cs =
+            crate::member::view(&q.path, Some(up_cs.into_bytes()), Some(rb_cs.into_bytes()), None);
+        view.text = cs.text;
+        view.decompiled = true;
+    }
     if !pair.problems.is_empty() {
         view.unavailable = Some(pair.problems.join("; "));
     }

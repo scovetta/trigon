@@ -1771,6 +1771,12 @@ it), and wants its own design:
   * The faithful move: read the version from the *published* package's assembly metadata and drive
     the specific properties that reproduce it, or detect the project's version-property indirection.
     This is inference, and belongs with the model rung rather than the tool.
+  * The recipe is often written down where the CI can read it. `castle.core`'s `appveyor.yml`
+    ([3.79](16-findings.md)) sets `APPVEYOR_BUILD_VERSION` to the git tag minus its `v`, which
+    `common.props` reads into `BuildVersion`. Setting that one **environment variable** — a value
+    Trigon already has, since the strategy found the tag — reproduces the whole derivation the way
+    the publisher did, without Trigon knowing the property names. Reading the CI config for the
+    version scheme is the general form, and it is the same rung B45 wants for the SDK.
 
 Until then, a NuGet package that threads its version through a custom property reproduces its build
 but not its bytes, and the divergence is the version attributes rather than the code — which the

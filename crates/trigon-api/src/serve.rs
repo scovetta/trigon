@@ -17,6 +17,8 @@ pub struct Config {
     /// How often to look for runs that arrived since startup. The index is additive, so a refresh
     /// costs one `LIST` plus a `GET` per new id and not a re-read of the corpus.
     pub refresh_seconds: u64,
+    /// The decompiler the member view uses for managed assemblies, where the binary supplied one.
+    pub decompiler: Option<crate::Decompiler>,
 }
 
 /// Serve until interrupted.
@@ -46,6 +48,7 @@ pub async fn run(store: trigon_store::Store, cfg: Config) -> Result<(), String> 
 
     let api = Arc::new(Api {
         store: store.clone(),
+        decompiler: cfg.decompiler.clone(),
         queue: queue.clone(),
         index: index.clone(),
         switches: cfg.switches,

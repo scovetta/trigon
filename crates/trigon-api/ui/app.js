@@ -1199,7 +1199,7 @@ async function openMember(runId, path, slot, state) {
 // `openMember`, because those ask for something the boot did not carry.
 function drawMember(runId, path, slot, state, d) {
   const reload = (next) => openMember(runId, path, slot, { ...state, ...next, offset: next.offset });
-  const wantHex = state.view ? state.view === 'hex' : d.binary;
+  const wantHex = state.view ? state.view === 'hex' : (d.binary && !d.decompiled);
   const raw = (side) => `/v1/runs/${encodeURIComponent(runId)}/member/raw?` +
     new URLSearchParams({ path, side });
 
@@ -1216,7 +1216,7 @@ function drawMember(runId, path, slot, state, d) {
 
   slot.replaceChildren(el('div', { class: 'member-open' },
     el('div', { class: 'filters' },
-      tab('text', 'text', !!d.text),
+      tab(d.decompiled ? 'C# (decompiled)' : 'text', 'text', !!d.text),
       tab('hex', 'hex', true),
       el('span', { class: 'spacer' }),
       d.in_upstream ? el('a', { class: 'chip', href: raw('upstream'), text: '↓ published' }) : null,
@@ -1238,10 +1238,13 @@ function drawMember(runId, path, slot, state, d) {
             : 'The published artifact does not contain it, so the build produced something that was never shipped. What is below is that file.')
       : null,
 
-    d.binary && !state.view
+    d.decompiled
       ? el('p', { class: 'note empty' },
-          `Opened as hex: ${d.binary_because}. The text view is off for this member because rendering these bytes as lines would invent structure they do not have.`)
-      : null,
+          'The text view is C# decompiled by ILSpy — a reading of the assembly, not its bytes (those are the hex view). ILSpy hides most compiler codegen, so an empty diff means it found no source-level difference; weigh it with the census, it is not proof the sources match.')
+      : (d.binary && !state.view
+          ? el('p', { class: 'note empty' },
+              `Opened as hex: ${d.binary_because}. The text view is off for this member because rendering these bytes as lines would invent structure they do not have.`)
+          : null),
 
     d.unavailable ? el('p', { class: 'withheld-note', text: d.unavailable }) : null,
 

@@ -3325,3 +3325,67 @@ The image (`localhost/trigon-ilspy`, `ilspycmd` pinned) is built once and reused
 on every decompile; both sides always go through the one pinned tool, so a difference in the C# is a
 difference in the assemblies and not in the decompiler. Best effort throughout — a machine with no
 podman loses the reading, not the run.
+
+### 3.78 The decompiled diff, in `trigon serve` as well as in the model's prompt
+
+[3.77](#377-decompiling-the-assembly-so-the-diff-is-c-and-not-bytes) put the decompiled C# in front
+of the opinion model but not in front of a person: `trigon serve`'s member view still opened a
+`.dll` as a hex window. The gap was real — a reader browsing a divergence saw exactly what the model
+used to, "these bytes differ", and nothing to act on.
+
+The member route now serves the C# diff for a managed assembly, and the same one the opinion reads:
+open `lib/net6.0/Castle.Core.dll` on a divergent `castle.core` run and the text view is
+
+```
+- [assembly: TargetFramework(".NETCoreApp,Version=v6.0", FrameworkDisplayName = ".NET 6.0")]
++ [assembly: TargetFramework(".NETCoreApp,Version=v6.0", FrameworkDisplayName = "")]
+- [assembly: AssemblyCopyright("Copyright (c) 2004-2022 Castle Project …")]
++ [assembly: AssemblyCopyright("Copyright (c) 2004-2026 Castle Project …")]
+- [assembly: AssemblyFileVersion("5.1.1")]
++ [assembly: AssemblyFileVersion("0.0.0")]
+- [assembly: AssemblyVersion("5.0.0.0")]
++ [assembly: AssemblyVersion("0.0.0.0")]
+```
+
+with every other line identical — the hex view is still a click away for the bytes themselves.
+
+**Injected, so the serving crate never learns what ILSpy is.** `trigon-api` cannot run a container —
+that is the binary's world, and a public read surface with a podman dependency is the wrong shape.
+So the decompiler arrives as a hook: `trigon serve` hands `Api` a closure, `trigon-api` asks it about
+every member and gets `None` for the ones it does not handle, and a deployment without podman serves
+the hex view exactly as before. The predicate for "is this an assembly" lives once, with the
+decompiler in the binary. The class gate that already covers member bytes covers this — a
+decompilation is the member's content in another form — and `decompiled: true` on the view is what
+makes the page say the diff is a reading of the assembly, not the assembly.
+
+### 3.79 The reproduction recipe is in the CI config, not the build scripts
+
+Asked, of `castle.core`: *"there are build scripts in the repository, are we using them? should we?"*
+No, and no — and the reason is the same one [3.76](#376-why-castlecore511-still-diverges-once-it-builds-peeled-apart)
+and B44/B45 keep circling.
+
+`build.sh` is not a recipe for the package. It runs `dotnet build --configuration Release` over the
+whole solution and then the **test suites** — net462 through mono, netcoreapp3.1 and net6.0 — and
+fails if any test fails. It needs mono or docker, builds the test projects as well as the library,
+never runs `dotnet pack`, and **sets no version**: it would produce `0.0.0` exactly as Trigon's
+direct `dotnet pack` does. Running it would cost minutes of test execution and a mono toolchain to
+reconstruct one library, and reconstruct it no more faithfully. Trigon's targeted pack of the one
+project under verification is the right shape.
+
+The recipe is one directory up, in the CI config the build script never reads:
+
+- `appveyor.yml` line 46: `Update-AppveyorBuild -Version ($env:APPVEYOR_REPO_TAG_NAME).TrimStart("v")`
+  — the package version is **the git tag minus its `v`**, `v5.1.1` → `5.1.1`, set into
+  `APPVEYOR_BUILD_VERSION`, which `common.props` reads into `BuildVersion`, from which every version
+  attribute derives. This is exactly the tag Trigon's strategy already found (`PrefixedTag`), so the
+  version B44 cannot inject is sitting in a fact Trigon already holds.
+- `.github/workflows/build.yml` names the SDKs the CI installs (2.1, 3.1, 6.0, 7.0) — the toolchain
+  index B45 wants, stated by the project itself.
+
+So the answer to "should we use the build scripts" is the sharper form of B44/B45: **not the build
+scripts, but the CI configuration.** For NuGet, Trigon infers a heuristic strategy and does not read
+the CI config the way its GitHub-Actions rung does for other ecosystems; doing so would close the
+version gap (set `APPVEYOR_BUILD_VERSION`, or the property the config threads a version through) and
+inform the SDK choice. Filed against B44 and B45 rather than built here, because reading a CI config
+for its version and toolchain scheme is inference and belongs with the model rung, not a hardcoded
+reading of one project's `appveyor.yml`.

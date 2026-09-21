@@ -183,6 +183,7 @@ async fn a_member_with_no_bytes_says_which_of_the_three_reasons_it_is() {
             index,
             switches: trigon_api::Switches::default(),
             unauthenticated: trigon_api::Principal::Operator,
+            decompiler: None,
             member_reads: trigon_api::default_member_permits(),
         });
         let mut router = trigon_api::router(api);
@@ -318,6 +319,7 @@ async fn an_artifact_too_large_is_refused_without_reading_it() {
         index,
         switches: trigon_api::Switches::default(),
         unauthenticated: trigon_api::Principal::Operator,
+        decompiler: None,
         member_reads: trigon_api::default_member_permits(),
     });
 
@@ -522,4 +524,102 @@ fn listing_an_oversized_artifact_is_refused_too() {
     let e = trigon_api::member::names(vec![0u8; (256 << 20) + 1], "pkg.tgz")
         .expect_err("over MAX_ARTIFACT");
     assert!(e.contains("will not parse anything over"), "{e}");
+}
+
+/// A managed assembly's member view is the decompiled C#, where a decompiler was supplied.
+///
+/// The decompiler is injected — ILSpy runs in a container, which is the binary's world, so the
+/// serving crate is handed a hook and never mentions it. This drives the seam with a *stub* hook
+/// (no podman): the route must call it for a `.dll`, put the C# diff in the text view, and mark it
+/// `decompiled`; and with no hook the same member stays a binary/hex view, so the C# is an
+/// addition and never a silent replacement of the bytes.
+#[tokio::test]
+async fn a_dll_member_is_served_as_decompiled_csharp_when_a_decompiler_is_present() {
+    use std::sync::Arc;
+    use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
+
+    fn tar_with_dll(byte: u8) -> Vec<u8> {
+        tar_of(&[("lib/net6.0/A.dll", &[0u8, 1, 2, byte][..])])
+    }
+
+    async fn view(store: Arc<Store>, id: &str, decompiler: Option<trigon_api::Decompiler>) -> serde_json::Value {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower_service::Service as _;
+        let index = trigon_api::Index::new();
+        index.refresh(&store, trigon_api::Switches::default()).await.unwrap();
+        let api = Arc::new(trigon_api::Api {
+            store,
+            queue: None,
+            index,
+            switches: trigon_api::Switches::default(),
+            unauthenticated: trigon_api::Principal::Operator,
+            decompiler,
+            member_reads: trigon_api::default_member_permits(),
+        });
+        let mut router = trigon_api::router(api);
+        let res = router
+            .call(
+                Request::builder()
+                    .uri(format!("/v1/runs/{id}/member?path=lib%2Fnet6.0%2FA.dll"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let b = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&b).unwrap()
+    }
+
+    let store = Arc::new(Store::in_memory());
+    let up = tar_with_dll(10);
+    let rb = tar_with_dll(20);
+    let up_d = store.blobs().put(up).await.unwrap();
+    let rb_d = store.blobs().put(rb).await.unwrap();
+    let env = Environment {
+        base_image: "x@sha256:0".into(),
+        derived_image: None,
+        egress: "mirror".into(),
+        isolation: "podman".into(),
+        attestable: true,
+        registry_moment: None,
+        pin: None,
+        guard_manifest: None,
+        guarded_members: None,
+    };
+    let mut r = RunRecord::new(
+        "1700000009-dd",
+        "pkg:nuget/a@1.0.0",
+        ArtifactRef { name: "a.tar".into(), sha256: up_d, bytes: 4, stored: true },
+        env,
+        "2026-01-01T00:00:00Z",
+    );
+    r.rebuild = Some(ArtifactRef { name: "a.tar".into(), sha256: rb_d, bytes: 4, stored: true });
+    r.state = RunState::Done;
+    r.outcome = Some("divergent".into());
+    store.put_run(&r).await.unwrap();
+
+    // A stub decompiler: distinct C# per side, keyed on the first differing byte, so the diff is
+    // real. Only for `.dll`, so the predicate lives with the (stub) decompiler exactly as it does
+    // with the real one.
+    let dec: trigon_api::Decompiler = Arc::new(|name: &str, a: &[u8], b: &[u8]| {
+        name.ends_with(".dll").then(|| {
+            (
+                format!("class A {{ int v = {}; }}\n", a[3]),
+                format!("class A {{ int v = {}; }}\n", b[3]),
+            )
+        })
+    });
+
+    // With the hook: the text view is the C# diff, and it is marked decompiled.
+    let with = view(store.clone(), "1700000009-dd", Some(dec)).await;
+    assert_eq!(with["decompiled"], serde_json::json!(true), "{with}");
+    assert_eq!(with["binary"], serde_json::json!(true), "the bytes are still binary: {with}");
+    let text = with["text"].to_string();
+    assert!(text.contains("int v = 10") && text.contains("int v = 20"), "the C# diff: {text}");
+
+    // Without the hook: the same member is a binary/hex view, no phantom text, not decompiled.
+    let without = view(store, "1700000009-dd", None).await;
+    assert_eq!(without["decompiled"], serde_json::json!(false), "{without}");
+    assert_eq!(without["text"], serde_json::Value::Null, "no text view without a decompiler: {without}");
 }
