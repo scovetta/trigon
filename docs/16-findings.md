@@ -3285,3 +3285,43 @@ current at `registry_time`, which is [B45](17-backlog.md).
 with a version and a year injected, with a compiler pinned by the calendar — and Trigon builds the
 project. Each layer is Trigon being handed less than the CI had and having to reconstruct the rest;
 1 it can do from the project, 2 from the publish metadata, 3 only from a historical toolchain index.
+
+### 3.77 Decompiling the assembly, so the diff is C# and not bytes
+
+Asked directly: *"could we use ilspy to decompile the DLLs to show the differences as source code?"* Yes,
+and it turns out to be the sharpest tool yet for the compiled-language case.
+
+For an executable member a byte diff says only "these differ", which is true and useless — and the
+diff-opinion model ([3.74](#374-the-record-could-say-two-members-differ-and-not-whether-it-matters))
+read `castle.core`'s four differing DLLs as *substantive* precisely because "binary differences in
+all DLLs" looks substantive. `ilspycmd`, run in a container, turns each side back into C#, and the
+diff of *that* is legible. Measured on `castle.core@5.1.1`'s net6.0 assembly: the two copies differ
+by **3,690 scattered bytes at identical size**, and decompile to C# that differs by **sixteen
+lines, every one an assembly attribute** — copyright year, `AssemblyFileVersion` 5.1.1 vs 0.0.0,
+`AssemblyVersion` 5.0.0.0 vs 0.0.0.0, the framework display name. With the version and year
+reconstructed ([3.76](#376-why-castlecore511-still-diverges-once-it-builds-peeled-apart)) it is
+**one line**. All 25,820 lines of code are identical. ILSpy normalises the compiler codegen that
+[B45](17-backlog.md) is about, so what is left in the diff is the difference that is really there.
+
+**Display only, the rule the opinion is already under.** ADR-0013 gives caches "bytes, never
+decisions"; a decompiler gets "readable form, never a decision". The C# never reaches the comparison
+outcome, the publication gate or a signed statement — it is produced after the verdict is final,
+from bytes re-read off disk, and flows only into the opinion prompt. An adversarial pass confirmed
+that boundary holds and turned up two things worth fixing, both about not overclaiming or not
+trusting the input:
+
+- **The reassurance was too strong.** The header first told the model "an empty diff means identical
+  source compiled differently". ILSpy hides most codegen but not all, and past a 2 MiB truncation an
+  empty diff means "identical prefix", not "identical source". It now says the decompiler found no
+  source-level difference, that this is *likely* the toolchain, and that the census is what decides
+  — a hypothesis about *why* the bytes differ, never a second opinion about *whether* they do.
+- **The bytes are the publisher's, so the container is bounded.** The decompile runs on the
+  divergent path, right where an accusation is recorded, and the sandbox's build timeout does not
+  reach it. A crafted assembly could have hung `ilspycmd` and stalled the run; the decompile now
+  runs under `--memory`, `--pids-limit` and a `timeout`, and a side that fails or times out falls
+  back to the byte diff rather than a truncated one.
+
+The image (`localhost/trigon-ilspy`, `ilspycmd` pinned) is built once and reused; `--network none`
+on every decompile; both sides always go through the one pinned tool, so a difference in the C# is a
+difference in the assemblies and not in the decompiler. Best effort throughout — a machine with no
+podman loses the reading, not the run.

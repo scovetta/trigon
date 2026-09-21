@@ -999,6 +999,8 @@ fn rfc3339_from_unix(secs: u64) -> String {
 }
 
 #[cfg(feature = "build")]
+mod decompile;
+#[cfg(feature = "build")]
 mod dotnet;
 #[cfg(feature = "build")]
 mod progress;
@@ -5653,6 +5655,42 @@ mod rebuild {
                     "\n=== {path} — differs; only one side was readable, so no diff is shown \
                      ===\n"
                 ));
+                shown += 1;
+                continue;
+            }
+            // **A managed assembly is decompiled, so the diff is C# and not bytes.** A `.dll`
+            // reads as binary and would render as a hex window nobody can act on — and the model
+            // reads "binary differences in all DLLs" as substantive because they look it. ILSpy
+            // turns each side back into source, normalising the compiler codegen that a rebuild
+            // under a different SDK changes throughout, so what is left in the diff is the
+            // difference that is really there: on `castle.core` it is three version attributes on
+            // otherwise identical code. Display only, best effort, both-sides-or-fall-through —
+            // see `crate::decompile`.
+            if f.status == St::Differs
+                && crate::decompile::looks_like_assembly(&path)
+                && let (Some(a), Some(b)) = (up.as_deref(), rb.as_deref())
+                && let Some((up_cs, rb_cs)) = crate::decompile::sources(a, b)
+            {
+                // One header, from `render_member`, so the byte counts stay the *assembly's* and
+                // not the decompiled string's — a reader comparing 385 KB to 385 KB should not be
+                // told the members are a megabyte of C#. The path carries the caveat that the diff
+                // below is a decompilation.
+                let mut cs = trigon_api::member::view(
+                    &format!(
+                        "{path} — C# decompiled by ILSpy (a reading aid, not the bytes). The \
+                         decompiler hides most compiler codegen, so an empty diff below means it \
+                         found no source-level difference — the bytes still differ, and that is \
+                         likely the toolchain, though the decompiler can also miss a difference it \
+                         does not render or one past a `diff truncated` note. Weigh it with the \
+                         byte census; it is not proof the sources match."
+                    ),
+                    Some(up_cs.into_bytes()),
+                    Some(rb_cs.into_bytes()),
+                    None,
+                );
+                cs.upstream_bytes = Some(a.len() as u64);
+                cs.rebuild_bytes = Some(b.len() as u64);
+                render_member(&mut out, &cs, MAX_BYTES);
                 shown += 1;
                 continue;
             }
