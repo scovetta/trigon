@@ -96,7 +96,7 @@ a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset:
 a:hover { text-decoration-thickness: 2px; }
 code, .mono { font-family: var(--mono); font-size: .88em; }
 
-.wrap { max-width: 1160px; margin: 0 auto; padding-block: 0 4rem; padding-inline: 16px; }
+.wrap { max-width: var(--wrap-max); margin: 0 auto; padding-block: 0 4rem; padding-inline: 16px; }
 
 /* ---- header ------------------------------------------------------------ */
 
@@ -439,6 +439,14 @@ td.member-slot:empty { display: none; }
   background: color-mix(in srgb, var(--accent) 5%, transparent);
   padding: .7rem .9rem 1rem;
   margin: 0 0 .4rem;
+  /* A definite width cap, so a long line scrolls **inside** the diff instead of stretching this
+     table cell — and through it the whole table and the page — to the line's width. This cell is
+     `colspan=6` in a `width:100%` auto-layout table, where a cell grows to its content and takes
+     the table past its 100% with it; `overflow-x` on `.diff` cannot bite until its container has a
+     width the content does not set. The value is `.wrap`'s content box (`--wrap-max`, less its two
+     16px gutters), viewport-clamped for narrow screens; `box-sizing: border-box` is global, so the
+     padding above is inside it. */
+  max-width: calc(min(var(--wrap-max), 100vw) - 32px);
 }
 .member-open .filters { margin: 0 0 .7rem; }
 .member-open .chip[disabled] { opacity: .4; cursor: not-allowed; }
