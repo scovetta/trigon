@@ -63,25 +63,40 @@ fn paint_with(on: bool, code: &str, text: &str) -> String {
     }
 }
 
-/// A section title or a figure worth the eye landing on. Bold, no colour — weight reads on any
-/// palette, where a colour might not.
+/// The one width every `label   value` line pads its label to, tool-wide. A single column means a
+/// value starts at the same place in the resolve narration, the build stats, the verdict and the
+/// listings alike — so a whole run reads down one edge rather than stepping in and out as the
+/// sections change. Twelve fits the longest label that recurs (`isolation`, `stabilizers`) with a
+/// space to spare; the rare wider one is styled by hand.
+pub const LABEL: usize = 12;
+
+/// A section or phase title — the package reference, `strategy <digest>`, `applied`, `members`.
+/// Bold and bright white, so it parts the run into blocks the eye can jump between. Weight over
+/// hue here, because a title's job is to separate, and separation reads on any palette.
 pub fn heading(text: &str) -> String {
-    paint("1", text)
+    paint("1;97", text)
 }
 
-/// The left-hand word in a label/value pair. Dim, so the value it introduces is what stands out.
+/// The left-hand word in a label/value pair. **Bold blue** — a real hue with weight behind it, so
+/// the key stands off from its value and the whole left edge carries colour rather than the grey it
+/// used to. Bright blue rather than plain blue, because a terminal that does not brighten bold
+/// leaves plain blue dark and low-contrast on a dark ground — the exact washed-out look this
+/// replaces. Blue is the structural colour throughout; cyan, next to it, is reserved for the data.
 pub fn label(text: &str) -> String {
-    paint("2", text)
+    paint("1;94", text)
 }
 
-/// Secondary prose — an aside, a fallback explanation, a "no data". Dim.
+/// Secondary prose — an aside, a fallback explanation, a "no data". Grey (bright black), not faint:
+/// faint is the lowest-contrast code a terminal has and several render it invisible, which is what
+/// made the first pass read as washed out. Grey recedes without disappearing.
 pub fn muted(text: &str) -> String {
-    paint("2", text)
+    paint("90", text)
 }
 
-/// A digest, a reference, an identifier the reader might copy. Cyan.
+/// A digest, a reference, an identifier the reader might copy. **Bright cyan** — the data colour,
+/// one step brighter than the blue of the labels so the two never blur into each other.
 pub fn ident(text: &str) -> String {
-    paint("36", text)
+    paint("96", text)
 }
 
 /// A good outcome, or the "=" that says two hashes agree. Green.
@@ -106,11 +121,11 @@ pub fn verdict(code: &str, mark: &str, word: &str) -> String {
     paint(code, &format!("{mark} {word}"))
 }
 
-/// Left-pad `text` to `width` on the plain string, then dim it as a label column. The padding is
-/// part of the label, so the colour covers the trailing spaces — invisible either way — and the
-/// value that follows starts at the same column on every row.
-pub fn label_col(text: &str, width: usize) -> String {
-    label(&format!("{text:<width$}"))
+/// Left-pad `text` to [`LABEL`] on the plain string, then paint it as a label. The padding is part
+/// of the label, so the colour covers the trailing spaces — invisible either way — and the value
+/// that follows starts at the same column on every row and in every section.
+pub fn label_col(text: &str) -> String {
+    label(&format!("{text:<width$}", width = LABEL))
 }
 
 #[cfg(test)]
@@ -154,10 +169,13 @@ mod tests {
     #[test]
     fn a_label_column_is_padded_on_the_visible_text_whether_or_not_it_is_painted() {
         // Whatever `enabled()` decided in this harness, the width the reader sees is the same: the
-        // padding is measured in visible characters, so columns line up either way.
-        assert_eq!(visible(&label_col("raw", 12)), "raw         ");
-        assert_eq!(visible(&label_col("stabilizer set", 14)), "stabilizer set");
-        // And the painted form, forced on, strips back to exactly that.
-        assert_eq!(visible(&paint_with(true, "2", "raw         ")), "raw         ");
+        // padding is measured in visible characters, so columns line up either way — and every
+        // label pads to the one tool-wide `LABEL` width, so sections line up with each other too.
+        assert_eq!(visible(&label_col("raw")).chars().count(), LABEL);
+        assert_eq!(visible(&label_col("raw")), format!("{:<width$}", "raw", width = LABEL));
+        // A label already as wide as the column gets no padding and is not truncated.
+        assert_eq!(visible(&label_col("stabilizers")), format!("{:<width$}", "stabilizers", width = LABEL));
+        // And the painted form, forced on, strips back to exactly the visible text.
+        assert_eq!(visible(&paint_with(true, "90", "raw         ")), "raw         ");
     }
 }

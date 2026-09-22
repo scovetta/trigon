@@ -1552,7 +1552,7 @@ mod registry {
             OutputFormat::Text => {
                 println!("{}", style::heading(&resolved.reference.to_string()));
                 if let Some(t) = &resolved.intrinsics.publish_time {
-                    println!("  {} {t}", style::label_col("published", 10));
+                    println!("  {} {t}", style::label_col("published"));
                 }
                 match &resolved.source {
                     // The rung is printed, not just the answer. A registry-recorded commit and a
@@ -1560,16 +1560,16 @@ mod registry {
                     Some(s) if !s.commit.is_empty() => {
                         println!(
                             "  {} {} @ {}",
-                            style::label_col("source", 10),
+                            style::label_col("source"),
                             s.repo_url,
                             style::ident(&s.commit)
                         );
-                        println!("  {} {:?}", style::label_col("found by", 10), s.how);
+                        println!("  {} {:?}", style::label_col("found by"), s.how);
                     }
                     Some(s) => {
                         println!(
                             "  {} {} {}",
-                            style::label_col("source", 10),
+                            style::label_col("source"),
                             s.repo_url,
                             style::muted("(no commit)")
                         );
@@ -1577,12 +1577,12 @@ mod registry {
                             Some((sha, name, how)) => {
                                 println!(
                                     "  {} {name} -> {}",
-                                    style::label_col("tag", 10),
+                                    style::label_col("tag"),
                                     style::ident(sha)
                                 );
                                 println!(
                                     "  {} {:?}, which is what a rebuild would use",
-                                    style::label_col("found by", 10),
+                                    style::label_col("found by"),
                                     how
                                 );
                                 // The caveat is the point. A tag is a mutable reference: it can be
@@ -1592,7 +1592,7 @@ mod registry {
                                 // against one has to be read against that.
                                 println!(
                                     "  {} {}",
-                                    style::label_col("", 10),
+                                    style::label_col(""),
                                     style::muted(
                                         "a tag is mutable — it can be moved after the release, so \
                                          this identifies the commit the tag points at today rather \
@@ -1603,12 +1603,12 @@ mod registry {
                             None => println!(
                                 "  {} {:?}: no tag matches this version, so something stronger has \
                                  to find the commit",
-                                style::label_col("found by", 10),
+                                style::label_col("found by"),
                                 s.how
                             ),
                         }
                     }
-                    None => println!("  {} {}", style::label_col("source", 10), style::muted("not declared")),
+                    None => println!("  {} {}", style::label_col("source"), style::muted("not declared")),
                 }
                 println!("\n  {}", style::heading("artifacts"));
                 let w = resolved
@@ -1947,7 +1947,7 @@ mod build {
                 .or_else(|| cache_dir().and_then(|d| crate::dotnet_global_json(&d, subdir)));
             let (major, why) =
                 crate::dotnet::choose(project.as_deref(), global_json.as_deref(), published);
-            println!("  {} .NET {major}: {}", style::label_col("sdk", 9), style::muted(&why));
+            println!("  {} .NET {major}: {}", style::label_col("sdk"), style::muted(&why));
             (major, why)
         });
         let sdk_why = sdk_major.as_ref().map(|(_, w)| w.clone());
@@ -2073,10 +2073,10 @@ mod build {
 
             if verbose {
                 println!("{} {}", style::heading("strategy"), style::ident(&digest[..16]));
-                println!("  {} {}", style::label_col("egress", 10), outcome.egress);
-                println!("  {} {:?}", style::label_col("isolation", 10), outcome.isolation);
+                println!("  {} {}", style::label_col("egress"), outcome.egress);
+                println!("  {} {:?}", style::label_col("isolation"), outcome.isolation);
                 for (phase, d) in &outcome.timings {
-                    let name = style::label_col(&format!("{phase:?}").to_lowercase(), 10);
+                    let name = style::label_col(&format!("{phase:?}").to_lowercase());
                     match d {
                         // `None` means no data, never zero. A timing we failed to read is not a
                         // fast phase, and reporting it as one poisons every average downstream.
@@ -2096,7 +2096,7 @@ mod build {
                         println!(
                             "  {} {} response{} crossed into the build, {opened} opened and \
                              checked",
-                            style::label_col("network", 10),
+                            style::label_col("network"),
                             t.len(),
                             if t.len() == 1 { "" } else { "s" },
                         );
@@ -2111,7 +2111,7 @@ mod build {
                         if partial > 0 {
                             println!(
                                 "  {} {}",
-                                style::label_col("", 10),
+                                style::label_col(""),
                                 style::warn(&format!(
                                     "{partial} of them were abandoned part-way, so their bytes \
                                      crossed unchecked"
@@ -2119,7 +2119,7 @@ mod build {
                             );
                         }
                         if let Some(p) = &transcript_path {
-                            println!("  {} {}", style::label_col("", 10), style::muted(&p.display().to_string()));
+                            println!("  {} {}", style::label_col(""), style::muted(&p.display().to_string()));
                         }
                     }
                     // Two reasons, and naming the wrong one sends the reader to the wrong fix.
@@ -2144,7 +2144,7 @@ mod build {
                 }
                 match (&outcome.artifact, outcome.succeeded()) {
                     (Some(p), _) => {
-                        println!("\n  {} {}", style::label_col("artifact", 10), p.display())
+                        println!("\n  {} {}", style::label_col("artifact"), p.display())
                     }
                     (None, true) => println!(
                         "\n  {}",
@@ -2266,7 +2266,7 @@ mod build {
                     eprintln!("\n{}", short.text);
                     println!(
                         "\n  {} {}",
-                        style::label_col("failure", 10),
+                        style::label_col("failure"),
                         style::bad(&signature.to_string())
                     );
                     // What the flag gates, not a claim about the world. It said `no strategy
@@ -2275,9 +2275,9 @@ mod build {
                     // model call is worth making, and the deterministic rung below rewrites it
                     // anyway.
                     if !signature.repairable {
-                        println!("  {} {}", style::label_col("", 10), style::muted("not one to ask the model about"));
+                        println!("  {} {}", style::label_col(""), style::muted("not one to ask the model about"));
                     }
-                    println!("  {} {}", style::label_col("log", 10), log_path.display());
+                    println!("  {} {}", style::label_col("log"), log_path.display());
                 }
                 return Err(BuildFailure {
                     phase,
@@ -2691,6 +2691,19 @@ fn serve_corpus(
         .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// A risk tier, painted by how much latitude the pass took. Structural and metadata edits are the
+/// cheap, reversible ones and read cool — cyan and grey; content and lossy edits are the ones that
+/// can hold a match only with a caveat, so they earn a warm colour that says to look twice.
+fn risk_painted(risk: trigon_core::RiskTier, text: &str) -> String {
+    use trigon_core::RiskTier::*;
+    match risk {
+        Structural => style::ident(text),
+        Metadata => style::muted(text),
+        Content => style::warn(text),
+        Lossy => style::bad(text),
+    }
+}
+
 fn print_text(c: &Comparison, explain: bool) {
     // The verdict, and the one line a reader looks for first: painted to the outcome, and still
     // legible with a symbol and a word when it is not painted at all.
@@ -2703,10 +2716,10 @@ fn print_text(c: &Comparison, explain: bool) {
     println!();
 
     // What was compared, and under which set — the frame for everything below it.
-    println!("  {} {}", style::label_col("format", 14), c.upstream.format);
+    println!("  {} {}", style::label_col("format"), c.upstream.format);
     println!(
         "  {} {} {}",
-        style::label_col("stabilizer set", 14),
+        style::label_col("stabilizers"),
         c.upstream.set.0,
         style::muted(&format!("({})", short(&c.upstream.set.1.to_hex()))),
     );
@@ -2715,7 +2728,7 @@ fn print_text(c: &Comparison, explain: bool) {
     // The digests, upstream against rebuild, each row marked with whether the two sides agree.
     println!(
         "  {} {} {}",
-        style::label_col("", 12),
+        style::label_col(""),
         style::heading(&format!("{:<18}", "upstream")),
         style::heading("rebuild"),
     );
@@ -2755,7 +2768,7 @@ fn print_text(c: &Comparison, explain: bool) {
             println!(
                 "    {:<24} {} {}",
                 a.id.as_str(),
-                style::muted(&format!("{:<10}", format!("{:?}", a.risk).to_lowercase())),
+                risk_painted(a.risk, &format!("{:<10}", format!("{:?}", a.risk).to_lowercase())),
                 style::muted(&format!("{:>6} entries", a.entries_touched)),
             );
         }
@@ -2856,7 +2869,7 @@ fn row(label: &str, a: &str, b: &str) {
     };
     println!(
         "  {} {} {} {}",
-        style::label_col(label, 12),
+        style::label_col(label),
         style::ident(&format!("{:<18}", short(a))),
         style::ident(&format!("{:<18}", short(b))),
         mark,
@@ -2865,6 +2878,24 @@ fn row(label: &str, a: &str, b: &str) {
 
 fn short(hex: &str) -> String {
     format!("{}…", &hex[..hex.len().min(12)])
+}
+
+/// A git ref or image reference for display. A full hex object name — a 40-char commit, a 64-char
+/// image id — is shortened to its first twelve like a digest, because at full length it wraps the
+/// terminal and pushes the line that follows it back to the margin. A tag, a branch, or a readable
+/// `registry/name:tag` has non-hex characters or is short already, and is left exactly as it is:
+/// those are meant to be read whole, and none of them overflows.
+///
+/// Build-only: it shortens the run narration, which the verifier does not print.
+#[cfg(feature = "build")]
+fn short_ref(reference: &str) -> String {
+    let is_object_name =
+        reference.len() >= 32 && reference.bytes().all(|b| b.is_ascii_hexdigit());
+    if is_object_name {
+        format!("{}…", &reference[..12])
+    } else {
+        reference.to_string()
+    }
 }
 
 /// What selects a profile, in the words the reader would use to cause it.
@@ -3156,7 +3187,7 @@ fn stabilizers(prof: &str) -> Result<()> {
         println!(
             "  {:<w$} {} {} {}",
             m.id().as_str(),
-            style::muted(&format!("{:<11}", format!("{:?}", m.risk()).to_lowercase())),
+            risk_painted(m.risk(), &format!("{:<11}", format!("{:?}", m.risk()).to_lowercase())),
             style::muted(&format!("{:<9}", format!("{:?}", m.stage()).to_lowercase())),
             style::muted(&format!("{:?}", m.provenance()))
         );
@@ -3406,7 +3437,7 @@ mod rebuild {
     /// formats. The value is `Display`, so a caller passes a plain string or a styled one and the
     /// colour it wants rides along in the value, never in the label.
     fn note(label: &str, value: impl std::fmt::Display) {
-        println!("  {} {value}", style::label_col(label, 10));
+        println!("  {} {value}", style::label_col(label));
     }
     use trigon_registry::{
         Client, ClientConfig, DefinitionsInferrer, NpmInferrer, PyPiInferrer, StrategyInferrer,
@@ -3902,7 +3933,7 @@ mod rebuild {
                             let commit = if found.commit.is_empty() {
                                 style::muted("(no commit)")
                             } else {
-                                style::ident(&found.commit)
+                                style::ident(&short_ref(&found.commit))
                             };
                             note("nuspec", format!("{} @ {commit}", found.repo_url));
                         }
@@ -3915,7 +3946,7 @@ mod rebuild {
                         && src.commit.is_empty()
                     {
                         if verbose {
-                            note("vcs-info", style::ident(&sha));
+                            note("vcs-info", style::ident(&short_ref(&sha)));
                         }
                         src.commit = sha;
                         src.how = trigon_core::SourceDiscovery::PublishedProvenance;
@@ -4114,7 +4145,7 @@ mod rebuild {
         if verbose {
             note(
                 "source",
-                format!("{} @ {}", loc.repo, style::ident(&loc.git_ref)),
+                format!("{} @ {}", loc.repo, style::ident(&short_ref(&loc.git_ref))),
             );
             note(
                 "strategy",
@@ -6712,9 +6743,9 @@ mod mirror {
         if !here {
             println!(
                 "  {} {} {}",
-                style::label_col("image", 10),
+                style::label_col("image"),
                 style::muted("pulling"),
-                style::ident(reference)
+                style::ident(&short_ref(reference))
             );
             let ok = std::process::Command::new("podman")
                 .args(["pull", reference])
@@ -6954,8 +6985,8 @@ mod mirror {
             if verbose {
                 println!(
                     "  {} {} {}",
-                    style::label_col("image", 10),
-                    style::ident(parent),
+                    style::label_col("image"),
+                    style::ident(&short_ref(parent)),
                     style::muted("already carries what this strategy needs")
                 );
             }
@@ -6976,8 +7007,8 @@ mod mirror {
             if verbose {
                 println!(
                     "  {} {} {}",
-                    style::label_col("image", 10),
-                    style::ident(parent),
+                    style::label_col("image"),
+                    style::ident(&short_ref(parent)),
                     style::muted("already carries what this strategy needs")
                 );
             }
@@ -7044,8 +7075,8 @@ mod mirror {
 
         println!(
             "  {} deriving one from {}, adding: {}",
-            style::label_col("image", 10),
-            style::ident(parent),
+            style::label_col("image"),
+            style::ident(&short_ref(parent)),
             style::warn(&packages.join(", "))
         );
         base_image(parent, &packages, &tag, false, false)?;
