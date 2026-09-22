@@ -3531,3 +3531,9 @@ SDK than the newest-at-publish and pinning it *without* a `global.json` — chie
 the weeks just after a new major, before the ecosystem's CI images rolled forward. That case now
 diverges where it may have matched; the principled repair is an escalation rung that, on a .NET
 codegen divergence, retries under the floor SDK, and is the natural next step past this one.
+
+### 3.84 Colour and sections in the human-readable output
+
+The verdict and the build report were correct and hard to skim: one weight, one colour, labels and values and prose all the same grey. A `style` module now paints them, under three rules that keep the colour honest — colour follows the terminal (a result piped to a file or a program is plain, the same principle the log subscriber already applies to stderr); `NO_COLOR` set to anything non-empty wins, per <https://no-color.org>, with `CLICOLOR_FORCE` to override back on for a pager; and colour is only ever an accent, never the message, so every distinction it draws is also in the words and the symbols and the plain output says exactly what the coloured one does.
+
+The module is zero-dependency — a hand-rolled SGR wrapper, in keeping with the verifier's small-tree ethos — and not gated behind the `build` feature, because the verifier prints a verdict too and it should read as well as a build's does. Widths are computed on the plain text with the colour wrapped around the result, since an escape sequence has bytes but no width; pad first, paint second, or the columns drift by the length of the codes. What it paints: the verdict green/yellow/red to its outcome, the digest rows' `=`/`≠` green and red, a non-zero differ count red, noteworthy codes yellow, section titles bold, field labels and explanatory asides dim, and identifiers cyan. The same vocabulary carries across `verify`, the build run, `resolve`, and the `stabilizers` listings, so the whole tool reads as one report rather than a dozen ad-hoc formats.

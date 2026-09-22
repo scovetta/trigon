@@ -998,6 +998,10 @@ fn rfc3339_from_unix(secs: u64) -> String {
     )
 }
 
+/// Colour and alignment for the human-readable output. Not gated: the verifier's `verify` prints a
+/// verdict too, and it should read as well as a build's does.
+mod style;
+
 #[cfg(feature = "build")]
 mod decompile;
 #[cfg(feature = "build")]
@@ -1546,24 +1550,39 @@ mod registry {
                 println!("{}", serde_json::to_string_pretty(&resolved)?);
             }
             OutputFormat::Text => {
-                println!("{}", resolved.reference);
+                println!("{}", style::heading(&resolved.reference.to_string()));
                 if let Some(t) = &resolved.intrinsics.publish_time {
-                    println!("  published  {t}");
+                    println!("  {} {t}", style::label_col("published", 10));
                 }
                 match &resolved.source {
                     // The rung is printed, not just the answer. A registry-recorded commit and a
                     // fuzzy tag match are both "a commit", and they should not be read alike.
                     Some(s) if !s.commit.is_empty() => {
-                        println!("  source     {} @ {}", s.repo_url, s.commit);
-                        println!("  found by   {:?}", s.how);
+                        println!(
+                            "  {} {} @ {}",
+                            style::label_col("source", 10),
+                            s.repo_url,
+                            style::ident(&s.commit)
+                        );
+                        println!("  {} {:?}", style::label_col("found by", 10), s.how);
                     }
                     Some(s) => {
-                        println!("  source     {} (no commit)", s.repo_url);
+                        println!(
+                            "  {} {} {}",
+                            style::label_col("source", 10),
+                            s.repo_url,
+                            style::muted("(no commit)")
+                        );
                         match &tag {
                             Some((sha, name, how)) => {
-                                println!("  tag        {name} -> {sha}");
                                 println!(
-                                    "  found by   {:?}, which is what a rebuild would use",
+                                    "  {} {name} -> {}",
+                                    style::label_col("tag", 10),
+                                    style::ident(sha)
+                                );
+                                println!(
+                                    "  {} {:?}, which is what a rebuild would use",
+                                    style::label_col("found by", 10),
                                     how
                                 );
                                 // The caveat is the point. A tag is a mutable reference: it can be
@@ -1572,21 +1591,26 @@ mod registry {
                                 // What a tag gives is a good approximation, and a divergence
                                 // against one has to be read against that.
                                 println!(
-                                    "             a tag is mutable — it can be moved after the \
-                                     release, so this identifies the commit the tag points at \
-                                     today rather than the one that was published"
+                                    "  {} {}",
+                                    style::label_col("", 10),
+                                    style::muted(
+                                        "a tag is mutable — it can be moved after the release, so \
+                                         this identifies the commit the tag points at today rather \
+                                         than the one that was published"
+                                    )
                                 );
                             }
                             None => println!(
-                                "  found by   {:?}: no tag matches this version, so something \
-                                 stronger has to find the commit",
+                                "  {} {:?}: no tag matches this version, so something stronger has \
+                                 to find the commit",
+                                style::label_col("found by", 10),
                                 s.how
                             ),
                         }
                     }
-                    None => println!("  source     not declared"),
+                    None => println!("  {} {}", style::label_col("source", 10), style::muted("not declared")),
                 }
-                println!("\n  artifacts");
+                println!("\n  {}", style::heading("artifacts"));
                 let w = resolved
                     .artifacts
                     .iter()
@@ -1595,10 +1619,10 @@ mod registry {
                     .unwrap_or(0);
                 for a in &resolved.artifacts {
                     let digest = match &a.declared_sha256 {
-                        Some(d) => format!("sha256:{}", &d.to_hex()[..16]),
+                        Some(d) => style::ident(&format!("sha256:{}", &d.to_hex()[..16])),
                         // Said plainly. npm publishes sha1 and sometimes sha512, so for most of it
                         // there is nothing to check the bytes against.
-                        None => "no sha256 declared".into(),
+                        None => style::muted("no sha256 declared"),
                     };
                     println!("    {:<w$}  {digest}", a.id.as_str());
                 }
@@ -1923,7 +1947,7 @@ mod build {
                 .or_else(|| cache_dir().and_then(|d| crate::dotnet_global_json(&d, subdir)));
             let (major, why) =
                 crate::dotnet::choose(project.as_deref(), global_json.as_deref(), published);
-            println!("  sdk        .NET {major}: {why}");
+            println!("  {} .NET {major}: {}", style::label_col("sdk", 9), style::muted(&why));
             (major, why)
         });
         let sdk_why = sdk_major.as_ref().map(|(_, w)| w.clone());
@@ -2048,15 +2072,16 @@ mod build {
             });
 
             if verbose {
-                println!("strategy {}", &digest[..16]);
-                println!("  egress    {}", outcome.egress);
-                println!("  isolation {:?}", outcome.isolation);
+                println!("{} {}", style::heading("strategy"), style::ident(&digest[..16]));
+                println!("  {} {}", style::label_col("egress", 10), outcome.egress);
+                println!("  {} {:?}", style::label_col("isolation", 10), outcome.isolation);
                 for (phase, d) in &outcome.timings {
+                    let name = style::label_col(&format!("{phase:?}").to_lowercase(), 10);
                     match d {
                         // `None` means no data, never zero. A timing we failed to read is not a
                         // fast phase, and reporting it as one poisons every average downstream.
-                        Some(d) => println!("  {phase:?}{:>10.1}s", d.as_secs_f64()),
-                        None => println!("  {phase:?}      no data"),
+                        Some(d) => println!("  {name} {:>7.1}s", d.as_secs_f64()),
+                        None => println!("  {name} {}", style::muted("no data")),
                     }
                 }
                 match &outcome.transcript {
@@ -2109,14 +2134,19 @@ mod build {
                                  than nothing."
                             }
                         };
-                        println!("\n  not attestable: {why}");
+                        println!("\n  {} {why}", style::warn("not attestable:"));
                     }
                 }
                 match (&outcome.artifact, outcome.succeeded()) {
-                    (Some(p), _) => println!("\n  artifact  {}", p.display()),
+                    (Some(p), _) => {
+                        println!("\n  {} {}", style::label_col("artifact", 10), p.display())
+                    }
                     (None, true) => println!(
-                        "\n  the build succeeded but produced no single artifact. Check \
-                         output_path: a glob matching several files does not identify one."
+                        "\n  {}",
+                        style::warn(
+                            "the build succeeded but produced no single artifact. Check \
+                             output_path: a glob matching several files does not identify one."
+                        )
                     ),
                     (None, false) => {}
                 }
@@ -2229,16 +2259,20 @@ mod build {
                     // full text is on disk either way.
                     let short = trigon_core::compress(&outcome.log_tail, 4096);
                     eprintln!("\n{}", short.text);
-                    println!("\n  failure   {signature}");
+                    println!(
+                        "\n  {} {}",
+                        style::label_col("failure", 10),
+                        style::bad(&signature.to_string())
+                    );
                     // What the flag gates, not a claim about the world. It said `no strategy
                     // change fixes this one` until a run printed that line and then repaired the
                     // build two lines later: `yarn: not found` is `repairable: false` because no
                     // model call is worth making, and the deterministic rung below rewrites it
                     // anyway.
                     if !signature.repairable {
-                        println!("            not one to ask the model about");
+                        println!("  {} {}", style::label_col("", 10), style::muted("not one to ask the model about"));
                     }
-                    println!("  log       {}", log_path.display());
+                    println!("  {} {}", style::label_col("log", 10), log_path.display());
                 }
                 return Err(BuildFailure {
                     phase,
@@ -2653,21 +2687,33 @@ fn serve_corpus(
 }
 
 fn print_text(c: &Comparison, explain: bool) {
-    let mark = match c.outcome {
-        Match::Exact | Match::Normalized => "✔",
-        Match::NormalizedWithCaveats => "◐",
-        Match::Divergent => "✖",
+    // The verdict, and the one line a reader looks for first: painted to the outcome, and still
+    // legible with a symbol and a word when it is not painted at all.
+    let (code, mark) = match c.outcome {
+        Match::Exact | Match::Normalized => ("1;32", "✔"),
+        Match::NormalizedWithCaveats => ("1;33", "◐"),
+        Match::Divergent => ("1;31", "✖"),
     };
-    println!("{mark} {}", c.outcome);
+    println!("{}", style::verdict(code, mark, &c.outcome.to_string()));
     println!();
-    println!("  format         {}", c.upstream.format);
+
+    // What was compared, and under which set — the frame for everything below it.
+    println!("  {} {}", style::label_col("format", 14), c.upstream.format);
     println!(
-        "  stabilizer set {} ({})",
+        "  {} {} {}",
+        style::label_col("stabilizer set", 14),
         c.upstream.set.0,
-        short(&c.upstream.set.1.to_hex())
+        style::muted(&format!("({})", short(&c.upstream.set.1.to_hex()))),
     );
     println!();
-    println!("  {:<12} {:<18} {:<18}", "", "upstream", "rebuild");
+
+    // The digests, upstream against rebuild, each row marked with whether the two sides agree.
+    println!(
+        "  {} {} {}",
+        style::label_col("", 12),
+        style::heading(&format!("{:<18}", "upstream")),
+        style::heading("rebuild"),
+    );
     row(
         "raw",
         &c.upstream.raw.sha256.to_hex(),
@@ -2684,16 +2730,16 @@ fn print_text(c: &Comparison, explain: bool) {
 
     if let Some(false) = c.container_bit_identical() {
         println!();
-        println!("  containers differ as well as the framing");
+        println!("  {}", style::muted("containers differ as well as the framing"));
     } else if c.container_bit_identical() == Some(true) && c.outcome != Match::Exact {
         println!();
-        println!("  same container, different outer framing");
+        println!("  {}", style::muted("same container, different outer framing"));
     }
 
     let applied = c.applied();
     if !applied.is_empty() {
         println!();
-        println!("  applied");
+        println!("  {}", style::heading("applied"));
         let mut seen: Vec<String> = Vec::new();
         for a in applied {
             let key = a.id.to_string();
@@ -2702,17 +2748,17 @@ fn print_text(c: &Comparison, explain: bool) {
             }
             seen.push(key);
             println!(
-                "    {:<24} {:<10} {:>6} entries",
+                "    {:<24} {} {}",
                 a.id.as_str(),
-                format!("{:?}", a.risk).to_lowercase(),
-                a.entries_touched
+                style::muted(&format!("{:<10}", format!("{:?}", a.risk).to_lowercase())),
+                style::muted(&format!("{:>6} entries", a.entries_touched)),
             );
         }
     }
 
     if let Some(reason) = c.cap_reason() {
         println!();
-        println!("  capped below `normalized`: {reason}");
+        println!("  {} {reason}", style::warn("capped below `normalized`:"));
     }
 
     // Both parses and the comparison. The comparison's notes were missing, so
@@ -2728,23 +2774,44 @@ fn print_text(c: &Comparison, explain: bool) {
         .collect();
     if !notes.is_empty() {
         println!();
-        println!("  notes");
+        println!("  {}", style::heading("notes"));
         for n in notes {
             let at = n.path.as_ref().map(|p| format!(" {p}")).unwrap_or_default();
-            println!("    {:?}{at}: {}", n.code, n.detail);
+            println!(
+                "    {}{}: {}",
+                style::warn(&format!("{:?}", n.code)),
+                style::muted(&at),
+                n.detail,
+            );
         }
     }
 
     if let Some(d) = &c.diff {
         println!();
+        // A count is coloured only when it is worth the eye: identical is the good number, and a
+        // non-zero differ / only-side count is the one to notice; a zero stays plain.
+        let hot = |n: u32, paint: fn(&str) -> String| {
+            if n > 0 {
+                paint(&n.to_string())
+            } else {
+                n.to_string()
+            }
+        };
         println!(
-            "  members  {} identical, {} differ, {} upstream-only, {} rebuild-only",
-            d.identical, d.differs, d.only_upstream, d.only_rebuild
+            "  {}  {} identical, {} differ, {} upstream-only, {} rebuild-only",
+            style::heading("members"),
+            style::good(&d.identical.to_string()),
+            hot(d.differs, style::bad),
+            hot(d.only_upstream, style::warn),
+            hot(d.only_rebuild, style::warn),
         );
         if d.executable_differs > 0 {
             println!(
-                "  {} executable member(s) differ, which is never benign",
-                d.executable_differs
+                "  {}",
+                style::bad(&format!(
+                    "{} executable member(s) differ, which is never benign",
+                    d.executable_differs
+                )),
             );
         }
         let interesting: Vec<_> = d
@@ -2758,26 +2825,36 @@ fn print_text(c: &Comparison, explain: bool) {
             10.min(interesting.len())
         };
         for f in &interesting[..limit] {
-            println!(
-                "    {:<16} {}",
-                format!("{:?}", f.status).to_lowercase(),
-                f.path
-            );
+            use trigon_compare::FileStatus::*;
+            let status = format!("{:<16}", format!("{:?}", f.status).to_lowercase());
+            let status = match f.status {
+                Differs => style::warn(&status),
+                OnlyUpstream | OnlyRebuild => style::ident(&status),
+                Identical => status,
+            };
+            println!("    {} {}", status, f.path);
         }
         if interesting.len() > limit {
-            println!("    … {} more, pass --explain", interesting.len() - limit);
+            println!(
+                "    {}",
+                style::muted(&format!("… {} more, pass --explain", interesting.len() - limit)),
+            );
         }
     }
 }
 
 fn row(label: &str, a: &str, b: &str) {
-    let same = a == b;
+    let mark = if a == b {
+        style::good("=")
+    } else {
+        style::bad("≠")
+    };
     println!(
-        "  {:<12} {:<18} {:<18} {}",
-        label,
-        short(a),
-        short(b),
-        if same { "=" } else { "≠" }
+        "  {} {} {} {}",
+        style::label_col(label, 12),
+        style::ident(&format!("{:<18}", short(a))),
+        style::ident(&format!("{:<18}", short(b))),
+        mark,
     );
 }
 
@@ -2841,21 +2918,24 @@ fn list_profiles_cmd() -> Result<()> {
 
     // Sized to what is present rather than to a guess, the way `stabilizers` does it.
     let w = ids.iter().map(|i| i.len()).max().unwrap_or(0).max(7);
-    println!("{} stabilizer profiles.", ids.len());
+    println!("{} stabilizer profiles.", style::heading(&ids.len().to_string()));
     println!();
     println!(
-        "  {:<w$}  {:>6}  {:<16}  selected by",
-        "profile", "passes", "set digest"
+        "  {}  {}  {}  {}",
+        style::heading(&format!("{:<w$}", "profile")),
+        style::heading(&format!("{:>6}", "passes")),
+        style::heading(&format!("{:<16}", "set digest")),
+        style::heading("selected by"),
     );
     for set in &sets {
         let sel = selectors_for(set.id.as_str());
         println!(
-            "  {:<w$}  {:>6}  {:<16}  {}",
+            "  {:<w$}  {:>6}  {}  {}",
             set.id.as_str(),
             set.members.len(),
-            &set.digest().to_hex()[..16],
+            style::ident(&format!("{:<16}", &set.digest().to_hex()[..16])),
             if sel.is_empty() {
-                "nothing".to_string()
+                style::muted("nothing")
             } else {
                 sel.join(", ")
             },
@@ -2863,7 +2943,10 @@ fn list_profiles_cmd() -> Result<()> {
     }
 
     println!();
-    println!("Passes that can hold a match at `normalized_with_caveats`:");
+    println!(
+        "{}",
+        style::heading("Passes that can hold a match at `normalized_with_caveats`:")
+    );
     let mut any = false;
     for set in &sets {
         let caps = capping_passes(set);
@@ -2871,15 +2954,21 @@ fn list_profiles_cmd() -> Result<()> {
             continue;
         }
         any = true;
-        println!("  {:<w$}  {}", set.id.as_str(), caps.join(", "));
+        println!("  {:<w$}  {}", set.id.as_str(), style::warn(&caps.join(", ")));
     }
     if !any {
-        println!("  none: every pass in every profile is built in, at metadata risk or below");
+        println!(
+            "  {}",
+            style::muted("none: every pass in every profile is built in, at metadata risk or below")
+        );
     }
     println!(
-        "  The cap is read off the passes that fired, not off this list, so a profile carrying one"
+        "  {}",
+        style::muted(
+            "The cap is read off the passes that fired, not off this list, so a profile carrying \
+             one caps nothing on a run where it found nothing to do."
+        )
     );
-    println!("  caps nothing on a run where it found nothing to do.");
 
     let orphans: Vec<&str> = sets
         .iter()
@@ -2889,25 +2978,33 @@ fn list_profiles_cmd() -> Result<()> {
     if !orphans.is_empty() {
         println!();
         println!(
-            "Nothing selects {}: {}. An artifact of that shape gets the fallback for its format, \
-             so these passes never run and the normalization they describe does not happen. \
-             `--profile` reaches one by hand.",
-            if orphans.len() == 1 {
-                "one profile".to_string()
-            } else {
-                format!("{} profiles", orphans.len())
-            },
-            orphans.join(", ")
+            "{}",
+            style::warn(&format!(
+                "Nothing selects {}: {}. An artifact of that shape gets the fallback for its \
+                 format, so these passes never run and the normalization they describe does not \
+                 happen. `--profile` reaches one by hand.",
+                if orphans.len() == 1 {
+                    "one profile".to_string()
+                } else {
+                    format!("{} profiles", orphans.len())
+                },
+                orphans.join(", ")
+            ))
         );
     }
     println!();
     println!(
-        "The digest is over the passes and their tiers, and it is what an attestation carries:"
+        "{}",
+        style::muted(
+            "The digest is over the passes and their tiers, and it is what an attestation carries: \
+             a statement stays readable against the set it named, and reordering a pass makes a \
+             new one."
+        )
     );
     println!(
-        "a statement stays readable against the set it named, and reordering a pass makes a new one."
+        "{}",
+        style::muted("`trigon stabilizers --profile <id>` lists the passes in one.")
     );
-    println!("`trigon stabilizers --profile <id>` lists the passes in one.");
     Ok(())
 }
 
@@ -3036,7 +3133,11 @@ fn stabilizers(prof: &str) -> Result<()> {
             trigon_stabilize::all_profiles().join(", ")
         )
     })?;
-    println!("{} ({})", set.id, set.digest());
+    println!(
+        "{} {}",
+        style::heading(&set.id.to_string()),
+        style::muted(&format!("({})", set.digest()))
+    );
     println!();
     // Sized to the longest id present rather than to a guess: `gem-metadata-rubygems-version` is
     // 29 characters and a fixed width silently breaks the alignment of every row after it.
@@ -3048,11 +3149,11 @@ fn stabilizers(prof: &str) -> Result<()> {
         .unwrap_or(0);
     for m in &set.members {
         println!(
-            "  {:<w$} {:<11} {:<9} {:?}",
+            "  {:<w$} {} {} {}",
             m.id().as_str(),
-            format!("{:?}", m.risk()).to_lowercase(),
-            format!("{:?}", m.stage()).to_lowercase(),
-            m.provenance()
+            style::muted(&format!("{:<11}", format!("{:?}", m.risk()).to_lowercase())),
+            style::muted(&format!("{:<9}", format!("{:?}", m.stage()).to_lowercase())),
+            style::muted(&format!("{:?}", m.provenance()))
         );
     }
     Ok(())
