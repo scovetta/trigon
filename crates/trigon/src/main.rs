@@ -2094,8 +2094,9 @@ mod build {
                             .filter(|e| e.checked == trigon_mirror::Checked::Opened)
                             .count();
                         println!(
-                            "  network   {} response{} crossed into the build, {opened} opened \
-                             and checked",
+                            "  {} {} response{} crossed into the build, {opened} opened and \
+                             checked",
+                            style::label_col("network", 10),
                             t.len(),
                             if t.len() == 1 { "" } else { "s" },
                         );
@@ -2109,12 +2110,16 @@ mod build {
                             .count();
                         if partial > 0 {
                             println!(
-                                "            {partial} of them were abandoned part-way, so their \
-                                 bytes crossed unchecked"
+                                "  {} {}",
+                                style::label_col("", 10),
+                                style::warn(&format!(
+                                    "{partial} of them were abandoned part-way, so their bytes \
+                                     crossed unchecked"
+                                ))
                             );
                         }
                         if let Some(p) = &transcript_path {
-                            println!("            {}", p.display());
+                            println!("  {} {}", style::label_col("", 10), style::muted(&p.display().to_string()));
                         }
                     }
                     // Two reasons, and naming the wrong one sends the reader to the wrong fix.
@@ -3394,6 +3399,15 @@ mod rebuild {
 
     use super::*;
     use trigon_core::TargetRef;
+
+    /// One line of a run's narration: a dim label in a fixed 10-wide column, then a value already
+    /// styled by its role. The column matches the strategy and verdict blocks, so a whole run —
+    /// resolve through repair through verdict — reads as one report rather than a stack of ad-hoc
+    /// formats. The value is `Display`, so a caller passes a plain string or a styled one and the
+    /// colour it wants rides along in the value, never in the label.
+    fn note(label: &str, value: impl std::fmt::Display) {
+        println!("  {} {value}", style::label_col(label, 10));
+    }
     use trigon_registry::{
         Client, ClientConfig, DefinitionsInferrer, NpmInferrer, PyPiInferrer, StrategyInferrer,
         for_ecosystem,
@@ -3824,8 +3838,8 @@ mod rebuild {
         // file as malformed.
         resolved.about = Some(meta.id.clone());
         if verbose {
-            println!("{}", resolved.reference);
-            println!("  artifact   {}", meta.id);
+            println!("{}", style::heading(&resolved.reference.to_string()));
+            note("artifact", &meta.id);
         }
 
         mark("fetch");
@@ -3851,7 +3865,14 @@ mod rebuild {
                 .unwrap_or(0),
         ));
         if verbose {
-            println!("  published  sha256 {}", &upstream_digest.to_hex()[..16]);
+            note(
+                "published",
+                format!(
+                    "{} {}",
+                    style::muted("sha256"),
+                    style::ident(&upstream_digest.to_hex()[..16])
+                ),
+            );
         }
 
         // What the published artifact says about the toolchain that made it, added to the
@@ -3860,7 +3881,7 @@ mod rebuild {
         if let Ok(bytes) = std::fs::read(&upstream_path) {
             let found = trigon_registry::wheel::generator_evidence(&bytes);
             if verbose && let Some(e) = found.first() {
-                println!("  generator  {:?}", e.claim);
+                note("generator", format!("{:?}", e.claim));
             }
             resolved.intrinsics.evidence.extend(found);
 
@@ -3878,14 +3899,12 @@ mod rebuild {
                 trigon_core::Ecosystem::NuGet => {
                     if let Some(found) = trigon_registry::nupkg_source(&bytes) {
                         if verbose {
-                            println!(
-                                "  nuspec     {} @ {}",
-                                found.repo_url,
-                                match found.commit.is_empty() {
-                                    true => "(no commit)",
-                                    false => &found.commit,
-                                }
-                            );
+                            let commit = if found.commit.is_empty() {
+                                style::muted("(no commit)")
+                            } else {
+                                style::ident(&found.commit)
+                            };
+                            note("nuspec", format!("{} @ {commit}", found.repo_url));
                         }
                         resolved.source = Some(found);
                     }
@@ -3896,7 +3915,7 @@ mod rebuild {
                         && src.commit.is_empty()
                     {
                         if verbose {
-                            println!("  vcs-info   {sha}");
+                            note("vcs-info", style::ident(&sha));
                         }
                         src.commit = sha;
                         src.how = trigon_core::SourceDiscovery::PublishedProvenance;
@@ -3922,8 +3941,9 @@ mod rebuild {
         let enforced = args.egress == "mirror-only";
         let reserved = match args.timewarp.as_deref() {
             Some("auto") if enforced => {
-                println!(
-                    "  mirror     inside the build's network island, which is its only route out"
+                note(
+                    "mirror",
+                    style::muted("inside the build's network island, which is its only route out"),
                 );
                 None
             }
@@ -4042,12 +4062,16 @@ mod rebuild {
             println!();
             if report.declines.is_empty() {
                 println!(
-                    "  no-strategy  no rung proposed a recipe, and none said why. That is a gap in \
-                     Trigon rather than a fact about this package."
+                    "  {}  {}",
+                    style::warn("no-strategy"),
+                    style::muted(
+                        "no rung proposed a recipe, and none said why. That is a gap in Trigon \
+                         rather than a fact about this package."
+                    )
                 );
             }
             for d in &report.declines {
-                println!("  declined   {d}");
+                note("declined", style::warn(d));
             }
             return Ok(Ran {
                 outcome: Outcome::NoStrategy,
@@ -4088,15 +4112,21 @@ mod rebuild {
         // it replaces.
         resolved.source = report.source.clone();
         if verbose {
-            println!("  source     {} @ {}", loc.repo, loc.git_ref);
-            println!(
-                "  strategy   {:?}, commit found by {:?}, confidence {:?}",
-                candidate.derivation, candidate.discovery, candidate.confidence
+            note(
+                "source",
+                format!("{} @ {}", loc.repo, style::ident(&loc.git_ref)),
+            );
+            note(
+                "strategy",
+                format!(
+                    "{:?}, commit found by {:?}, confidence {:?}",
+                    candidate.derivation, candidate.discovery, candidate.confidence
+                ),
             );
             for a in &candidate.assumptions {
                 // Printed, not buried. A divergence has to be readable against the guesses that
                 // produced it rather than taken as a fact about the package.
-                println!("  assuming   {a}");
+                note("assuming", style::muted(a));
             }
         }
 
@@ -4123,11 +4153,16 @@ mod rebuild {
             &target,
         )?;
         if verbose {
-            println!(
-                "  guarding   the artifact and {} of its members ({} too small, too common, or \
-                 also in the source)",
-                guard.members.len(),
-                guard.filtered_out
+            note(
+                "guarding",
+                format!(
+                    "the artifact and {} of its members {}",
+                    guard.members.len(),
+                    style::muted(&format!(
+                        "({} too small, too common, or also in the source)",
+                        guard.filtered_out
+                    ))
+                ),
             );
         }
 
@@ -4143,7 +4178,7 @@ mod rebuild {
                         .await
                 })?;
                 if verbose {
-                    println!("  mirror     serving the index as of the publish date");
+                    note("mirror", style::muted("serving the index as of the publish date"));
                 }
                 Some(handle)
             }
@@ -4360,9 +4395,12 @@ mod rebuild {
                     && changes_anything(&next, &strategy_digest)
                 {
                     if verbose {
-                        println!(
-                            "  repair     reconstructed the assembly version from the published \
-                             package; no model needed"
+                        note(
+                            "repair",
+                            style::good(
+                                "reconstructed the assembly version from the published package; \
+                                 no model needed"
+                            ),
                         );
                     }
                     report
@@ -4389,7 +4427,7 @@ mod rebuild {
                 ) {
                     trigon_ai::Decision::Stop(reason) => {
                         if verbose {
-                            println!("  repair     stopped: {}", stop_reason(&reason));
+                            note("repair", style::warn(&format!("stopped: {}", stop_reason(&reason))));
                         }
                         report.repair_stopped = Some(stop_reason(&reason));
                         tracing::info!(?reason, "the repair loop stopped after a divergence");
@@ -4410,10 +4448,9 @@ mod rebuild {
                         let read = repo_inputs.as_ref().expect("just filled");
                         let brief = divergence_brief(&comparison);
                         if verbose {
-                            println!(
-                                "  repair     attempt {} on {}",
-                                repairs.attempts().len() + 1,
-                                failure.key()
+                            note(
+                                "repair",
+                                format!("attempt {} on {}", repairs.attempts().len() + 1, failure.key()),
                             );
                         }
                         let before = cfg.spent();
@@ -4445,8 +4482,9 @@ mod rebuild {
                             Ok(next) => match usable(&next, timewarp) {
                                 Ok(()) if !changes_anything(&next, &strategy_digest) => {
                                     if verbose {
-                                        println!(
-                                            "  repair     proposed the same recipe; nothing to try"
+                                        note(
+                                            "repair",
+                                            style::warn("proposed the same recipe; nothing to try"),
                                         );
                                     }
                                     report.repair_stopped = Some(
@@ -4484,7 +4522,7 @@ mod rebuild {
                                 }
                                 Err(e) => {
                                     if verbose {
-                                        println!("  repair     discarded: {e}");
+                                        note("repair", style::warn(&format!("discarded: {e}")));
                                     }
                                     report.repair_stopped =
                                         Some(format!("the proposed recipe does not render: {e}"));
@@ -4548,7 +4586,7 @@ mod rebuild {
                 && changes_anything(&next, &strategy_digest)
             {
                 if verbose {
-                    println!("  repair     rewrote yarn as npm run; no model needed");
+                    note("repair", style::good("rewrote yarn as npm run; no model needed"));
                 }
                 report
                     .repairs
@@ -4571,7 +4609,7 @@ mod rebuild {
                     // is too small", "we have no rule for this" and "working as intended", and a
                     // run that just stops tells the operator none of them.
                     if verbose {
-                        println!("  repair     stopped: {}", stop_reason(&reason));
+                        note("repair", style::warn(&format!("stopped: {}", stop_reason(&reason))));
                     }
                     report.repair_stopped = Some(stop_reason(&reason));
                     tracing::info!(?reason, "the repair loop stopped");
@@ -4598,11 +4636,18 @@ mod rebuild {
                     // budget buys dependency noise; a smaller one clips the error.
                     let compressed = trigon_core::compress(&log, 8 * 1024);
                     if verbose {
-                        println!(
-                            "  repair     attempt {} on {}{}",
-                            repairs.attempts().len() + 1,
-                            failure.key(),
-                            if escalate { ", escalated" } else { "" },
+                        note(
+                            "repair",
+                            format!(
+                                "attempt {} on {}{}",
+                                repairs.attempts().len() + 1,
+                                failure.key(),
+                                if escalate {
+                                    style::warn(", escalated")
+                                } else {
+                                    String::new()
+                                },
+                            ),
                         );
                     }
                     let before = cfg.spent();
@@ -4641,8 +4686,9 @@ mod rebuild {
                         Ok(next) => match usable(&next, timewarp) {
                             Ok(()) if !changes_anything(&next, &strategy_digest) => {
                                 if verbose {
-                                    println!(
-                                        "  repair     proposed the same recipe; nothing to try"
+                                    note(
+                                        "repair",
+                                        style::warn("proposed the same recipe; nothing to try"),
                                     );
                                 }
                                 report.repair_stopped =
@@ -4655,7 +4701,7 @@ mod rebuild {
                             }
                             Err(e) => {
                                 if verbose {
-                                    println!("  repair     discarded: {e}");
+                                    note("repair", style::warn(&format!("discarded: {e}")));
                                 }
                                 report.repair_stopped =
                                     Some(format!("the proposed recipe does not render: {e}"));
@@ -4817,17 +4863,24 @@ mod rebuild {
                 // versions and withholds none of them; the thousand-odd are its devDependency
                 // tree, where `mocha` alone accounts for a hundred. "1044 versions withheld" on
                 // its own reads as a claim about left-pad and is not one.
-                println!(
-                    "\n  mirror     {} index request(s), {} version(s) withheld across them",
-                    observed.index_requests, observed.versions_withheld,
+                println!();
+                note(
+                    "mirror",
+                    format!(
+                        "{} index request(s), {} version(s) withheld across them",
+                        observed.index_requests, observed.versions_withheld,
+                    ),
                 );
                 if observed.toolchain_requests > 0 {
                     // Named separately because it is a different claim: the build fetched the
                     // thing that would run, not a dependency, and it did so from a host on the
                     // mirror's allowlist rather than one the strategy chose.
-                    println!(
-                        "             {} toolchain download(s) through the allowlist",
-                        observed.toolchain_requests
+                    note(
+                        "",
+                        style::muted(&format!(
+                            "{} toolchain download(s) through the allowlist",
+                            observed.toolchain_requests
+                        )),
                     );
                 }
             }
@@ -6657,7 +6710,12 @@ mod mirror {
             .status()
             .is_ok_and(|s| s.success());
         if !here {
-            println!("  image      pulling {reference}");
+            println!(
+                "  {} {} {}",
+                style::label_col("image", 10),
+                style::muted("pulling"),
+                style::ident(reference)
+            );
             let ok = std::process::Command::new("podman")
                 .args(["pull", reference])
                 .status()
@@ -6894,7 +6952,12 @@ mod mirror {
             && required.iter().all(|r| have.iter().any(|h| h == r))
         {
             if verbose {
-                println!("  image      {parent} already carries what this strategy needs");
+                println!(
+                    "  {} {} {}",
+                    style::label_col("image", 10),
+                    style::ident(parent),
+                    style::muted("already carries what this strategy needs")
+                );
             }
             return Ok(Resolved { image: parent.to_string(), derived: None });
         }
@@ -6911,7 +6974,12 @@ mod mirror {
         let missing = missing_from(parent, required);
         if missing.is_empty() {
             if verbose {
-                println!("  image      {parent} already carries what this strategy needs");
+                println!(
+                    "  {} {} {}",
+                    style::label_col("image", 10),
+                    style::ident(parent),
+                    style::muted("already carries what this strategy needs")
+                );
             }
             return Ok(Resolved { image: parent.to_string(), derived: None });
         }
@@ -6975,8 +7043,10 @@ mod mirror {
         }
 
         println!(
-            "  image      deriving one from {parent}, adding: {}",
-            packages.join(", ")
+            "  {} deriving one from {}, adding: {}",
+            style::label_col("image", 10),
+            style::ident(parent),
+            style::warn(&packages.join(", "))
         );
         base_image(parent, &packages, &tag, false, false)?;
         Ok(Resolved {
@@ -7146,7 +7216,13 @@ mod mirror {
         std::fs::create_dir_all(&dir)?;
         let file = dir.join("Containerfile");
         std::fs::write(&file, &containerfile)?;
-        println!("building {tag} from {from} with: {}", packages.join(", "));
+        println!(
+            "{} {} from {} with: {}",
+            style::heading("building"),
+            style::ident(tag),
+            style::ident(from),
+            style::warn(&packages.join(", "))
+        );
         let status = std::process::Command::new("podman")
             .args(["build", "--tag", tag, "--file"])
             .arg(&file)
@@ -7170,8 +7246,10 @@ mod mirror {
         match out {
             Ok(o) if o.status.success() && !o.stdout.is_empty() => {
                 println!(
-                    "\n{tag} is ready: {}",
-                    String::from_utf8_lossy(&o.stdout).trim()
+                    "\n{} {}: {}",
+                    style::good(tag),
+                    style::good("is ready"),
+                    style::ident(String::from_utf8_lossy(&o.stdout).trim())
                 );
             }
             // A locally built image has no repository digest until it is pushed, so the id is what
@@ -7186,8 +7264,12 @@ mod mirror {
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .unwrap_or_default();
                 println!(
-                    "\n{tag} is ready. It has no repository digest until it is pushed, so \
-                          pass its id:\n\n    --image {id}"
+                    "\n{} {}",
+                    style::good(&format!("{tag} is ready.")),
+                    style::muted(&format!(
+                        "It has no repository digest until it is pushed, so pass its id:\n\n    \
+                         --image {id}"
+                    ))
                 );
             }
         }
