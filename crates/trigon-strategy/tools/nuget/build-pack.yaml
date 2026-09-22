@@ -83,6 +83,26 @@ steps:
       }
       export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
       export NUGET_PACKAGES=/trigon/nuget/packages
+      # **A readme's remote `<!-- include URL -->` is fetched at pack time, and that is network.**
+      # NuGetizer (devlooped) resolves `<!-- include <path-or-url> -->` directives in the package
+      # readme by inlining the target. A local path resolves from the checkout; an `http(s)://` URL
+      # is fetched over the wire — `moq@4.20.72`'s readme pulls
+      # `raw.githubusercontent.com/devlooped/sponsors/main/footer.md` — and under `mirror-only` the
+      # build's network island has no route there, so `dotnet pack` dies `Network is unreachable` in
+      # NuGetizer's `CreatePackage` before it writes a package (`docs/16-findings.md` §3.86).
+      #
+      # The remote target is a moving branch (`…/main/…`) whose content — a sponsor list refreshed at
+      # release time and absent from the checkout — is not reproducible even for the publisher, and is
+      # not the package's own source. Neutralise only the *remote* include directives so the pack
+      # stays offline and produces an artifact; local includes resolve from the checkout untouched.
+      # The readme then differs from the published one in exactly that refreshed region, which is a
+      # divergence the run can show and explain rather than a build that never ran.
+      for md in $(find . -type f -name '*.md' -not -path './.git/*' 2>/dev/null); do
+        if grep -qiE '<!--[[:space:]]*include[[:space:]]+https?://' "$md" 2>/dev/null; then
+          sed -i -E '/<!--[[:space:]]*include[[:space:]]+https?:\/\//d' "$md"
+          echo "trigon: neutralised a remote readme include in $md so pack stays offline"
+        fi
+      done
       # `--no-restore`: the deps phase already did it, and a restore here would open the network in
       # the phase that is supposed to be observable.
       # **`LanguageTargets`, and it is the whole fix for a large stratum.** A project may override
