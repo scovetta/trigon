@@ -3496,3 +3496,38 @@ an era-appropriate SDK the residual is the structural debug layout ([B46](17-bac
 `.NET 6`-by-target SDK that `--image auto` selects today it is compiler codegen throughout
 ([B45](17-backlog.md)). Two of the three layers are now built; the third is the SDK-by-publish-date
 frontier.
+
+### 3.83 SDK by publish date: build with the toolchain the CI had, not the one the target names
+
+Piece three of the castle.core work, and the layer [3.82](#382-version-reconstruction-build-the-assembly-with-the-version-the-feed-served)
+named as the frontier. `dotnet::choose` selected the SDK by the project's declared target-framework
+major, capped at the newest that had shipped by the publish date — a `net6.0` target became the .NET
+6 SDK. That is the wrong toolchain: a package is built with whatever SDK its CI had installed, which
+is the newest one that existed when it published, and the declared target is a *floor* that SDK
+clears rather than the SDK itself. castle.core proves it directly — its `appveyor.yml` builds on the
+"Visual Studio 2022"/"Ubuntu" images, whose December-2022 SDK was .NET 7.0.101, and building under
+.NET 7 gets its decompiled code byte-identical where .NET 6 diverges throughout ([B45](17-backlog.md)).
+
+So the choice is inverted. The publish instant now leads — `choose` builds with the newest SDK that
+existed at `registry_time` — and the declared target only pulls the choice *up*, when a project
+targets something newer than any SDK that had shipped (a preview, or a publish instant that is not
+when the bytes were made). Above both sits a `global.json`: when the repository pins an SDK, that is
+the publisher naming the toolchain outright, and it wins over target and date alike. The resolution
+is read from the same two roots the project file is (the host checkout, else the source cache) by
+walking up from the project directory to the checkout boundary — no further, so a `global.json`
+above the boundary, which the package never carried, is never read.
+
+For castle.core, `choose` now returns .NET 7 for a 2022-12-30 publish, and the assumption line says
+why: *the newest SDK that existed when the package was published; the declared .NET 6 target is a
+floor that SDK clears.* What remains is patch precision — the image is the rolling `sdk:7.0` tag, not
+the exact `7.0.101` — which for castle's code does not matter (the decompiled bytes are stable across
+a major's patches) and leaves only the structural debug layout ([B46](17-backlog.md)). All three
+layers of the castle.core reconstruction are now built.
+
+**The regression this trades against.** Preferring the newest SDK can only turn a match into a
+divergence, never a divergence into a false match — a wrong toolchain produces different bytes, which
+the comparison catches, not agreeing ones. The exposure is a package genuinely built with an older
+SDK than the newest-at-publish and pinning it *without* a `global.json` — chiefly one published in
+the weeks just after a new major, before the ecosystem's CI images rolled forward. That case now
+diverges where it may have matched; the principled repair is an escalation rung that, on a .NET
+codegen divergence, retries under the floor SDK, and is the natural next step past this one.

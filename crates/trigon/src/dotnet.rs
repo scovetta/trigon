@@ -95,25 +95,68 @@ pub fn ceiling_at(published: &str) -> Option<u32> {
         .next_back()
 }
 
-/// The image tag to build with, and the sentence explaining it.
+/// The SDK major a `global.json` pins, if it pins one.
+///
+/// `global.json` is how a repository says "build me with this SDK and no other". Its `sdk.version`
+/// is a full version such as `7.0.101`, and the major is its first component; a `-preview` suffix
+/// rides along on the last component and does not change it. A file with no `sdk.version` — some
+/// carry only an `msbuild-sdks` map — pins no SDK and yields None, as does anything that is not
+/// JSON. The major is what a pin resolves to here because the image is chosen at major granularity;
+/// `rollForward` can only carry the real SDK to a newer one, never an older, so the pinned major is
+/// the floor the pin establishes and the one worth honouring.
+pub fn pin_from_global_json(text: &str) -> Option<u32> {
+    let doc: serde_json::Value = serde_json::from_str(text).ok()?;
+    let version = doc.get("sdk")?.get("version")?.as_str()?;
+    version.split('.').next()?.parse::<u32>().ok()
+}
+
+/// The SDK major to build with, and the sentence explaining it.
 ///
 /// The sentence goes into the run's assumptions. A reader of a divergence has to be able to see
 /// which SDK produced it and why that one, because "the toolchain" is the first thing to suspect in
 /// a compiled ecosystem and the second thing they cannot check without this.
-pub fn choose(project: Option<&str>, published: Option<&str>) -> (u32, String) {
+///
+/// The evidence, strongest first. A `global.json` pin is the publisher naming the SDK outright.
+/// Failing that, the **publish instant** leads: a package is built by whatever SDK the publisher's
+/// CI had installed, which is the newest one that existed when they published — castle.core targets
+/// `net6.0` but its December 2022 build ran on the .NET 7 SDK, because that is what the CI image
+/// carried. The project's declared `TargetFramework` is therefore a **floor**, an SDK older than
+/// which cannot build the project at all, and not the SDK the publisher used; it only pulls the
+/// choice up, when it points past the newest SDK that had shipped.
+pub fn choose(
+    project: Option<&str>,
+    global_json: Option<&str>,
+    published: Option<&str>,
+) -> (u32, String) {
+    // A global.json is the publisher pinning the SDK explicitly. Nothing here is stronger evidence
+    // of which toolchain made these bytes, so it wins outright.
+    if let Some(pin) = global_json.and_then(pin_from_global_json) {
+        return (
+            pin,
+            format!(
+                "the repository's global.json pins the .NET {pin} SDK, which is the publisher \
+                 stating outright which toolchain built this — stronger than any inference from \
+                 the declared target framework or the publish date"
+            ),
+        );
+    }
+
     let floor = project.and_then(floor_from_project);
     let ceiling = published.and_then(ceiling_at);
     let newest = RELEASES.last().map(|(m, _)| *m).unwrap_or(9);
 
     match (floor, ceiling) {
-        // The project names what it needs. Trust it: an SDK older than this cannot build the
-        // project at all, and one much newer changes more than it has to.
-        (Some(f), Some(c)) if f <= c => (
-            f,
+        // The common case, and the one castle.core turned on: a package is built with whatever SDK
+        // the publisher's CI had installed, which is the newest that existed when they published.
+        // The declared target is a floor this SDK clears, not the SDK itself — so build with the
+        // newest, not with the target's major.
+        (Some(f), Some(c)) if c >= f => (
+            c,
             format!(
-                "the project declares a .NET {f} target framework and the package was published \
-                 when .NET {c} was the newest SDK available, so this builds with the SDK matching \
-                 the declared target rather than the newest one"
+                "this builds with .NET {c}, the newest SDK that existed when the package was \
+                 published; the project's declared .NET {f} target is a floor that SDK clears, not \
+                 the SDK the publisher used — a package is built with the toolchain the CI had, \
+                 which is the newest one"
             ),
         ),
         // The project targets something newer than anything that existed when it was published.
@@ -131,7 +174,8 @@ pub fn choose(project: Option<&str>, published: Option<&str>) -> (u32, String) {
             f,
             format!(
                 "the project declares a .NET {f} target framework, and this run records no publish \
-                 instant to bound the choice from above"
+                 instant to prefer a newer SDK from, so it builds with the declared target as a \
+                 floor"
             ),
         ),
         // No declared framework — a `netstandard` or .NET Framework project, or no checkout to read
@@ -246,22 +290,28 @@ mod tests {
     }
 
     #[test]
-    fn the_declared_target_wins_where_it_is_available() {
+    fn the_newest_sdk_at_publish_wins_over_the_declared_target() {
+        // castle.core's shape exactly: a net6.0 target, published after the .NET 7 SDK shipped. The
+        // publisher's CI carried .NET 7, so that is what built these bytes — not the .NET 6 SDK the
+        // target names. The declared target is a floor the chosen SDK clears, nothing more.
         let (major, why) = choose(
-            Some("<TargetFramework>net6.0</TargetFramework>"),
-            Some("2026-01-01T00:00:00Z"),
+            Some("<TargetFrameworks>net462;netstandard2.0;net6.0</TargetFrameworks>"),
+            None,
+            Some("2022-12-30T00:00:00Z"),
         );
-        assert_eq!(major, 6, "a net6.0 project builds with the SDK it names");
-        assert!(why.contains("declares a .NET 6"), "{why}");
-        assert!(why.contains("rather than the newest"), "{why}");
+        assert_eq!(major, 7, "the newest SDK at publish built it, not the target's");
+        assert!(why.contains("newest SDK that existed"), "{why}");
+        assert!(why.contains("floor that SDK clears"), "{why}");
     }
 
     #[test]
     fn a_target_newer_than_the_publish_date_is_said_out_loud() {
         // QuestPDF's shape: .NET 10 declared. If the publish instant predates .NET 10 the two
-        // pieces of evidence disagree, and silently preferring one would hide that.
+        // pieces of evidence disagree, and here the floor has to pull the choice up because nothing
+        // older can build the project at all.
         let (major, why) = choose(
             Some("<TargetFramework>net10.0</TargetFramework>"),
+            None,
             Some("2024-01-01T00:00:00Z"),
         );
         assert_eq!(major, 10, "nothing older can build the project");
@@ -271,9 +321,23 @@ mod tests {
     }
 
     #[test]
+    fn a_global_json_pin_overrides_the_target_and_the_date() {
+        // The publisher pinned an SDK. That beats both the floor and the publish-date ceiling: even
+        // with a net6.0 target published when .NET 7 was newest, a global.json pinning 8 means 8.
+        let (major, why) = choose(
+            Some("<TargetFramework>net6.0</TargetFramework>"),
+            Some(r#"{ "sdk": { "version": "8.0.100", "rollForward": "latestMinor" } }"#),
+            Some("2022-12-30T00:00:00Z"),
+        );
+        assert_eq!(major, 8, "global.json is the publisher naming the SDK outright");
+        assert!(why.contains("global.json pins the .NET 8"), "{why}");
+    }
+
+    #[test]
     fn with_no_declared_framework_the_publish_date_decides() {
         let (major, why) = choose(
             Some("<TargetFramework>netstandard2.0</TargetFramework>"),
+            None,
             Some("2019-06-01T00:00:00Z"),
         );
         assert_eq!(
@@ -288,8 +352,29 @@ mod tests {
 
     #[test]
     fn knowing_nothing_is_a_guess_and_says_so() {
-        let (_, why) = choose(None, None);
+        let (_, why) = choose(None, None, None);
         assert!(why.contains("a guess"), "{why}");
+    }
+
+    #[test]
+    fn a_pin_is_read_from_global_json_and_only_from_a_version() {
+        assert_eq!(
+            pin_from_global_json(r#"{ "sdk": { "version": "7.0.101" } }"#),
+            Some(7)
+        );
+        // A prerelease suffix rides on the last component; the major is unchanged.
+        assert_eq!(
+            pin_from_global_json(r#"{ "sdk": { "version": "8.0.100-preview.7.23376.3" } }"#),
+            Some(8)
+        );
+        // No `sdk.version` — an `msbuild-sdks`-only file pins no SDK.
+        assert_eq!(
+            pin_from_global_json(r#"{ "msbuild-sdks": { "MSBuild.Sdk.Extras": "3.0.44" } }"#),
+            None
+        );
+        assert_eq!(pin_from_global_json(r#"{ "sdk": {} }"#), None);
+        // Not JSON at all.
+        assert_eq!(pin_from_global_json("this is not json"), None);
     }
 
     #[test]

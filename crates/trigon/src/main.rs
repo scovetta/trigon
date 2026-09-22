@@ -1886,39 +1886,43 @@ mod build {
         // recipe.
         instructions.executable()?;
 
-        // **Which SDK, from the evidence rather than from a constant.** Two things narrow it and
-        // neither is a guess: the project's declared `TargetFramework` is a floor — an older SDK
-        // cannot build it, and says so as `NETSDK1045` — and the publish instant is a ceiling,
-        // because an SDK that shipped afterwards cannot have made these bytes. `registry_time` is
-        // already in the strategy, put there for the dependency timewarp; this is the same
-        // evidence applied to the toolchain.
+        // **Which SDK, from the evidence rather than from a constant.** A package is built with
+        // whatever SDK the publisher's CI had installed — the newest that existed when it was
+        // published — so the publish instant leads. `registry_time` is already in the strategy, put
+        // there for the dependency timewarp; this is the same evidence applied to the toolchain.
+        // Two things override that lead: a `global.json` pins the SDK outright, and the project's
+        // declared `TargetFramework` is a floor — an SDK older than it cannot build the project,
+        // and says so as `NETSDK1045` — that pulls the choice up when the target is newer than
+        // anything that had shipped.
         //
-        // Both are best effort. A checkout that is not on disk yields no floor and a strategy with
-        // no moment yields no ceiling, and `choose` says which of them it had.
+        // All best effort. A checkout that is not on disk yields no floor and no pin, a strategy
+        // with no moment yields no publish date, and `choose` says which of them it had.
         let sdk_major = (toolchain == Some("dotnet")).then(|| {
             // The host-side checkout where there is one, and the source cache otherwise. At
             // `--egress open` nothing is fetched host-side — the clone happens in the container —
             // but a rung that read the repository to find a commit will have left one here, and a
             // project file is a project file wherever it is read from.
-            let from_cache = || {
+            let subdir = instructions.location.subdir.as_deref();
+            let cache_dir = || {
                 let dir = crate::provenance::checkout_dir(
                     &trigon_registry::SourceCache::default_root(),
                     &instructions.location.repo,
                     &instructions.location.commit,
                 );
-                dir.is_dir()
-                    .then(|| {
-                        crate::dotnet_project_text(&dir, instructions.location.subdir.as_deref())
-                    })
-                    .flatten()
+                dir.is_dir().then_some(dir)
             };
             let project = source_tree
                 .as_deref()
-                .and_then(|root| {
-                    crate::dotnet_project_text(root, instructions.location.subdir.as_deref())
-                })
-                .or_else(from_cache);
-            let (major, why) = crate::dotnet::choose(project.as_deref(), published);
+                .and_then(|root| crate::dotnet_project_text(root, subdir))
+                .or_else(|| cache_dir().and_then(|d| crate::dotnet_project_text(&d, subdir)));
+            // A global.json pins the SDK, and pins it over both the target framework and the
+            // publish date — the same two roots, read the same two ways.
+            let global_json = source_tree
+                .as_deref()
+                .and_then(|root| crate::dotnet_global_json(root, subdir))
+                .or_else(|| cache_dir().and_then(|d| crate::dotnet_global_json(&d, subdir)));
+            let (major, why) =
+                crate::dotnet::choose(project.as_deref(), global_json.as_deref(), published);
             println!("  sdk        .NET {major}: {why}");
             (major, why)
         });
@@ -9973,6 +9977,39 @@ output_path: '*.tgz'
 /// `nuget_project` settled. Where a directory holds several, their target frameworks are almost
 /// always the same, and `choose` takes the highest anyway.
 #[cfg(feature = "build")]
+/// The `global.json` that applies to a project, if any.
+///
+/// .NET resolves `global.json` by walking up from the project directory to the filesystem root and
+/// taking the first one it finds. This walks up from `subdir` to `root` — the checkout boundary,
+/// which is as far as anything we build reaches, and the `starts_with` guard keeps the walk from
+/// escaping it. Repositories almost always keep the file at the root, so the common case is one
+/// `read` at the top of the walk.
+///
+/// Build-only: nothing in the verifier chooses an SDK, so under `--no-default-features` this and
+/// its sibling below have no caller and `-D warnings` would reject them.
+#[cfg(feature = "build")]
+fn dotnet_global_json(root: &Path, subdir: Option<&str>) -> Option<String> {
+    let start = match subdir {
+        Some(d) => root.join(d),
+        None => root.to_path_buf(),
+    };
+    let mut dir = start.as_path();
+    loop {
+        if let Ok(text) = std::fs::read_to_string(dir.join("global.json")) {
+            return Some(text);
+        }
+        if dir == root {
+            break;
+        }
+        match dir.parent() {
+            Some(p) if p.starts_with(root) => dir = p,
+            _ => break,
+        }
+    }
+    None
+}
+
+#[cfg(feature = "build")]
 fn dotnet_project_text(root: &Path, subdir: Option<&str>) -> Option<String> {
     let start = match subdir {
         Some(d) => root.join(d),
@@ -10006,4 +10043,49 @@ fn dotnet_project_text(root: &Path, subdir: Option<&str>) -> Option<String> {
     }
     found.sort();
     std::fs::read_to_string(found.first()?).ok()
+}
+
+#[cfg(all(test, feature = "build"))]
+mod global_json_tests {
+    use super::dotnet_global_json;
+
+    #[test]
+    fn it_is_found_at_the_root_and_from_a_subdir_walks_up_to_it() {
+        let root = std::env::temp_dir().join(format!("trigon-gj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let deep = root.join("src").join("Castle.Core");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(root.join("global.json"), r#"{ "sdk": { "version": "7.0.101" } }"#).unwrap();
+
+        // A project two directories down still sees the repository-root pin.
+        let from_subdir = dotnet_global_json(&root, Some("src/Castle.Core"));
+        assert!(
+            from_subdir.as_deref().is_some_and(|t| t.contains("7.0.101")),
+            "{from_subdir:?}"
+        );
+        // And so does a build rooted at the top.
+        assert!(dotnet_global_json(&root, None).is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_global_json_anywhere_is_none_and_the_walk_stays_inside_the_root() {
+        // A global.json above the checkout boundary must not be read: it is not part of what was
+        // published, and reading it would pin a build to a file the package never carried.
+        let base = std::env::temp_dir().join(format!("trigon-gj-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("checkout");
+        let sub = root.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(base.join("global.json"), r#"{ "sdk": { "version": "6.0.0" } }"#).unwrap();
+
+        assert_eq!(
+            dotnet_global_json(&root, Some("src")),
+            None,
+            "the walk stops at the root and never reaches the parent's global.json"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

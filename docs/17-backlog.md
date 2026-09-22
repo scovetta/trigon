@@ -1795,24 +1795,39 @@ source for any `DateTime.Now`-derived stamp.
 
 ## B45. The SDK is selected by target-framework major, not by the toolchain current at publish time
 
+**Substantively resolved by [3.83](16-findings.md); what remains is patch precision, below.**
+
 [3.76](16-findings.md) peeled `castle.core@5.1.1` down to its last layer: with version, year and
 symbols all reconciled, each assembly still differs by ~1% of its bytes, scattered, at identical
-size — a different Roslyn. The build used SDK 6.0.428 (2024); the package was compiled 2022-12-30.
-`dotnet::choose` picks the SDK by the declared target framework's major version and the publish
-date's *era* ("published when .NET 7 was newest, so build with 6"), which lands the right major and
-the wrong patch.
+size — a different Roslyn. `dotnet::choose` picked the SDK by the declared target framework's major,
+capped at the publish date's era ("`net6.0`, published when .NET 7 was newest, so build with 6").
+That entry read this as the right major and the wrong patch; it was the **wrong major**. The
+publisher's CI ([3.79](16-findings.md), the AppVeyor "Visual Studio 2022"/"Ubuntu" images) carried
+the *newest* SDK that existed in December 2022 — .NET 7.0.101 — and building under .NET 7 gets
+castle's decompiled code byte-identical where .NET 6 diverges throughout. A package is built with the
+toolchain the CI had, which is the newest one; the declared target is a floor that SDK clears.
 
-Byte reproduction of a compiled assembly needs the compiler that produced it, and for the SDK that
-means the exact build current at `registry_time`, not merely the matching major. This is the
-compiled-language frontier the roadmap names: an index from date to SDK build (Microsoft publishes
-the release history), a base image per SDK patch rather than per major, and the honest admission
-that where the exact toolchain cannot be had, the verdict is "toolchain-divergent" rather than a
-claim about the source. The strategy's assumption line already tells a reader this; the tooling does
-not yet act on it.
+[3.83](16-findings.md) inverts the selection accordingly: the publish instant leads (newest SDK at
+`registry_time`), the declared target only pulls the choice up past the newest that had shipped, and
+a `global.json` pin overrides both. `choose` now returns .NET 7 for castle.
 
-The diff-opinion ask is the near-term mitigation: a run that diverges only in compiler codegen, with
-version and copyright matched, is one a reader can be told is *likely toolchain, not source* — which
-is precisely the reading [3.74](16-findings.md) exists to record.
+What is left is the frontier the original entry named for the wrong reason: **byte** reproduction
+still needs the exact build current at `registry_time`, not merely the matching major. The image is
+the rolling `sdk:<major>.0` tag, not the exact patch. For castle's code this does not matter — the
+decompiled bytes are stable across a major's patches — but the last metadata and debug-layout bytes
+([B46](17-backlog.md)) want the exact patch: an index from date to SDK build (Microsoft publishes the
+release history), a base image per patch rather than per major, and the honest admission that where
+the exact toolchain cannot be had, the verdict is "toolchain-divergent" rather than a claim about the
+source.
+
+Two follow-ons past the major-level fix, both smaller than it was:
+
+  * **Patch precision.** The per-patch date index and per-patch base image above.
+  * **The escalation rung.** Preferring the newest SDK can only turn a match into a divergence, never
+    a false match ([3.83](16-findings.md)). The residual exposure — a package built with an older SDK
+    than the newest-at-publish and pinning it *without* a `global.json`, chiefly one published just
+    after a new major — is repaired by a rung that, on a .NET codegen divergence, retries under the
+    floor SDK, in the same place the version rung fires.
 
 ## B46. A .NET assembly's debug layout is structural, and closes only with a matching build environment
 
