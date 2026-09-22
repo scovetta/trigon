@@ -111,6 +111,75 @@ pub fn sources(a: &[u8], b: &[u8]) -> Option<(String, String)> {
     result
 }
 
+/// Decompile a single assembly to C#, or `None`.
+///
+/// The one-sided form of [`sources`], for reading rather than diffing — the version reconstruction
+/// rung asks it for the published assembly's attribute lines.
+pub fn source(dll: &[u8]) -> Option<String> {
+    let image = ensure_image()?;
+    let dir = scratch_dir()?;
+    let result = (|| {
+        std::fs::write(dir.join("a.dll"), dll).ok()?;
+        let out = podman(180)
+            .args([
+                "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "256", "-v",
+            ])
+            .arg(format!("{}:/w:Z", dir.display()))
+            .args([
+                image.as_str(),
+                "sh",
+                "-c",
+                "timeout -k 5 120 ilspycmd /w/a.dll > /w/a.cs 2>/dev/null",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let cs = std::fs::read_to_string(dir.join("a.cs")).ok()?;
+        (!cs.trim().is_empty()).then_some(cs)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// The value inside `[assembly: <attr>("...")]`, or `None` if this line is not that attribute.
+fn assembly_attr<'a>(line: &'a str, attr: &str) -> Option<&'a str> {
+    let head = format!("[assembly: {attr}(\"");
+    line.trim().strip_prefix(&head)?.strip_suffix("\")]")
+}
+
+/// Read a published assembly's version stamps by decompiling it and parsing the assembly-level
+/// attributes ILSpy emits at the top of the module.
+///
+/// Parsing the decompilation rather than the metadata tables reuses the one decompiler this binary
+/// already carries and keeps the reader out of the business of walking custom-attribute blobs.
+/// `None` when the assembly cannot be decompiled or carries no version attribute at all.
+pub fn assembly_version_info(dll: &[u8]) -> Option<trigon_strategy::AssemblyVersionInfo> {
+    let cs = source(dll)?;
+    let mut info = trigon_strategy::AssemblyVersionInfo::default();
+    // The attributes sit in the first dozens of lines; a bound keeps a pathological decompilation
+    // from being scanned in full.
+    for line in cs.lines().take(400) {
+        if let Some(v) = assembly_attr(line, "AssemblyVersion") {
+            info.assembly_version = Some(v.to_string());
+        } else if let Some(v) = assembly_attr(line, "AssemblyFileVersion") {
+            info.file_version = Some(v.to_string());
+        } else if let Some(v) = assembly_attr(line, "AssemblyInformationalVersion") {
+            info.informational_version = Some(v.to_string());
+        } else if let Some(v) = assembly_attr(line, "AssemblyCopyright") {
+            info.copyright = Some(v.to_string());
+        }
+    }
+    // The package version prop: the informational version is what a `.csproj` `Version` becomes,
+    // and the file version is the fallback where a build set no informational one.
+    info.version = info
+        .informational_version
+        .clone()
+        .or_else(|| info.file_version.clone());
+    (info != trigon_strategy::AssemblyVersionInfo::default()).then_some(info)
+}
+
 /// The image tag if it is present or can be built, else `None`.
 ///
 /// Built at most once per process: the first divergent run with managed members pays the tool

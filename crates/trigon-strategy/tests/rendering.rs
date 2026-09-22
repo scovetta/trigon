@@ -139,3 +139,42 @@ fn dotnet_pack_forces_the_properties_a_bare_csproj_pack_lacks() {
         i.build
     );
 }
+
+
+/// The version-reconstruction rung's parameters render as the standard global MSBuild properties.
+#[test]
+fn dotnet_pack_renders_the_reconstructed_version_stamps() {
+    let src = "schema: 1\nkind: flow\nlocation:\n  repo: https://example.invalid/x\n  ref: aa\n\
+               \x20 subdir: src/Castle.Core\n\
+               build:\n  - uses: nuget/build/pack\n    with:\n      version: 5.1.1\n\
+               \x20     assembly_version: 5.0.0.0\n      file_version: 5.1.1\n\
+               \x20     informational_version: 5.1.1\n      copyright: 'Copyright (c) 2004-2022 X'\n\
+               output_dir: trigon-pack\noutput_path: trigon-pack/*.nupkg\n";
+    let s = trigon_strategy::from_yaml(src).expect("parses");
+    let tools = trigon_strategy::ToolRegistry::builtin().expect("registry");
+    let cx = trigon_strategy::Context {
+        location: trigon_strategy::LocationCtx {
+            repo: "https://example.invalid/x".into(),
+            git_ref: "aa".into(),
+            subdir: "src/Castle.Core".into(),
+        },
+        env: trigon_strategy::EnvCtx {
+            arch: "x86_64".into(),
+            platform: "linux".into(),
+            has_repo: true,
+            timewarp_base: "timewarp:8129".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let i = trigon_strategy::render(&s, &cx, &tools).expect("renders");
+    for needle in [
+        "-p:AssemblyVersion=5.0.0.0",
+        "-p:FileVersion=5.1.1",
+        "-p:InformationalVersion=5.1.1",
+        "-p:PackageVersion=5.1.1",
+        "-p:Copyright=Copyright (c) 2004-2022 X",
+    ] {
+        assert!(i.build.contains(needle), "missing {needle} in:\n{}", i.build);
+    }
+}

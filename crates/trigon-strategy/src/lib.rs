@@ -9,6 +9,7 @@
 //!
 //! This crate is pure: no network, no clock, no filesystem beyond what a caller hands it.
 
+mod dotnet;
 mod yarn;
 mod compat;
 mod context;
@@ -20,6 +21,7 @@ mod parse;
 mod render;
 mod tool;
 
+pub use dotnet::{AssemblyVersionInfo, with_assembly_version};
 pub use yarn::{scripts_from_checkout, without_yarn};
 pub use compat::{CustomStabilizer, Imported, import};
 pub use context::{Context, EnvCtx, IntrinsicsCtx, LocationCtx, TargetCtx};

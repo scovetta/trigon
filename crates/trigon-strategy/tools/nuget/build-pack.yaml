@@ -22,6 +22,22 @@ params:
       `-p:Version=`. The version the feed served, which is often set at publish time by CI rather
       than committed in the `.csproj` — so a checkout at the release tag frequently carries a
       placeholder, and the package would come out named for the wrong version without this.
+  assembly_version:
+    required: false
+    doc: >-
+      `-p:AssemblyVersion=`, read back from the published assembly. The version reconstruction rung
+      sets these four when a .NET assembly diverges only in its version stamps.
+  file_version:
+    required: false
+    doc: "`-p:FileVersion=`, read back from the published assembly."
+  informational_version:
+    required: false
+    doc: "`-p:InformationalVersion=`, read back from the published assembly."
+  copyright:
+    required: false
+    doc: >-
+      `-p:Copyright=`, read back from the published assembly — a project that stamps the build year
+      (`Copyright ... $(CurrentYear)`) diverges on it, and the published value is the truth.
   output_dir:
     required: false
     default: trigon-pack
@@ -186,6 +202,31 @@ steps:
       [ -n "$CSHARP_TARGETS" ] && set -- "$@" -p:LanguageTargets="$CSHARP_TARGETS"
       {%- if with.version %}
       set -- "$@" -p:Version={{ with.version }}
+      {#- `PackageVersion` too: it defaults to `Version`, so this is a no-op for a normal project,
+          but one that sets it explicitly from a CI property (`castle.core`'s
+          `<PackageVersion>$(BuildVersion)</PackageVersion>`) ignores `Version` and would name the
+          package `0.0.0` without it. A global property overrides the project's. #}
+      set -- "$@" -p:PackageVersion={{ with.version }}
+      {%- endif %}
+      {#- **The assembly's own version stamps, read back from what the feed served.** A project
+          that derives its version from a CI-only property — `castle.core` reads
+          `APPVEYOR_BUILD_VERSION` into `<BuildVersion>` — ignores `-p:Version`, so the assemblies
+          come out `0.0.0` and diverge from the published ones in every version attribute. These are
+          standard MSBuild properties, and a value passed on the command line is a global property
+          that overrides whatever the project set it to, whatever it named the intermediate. The
+          values are the published assembly's own, so this reproduces the stamps rather than
+          inventing them; quoted, because a copyright carries spaces. #}
+      {%- if with.assembly_version %}
+      set -- "$@" "-p:AssemblyVersion={{ with.assembly_version }}"
+      {%- endif %}
+      {%- if with.file_version %}
+      set -- "$@" "-p:FileVersion={{ with.file_version }}"
+      {%- endif %}
+      {%- if with.informational_version %}
+      set -- "$@" "-p:InformationalVersion={{ with.informational_version }}"
+      {%- endif %}
+      {%- if with.copyright %}
+      set -- "$@" "-p:Copyright={{ with.copyright }}"
       {%- endif %}
       {%- if project and project != '.' %}
       set -- "$@" {{ project }}

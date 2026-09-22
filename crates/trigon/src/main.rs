@@ -4244,6 +4244,31 @@ mod rebuild {
                     break (built, strategy_digest);
                 }
 
+                // **The .NET version rung, before the model and without needing one.** A managed
+                // assembly that diverges only in its version stamps is answered by building with the
+                // published version, read back from the assembly itself — deterministic, so it runs
+                // whether or not a provider is configured. It keeps this divergence before going
+                // round, exactly as an accepted model repair does, so a re-run that fails still
+                // reports what was found here.
+                if let Some(next) = dotnet_version_repair(&comparison, &upstream_path, &strategy)
+                    && usable(&next, timewarp).is_ok()
+                    && changes_anything(&next, &strategy_digest)
+                {
+                    if verbose {
+                        println!(
+                            "  repair     reconstructed the assembly version from the published \
+                             package; no model needed"
+                        );
+                    }
+                    report
+                        .repairs
+                        .push("deterministic: .NET assembly version reconstruction".into());
+                    judged = Some((rebuilt, comparison));
+                    judged_built = built.as_ref().ok().cloned();
+                    strategy = next;
+                    continue;
+                }
+
                 let Some(cfg) = &model else {
                     judged = Some((rebuilt, comparison));
                     break (built, strategy_digest);
@@ -8149,6 +8174,41 @@ fn changes_anything(next: &trigon_strategy::Strategy, current: &Option<String>) 
     }
 }
 
+/// The deterministic .NET version-reconstruction rung: read the published assembly's version stamps
+/// and set them on the strategy's `nuget/build/pack` step, or `None` if there is nothing to do.
+///
+/// Fires on a divergence in which a managed assembly differs — the common case for a signed .NET
+/// package whose code reproduces but whose `AssemblyVersion`/`FileVersion`/copyright were stamped by
+/// CI from an environment a checkout does not carry. Reconstructs rather than normalizes, because
+/// those stamps are consumer-meaningful; the values are the published assembly's own, read back by
+/// decompiling one differing member. Guarded by `usable` and `changes_anything` so it neither
+/// proposes an unrenderable recipe nor loops once the stamps are set.
+#[cfg(feature = "build")]
+fn dotnet_version_repair(
+    c: &trigon_compare::Comparison,
+    upstream_path: &Path,
+    strategy: &trigon_strategy::Strategy,
+) -> Option<trigon_strategy::Strategy> {
+    let d = c.diff.as_ref()?;
+    // A differing managed assembly is the signal to try. Its bytes carry the version we need.
+    let f = d.files.iter().find(|f| {
+        f.status == trigon_compare::FileStatus::Differs
+            && trigon_core::is_managed_assembly(&String::from_utf8_lossy(f.path.as_bytes()))
+    })?;
+    let up_bytes = std::fs::read(upstream_path).ok()?;
+    let up_name = crate::file_name(upstream_path);
+    let raw = f.upstream_raw_path.as_ref().unwrap_or(&f.path);
+    let dll = trigon_api::member::read(up_bytes, &up_name, &String::from_utf8_lossy(raw.as_bytes()))
+        .ok()?;
+    let info = crate::decompile::assembly_version_info(&dll)?;
+    // The candidate only; the caller validates it with `usable` and guards against a no-op with
+    // `changes_anything`, in view of both, the way the yarn rung does — the acceptance-site
+    // tripwire reads that guard out of the source and a validation hidden in here is invisible to
+    // it.
+    trigon_strategy::with_assembly_version(strategy, &info)
+}
+
+
 #[cfg(feature = "build")]
 fn usable(strategy: &trigon_strategy::Strategy, timewarp_base: &str) -> Result<(), String> {
     let tools = trigon_strategy::ToolRegistry::builtin().map_err(|e| e.to_string())?;
@@ -9697,26 +9757,28 @@ output_dir: trigon-pack
         //
         // Split, so this test's own source does not satisfy the check it is making, which is the
         // same trap the assertion above documents.
+        // Every arm that stashes the build must keep the comparison first. There are two now — the
+        // model's divergence accept arm and the deterministic .NET version rung — so this pairs
+        // each `stash` with a `keep` that precedes it and follows the previous `stash`, rather than
+        // pinning a count or a single anchor. That spans the comment one arm puts between the two
+        // lines, and cannot be satisfied by a neighbour: each keep is spent on exactly one stash.
         let stash = concat!("judged_built = built", ".as_ref().ok().cloned();");
         let keep = concat!("judged = Some((rebuilt,", " comparison));");
-        assert_eq!(
-            src.matches(stash).count(),
-            1,
-            "the divergence accept arm moved or was duplicated; this check needs rewriting"
-        );
-        let at = src.find(stash).expect("checked just above");
-        // Scoped to this arm, from its own `Ok(()) => {` — a fixed window would either be too
-        // small for the comment between the two lines or wide enough to catch the *previous*
-        // arm's keep, and a check satisfied by the neighbour checks nothing.
-        let arm = src[..at]
-            .rfind("Ok(()) => {")
-            .expect("the stash sits inside a match arm");
+        let stashes: Vec<usize> = src.match_indices(stash).map(|(i, _)| i).collect();
         assert!(
-            src[arm..at].contains(keep),
-            "the arm that accepts a repair after a divergence stashes the build without keeping \
-             the comparison. A repaired recipe that then fails to build would lose a verdict the \
-             run had already established and report `build-failed` instead."
+            !stashes.is_empty(),
+            "the divergence accept arm moved; this check needs rewriting"
         );
+        let mut prev = 0;
+        for at in stashes {
+            assert!(
+                src[prev..at].contains(keep),
+                "an arm that accepts a repair after a divergence stashes the build at byte {at} \
+                 without keeping the comparison first. A repaired recipe that then fails to build \
+                 would lose a verdict the run had already established and report `build-failed`."
+            );
+            prev = at + stash.len();
+        }
 
         let propagates = concat!("usable(&next, timewarp)", "?");
         assert!(

@@ -3464,3 +3464,35 @@ The shape, again: three layers, each handed less than the CI had. The code recon
 project. The version reconstructs from the published assembly. The signature and build GUIDs cannot
 be reconstructed at all and are normalized instead — and the debug *layout* needs the build
 environment, which is the frontier.
+
+### 3.82 Version reconstruction: build the assembly with the version the feed served
+
+Piece two of the castle.core work, and the honest primary fix for the version stamps
+[3.81](#381-a-stabilizer-for-a-net-assemblys-build-and-signing-identity) declined to normalize:
+they are consumer-meaningful, so the assembly is built *with* the published version rather than
+having the difference erased.
+
+A deterministic repair rung, the shape of the yarn rung and running in the same place — before any
+model, whether or not one is configured. On a divergence in which a managed assembly differs, it
+reads that assembly's version stamps back out of the published package (`AssemblyVersion`,
+`AssemblyFileVersion`, `AssemblyInformationalVersion`, copyright — parsed from a decompilation of
+one differing member) and sets them on the `nuget/build/pack` step as standard MSBuild properties.
+A value passed on the command line is a global property that overrides whatever the project derived
+it from, whatever the intermediate was named — so `castle.core`'s `<BuildVersion>`-from-CI
+indirection, which defeated `-p:Version`, is beside the point. `-p:PackageVersion` goes with them,
+so the package version reconstructs too and the nupkg is no longer named `0.0.0`.
+
+Proven end to end: `castle.core@5.1.1` rebuilt with no model at all now carries the published
+`AssemblyVersion 5.0.0.0`, `AssemblyFileVersion 5.1.1`, `AssemblyInformationalVersion 5.1.1` and
+`Copyright … 2004-2022` where a default build wrote `0.0.0`/`0.0.0.0`/`2026`, and the package is
+`Castle.Core.5.1.1.nupkg`. The rung fires once — `changes_anything` and a no-op-returning transform
+guard it against looping — and keeps the divergence it found before going round, so a re-run that
+fails still reports it.
+
+**What this does and does not close.** The version reconstruction makes the assemblies decompile
+identically to the published ones; combined with `dotnet-assembly-identity` it removes the version
+and the signing/build identity. What remains for a full `castle.core` match is the toolchain: under
+an era-appropriate SDK the residual is the structural debug layout ([B46](17-backlog.md)); under the
+`.NET 6`-by-target SDK that `--image auto` selects today it is compiler codegen throughout
+([B45](17-backlog.md)). Two of the three layers are now built; the third is the SDK-by-publish-date
+frontier.
