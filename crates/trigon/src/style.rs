@@ -20,6 +20,14 @@
 use std::io::IsTerminal as _;
 use std::sync::OnceLock;
 
+/// Whether stdout is a terminal at all, cached. This is the fact both colour and wrapping turn on:
+/// escapes into a pipe corrupt it, and a hard wrap into a pipe changes bytes a program downstream
+/// meant to rewrap itself. Decided once — the terminal does not change under us mid-command.
+fn is_tty() -> bool {
+    static TTY: OnceLock<bool> = OnceLock::new();
+    *TTY.get_or_init(|| std::io::stdout().is_terminal())
+}
+
 /// Whether to emit escape sequences at all. Decided once — the terminal and the environment do not
 /// change under us mid-command — and cheap to ask repeatedly thereafter.
 pub fn enabled() -> bool {
@@ -40,9 +48,92 @@ pub fn enabled() -> bool {
         if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| !v.is_empty() && v != "0") {
             return true;
         }
-        std::io::stdout().is_terminal()
+        is_tty()
     })
 }
+
+/// The terminal's usable column count, or `None` when there is no terminal to measure. Read once.
+///
+/// `COLUMNS` wins when a caller exports it — the reader piping through `less -R` who has chosen a
+/// width — and otherwise `TIOCGWINSZ` on stdout answers, behind the same `libc` the crate already
+/// links. `None` when stdout is not a terminal, so wrapping leaves piped output as single lines the
+/// bytes it always was.
+pub fn width() -> Option<usize> {
+    static W: OnceLock<Option<usize>> = OnceLock::new();
+    *W.get_or_init(|| {
+        // An explicit `COLUMNS` is honoured whether or not stdout is a terminal — it is the reader
+        // stating a width, for a pager or a captured preview — and it is the only thing that makes
+        // a *piped* run wrap. Without it, a pipe measures nothing and the value stays one line.
+        if let Some(cols) = std::env::var("COLUMNS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            && cols >= 20
+        {
+            return Some(cols);
+        }
+        if !is_tty() {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd as _;
+            // SAFETY: `winsize` is plain old data and `ioctl` fills it; the fd is stdout's, valid
+            // for the length of the call. A non-zero return or an absurd width falls through.
+            let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+            let fd = std::io::stdout().as_raw_fd();
+            if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col >= 20 {
+                return Some(ws.ws_col as usize);
+            }
+        }
+        // A terminal we could not measure: wrap to a conventional width rather than not at all.
+        Some(100)
+    })
+}
+
+/// Fold a long value to the terminal width with a hanging indent, so an explanation flows *under*
+/// its value column instead of wrapping back to the left margin. The first line carries no indent —
+/// the caller has already placed it after the label — and every continuation begins at `indent`.
+///
+/// Piped or redirected ([`width`] is `None`), the value comes back as one line: the layout a
+/// program downstream sees is unchanged, and it is free to rewrap. The text must be plain — measure
+/// before you paint, or the escape bytes count as width — so a caller wraps, then colours the whole
+/// result in one span.
+pub fn wrap(value: &str, indent: usize) -> String {
+    match width() {
+        Some(cols) => wrap_to(cols, value, indent),
+        None => value.to_string(),
+    }
+}
+
+/// The fold itself, against an explicit width, so a test drives it without a terminal.
+fn wrap_to(cols: usize, value: &str, indent: usize) -> String {
+    let avail = cols.saturating_sub(indent).max(20);
+    let pad = " ".repeat(indent);
+    let mut out = String::new();
+    let mut col = 0usize;
+    let mut fresh_line = true;
+    for word in value.split(' ') {
+        let wlen = word.chars().count();
+        if !fresh_line && col + 1 + wlen > avail {
+            out.push('\n');
+            out.push_str(&pad);
+            col = 0;
+            fresh_line = true;
+        }
+        if !fresh_line {
+            out.push(' ');
+            col += 1;
+        }
+        out.push_str(word);
+        col += wlen;
+        fresh_line = false;
+    }
+    out
+}
+
+/// The column a `label   value` line's value starts at: the two-space indent, the label, one space.
+/// The indent [`wrap`] hangs a long value under, so callers do not re-derive it.
+pub const VALUE_COL: usize = 2 + LABEL + 1;
 
 /// Wrap `text` in one SGR sequence and its reset, or hand it back untouched when colour is off.
 ///
@@ -172,10 +263,55 @@ mod tests {
         // padding is measured in visible characters, so columns line up either way — and every
         // label pads to the one tool-wide `LABEL` width, so sections line up with each other too.
         assert_eq!(visible(&label_col("raw")).chars().count(), LABEL);
-        assert_eq!(visible(&label_col("raw")), format!("{:<width$}", "raw", width = LABEL));
+        assert_eq!(
+            visible(&label_col("raw")),
+            format!("{:<width$}", "raw", width = LABEL)
+        );
         // A label already as wide as the column gets no padding and is not truncated.
-        assert_eq!(visible(&label_col("stabilizers")), format!("{:<width$}", "stabilizers", width = LABEL));
+        assert_eq!(
+            visible(&label_col("stabilizers")),
+            format!("{:<width$}", "stabilizers", width = LABEL)
+        );
         // And the painted form, forced on, strips back to exactly the visible text.
-        assert_eq!(visible(&paint_with(true, "90", "raw         ")), "raw         ");
+        assert_eq!(
+            visible(&paint_with(true, "90", "raw         ")),
+            "raw         "
+        );
+    }
+
+    #[test]
+    fn a_long_value_folds_under_its_column_with_a_hanging_indent() {
+        let indent = VALUE_COL; // where the value starts, so continuations sit under it
+        let text = "the project declares a target framework and the package was published later";
+        let folded = wrap_to(40, text, indent);
+        let lines: Vec<&str> = folded.lines().collect();
+        assert!(
+            lines.len() > 1,
+            "a value wider than the terminal should fold: {folded:?}"
+        );
+        // First line has no indent — the label already placed it.
+        assert!(!lines[0].starts_with(' '), "{:?}", lines[0]);
+        // Every continuation hangs at exactly `indent`, so it aligns under the value column.
+        for cont in &lines[1..] {
+            assert!(cont.starts_with(&" ".repeat(indent)), "{cont:?}");
+            assert!(
+                !cont[indent..].starts_with(' '),
+                "one indent, not more: {cont:?}"
+            );
+        }
+        // No content line runs past the width (words are short here, none exceeds `avail`).
+        for l in &lines {
+            assert!(l.chars().count() <= 40, "over width: {l:?}");
+        }
+        // Nothing is lost or duplicated: the words come back in order.
+        assert_eq!(
+            folded.split_whitespace().collect::<Vec<_>>(),
+            text.split(' ').collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_value_that_fits_is_returned_as_one_line() {
+        assert_eq!(wrap_to(80, "short enough", VALUE_COL), "short enough");
     }
 }

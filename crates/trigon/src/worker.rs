@@ -218,13 +218,29 @@ pub fn serve(
             queue.migrate().await.map_err(anyhow::Error::from)?;
         }
         println!(
-            "worker {} on {queue_url}, building with {} at egress {}",
-            cfg.worker, builder.image, builder.egress
+            "{} {} {} {}",
+            crate::style::heading("worker"),
+            crate::style::ident(&cfg.worker),
+            crate::style::muted("on"),
+            crate::style::ident(queue_url),
+        );
+        crate::field(
+            "building",
+            format!(
+                "{} {} {}",
+                crate::style::ident(&crate::short_ref(&builder.image)),
+                crate::style::muted("at egress"),
+                crate::style::ident(&builder.egress.to_string()),
+            ),
         );
         let engine = Engine::new(queue, cfg);
         if once {
             let n = engine.tick(&builder).await?;
-            println!("handled {n} job(s)");
+            println!(
+                "{} {} job(s)",
+                crate::style::heading("handled"),
+                crate::style::good(&n.to_string())
+            );
             return anyhow::Ok(());
         }
 
@@ -234,7 +250,10 @@ pub fn serve(
             // Between jobs, never during one. A build killed halfway leaves a leased job, a
             // half-written work directory and no record; waiting costs one build's latency.
             if tokio::signal::ctrl_c().await.is_ok() {
-                println!("\nfinishing the current job, then stopping");
+                println!(
+                    "\n{}",
+                    crate::style::warn("finishing the current job, then stopping")
+                );
                 signal.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         });

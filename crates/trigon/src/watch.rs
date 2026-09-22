@@ -3307,7 +3307,12 @@ pub fn serve(
         let listener = tokio::net::TcpListener::bind(&bind)
             .await
             .with_context(|| format!("binding {bind}"))?;
-        println!("watching on http://{bind}  (read-only; ctrl-c to stop)");
+        println!(
+            "{} {} {}",
+            crate::style::heading("watching on"),
+            crate::style::ident(&format!("http://{bind}")),
+            crate::style::muted("(read-only; ctrl-c to stop)")
+        );
         axum::serve(listener, app).await?;
         Ok(())
     })

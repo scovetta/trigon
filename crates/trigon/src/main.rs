@@ -1018,7 +1018,6 @@ mod worker;
 #[cfg(feature = "build")]
 mod check;
 
-
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
     let cli = Cli::parse();
@@ -1558,57 +1557,52 @@ mod registry {
                     // The rung is printed, not just the answer. A registry-recorded commit and a
                     // fuzzy tag match are both "a commit", and they should not be read alike.
                     Some(s) if !s.commit.is_empty() => {
-                        println!(
-                            "  {} {} @ {}",
-                            style::label_col("source"),
-                            s.repo_url,
-                            style::ident(&s.commit)
+                        field(
+                            "source",
+                            format!("{} @ {}", s.repo_url, style::ident(&short_ref(&s.commit))),
                         );
-                        println!("  {} {:?}", style::label_col("found by"), s.how);
+                        field("found by", format!("{:?}", s.how));
                     }
                     Some(s) => {
-                        println!(
-                            "  {} {} {}",
-                            style::label_col("source"),
-                            s.repo_url,
-                            style::muted("(no commit)")
+                        field(
+                            "source",
+                            format!("{} {}", s.repo_url, style::muted("(no commit)")),
                         );
                         match &tag {
                             Some((sha, name, how)) => {
-                                println!(
-                                    "  {} {name} -> {}",
-                                    style::label_col("tag"),
-                                    style::ident(sha)
+                                field(
+                                    "tag",
+                                    format!("{name} -> {}", style::ident(&short_ref(sha))),
                                 );
-                                println!(
-                                    "  {} {:?}, which is what a rebuild would use",
-                                    style::label_col("found by"),
-                                    how
+                                field(
+                                    "found by",
+                                    format!("{how:?}, which is what a rebuild would use"),
                                 );
                                 // The caveat is the point. A tag is a mutable reference: it can be
                                 // moved or deleted after a release, and `pad-left 2.1.0` in the
                                 // corpus is a package whose recorded commit was force-pushed away.
                                 // What a tag gives is a good approximation, and a divergence
                                 // against one has to be read against that.
-                                println!(
-                                    "  {} {}",
-                                    style::label_col(""),
-                                    style::muted(
-                                        "a tag is mutable — it can be moved after the release, so \
-                                         this identifies the commit the tag points at today rather \
-                                         than the one that was published"
-                                    )
+                                field_wrapped(
+                                    "",
+                                    "a tag is mutable — it can be moved after the release, so this \
+                                     identifies the commit the tag points at today rather than the \
+                                     one that was published",
+                                    style::muted,
                                 );
                             }
-                            None => println!(
-                                "  {} {:?}: no tag matches this version, so something stronger has \
-                                 to find the commit",
-                                style::label_col("found by"),
-                                s.how
-                            ),
+                            None => {
+                                field("found by", format!("{:?}", s.how));
+                                field_wrapped(
+                                    "",
+                                    "no tag matches this version, so something stronger has to \
+                                     find the commit",
+                                    style::muted,
+                                );
+                            }
                         }
                     }
-                    None => println!("  {} {}", style::label_col("source"), style::muted("not declared")),
+                    None => field("source", style::muted("not declared")),
                 }
                 println!("\n  {}", style::heading("artifacts"));
                 let w = resolved
@@ -1646,14 +1640,14 @@ mod registry {
             std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
         let digest = rt.block_on(registry.fetch(meta, &mut file))?;
 
-        println!("{}", path.display());
-        println!("  sha256  {digest}");
-        println!(
-            "  {}",
+        println!("{}", style::heading(&path.display().to_string()));
+        field("sha256", style::ident(&short(&digest.to_hex())));
+        field(
+            "checked",
             match &meta.declared_sha256 {
-                Some(_) => "matches the digest the registry declared",
-                None => "the registry declared no sha256, so nothing was checked against it",
-            }
+                Some(_) => style::good("matches the digest the registry declared"),
+                None => style::muted("the registry declared no sha256, so nothing was checked"),
+            },
         );
         Ok(())
     }
@@ -1947,7 +1941,14 @@ mod build {
                 .or_else(|| cache_dir().and_then(|d| crate::dotnet_global_json(&d, subdir)));
             let (major, why) =
                 crate::dotnet::choose(project.as_deref(), global_json.as_deref(), published);
-            println!("  {} .NET {major}: {}", style::label_col("sdk"), style::muted(&why));
+            println!(
+                "  {} {}",
+                style::label_col("sdk"),
+                style::muted(&style::wrap(
+                    &format!(".NET {major}: {why}"),
+                    style::VALUE_COL
+                ))
+            );
             (major, why)
         });
         let sdk_why = sdk_major.as_ref().map(|(_, w)| w.clone());
@@ -2072,9 +2073,17 @@ mod build {
             });
 
             if verbose {
-                println!("{} {}", style::heading("strategy"), style::ident(&digest[..16]));
+                println!(
+                    "{} {}",
+                    style::heading("strategy"),
+                    style::ident(&digest[..16])
+                );
                 println!("  {} {}", style::label_col("egress"), outcome.egress);
-                println!("  {} {:?}", style::label_col("isolation"), outcome.isolation);
+                println!(
+                    "  {} {:?}",
+                    style::label_col("isolation"),
+                    outcome.isolation
+                );
                 for (phase, d) in &outcome.timings {
                     let name = style::label_col(&format!("{phase:?}").to_lowercase());
                     match d {
@@ -2119,7 +2128,11 @@ mod build {
                             );
                         }
                         if let Some(p) = &transcript_path {
-                            println!("  {} {}", style::label_col(""), style::muted(&p.display().to_string()));
+                            println!(
+                                "  {} {}",
+                                style::label_col(""),
+                                style::muted(&p.display().to_string())
+                            );
                         }
                     }
                     // Two reasons, and naming the wrong one sends the reader to the wrong fix.
@@ -2139,20 +2152,23 @@ mod build {
                                  than nothing."
                             }
                         };
-                        println!("\n  {} {why}", style::warn("not attestable:"));
+                        println!();
+                        field_wrapped("not attestable", why, style::warn);
                     }
                 }
                 match (&outcome.artifact, outcome.succeeded()) {
                     (Some(p), _) => {
                         println!("\n  {} {}", style::label_col("artifact"), p.display())
                     }
-                    (None, true) => println!(
-                        "\n  {}",
-                        style::warn(
+                    (None, true) => {
+                        println!();
+                        field_wrapped(
+                            "artifact",
                             "the build succeeded but produced no single artifact. Check \
-                             output_path: a glob matching several files does not identify one."
-                        )
-                    ),
+                             output_path: a glob matching several files does not identify one.",
+                            style::warn,
+                        );
+                    }
                     (None, false) => {}
                 }
             }
@@ -2275,7 +2291,11 @@ mod build {
                     // model call is worth making, and the deterministic rung below rewrites it
                     // anyway.
                     if !signature.repairable {
-                        println!("  {} {}", style::label_col(""), style::muted("not one to ask the model about"));
+                        println!(
+                            "  {} {}",
+                            style::label_col(""),
+                            style::muted("not one to ask the model about")
+                        );
                     }
                     println!("  {} {}", style::label_col("log"), log_path.display());
                 }
@@ -2561,12 +2581,23 @@ fn grant(url: &str, id: &str, name: Option<&str>, scopes: &str, daily_quota: i64
         q.add_principal(id, name.unwrap_or(id), &scopes, daily_quota, &token)
             .await
             .map_err(anyhow::Error::from)?;
-        println!("principal  {id} ({})", scopes.join(", "));
-        println!("quota      {daily_quota} rebuild(s) a day");
-        println!("token      {token}");
+        field(
+            "principal",
+            format!(
+                "{} {}",
+                style::ident(id),
+                style::muted(&format!("({})", scopes.join(", ")))
+            ),
+        );
+        field("quota", format!("{daily_quota} rebuild(s) a day"));
+        field("token", style::ident(&token.to_string()));
         println!();
         println!(
-            "Shown once; only its digest is stored. Use it as `Authorization: Bearer <token>`."
+            "{}",
+            style::muted(&style::wrap(
+                "Shown once; only its digest is stored. Use it as `Authorization: Bearer <token>`.",
+                0,
+            ))
         );
         anyhow::Ok(())
     })
@@ -2628,9 +2659,14 @@ fn enqueue_targets(url: &str, targets: &[String], tier: &str, migrate: bool) -> 
         // The count is of targets *offered*, not of jobs created: `enqueue` is idempotent, so
         // re-running this over the same list adds nothing and says so rather than claiming to have
         // queued five thousand builds it did not queue.
-        println!("offered {n} target(s) to the {} queue", tier.as_str());
+        println!(
+            "{} {} target(s) to the {} queue",
+            style::heading("offered"),
+            style::good(&n.to_string()),
+            style::ident(tier.as_str())
+        );
         for (state, count) in q.depth().await.map_err(anyhow::Error::from)? {
-            println!("  {state:<8} {count}");
+            field(&state, style::ident(&count.to_string()));
         }
         anyhow::Ok(())
     })
@@ -2679,9 +2715,16 @@ fn serve_corpus(
     // in as many words that loopback was the only thing that ever mitigated that.
     if !public && !cfg.bind.starts_with("127.") && !cfg.bind.starts_with("localhost") {
         eprintln!(
-            "warning: binding {} without --public. Build logs and network transcripts are stored \
-             unredacted and this serves them to anyone who can reach that address.",
-            cfg.bind
+            "{} {}",
+            style::bad("warning:"),
+            style::warn(&style::wrap(
+                &format!(
+                    "binding {} without --public. Build logs and network transcripts are stored \
+                     unredacted and this serves them to anyone who can reach that address.",
+                    cfg.bind
+                ),
+                9,
+            ))
         );
     }
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -2689,6 +2732,28 @@ fn serve_corpus(
         .build()?;
     rt.block_on(trigon_api::run(store, cfg))
         .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// One `label   value` line of narration, the tool-wide shape: a bold-blue label padded to
+/// [`style::LABEL`], a space, then a value already painted by its role. Every command that narrates
+/// uses this, so a value starts at the same column whichever command printed it.
+fn field(label: &str, value: impl std::fmt::Display) {
+    println!("  {} {value}", style::label_col(label));
+}
+
+/// A field whose value is long prose: folded to the terminal under its value column with a hanging
+/// indent, *then* painted — the wrap has to see the plain text, because an escape sequence has bytes
+/// but no width. Piped, [`style::wrap`] leaves it one line, so redirected output is unchanged.
+///
+/// Build-only: every caller narrates a build (resolve, the run, image derivation); the verifier
+/// wraps its own long lines through [`style::wrap`] inline.
+#[cfg(feature = "build")]
+fn field_wrapped(label: &str, text: &str, paint: fn(&str) -> String) {
+    println!(
+        "  {} {}",
+        style::label_col(label),
+        paint(&style::wrap(text, style::VALUE_COL))
+    );
 }
 
 /// A risk tier, painted by how much latitude the pass took. Structural and metadata edits are the
@@ -2748,10 +2813,16 @@ fn print_text(c: &Comparison, explain: bool) {
 
     if let Some(false) = c.container_bit_identical() {
         println!();
-        println!("  {}", style::muted("containers differ as well as the framing"));
+        println!(
+            "  {}",
+            style::muted("containers differ as well as the framing")
+        );
     } else if c.container_bit_identical() == Some(true) && c.outcome != Match::Exact {
         println!();
-        println!("  {}", style::muted("same container, different outer framing"));
+        println!(
+            "  {}",
+            style::muted("same container, different outer framing")
+        );
     }
 
     let applied = c.applied();
@@ -2768,7 +2839,10 @@ fn print_text(c: &Comparison, explain: bool) {
             println!(
                 "    {:<24} {} {}",
                 a.id.as_str(),
-                risk_painted(a.risk, &format!("{:<10}", format!("{:?}", a.risk).to_lowercase())),
+                risk_painted(
+                    a.risk,
+                    &format!("{:<10}", format!("{:?}", a.risk).to_lowercase())
+                ),
                 style::muted(&format!("{:>6} entries", a.entries_touched)),
             );
         }
@@ -2776,7 +2850,14 @@ fn print_text(c: &Comparison, explain: bool) {
 
     if let Some(reason) = c.cap_reason() {
         println!();
-        println!("  {} {reason}", style::warn("capped below `normalized`:"));
+        println!(
+            "  {} {}",
+            style::label_col("capped"),
+            style::warn(&style::wrap(
+                &format!("below `normalized` — {reason}"),
+                style::VALUE_COL
+            )),
+        );
     }
 
     // Both parses and the comparison. The comparison's notes were missing, so
@@ -2798,8 +2879,8 @@ fn print_text(c: &Comparison, explain: bool) {
             println!(
                 "    {}{}: {}",
                 style::warn(&format!("{:?}", n.code)),
-                style::muted(&at),
-                n.detail,
+                style::ident(&at),
+                style::wrap(&n.detail, 6),
             );
         }
     }
@@ -2855,7 +2936,10 @@ fn print_text(c: &Comparison, explain: bool) {
         if interesting.len() > limit {
             println!(
                 "    {}",
-                style::muted(&format!("… {} more, pass --explain", interesting.len() - limit)),
+                style::muted(&format!(
+                    "… {} more, pass --explain",
+                    interesting.len() - limit
+                )),
             );
         }
     }
@@ -2880,22 +2964,40 @@ fn short(hex: &str) -> String {
     format!("{}…", &hex[..hex.len().min(12)])
 }
 
-/// A git ref or image reference for display. A full hex object name — a 40-char commit, a 64-char
-/// image id — is shortened to its first twelve like a digest, because at full length it wraps the
-/// terminal and pushes the line that follows it back to the margin. A tag, a branch, or a readable
-/// `registry/name:tag` has non-hex characters or is short already, and is left exactly as it is:
-/// those are meant to be read whole, and none of them overflows.
+/// A git ref or image reference for display, with any long hex object name in it shortened to its
+/// first twelve like a digest — because at full length it wraps the terminal and pushes the line
+/// after it back to the margin. This is a bare 40-char commit or 64-char image id, and also one
+/// *embedded* in a readable reference: `mcr.microsoft.com/dotnet/sdk@sha256:2dd7f3b0…eca9` is a name
+/// the reader wants but for the 64 hex characters on the end, which are what overflow. A tag, a
+/// branch, or a plain `registry/name:tag` carries no such run and is left exactly as it is.
 ///
 /// Build-only: it shortens the run narration, which the verifier does not print.
 #[cfg(feature = "build")]
 fn short_ref(reference: &str) -> String {
-    let is_object_name =
-        reference.len() >= 32 && reference.bytes().all(|b| b.is_ascii_hexdigit());
-    if is_object_name {
-        format!("{}…", &reference[..12])
-    } else {
-        reference.to_string()
+    // Every maximal run of hex digits of 32 or more is a digest; leave shorter runs (a `:8.0`, a
+    // year) alone. Rebuilt left to right so the byte offsets stay valid as the string shrinks.
+    let bytes = reference.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+            i += 1;
+        }
+        let run = &reference[start..i];
+        if run.len() >= 32 {
+            out.push_str(&run[..12]);
+            out.push('…');
+        } else {
+            out.push_str(run);
+        }
+        if i < bytes.len() {
+            // The one non-hex byte that ended the run (ASCII in every reference we handle).
+            out.push(bytes[i] as char);
+            i += 1;
+        }
     }
+    out
 }
 
 /// What selects a profile, in the words the reader would use to cause it.
@@ -2954,7 +3056,10 @@ fn list_profiles_cmd() -> Result<()> {
 
     // Sized to what is present rather than to a guess, the way `stabilizers` does it.
     let w = ids.iter().map(|i| i.len()).max().unwrap_or(0).max(7);
-    println!("{} stabilizer profiles.", style::heading(&ids.len().to_string()));
+    println!(
+        "{} stabilizer profiles.",
+        style::heading(&ids.len().to_string())
+    );
     println!();
     println!(
         "  {}  {}  {}  {}",
@@ -2990,20 +3095,27 @@ fn list_profiles_cmd() -> Result<()> {
             continue;
         }
         any = true;
-        println!("  {:<w$}  {}", set.id.as_str(), style::warn(&caps.join(", ")));
+        println!(
+            "  {:<w$}  {}",
+            set.id.as_str(),
+            style::warn(&caps.join(", "))
+        );
     }
     if !any {
         println!(
             "  {}",
-            style::muted("none: every pass in every profile is built in, at metadata risk or below")
+            style::muted(
+                "none: every pass in every profile is built in, at metadata risk or below"
+            )
         );
     }
     println!(
         "  {}",
-        style::muted(
+        style::muted(&style::wrap(
             "The cap is read off the passes that fired, not off this list, so a profile carrying \
-             one caps nothing on a run where it found nothing to do."
-        )
+             one caps nothing on a run where it found nothing to do.",
+            2,
+        ))
     );
 
     let orphans: Vec<&str> = sets
@@ -3015,27 +3127,31 @@ fn list_profiles_cmd() -> Result<()> {
         println!();
         println!(
             "{}",
-            style::warn(&format!(
-                "Nothing selects {}: {}. An artifact of that shape gets the fallback for its \
-                 format, so these passes never run and the normalization they describe does not \
-                 happen. `--profile` reaches one by hand.",
-                if orphans.len() == 1 {
-                    "one profile".to_string()
-                } else {
-                    format!("{} profiles", orphans.len())
-                },
-                orphans.join(", ")
+            style::warn(&style::wrap(
+                &format!(
+                    "Nothing selects {}: {}. An artifact of that shape gets the fallback for its \
+                     format, so these passes never run and the normalization they describe does \
+                     not happen. `--profile` reaches one by hand.",
+                    if orphans.len() == 1 {
+                        "one profile".to_string()
+                    } else {
+                        format!("{} profiles", orphans.len())
+                    },
+                    orphans.join(", ")
+                ),
+                0,
             ))
         );
     }
     println!();
     println!(
         "{}",
-        style::muted(
+        style::muted(&style::wrap(
             "The digest is over the passes and their tiers, and it is what an attestation carries: \
              a statement stays readable against the set it named, and reordering a pass makes a \
-             new one."
-        )
+             new one.",
+            0,
+        ))
     );
     println!(
         "{}",
@@ -3172,7 +3288,7 @@ fn stabilizers(prof: &str) -> Result<()> {
     println!(
         "{} {}",
         style::heading(&set.id.to_string()),
-        style::muted(&format!("({})", set.digest()))
+        style::muted(&format!("({})", short(&set.digest().to_hex())))
     );
     println!();
     // Sized to the longest id present rather than to a guess: `gem-metadata-rubygems-version` is
@@ -3187,7 +3303,10 @@ fn stabilizers(prof: &str) -> Result<()> {
         println!(
             "  {:<w$} {} {} {}",
             m.id().as_str(),
-            risk_painted(m.risk(), &format!("{:<11}", format!("{:?}", m.risk()).to_lowercase())),
+            risk_painted(
+                m.risk(),
+                &format!("{:<11}", format!("{:?}", m.risk()).to_lowercase())
+            ),
             style::muted(&format!("{:<9}", format!("{:?}", m.stage()).to_lowercase())),
             style::muted(&format!("{:?}", m.provenance()))
         );
@@ -3331,7 +3450,6 @@ fn strategy_render(
     Ok(())
 }
 
-
 /// Whether the artifact-hash guard was actually armed, and so whether the manifest is a fact about
 /// this run rather than a description of what we would have watched.
 ///
@@ -3387,7 +3505,10 @@ mod may_derive_tests {
     fn auto_builds_freely_where_the_tier_already_admits_the_network() {
         // At `open` there is no account to keep complete, so there is nothing for the refusal to
         // protect and refusing would only cost the run.
-        assert_eq!(super::may_derive("auto", EgressTier::Open), Derive::IfNeeded);
+        assert_eq!(
+            super::may_derive("auto", EgressTier::Open),
+            Derive::IfNeeded
+        );
     }
 
     #[test]
@@ -3395,7 +3516,11 @@ mod may_derive_tests {
         // The one thing the flag changes. Everything else — selection, the admission table, the
         // content tag — is `auto`'s, unchanged. What `derive` does *not* change is the build's own
         // egress: the tier passed here is still the tier the build runs at.
-        for tier in [EgressTier::Open, EgressTier::MirrorOnly, EgressTier::DenyAll] {
+        for tier in [
+            EgressTier::Open,
+            EgressTier::MirrorOnly,
+            EgressTier::DenyAll,
+        ] {
             assert_eq!(super::may_derive("derive", tier), Derive::IfNeeded);
         }
     }
@@ -3431,14 +3556,6 @@ mod rebuild {
     use super::*;
     use trigon_core::TargetRef;
 
-    /// One line of a run's narration: a dim label in a fixed 10-wide column, then a value already
-    /// styled by its role. The column matches the strategy and verdict blocks, so a whole run —
-    /// resolve through repair through verdict — reads as one report rather than a stack of ad-hoc
-    /// formats. The value is `Display`, so a caller passes a plain string or a styled one and the
-    /// colour it wants rides along in the value, never in the label.
-    fn note(label: &str, value: impl std::fmt::Display) {
-        println!("  {} {value}", style::label_col(label));
-    }
     use trigon_registry::{
         Client, ClientConfig, DefinitionsInferrer, NpmInferrer, PyPiInferrer, StrategyInferrer,
         for_ecosystem,
@@ -3870,7 +3987,17 @@ mod rebuild {
         resolved.about = Some(meta.id.clone());
         if verbose {
             println!("{}", style::heading(&resolved.reference.to_string()));
-            note("artifact", &meta.id);
+            // The invocation's frame — image, tier, where the work and the record land. This was
+            // printed by `rebuild-and-attest.sh` in plain, narrower columns; it belongs in the
+            // binary, which owns the styling and the `NO_COLOR` rule and shows it to anyone who
+            // runs `trigon rebuild` directly rather than through the script.
+            field("image", style::ident(&short_ref(&args.image)));
+            field("egress", style::ident(&args.egress));
+            field("work", args.work.display());
+            if let Some(store) = &args.store {
+                field("store", store.display());
+            }
+            field("artifact", &meta.id);
         }
 
         mark("fetch");
@@ -3896,7 +4023,7 @@ mod rebuild {
                 .unwrap_or(0),
         ));
         if verbose {
-            note(
+            field(
                 "published",
                 format!(
                     "{} {}",
@@ -3912,7 +4039,7 @@ mod rebuild {
         if let Ok(bytes) = std::fs::read(&upstream_path) {
             let found = trigon_registry::wheel::generator_evidence(&bytes);
             if verbose && let Some(e) = found.first() {
-                note("generator", format!("{:?}", e.claim));
+                field("generator", format!("{:?}", e.claim));
             }
             resolved.intrinsics.evidence.extend(found);
 
@@ -3935,7 +4062,7 @@ mod rebuild {
                             } else {
                                 style::ident(&short_ref(&found.commit))
                             };
-                            note("nuspec", format!("{} @ {commit}", found.repo_url));
+                            field("nuspec", format!("{} @ {commit}", found.repo_url));
                         }
                         resolved.source = Some(found);
                     }
@@ -3946,7 +4073,7 @@ mod rebuild {
                         && src.commit.is_empty()
                     {
                         if verbose {
-                            note("vcs-info", style::ident(&short_ref(&sha)));
+                            field("vcs-info", style::ident(&short_ref(&sha)));
                         }
                         src.commit = sha;
                         src.how = trigon_core::SourceDiscovery::PublishedProvenance;
@@ -3972,7 +4099,7 @@ mod rebuild {
         let enforced = args.egress == "mirror-only";
         let reserved = match args.timewarp.as_deref() {
             Some("auto") if enforced => {
-                note(
+                field(
                     "mirror",
                     style::muted("inside the build's network island, which is its only route out"),
                 );
@@ -4058,9 +4185,13 @@ mod rebuild {
 
         report.model = model.as_ref().map(|m| m.describe());
         if let (Some(m), true) = (&model, verbose) {
-            println!(
-                "  model      {}, asked only where nothing deterministic answers",
-                m.describe()
+            field(
+                "model",
+                format!(
+                    "{} {}",
+                    style::ident(&m.describe()),
+                    style::muted("— asked only where nothing deterministic answers")
+                ),
             );
         }
         let rungs = ladder(
@@ -4095,14 +4226,15 @@ mod rebuild {
                 println!(
                     "  {}  {}",
                     style::warn("no-strategy"),
-                    style::muted(
+                    style::muted(&style::wrap(
                         "no rung proposed a recipe, and none said why. That is a gap in Trigon \
-                         rather than a fact about this package."
-                    )
+                         rather than a fact about this package.",
+                        style::VALUE_COL,
+                    ))
                 );
             }
             for d in &report.declines {
-                note("declined", style::warn(d));
+                field_wrapped("declined", d, style::warn);
             }
             return Ok(Ran {
                 outcome: Outcome::NoStrategy,
@@ -4143,11 +4275,11 @@ mod rebuild {
         // it replaces.
         resolved.source = report.source.clone();
         if verbose {
-            note(
+            field(
                 "source",
                 format!("{} @ {}", loc.repo, style::ident(&short_ref(&loc.git_ref))),
             );
-            note(
+            field(
                 "strategy",
                 format!(
                     "{:?}, commit found by {:?}, confidence {:?}",
@@ -4156,8 +4288,10 @@ mod rebuild {
             );
             for a in &candidate.assumptions {
                 // Printed, not buried. A divergence has to be readable against the guesses that
-                // produced it rather than taken as a fact about the package.
-                note("assuming", style::muted(a));
+                // produced it rather than taken as a fact about the package. Folded under the
+                // value column, because an assumption is a whole sentence and wrapping it to the
+                // left margin loses which line it belongs to.
+                field("assuming", style::muted(&style::wrap(a, style::VALUE_COL)));
             }
         }
 
@@ -4184,16 +4318,17 @@ mod rebuild {
             &target,
         )?;
         if verbose {
-            note(
+            field(
                 "guarding",
-                format!(
-                    "the artifact and {} of its members {}",
-                    guard.members.len(),
-                    style::muted(&format!(
-                        "({} too small, too common, or also in the source)",
+                style::muted(&style::wrap(
+                    &format!(
+                        "the artifact and {} of its members ({} too small, too common, or also \
+                         in the source)",
+                        guard.members.len(),
                         guard.filtered_out
-                    ))
-                ),
+                    ),
+                    style::VALUE_COL,
+                )),
             );
         }
 
@@ -4209,7 +4344,10 @@ mod rebuild {
                         .await
                 })?;
                 if verbose {
-                    note("mirror", style::muted("serving the index as of the publish date"));
+                    field(
+                        "mirror",
+                        style::muted("serving the index as of the publish date"),
+                    );
                 }
                 Some(handle)
             }
@@ -4426,12 +4564,11 @@ mod rebuild {
                     && changes_anything(&next, &strategy_digest)
                 {
                     if verbose {
-                        note(
+                        field_wrapped(
                             "repair",
-                            style::good(
-                                "reconstructed the assembly version from the published package; \
-                                 no model needed"
-                            ),
+                            "reconstructed the assembly version from the published package; no \
+                             model needed",
+                            style::good,
                         );
                     }
                     report
@@ -4458,7 +4595,10 @@ mod rebuild {
                 ) {
                     trigon_ai::Decision::Stop(reason) => {
                         if verbose {
-                            note("repair", style::warn(&format!("stopped: {}", stop_reason(&reason))));
+                            field(
+                                "repair",
+                                style::warn(&format!("stopped: {}", stop_reason(&reason))),
+                            );
                         }
                         report.repair_stopped = Some(stop_reason(&reason));
                         tracing::info!(?reason, "the repair loop stopped after a divergence");
@@ -4479,9 +4619,13 @@ mod rebuild {
                         let read = repo_inputs.as_ref().expect("just filled");
                         let brief = divergence_brief(&comparison);
                         if verbose {
-                            note(
+                            field(
                                 "repair",
-                                format!("attempt {} on {}", repairs.attempts().len() + 1, failure.key()),
+                                format!(
+                                    "attempt {} on {}",
+                                    repairs.attempts().len() + 1,
+                                    failure.key()
+                                ),
                             );
                         }
                         let before = cfg.spent();
@@ -4513,7 +4657,7 @@ mod rebuild {
                             Ok(next) => match usable(&next, timewarp) {
                                 Ok(()) if !changes_anything(&next, &strategy_digest) => {
                                     if verbose {
-                                        note(
+                                        field(
                                             "repair",
                                             style::warn("proposed the same recipe; nothing to try"),
                                         );
@@ -4553,7 +4697,7 @@ mod rebuild {
                                 }
                                 Err(e) => {
                                     if verbose {
-                                        note("repair", style::warn(&format!("discarded: {e}")));
+                                        field("repair", style::warn(&format!("discarded: {e}")));
                                     }
                                     report.repair_stopped =
                                         Some(format!("the proposed recipe does not render: {e}"));
@@ -4612,12 +4756,18 @@ mod rebuild {
             if failure.code == "npm/unsupported-package-manager"
                 && failure.subject.as_deref() == Some("yarn")
                 && let Some(dir) = checkout.as_deref()
-                && let Some(next) = trigon_strategy::without_yarn(&strategy, &trigon_strategy::scripts_from_checkout(dir))
+                && let Some(next) = trigon_strategy::without_yarn(
+                    &strategy,
+                    &trigon_strategy::scripts_from_checkout(dir),
+                )
                 && usable(&next, timewarp).is_ok()
                 && changes_anything(&next, &strategy_digest)
             {
                 if verbose {
-                    note("repair", style::good("rewrote yarn as npm run; no model needed"));
+                    field(
+                        "repair",
+                        style::good("rewrote yarn as npm run; no model needed"),
+                    );
                 }
                 report
                     .repairs
@@ -4640,7 +4790,10 @@ mod rebuild {
                     // is too small", "we have no rule for this" and "working as intended", and a
                     // run that just stops tells the operator none of them.
                     if verbose {
-                        note("repair", style::warn(&format!("stopped: {}", stop_reason(&reason))));
+                        field(
+                            "repair",
+                            style::warn(&format!("stopped: {}", stop_reason(&reason))),
+                        );
                     }
                     report.repair_stopped = Some(stop_reason(&reason));
                     tracing::info!(?reason, "the repair loop stopped");
@@ -4667,7 +4820,7 @@ mod rebuild {
                     // budget buys dependency noise; a smaller one clips the error.
                     let compressed = trigon_core::compress(&log, 8 * 1024);
                     if verbose {
-                        note(
+                        field(
                             "repair",
                             format!(
                                 "attempt {} on {}{}",
@@ -4717,7 +4870,7 @@ mod rebuild {
                         Ok(next) => match usable(&next, timewarp) {
                             Ok(()) if !changes_anything(&next, &strategy_digest) => {
                                 if verbose {
-                                    note(
+                                    field(
                                         "repair",
                                         style::warn("proposed the same recipe; nothing to try"),
                                     );
@@ -4732,7 +4885,7 @@ mod rebuild {
                             }
                             Err(e) => {
                                 if verbose {
-                                    note("repair", style::warn(&format!("discarded: {e}")));
+                                    field("repair", style::warn(&format!("discarded: {e}")));
                                 }
                                 report.repair_stopped =
                                     Some(format!("the proposed recipe does not render: {e}"));
@@ -4895,7 +5048,7 @@ mod rebuild {
                 // tree, where `mocha` alone accounts for a hundred. "1044 versions withheld" on
                 // its own reads as a claim about left-pad and is not one.
                 println!();
-                note(
+                field(
                     "mirror",
                     format!(
                         "{} index request(s), {} version(s) withheld across them",
@@ -4906,7 +5059,7 @@ mod rebuild {
                     // Named separately because it is a different claim: the build fetched the
                     // thing that would run, not a dependency, and it did so from a host on the
                     // mirror's allowlist rather than one the strategy chose.
-                    note(
+                    field(
                         "",
                         style::muted(&format!(
                             "{} toolchain download(s) through the allowlist",
@@ -5301,10 +5454,15 @@ mod rebuild {
             // in one function and neither said which file, so a run lost to a deleted rebuild
             // artifact and one lost to a fetch that left nothing behind produced the same eight
             // words. Naming the path is what turned the first of those into a fixable bug.
-            let up_bytes = std::fs::read(upstream_path)
-                .with_context(|| format!("reading the published artifact at {}", upstream_path.display()))?;
-            let rb_bytes = std::fs::read(rebuilt)
-                .with_context(|| format!("reading the rebuilt artifact at {}", rebuilt.display()))?;
+            let up_bytes = std::fs::read(upstream_path).with_context(|| {
+                format!(
+                    "reading the published artifact at {}",
+                    upstream_path.display()
+                )
+            })?;
+            let rb_bytes = std::fs::read(rebuilt).with_context(|| {
+                format!("reading the rebuilt artifact at {}", rebuilt.display())
+            })?;
             let up = store.blobs().put(up_bytes.clone()).await?;
             let rb = store.blobs().put(rb_bytes.clone()).await?;
 
@@ -5491,12 +5649,14 @@ mod rebuild {
                     if !crate::decompile::looks_like_assembly(&path) {
                         continue;
                     }
-                    let up_raw =
-                        String::from_utf8_lossy(f.upstream_raw_path.as_ref().unwrap_or(&f.path).as_bytes())
-                            .into_owned();
-                    let rb_raw =
-                        String::from_utf8_lossy(f.rebuild_raw_path.as_ref().unwrap_or(&f.path).as_bytes())
-                            .into_owned();
+                    let up_raw = String::from_utf8_lossy(
+                        f.upstream_raw_path.as_ref().unwrap_or(&f.path).as_bytes(),
+                    )
+                    .into_owned();
+                    let rb_raw = String::from_utf8_lossy(
+                        f.rebuild_raw_path.as_ref().unwrap_or(&f.path).as_bytes(),
+                    )
+                    .into_owned();
                     let (Ok(a), Ok(b)) = (
                         trigon_api::member::read(up_bytes.clone(), &up_name, &up_raw),
                         trigon_api::member::read(rb_bytes.clone(), &rb_name, &rb_raw),
@@ -5864,9 +6024,8 @@ mod rebuild {
         let up_name = crate::file_name(upstream);
         let rb_name = crate::file_name(rebuilt);
 
-        let mut out = String::from(
-            "`-` lines are the published artifact, `+` lines are the rebuild.\n",
-        );
+        let mut out =
+            String::from("`-` lines are the published artifact, `+` lines are the rebuild.\n");
         {
             // **The census and the bytes are taken at different moments, and the model is told.**
             // The comparison that called these members different ran *after* normalization; the
@@ -5875,8 +6034,7 @@ mod rebuild {
             // an opinion of "equivalent — just a timestamp" about a member the stabilized
             // comparison still flags would be answering the wrong question. Saying which passes
             // ran is the cheap honest half; diffing stabilized bytes is B43.
-            let applied: Vec<String> =
-                c.applied().iter().map(|a| a.id.to_string()).collect();
+            let applied: Vec<String> = c.applied().iter().map(|a| a.id.to_string()).collect();
             if !applied.is_empty() {
                 out.push_str(&format!(
                     "The comparison that found these differences ran after normalization \
@@ -5921,7 +6079,9 @@ mod rebuild {
                 // Neither side readable — a nested member the serving limits refused, say. Name
                 // it rather than skip it: the census says it differs and silence would misstate
                 // what the model was shown.
-                out.push_str(&format!("\n=== {path} — differs; contents unavailable ===\n"));
+                out.push_str(&format!(
+                    "\n=== {path} — differs; contents unavailable ===\n"
+                ));
                 shown += 1;
                 continue;
             }
@@ -5977,7 +6137,10 @@ mod rebuild {
             let view = trigon_api::member::view(&path, up, rb, None);
             if f.status == St::Differs
                 && !view.binary
-                && view.text.as_ref().is_some_and(|t| t.hunks.is_empty() && t.truncated.is_none())
+                && view
+                    .text
+                    .as_ref()
+                    .is_some_and(|t| t.hunks.is_empty() && t.truncated.is_none())
             {
                 // Both sides read, text, no truncation — and no difference visible. The archives
                 // hold more than one member at this path and `member::read` returns the first,
@@ -6135,7 +6298,12 @@ mod rebuild {
                 ]),
                 1 << 20,
             );
-            assert!(out.contains("=== package/index.js — in both; 100 bytes published, 101 rebuilt ==="), "{out}");
+            assert!(
+                out.contains(
+                    "=== package/index.js — in both; 100 bytes published, 101 rebuilt ==="
+                ),
+                "{out}"
+            );
             assert!(out.contains("@@ published:5 rebuild:5 @@"), "{out}");
             assert!(out.contains("\n-old\n+new\n"), "{out}");
         }
@@ -6148,8 +6316,15 @@ mod rebuild {
             let lines: Vec<_> = (0..10).map(|_| line("added", &"y".repeat(200))).collect();
             let mut out = String::new();
             super::render_member(&mut out, &text_view(lines), 600);
-            assert!(out.contains("the byte budget for this prompt is spent"), "{out}");
-            assert!(out.len() < 1_200, "the cut did not hold: {} bytes", out.len());
+            assert!(
+                out.contains("the byte budget for this prompt is spent"),
+                "{out}"
+            );
+            assert!(
+                out.len() < 1_200,
+                "the cut did not hold: {} bytes",
+                out.len()
+            );
         }
 
         #[test]
@@ -6161,8 +6336,16 @@ mod rebuild {
             let lines = vec![line("added", &"y".repeat(2 << 20))];
             let mut out = String::new();
             super::render_member(&mut out, &text_view(lines), 600);
-            assert!(out.len() < 800, "one line blew the budget: {} bytes", out.len());
-            assert!(out.contains("cut mid-line"), "{}", &out[..out.len().min(200)]);
+            assert!(
+                out.len() < 800,
+                "one line blew the budget: {} bytes",
+                out.len()
+            );
+            assert!(
+                out.contains("cut mid-line"),
+                "{}",
+                &out[..out.len().min(200)]
+            );
         }
 
         #[test]
@@ -6199,7 +6382,10 @@ mod rebuild {
                     "member::view now speaks `{k}`, which render_member would draw as context"
                 );
             }
-            assert!(kinds.contains("removed") && kinds.contains("added"), "{kinds:?}");
+            assert!(
+                kinds.contains("removed") && kinds.contains("added"),
+                "{kinds:?}"
+            );
         }
 
         #[test]
@@ -6210,7 +6396,10 @@ mod rebuild {
             v.text = None;
             let mut out = String::new();
             super::render_member(&mut out, &v, 1 << 20);
-            assert!(out.contains("(binary: a NUL in the first kilobyte; no text diff)"), "{out}");
+            assert!(
+                out.contains("(binary: a NUL in the first kilobyte; no text diff)"),
+                "{out}"
+            );
         }
 
         #[test]
@@ -6226,7 +6415,10 @@ mod rebuild {
             }
             let mut out = String::new();
             super::render_member(&mut out, &v, 1 << 20);
-            assert!(out.contains("(diff truncated: only the first 512 KiB"), "{out}");
+            assert!(
+                out.contains("(diff truncated: only the first 512 KiB"),
+                "{out}"
+            );
             assert!(out.contains("too large to align"), "{out}");
             assert!(out.contains("(7 diff line(s) omitted)"), "{out}");
         }
@@ -6984,13 +7176,20 @@ mod mirror {
         {
             if verbose {
                 println!(
-                    "  {} {} {}",
+                    "  {} {}",
                     style::label_col("image"),
-                    style::ident(&short_ref(parent)),
+                    style::ident(&short_ref(parent))
+                );
+                println!(
+                    "  {} {}",
+                    style::label_col(""),
                     style::muted("already carries what this strategy needs")
                 );
             }
-            return Ok(Resolved { image: parent.to_string(), derived: None });
+            return Ok(Resolved {
+                image: parent.to_string(),
+                derived: None,
+            });
         }
 
         // **Ask the image, where the label cannot answer.** A label is an index and only our own
@@ -7006,13 +7205,20 @@ mod mirror {
         if missing.is_empty() {
             if verbose {
                 println!(
-                    "  {} {} {}",
+                    "  {} {}",
                     style::label_col("image"),
-                    style::ident(&short_ref(parent)),
+                    style::ident(&short_ref(parent))
+                );
+                println!(
+                    "  {} {}",
+                    style::label_col(""),
                     style::muted("already carries what this strategy needs")
                 );
             }
-            return Ok(Resolved { image: parent.to_string(), derived: None });
+            return Ok(Resolved {
+                image: parent.to_string(),
+                derived: None,
+            });
         }
 
         if derive == Derive::NotAtThisTier {
@@ -7073,11 +7279,11 @@ mod mirror {
             });
         }
 
-        println!(
-            "  {} deriving one from {}, adding: {}",
-            style::label_col("image"),
-            style::ident(&short_ref(parent)),
-            style::warn(&packages.join(", "))
+        field("image", style::ident(&short_ref(parent)));
+        field_wrapped(
+            "",
+            &format!("deriving from it, adding: {}", packages.join(", ")),
+            style::warn,
         );
         base_image(parent, &packages, &tag, false, false)?;
         Ok(Resolved {
@@ -7250,8 +7456,8 @@ mod mirror {
         println!(
             "{} {} from {} with: {}",
             style::heading("building"),
-            style::ident(tag),
-            style::ident(from),
+            style::ident(&short_ref(tag)),
+            style::ident(&short_ref(from)),
             style::warn(&packages.join(", "))
         );
         let status = std::process::Command::new("podman")
@@ -7280,7 +7486,7 @@ mod mirror {
                     "\n{} {}: {}",
                     style::good(tag),
                     style::good("is ready"),
-                    style::ident(String::from_utf8_lossy(&o.stdout).trim())
+                    style::ident(&short_ref(String::from_utf8_lossy(&o.stdout).trim()))
                 );
             }
             // A locally built image has no repository digest until it is pushed, so the id is what
@@ -7356,7 +7562,12 @@ mod mirror {
         let ignore = root.join("target").join("mirror.containerignore");
         std::fs::write(&ignore, "target/\n.git/\nfuzz/target/\ncorpora/cache/\n")?;
 
-        println!("building {tag} (this compiles trigon in a container; it takes a few minutes)");
+        println!(
+            "{} {} {}",
+            style::heading("building"),
+            style::ident(tag),
+            style::muted("(this compiles trigon in a container; it takes a few minutes)")
+        );
         let status = std::process::Command::new("podman")
             .arg("build")
             .args([
@@ -7373,7 +7584,11 @@ mod mirror {
         if !status.success() {
             bail!("podman build failed");
         }
-        println!("\n{tag} is ready. `--egress mirror-only` can now be enforced.");
+        println!(
+            "\n{} {}",
+            style::good(&format!("{tag} is ready.")),
+            style::muted("`--egress mirror-only` can now be enforced.")
+        );
         Ok(())
     }
 
@@ -8416,8 +8631,9 @@ fn dotnet_version_repair(
     let up_bytes = std::fs::read(upstream_path).ok()?;
     let up_name = crate::file_name(upstream_path);
     let raw = f.upstream_raw_path.as_ref().unwrap_or(&f.path);
-    let dll = trigon_api::member::read(up_bytes, &up_name, &String::from_utf8_lossy(raw.as_bytes()))
-        .ok()?;
+    let dll =
+        trigon_api::member::read(up_bytes, &up_name, &String::from_utf8_lossy(raw.as_bytes()))
+            .ok()?;
     let info = crate::decompile::assembly_version_info(&dll)?;
     // The candidate only; the caller validates it with `usable` and guards against a no-op with
     // `changes_anything`, in view of both, the way the yarn rung does — the acceptance-site
@@ -8425,7 +8641,6 @@ fn dotnet_version_repair(
     // it.
     trigon_strategy::with_assembly_version(strategy, &info)
 }
-
 
 #[cfg(feature = "build")]
 fn usable(strategy: &trigon_strategy::Strategy, timewarp_base: &str) -> Result<(), String> {
@@ -8561,18 +8776,38 @@ fn keygen(out: &Path, public_out: Option<&Path>) -> Result<()> {
             .with_context(|| format!("writing {}", pub_path.display()))?;
     }
 
-    println!("wrote {} (0600)", out.display());
+    field(
+        "wrote",
+        format!(
+            "{} {}",
+            style::ident(&out.display().to_string()),
+            style::muted("(0600)")
+        ),
+    );
     if let Some(pub_path) = public_out {
-        println!("wrote {}", pub_path.display());
+        field("wrote", style::ident(&pub_path.display().to_string()));
     }
-    println!("\npublic key  {}", key.public_hex());
+    println!();
+    // The full hex, never shortened: it is what a verifier pins, so it has to be copyable whole.
+    field("public key", style::ident(&key.public_hex()));
+    println!();
+    field(
+        "verify",
+        style::ident(&format!(
+            "trigon verify-attestation <bundle> --public-key {}",
+            key.public_hex()
+        )),
+    );
+    println!();
     println!(
-        "\nPin that hex in whoever checks these statements:\n  \
-         trigon verify-attestation <bundle> --public-key {}\n\n\
-         It is the only thing that makes a signature mean anything — an unpinned signature is \
-         worth exactly the bundle's re-derivation. This key signs unchained statements; a public \
-         instance wants a key under a trusted root instead (ADR-0011).",
-        key.public_hex()
+        "{}",
+        style::muted(&style::wrap(
+            "Pin that hex in whoever checks these statements — it is the only thing that makes a \
+             signature mean anything, and an unpinned signature is worth exactly the bundle's \
+             re-derivation. This key signs unchained statements; a public instance wants a key \
+             under a trusted root instead (ADR-0011).",
+            0,
+        ))
     );
     Ok(())
 }
@@ -9906,7 +10141,8 @@ output_dir: trigon-pack
         // cost a run that had already computed a complete comparison: the rejection happened inside
         // the *next* build, where it was a fatal error rather than a discarded suggestion.
         let bad = trigon_strategy::from_yaml(NAMES_A_PARAMETER_THAT_DOES_NOT_EXIST).unwrap();
-        let why = super::usable(&bad, "timewarp:8129").expect_err("`project` is not a parameter of this tool");
+        let why = super::usable(&bad, "timewarp:8129")
+            .expect_err("`project` is not a parameter of this tool");
         assert!(why.contains("has no parameter"), "{why}");
         assert!(why.contains("project"), "{why}");
         // And it names what the tool does take, so the operator reading the line can tell whether
@@ -10031,7 +10267,10 @@ output_path: '*.tgz'
         let s = trigon_strategy::from_yaml(yaml).expect("the proposal itself is valid YAML");
         let e = super::usable(&s, "http://mirror.invalid")
             .expect_err("a recipe needing `npm` in the image must not pass the repair gate");
-        assert!(e.contains("npm"), "the refusal should name the dependency: {e}");
+        assert!(
+            e.contains("npm"),
+            "the refusal should name the dependency: {e}"
+        );
         assert!(e.contains("ADR-0012"), "and say which rule refuses it: {e}");
     }
 
@@ -10118,7 +10357,8 @@ output_path: '*.tgz'
              output_path: '*.tgz'\n",
         )
         .expect("this parses; that is the point");
-        let why = super::usable(&empty, "timewarp:8129").expect_err("a recipe that builds nothing is not usable");
+        let why = super::usable(&empty, "timewarp:8129")
+            .expect_err("a recipe that builds nothing is not usable");
         assert!(
             why.contains("empty build phase"),
             "the rejection has to say what is wrong with it: {why}"
@@ -10269,12 +10509,18 @@ mod global_json_tests {
         let _ = std::fs::remove_dir_all(&root);
         let deep = root.join("src").join("Castle.Core");
         std::fs::create_dir_all(&deep).unwrap();
-        std::fs::write(root.join("global.json"), r#"{ "sdk": { "version": "7.0.101" } }"#).unwrap();
+        std::fs::write(
+            root.join("global.json"),
+            r#"{ "sdk": { "version": "7.0.101" } }"#,
+        )
+        .unwrap();
 
         // A project two directories down still sees the repository-root pin.
         let from_subdir = dotnet_global_json(&root, Some("src/Castle.Core"));
         assert!(
-            from_subdir.as_deref().is_some_and(|t| t.contains("7.0.101")),
+            from_subdir
+                .as_deref()
+                .is_some_and(|t| t.contains("7.0.101")),
             "{from_subdir:?}"
         );
         // And so does a build rooted at the top.
@@ -10292,7 +10538,11 @@ mod global_json_tests {
         let root = base.join("checkout");
         let sub = root.join("src");
         std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(base.join("global.json"), r#"{ "sdk": { "version": "6.0.0" } }"#).unwrap();
+        std::fs::write(
+            base.join("global.json"),
+            r#"{ "sdk": { "version": "6.0.0" } }"#,
+        )
+        .unwrap();
 
         assert_eq!(
             dotnet_global_json(&root, Some("src")),

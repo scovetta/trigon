@@ -90,7 +90,10 @@ if [ -z "$WORK" ]; then
     WORK="./work/$(printf '%s' "$PURL" | tr -c 'A-Za-z0-9._@-' '-')"
 fi
 
-say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+# Bold headings, but only where the binary would colour too: stdout is a terminal and NO_COLOR is
+# unset. This mirrors `style::enabled()` so the script and `trigon`'s own output agree about colour.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then B='\033[1;97m'; R='\033[0m'; else B=''; R=''; fi
+say() { printf '\n%b%s%b\n' "$B" "$*" "$R"; }
 
 # ---------------------------------------------------------------------------------------------
 # The images. This is the step that is worth scripting: a stale `--image` digest is reported as a
@@ -130,9 +133,9 @@ fi
 # the only way to know which that is, is to know which were there before.
 RUNS_BEFORE="$("$TRIGON" runs --store "$STORE" 2>/dev/null | awk '$1 != "no" { print $1 }' | sort)"
 
-say "rebuilding $PURL"
-printf '  image   %s\n  egress  %s\n  store   %s\n  work    %s\n' \
-    "$IMAGE" "$EGRESS" "$STORE" "$WORK"
+# The invocation banner — image, egress, store, work — is printed by `trigon rebuild` itself now,
+# styled and in the tool-wide column, so a direct run shows it too and there is one place that owns
+# the colour. Nothing to echo here.
 
 rm -rf "$WORK"
 set +e
