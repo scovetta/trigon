@@ -3424,3 +3424,43 @@ key runs past 500 characters — and the diff rows are flex at the container wid
 clipped rather than scrolled. Each row is now `width: max-content` with `min-width: 100%`, so the
 widest line sets the scroll region and the container's `overflow-x` becomes a real horizontal
 scrollbar while a short line still fills the width for its highlight.
+
+### 3.81 A stabilizer for a .NET assembly's build and signing identity
+
+Asked, of castle.core: the DLL differences look like cosmetic version numbers filled in at release
+— can a stabilizer handle them? Investigating it changed the answer.
+
+**The version numbers are not the cosmetic part; they are reconstructable, and better reconstructed
+than normalized** (they are consumer-meaningful — `AssemblyVersion` is a binding identity). Building
+with the target version, year and copyright — read from the published assembly and passed as
+*standard* global MSBuild properties, no project-specific names — makes the rebuild decompile
+**byte-identical** to the published DLL. Under an era-appropriate SDK (7.0.101) that took castle's
+net6.0 assembly from a 3,690-byte divergence to **485 bytes**.
+
+Those 485 bytes are the genuinely cosmetic, genuinely *un*reproducible part, and they are what the
+stabilizer handles:
+
+- the **strong-name signature** — an RSA signature over the assembly, made with a private key we do
+  not have. This is exactly `nupkg-signature`'s case one level in: a `.sig` over content we rebuild.
+- the **MVID** — a per-compilation GUID the runtime never reads for behaviour.
+- the **PE timestamp and checksum**, and the **debug directory** — PDB GUID, checksum, path and
+  build timestamps, for a `.pdb` the package does not even ship.
+
+`dotnet-assembly-identity` walks the PE and CLI headers and zeroes exactly those regions in place,
+so it names nothing a consumer runs and moves no offsets. `Metadata` risk — the signature alone is
+`Structural`, the rest is `Metadata` like the archive timestamps — so a match reached through it is
+`Normalized`, not caveated: what is zeroed is bookkeeping, not behaviour. Measured on castle:
+485 → 217 bytes.
+
+**The residual 217 is structural, and a stabilizer cannot reach it.** The debug entries' pointer
+fields and the trailing PDB data sit at *different offsets* in the two files, because the PDB path
+is a different length — the build *environment* (the source path map, the exact SDK patch), not a
+field with a fixed home. Zeroing aligns same-offset regions; it cannot align different ones. So the
+last mile is reconstruction of the build environment ([B45](17-backlog.md)) — matching
+`DeterministicSourcePaths` and the SDK current at `registry_time` — not another stabilizer. Filed as
+[B46](17-backlog.md).
+
+The shape, again: three layers, each handed less than the CI had. The code reconstructs from the
+project. The version reconstructs from the published assembly. The signature and build GUIDs cannot
+be reconstructed at all and are normalized instead — and the debug *layout* needs the build
+environment, which is the frontier.

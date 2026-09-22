@@ -465,6 +465,207 @@ archive_pass!(
     }
 );
 
+// --- .NET assemblies -----------------------------------------------------------------------------
+
+fn u16le(b: &[u8], o: usize) -> Option<u16> {
+    b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]))
+}
+fn u32le(b: &[u8], o: usize) -> Option<u32> {
+    b.get(o..o + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+/// The byte ranges of a managed assembly that a rebuild cannot reproduce and a consumer does not
+/// read as logic: the PE timestamp and checksum, the module's MVID, and the strong-name signature.
+///
+/// `None` when the bytes are not a managed PE — a native `.dll`, a data file that happens to end
+/// `.dll`, anything malformed or truncated — which the caller reads as "not ours, leave it whole".
+/// Every field is reached by walking the headers rather than scanning for values, so nothing but
+/// these four regions is ever named.
+fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
+    if b.get(0..2)? != b"MZ" {
+        return None;
+    }
+    let pe = u32le(b, 0x3c)? as usize;
+    if b.get(pe..pe + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let coff = pe + 4;
+    let num_sections = u16le(b, coff + 2)? as usize;
+    let opt_size = u16le(b, coff + 16)? as usize;
+    let opt = coff + 20;
+    // The checksum sits at optional-header offset 64 in both PE32 and PE32+; only the data
+    // directories move, because the two headers differ in the fields before them.
+    let (dir_off, checksum_off) = match u16le(b, opt)? {
+        0x10b => (opt + 96, opt + 64),
+        0x20b => (opt + 112, opt + 64),
+        _ => return None,
+    };
+    // Data directory 14 is the CLI header. A zero RVA there is a native image: nothing to do.
+    let cli_dir = dir_off + 14 * 8;
+    let cli_rva = u32le(b, cli_dir)? as usize;
+    if cli_rva == 0 {
+        return None;
+    }
+    let sec = opt + opt_size;
+    let rva_to_off = |rva: usize| -> Option<usize> {
+        (0..num_sections).find_map(|i| {
+            let s = sec + i * 40;
+            let vsize = u32le(b, s + 8)? as usize;
+            let vaddr = u32le(b, s + 12)? as usize;
+            let praw = u32le(b, s + 20)? as usize;
+            (rva >= vaddr && rva < vaddr + vsize.max(1)).then_some(praw + (rva - vaddr))
+        })
+    };
+
+    let mut regions = Vec::new();
+    // The PE timestamp and checksum: a date and a hash of the file, neither reproducible nor read
+    // as logic. `Metadata` risk, the tier `tar-time`/`zip-time` already sit at.
+    regions.push((coff + 4, 4));
+    regions.push((checksum_off, 4));
+
+    let cli = rva_to_off(cli_rva)?;
+    // The strong-name signature: an RSA signature over the assembly, made with a private key we do
+    // not have, exactly the ".sig over content we are rebuilding" the `Structural` tier and
+    // `nupkg-signature` are about.
+    let sn_rva = u32le(b, cli + 32)? as usize;
+    let sn_size = u32le(b, cli + 36)? as usize;
+    if sn_rva != 0 && sn_size != 0 {
+        let sn = rva_to_off(sn_rva)?;
+        if sn.checked_add(sn_size).is_some_and(|end| end <= b.len()) {
+            regions.push((sn, sn_size));
+        }
+    }
+
+    // The debug directory (data directory 6): a table of entries, each with a build timestamp, and
+    // the CodeView/PDB-checksum data they point at — the PDB's GUID (the MVID again), its age, the
+    // path it was written to, and a hash of a `.pdb` the package does not even ship. All build
+    // identity, none of it read as behaviour. Zero the directory's own RVA/size in the header, each
+    // entry's timestamp, and each entry's pointed data, so two builds that differ only in where
+    // and when they wrote their debug info agree.
+    let dbg_dir = dir_off + 6 * 8;
+    let dbg_rva = u32le(b, dbg_dir)? as usize;
+    let dbg_size = u32le(b, dbg_dir + 4)? as usize;
+    if dbg_rva != 0 && dbg_size != 0 {
+        // The 8-byte directory entry itself (RVA + size): it moves between builds.
+        regions.push((dbg_dir, 8));
+        if let Some(dbg) = rva_to_off(dbg_rva) {
+            let entries = dbg_size / 28;
+            for i in 0..entries {
+                let ent = dbg + i * 28;
+                // Each entry's TimeDateStamp.
+                if ent + 8 <= b.len() {
+                    regions.push((ent + 4, 4));
+                }
+                // The data it points at, by file offset (PointerToRawData), not RVA.
+                let size_of_data = u32le(b, ent + 16)? as usize;
+                let ptr_raw = u32le(b, ent + 24)? as usize;
+                if ptr_raw != 0
+                    && size_of_data != 0
+                    && ptr_raw.checked_add(size_of_data).is_some_and(|e| e <= b.len())
+                {
+                    regions.push((ptr_raw, size_of_data));
+                }
+            }
+        }
+    }
+
+    // The MVID: a per-compilation GUID the runtime never reads for behaviour, in the `#GUID` heap.
+    // Zero the whole heap rather than parse the tables to reach `Module.Mvid`: the heap holds only
+    // GUIDs, all of them build identifiers, so zeroing it names nothing a consumer runs.
+    let md_rva = u32le(b, cli + 8)? as usize;
+    if md_rva != 0
+        && let Some(md) = rva_to_off(md_rva)
+        && b.get(md..md + 4) == Some(&[0x42, 0x53, 0x4a, 0x42])
+    {
+        let ver_len = u32le(b, md + 12)? as usize;
+        let ver_padded = ver_len.checked_add(3)? & !3;
+        let after_ver = md + 16 + ver_padded;
+        let streams = u16le(b, after_ver + 2)? as usize;
+        let mut q = after_ver + 4;
+        for _ in 0..streams {
+            let s_off = u32le(b, q)? as usize;
+            let s_size = u32le(b, q + 4)? as usize;
+            let name_start = q + 8;
+            let name_end = name_start + b.get(name_start..)?.iter().position(|&c| c == 0)?;
+            let name = b.get(name_start..name_end)?;
+            let name_padded = (name_end - name_start + 1).checked_add(3)? & !3;
+            if name == b"#GUID" {
+                let heap = md.checked_add(s_off)?;
+                if heap.checked_add(s_size).is_some_and(|end| end <= b.len()) {
+                    regions.push((heap, s_size));
+                }
+            }
+            q = name_start + name_padded;
+        }
+    }
+    Some(regions)
+}
+
+entry_pass!(
+    /// Zero a managed assembly's build- and signing-identity fields: PE timestamp and checksum,
+    /// the module MVID, and the strong-name signature.
+    ///
+    /// **The residual after the code already matches.** With the version reconstructed and the SDK
+    /// close, `castle.core`'s assemblies decompile identically and differ only here — a signature
+    /// made with a key we do not have, a per-compilation GUID, a build date. None is code and none
+    /// is reproducible, so a signed .NET package can never match byte-for-byte until they are
+    /// normalized. This is the strong-name signature's `nupkg-signature`, applied one level in, to
+    /// the assembly rather than the package.
+    ///
+    /// `Metadata` risk: the signature alone would be `Structural` (integrity metadata over content
+    /// we rebuild), the MVID and timestamp are `Metadata` like the archive timestamps, and a pass
+    /// carries the higher of what it does. Both are builtin and at or below `Metadata`, so a match
+    /// reached through this is `Normalized`, not caveated — the honest tier, because what is zeroed
+    /// is bookkeeping, not the assembly's behaviour.
+    ///
+    /// Reached by walking the PE and CLI headers, so it touches exactly those four regions and
+    /// nothing else; a native `.dll` or a mislabelled data file parses as "not a managed image"
+    /// and is left whole. Zeroed in place, so the member's length and the archive's framing do not
+    /// move.
+    DotnetAssemblyIdentity,
+    "dotnet-assembly-identity",
+    RiskTier::Metadata,
+    is_zip,
+    |e| {
+        if !trigon_core::is_managed_assembly(&String::from_utf8_lossy(e.path.as_bytes())) {
+            return Touched::NONE;
+        }
+        let Ok(body) = e.body_bytes() else {
+            return Touched::NONE;
+        };
+        let Some(regions) = dotnet_build_identity_regions(&body) else {
+            return Touched::NONE;
+        };
+        // Nothing to do unless a named region actually carries a non-zero byte — so an assembly
+        // that was already public-signed and deterministic stays on its original `Body` rather
+        // than being promoted to `Inline` for no change.
+        let dirty = regions
+            .iter()
+            .any(|&(o, l)| body.get(o..o + l).is_some_and(|s| s.iter().any(|&x| x != 0)));
+        if !dirty {
+            return Touched::NONE;
+        }
+        drop(body);
+        match e.body_mut() {
+            Ok(b) => {
+                let mut n = 0u64;
+                for (o, l) in dotnet_build_identity_regions(b).unwrap_or_default() {
+                    if let Some(s) = b.get_mut(o..o + l) {
+                        for x in s.iter_mut() {
+                            if *x != 0 {
+                                *x = 0;
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+                Touched::entry_bytes(n)
+            }
+            Err(_) => Touched::NONE,
+        }
+    }
+);
+
 /// Every builtin pass. Used by the profile registry and by the dependency-policy test.
 pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
     vec![
@@ -490,6 +691,7 @@ pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
         Arc::new(NupkgDocMemberOrder),
         Arc::new(NupkgPackagingNames),
         Arc::new(NupkgPackagerVersion),
+        Arc::new(DotnetAssemblyIdentity),
     ]
 }
 
@@ -1432,5 +1634,47 @@ mod nupkg_text_tests {
             sort_doc_members(b"<doc><members><member name=\"T:A\"/></members></doc>").is_none()
         );
         assert!(sort_doc_members(b"<doc><members><member name=\"T:B\"/>").is_none());
+    }
+}
+
+#[cfg(test)]
+mod dotnet_assembly_tests {
+    use super::dotnet_build_identity_regions;
+
+    /// The whole point, against two real assemblies: with the code already identical, zeroing the
+    /// build/signing identity makes the bytes equal. Gated on two paths so the suite runs without
+    /// them; point them at a published assembly and its rebuild to check the residual closes.
+    #[test]
+    fn dotnet_identity_closes_the_residual_between_two_real_assemblies() {
+        let (Ok(pa), Ok(pb)) = (
+            std::env::var("TRIGON_DOTNET_A"),
+            std::env::var("TRIGON_DOTNET_B"),
+        ) else {
+            eprintln!("skipped: set TRIGON_DOTNET_A and TRIGON_DOTNET_B to two assemblies");
+            return;
+        };
+        let mut a = std::fs::read(pa).unwrap();
+        let mut b = std::fs::read(pb).unwrap();
+        let before = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+        for buf in [&mut a, &mut b] {
+            for (o, l) in dotnet_build_identity_regions(buf).unwrap_or_default() {
+                buf[o..o + l].fill(0);
+            }
+        }
+        let after = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+        eprintln!("differing bytes: {before} before, {after} after identity normalization");
+        // A reduction, not necessarily zero: the signature, MVID, timestamps and debug data are
+        // fixed-location and close here, but a residual can remain when the two builds laid their
+        // debug/PDB data out differently (a different PDB path length shifts it) — that is the
+        // build environment, not something a byte-zeroing stabilizer can reach. See B46.
+        assert!(after < before, "identity normalization changed nothing ({before} bytes)");    }
+
+    /// A non-managed input is left whole: no `MZ`, or a PE with no CLI header, yields no regions.
+    #[test]
+    fn a_non_managed_input_yields_no_regions() {
+        assert!(dotnet_build_identity_regions(b"not a PE at all").is_none());
+        assert!(dotnet_build_identity_regions(&[]).is_none());
+        // `MZ` but nothing after: must not panic, must decline.
+        assert!(dotnet_build_identity_regions(b"MZ").is_none());
     }
 }

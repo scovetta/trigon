@@ -88,6 +88,7 @@ pub fn profile(id: &str) -> Option<StabilizerSet> {
                 Arc::new(NupkgPackagerVersion) as Arc<dyn Stabilizer>,
                 Arc::new(NupkgTextEol) as Arc<dyn Stabilizer>,
                 Arc::new(NupkgDocMemberOrder) as Arc<dyn Stabilizer>,
+                Arc::new(DotnetAssemblyIdentity) as Arc<dyn Stabilizer>,
             ],
         ]
         .concat(),

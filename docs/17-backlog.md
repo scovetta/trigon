@@ -1813,3 +1813,30 @@ not yet act on it.
 The diff-opinion ask is the near-term mitigation: a run that diverges only in compiler codegen, with
 version and copyright matched, is one a reader can be told is *likely toolchain, not source* — which
 is precisely the reading [3.74](16-findings.md) exists to record.
+
+## B46. A .NET assembly's debug layout is structural, and closes only with a matching build environment
+
+[3.81](16-findings.md)'s `dotnet-assembly-identity` normalizes the fixed-location build/signing
+identity of a managed assembly (strong-name signature, MVID, PE timestamp/checksum, debug
+timestamps and the debug data it can locate), taking castle.core's net6.0 DLL from 485 to 217
+differing bytes once the version is reconstructed. The remaining 217 are **structural**: the debug
+directory entries' `PointerToRawData`/`AddressOfRawData` and the CodeView/PDB-checksum data they
+point at sit at different offsets in the two files, because the embedded PDB path is a different
+length. A byte-zeroing stabilizer aligns same-offset regions and cannot align different ones.
+
+Closing it is a reconstruction problem, not a normalization one, and it is the same frontier as
+[B45](17-backlog.md):
+
+- **The PDB path.** `-p:ContinuousIntegrationBuild=true` with `DeterministicSourcePaths` maps the
+  source root to `/_/`, so the path — and thus the debug data's length and layout — is a function of
+  the *relative* build tree, which Trigon controls, plus the exact SDK. Matching the publisher's
+  requires building in the same relative structure the CI used.
+- **The exact SDK.** 7.0.101 got castle's code byte-identical and the residual to 217; the exact
+  patch current at `registry_time` would close the last metadata and debug-layout bytes.
+
+An alternative worth weighing: normalize by *removing* the debug directory from both sides entirely
+(rewriting the data-directory entry to zero and dropping the entries and their data), which is a
+structural rewrite rather than an in-place zero. It would make the debug layout irrelevant to the
+comparison at the cost of a real edit to the PE — a bigger, `Structural`-tier change than
+`dotnet-assembly-identity`'s in-place zeroing, and one to weigh against just reconstructing the
+path.
