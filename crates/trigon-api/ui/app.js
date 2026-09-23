@@ -879,19 +879,41 @@ function ledgerPanel(d) {
       'No pass changed anything on either side, so the two artifacts were compared exactly as published. The verdict owes nothing to normalization.'));
   }
   const max = Math.max(...d.applied.map((p) => p.entries), 1);
-  const rows = d.applied.map((p) => el('tr', {},
-    el('td', {},
-      el('code', { text: p.id }),
-      p.caps ? el('span', { class: 'tag normalized_with_caveats', text: 'caps' }) : null),
-    el('td', { class: 'n', text: p.entries }),
-    el('td', { class: 'bar-cell' },
-      el('div', { class: 'bar-track' },
-        el('div', { class: 'bar-fill', style: [['width', `${(p.entries / max) * 100}%`], ['background', RISK_COLOUR[p.risk] || 'var(--dim)']] }))),
-    el('td', { class: 'dim', text: p.risk }),
-    el('td', {}, p.provenance === 'builtin'
-      ? el('span', { class: 'dim', text: 'builtin' })
-      : el('span', { class: 'diff', text: p.who })),
-    el('td', { class: 'n dim', text: p.bytes ? bytes(p.bytes) : '—' })));
+  // Each pass is a button that unfolds a plain-language description of what it did — so a reader
+  // can tell what `dotnet-il-canonical` or `zip-time` actually changed without leaving the page.
+  const rows = d.applied.flatMap((p) => {
+    const doc = STABILIZER_DOCS[p.id];
+    const detail = el('tr', { class: 'pass-doc', hidden: true },
+      el('td', { colspan: 6 }, doc
+        ? el('div', { class: 'pass-doc-body' },
+            el('p', { class: 'sentence', text: doc.sum }),
+            el('p', { class: 'note', text: doc.why }))
+        : el('p', { class: 'note empty', text: 'No description on file for this pass.' })));
+    const name = doc
+      ? el('button', {
+          class: 'pass-name', type: 'button', 'aria-expanded': 'false', title: doc.sum,
+          onclick: (e) => {
+            const nowOpen = detail.hidden;
+            detail.hidden = !nowOpen;
+            e.currentTarget.setAttribute('aria-expanded', String(nowOpen));
+            e.currentTarget.classList.toggle('open', nowOpen);
+          },
+        }, el('code', { text: p.id }), el('span', { class: 'info', text: 'ⓘ' }))
+      : el('code', { text: p.id });
+    const main = el('tr', {},
+      el('td', {}, name,
+        p.caps ? el('span', { class: 'tag normalized_with_caveats', text: 'caps' }) : null),
+      el('td', { class: 'n', text: p.entries }),
+      el('td', { class: 'bar-cell' },
+        el('div', { class: 'bar-track' },
+          el('div', { class: 'bar-fill', style: [['width', `${(p.entries / max) * 100}%`], ['background', RISK_COLOUR[p.risk] || 'var(--dim)']] }))),
+      el('td', { class: 'dim', text: p.risk }),
+      el('td', {}, p.provenance === 'builtin'
+        ? el('span', { class: 'dim', text: 'builtin' })
+        : el('span', { class: 'diff', text: p.who })),
+      el('td', { class: 'n dim', text: p.bytes ? bytes(p.bytes) : '—' }));
+    return [main, detail];
+  });
 
   return panel('The stabilizers', el('div', {},
     el('p', { class: 'sentence' },
@@ -925,19 +947,98 @@ const RISK_COLOUR = {
   content: 'var(--caveat)', lossy: 'var(--fail)',
 };
 
+// What each pass actually does, in the words a reader needs. `sum` is the one line; `why` says what
+// it normalizes and why doing so is safe — never code, always something a build wrote around the
+// code. Keyed by the id the ledger prints, so a pass with no entry simply shows none.
+const STABILIZER_DOCS = {
+  'tar-entry-order': { sum: 'Sorts the archive entries into a canonical order.', why: 'Two builds can lay the same files down in a different order; the order is not part of what the package means, so both are sorted the same way before comparing.' },
+  'tar-time': { sum: 'Zeroes each entry’s modification time.', why: 'A build stamps every file with when it ran. That instant is not reproducible and is not content, so it is fixed to the same value on both sides.' },
+  'tar-mode': { sum: 'Normalizes Unix permission bits.', why: 'The umask and tooling of the building machine leak into the mode bits; the executable bit that matters is kept, the rest normalized.' },
+  'tar-owners': { sum: 'Zeroes the owning uid and gid.', why: 'Which numeric user built the package is not part of it.' },
+  'tar-xattrs': { sum: 'Drops extended attributes a build tool may attach.', why: 'Filesystem xattrs (SELinux labels, provenance) travel with a build machine, not with the package.' },
+  'tar-device': { sum: 'Zeroes device major/minor numbers on special entries.', why: 'A device number is a property of the machine, not the archive.' },
+  'zip-entry-order': { sum: 'Sorts zip entries into a canonical order.', why: 'The order a zip lists its files in is the writer’s choice, not content; both sides are sorted the same way.' },
+  'zip-time': { sum: 'Zeroes each zip entry’s timestamp.', why: 'The DOS date/time a zip records is when the build ran, which is not reproducible and not content.' },
+  'zip-versions': { sum: 'Normalizes the “version made by / needed to extract” fields.', why: 'These name which tool and OS wrote the zip, not what is inside it.' },
+  'zip-misc': { sum: 'Normalizes assorted zip header fields that vary by writer.', why: 'External attributes and general-purpose flags differ between zip libraries without changing a byte of the files.' },
+  'zip-compression': { sum: 'Re-expresses every entry at one canonical compression.', why: 'Deflate level is a choice of the writer; the uncompressed bytes are what matter, so two zips of identical files match whatever level each used.' },
+  'gzip-meta': { sum: 'Zeroes the gzip header’s timestamp, name and OS byte.', why: 'The gzip wrapper records when and where it ran; the compressed content underneath is unchanged.' },
+  'cargo-vcs-hash': { sum: 'Normalizes the git commit in a crate’s .cargo_vcs_info.json.', why: 'The recorded commit says where the source lives, not what it is — and a rebuild from a tag resolves it differently. Content risk: it edits a file the package ships.' },
+  'npm-install-fields': { sum: 'Drops npm’s install-time bookkeeping fields.', why: 'A tarball’s recorded integrity/resolved/from fields say where npm fetched it, not what is in it.' },
+  'nupkg-portable-folder-name': { sum: 'Renames a portable-framework lib folder to a canonical spelling.', why: 'Tooling writes `portable-net45+win8` and its permutations inconsistently; the folder’s meaning is the same however the monikers are ordered.' },
+  'nupkg-signature': { sum: 'Removes a NuGet package’s author signature (.signature.p7s).', why: 'A signature is made with a private key the rebuild does not have, over the very bytes being rebuilt. Structural: a whole member is dropped.' },
+  'nupkg-packaging-names': { sum: 'Normalizes the random GUID names OPC packaging invents.', why: 'The `.psmdcp` file and its relationship entry are named after a fresh GUID on every pack; nothing depends on the name.' },
+  'nupkg-packager-version': { sum: 'Zeroes the packaging-tool version in the .nuspec’s psmdcp.', why: 'Which NuGet version wrote the package is provenance, not content.' },
+  'nupkg-text-eol': { sum: 'Normalizes line endings in the package’s text files.', why: 'CRLF vs LF is a checkout and platform artifact; the text is the same either way. Content risk: it rewrites shipped bytes.' },
+  'nupkg-doc-member-order': { sum: 'Sorts the members of an XML documentation file.', why: 'The compiler may emit `<member>` entries in any order; sorting them makes two docs of the same API match. Structural.' },
+  'dotnet-assembly-identity': { sum: 'Zeroes a .NET assembly’s build and signing identity.', why: 'The strong-name signature (a key we do not have), the module MVID (a per-compilation GUID), the PE timestamp and checksum, and the debug-directory data — none is code, all are stamps a build writes around it.' },
+  'dotnet-il-canonical': { sum: 'Compares a managed assembly by its code, not its byte layout.', why: 'It reads the assembly’s own tables and keeps every method’s name, signature and IL, resolved through the heaps to values — so two assemblies built from the same source match even when SourceLink, a source-generator’s document order or a shifted heap laid their metadata and embedded PDB out differently. Lossy: it drops resources, attributes and field data, so a match it makes is caveated, and a real code change still shows.' },
+  'nupkg-repository-branch': { sum: 'Drops the <repository branch=…> git ref from the .nuspec.', why: 'That names the tag or branch the publisher built from, which a detached-commit checkout cannot reproduce. The commit — the identity — is kept.' },
+  'nupkg-readme-markers': { sum: 'Strips NuGetizer’s <!-- include … --> readme markers.', why: 'These are assembly directives NuGetizer leaves in the readme, spelled a hair differently once a remote include is neutralized for an offline build; the text a reader sees is unchanged. Content risk.' },
+  'pyc-header': { sum: 'Zeroes the source mtime in a .pyc header.', why: 'A compiled Python file stamps when its .py was last modified, for cache invalidation — not part of the bytecode.' },
+  'wheel-direct-url': { sum: 'Drops direct_url.json from a wheel.', why: 'It records the URL or path pip installed from, which is about the install, not the package.' },
+  'wheel-metadata-eol': { sum: 'Normalizes line endings in a wheel’s METADATA and RECORD.', why: 'CRLF vs LF in the metadata is a platform artifact. Content risk.' },
+  'wheel-record': { sum: 'Rebuilds the wheel’s RECORD manifest after the other passes.', why: 'RECORD lists every file and its hash; the passes above change some, so it is regenerated last so it still describes the package.' },
+  'wheel-direct-url-drop': { sum: 'Drops direct_url.json from a wheel.', why: 'Records where pip installed from, not what is in the package.' },
+  'gem-exclude-checksums': { sum: 'Drops a gem’s checksums.yaml.gz.', why: 'It is a hash of the gem’s other members and is re-derivable from them, so it carries nothing new.' },
+  'gem-exclude-signatures': { sum: 'Drops a gem’s signature files.', why: 'Made with a private key the rebuild does not have.' },
+  'gem-metadata-cert-chain': { sum: 'Zeroes the signing certificate chain in a gem’s metadata.', why: 'The signer’s certificate is identity, not content.' },
+  'gem-metadata-date': { sum: 'Zeroes the build date in a gem’s metadata.', why: 'When the gem was built is not part of it.' },
+  'gem-metadata-rubygems-version': { sum: 'Normalizes the RubyGems tool version in a gem’s metadata.', why: 'Which packaging version wrote the gem is provenance.' },
+};
+
+// Passes that work on the archive framing — an entry's mode, size, timestamp, checksum, or the
+// order members are stored in — rather than on a member's own bytes. `entry:*` differences are
+// reconciled by whichever of these fired.
+const FRAMING_PASS = /^(zip|tar|gzip|ar)-/;
+
+// Of the passes that fired on this run, the ones that reconcile the differences this member
+// carried. The comparison records *that* a member's entry metadata (or body) differed and that it
+// is now identical, but not which pass erased which field — so attribution is by family, not by
+// proof. Any `entry:*` difference is credited to the framing passes that fired; a `body` difference
+// to the content passes that address a file of this kind. Kept to passes actually in the ledger, so
+// the list names passes that ran, never passes that merely could.
+function reconcilingPasses(m, applied) {
+  const diffs = m.differences || [];
+  if (!diffs.length) return [];
+  const p = (m.path || '').toLowerCase();
+  const fired = new Set(applied.map((a) => a.id));
+  const ids = new Set();
+  const add = (...xs) => xs.forEach((x) => { if (fired.has(x)) ids.add(x); });
+
+  // Entry metadata: whichever framing passes fired did this, and the blob does not split it finer.
+  if (diffs.some((r) => r.startsWith('entry:'))) {
+    for (const id of fired) if (FRAMING_PASS.test(id)) ids.add(id);
+  }
+  // The member's own bytes: attributed by what kind of file it is.
+  if (diffs.some((r) => r === 'body' || r.startsWith('body'))) {
+    if (/\.(dll|exe)$/.test(p)) add('dotnet-il-canonical', 'dotnet-assembly-identity');
+    else if (p.endsWith('.nuspec')) add('nupkg-repository-branch', 'nupkg-packager-version', 'nupkg-packaging-names');
+    else if (p.endsWith('.psmdcp')) add('nupkg-packager-version', 'nupkg-packaging-names');
+    else if (/readme|\.md$/.test(p)) add('nupkg-readme-markers', 'nupkg-text-eol');
+    else if (p.endsWith('.xml')) add('nupkg-doc-member-order', 'nupkg-text-eol');
+    else add('nupkg-text-eol', 'wheel-metadata-eol', 'cargo-vcs-hash', 'npm-install-fields');
+  }
+  return [...ids];
+}
+
 // Every member, most interesting first. A hundred identical members must not bury the ten that
 // differ, and a list capped at five hundred that sorted by path would cap away exactly the rows
 // somebody came to read.
 function membersPanel(d, runId) {
   const rows = d.members.flatMap((m) => {
     const [label, colour, why] = MEMBER_STATE[m.status] || [m.status, 'var(--dim)', ''];
-    // Only a member with something to look at is openable: two identical copies have no diff and
-    // offering one would be offering an empty panel.
-    const worth = m.status !== 'identical';
+    // Openable when there is something to see: a member that still differs, or one that differed
+    // before a pass reconciled it — `identical` now, but with a pre-stabilization difference on
+    // record. Opening the latter shows the difference the passes erased and names which erased it.
+    const reconciled = m.status === 'identical' && m.differences.length
+      ? { differences: m.differences, passes: reconcilingPasses(m, d.applied) }
+      : null;
+    const worth = m.status !== 'identical' || m.differences.length > 0;
     const slot = el('td', { colspan: 6, class: 'member-slot' });
     const open = () => {
       rememberOpen(m.path);
-      openMember(runId, m.path, slot, {});
+      openMember(runId, m.path, slot, { reconciled });
     };
     // Entered on a link to this member. The server has usually already put the panel in the
     // document, in which case it is drawn here with no request at all — see `BOOT.member`. Where it
@@ -952,9 +1053,10 @@ function membersPanel(d, runId) {
         queueMicrotask(() => openMember(runId, m.path, slot, { view: want.view }));
       }
     }
-    return [el('tr', { class: worth ? 'openable' : '' },
+    return [el('tr', { class: [worth ? 'openable' : '', reconciled ? 'reconciled' : ''].filter(Boolean).join(' ') },
       el('td', { class: 'url' }, worth
-        ? el('button', { class: 'member-link', onclick: open, title: 'open this member', text: m.path })
+        ? el('button', { class: 'member-link', onclick: open,
+            title: reconciled ? 'differed, then a pass reconciled it — open to see how' : 'open this member', text: m.path })
         : el('code', { text: m.path })),
       el('td', {}, el('span', { class: 'member-state', title: why },
         el('i', { style: [['background', colour]] }), label)),
@@ -1229,6 +1331,33 @@ function drawMember(runId, path, slot, state, d) {
         },
         text: 'close',
       })),
+
+    // For a member the passes reconciled: say so up front, and name the passes that did it. What
+    // follows below is the difference they erased — the published and built copies as they were.
+    state.reconciled
+      ? el('div', { class: 'reconciled-note' },
+          el('p', { class: 'sentence' },
+            el('strong', { text: 'Reconciled. ' }),
+            'The published and built copies differed, and stabilization made them identical. What differed and the passes that erased it are below; the member’s bytes follow.'),
+          // What differed, before → the passes that erased it, after. Two short lists so the
+          // transform reads as a chain: this is what was wrong, this is what put it right.
+          el('div', { class: 'reconciled-flow' },
+            el('div', { class: 'reconciled-col' },
+              el('p', { class: 'reconciled-head', text: 'differed' }),
+              el('ul', { class: 'reconciled-diffs' }, state.reconciled.differences.map((r) =>
+                el('li', {},
+                  el('code', { text: r }),
+                  el('span', { class: 'note', text: ` — ${DIFFERENCE_RULE[r] || DIFFERENCE_RULE[r.split(':')[0]] || 'differed before stabilization'}` }))))),
+            el('div', { class: 'reconciled-arrow', text: '→' }),
+            el('div', { class: 'reconciled-col' },
+              el('p', { class: 'reconciled-head', text: 'reconciled by' }),
+              state.reconciled.passes.length
+                ? el('ul', { class: 'reconciled-passes' }, state.reconciled.passes.map((id) =>
+                    el('li', {},
+                      el('code', { text: id }),
+                      el('span', { class: 'note', text: ` — ${(STABILIZER_DOCS[id] || {}).sum || ''}` }))))
+                : el('p', { class: 'note empty', text: 'A pass in the set reconciled it; see the ledger above for what fired.' }))))
+      : null,
 
     !d.in_upstream || !d.in_rebuild
       ? el('p', { class: 'withheld-note' },

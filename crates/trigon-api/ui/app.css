@@ -403,6 +403,64 @@ table.ledger .bar-track { margin: 0; }
   table.ledger .bar-cell { display: none; }
 }
 
+/* A pass id that unfolds its description. A button, not a link: it goes nowhere, it discloses. */
+button.pass-name {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0;
+  cursor: pointer; display: inline-flex; align-items: baseline; gap: .35rem;
+}
+button.pass-name .info { color: var(--dim); font-size: .82em; transition: color .12s; }
+button.pass-name:hover .info,
+button.pass-name:focus-visible .info { color: var(--accent, var(--structural)); }
+button.pass-name.open .info { color: var(--structural); }
+button.pass-name:focus-visible { outline: 2px solid var(--structural); outline-offset: 2px; border-radius: 3px; }
+
+/* The unfolded row: full-width, indented under the pass, quiet ground so it reads as an aside. */
+tr.pass-doc > td {
+  background: var(--panel-2, rgba(127, 127, 127, .06));
+  border-top: 0;
+}
+.pass-doc-body { padding: .2rem 0 .5rem 1.2rem; border-left: 2px solid var(--line, rgba(127,127,127,.25)); max-width: 62ch; }
+.pass-doc-body .sentence { margin: 0 0 .3rem; font-weight: 600; }
+.pass-doc-body .note { margin: 0; }
+
+/* A member that differed and was reconciled by a pass: a quiet marker in the list, and a banner in
+   the opened panel naming what erased the difference shown below it. */
+table.runs tr.reconciled td.url .member-link::after {
+  content: '\2713'; /* check: it matched, after work */
+  color: var(--ok); margin-left: .45rem; font-size: .82em;
+}
+.reconciled-note {
+  border: 1px solid var(--line, rgba(127,127,127,.25)); border-left: 3px solid var(--ok);
+  border-radius: 6px; padding: .6rem .8rem; margin: 0 0 .8rem; max-width: 74ch;
+  background: var(--panel-2, rgba(80, 200, 120, .05));
+}
+.reconciled-note .sentence { margin: 0; }
+/* differed  →  reconciled by: the transform as a chain, two columns and an arrow. Stacks on a
+   narrow screen, where the arrow turns to point down. */
+.reconciled-flow {
+  display: flex; align-items: flex-start; gap: .8rem; margin: .55rem 0 0; flex-wrap: wrap;
+}
+.reconciled-col { flex: 1 1 20ch; min-width: 18ch; }
+.reconciled-head {
+  margin: 0 0 .25rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--dim); font-weight: 700;
+}
+.reconciled-arrow {
+  align-self: center; color: var(--ok); font-size: 1.1rem; font-weight: 700; flex: 0 0 auto;
+}
+.reconciled-note ul.reconciled-diffs,
+.reconciled-note .reconciled-passes { margin: 0; padding-left: 1.1rem; }
+.reconciled-note .reconciled-diffs li,
+.reconciled-note .reconciled-passes li { margin: .15rem 0; }
+.reconciled-note .reconciled-diffs code,
+.reconciled-note .reconciled-passes code { font-size: .84em; }
+.reconciled-note .reconciled-diffs .note,
+.reconciled-note .reconciled-passes .note { display: inline; }
+@media (max-width: 560px) {
+  .reconciled-flow { flex-direction: column; gap: .3rem; }
+  .reconciled-arrow { align-self: flex-start; transform: rotate(90deg); }
+}
+
 /* A difference rule id. Shown verbatim because it is a stable name that appears in cache keys and
    cluster ids; the tooltip carries the sentence. */
 .rule {
