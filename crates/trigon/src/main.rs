@@ -33,6 +33,38 @@ struct Cli {
     /// Structured logs, one JSON object per line, for anything that aggregates them.
     #[arg(long, global = true)]
     log_json: bool,
+
+    /// The palette and flourishes for the human-readable output.
+    ///
+    /// `auto` (the default) colours when stdout is a terminal; `textnocolor` is always plain and
+    /// `textcolor` always the base palette; `neon` brightens it; `bbs` adds the flourishes.
+    /// `NO_COLOR` still overrides everything. This is a display choice, orthogonal to `--output
+    /// text|json` — `json` is never themed.
+    #[arg(long, value_enum, default_value_t = ThemeArg::Auto, global = true)]
+    theme: ThemeArg,
+}
+
+/// The `--theme` values, named as the reader types them. Kept apart from [`style::Theme`] so `clap`
+/// owns the surface and the style module owns the behaviour.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ThemeArg {
+    Auto,
+    Textcolor,
+    Textnocolor,
+    Neon,
+    Bbs,
+}
+
+impl From<ThemeArg> for style::Theme {
+    fn from(a: ThemeArg) -> Self {
+        match a {
+            ThemeArg::Auto => style::Theme::Auto,
+            ThemeArg::Textcolor => style::Theme::Colour,
+            ThemeArg::Textnocolor => style::Theme::Mono,
+            ThemeArg::Neon => style::Theme::Neon,
+            ThemeArg::Bbs => style::Theme::Bbs,
+        }
+    }
 }
 
 /// Install the subscriber.
@@ -1021,6 +1053,8 @@ mod check;
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
     let cli = Cli::parse();
+    // Before any output: the palette functions read this, and the first write must already know it.
+    style::set_theme(cli.theme.into());
     init_logging(cli.verbose, cli.log_json);
     let result = dispatch(cli.cmd, cli.verbose > 0);
     if let Err(e) = &result {

@@ -28,6 +28,78 @@ fn is_tty() -> bool {
     *TTY.get_or_init(|| std::io::stdout().is_terminal())
 }
 
+/// Which palette and flourishes the human-readable output wears. Chosen once, at startup, from
+/// `--theme`; everything the palette functions below emit reads it.
+///
+/// - `Auto` is the default and the behaviour before this existed: the base palette, coloured when
+///   stdout is a terminal and `NO_COLOR` is unset.
+/// - `Mono` is `--theme textnocolor`: no escapes at all, whatever the terminal — for a clean pipe.
+/// - `Colour` is `--theme textcolor`: the base palette, forced on even into a pipe.
+/// - `Neon` brightens the whole palette a step (`--theme neon`).
+/// - `Bbs` takes the neon palette and adds the flourishes — a block-prefixed heading, a reverse
+///   video verdict badge — for the full board (`--theme bbs`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Theme {
+    #[default]
+    Auto,
+    Mono,
+    Colour,
+    Neon,
+    Bbs,
+}
+
+static THEME: OnceLock<Theme> = OnceLock::new();
+
+/// Set the theme once, before any output. A second call is ignored — the first wins, so a stray
+/// later call cannot repaint a run mid-stream.
+pub fn set_theme(t: Theme) {
+    let _ = THEME.set(t);
+}
+
+fn theme() -> Theme {
+    THEME.get().copied().unwrap_or_default()
+}
+
+/// The seven SGR codes the active theme paints with. Neon and BBS share the bright set; everything
+/// else takes the base set that the tool shipped with.
+struct Palette {
+    heading: &'static str,
+    label: &'static str,
+    muted: &'static str,
+    ident: &'static str,
+    ok: &'static str,
+    warn: &'static str,
+    bad: &'static str,
+}
+
+fn palette() -> Palette {
+    palette_for(theme())
+}
+
+fn palette_for(t: Theme) -> Palette {
+    match t {
+        // Bright cyan keys, bright-white data, magenta titles, and the high-intensity status set.
+        Theme::Neon | Theme::Bbs => Palette {
+            heading: "1;95",
+            label: "1;96",
+            muted: "90",
+            ident: "1;97",
+            ok: "1;92",
+            warn: "1;93",
+            bad: "1;91",
+        },
+        _ => Palette {
+            heading: "1;97",
+            label: "1;94",
+            muted: "90",
+            ident: "96",
+            ok: "32",
+            warn: "33",
+            bad: "31",
+        },
+    }
+}
+
 /// Whether to emit escape sequences at all. Decided once — the terminal and the environment do not
 /// change under us mid-command — and cheap to ask repeatedly thereafter.
 pub fn enabled() -> bool {
@@ -35,20 +107,28 @@ pub fn enabled() -> bool {
     *ON.get_or_init(|| {
         // Presence with any non-empty value, whatever the value, disables colour. `NO_COLOR=0` is
         // still `NO_COLOR` set; the standard is deliberate about that, and honouring the letter of
-        // it is what makes the promise worth relying on.
+        // it is what makes the promise worth relying on — it wins over an explicit colour theme.
         if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
             return false;
         }
-        // A terminal that says it cannot do this is taken at its word.
-        if std::env::var_os("TERM").is_some_and(|v| v == "dumb") {
-            return false;
+        match theme() {
+            // The reader named a theme. `textnocolor` means plain; any colour theme means colour,
+            // even into a pipe — the explicit choice is the whole point of the flag.
+            Theme::Mono => false,
+            Theme::Colour | Theme::Neon | Theme::Bbs => true,
+            Theme::Auto => {
+                // A terminal that says it cannot do this is taken at its word.
+                if std::env::var_os("TERM").is_some_and(|v| v == "dumb") {
+                    return false;
+                }
+                // The one override that turns colour back on for a pipe: a pager the reader chose,
+                // told to interpret the escapes rather than print them.
+                if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| !v.is_empty() && v != "0") {
+                    return true;
+                }
+                is_tty()
+            }
         }
-        // The one override that turns colour back on for a pipe: a pager the reader chose, told to
-        // interpret the escapes rather than print them.
-        if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| !v.is_empty() && v != "0") {
-            return true;
-        }
-        is_tty()
     })
 }
 
@@ -165,7 +245,12 @@ pub const LABEL: usize = 12;
 /// Bold and bright white, so it parts the run into blocks the eye can jump between. Weight over
 /// hue here, because a title's job is to separate, and separation reads on any palette.
 pub fn heading(text: &str) -> String {
-    paint("1;97", text)
+    // BBS parts its sections with a shaded block, not just weight.
+    if theme() == Theme::Bbs {
+        paint(palette().heading, &format!("▓▒ {text}"))
+    } else {
+        paint(palette().heading, text)
+    }
 }
 
 /// The left-hand word in a label/value pair. **Bold blue** — a real hue with weight behind it, so
@@ -174,42 +259,67 @@ pub fn heading(text: &str) -> String {
 /// leaves plain blue dark and low-contrast on a dark ground — the exact washed-out look this
 /// replaces. Blue is the structural colour throughout; cyan, next to it, is reserved for the data.
 pub fn label(text: &str) -> String {
-    paint("1;94", text)
+    paint(palette().label, text)
 }
 
 /// Secondary prose — an aside, a fallback explanation, a "no data". Grey (bright black), not faint:
 /// faint is the lowest-contrast code a terminal has and several render it invisible, which is what
 /// made the first pass read as washed out. Grey recedes without disappearing.
 pub fn muted(text: &str) -> String {
-    paint("90", text)
+    paint(palette().muted, text)
 }
 
 /// A digest, a reference, an identifier the reader might copy. **Bright cyan** — the data colour,
 /// one step brighter than the blue of the labels so the two never blur into each other.
 pub fn ident(text: &str) -> String {
-    paint("96", text)
+    paint(palette().ident, text)
 }
 
 /// A good outcome, or the "=" that says two hashes agree. Green.
 pub fn good(text: &str) -> String {
-    paint("32", text)
+    paint(palette().ok, text)
 }
 
 /// A caveat: reached a match, but not the clean one. Yellow.
 pub fn warn(text: &str) -> String {
-    paint("33", text)
+    paint(palette().warn, text)
 }
 
 /// A divergence, or the "≠" that says two hashes differ. Red.
 pub fn bad(text: &str) -> String {
-    paint("31", text)
+    paint(palette().bad, text)
 }
 
 /// The verdict line's mark and word together, painted to the outcome: green and bold for a match,
 /// yellow for a caveated one, red for a divergence. Bold as well as coloured because it is the one
 /// line a reader looks for first.
 pub fn verdict(code: &str, mark: &str, word: &str) -> String {
-    paint(code, &format!("{mark} {word}"))
+    // `code` names the outcome — "1;32" match, "1;33" caveat, "1;31" divergence. Each theme
+    // renders it its own way, so the call site stays the same across all of them.
+    match theme() {
+        // A reverse-video badge, block-bordered, in the outcome's colour — the marquee line.
+        Theme::Bbs => {
+            let bg = match code {
+                "1;32" => "42",
+                "1;33" => "43",
+                _ => "41",
+            };
+            paint(
+                &format!("1;30;{bg}"),
+                &format!("▐ {mark} {} ▌", word.to_uppercase()),
+            )
+        }
+        // The bright-status set, one step up from the base green/yellow/red.
+        Theme::Neon => {
+            let bright = match code {
+                "1;32" => "1;92",
+                "1;33" => "1;93",
+                _ => "1;91",
+            };
+            paint(bright, &format!("{mark} {word}"))
+        }
+        _ => paint(code, &format!("{mark} {word}")),
+    }
 }
 
 /// Left-pad `text` to [`LABEL`] on the plain string, then paint it as a label. The padding is part
@@ -313,5 +423,21 @@ mod tests {
     #[test]
     fn a_value_that_fits_is_returned_as_one_line() {
         assert_eq!(wrap_to(80, "short enough", VALUE_COL), "short enough");
+    }
+
+    #[test]
+    fn neon_and_bbs_share_the_bright_palette_and_the_base_stays_base() {
+        // The neon step: bright-cyan keys, bright-white data, high-intensity status.
+        let n = palette_for(Theme::Neon);
+        assert_eq!((n.label, n.ident, n.ok, n.bad), ("1;96", "1;97", "1;92", "1;91"));
+        // BBS rides the same palette; its difference is flourish, not colour.
+        let b = palette_for(Theme::Bbs);
+        assert_eq!((b.label, b.ident, b.heading), (n.label, n.ident, n.heading));
+        // Auto and the explicit textcolour theme both take what the tool shipped with.
+        for t in [Theme::Auto, Theme::Colour, Theme::Mono] {
+            let p = palette_for(t);
+            assert_eq!((p.label, p.ident, p.ok), ("1;94", "96", "32"));
+        }
+        assert_eq!(Theme::default(), Theme::Auto);
     }
 }
