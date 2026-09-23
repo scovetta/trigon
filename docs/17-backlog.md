@@ -1831,6 +1831,12 @@ Two follow-ons past the major-level fix, both smaller than it was:
 
 ## B46. A .NET assembly's debug layout is structural, and closes only with a matching build environment
 
+**Resolved for the code-identical case by [3.89](16-findings.md): `dotnet-il-canonical` compares a
+managed assembly by its method IL rather than its layout, so the structural residual below no longer
+holds a divergence when the code is the same — it lands `normalized_with_caveats`. What remains open
+is only the reverse: distinguishing a layout-only difference from a real one without the lossy step,
+which is what a matching build environment would give for free.**
+
 [3.81](16-findings.md)'s `dotnet-assembly-identity` normalizes the fixed-location build/signing
 identity of a managed assembly (strong-name signature, MVID, PE timestamp/checksum, debug
 timestamps and the debug data it can locate), taking castle.core's net6.0 DLL from 485 to 217

@@ -15,6 +15,7 @@
 #![warn(missing_debug_implementations)]
 
 mod cx;
+mod ilcanon;
 mod passes;
 mod profiles;
 mod set;

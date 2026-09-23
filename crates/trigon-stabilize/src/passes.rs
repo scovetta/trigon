@@ -471,7 +471,8 @@ fn u16le(b: &[u8], o: usize) -> Option<u16> {
     b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]))
 }
 fn u32le(b: &[u8], o: usize) -> Option<u32> {
-    b.get(o..o + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    b.get(o..o + 4)
+        .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
 }
 
 /// The byte ranges of a managed assembly that a rebuild cannot reproduce and a consumer does not
@@ -561,7 +562,9 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
                 let ptr_raw = u32le(b, ent + 24)? as usize;
                 if ptr_raw != 0
                     && size_of_data != 0
-                    && ptr_raw.checked_add(size_of_data).is_some_and(|e| e <= b.len())
+                    && ptr_raw
+                        .checked_add(size_of_data)
+                        .is_some_and(|e| e <= b.len())
                 {
                     regions.push((ptr_raw, size_of_data));
                 }
@@ -666,6 +669,145 @@ entry_pass!(
     }
 );
 
+// **The last resort for a managed assembly, and a lossy one.** `dotnet-assembly-identity` zeroes
+// the fixed-location build identity, but a rebuild whose SourceLink URL, source-generator document
+// order or a heap's length differs from the publisher's lays its metadata and embedded PDB out at
+// shifted offsets that a byte-zeroing pass cannot align ([B46](../../../docs/17-backlog.md),
+// `docs/16-findings.md` §3.87). None of that is code: `moq@4.20.72`'s four assemblies decompile
+// identically and their method IL is byte-for-byte equal.
+//
+// So this replaces a managed assembly with the canonical *functional* form [`crate::ilcanon`]
+// reads out of it — every method's name, signature and IL, resolved through the heaps to values
+// rather than the offsets that moved. Two assemblies built from the same source reduce to the same
+// bytes; a real code change still shows. It drops resources, custom attributes and field data, so
+// it is `Lossy`: a match it produces is `normalized_with_caveats`, never a clean `normalized` — the
+// honest tier for "the code is the same, and we did not check the rest." An assembly it cannot read
+// whole is left exactly as it was.
+entry_pass!(
+    DotnetIlCanonical,
+    "dotnet-il-canonical",
+    RiskTier::Lossy,
+    is_zip,
+    |e| {
+        if !trigon_core::is_managed_assembly(&String::from_utf8_lossy(e.path.as_bytes())) {
+            return Touched::NONE;
+        }
+        let Ok(body) = e.body_bytes() else {
+            return Touched::NONE;
+        };
+        let Some(canon) = crate::ilcanon::canonical_managed(&body) else {
+            return Touched::NONE;
+        };
+        drop(body);
+        match e.body_mut() {
+            Ok(b) => {
+                *b = canon;
+                let n = b.len() as u64;
+                e.meta.size = n;
+                Touched::entry_bytes(n)
+            }
+            Err(_) => Touched::NONE,
+        }
+    }
+);
+
+// The `<repository>` element's `branch` attribute is the git ref the package was built from, and
+// nothing the package does depends on it. A publisher who builds from the release tag stamps
+// `branch="v4.20.72"`; trigon checks the same commit out detached, so the ref is nameless and the
+// attribute is absent — `moq@4.20.72`'s nuspec differed in exactly this and nothing else. The commit
+// is the identity and is kept; the branch is a label on how the commit was reached, so it is
+// dropped from both sides. `Metadata`, the tier the other provenance stamps sit at.
+entry_pass!(
+    NupkgRepositoryBranch,
+    "nupkg-repository-branch",
+    RiskTier::Metadata,
+    is_zip,
+    |e| {
+        if !e.path.as_bytes().ends_with(b".nuspec") {
+            return Touched::NONE;
+        }
+        rewrite_body(e, drop_repository_branch)
+    }
+);
+
+/// Remove ` branch="…"` from the `<repository …>` element, or `None` when there is none.
+fn drop_repository_branch(t: &str) -> Option<String> {
+    let open = t.find("<repository")?;
+    let close = t[open..].find('>')? + open;
+    let attr = t[open..close].find(" branch=\"")? + open;
+    let val = attr + " branch=\"".len();
+    let end = t[val..close].find('"')? + val;
+    Some(format!("{}{}", &t[..attr], &t[end + 1..]))
+}
+
+// NuGetizer (devlooped) assembles a package readme from `<!-- include <path-or-url> -->` directives
+// and leaves the directive and its close marker in the file as comments. A remote include is
+// fetched at pack time, which `mirror-only` forbids, so `nuget/build/pack` neutralises it
+// (`docs/16-findings.md` §3.86) — and that leaves the markers spelled a hair differently than the
+// publisher's networked build did (`<!-- include … -->` kept vs dropped, a stray blank). The sponsor
+// list itself, which comes from a *local* include, reproduces byte for byte; only the invisible
+// markers and the whitespace around them differ. So strip the single-token marker comments from
+// both, squeeze the blank runs that removing them leaves, and trim trailing space. `Content`: it
+// edits the readme's bytes, though not a glyph a reader sees.
+entry_pass!(
+    NupkgReadmeMarkers,
+    "nupkg-readme-markers",
+    RiskTier::Content,
+    is_zip,
+    |e| {
+        if !e.path.as_bytes().ends_with(b".md") {
+            return Touched::NONE;
+        }
+        rewrite_body(e, normalize_readme_markers)
+    }
+);
+
+/// A single-token `<!-- include foo -->` or `<!-- foo -->` marker — NuGetizer's, not a prose comment
+/// (which carries spaces inside). Only these are stripped.
+fn is_nugetizer_marker(line: &str) -> bool {
+    let l = line.trim();
+    let Some(inner) = l.strip_prefix("<!--").and_then(|r| r.strip_suffix("-->")) else {
+        return false;
+    };
+    let inner = inner.trim();
+    let inner = inner
+        .strip_prefix("include")
+        .map(str::trim)
+        .unwrap_or(inner);
+    !inner.is_empty() && !inner.contains(char::is_whitespace)
+}
+
+/// Drop NuGetizer marker comments, squeeze the blank runs that leaves, and trim trailing whitespace.
+/// `None` when nothing changed, so a readme with no markers stays on its original body.
+fn normalize_readme_markers(t: &str) -> Option<String> {
+    let mut out = String::with_capacity(t.len());
+    let mut prev_blank = true; // treat the start as "after a blank" so a leading blank is squeezed
+    let mut changed = false;
+    for line in t.split('\n') {
+        let trimmed = line.trim_end();
+        if trimmed != line {
+            changed = true;
+        }
+        if is_nugetizer_marker(trimmed) {
+            changed = true;
+            continue;
+        }
+        let blank = trimmed.is_empty();
+        if blank && prev_blank {
+            changed = true;
+            continue;
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+        prev_blank = blank;
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
+        changed = true;
+    }
+    changed.then_some(out)
+}
+
 /// Every builtin pass. Used by the profile registry and by the dependency-policy test.
 pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
     vec![
@@ -692,6 +834,9 @@ pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
         Arc::new(NupkgPackagingNames),
         Arc::new(NupkgPackagerVersion),
         Arc::new(DotnetAssemblyIdentity),
+        Arc::new(DotnetIlCanonical),
+        Arc::new(NupkgRepositoryBranch),
+        Arc::new(NupkgReadmeMarkers),
     ]
 }
 
@@ -1667,7 +1812,11 @@ mod dotnet_assembly_tests {
         // fixed-location and close here, but a residual can remain when the two builds laid their
         // debug/PDB data out differently (a different PDB path length shifts it) — that is the
         // build environment, not something a byte-zeroing stabilizer can reach. See B46.
-        assert!(after < before, "identity normalization changed nothing ({before} bytes)");    }
+        assert!(
+            after < before,
+            "identity normalization changed nothing ({before} bytes)"
+        );
+    }
 
     /// A non-managed input is left whole: no `MZ`, or a PE with no CLI header, yields no regions.
     #[test]
