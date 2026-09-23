@@ -564,3 +564,61 @@ fn a_body_rewrite_is_attributed_to_the_pass_that_made_it() {
         d.field_edits
     );
 }
+
+// --- the pass-by-pass progression -----------------------------------------------------------------
+
+/// The set re-applied one pass at a time: the metadata-only member closes on the pass that
+/// normalizes it, the body difference survives every pass, and the last step reproduces the
+/// signature the verdict was taken on.
+#[test]
+fn progression_shows_which_pass_closed_which_member() {
+    let set = profile("tar").unwrap();
+    let c = compare_bytes(
+        tar(1_700_000_000, 1000, b"UPSTREAM"),
+        tar(1_500_000_000, 501, b"rebuilt!"),
+        Format::Tar,
+        &set,
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(c.outcome, Match::Divergent);
+    let p = c.diff.as_ref().unwrap().progression.as_ref().expect("progression recorded");
+
+    assert!(p.omitted.is_none(), "{:?}", p.omitted);
+    assert!(p.consistent, "the last step must reproduce the verdict's signature");
+    assert_eq!(p.steps.len(), set.members.len() + 1, "one step per pass, plus as-published");
+
+    let first = &p.steps[0];
+    assert!(first.pass.is_none());
+    assert_eq!(first.members, 2, "as published, both members differ");
+
+    let last = p.steps.last().unwrap();
+    assert_eq!(last.members, 1, "only the body difference survives");
+    assert_eq!(last.bodies, 1);
+
+    // b.txt differed only in metadata; exactly one pass closed it, and it was a named pass.
+    let closer: Vec<_> = p
+        .steps
+        .iter()
+        .filter(|s| s.closed.iter().any(|m| m == "pkg/b.txt"))
+        .collect();
+    assert_eq!(closer.len(), 1, "{:#?}", p.steps);
+    assert!(closer[0].pass.is_some());
+
+    // Never worse after a pass than before it.
+    for w in p.steps.windows(2) {
+        assert!(w[1].members <= w[0].members, "{:#?}", p.steps);
+    }
+}
+
+/// An exact match has nothing to close, and says so in one step rather than twelve.
+#[test]
+fn an_exact_match_has_one_step() {
+    let a = tar(1, 1, b"same");
+    let c = compare_bytes(a.clone(), a, Format::Tar, &profile("tar").unwrap(), &Limits::default())
+        .unwrap();
+    let p = c.diff.unwrap().progression.unwrap();
+    assert_eq!(p.steps.len(), 1);
+    assert_eq!(p.steps[0].differences, 0);
+    assert!(p.consistent);
+}

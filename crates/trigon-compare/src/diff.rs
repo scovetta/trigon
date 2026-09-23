@@ -107,6 +107,12 @@ pub struct DiffReport {
     /// before this field existed — which is what the default is for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub field_edits: Vec<FieldProvenance>,
+    /// The differences left after each pass of the set, from the artifacts as published to the
+    /// last pass — how the gap closed, or how far it got. Explanation only; see
+    /// [`crate::progression`]. Absent from every comparison written before it existed, and from
+    /// one produced by [`crate::compare`] alone, which never saw the published bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progression: Option<crate::progression::Progression>,
 }
 
 /// Which passes changed one field of one member, merged and deduplicated across both sides.
@@ -192,6 +198,7 @@ pub fn report(upstream: &Archive, rebuild: &Archive) -> DiffReport {
         executable_differs: counts.4,
         files,
         field_edits: Vec::new(),
+        progression: None,
     }
 }
 

@@ -438,6 +438,27 @@ enum Cmd {
         #[arg(long, default_value = "./trigon-store")]
         store: PathBuf,
     },
+    /// Fill in how a stored run was normalized: per-field attribution and the pass-by-pass
+    /// progression, for runs judged before either was recorded.
+    ///
+    /// Re-derives each comparison from the two artifacts in the store under the stabilizer set the
+    /// run was judged with, and writes it **beside** the original under `derived/` only when it
+    /// agrees with the original on the verdict, the digests and the difference signature. The run
+    /// record and its comparison are never changed. A run judged under a set this binary no longer
+    /// has is skipped, because a different set would explain a different verdict.
+    #[cfg(feature = "build")]
+    Rederive {
+        #[arg(long, default_value = "./trigon-store")]
+        store: PathBuf,
+        /// Runs to re-derive. Every run in the store when omitted.
+        runs: Vec<String>,
+        /// Re-derive even where a derivation, or a judge-time progression, already exists.
+        #[arg(long)]
+        force: bool,
+        /// Say what would be written, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Build a base image carrying the system packages an enforced tier cannot install.
     ///
     /// At `mirror-only` and `deny-all` the image build has no network, so nothing can `apt-get`.
@@ -1049,6 +1070,8 @@ mod worker;
 
 #[cfg(feature = "build")]
 mod check;
+#[cfg(feature = "build")]
+mod rederive;
 
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
@@ -1473,6 +1496,18 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
         } => check::run(&file, &store, &format),
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
+        #[cfg(feature = "build")]
+        Cmd::Rederive {
+            store,
+            runs,
+            force,
+            dry_run,
+        } => rederive::run(rederive::Args {
+            store,
+            runs,
+            force,
+            dry_run,
+        }),
         #[cfg(feature = "build")]
         Cmd::BaseImage {
             from,

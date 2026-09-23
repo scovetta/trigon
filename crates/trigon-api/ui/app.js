@@ -938,6 +938,209 @@ function contentsPanel(d) {
 
 // The ledger: which passes fired, at what risk, under whose authority, and which of them hold the
 // verdict below `normalized` however well the bytes agree.
+// A pass's name as a button that unfolds its plain-language description in a row beneath — the
+// ledger's rows and the progression's use the same one, so a pass reads the same wherever it is
+// named. Returns the name to put in a cell and the hidden row to put after the row holding it.
+function passUnfold(id, colspan) {
+  const doc = STABILIZER_DOCS[id];
+  const detail = el('tr', { class: 'pass-doc', hidden: true },
+    el('td', { colspan }, doc
+      ? el('div', { class: 'pass-doc-body' },
+          el('p', { class: 'sentence', text: doc.sum }),
+          el('p', { class: 'note', text: doc.why }))
+      : el('p', { class: 'note empty', text: 'No description on file for this pass.' })));
+  const name = doc
+    ? el('button', {
+        class: 'pass-name', type: 'button', 'aria-expanded': 'false', title: doc.sum,
+        onclick: (e) => {
+          const nowOpen = detail.hidden;
+          detail.hidden = !nowOpen;
+          e.currentTarget.setAttribute('aria-expanded', String(nowOpen));
+          e.currentTarget.classList.toggle('open', nowOpen);
+        },
+      }, el('code', { text: id }), el('span', { class: 'info', text: 'ⓘ' }))
+    : el('code', { text: id });
+  return { name, detail };
+}
+
+// How the gap closed, pass by pass: the differences left after each pass of the set, from the two
+// artifacts as published to the last pass. The comparison records it (or `trigon rederive` fills
+// it in for a run judged before it did); the page only draws it. Explanation, never verdict — the
+// recorder checks its last step against the signature the verdict was taken on, and says so here
+// when it did not match.
+function progressionPanel(d) {
+  const title = 'How the gap closed, pass by pass';
+  const p = d.progression;
+  if (!p) {
+    return panel(title, el('p', { class: 'note empty' },
+      'This run was judged before the comparison recorded its progression. ',
+      el('code', { text: 'trigon rederive' }),
+      ' fills it in from the stored artifacts, for any run judged under a stabilizer set this binary still has.'));
+  }
+  if (p.omitted) {
+    return panel(title, el('p', { class: 'note empty', text: `Not recorded for this run: ${p.omitted}.` }));
+  }
+  const steps = p.steps || [];
+  if (steps.length <= 1) {
+    return panel(title, el('p', { class: 'note' }, steps.length && steps[0].differences === 0
+      ? 'Nothing to close: the two artifacts were identical as published, so no pass had a difference to remove.'
+      : 'No steps were recorded.'));
+  }
+
+  const start = steps[0];
+  const end = steps[steps.length - 1];
+  const max = Math.max(start.differences, 1);
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const rows = steps.flatMap((s, i) => {
+    const prev = i ? steps[i - 1] : null;
+    const removed = prev ? prev.differences - s.differences : 0;
+    const idle = prev && removed === 0 && !s.closed_total && !s.opened_total;
+    const unfold = s.pass ? passUnfold(s.pass, 6) : null;
+    const closedRow = el('tr', { class: 'pass-doc', hidden: true },
+      el('td', { colspan: 6 }, el('div', { class: 'pass-doc-body' },
+        s.closed_total ? el('p', { class: 'note' }, el('strong', { text: 'Closed here: ' }),
+          s.closed.map((m, j) => [j ? ', ' : '', el('code', { text: m })]),
+          s.closed_total > s.closed.length ? ` and ${s.closed_total - s.closed.length} more` : '') : null,
+        s.opened_total ? el('p', { class: 'note diff' }, el('strong', { text: 'Opened here, which a pass should never do: ' }),
+          s.opened.map((m, j) => [j ? ', ' : '', el('code', { text: m })]),
+          s.opened_total > s.opened.length ? ` and ${s.opened_total - s.opened.length} more` : '') : null)));
+    const members = s.closed_total || s.opened_total
+      ? el('button', {
+          class: 'chip', type: 'button',
+          onclick: () => { closedRow.hidden = !closedRow.hidden; },
+          text: [s.closed_total ? `closed ${s.closed_total}` : null, s.opened_total ? `opened ${s.opened_total}` : null].filter(Boolean).join(' · '),
+        })
+      : el('span', { class: 'dim', text: '—' });
+    const passCell = s.pass
+      ? el('td', {}, unfold.name,
+          s.fired ? null : el('span', { class: 'tag fault', title: 'This pass changed nothing on either side of this run.', text: 'did not fire' }),
+          s.fired && idle ? el('span', { class: 'dim idle-why', text: ' changed only fields that already agreed' }) : null)
+      : el('td', {}, el('strong', { text: 'as published' }));
+    const main = el('tr', { class: idle ? 'step-idle' : '' },
+      el('td', { class: 'n dim', text: i }),
+      passCell,
+      // Differences can rise across a step: a pass that renames members changes the paths the
+      // comparator names, so a difference may be counted under a new name before a later pass
+      // closes it. Shown as a rise, never folded into "0".
+      el('td', { class: 'n' }, removed > 0
+        ? el('span', { class: 'delta', text: `−${removed}` })
+        : removed < 0
+          ? el('span', { class: 'delta grew', title: 'more differences are counted after this pass than before it', text: `+${-removed}` })
+          : el('span', { class: 'dim', text: prev ? '0' : '' })),
+      el('td', { class: 'bar-cell' },
+        el('div', { class: 'bar-track', title: `${s.differences} difference(s) left` },
+          el('div', { class: 'bar-fill', style: [['width', `${(s.differences / max) * 100}%`], ['background', s.differences ? (s.bodies ? 'var(--fail)' : 'var(--caveat)') : 'var(--ok)']] }))),
+      el('td', { class: 'n', text: `${s.differences} · ${s.members}` }),
+      el('td', {}, members));
+    return [main, unfold ? unfold.detail : null, closedRow].filter(Boolean);
+  });
+
+  const summary = end.differences === 0
+    ? `As published, the two artifacts differed in ${plural(start.differences, 'way', 'ways')} across ${plural(start.members, 'member', 'members')}. Each step below is one more pass of the set; after the last, nothing is left.`
+    : `As published, the two artifacts differed in ${plural(start.differences, 'way', 'ways')} across ${plural(start.members, 'member', 'members')}. After the last pass, ${plural(end.differences, 'difference remains', 'differences remain')} in ${plural(end.members, 'member', 'members')}${end.bodies ? ` — ${end.bodies} of them in a member's own bytes, which no pass in this set removed` : ''}.`;
+
+  return panel(title, el('div', {},
+    el('p', { class: 'sentence', text: summary }),
+    p.consistent ? null : el('p', { class: 'withheld-note' },
+      el('strong', { text: 'Not a trustworthy explanation for this run. ' }),
+      'Re-applying the set one pass at a time did not end on the difference signature the verdict was taken on. The verdict is unaffected; this panel is what cannot be relied on.'),
+    el('div', { class: 'table-scroll' }, el('table', { class: 'runs ledger progression' },
+      el('thead', {}, el('tr', {},
+        el('th', { class: 'n', text: 'step' }),
+        el('th', { text: 'pass' }),
+        el('th', { class: 'n', text: 'removed' }),
+        el('th', { text: 'left' }),
+        el('th', { class: 'n', text: 'left · members' }),
+        el('th', { text: 'members' }))),
+      el('tbody', {}, rows))),
+    el('p', { class: 'note' },
+      'Counted as the comparator names a difference: a member\'s bytes, each field of its archive entry, a member present on one side only, and the archive as a whole. An entry\'s size and checksum, and a zip member\'s mode, are left out, because serialization recomputes them from what is counted (B47). The bar is red while a member\'s own bytes still differ, amber while only packaging does.')));
+}
+
+// What crossed the network into the build, summarized from its transcript. Fetched rather than
+// booted, and gated exactly as the raw transcript is: its URLs are unredacted, so a reader refused
+// the transcript is refused this with the same sentence.
+function networkPanel(id, entry) {
+  const title = 'What crossed the network';
+  if (!entry.has.network_transcript) {
+    return panel(title, el('p', { class: 'note empty', text: 'This run recorded no network transcript. Absent is not empty: it means none was written, not that nothing crossed.' }));
+  }
+  const slot = el('div', {}, el('p', { class: 'empty', text: 'reading the transcript…' }));
+  api(`/v1/runs/${encodeURIComponent(id)}/network/summary`)
+    .then((s) => slot.replaceChildren(drawNetwork(s, id)))
+    .catch((e) => slot.replaceChildren(e.status === 403
+      ? el('p', { class: 'withheld-note' }, el('strong', { text: 'Not shown here. ' }), el('span', { text: e.message }))
+      : el('p', { class: 'note empty', text: `The transcript could not be summarized: ${e.message}` })));
+  return panel(title, slot);
+}
+
+// What each guard outcome means, for the legend. The mirror's own words, shortened.
+const CHECKED = {
+  opened: 'every member hashed and compared against the manifest',
+  hashed: 'the whole body\'s digest compared, and nothing inside it',
+  generated: 'composed by the mirror itself — a filtered index — so there was nothing to catch',
+  unarmed: 'no guard manifest was loaded, so nothing was compared',
+  partial: 'the response never finished; the bytes are what actually crossed',
+};
+
+function drawNetwork(s, id) {
+  if (!s.exchanges) {
+    return el('p', { class: 'note' }, s.unreadable
+      ? `The transcript holds ${s.unreadable} line(s) that are not exchanges and none that are.`
+      : 'The transcript was written and is empty: the build\'s egress was accounted for, and nothing crossed.');
+  }
+  const hostMax = Math.max(...s.hosts.map((h) => h.bytes), 1);
+  const exchangeRow = (x) => el('tr', {},
+    el('td', { class: 'dim', text: x.route }),
+    el('td', { class: 'url-cell' }, el('code', { text: x.url })),
+    el('td', { class: 'n', text: bytes(x.bytes) }),
+    el('td', { class: 'dim', title: CHECKED[x.checked] || '', text: x.checked || '—' }),
+    el('td', { class: 'dim mono', title: x.sha256 || '', text: x.sha256 ? x.sha256.slice(0, 12) : '—' }));
+  const exchangeTable = (list) => el('div', { class: 'table-scroll' }, el('table', { class: 'runs' },
+    el('thead', {}, el('tr', {},
+      el('th', { text: 'route' }), el('th', { text: 'url' }), el('th', { class: 'n', text: 'bytes' }),
+      el('th', { text: 'guard' }), el('th', { text: 'sha256' }))),
+    el('tbody', {}, list.map(exchangeRow))));
+
+  return el('div', {},
+    el('p', { class: 'sentence' },
+      `${s.exchanges} exchange(s) crossed into the build, ${bytes(s.bytes)} in all, from ${s.hosts_total} host(s).`,
+      s.withheld ? ` The mirror withheld ${s.withheld} version(s) from ${s.indexes_withholding} index document(s) because they were published after the pinned moment, so the build resolved against the registry as it stood then.` : ''),
+    el('div', { class: 'net-grid' },
+      el('div', {},
+        el('p', { class: 'reconciled-head', text: 'by route' }),
+        el('ul', { class: 'assumptions' }, s.routes.map((b) =>
+          el('li', {}, el('code', { text: b.name }), ` ${b.count} · ${bytes(b.bytes)}`)))),
+      el('div', {},
+        el('p', { class: 'reconciled-head', text: 'what the guard could do' }),
+        el('ul', { class: 'assumptions' }, s.checked.map((b) =>
+          el('li', {}, el('code', { text: b.name }), ` ${b.count}`,
+            CHECKED[b.name] ? el('span', { class: 'note', text: ` — ${CHECKED[b.name]}` }) : null))))),
+    s.unreadable ? el('p', { class: 'withheld-note', text: `${s.unreadable} line(s) of the transcript are not exchanges and are counted here rather than dropped.` }) : null,
+    el('p', { class: 'reconciled-head', text: `hosts${s.hosts_total > s.hosts.length ? ` (the ${s.hosts.length} largest of ${s.hosts_total})` : ''}` }),
+    el('div', { class: 'table-scroll' }, el('table', { class: 'runs ledger' },
+      el('thead', {}, el('tr', {},
+        el('th', { text: 'host' }), el('th', { class: 'n', text: 'exchanges' }), el('th', { text: '' }),
+        el('th', { class: 'n', text: 'bytes' }), el('th', { text: 'routes' }))),
+      el('tbody', {}, s.hosts.map((h) => el('tr', {},
+        el('td', {}, el('code', { text: h.host })),
+        el('td', { class: 'n', text: h.count }),
+        el('td', { class: 'bar-cell' }, el('div', { class: 'bar-track' },
+          el('div', { class: 'bar-fill', style: [['width', `${(h.bytes / hostMax) * 100}%`], ['background', 'var(--accent)']] }))),
+        el('td', { class: 'n', text: bytes(h.bytes) }),
+        el('td', { class: 'dim', text: h.routes.join(', ') })))))),
+    s.toolchain_total ? [
+      el('p', { class: 'reconciled-head', text: `toolchain${s.toolchain_total > s.toolchain.length ? ` (${s.toolchain.length} of ${s.toolchain_total})` : ''}` }),
+      exchangeTable(s.toolchain),
+    ] : null,
+    el('p', { class: 'reconciled-head', text: 'the largest exchanges' }),
+    exchangeTable(s.largest),
+    el('p', { class: 'note' },
+      'Every exchange is in ',
+      el('a', { href: `/v1/runs/${encodeURIComponent(id)}/network`, text: 'the full transcript' }),
+      ', one JSON line each.'));
+}
+
 function ledgerPanel(d) {
   if (!d.applied.length) {
     return panel('The stabilizers', el('p', { class: 'note' },
@@ -947,24 +1150,7 @@ function ledgerPanel(d) {
   // Each pass is a button that unfolds a plain-language description of what it did — so a reader
   // can tell what `dotnet-il-canonical` or `zip-time` actually changed without leaving the page.
   const rows = d.applied.flatMap((p) => {
-    const doc = STABILIZER_DOCS[p.id];
-    const detail = el('tr', { class: 'pass-doc', hidden: true },
-      el('td', { colspan: 6 }, doc
-        ? el('div', { class: 'pass-doc-body' },
-            el('p', { class: 'sentence', text: doc.sum }),
-            el('p', { class: 'note', text: doc.why }))
-        : el('p', { class: 'note empty', text: 'No description on file for this pass.' })));
-    const name = doc
-      ? el('button', {
-          class: 'pass-name', type: 'button', 'aria-expanded': 'false', title: doc.sum,
-          onclick: (e) => {
-            const nowOpen = detail.hidden;
-            detail.hidden = !nowOpen;
-            e.currentTarget.setAttribute('aria-expanded', String(nowOpen));
-            e.currentTarget.classList.toggle('open', nowOpen);
-          },
-        }, el('code', { text: p.id }), el('span', { class: 'info', text: 'ⓘ' }))
-      : el('code', { text: p.id });
+    const { name, detail } = passUnfold(p.id, 6);
     const main = el('tr', {},
       el('td', {}, name,
         p.caps ? el('span', { class: 'tag normalized_with_caveats', text: 'caps' }) : null),
@@ -1485,6 +1671,7 @@ async function detail(id) {
         censusPanel(d),
         contentsPanel(d),
         ledgerPanel(d),
+        progressionPanel(d),
         membersPanel(d, id),
         notesPanel(d),
       ],
@@ -1551,6 +1738,8 @@ async function detail(id) {
         'The artifact under test reached the build over the network. Whatever came out may be perfectly honest and we cannot tell, which is exactly what void means.'))) : null,
 
     panel('What it cost', costs(record)),
+
+    networkPanel(id, entry),
 
     panel('The evidence, as stored', el('div', {},
       el('p', { class: 'note' },

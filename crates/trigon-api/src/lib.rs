@@ -19,6 +19,7 @@ pub mod evidence;
 pub mod fleet;
 pub mod index;
 pub mod member;
+pub mod network;
 pub mod publication;
 pub mod recover;
 pub mod request;
@@ -141,6 +142,7 @@ pub fn router(api: Arc<Api>) -> axum::Router {
         .route("/v1/runs/{id}/attestation", get(routes::attestation))
         .route("/v1/runs/{id}/log", get(routes::build_log))
         .route("/v1/runs/{id}/network", get(routes::network))
+        .route("/v1/runs/{id}/network/summary", get(routes::network_summary))
         .route("/v1/artifacts/{digest}", get(routes::artifact))
         .route("/v1/targets/{purl}", get(routes::target))
         .route("/v1/evidence/{digest}", get(routes::evidence_blob))

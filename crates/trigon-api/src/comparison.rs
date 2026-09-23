@@ -110,6 +110,58 @@ struct Diff {
     /// here is a difference nothing addressed.
     #[serde(default)]
     field_edits: Vec<StoredEdit>,
+    /// The differences left after each pass, as `trigon_compare::progression` recorded them. Absent
+    /// from every comparison judged before it existed, unless `trigon rederive` has filled it in.
+    #[serde(default)]
+    progression: Option<Progression>,
+}
+
+/// How the differences between the two artifacts shrank as each pass of the set ran, from the
+/// artifacts as published to the last pass. Explanation, never verdict: the recording side checks
+/// its last step against the signature the verdict was taken on, and `consistent` says whether it
+/// matched.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Progression {
+    #[serde(default)]
+    pub steps: Vec<Step>,
+    #[serde(default)]
+    pub consistent: bool,
+    /// Why there are no steps, where there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<String>,
+}
+
+/// One point on the way from published to stabilized.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Step {
+    /// The pass applied to reach this step; absent for the artifacts as published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass: Option<String>,
+    /// Differences left, counted as the comparator names them.
+    #[serde(default)]
+    pub differences: u32,
+    /// Members with a difference left.
+    #[serde(default)]
+    pub members: u32,
+    /// Members whose own bytes still differ.
+    #[serde(default)]
+    pub bodies: u32,
+    /// Members this step closed, up to the recorder's bound; `closed_total` is the whole count.
+    #[serde(default)]
+    pub closed: Vec<String>,
+    #[serde(default)]
+    pub closed_total: u32,
+    /// Members this step re-opened. A pass should never do this; one that did is a finding.
+    #[serde(default)]
+    pub opened: Vec<String>,
+    #[serde(default)]
+    pub opened_total: u32,
+    /// Whether the pass changed anything on either side — whether it is in the ledger. A pass
+    /// that fired and closed nothing changed fields that already agreed.
+    #[serde(default)]
+    pub fired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
 }
 
 /// One `field_edits` row: the passes that wrote one field of one member. `field` is bare (`mode`,
@@ -185,6 +237,8 @@ pub struct View {
     pub notes: Vec<NoteGroup>,
     pub upstream_bytes: u64,
     pub rebuild_bytes: u64,
+    /// How the gap closed pass by pass, where the comparison recorded it.
+    pub progression: Option<Progression>,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,6 +373,53 @@ fn spurious_residual(
         }
         _ => false,
     }
+}
+
+/// The comparison a page should render for a recorded comparison digest.
+///
+/// A re-derivation written by `trigon rederive` is preferred where one exists **and agrees with the
+/// recorded comparison on everything the verdict rests on** — checked here, field by field, so a
+/// derived blob that says anything different about the run is ignored rather than shown. Only the
+/// rendering uses this. The raw evidence route serves what the run recorded, always.
+pub async fn bytes_for_view(
+    store: &trigon_store::Store,
+    recorded: &trigon_core::Digest,
+) -> Result<Vec<u8>, trigon_store::StoreError> {
+    let original = store.blobs().get(recorded).await?;
+    if let Ok(Some(derived)) = store.get_derived_comparison(recorded).await
+        && agrees(&original, &derived)
+    {
+        return Ok(derived.to_vec());
+    }
+    Ok(original.to_vec())
+}
+
+/// Whether two comparisons agree on what a verdict rests on: the outcome, both sides' raw and
+/// stabilized digests, the set, the member counts and the difference signature.
+fn agrees(a: &[u8], b: &[u8]) -> bool {
+    let (Ok(a), Ok(b)) = (
+        serde_json::from_slice::<serde_json::Value>(a),
+        serde_json::from_slice::<serde_json::Value>(b),
+    ) else {
+        return false;
+    };
+    [
+        "/outcome",
+        "/upstream/raw/sha256",
+        "/upstream/stabilized/sha256",
+        "/upstream/set",
+        "/rebuild/raw/sha256",
+        "/rebuild/stabilized/sha256",
+        "/rebuild/set",
+        "/diff/codes",
+        "/diff/identical",
+        "/diff/differs",
+        "/diff/only_upstream",
+        "/diff/only_rebuild",
+        "/diff/executable_differs",
+    ]
+    .iter()
+    .all(|p| a.pointer(p) == b.pointer(p))
 }
 
 pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
@@ -501,7 +602,20 @@ pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
         }
     }
 
+    // Each step's pass joined to the ledger, so the page can say which steps a pass reached by
+    // changing something and which it reached by finding nothing to change.
+    let progression = c.diff.progression.clone().map(|mut p| {
+        for step in &mut p.steps {
+            if let Some(pass) = step.pass.as_ref().and_then(|id| by_id.get(id)) {
+                step.fired = true;
+                step.risk = Some(pass.risk.clone());
+            }
+        }
+        p
+    });
+
     Some(View {
+        progression,
         ladder: ladder(&c),
         outcome: c.outcome.clone(),
         format: c.upstream.format.clone(),

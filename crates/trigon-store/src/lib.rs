@@ -388,6 +388,53 @@ impl Store {
         }
     }
 
+    fn derived_comparison_path(original: &Digest) -> ObjPath {
+        let hex = original.to_hex();
+        ObjPath::from(format!("derived/comparison/sha256/{}/{hex}.json", &hex[..2]))
+    }
+
+    /// Store a comparison **re-derived** from a run's stored artifacts, keyed by the digest of the
+    /// comparison the run actually recorded.
+    ///
+    /// The re-derivation carries the explanatory detail a comparison written before it existed
+    /// lacks — which pass changed which field, and how the differences shrank pass by pass — and
+    /// nothing else may differ: `trigon rederive` refuses to write one whose verdict, digests or
+    /// difference signature disagree with the original. The original is never replaced. The run
+    /// record keeps naming it, it stays in the blob store, and it is what the raw evidence route
+    /// serves; this sits beside it as a reading aid, like [`Self::put_decompiled`], and nothing
+    /// reads it to decide an outcome.
+    pub async fn put_derived_comparison(
+        &self,
+        original: &Digest,
+        bytes: &[u8],
+    ) -> Result<(), StoreError> {
+        self.inner
+            .put(
+                &Self::derived_comparison_path(original),
+                PutPayload::from(bytes.to_vec()),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The re-derived comparison for a recorded one, or `None` if none was written.
+    ///
+    /// `None` is "never re-derived", never "nothing to explain".
+    pub async fn get_derived_comparison(
+        &self,
+        original: &Digest,
+    ) -> Result<Option<bytes::Bytes>, StoreError> {
+        match self
+            .inner
+            .get(&Self::derived_comparison_path(original))
+            .await
+        {
+            Ok(r) => Ok(Some(r.bytes().await?)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub async fn get_attestation(&self, path: &str) -> Result<trigon_attest::Envelope, StoreError> {
         let bytes = self.inner.get(&ObjPath::from(path)).await?.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)

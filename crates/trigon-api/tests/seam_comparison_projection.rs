@@ -96,6 +96,22 @@ fn the_projection_reads_a_real_comparison() {
     assert_eq!(v.kinds.values().sum::<usize>(), v.census.total);
 
     assert!(v.upstream_bytes > 0 && v.rebuild_bytes > 0);
+
+    // The pass-by-pass progression, recorded by `compare_bytes` and read back here. One step for
+    // the artifacts as published and one per pass in the set, each pass named.
+    let p = v.progression.as_ref().expect("the progression did not survive");
+    assert!(p.omitted.is_none(), "{:?}", p.omitted);
+    assert!(p.consistent, "the last step must reproduce the verdict's signature");
+    let set = trigon_stabilize::default_for(Format::Zip);
+    assert_eq!(p.steps.len(), set.members.len() + 1);
+    assert!(p.steps[0].pass.is_none());
+    assert!(p.steps[1..].iter().all(|s| s.pass.is_some()));
+    assert!(p.steps[0].members >= p.steps.last().unwrap().members);
+    // A step's `fired` is joined from the ledger: every pass the ledger shows is marked as fired.
+    for s in &p.steps[1..] {
+        let in_ledger = v.applied.iter().any(|a| Some(&a.id) == s.pass.as_ref());
+        assert_eq!(s.fired, in_ledger, "{:?}", s.pass);
+    }
 }
 
 /// The ledger carries risk and provenance, and the ceiling agrees with the comparator's.

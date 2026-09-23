@@ -11,9 +11,11 @@
 #![warn(missing_debug_implementations)]
 
 mod diff;
+pub mod progression;
 mod signature;
 
 pub use diff::{ContentKind, DiffReport, FileDiff, FileStatus};
+pub use progression::{Progression, Step};
 pub use signature::{matches, signature};
 
 use serde::{Deserialize, Serialize};
@@ -301,7 +303,35 @@ pub fn compare_bytes(
     set: &StabilizerSet,
     limits: &Limits,
 ) -> Result<Comparison, CompareError> {
+    // Kept for the pass-by-pass explanation, which re-parses both from the published bytes. A copy
+    // of each, bounded, because `summarize` consumes its input and the archive it returns has been
+    // stabilized in place.
+    let total = upstream.len() + rebuild.len();
+    let explain = (total <= progression::MAX_BYTES).then(|| (upstream.clone(), rebuild.clone()));
     let (us, ua) = summarize(upstream, format, set, limits)?;
     let (rs, ra) = summarize(rebuild, format, set, limits)?;
-    compare(us, rs, Some(&ua), Some(&ra))
+    let mut c = compare(us, rs, Some(&ua), Some(&ra))?;
+
+    let explained = match explain {
+        _ if c.outcome == Match::Exact => Progression::nothing_to_close(),
+        Some((u, r)) => {
+            // The signature the verdict rests on, which the last step must reproduce. A divergence
+            // already carries it; any other outcome skipped computing it.
+            let full = match &c.diff {
+                Some(d) if c.outcome == Match::Divergent => d.codes.clone(),
+                _ => signature(&ua, &ra),
+            };
+            progression::compute(u, r, format, set, limits, &full)
+        }
+        None => Progression::omitted(format!(
+            "the two artifacts total {} MiB, over the {} MiB bound for re-applying the set one pass \
+             at a time",
+            total >> 20,
+            progression::MAX_BYTES >> 20
+        )),
+    };
+    if let Some(d) = c.diff.as_mut() {
+        d.progression = Some(explained);
+    }
+    Ok(c)
 }

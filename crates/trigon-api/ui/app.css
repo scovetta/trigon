@@ -423,6 +423,26 @@ tr.pass-doc > td {
 .pass-doc-body .sentence { margin: 0 0 .3rem; font-weight: 600; }
 .pass-doc-body .note { margin: 0; }
 
+/* A table that may be wider than the page scrolls inside its own box; the page never does. */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+
+/* How the gap closed, pass by pass. A step where nothing that differed changed is kept, because a
+   pass that fired and closed nothing is itself something a reader wants to see, but it recedes. */
+table.progression tr.step-idle td { opacity: .55; }
+table.progression tr.step-idle:hover td { opacity: 1; }
+table.progression .delta { color: var(--ok); font-weight: 700; font-variant-numeric: tabular-nums; }
+table.progression .delta.grew { color: var(--caveat); }
+table.progression td.n { font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.progression .idle-why { font-size: .8em; }
+table.progression .tag.fault { margin-left: .4rem; }
+table.progression .chip { font-size: .78rem; padding: .05rem .45rem; }
+
+/* What crossed the network. Two short lists side by side, stacking on a narrow screen. */
+.net-grid { display: flex; flex-wrap: wrap; gap: .4rem 2rem; margin: .2rem 0 .6rem; }
+.net-grid > div { flex: 1 1 22ch; min-width: 0; }
+td.url-cell { overflow-wrap: anywhere; word-break: break-all; }
+td.url-cell code { font-size: .8em; }
+
 /* A member that differed and was reconciled by a pass: a quiet marker in the list, and a banner in
    the opened panel naming what erased the difference shown below it. */
 table.runs tr.reconciled td.url .member-link::after {

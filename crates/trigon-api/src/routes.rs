@@ -580,7 +580,9 @@ pub async fn diff(State(api): S, Path(id): Path<String>) -> Response {
              verdict says why on its own page.",
         );
     };
-    let bytes = match api.store.blobs().get(&digest).await {
+    // Rendered from the re-derivation where `trigon rederive` wrote one that agrees with the
+    // recorded comparison; `comparison` (the raw evidence route) always serves the recorded one.
+    let bytes = match crate::comparison::bytes_for_view(&api.store, &digest).await {
         Ok(b) => b,
         Err(e) => {
             return refuse(
@@ -609,6 +611,37 @@ pub async fn build_log(State(api): S, Path(id): Path<String>) -> Response {
 
 pub async fn network(State(api): S, Path(id): Path<String>) -> Response {
     blob_of(&api, &id, "network").await
+}
+
+/// The network transcript, summarized: totals, routes, what the guard could check, the hosts, and
+/// the largest exchanges.
+///
+/// Gated exactly as the raw transcript is, because it carries the same unredacted URLs: the class
+/// is read off the record, never asserted by the caller, and a principal refused the transcript is
+/// refused its summary with the same sentence.
+pub async fn network_summary(State(api): S, Path(id): Path<String>) -> Response {
+    let Some(r) = api.index.get(&id) else {
+        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    };
+    let Some((digest, class)) = digest_of(&r, "network") else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "not_recorded",
+            "this run recorded no network transcript. Absent is not empty: no transcript was \
+             written, which is a different fact from one that was written and held nothing.",
+        );
+    };
+    if !admits(api.principal(), class) {
+        return refuse(StatusCode::FORBIDDEN, "class_gated", class.refusal());
+    }
+    match api.store.blobs().get(&digest).await {
+        Ok(bytes) => json(crate::network::summarize(&bytes)),
+        Err(e) => refuse(
+            StatusCode::NOT_FOUND,
+            "no_such_blob",
+            &format!("the record names a transcript the store cannot return: {e}"),
+        ),
+    }
 }
 
 /// The signed statement, anonymous, permalinked.
@@ -870,6 +903,11 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
         "/v1/runs/{id}/network",
         "get",
         "What crossed into the build. Class-gated: unredacted",
+    ),
+    (
+        "/v1/runs/{id}/network/summary",
+        "get",
+        "The network transcript summarized: routes, hosts, guard coverage, largest exchanges. Class-gated like the transcript",
     ),
     (
         "/v1/check",

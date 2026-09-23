@@ -249,7 +249,9 @@ async fn diff_boot(api: &Api, record: &trigon_store::RunRecord) -> serde_json::V
     let Some(digest) = record.comparison else {
         return serde_json::Value::Null;
     };
-    let Ok(bytes) = api.store.blobs().get(&digest).await else {
+    // The re-derivation where one exists and agrees, so a run judged before per-field attribution
+    // and the pass-by-pass progression were recorded can still show both.
+    let Ok(bytes) = crate::comparison::bytes_for_view(&api.store, &digest).await else {
         return serde_json::Value::Null;
     };
     let Some(view) = crate::comparison::render(&bytes, None) else {
