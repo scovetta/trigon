@@ -1861,3 +1861,32 @@ structural rewrite rather than an in-place zero. It would make the debug layout 
 comparison at the cost of a real edit to the PE — a bigger, `Structural`-tier change than
 `dotnet-assembly-identity`'s in-place zeroing, and one to weigh against just reconstructing the
 path.
+
+## B47. `signature` reports differences in fields the writer recomputes
+
+`signature` compares the stabilized archive in memory, but three of the fields it compares are stale
+shadows of what serialization will actually emit:
+
+- **`entry:size`** — the entry's uncompressed size, which the zip and tar writers recompute from the
+  body on every write. It is a function of the body: equal when the body is, and when it is not,
+  `body@` already names the difference. It never carries information of its own.
+- **`entry:zip.crc32`** — the checksum of the body, likewise recomputed from the body at write time.
+  Same story as `size`.
+- **`entry:mode`** — for a zip, `meta.mode` is derived from `external_attrs` at parse and never
+  written back; the writer emits `external_attrs`. Once a pass normalizes `external_attrs` the
+  serialized mode is equal, but the parse-time `meta.mode` shadow still differs. (For a tar,
+  `meta.mode` is real, so this applies to zips only.)
+
+The effect: a member the passes made byte-identical can still carry `entry:size`, `entry:zip.crc32`
+and `entry:mode` codes that cannot survive into the output. It is harmless to the verdict — the
+stabilized digest is taken from the serialized bytes, where these are already equal — but it means
+the divergence signature over-reports, and any consumer joining against it (the serve UI's per-member
+transform, [3.91](16-findings.md#391)) has to filter them back out.
+
+`comparison.rs` filters them from the *projection* today, which is correct for the UI but leaves the
+stored, signed signature carrying the spurious codes. The real fix is in `signature`: do not emit a
+difference for a field the writer derives from another it already compares — drop `zip.crc32` and
+`size` outright (subsumed by `body@`), and compare a zip's mode via `external_attrs` rather than the
+`meta.mode` shadow. Deferred here rather than done inline because it changes the published divergence
+signature for every divergent zip/tar run, so it wants versioning of the signature format alongside,
+not a silent change under existing attestations.
