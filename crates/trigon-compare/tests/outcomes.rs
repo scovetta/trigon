@@ -482,3 +482,85 @@ fn duplicate_paths_compare_positionally() {
         "both occurrences moved"
     );
 }
+
+// --- field-level attribution ---------------------------------------------------------------------
+
+/// Every difference the comparator can name is joined to the pass that made it, from ground truth:
+/// a member reconciled only by metadata passes carries edits and no codes, and a genuine body
+/// difference no pass rewrote carries a code and no body edit.
+#[test]
+fn field_edits_attribute_each_change_to_its_pass() {
+    // a.txt: bodies differ (nothing rewrites them) -> forces Divergent, a real `body@` residual.
+    // b.txt: same body, differing mtime + uid -> reconciled by tar-time / tar-owners.
+    let c = compare_bytes(
+        tar(1_700_000_000, 1000, b"UPSTREAM"),
+        tar(1_500_000_000, 501, b"rebuilt!"),
+        Format::Tar,
+        &profile("tar").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(c.outcome, Match::Divergent);
+    let d = c.diff.as_ref().unwrap();
+
+    let edits_for = |path: &str, field: &str| -> Vec<String> {
+        d.field_edits
+            .iter()
+            .find(|e| e.path == path && e.field == field)
+            .map(|e| e.passes.clone())
+            .unwrap_or_default()
+    };
+
+    // b.txt's mtime was zeroed by tar-time, its owner ids by tar-owners — proven, not guessed.
+    assert_eq!(edits_for("pkg/b.txt", "mtime"), vec!["tar-time".to_string()]);
+    assert_eq!(edits_for("pkg/b.txt", "tar.uid"), vec!["tar-owners".to_string()]);
+    // …and those reconciliations left no residual code behind.
+    assert!(
+        !d.codes.iter().any(|c| c.ends_with("@pkg/b.txt")),
+        "b.txt should have no residual codes: {:?}",
+        d.codes
+    );
+
+    // a.txt's body genuinely differs and no pass rewrote it: a code with no body edit to own it.
+    assert!(d.codes.contains("body@pkg/a.txt"));
+    assert!(
+        edits_for("pkg/a.txt", "body").is_empty(),
+        "no pass rewrote a.txt's body, so nothing should claim it"
+    );
+}
+
+/// A pass that rewrites a body is credited for it — the `body` field is attributed from the pass's
+/// own byte-count signal, never by reading the bytes.
+#[test]
+fn a_body_rewrite_is_attributed_to_the_pass_that_made_it() {
+    // Two wheels whose RECORD/text differ only in line endings, which wheel-metadata-eol rewrites.
+    // Built as a minimal zip so the eol pass has a body to rewrite.
+    use std::io::Write as _;
+    fn whl(crlf: bool) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let eol = if crlf { "\r\n" } else { "\n" };
+        w.start_file("demo-1.0.dist-info/METADATA", opts).unwrap();
+        write!(w, "Metadata-Version: 2.1{eol}Name: demo{eol}Version: 1.0{eol}").unwrap();
+        w.finish().unwrap().into_inner()
+    }
+    let c = compare_bytes(
+        whl(true),
+        whl(false),
+        Format::Zip,
+        &profile("wheel").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
+    let d = c.diff.as_ref().unwrap();
+    let meta = d
+        .field_edits
+        .iter()
+        .find(|e| e.path.ends_with("METADATA") && e.field == "body");
+    assert!(
+        meta.is_some_and(|e| e.passes.iter().any(|p| p == "wheel-metadata-eol")),
+        "the eol pass should own the METADATA body rewrite: {:?}",
+        d.field_edits
+    );
+}

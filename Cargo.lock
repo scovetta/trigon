@@ -3253,6 +3253,7 @@ dependencies = [
  "trigon-archive",
  "trigon-core",
  "trigon-stabilize",
+ "zip",
 ]
 
 [[package]]

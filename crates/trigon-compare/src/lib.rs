@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256, Sha512 as Sha512Hasher};
 use trigon_archive::{ArchiveError, Limits, parse, serialize};
 use trigon_core::{Digest, Format, Match, MultiDigest, Note, NoteCode, ProfileId, Sha512};
-use trigon_stabilize::{Applied, StabilizerSet, apply};
+use trigon_stabilize::{Applied, FieldEdit, StabilizerSet, apply_traced};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompareError {
@@ -63,6 +63,11 @@ pub struct Summary {
     pub applied: Vec<Applied>,
     pub notes: Vec<Note>,
     pub set: (ProfileId, Digest),
+    /// Which pass changed which field of which member, on this side. Ground truth for attribution;
+    /// consumed by [`compare`] to annotate the diff and never stored on its own — the merged,
+    /// deduplicated result lives on the [`diff::DiffReport`] instead, so the blob carries it once.
+    #[serde(skip)]
+    pub edits: Vec<FieldEdit>,
 }
 
 /// Parse, stabilize and digest one artifact.
@@ -79,7 +84,7 @@ pub fn summarize(
     let mut parsed = parse(bytes, format, limits, &mut notes)?;
     let container = parsed.container_bytes().map(|c| multi_digest(c, false));
 
-    let applied = apply(set, &mut parsed.archive);
+    let (applied, edits) = apply_traced(set, &mut parsed.archive);
     // `store_only`: the stabilized stream never passes through a deflate encoder, so no encoder's
     // behaviour can reach a signed digest.
     let stabilized_bytes = serialize(&parsed.archive, true)?;
@@ -95,6 +100,7 @@ pub fn summarize(
             applied,
             notes,
             set: (set.id.clone(), set.digest()),
+            edits,
         },
         parsed.archive,
     ))
@@ -229,6 +235,13 @@ pub fn compare(
         && let (Some(d), Some(u), Some(r)) = (diff.as_mut(), upstream_archive, rebuild_archive)
     {
         d.codes = signature::signature(u, r);
+    }
+
+    // What each pass changed, merged from both sides. Recorded on every outcome that ran a pass:
+    // on a divergence it says which pass owns each residual code, and on a match it is the only
+    // record of what the passes did — the difference codes are empty because nothing survived.
+    if let Some(d) = diff.as_mut() {
+        d.field_edits = diff::merge_edits([&upstream.edits, &rebuild.edits]);
     }
 
     // Membership notes, from the report the walker already built. One per differing member rather

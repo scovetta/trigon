@@ -166,6 +166,7 @@ fn summary(raw: u8, stabilized: u8, applied: Vec<Applied>) -> Summary {
         // Both sides must report the same set digest or `compare` refuses outright, which is a
         // different invariant (`comparing_across_stabilizer_sets_is_refused`) and not this one.
         set: (ProfileId::new("tar"), Digest::from_bytes([0xEE; 32])),
+        edits: Vec::new(),
     }
 }
 

@@ -784,8 +784,73 @@ const DIFFERENCE_RULE = {
   'entry:uid': 'The archive entry records a different owner id.',
   'entry:gid': 'The archive entry records a different group id.',
   'entry:zip.crc32': 'The zip entry’s checksum differs, which follows from any of the above.',
+  'entry:zip.method': 'The zip entry’s compression method differs.',
+  'entry:zip.external_attrs': 'The zip entry’s external attributes differ — where a unix mode is carried.',
+  'entry:zip.creator_version': 'The zip entry names a different creating tool/OS.',
+  'entry:zip.reader_version': 'The zip entry names a different minimum reader version.',
+  'entry:zip.dos_datetime': 'The zip entry’s MS-DOS timestamp differs.',
+  'entry:mtime': 'The archive entry’s timestamp differs — usually a build clock nobody pinned.',
   entry: 'Something about the archive entry differs, rather than the file it holds.',
 };
+
+// The gloss for a difference code, falling back through `entry:zip.x → entry → the raw name`.
+function glossField(rule) {
+  return DIFFERENCE_RULE[rule]
+    || DIFFERENCE_RULE[rule.replace(/\.[^.]+$/, '')]
+    || DIFFERENCE_RULE[rule.split(':')[0]]
+    || 'a field of the archive entry';
+}
+
+// One field of a member and the passes that acted on it, as a list item: the code, its gloss, and
+// an arrow to the pass ids that changed it. `resolved` styles the two cases — a field a pass put
+// right, versus one that still differs (where an empty pass list means nothing in the set touches
+// it, which is itself the finding).
+function memberFieldRow(fw, resolved) {
+  const passes = fw.passes || [];
+  const kids = [
+    el('code', { text: fw.field }),
+    el('span', { class: 'note', text: ` — ${glossField(fw.field)}` }),
+  ];
+  if (passes.length) {
+    kids.push(el('span', { class: 'by' },
+      el('span', { class: 'by-arrow', text: resolved ? ' ✓ ' : ' ↳ ' }),
+      ...passes.flatMap((id, i) => [
+        i ? el('span', { class: 'note', text: ', ' }) : null,
+        el('code', { class: 'pass', title: (STABILIZER_DOCS[id] || {}).sum || '', text: id }),
+      ].filter(Boolean))));
+  } else {
+    kids.push(el('span', { class: 'by empty', text: ' ↳ nothing in the set addresses it' }));
+  }
+  return el('li', { class: resolved ? 'fw-ok' : 'fw-residual' }, ...kids);
+}
+
+// The opened member's transform, from the comparison's field-level record: reconciled on the left,
+// still-differing on the right, an arrow between only when something remains. A member with only a
+// left column was made byte-identical by the passes named there — including a `.dll` reconciled by
+// `dotnet-il-canonical`, whose transform leaves no residual code and so was invisible before.
+function memberTransform({ reconciled, residual }) {
+  const rec = reconciled || [];
+  const res = residual || [];
+  const differs = res.length > 0;
+  return el('div', { class: `reconciled-note${differs ? ' has-residual' : ''}` },
+    el('p', { class: 'sentence' },
+      el('strong', { text: differs ? 'Partly reconciled. ' : 'Reconciled. ' }),
+      differs
+        ? 'The passes normalized the fields on the left; those on the right still differ. Each field is joined to the pass that acted on it — measured, not guessed.'
+        : 'Every field that differed was normalized by a pass, and the member is now byte-identical. Each field is joined to the pass that did it.'),
+    el('div', { class: 'reconciled-flow' },
+      el('div', { class: 'reconciled-col' },
+        el('p', { class: 'reconciled-head', text: 'reconciled' }),
+        rec.length
+          ? el('ul', { class: 'reconciled-diffs' }, rec.map((fw) => memberFieldRow(fw, true)))
+          : el('p', { class: 'note empty', text: 'nothing needed changing' })),
+      differs ? el('div', { class: 'reconciled-arrow', text: '→' }) : null,
+      differs
+        ? el('div', { class: 'reconciled-col' },
+            el('p', { class: 'reconciled-head', text: 'still differs' }),
+            el('ul', { class: 'reconciled-diffs residual' }, res.map((fw) => memberFieldRow(fw, false))))
+        : null));
+}
 
 const KIND_COLOUR = {
   executable: 'var(--fail)', binary: 'var(--one-side)',
@@ -987,40 +1052,9 @@ const STABILIZER_DOCS = {
   'gem-metadata-rubygems-version': { sum: 'Normalizes the RubyGems tool version in a gem’s metadata.', why: 'Which packaging version wrote the gem is provenance.' },
 };
 
-// Passes that work on the archive framing — an entry's mode, size, timestamp, checksum, or the
-// order members are stored in — rather than on a member's own bytes. `entry:*` differences are
-// reconciled by whichever of these fired.
-const FRAMING_PASS = /^(zip|tar|gzip|ar)-/;
-
-// Of the passes that fired on this run, the ones that reconcile the differences this member
-// carried. The comparison records *that* a member's entry metadata (or body) differed and that it
-// is now identical, but not which pass erased which field — so attribution is by family, not by
-// proof. Any `entry:*` difference is credited to the framing passes that fired; a `body` difference
-// to the content passes that address a file of this kind. Kept to passes actually in the ledger, so
-// the list names passes that ran, never passes that merely could.
-function reconcilingPasses(m, applied) {
-  const diffs = m.differences || [];
-  if (!diffs.length) return [];
-  const p = (m.path || '').toLowerCase();
-  const fired = new Set(applied.map((a) => a.id));
-  const ids = new Set();
-  const add = (...xs) => xs.forEach((x) => { if (fired.has(x)) ids.add(x); });
-
-  // Entry metadata: whichever framing passes fired did this, and the blob does not split it finer.
-  if (diffs.some((r) => r.startsWith('entry:'))) {
-    for (const id of fired) if (FRAMING_PASS.test(id)) ids.add(id);
-  }
-  // The member's own bytes: attributed by what kind of file it is.
-  if (diffs.some((r) => r === 'body' || r.startsWith('body'))) {
-    if (/\.(dll|exe)$/.test(p)) add('dotnet-il-canonical', 'dotnet-assembly-identity');
-    else if (p.endsWith('.nuspec')) add('nupkg-repository-branch', 'nupkg-packager-version', 'nupkg-packaging-names');
-    else if (p.endsWith('.psmdcp')) add('nupkg-packager-version', 'nupkg-packaging-names');
-    else if (/readme|\.md$/.test(p)) add('nupkg-readme-markers', 'nupkg-text-eol');
-    else if (p.endsWith('.xml')) add('nupkg-doc-member-order', 'nupkg-text-eol');
-    else add('nupkg-text-eol', 'wheel-metadata-eol', 'cargo-vcs-hash', 'npm-install-fields');
-  }
-  return [...ids];
-}
+// Field-level attribution is no longer inferred here: the comparison records which pass changed
+// which field of which member (`member.reconciled` / `member.residual`), so the transform is read
+// off ground truth in `memberTransform` rather than guessed from the file's name.
 
 // Every member, most interesting first. A hundred identical members must not bury the ten that
 // differ, and a list capped at five hundred that sorted by path would cap away exactly the rows
@@ -1028,13 +1062,14 @@ function reconcilingPasses(m, applied) {
 function membersPanel(d, runId) {
   const rows = d.members.flatMap((m) => {
     const [label, colour, why] = MEMBER_STATE[m.status] || [m.status, 'var(--dim)', ''];
-    // Openable when there is something to see: a member that still differs, or one that differed
-    // before a pass reconciled it — `identical` now, but with a pre-stabilization difference on
-    // record. Opening the latter shows the difference the passes erased and names which erased it.
-    const reconciled = m.status === 'identical' && m.differences.length
-      ? { differences: m.differences, passes: reconcilingPasses(m, d.applied) }
+    // Ground truth from the comparison: `reconciled` is the fields a pass changed that no longer
+    // differ, each with the pass that did it; `residual` is what still differs, each with the pass
+    // that tried (or nothing). Either makes the member worth opening — a member a pass touched has
+    // a story even when it ended identical (Moq's DLLs, reconciled by `dotnet-il-canonical`).
+    const reconciled = (m.reconciled && m.reconciled.length) || (m.residual && m.residual.length)
+      ? { reconciled: m.reconciled || [], residual: m.residual || [] }
       : null;
-    const worth = m.status !== 'identical' || m.differences.length > 0;
+    const worth = m.status !== 'identical' || !!reconciled;
     const slot = el('td', { colspan: 6, class: 'member-slot' });
     const open = () => {
       rememberOpen(m.path);
@@ -1053,17 +1088,23 @@ function membersPanel(d, runId) {
         queueMicrotask(() => openMember(runId, m.path, slot, { view: want.view }));
       }
     }
-    return [el('tr', { class: [worth ? 'openable' : '', reconciled ? 'reconciled' : ''].filter(Boolean).join(' ') },
+    // A member a pass fully reconciled (touched, nothing left differing) gets the check marker;
+    // one that still differs does not, even where a pass acted on it.
+    const fullyReconciled = reconciled && !(m.residual && m.residual.length);
+    const memberTitle = !reconciled
+      ? 'open this member'
+      : fullyReconciled
+        ? 'a pass changed this and reconciled it — open to see what it did'
+        : 'a pass acted on this and it still differs — open to see the split';
+    return [el('tr', { class: [worth ? 'openable' : '', fullyReconciled ? 'reconciled' : ''].filter(Boolean).join(' ') },
       el('td', { class: 'url' }, worth
-        ? el('button', { class: 'member-link', onclick: open,
-            title: reconciled ? 'differed, then a pass reconciled it — open to see how' : 'open this member', text: m.path })
+        ? el('button', { class: 'member-link', onclick: open, title: memberTitle, text: m.path })
         : el('code', { text: m.path })),
       el('td', {}, el('span', { class: 'member-state', title: why },
         el('i', { style: [['background', colour]] }), label)),
-      // What differed about it before any pass ran. The row that matters is an *identical* member
-      // with `entry:mode` here: the file is byte for byte what was published, its archive entry was
-      // not, and a pass removed the difference — so the divergence was about how it was packed
-      // rather than about what anybody wrote.
+      // The residual codes — what still differs after stabilization. An identical member with an
+      // `entry:` rule here has bytes that match and a frame field the passes left; open it to see
+      // that split, and which pass, if any, acted on each field.
       el('td', { class: 'opt' }, m.differences.length
         ? m.differences.map((r) => el('span', {
             class: 'rule',
@@ -1332,31 +1373,11 @@ function drawMember(runId, path, slot, state, d) {
         text: 'close',
       })),
 
-    // For a member the passes reconciled: say so up front, and name the passes that did it. What
-    // follows below is the difference they erased — the published and built copies as they were.
+    // How this member was transformed, from the comparison's own record: on the left the fields a
+    // pass changed and reconciled, on the right the fields that still differ — each joined to the
+    // pass that acted on it. Ground truth, not inference: the stabilizer measured what it changed.
     state.reconciled
-      ? el('div', { class: 'reconciled-note' },
-          el('p', { class: 'sentence' },
-            el('strong', { text: 'Reconciled. ' }),
-            'The published and built copies differed, and stabilization made them identical. What differed and the passes that erased it are below; the member’s bytes follow.'),
-          // What differed, before → the passes that erased it, after. Two short lists so the
-          // transform reads as a chain: this is what was wrong, this is what put it right.
-          el('div', { class: 'reconciled-flow' },
-            el('div', { class: 'reconciled-col' },
-              el('p', { class: 'reconciled-head', text: 'differed' }),
-              el('ul', { class: 'reconciled-diffs' }, state.reconciled.differences.map((r) =>
-                el('li', {},
-                  el('code', { text: r }),
-                  el('span', { class: 'note', text: ` — ${DIFFERENCE_RULE[r] || DIFFERENCE_RULE[r.split(':')[0]] || 'differed before stabilization'}` }))))),
-            el('div', { class: 'reconciled-arrow', text: '→' }),
-            el('div', { class: 'reconciled-col' },
-              el('p', { class: 'reconciled-head', text: 'reconciled by' }),
-              state.reconciled.passes.length
-                ? el('ul', { class: 'reconciled-passes' }, state.reconciled.passes.map((id) =>
-                    el('li', {},
-                      el('code', { text: id }),
-                      el('span', { class: 'note', text: ` — ${(STABILIZER_DOCS[id] || {}).sum || ''}` }))))
-                : el('p', { class: 'note empty', text: 'A pass in the set reconciled it; see the ledger above for what fired.' }))))
+      ? memberTransform(state.reconciled)
       : null,
 
     !d.in_upstream || !d.in_rebuild

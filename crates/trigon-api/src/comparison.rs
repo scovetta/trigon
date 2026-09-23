@@ -88,12 +88,13 @@ struct StoredNote {
 
 #[derive(Debug, Deserialize)]
 struct Diff {
-    /// `rule@path` for every difference the comparator found, before stabilization.
+    /// `rule@path` for every difference that *survived* stabilization — the residual that keeps a
+    /// run divergent, not the pre-stabilization difference the passes erased.
     ///
     /// `body@lib/x.dll` is the file's own bytes; `entry:mode@lib/x.dll` is the archive entry's
-    /// mode. The distinction is most of what a reader wants and it was in the blob and nowhere
-    /// else: on `Newtonsoft.Json@11.0.1` every one of the 23 members' entry metadata differed and
-    /// a pass accounted for all of it, while 10 members' *bodies* differed and nothing did.
+    /// mode. A member listed identical with an `entry:mode` code beside it has bytes that match and
+    /// an archive frame that still differs. What the passes *did* erase is not here — it left no
+    /// code precisely because it was erased — it is in [`field_edits`](Self::field_edits).
     #[serde(default)]
     codes: Vec<String>,
     identical: usize,
@@ -103,6 +104,22 @@ struct Diff {
     executable_differs: usize,
     #[serde(default)]
     files: Vec<StoredFile>,
+    /// Which passes changed which field of which member — the ground-truth join partner for
+    /// `codes`. A `(field, path)` here whose field is not among that member's codes was reconciled
+    /// by these passes; one that is among them was touched but not resolved; a code with no entry
+    /// here is a difference nothing addressed.
+    #[serde(default)]
+    field_edits: Vec<StoredEdit>,
+}
+
+/// One `field_edits` row: the passes that wrote one field of one member. `field` is bare (`mode`,
+/// `zip.crc32`, `body`); a code spells the same field `entry:mode` / `body`.
+#[derive(Debug, Deserialize)]
+struct StoredEdit {
+    path: String,
+    field: String,
+    #[serde(default)]
+    passes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,12 +245,24 @@ pub struct Member {
     /// Whether the two sides' stored digests differ. Distinct from `status`, which is the
     /// comparator's word for it.
     pub digests_differ: bool,
-    /// What differed about this member, before any pass ran: `body`, `entry:mode`, `entry:size`.
-    ///
-    /// A member listed as identical with `entry:mode` here is the interesting case — the file is
-    /// byte for byte what was published and its archive entry was not, so the divergence was about
-    /// how it was packed rather than about what anybody wrote, and a pass removed it.
+    /// What *still* differs about this member after stabilization: `body`, `entry:mode`. Each is
+    /// annotated with the passes that touched that field, if any — an empty list means nothing in
+    /// the set addresses it. The residual half of the transform.
+    pub residual: Vec<FieldWork>,
+    /// What a pass *changed and reconciled* on this member: a field some pass wrote that no longer
+    /// differs. This is how the transform is made visible — `body` reconciled by `dotnet-il-canonical`
+    /// on a `.dll`, `mtime` by `zip-time`, and so on. Empty for a member no pass touched.
+    pub reconciled: Vec<FieldWork>,
+    /// The raw residual codes, kept for readers written before `residual`/`reconciled` existed.
     pub differences: Vec<String>,
+}
+
+/// One field of a member and the passes that wrote it. `field` is spelled as the comparator's
+/// difference code spells it — `entry:mode`, `body` — so the reader sees one vocabulary.
+#[derive(Debug, Serialize)]
+pub struct FieldWork {
+    pub field: String,
+    pub passes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -263,6 +292,33 @@ pub fn raw_name(bytes: &[u8], path: &str, side: &str) -> Option<String> {
         _ => f.rebuild_raw_path,
     }?;
     Some(String::from_utf8_lossy(&raw).into_owned())
+}
+
+/// A residual difference code that cannot reach the serialized output, so presenting it as "still
+/// differs" would mislead. Each is proven at the writer (`trigon_archive::zip`):
+///   - `entry:zip.crc32` is the checksum of the body and `entry:size` is the body's length; the
+///     writer recomputes both from the body on every write. Neither is ever an independent
+///     difference — equal when the body is, following the body when not, and in that case `body@`
+///     already names it. So both are redundant with `body@` and dropped.
+///   - `entry:mode` on a zip is a stale parse-time shadow of `external_attrs`, which is what the
+///     writer emits; once `external_attrs` is reconciled the serialized mode is equal. A tar has no
+///     `external_attrs`, so this never fires there and a genuine tar mode difference is kept.
+///
+/// This filters the *projection* only. The stored comparison keeps every code, so an attestation
+/// and anyone reading the blob still see exactly what the comparator found.
+fn spurious_residual(
+    rule: &str,
+    reconciled_rules: &std::collections::BTreeSet<String>,
+    residual_rules: &std::collections::BTreeSet<String>,
+) -> bool {
+    match rule {
+        "entry:zip.crc32" | "entry:size" => true,
+        "entry:mode" => {
+            reconciled_rules.contains("entry:zip.external_attrs")
+                && !residual_rules.contains("entry:zip.external_attrs")
+        }
+        _ => false,
+    }
 }
 
 pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
@@ -331,6 +387,25 @@ pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
         }
     }
 
+    // Ground-truth attribution: which passes wrote which field of which member, indexed by path.
+    // Joined against the residual codes above, this splits each member's fields into what a pass
+    // reconciled (a field it wrote that left no surviving code) and what still differs.
+    let mut edits_by_path: BTreeMap<&str, Vec<(&str, &Vec<String>)>> = BTreeMap::new();
+    for e in &c.diff.field_edits {
+        edits_by_path
+            .entry(e.path.as_str())
+            .or_default()
+            .push((e.field.as_str(), &e.passes));
+    }
+    // A bare field name as a difference code spells it: `body`, else `entry:<field>`.
+    let rule_of = |field: &str| -> String {
+        if field == "body" {
+            "body".to_string()
+        } else {
+            format!("entry:{field}")
+        }
+    };
+
     let mut files: Vec<&StoredFile> = c.diff.files.iter().collect();
     files.sort_by_key(|f| (rank(&f.status), path_of(&f.path)));
     let members: Vec<Member> = files
@@ -340,11 +415,58 @@ pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
             // Decoded once and used twice: as the member's own path and as the key into the rule
             // map. Two calls would be two allocations per member, five hundred times.
             let path = path_of(&f.path);
+            let residual_rules: std::collections::BTreeSet<String> = why
+                .get(path.as_str())
+                .map(|v| v.iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default();
+            let edits = edits_by_path.get(path.as_str());
+            // Reconciled: a field a pass wrote whose rule is not among the surviving codes.
+            let reconciled_all: Vec<FieldWork> = edits
+                .map(|es| {
+                    es.iter()
+                        .filter(|(field, _)| !residual_rules.contains(&rule_of(field)))
+                        .map(|(field, passes)| FieldWork {
+                            field: rule_of(field),
+                            passes: (*passes).clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // From the unfiltered set, so `entry:mode`'s test still sees a reconciled `external_attrs`.
+            let reconciled_rules: std::collections::BTreeSet<String> =
+                reconciled_all.iter().map(|fw| fw.field.clone()).collect();
+            // A body-derived field (size, crc32) reconciled on its own is an echo of the body being
+            // reconciled — dropped so the list shows the work, not its shadow.
+            let reconciled: Vec<FieldWork> = reconciled_all
+                .into_iter()
+                .filter(|fw| !spurious_residual(&fw.field, &reconciled_rules, &residual_rules))
+                .collect();
+            // Residual: each surviving code that can actually reach the output, annotated with any
+            // pass that touched that field. A code the writer recomputes away is dropped, so a
+            // member the passes truly reconciled does not read as still-differing.
+            let residual: Vec<FieldWork> = residual_rules
+                .iter()
+                .filter(|rule| !spurious_residual(rule, &reconciled_rules, &residual_rules))
+                .map(|rule| {
+                    let field = rule.strip_prefix("entry:").unwrap_or(rule);
+                    let passes = edits
+                        .and_then(|es| es.iter().find(|(fld, _)| *fld == field))
+                        .map(|(_, p)| (*p).clone())
+                        .unwrap_or_default();
+                    FieldWork {
+                        field: rule.clone(),
+                        passes,
+                    }
+                })
+                .collect();
             Member {
-                differences: why
-                    .get(path.as_str())
-                    .map(|v| v.iter().map(|s| s.to_string()).collect())
-                    .unwrap_or_default(),
+                differences: residual_rules
+                    .iter()
+                    .filter(|rule| !spurious_residual(rule, &reconciled_rules, &residual_rules))
+                    .cloned()
+                    .collect(),
+                residual,
+                reconciled,
                 path,
                 status: f.status.clone(),
                 kind: f.kind.clone(),

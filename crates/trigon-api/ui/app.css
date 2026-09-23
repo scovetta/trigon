@@ -451,11 +451,29 @@ table.runs tr.reconciled td.url .member-link::after {
 .reconciled-note ul.reconciled-diffs,
 .reconciled-note .reconciled-passes { margin: 0; padding-left: 1.1rem; }
 .reconciled-note .reconciled-diffs li,
-.reconciled-note .reconciled-passes li { margin: .15rem 0; }
+.reconciled-note .reconciled-passes li { margin: .28rem 0; line-height: 1.4; }
 .reconciled-note .reconciled-diffs code,
 .reconciled-note .reconciled-passes code { font-size: .84em; }
 .reconciled-note .reconciled-diffs .note,
 .reconciled-note .reconciled-passes .note { display: inline; }
+/* A field row's marker dot: which side it belongs to reads at a glance. */
+.reconciled-diffs li.fw-ok::marker { color: var(--ok); }
+.reconciled-diffs li.fw-residual::marker { color: var(--caveat); }
+/* field  ↳ / ✓  the passes that acted on it. The passes sit on their own indented line so a long
+   gloss and a long pass list never collide. */
+.reconciled-note .by { display: block; margin-left: .1rem; font-size: .82em; }
+.reconciled-note .by-arrow { color: var(--dim); font-weight: 700; }
+.reconciled-note li.fw-ok .by-arrow { color: var(--ok); }
+.reconciled-note .by.empty { color: var(--faint); font-style: italic; }
+.reconciled-note code.pass {
+  font-size: .82em; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border-radius: 3px; padding: 0 .25rem;
+}
+/* When something still differs the note is a caveat, not a clean win. */
+.reconciled-note.has-residual { border-left-color: var(--caveat); background: var(--caveat-wash, rgba(200,150,40,.06)); }
+.reconciled-note.has-residual .reconciled-arrow { color: var(--caveat); }
+.reconciled-diffs.residual li code:first-child { color: var(--caveat); }
 @media (max-width: 560px) {
   .reconciled-flow { flex-direction: column; gap: .3rem; }
   .reconciled-arrow { align-self: flex-start; transform: rotate(90deg); }

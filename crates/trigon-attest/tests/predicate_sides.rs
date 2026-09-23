@@ -30,6 +30,7 @@ fn side(applied: Vec<Applied>, stabilized: u8) -> Summary {
         applied,
         notes: Vec::new(),
         set: (ProfileId::new("wheel"), digest(0x5E)),
+        edits: Vec::new(),
     }
 }
 

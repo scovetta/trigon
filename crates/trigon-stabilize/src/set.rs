@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use sha2::{Digest as _, Sha256};
-use trigon_archive::{Archive, Body};
+use trigon_archive::{Archive, Body, Entry, EntryKind, RawMeta};
 use trigon_core::{Digest, ProfileId, Provenance, RiskTier, StabilizerId};
 
 use crate::{Cx, Stabilizer};
@@ -204,17 +204,174 @@ pub struct Applied {
     pub bytes_changed: u64,
 }
 
+/// One field of one member that one pass changed.
+///
+/// This is the ground truth behind "which pass did what to this file". A pass changes an entry;
+/// this records exactly which of the entry's comparable fields moved and which pass moved it,
+/// named as the comparator names the same field in a difference code — so a residual `entry:mode@x`
+/// or a reconciled `body@x` joins to the pass that wrote it by `(field, path)`. Where the join
+/// finds a pass, attribution is proven rather than guessed; where it finds none, no pass touched
+/// that field, which is itself worth saying.
+///
+/// `field` is the code's rule minus its `entry:`/`body` framing: `mode`, `mtime`, `size`,
+/// `zip.crc32`, `tar.uid`, `tar.pax.<k>`, or `body`. `path` is the member as the comparator names
+/// it — lossy UTF-8, a nested member as `outer!inner`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FieldEdit {
+    pub path: String,
+    pub field: String,
+    pub pass: StabilizerId,
+}
+
+/// Exactly the fields [`trigon_compare`]'s `signature::entry` compares, snapshotted so a change to
+/// any one can be attributed to the pass that made it. Body is deliberately absent: reading it
+/// would defeat the copy-on-write model a 2 GB wheel relies on, and a body change is already
+/// reported losslessly by the pass's own `Touched::bytes`, so it is attributed from that instead.
+///
+/// Kept in lockstep with that comparator: a field it compares and this omits is a difference no
+/// pass could ever be shown to have caused, and the join would silently attribute it to nothing.
+#[derive(Clone)]
+struct Fp {
+    kind: EntryKind,
+    size: u64,
+    mtime: Option<i64>,
+    mode: u32,
+    raw: RawMeta,
+}
+
+impl Fp {
+    fn of(e: &Entry) -> Self {
+        Fp {
+            kind: e.kind.clone(),
+            size: e.meta.size,
+            mtime: e.meta.mtime,
+            mode: e.meta.mode,
+            raw: e.raw.clone(),
+        }
+    }
+}
+
+/// Every field name (as the comparator spells it) that differs between two fingerprints of one
+/// entry, pushed as an edit attributed to `pass` at `path`.
+fn record_field_changes(
+    before: &Fp,
+    after: &Fp,
+    path: &str,
+    pass: &StabilizerId,
+    out: &mut Vec<FieldEdit>,
+) {
+    let mut edit = |field: &str| {
+        out.push(FieldEdit {
+            path: path.to_string(),
+            field: field.to_string(),
+            pass: pass.clone(),
+        });
+    };
+    if before.kind != after.kind {
+        edit("kind");
+    }
+    if before.size != after.size {
+        edit("size");
+    }
+    if before.mtime != after.mtime {
+        edit("mtime");
+    }
+    if before.mode != after.mode {
+        edit("mode");
+    }
+    match (&before.raw, &after.raw) {
+        (RawMeta::Tar(a), RawMeta::Tar(b)) => {
+            if a.typeflag != b.typeflag {
+                edit("tar.typeflag");
+            }
+            if a.linkname != b.linkname {
+                edit("tar.linkname");
+            }
+            if a.uid != b.uid {
+                edit("tar.uid");
+            }
+            if a.gid != b.gid {
+                edit("tar.gid");
+            }
+            if a.uname != b.uname {
+                edit("tar.uname");
+            }
+            if a.gname != b.gname {
+                edit("tar.gname");
+            }
+            if a.devmajor != b.devmajor || a.devminor != b.devminor {
+                edit("tar.device");
+            }
+            if a.atime != b.atime {
+                edit("tar.atime");
+            }
+            if a.ctime != b.ctime {
+                edit("tar.ctime");
+            }
+            for k in a.pax.keys().chain(b.pax.keys()) {
+                if a.pax.get(k) != b.pax.get(k) {
+                    edit(&format!("tar.pax.{k}"));
+                }
+            }
+        }
+        (RawMeta::Zip(a), RawMeta::Zip(b)) => {
+            if a.creator_version != b.creator_version {
+                edit("zip.creator_version");
+            }
+            if a.reader_version != b.reader_version {
+                edit("zip.reader_version");
+            }
+            if a.flags != b.flags {
+                edit("zip.flags");
+            }
+            if a.method != b.method {
+                edit("zip.method");
+            }
+            if a.crc32 != b.crc32 {
+                edit("zip.crc32");
+            }
+            if a.extra != b.extra {
+                edit("zip.extra");
+            }
+            if a.comment != b.comment {
+                edit("zip.comment");
+            }
+            if a.external_attrs != b.external_attrs {
+                edit("zip.external_attrs");
+            }
+            if a.internal_attrs != b.internal_attrs {
+                edit("zip.internal_attrs");
+            }
+            if a.dos_datetime != b.dos_datetime {
+                edit("zip.dos_datetime");
+            }
+        }
+        _ => edit("raw.format"),
+    }
+}
+
 /// Run a set over an archive, in stage order, recursing into nested archives.
 ///
 /// Returns only the stabilizers that actually changed something: `applied` drives the provenance cap
 /// and the attestation, so a pass that was configured but did no work has no business in either.
 #[tracing::instrument(level = "debug", skip(set, archive), fields(profile = %set.id))]
 pub fn apply(set: &StabilizerSet, archive: &mut Archive) -> Vec<Applied> {
+    apply_traced(set, archive).0
+}
+
+/// [`apply`], and additionally the per-field, per-member edits each pass made — the ground truth a
+/// comparison joins to its difference codes to say which pass touched which field of which member.
+///
+/// The edits are the only extra work: the stabilization itself is identical, and the fingerprints
+/// it diffs are metadata only, so a body is never read to produce them.
+pub fn apply_traced(set: &StabilizerSet, archive: &mut Archive) -> (Vec<Applied>, Vec<FieldEdit>) {
     let cx = Cx::root(archive.format);
     let mut totals: Vec<Touched> = vec![Touched::NONE; set.members.len()];
-    run(set, archive, &cx, &mut totals);
+    let mut edits: Vec<FieldEdit> = Vec::new();
+    run(set, archive, &cx, &[], &mut totals, &mut edits);
 
-    set.members
+    let applied = set
+        .members
         .iter()
         .zip(totals)
         .filter(|(_, t)| t.entries > 0 || t.bytes > 0)
@@ -234,14 +391,32 @@ pub fn apply(set: &StabilizerSet, archive: &mut Archive) -> Vec<Applied> {
                 "applied"
             );
         })
-        .collect()
+        .collect();
+    (applied, edits)
 }
 
-fn run(set: &StabilizerSet, archive: &mut Archive, cx: &Cx, totals: &mut [Touched]) {
+/// The stabilized-name prefix a nested archive's members carry, matching the comparator's
+/// `outer!inner` spelling. Built from the path each entry is descended at, not from `Cx`, so the
+/// two never drift.
+fn joined(prefix: &[u8], name: &[u8]) -> String {
+    let mut p = Vec::with_capacity(prefix.len() + name.len());
+    p.extend_from_slice(prefix);
+    p.extend_from_slice(name);
+    String::from_utf8_lossy(&p).into_owned()
+}
+
+fn run(
+    set: &StabilizerSet,
+    archive: &mut Archive,
+    cx: &Cx,
+    prefix: &[u8],
+    totals: &mut [Touched],
+    edits: &mut Vec<FieldEdit>,
+) {
     // Depth first: a nested archive is stabilized before the parent re-serializes it, so a parent
     // pass sees the bytes its children will actually produce.
     for i in 0..archive.entries.len() {
-        let (path, nested_format) = {
+        let (name, nested_format) = {
             let e = &archive.entries[i];
             match &e.body {
                 Body::Nested { inner, .. } => (e.path.clone(), Some(inner.format)),
@@ -249,9 +424,13 @@ fn run(set: &StabilizerSet, archive: &mut Archive, cx: &Cx, totals: &mut [Touche
             }
         };
         if let Some(f) = nested_format {
-            let child = cx.push(f, path);
+            let child = cx.push(f, name.clone());
+            // `outer!inner`, the same key `signature`/`diff` build for a nested member.
+            let mut child_prefix = prefix.to_vec();
+            child_prefix.extend_from_slice(name.as_bytes());
+            child_prefix.push(b'!');
             if let Body::Nested { inner, .. } = &mut archive.entries[i].body {
-                run(set, inner, &child, totals);
+                run(set, inner, &child, &child_prefix, totals, edits);
             }
         }
     }
@@ -260,10 +439,44 @@ fn run(set: &StabilizerSet, archive: &mut Archive, cx: &Cx, totals: &mut [Touche
         if !s.applies(cx) {
             continue;
         }
+        // Fingerprint every entry before the pass, keyed by `ordinal` — stable across the reorder
+        // an `on_archive` pass may perform, where position is not. Metadata only: no body is read.
+        let before: std::collections::HashMap<u32, Fp> = archive
+            .entries
+            .iter()
+            .map(|e| (e.ordinal, Fp::of(e)))
+            .collect();
+
         let mut t = s.on_archive(archive, cx);
+        // Which entries the pass rewrote the body of, by ordinal — from its own `Touched::bytes`,
+        // the lossless signal, rather than from re-hashing the bytes it just changed.
+        let mut body_changed: Vec<u32> = Vec::new();
         for e in &mut archive.entries {
-            t.merge(s.on_entry(e, cx));
+            let te = s.on_entry(e, cx);
+            if te.bytes > 0 {
+                body_changed.push(e.ordinal);
+            }
+            t.merge(te);
         }
         totals[idx].merge(t);
+
+        if t.entries == 0 && t.bytes == 0 {
+            continue;
+        }
+        let id = s.id();
+        let bodies: std::collections::HashSet<u32> = body_changed.into_iter().collect();
+        for e in &archive.entries {
+            let path = joined(prefix, e.path.as_bytes());
+            if let Some(b) = before.get(&e.ordinal) {
+                record_field_changes(b, &Fp::of(e), &path, &id, edits);
+            }
+            if bodies.contains(&e.ordinal) {
+                edits.push(FieldEdit {
+                    path,
+                    field: "body".to_string(),
+                    pass: id.clone(),
+                });
+            }
+        }
     }
 }
