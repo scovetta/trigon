@@ -449,7 +449,8 @@ async function browse(params) {
   document.title = 'Trigon — the rebuild corpus';
   const ask = el('div', {});
   whenIdentified(ask, () => requestPanel(params.get('q')));
-  view.replaceChildren(denominators, filters, table, withheldNote, more, ask);
+  // Filtered: `replaceChildren` renders a null argument as the text "null".
+  view.replaceChildren(...[denominators, filters, table, withheldNote, more, ask].filter(Boolean));
 }
 
 /* ---- ask for a rebuild -------------------------------------------------- */
@@ -565,6 +566,9 @@ async function jobView(id) {
 
   const list = el('ul', { class: 'assumptions' });
   const head = el('p', { class: 'sentence', text: 'Waiting for a worker to pick this up.' });
+  // Why an anonymous reader sees phases and no notes. The server says so rather than leaving a
+  // bare "outcome" to be read as a job with nothing to report.
+  const withheld = el('p', { class: 'note empty' });
 
   const draw = async () => {
     let data;
@@ -578,6 +582,7 @@ async function jobView(id) {
       el('strong', { text: e.phase.replace(/-/g, ' ') }),
       e.detail ? el('span', { text: ` — ${e.detail}` }) : null,
       el('span', { class: 'empty', text: `  ${ago(new Date(e.at).toISOString())}` }))));
+    withheld.textContent = data.detail ? data.detail[0].toUpperCase() + data.detail.slice(1) : '';
     const last = events[events.length - 1];
     head.textContent = !last
       ? 'Waiting for a worker to pick this up.'
@@ -596,7 +601,7 @@ async function jobView(id) {
     el('p', {}, el('a', { href: '/queue', text: '← the queue' })),
     el('div', { class: 'verdict-head' }, el('h1', { text: `Job ${id}` })),
     head,
-    el('section', { class: 'panel' }, el('h2', { text: 'What it has done' }), list),
+    el('section', { class: 'panel' }, el('h2', { text: 'What it has done' }), list, withheld),
   );
   await draw();
   JOB_POLL = setInterval(draw, 3000);
@@ -744,6 +749,10 @@ function runTable(rows) {
       el('td', { class: 'opt', text: e.ecosystem }),
       el('td', {}, e.outcome
         ? verdictTag(e.outcome)
+        // A void row reaches an anonymous reader with no outcome, and says why in its place. "No
+        // verdict" would read as a run that never finished, which is not what happened.
+        : e.publication?.state === 'void'
+        ? el('span', { class: 'tag void', title: withheldTitle(e.publication), text: 'void' })
         // How it ended, not the word "failed". `no-strategy` means we have no recipe for this
         // package, which is a statement about us; a reader who sees "failed" reads it as one about
         // the package.
@@ -1615,20 +1624,27 @@ async function detail(id) {
   );
 
   const [, sentence] = VERDICT[entry.outcome] || [];
+  // A void run reaches an anonymous reader with no outcome and no comparison: shown, and never as
+  // a verdict. An operator's copy of the same run still has both, and is drawn as before.
+  const voided = !entry.outcome && entry.publication.state === 'void';
   const verdict = el('div', {},
     el('div', { class: 'verdict-line' },
       entry.outcome
         ? verdictTag(entry.outcome)
-        : el('span', {
-            class: `tag ${record.terminal === 'void' ? 'void' : 'none'}`,
-            text: (record.terminal || 'no verdict').replace(/-/g, ' '),
-          }),
+        // The "published as void" tag beside it says it once; a second tag would say it twice.
+        : voided
+          ? null
+          : el('span', {
+              class: `tag ${record.terminal === 'void' ? 'void' : 'none'}`,
+              text: (record.terminal || 'no verdict').replace(/-/g, ' '),
+            }),
       seal(entry.attested),
       entry.publication.state !== 'published'
         ? el('span', { class: 'tag void', title: withheldTitle(entry.publication), text: entry.publication.state === 'void' ? 'published as void' : 'not published' })
         : null),
     el('p', { class: 'sentence' },
       sentence
+        || (voided && 'We looked, and could not tell. A void is evidence of nothing about the package, in either direction, so no verdict is shown for it.')
         || TERMINAL[record.terminal]
         || 'This run finished without producing a verdict. What stopped it is below.'),
     entry.publication.state !== 'published'
@@ -1652,7 +1668,12 @@ async function detail(id) {
 
   // The comparison goes in a slot rather than in front of the paint. See `fillLater`.
   const comparison = el('div', {});
-  if (entry.has.comparison) {
+  if (entry.has.comparison && voided) {
+    // Not fetched: `/v1/runs/{id}/diff` refuses a void to this reader, and the fallback below
+    // would blame the rendering for a refusal that is the point.
+    comparison.replaceChildren(panel('What differs', el('p', { class: 'note empty' },
+      'Not published. A void carries no comparison outcome and no difference data: the comparison was made, and it is not evidence about the package.')));
+  } else if (entry.has.comparison) {
     comparison.replaceChildren(
       panel('What differs', el('p', { class: 'empty', text: 'reading the comparison…' })),
     );
@@ -1737,7 +1758,12 @@ async function detail(id) {
       el('p', { class: 'note empty' },
         'The artifact under test reached the build over the network. Whatever came out may be perfectly honest and we cannot tell, which is exactly what void means.'))) : null,
 
-    panel('What it cost', costs(record)),
+    panel('What it cost', voided
+      // Not "no costs were recorded", which is a different fact. The server leaves a void's costs
+      // out for this reader because they measure the rebuilt artifact, the comparison and any
+      // model asked about the difference.
+      ? el('p', { class: 'empty', text: 'Not published for a void. What a run cost counts the rebuilt artifact, the comparison and any model asked about the difference, and each of those says something about what the comparison found.' })
+      : costs(record)),
 
     networkPanel(id, entry),
 
@@ -1774,7 +1800,7 @@ const withheldTitle = (pub) => ({
   attempts_disagree: 'two attempts at this disagreed, so the honest answer is that we do not know. That is a finding about our repeatability, not about the package.',
   open_egress: 'the build ran with unrestricted network access, so nothing it produced is evidence about the package.',
   guard_tripped: 'the build reached the published artifact over the network, so a match would prove only that it downloaded it.',
-  non_builtin_stabilizer: 'a stabilizer a person or a model wrote was applied, so this publishes as void rather than as a divergence.',
+  non_builtin_stabilizer: 'a stabilizer a person or a model wrote was applied, so the normalization is itself a judgement call, and the run is evidence of nothing about the package in either direction.',
   kill_switch: 'divergence publication is stopped while the false-mismatch rate is reviewed.',
   provenance_unknown: 'this record does not say whether a hand-written or model-written stabilizer was applied, so one of the five safeguards cannot be checked. An accusation is not published on a safeguard nobody evaluated.',
   image_derived_outside_boundary: 'this run built its own base image, which spends network outside the boundary the rest of the run accounts for. The build ran at the tier it claims; the environment it ran in was assembled without that account.',

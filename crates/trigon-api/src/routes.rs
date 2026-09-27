@@ -81,27 +81,63 @@ pub async fn runs(State(api): S, UrlQuery(q): UrlQuery<RunsQuery>) -> Response {
 
 /// One run, in as much detail as the principal may see.
 ///
-/// The record is returned as it is stored, minus nothing — it holds digests, not bytes, and a
-/// digest is not a secret. What the digests *point at* is class-gated, which is where the control
-/// lives. The entry beside it carries the publication decision, so the front-end never has to
-/// re-derive one.
+/// The record is returned as it is stored — it holds digests, not bytes, and a digest is not a
+/// secret. What the digests *point at* is class-gated, which is where the control lives. The entry
+/// beside it carries the publication decision, so the front-end never has to re-derive one.
+///
+/// **Minus a void run's outcome, for an anonymous reader, and everything else that says it.**
+/// Safeguard 2 shows such a run as a void and never as a divergence, and both halves of this answer
+/// carry the outcome — the record in several other words too — so both are passed through
+/// [`crate::index::Entry::shown`] and [`crate::index::record_shown`]. The row stays, with its
+/// reason, so the reader is told why there is no verdict rather than shown a gap.
 pub async fn run(State(api): S, Path(id): Path<String>) -> Response {
-    let Some(record) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((record, entry)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
-    let Some(entry) = api.index.entry(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let public = api.principal() == Principal::Anonymous;
+    let record = crate::index::record_shown(record, entry.publication, public);
+    json(serde_json::json!({ "entry": entry.shown(public), "record": record }))
+}
+
+/// The run by that id and its row, if this reader may know there is one. Every per-run route asks
+/// this first, and answers [`no_such_run`] where it says `None`.
+///
+/// **For an anonymous reader a withheld run is absent, and is refused in the same bytes.** 404, not
+/// 403, because a 403 confirms the run exists, which for a withheld divergence is most of the
+/// accusation the gate is holding back. The routes each had their own version of that, and they
+/// disagreed with it: `/v1/runs/{id}` and its diff said "no run by that id" to an absent id and "no
+/// run by that id is published" to a withheld one, and the class-gated routes answered a withheld
+/// run with their class's 403 and an absent one with a 404. Run ids are a timestamp and eight hex
+/// digits of the published artifact's digest, which anyone holding the artifact has, so each
+/// difference was a test for whether a given package had a run held back.
+///
+/// A void is published, so it is returned, and each route shows it as one.
+fn run_for(api: &Api, id: &str) -> Option<(trigon_store::RunRecord, crate::index::Entry)> {
+    let public = api.principal() == Principal::Anonymous;
+    let (r, e) = (api.index.get(id)?, api.index.entry(id)?);
+    (!public || e.publication.is_public()).then_some((r, e))
+}
+
+/// The one refusal of a run [`run_for`] did not return, whether it is absent or withheld.
+fn no_such_run(api: &Api) -> Response {
+    let sentence = match api.principal() {
+        Principal::Anonymous => "no run by that id is published",
+        Principal::Operator => "no run by that id",
     };
-    if api.principal() == Principal::Anonymous && !entry.publication.is_public() {
-        // 404, not 403. A 403 confirms the run exists, which for a withheld divergence is most of
-        // the accusation the gate is holding back.
-        return refuse(
-            StatusCode::NOT_FOUND,
-            "no_such_run",
-            "no run by that id is published",
-        );
-    }
-    json(serde_json::json!({ "entry": entry, "record": record }))
+    refuse(StatusCode::NOT_FOUND, "no_such_run", sentence)
+}
+
+/// The refusal of anything that would show a void run to an anonymous reader as more than a void.
+fn published_as_void(because: crate::Withheld) -> Response {
+    refuse(
+        StatusCode::NOT_FOUND,
+        "published_as_void",
+        &format!(
+            "this run is published as void, not as a verdict: {} A void carries no comparison \
+             outcome and no difference data, because it is evidence of nothing about the package.",
+            because.sentence()
+        ),
+    )
 }
 
 /// The digest a named field of a run points at, with its class.
@@ -123,8 +159,8 @@ fn digest_of(r: &trigon_store::RunRecord, what: &str) -> Option<(Digest, Class)>
 /// record is a class the caller cannot choose. A route that took `?class=definition` and a digest
 /// would let anyone relabel a build log as a definition and read it.
 async fn blob_of(api: &Api, id: &str, what: &str) -> Response {
-    let Some(r) = api.index.get(id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, _)) = run_for(api, id) else {
+        return no_such_run(api);
     };
     let Some((digest, class)) = digest_of(&r, what) else {
         return refuse(
@@ -367,8 +403,8 @@ pub async fn member(
     Path(id): Path<String>,
     UrlQuery(q): UrlQuery<MemberQuery>,
 ) -> Response {
-    let Some(r) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, _)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
     // Held for the whole read. See `Api::member_reads`: one of these costs twice an artifact, and
     // the number in flight is what decides whether that is a lot of memory or a fatal amount.
@@ -478,8 +514,8 @@ pub async fn member_raw(
     Path(id): Path<String>,
     UrlQuery(q): UrlQuery<MemberQuery>,
 ) -> Response {
-    let Some(r) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, _)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
     let _permit = api.member_reads.clone().acquire_owned().await;
     if !admits(api.principal(), Class::Artifact) {
@@ -554,23 +590,19 @@ pub async fn member_raw(
 /// Anonymous, unlike the blob. See [`Class::Diff`]: the control on a difference summary is its
 /// bound, not its secrecy, and the same member paths already reach a signed statement served to
 /// anybody.
+///
+/// **Not for a void run**, whose view is its outcome and a census of what differed: the divergence
+/// in more detail than the verdict the run page no longer shows. `docs/19` §4.3 says a void
+/// carries no comparison outcome and no difference data, and the refusal says why in those terms.
 pub async fn diff(State(api): S, Path(id): Path<String>) -> Response {
-    let Some(r) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, entry)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
+    // `run_for` has already refused a withheld run, as it refuses an absent one.
     if api.principal() == Principal::Anonymous
-        && !api
-            .index
-            .entry(&id)
-            .is_some_and(|e| e.publication.is_public())
+        && let Publication::Void { because } = entry.publication
     {
-        // 404, matching `/v1/runs/{id}`: a 403 confirms the run exists, which for a withheld
-        // divergence is most of the accusation the gate is holding back.
-        return refuse(
-            StatusCode::NOT_FOUND,
-            "no_such_run",
-            "no run by that id is published",
-        );
+        return published_as_void(because);
     }
     let Some(digest) = r.comparison else {
         return refuse(
@@ -620,8 +652,8 @@ pub async fn network(State(api): S, Path(id): Path<String>) -> Response {
 /// is read off the record, never asserted by the caller, and a principal refused the transcript is
 /// refused its summary with the same sentence.
 pub async fn network_summary(State(api): S, Path(id): Path<String>) -> Response {
-    let Some(r) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, _)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
     let Some((digest, class)) = digest_of(&r, "network") else {
         return refuse(
@@ -660,23 +692,17 @@ pub async fn network_summary(State(api): S, Path(id): Path<String>) -> Response 
 /// void and never as a divergence*; a signed statement asserting one is that divergence in its most
 /// quotable form, and it would contradict the page it sits behind.
 pub async fn attestation(State(api): S, Path(id): Path<String>) -> Response {
-    let Some(r) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, entry)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
-    if api.principal() == Principal::Anonymous {
-        let published = api
-            .index
-            .entry(&id)
-            .is_some_and(|e| e.publication == Publication::Published);
-        if !published {
-            // 404 rather than 403, for the reason `run` gives: confirming the run exists is most
-            // of the accusation the gate is holding back.
-            return refuse(
-                StatusCode::NOT_FOUND,
-                "no_such_run",
-                "no run by that id has a published statement",
-            );
-        }
+    // A withheld run was refused above, as an absent one is; what reaches here unpublished is a
+    // void, which is shown and has no statement to show.
+    if api.principal() == Principal::Anonymous && entry.publication != Publication::Published {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "no_such_run",
+            "no run by that id has a published statement",
+        );
     }
     if r.attestations.is_empty() {
         return refuse(
@@ -710,6 +736,9 @@ pub async fn attestation(State(api): S, Path(id): Path<String>) -> Response {
 /// `19-distribution-and-lookup.md`: the only query that works without a naming authority. Somebody
 /// holding a tarball can ask about it without knowing what we call it, which is the query a
 /// consumer actually has.
+///
+/// Its rows come from [`crate::index::Index::page`], which hands an anonymous reader a void row
+/// without its outcome, as it does for `/v1/runs` and `/v1/targets/{purl}`.
 pub async fn artifact(State(api): S, Path(digest): Path<String>) -> Response {
     // `sha256:abcd…` or bare hex; both are what a caller has to hand.
     let hex = digest
@@ -810,15 +839,16 @@ pub async fn evidence_blob(State(api): S, Path(digest): Path<String>) -> Respons
 /// and hand-rolled: pulling in a generator to describe twelve GET routes would be more dependency
 /// than document.
 pub async fn openapi(State(api): S) -> Response {
-    let mut paths = BTreeMap::new();
+    // Gathered per path, because a path can carry more than one verb: `/v1/runs` is browsed with
+    // `GET` and asked of with `POST`. One operation per path is what let the table list it once,
+    // as the verb it is not browsed with.
+    let mut paths: BTreeMap<&str, serde_json::Map<String, serde_json::Value>> = BTreeMap::new();
     for (path, verb, summary) in ROUTES {
-        paths.insert(
-            path.to_string(),
+        paths.entry(path).or_default().insert(
+            verb.to_string(),
             serde_json::json!({
-                (*verb): {
-                    "summary": summary,
-                    "responses": { "200": { "description": "ok" } }
-                }
+                "summary": summary,
+                "responses": { "200": { "description": "ok" } }
             }),
         );
     }
@@ -848,6 +878,12 @@ pub async fn openapi(State(api): S) -> Response {
 /// document as a `get` — so the first route that was not one made the contract describe something
 /// the router does not have. A contract that has to be true of the router is not the place to
 /// assume a shape.
+///
+/// **And every route is in the table**, which `the_table_lists_every_route_the_router_mounts`
+/// holds against `lib.rs`. `/v1/me`, `/v1/queue` and `/v1/jobs/{id}/events` were mounted and
+/// missing, and `/v1/runs` was listed once, as `post`, with the description of its `get`. A sweep
+/// over "every anonymous route" is built from this table, so a route missing here is a route no
+/// sweep visits — and the job events route was publishing withheld divergences past one.
 pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/health",
@@ -861,8 +897,13 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     ),
     (
         "/v1/runs",
-        "post",
+        "get",
         "Browse and search. Filter by ecosystem, outcome, fault or text",
+    ),
+    (
+        "/v1/runs",
+        "post",
+        "Ask for a rebuild of a package URL. Needs a principal with a quota, and names nothing else",
     ),
     (
         "/v1/runs/{id}",
@@ -939,6 +980,21 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
         "get",
         "A blob by digest, for a principal who may read its class",
     ),
+    (
+        "/v1/me",
+        "get",
+        "What the presented credential may do, or that there is none",
+    ),
+    (
+        "/v1/queue",
+        "get",
+        "What is waiting and what is running. Names targets, never outcomes",
+    ),
+    (
+        "/v1/jobs/{id}/events",
+        "get",
+        "Where one job has got to. Its notes are for an operator",
+    ),
     ("/v1/openapi.json", "get", "This contract"),
 ];
 
@@ -985,6 +1041,48 @@ mod tests {
                 "{p} is outside the versioned surface"
             );
         }
+    }
+
+    /// The table and the router are the same set of routes, verb for verb.
+    ///
+    /// Read off `lib.rs`, because axum will not list a router's routes. The two routes that serve
+    /// the page are outside the versioned surface and are left out on purpose; everything under
+    /// `/v1/` the router mounts has to be in the contract, or a sweep built from the contract does
+    /// not visit it.
+    #[test]
+    fn the_table_lists_every_route_the_router_mounts() {
+        use std::collections::BTreeSet;
+        let src = include_str!("lib.rs");
+        let mounted: BTreeSet<(String, String)> = src
+            .split(".route(")
+            .skip(1)
+            .filter_map(|call| {
+                // `"/v1/queue", get(request::queue_state))`: the path, then the handler's verb,
+                // which is the last segment of whatever comes before its first parenthesis.
+                let mut parts = call.splitn(3, '"');
+                let path = parts.nth(1)?;
+                let rest = parts.next()?.trim_start_matches([',', ' ', '\n']);
+                let verb = rest.split('(').next()?.rsplit("::").next()?;
+                Some((path.to_string(), verb.to_string()))
+            })
+            .filter(|(path, _)| path.starts_with("/v1/"))
+            .collect();
+        assert!(
+            mounted.len() > 20,
+            "the scan found {} routes in lib.rs, so it is reading the wrong thing",
+            mounted.len()
+        );
+        let table: BTreeSet<(String, String)> = ROUTES
+            .iter()
+            .map(|(p, v, _)| (p.to_string(), v.to_string()))
+            .collect();
+        let unlisted: Vec<_> = mounted.difference(&table).collect();
+        let unmounted: Vec<_> = table.difference(&mounted).collect();
+        assert!(
+            unlisted.is_empty() && unmounted.is_empty(),
+            "the router mounts {unlisted:?}, which the contract does not list, and the contract \
+             lists {unmounted:?}, which the router does not mount"
+        );
     }
 
     #[test]

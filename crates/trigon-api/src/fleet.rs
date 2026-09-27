@@ -16,6 +16,7 @@ use axum::response::Response;
 use trigon_core::Status;
 
 use crate::evidence::{Class, admits};
+use crate::publication::Publication;
 use crate::routes::{json, refuse};
 use crate::{Api, Principal};
 
@@ -35,13 +36,28 @@ pub(crate) const MAX_LOCKFILE: usize = 8 << 20;
 
 /// `POST /v1/check` — a lockfile in, a verdict table out.
 ///
-/// The same five rows as `trigon check`, from the same parser and the same mapping: the lockfile
-/// reading is `trigon_core::lockfile` and the record-to-status rule is `RunRecord::status`, so the
-/// command line and the web page cannot drift into two answers.
+/// The same five rows as `trigon check`, from the same parser: the lockfile reading is
+/// `trigon_core::lockfile`, and a verdict the reader may see is mapped by `RunRecord::status`.
 ///
-/// **Anonymous.** It reports verdicts that are already public and adds nothing about any run the
-/// gate withholds — a withheld run simply is not in the index, so its packages land in
-/// `never checked`, which is the truth from where the reader stands.
+/// **What each principal is answered from.** The route is open to both, and the two answers
+/// differ on purpose.
+///
+/// - **An anonymous reader is answered only from what the publication gate releases.** A run
+///   `decide` calls `Published` reports its verdict. A run it calls `Void` reports `unsupported`
+///   with the gate's reason, never its outcome: `Publication::is_public` is true for a void, and
+///   `RunRecord::status` calls an open-egress divergence `divergent`, so filtering on "public"
+///   alone would still publish the accusation safeguard 2 turns into a void. A `Withheld` run is
+///   treated as absent, so the answer is the newest older run the gate does release, or `never
+///   checked` — the truth from where the reader stands, and nothing about a run they may not see.
+/// - **An operator is answered from the whole store**, newest run first and ungated, exactly as
+///   `trigon check` answers from a local one. It is the same person reading the same runs, so the
+///   command line and the page cannot drift into two answers; the gate decides what is published,
+///   and an operator reading their own corpus is not publication.
+///
+/// This comment used to promise the anonymous half while the code did the operator's for
+/// everybody: it said a withheld run "simply is not in the index", and it was in the index, and
+/// `Index::newest_for` does not ask the gate. So a withheld divergence reached anyone as
+/// `divergent`. See `docs/16-findings.md` §3.92 and §3.93.
 pub async fn check(State(api): State<Arc<Api>>, body: String) -> Response {
     if body.len() > MAX_LOCKFILE {
         return refuse(
@@ -86,13 +102,35 @@ pub async fn check(State(api): State<Arc<Api>>, body: String) -> Response {
         tally.insert(s.label(), 0);
     }
 
+    let public = api.principal() == Principal::Anonymous;
     for p in packages {
-        let (status, detail, run) = match api.index.newest_for(&p.purl) {
-            Some(r) => {
-                let (s, d) = r.status();
-                (s, d, Some(r.id.clone()))
+        let (status, detail, run) = if public {
+            match api.index.newest_public_for(&p.purl) {
+                Some((r, Publication::Published)) => {
+                    let (s, d) = r.status();
+                    (s, d, Some(r.id))
+                }
+                // The run is named, because a void is published and its page says the same thing
+                // at more length. The outcome is not, because a void has none to publish.
+                Some((r, Publication::Void { because })) => (
+                    Status::Unsupported,
+                    Some(format!("published as void: {}", because.sentence())),
+                    Some(r.id),
+                ),
+                // `newest_public_for` passes over a withheld run; were one to reach here, absent is
+                // still what it is to this reader.
+                Some((_, Publication::Withheld { .. })) | None => {
+                    (Status::NeverChecked, None, None)
+                }
             }
-            None => (Status::NeverChecked, None, None),
+        } else {
+            match api.index.newest_for(&p.purl) {
+                Some(r) => {
+                    let (s, d) = r.status();
+                    (s, d, Some(r.id))
+                }
+                None => (Status::NeverChecked, None, None),
+            }
         };
         *tally.entry(status.label()).or_default() += 1;
         rows.push(serde_json::json!({

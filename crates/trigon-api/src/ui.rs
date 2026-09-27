@@ -14,6 +14,7 @@
 //! supply chain, and this project's whole subject is supply chains.
 
 use crate::evidence::{Class, admits};
+use crate::publication::Publication;
 use crate::{Api, Principal};
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, Uri, header};
@@ -216,6 +217,9 @@ fn browse_boot(api: &Api, public: bool) -> serde_json::Value {
 /// The publication gate is asked here as well, rather than trusted to the fetch that would
 /// otherwise follow. Injecting a withheld run into the document and relying on the front-end not to
 /// draw it would put the accusation in the page source, which is the one place a gate cannot reach.
+///
+/// A void run is booted as the routes show it to the same reader: without its outcome, and without
+/// the rendered comparison, which `GET /v1/runs/{id}/diff` refuses an anonymous reader of a void.
 async fn run_boot(api: &Api, id: &str, public: bool, q: &DocQuery) -> serde_json::Value {
     let (Some(entry), Some(record)) = (api.index.entry(id), api.index.get(id)) else {
         return serde_json::json!({ "health": health_boot(api, public) });
@@ -223,11 +227,20 @@ async fn run_boot(api: &Api, id: &str, public: bool, q: &DocQuery) -> serde_json
     if public && !entry.publication.is_public() {
         return serde_json::json!({ "health": health_boot(api, public) });
     }
+    let diff = match entry.publication {
+        Publication::Void { .. } if public => serde_json::Value::Null,
+        _ => diff_boot(api, &record).await,
+    };
+    let member = member_boot(api, &record, q).await;
+    let publication = entry.publication;
     serde_json::json!({
         "health": health_boot(api, public),
-        "run": { "entry": entry, "record": record },
-        "diff": diff_boot(api, &record).await,
-        "member": member_boot(api, &record, q).await,
+        "run": {
+            "entry": entry.shown(public),
+            "record": crate::index::record_shown(record, publication, public),
+        },
+        "diff": diff,
+        "member": member,
     })
 }
 

@@ -59,6 +59,175 @@ pub struct Entry {
     pub has: Has,
 }
 
+impl Entry {
+    /// Whether an anonymous reader reads this row without its outcome: every row the gate does not
+    /// call `Published`.
+    ///
+    /// A `Void` row is shown — "we looked and could not tell, for this reason" is publishable — but
+    /// never with its outcome. [`Publication::is_public`] is true for it, and the outcome of an
+    /// open-egress divergence is still `divergent`, so a route that filtered on the one and
+    /// serialized the other published exactly the accusation safeguard 2 turns into a void.
+    ///
+    /// A `Withheld` row is not shown at all, but it is still *counted*, per query, so a page's
+    /// denominator is honest — and a count of rows matching `?outcome=divergent` is the outcome,
+    /// one package at a time. So it is matched as it is read: without one.
+    fn hides_outcome(&self, public: bool) -> bool {
+        public && self.publication != Publication::Published
+    }
+
+    /// The key this row is counted under in `Stats::by_fault`, as the reader is shown it, or
+    /// `None` where it is not counted there.
+    ///
+    /// One function for the count and the filter, because a bar a reader can click promises that
+    /// the click lists what the bar counted. The filter compared `fault` alone while the count fell
+    /// back to `terminal` and then to `void`, so `no-strategy` and `void` were bars whose click
+    /// listed nothing.
+    fn fault_bucket(&self, public: bool) -> Option<&str> {
+        let hidden = self.hides_outcome(public);
+        if self.evidence && !hidden {
+            // Counted by outcome, in the other denominator.
+            return None;
+        }
+        match (self.fault.as_deref(), self.terminal.as_deref()) {
+            (Some(f), _) => Some(f),
+            // A `no-strategy` is a scope statement with no fault attached, and filing it as
+            // `unclassified` would say nobody had named the cause when somebody had.
+            (None, Some(t)) => Some(t),
+            // Named, for the same reason: the gate said why, and the reason is `void`.
+            _ if hidden && matches!(self.publication, Publication::Void { .. }) => Some("void"),
+            // A withheld verdict. It is no more a failure nobody classified than it is a match,
+            // and filing it under one would put a verdict the reader was not shown into a count.
+            _ if hidden && self.outcome.is_some() => None,
+            _ => Some("unclassified"),
+        }
+    }
+
+    /// This row as the reader is to be shown it: unchanged for an operator.
+    ///
+    /// For an anonymous reader a `Void` row keeps everything but its outcome. The row stays, with
+    /// `publication` carrying the reason, so the reader is told why there is no verdict rather
+    /// than shown a gap; and it is not counted as evidence, because not being evidence about the
+    /// package is what void means.
+    pub fn shown(mut self, public: bool) -> Entry {
+        if self.hides_outcome(public) {
+            self.outcome = None;
+            self.evidence = false;
+        }
+        self
+    }
+}
+
+/// A run's record as the reader is to be shown it, given the gate's decision about it.
+///
+/// The record-level half of [`Entry::shown`]. `GET /v1/runs/{id}` returns the record beside the
+/// entry, and the record says what the comparison found in more places than `outcome`, so for an
+/// anonymous reader of a void run everything the rebuilt side, the comparison, or anything done
+/// because of what the comparison found produced is removed. `docs/19` §4.3: a void carries "no
+/// comparison outcome and no difference data".
+///
+/// **Every field is named, on purpose.** The first version cleared three fields and left others
+/// saying the same thing: `rebuild`, whose digest equals `upstream`'s exactly when the run was
+/// `exact`, and whose `stored` flag after `attest --prune` is kept on a divergence and dropped on
+/// a match; and `transparency`, the log entry for the very statement `attestations` was cleared
+/// to hide. A list of fields to remove misses the next one, so the record is taken apart without
+/// `..`, and a field added to `RunRecord` does not compile here until somebody has decided whether
+/// an anonymous reader of a void may see it.
+pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> RunRecord {
+    if !(public && matches!(publication, Publication::Void { .. })) {
+        return r;
+    }
+    let RunRecord {
+        // Kept: which run, of what, and how far it got.
+        id,
+        target,
+        state,
+        started,
+        finished,
+        attempt,
+        cache_key,
+        // Kept: the facts that establish the void — what tripped, which egress tier, whether a
+        // pass somebody wrote applied — which §4.3 says a void carries.
+        guard_trips,
+        refused_artifact,
+        environment,
+        non_builtin_stabilizer,
+        // Kept: what was built, and from where. All of it is decided before the comparison runs.
+        strategy,
+        strategy_digest,
+        derivation,
+        source,
+        instructions,
+        declines,
+        assumptions,
+        confidence,
+        timings,
+        failure,
+        terminal,
+        // Kept: the published artifact, which is what a reader holding it looks the run up by.
+        upstream,
+        // Kept: digests of blobs this reader is refused by class. A digest is not a verdict, and
+        // the class table is where the control on the bytes lives.
+        comparison,
+        build_log,
+        network_transcript,
+        // Gone: the verdict itself.
+        outcome: _,
+        // Gone: the rebuilt artifact. See above: its digest and its retention both say the verdict.
+        rebuild: _,
+        // Gone: named by predicate (`divergence.intoto.json`), pointing at statements
+        // `/v1/runs/{id}/attestation` refuses this reader; and the log entry for the same
+        // statement, which says where to read it instead.
+        attestations: _,
+        transparency: _,
+        // Gone: a model's reading of the diff, which is only ever asked of a divergence and so
+        // names one by existing.
+        diff_opinion: _,
+        // Gone: the model exchange. It records every question the run asked, the reading of a
+        // divergence and a repair after one among them, so its presence on a run whose recipe
+        // needed no model says what the comparison found.
+        transcript: _,
+        // Gone: what the run cost. It counts the rebuilt artifact's bytes (the difference from
+        // `upstream.bytes` is the rebuild's size), the comparison's, and the tokens spent on the
+        // two questions above — three measurements of the difference.
+        costs: _,
+    } = r;
+    RunRecord {
+        id,
+        target,
+        state,
+        outcome: None,
+        guard_trips,
+        refused_artifact,
+        started,
+        finished,
+        attempt,
+        cache_key,
+        environment,
+        strategy,
+        strategy_digest,
+        derivation,
+        source,
+        instructions,
+        upstream,
+        rebuild: None,
+        comparison,
+        build_log,
+        timings,
+        failure,
+        terminal,
+        declines,
+        assumptions,
+        confidence,
+        transcript: None,
+        network_transcript,
+        costs: None,
+        attestations: Vec::new(),
+        non_builtin_stabilizer,
+        diff_opinion: None,
+        transparency: None,
+    }
+}
+
 /// Which evidence this run left behind. Presence, not bytes.
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct Has {
@@ -240,6 +409,23 @@ impl Index {
             .cloned()
     }
 
+    /// The newest run for one target that the gate lets an anonymous reader see, with the gate's
+    /// decision about it.
+    ///
+    /// [`Self::newest_for`] with the gate asked first. A `Withheld` run is passed over as though it
+    /// did not exist, so the answer is the newest *older* run the gate releases, or `None`; a
+    /// `Void` run is returned, because a void is shown, and it is the caller's job to show it as
+    /// one. Ties on `started` go to the larger id, which is what `newest_for`'s walk over the
+    /// id-ordered records does, so the two agree whenever the gate withholds nothing.
+    pub fn newest_public_for(&self, target: &str) -> Option<(RunRecord, Publication)> {
+        let g = self.read_or_recover();
+        g.entries
+            .iter()
+            .filter(|e| e.target == target && e.publication.is_public())
+            .max_by(|a, b| a.started.cmp(&b.started).then_with(|| a.id.cmp(&b.id)))
+            .and_then(|e| g.records.get(&e.id).map(|r| (r.clone(), e.publication)))
+    }
+
     pub fn len(&self) -> usize {
         self.read_or_recover().entries.len()
     }
@@ -253,9 +439,18 @@ impl Index {
     /// The gate runs *after* the filter so `withheld` counts rows that matched what the reader
     /// asked for and were then held back — which is the number they need — rather than every
     /// withheld row in the corpus, which tells them nothing about their query.
+    ///
+    /// The filter reads each row as the reader is shown it, though. A void row reaches an
+    /// anonymous reader without its outcome, and matching `?outcome=divergent` against the outcome
+    /// it was not shown would list it under the word the redaction removed. A withheld row is read
+    /// the same way, and for a sharper reason: it is only ever a count, and a count of withheld rows
+    /// matching `?q=<package>&outcome=divergent` was 1 where `outcome=exact` was 0 — the accusation
+    /// the gate was holding back, named one package at a time. So a withheld row is counted against
+    /// what the reader may know of it (its package, its ecosystem, how it failed if it did) and
+    /// never selected by its verdict.
     pub fn page(&self, q: &Query, public: bool) -> Page {
         let g = self.read_or_recover();
-        let matched: Vec<&Entry> = g.entries.iter().filter(|e| q.matches(e)).collect();
+        let matched: Vec<&Entry> = g.entries.iter().filter(|e| q.matches(e, public)).collect();
         let total = matched.len();
 
         let visible: Vec<&Entry> = if public {
@@ -281,7 +476,7 @@ impl Index {
             .iter()
             .skip(start)
             .take(limit)
-            .map(|e| (*e).clone())
+            .map(|e| (*e).clone().shown(public))
             .collect();
         let next = (start + rows.len() < visible.len())
             .then(|| rows.last().map(|e| e.id.clone()))
@@ -300,32 +495,27 @@ impl Index {
         let mut s = Stats::default();
         for e in &g.entries {
             if public && !e.publication.is_public() {
-                *s.by_withheld
-                    .entry(
-                        e.publication
-                            .because()
-                            .map(|w| w.key().to_string())
-                            .unwrap_or_else(|| "unknown".into()),
-                    )
-                    .or_default() += 1;
+                // One total, never broken down by reason. Three reasons — the kill-switch, an image
+                // derived outside the boundary, and unknown provenance — are only ever given to a
+                // divergence, so a count under any of them is a count of held-back accusations,
+                // and on a small corpus the key alone names one. A total is safe because every
+                // outcome can be awaiting confirmation.
+                *s.by_withheld.entry("withheld".to_string()).or_default() += 1;
                 continue;
             }
             s.runs += 1;
             *s.by_ecosystem.entry(e.ecosystem.clone()).or_default() += 1;
-            if e.evidence {
+            // A void row is counted as the reader is shown it. An anonymous `by_outcome` that
+            // counted it under its outcome would publish, as a number, the divergence the row
+            // itself no longer carries.
+            if e.evidence && !e.hides_outcome(public) {
                 s.evidence += 1;
                 if let Some(o) = &e.outcome {
                     *s.by_outcome.entry(o.clone()).or_default() += 1;
                 }
-            } else if let Some(f) = &e.fault {
+            } else if let Some(k) = e.fault_bucket(public) {
                 // The other denominator. Never added to the one above.
-                *s.by_fault.entry(f.clone()).or_default() += 1;
-            } else if let Some(t) = &e.terminal {
-                // A `no-strategy` is a scope statement with no fault attached, and filing it as
-                // `unclassified` would say nobody had named the cause when somebody had.
-                *s.by_fault.entry(t.clone()).or_default() += 1;
-            } else {
-                *s.by_fault.entry("unclassified".into()).or_default() += 1;
+                *s.by_fault.entry(k.to_string()).or_default() += 1;
             }
             if s.newest.is_none() {
                 s.newest = Some(e.started.clone());
@@ -353,25 +543,30 @@ pub struct Query {
 }
 
 impl Query {
-    fn matches(&self, e: &Entry) -> bool {
+    /// Whether this row matches, read as a reader who is `public` or not is shown it.
+    fn matches(&self, e: &Entry, public: bool) -> bool {
+        let hidden = e.hides_outcome(public);
+        let outcome = if hidden { None } else { e.outcome.as_deref() };
         if let Some(x) = &self.ecosystem
             && &e.ecosystem != x
         {
             return false;
         }
         if let Some(x) = &self.outcome
-            && e.outcome.as_deref() != Some(x.as_str())
+            && outcome != Some(x.as_str())
         {
             return false;
         }
+        // The bucket `Stats::by_fault` counts the row under, so a clicked bar lists what it counted.
         if let Some(x) = &self.fault
-            && e.fault.as_deref() != Some(x.as_str())
+            && e.fault_bucket(public) != Some(x.as_str())
         {
             return false;
         }
+        let evidence = e.evidence && !hidden;
         match self.kind.as_deref() {
-            Some("evidence") if !e.evidence => return false,
-            Some("failed") if e.evidence => return false,
+            Some("evidence") if !evidence => return false,
+            Some("failed") if evidence => return false,
             _ => {}
         }
         if let Some(x) = &self.q {
@@ -379,7 +574,7 @@ impl Query {
                 "{} {} {} {}",
                 e.target,
                 e.failure_code.as_deref().unwrap_or(""),
-                e.outcome.as_deref().unwrap_or(""),
+                outcome.unwrap_or(""),
                 e.terminal.as_deref().unwrap_or("")
             )
             .to_ascii_lowercase();
@@ -668,6 +863,43 @@ mod tests {
         );
         assert_eq!(operator.rows.len(), 2, "an operator sees their own corpus");
         assert_eq!(operator.withheld, 0);
+    }
+
+    #[test]
+    fn an_anonymous_reader_gets_one_withheld_total_and_no_reason_that_only_a_divergence_has() {
+        // A confirmed divergence stopped by the kill-switch, beside an unconfirmed match. Counted
+        // by reason, the public stats would say `kill_switch: 1`, and that reason is only ever
+        // given to a divergence.
+        let ix = Index::new();
+        {
+            let mut g = ix.inner.write().unwrap();
+            for r in [
+                rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), Some("k1")),
+                rec("1700000002-ba", "pkg:npm/b@1", Some("divergent"), Some("k2")),
+                rec("1700000003-bb", "pkg:npm/b@1", Some("divergent"), Some("k2")),
+            ] {
+                g.records.insert(r.id.clone(), r);
+            }
+            g.entries = build(
+                &g.records,
+                Switches {
+                    stop_divergences: true,
+                },
+            );
+            let reasons: Vec<_> = g
+                .entries
+                .iter()
+                .filter_map(|e| e.publication.because().map(|w| w.key()))
+                .collect();
+            assert!(reasons.contains(&"kill_switch"), "{reasons:?}");
+        }
+        let s = ix.stats(true);
+        assert_eq!(
+            s.by_withheld,
+            BTreeMap::from([("withheld".to_string(), 3)]),
+            "the public count is a total, never a reason"
+        );
+        assert!(ix.stats(false).by_withheld.is_empty(), "an operator is shown every row");
     }
 
     #[test]

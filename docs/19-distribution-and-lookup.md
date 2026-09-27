@@ -9,7 +9,7 @@ decisions it waits on. What exists today:
 | Signing: DSSE and in-toto, with an ed25519 key we hold | built (`trigon attest`) |
 | ADR-0010's publication gate (`publication::decide`) | built, and consulted by `trigon serve` only, not by any publishing path |
 | `verify-attestation --rerun-comparison`, `Match::is_at_least` | built |
-| A lockfile check by purl against the local store (`trigon check`, `POST /v1/check`) | built; §6 says what it lacks, and §10 phase 0 fixes a leak in it |
+| A lockfile check by purl against the local store (`trigon check`, `POST /v1/check`) | built; §6 says what it lacks. §10 phase 0 closed its leak ([findings](16-findings.md) §3.93) |
 | Rekor publication (`attest --rekor`) and verification (`verify-attestation --transparency`) | built, measured, and **to be removed** (ADR-0014) |
 | The evidence repository, the evidence log, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
 

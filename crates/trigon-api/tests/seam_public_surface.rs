@@ -233,18 +233,30 @@ async fn the_contract_describes_the_router_that_exists() {
     assert_eq!(status, 200);
     let doc: serde_json::Value = serde_json::from_str(&body).expect("openapi is json");
     let paths = doc["paths"].as_object().expect("paths");
+    // Every verb the table gives a path, and no other. A set rather than one verb per path:
+    // `/v1/runs` is browsed with `GET` and asked of with `POST`, and a document with room for one
+    // of them had listed it as the verb it is not browsed with.
+    for (path, ..) in trigon_api::routes::ROUTES {
+        assert!(
+            paths.contains_key(*path),
+            "{path} is in the table and not in the contract"
+        );
+    }
     for (path, spec) in paths {
-        let ops: Vec<&String> = spec.as_object().expect("operations").keys().collect();
-        assert_eq!(ops.len(), 1, "{path} declares more than one verb");
-        let declared = ops[0].as_str();
-        let expected = trigon_api::routes::ROUTES
+        let declared: std::collections::BTreeSet<&str> = spec
+            .as_object()
+            .expect("operations")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = trigon_api::routes::ROUTES
             .iter()
-            .find(|(p, ..)| p == path)
+            .filter(|(p, ..)| p == path)
             .map(|(_, verb, _)| *verb)
-            .unwrap_or("get");
+            .collect();
         assert_eq!(
             declared, expected,
-            "{path} is rendered as `{declared}` and the table says `{expected}`"
+            "{path} is rendered with {declared:?} and the table says {expected:?}"
         );
     }
     // And every concrete route actually answers rather than 404ing, which is what makes the

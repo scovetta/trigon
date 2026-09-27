@@ -3687,3 +3687,55 @@ A second review of the git design, against GitHub's documentation, the C2SP spec
   plant leaves beyond the checkpoint for our next publication to sign. `publish` now builds only on
   the leaves a verified checkpoint covers, and `log sign` checks every new leaf against a record it
   can verify.
+
+### 3.93 The anonymous surface asks the gate before it says `divergent`
+
+`POST /v1/check` answered anonymous callers from `Index::newest_for`, which does not consult
+publication, so a withheld divergence reached anyone as `divergent` ([3.92](#392)). Filtering on
+"public" would not have fixed it: `Publication::is_public` is true for a `Void` run, and an
+open-egress divergence still carries the outcome `divergent`. `GET /v1/runs`, `/v1/runs/{id}`,
+`/v1/targets/{purl}` and `/v1/artifacts/{digest}` serialized that outcome to anybody, and so did
+the record beside the entry, the rendered diff, the run page's boot island, `?outcome=divergent`
+(which listed the row even with the word removed) and the `/v1/stats` counts.
+
+`docs/19` §10 phase 0 closes it. An anonymous check answers only from runs the gate calls
+`Published`; a `Void` run is `unsupported`, with the gate's reason; a `Withheld` run is absent, so
+the newest older run the gate releases answers, or `never checked`. An operator is answered from
+the whole store, ungated, as `trigon check` answers from a local one, and the handler's doc comment
+now says both. An anonymous reader of a void run gets the row with its reason and without its
+outcome, not counted as evidence; the record with nothing the comparison decided on it; and a
+`published_as_void` refusal in place of the rendered diff. The serve UI draws that row as `void`,
+with the reason.
+
+The first version was checked against `trigon serve --public` with no queue, and said no anonymous
+route returned `divergent`. Review found that wrong, and found more:
+
+- **`GET /v1/jobs/{id}/events` served the worker's `outcome` note**, the comparison's label, written
+  for every attempt before the gate runs, and `/v1/queue` hands out job ids. The route was missing
+  from `routes::ROUTES`, which the seam sweep is built from, as were `/v1/queue`, `/v1/me` and
+  `GET /v1/runs`. An anonymous reader now gets phases and times and no notes, and a test holds the
+  table to the router.
+- **The void's record said the verdict in other words**: `rebuild` (its digest is `upstream`'s on
+  `exact`, and a prune keeps only a divergence's bytes), `transparency` (the verdict statement's log
+  entry), `costs` and `transcript` (the rebuild's and the comparison's bytes, and a model asked only
+  about a divergence). `record_shown` now names every field, so a new one does not compile until it
+  is classified.
+- **A withheld row was matched on its real outcome**, so `?q=<package>&outcome=divergent` answered
+  `"withheld":1` where `outcome=exact` answered 0. It is matched without one, and still counted.
+- The `non_builtin_stabilizer` sentence told a reader of a package that matched that it would
+  otherwise have been a divergence; the per-run routes refused a withheld id and an absent one
+  differently; and the `void` bar filtered to nothing.
+
+Confirmed by `crates/trigon-api/tests/seam_publication_gate.rs`: a test per done-when item; a sweep
+of every route in the contract, over a sqlite queue holding the worker's notes; and §4.3 in its
+strongest form, that a void which matched and one which diverged, and a withheld match and a
+withheld divergence, get byte-identical answers to every anonymous request (the comparison's
+digest, kept on purpose, held equal). Each fix was reverted in turn to see a test fail.
+
+**Also closed: withheld counts by reason.** `/v1/stats` and `/v1/fleet` counted withheld runs by
+reason, and `kill_switch`, `image_derived_outside_boundary` and `provenance_unknown` are given only
+to a confirmed divergence, so `by_withheld` published how many there were, and on a small corpus one
+held-back package and its reason key were the accusation. An anonymous reader now gets one total,
+`withheld`; a total is safe because every outcome can be awaiting confirmation. The operator view is
+unchanged. `an_anonymous_reader_gets_one_withheld_total_and_no_reason_that_only_a_divergence_has`
+holds it.

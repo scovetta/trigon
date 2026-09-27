@@ -112,9 +112,13 @@ impl Withheld {
                 "the build reached the published artifact over the network, so a match would prove \
                  only that it downloaded it."
             }
+            // Said of every run this voids, a match among them: `decide` voids on this clause
+            // whatever the outcome. It said "void rather than a divergence", which told a reader
+            // that a package that reproduced would otherwise have been accused.
             Withheld::NonBuiltinStabilizer => {
                 "a stabilizer a person or a model wrote was applied, so the normalization is itself \
-                 a judgement call and this publishes as void rather than as a divergence."
+                 a judgement call, and the run is evidence of nothing about the package in either \
+                 direction."
             }
             Withheld::ImageDerivedOutsideBoundary => {
                 "this run built its own base image, which spends network outside the boundary the \
@@ -487,6 +491,61 @@ mod tests {
             let d = decide(&r, c, Switches::default());
             assert_eq!(d, Publication::Void { because: expect });
             assert!(d.is_public(), "a void is shown, not hidden");
+        }
+    }
+
+    /// A void's reason is shown beside a match as often as beside a divergence, so it may not say
+    /// which one it is beside.
+    ///
+    /// `decide` voids on safeguard 2 before it reads the outcome, so a hand-written pass that made
+    /// two sides agree voids the run too. The `NonBuiltinStabilizer` sentence said it "publishes as
+    /// void rather than as a divergence", and an anonymous check of a package that reproduced
+    /// answered with it: no verdict leaked, and an accusation was planted all the same. Both copies
+    /// of the sentence are read, because the page shows the other one.
+    #[test]
+    fn a_void_says_nothing_about_which_way_the_run_went() {
+        let js = include_str!("../ui/app.js");
+        let table = js
+            .split_once("const withheldTitle")
+            .expect("the page still renders a reason")
+            .1;
+        for (egress, guard, non_builtin, cause) in [
+            ("open", false, false, Withheld::OpenEgress),
+            ("mirror", true, false, Withheld::GuardTripped),
+            ("mirror", false, true, Withheld::NonBuiltinStabilizer),
+        ] {
+            for outcome in [
+                "exact",
+                "normalized",
+                "normalized_with_caveats",
+                "divergent",
+            ] {
+                let mut r = record(Some(outcome), egress);
+                if guard {
+                    r.guard_trips
+                        .push("the build fetched its own artifact".into());
+                }
+                let c = Corroboration {
+                    non_builtin_stabilizer: Some(non_builtin),
+                    ..confirmed()
+                };
+                assert_eq!(
+                    decide(&r, c, Switches::default()),
+                    Publication::Void { because: cause },
+                    "{outcome}: the premise, that this reason is given whatever the outcome"
+                );
+            }
+            let row = table
+                .split_once(&format!("{}:", cause.key()))
+                .and_then(|(_, rest)| rest.lines().next())
+                .unwrap_or_else(|| panic!("the page has no row for {cause:?}"));
+            for (whose, s) in [("the server's", cause.sentence()), ("the page's", row)] {
+                assert!(
+                    !s.contains("divergen"),
+                    "{whose} sentence for {cause:?} names a divergence, and it is shown for runs \
+                     that matched: {s}"
+                );
+            }
         }
     }
 
