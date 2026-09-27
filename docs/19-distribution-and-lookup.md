@@ -296,10 +296,13 @@ file, that file is read instead.
 [publish]
 repo = "git@github.com:<owner>/trigon-evidence.git"  # or https://…, ssh://…, file://…, a path
 branch = "main"
+origin = "github.com/<owner>/trigon-evidence"        # the log's origin, signed into records (D3)
+disputes = "https://github.com/<owner>/trigon-evidence/issues"   # the dispute pointer (D3)
 log_key = "~/.config/trigon/log.key"                 # read only by `trigon log sign`
 divergences = "refuse"                               # or "feed" (D7)
 rebuilt_artifacts = "none"                           # or "github-release" (D4)
 same_host_confirmation = false                       # D8
+confirmation_interval = "1h"                         # least time between agreeing attempts
 heartbeat = "7d"                                     # §7
 
 [freshness]
@@ -335,6 +338,13 @@ from such a source names the file that added it.
 - `TRIGON_EVIDENCE_CACHE` replaces `$XDG_CACHE_HOME/trigon/evidence` as the directory clones are
   kept in, and `TRIGON_EVIDENCE_STATE` replaces `$XDG_STATE_HOME/trigon/evidence` as the one each
   source's last accepted checkpoint and key history are kept in (§6.1).
+
+`attest` reads `origin` and `disputes` and signs them into the falsifying command and the dispute
+pointer (§4.2 item 6) when both are set, and leaves both out, absent rather than empty, when they
+are not, so attesting for local use needs no repository. `publish` refuses a statement that lacks
+them, or names another origin, and a repository whose `keys/log.vkey` names a different origin.
+`publication::decide` reads `same_host_confirmation` and `confirmation_interval` wherever it runs,
+`trigon serve` included.
 
 **Pins.** A source is pinned by its log key, whose name is the log's origin, and its attestation
 key. Its initial checkpoint is optional: without one, the first sync accepts the first checkpoint
