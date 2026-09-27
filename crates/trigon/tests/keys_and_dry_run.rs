@@ -52,7 +52,7 @@ fn a_generated_key_is_usable_and_only_by_its_owner() {
     // the moment to say so is the moment the key is made.
     let hex = text
         .lines()
-        .find_map(|l| l.strip_prefix("public key  "))
+        .find_map(|l| l.trim_start().strip_prefix("public key "))
         .expect("keygen prints the public key")
         .trim()
         .to_string();

@@ -476,7 +476,7 @@ fn a_wheel_gets_the_wheel_profile_not_the_zip_one() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("stabilizer set wheel"), "{text}");
+    assert_eq!(stabilizer_set(&text).as_deref(), Some("wheel"), "{text}");
 
     // .tgz stays generic on purpose: an npm tarball is a .tgz and so is a great deal else, and
     // nothing in the name says which.
@@ -489,7 +489,17 @@ fn a_wheel_gets_the_wheel_profile_not_the_zip_one() {
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("tar+gzip"), "{text}");
-    assert!(!text.contains("stabilizer set npm"), "{text}");
+    // Positively, not "not npm": a check for the absence of one label passes just as well when
+    // the label is renamed, which is how this one went vacuous once already.
+    assert_eq!(stabilizer_set(&text).as_deref(), Some("tar-gzip"), "{text}");
+}
+
+/// The set `trigon verify` says it compared under: the first word after the `stabilizers` label.
+fn stabilizer_set(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.trim_start().strip_prefix("stabilizers "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
 }
 
 fn write_zip(path: &Path, members: &[(&str, &[u8])]) {

@@ -3354,10 +3354,13 @@ fn stabilizers(prof: &str) -> Result<()> {
             trigon_stabilize::all_profiles().join(", ")
         )
     })?;
+    // The digest in full, unlike everywhere else a digest is shown: printing it is what this command
+    // is for, and a statement signs all 64 hex characters, so twelve of them cannot be compared
+    // against one. It is one line, and a terminal narrower than it wraps a heading, not a table.
     println!(
         "{} {}",
         style::heading(&set.id.to_string()),
-        style::muted(&format!("({})", short(&set.digest().to_hex())))
+        style::muted(&format!("({})", set.digest()))
     );
     println!();
     // Sized to the longest id present rather than to a guess: `gem-metadata-rubygems-version` is
