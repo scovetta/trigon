@@ -3609,3 +3609,81 @@ Both are fixed at the source. `apply_traced` fingerprints every entry before and
 This makes the transform legible member by member, and closes the two gaps [3.90](#390) could not. A `.dll` whose body a pass rewrote shows that work *even when it ends byte-identical* — Moq's assemblies, reconciled by `dotnet-il-canonical`, left no code and so were invisible at the member level before; now the member opens to `body ✓ dotnet-il-canonical`. And where the code survives, the residual names the pass that tried: Newtonsoft.Json@11.0.1's DLLs read `body ↳ dotnet-assembly-identity, dotnet-il-canonical` — compared by IL and divergent anyway, which is the honest statement that the divergence is a real source-level change (its stale-SDK rebuild), not packaging. Of the run's 23 members, 13 now read fully reconciled, each field joined to the exact pass behind it.
 
 **A comparator wart this exposed, and where it is handled.** `signature` compares the stabilized archive *in memory*, where three fields are stale shadows of what the writer will emit: an entry's `size` and `zip.crc32` are recomputed from the body on every write (`trigon_archive::zip`), and a zip's `meta.mode` is a parse-time shadow of `external_attrs`, which is what the writer actually stores. So a member the passes made byte-identical can still carry `entry:size`, `entry:zip.crc32` and `entry:mode` codes that cannot reach the output. These are filtered from the *projection* — `size` and `crc32` always (redundant with `body@`), `mode` when `external_attrs` was reconciled — so the UI does not report "still differs" on a member that is byte-for-byte identical. The stored blob keeps every code, and the real fix (not emitting a difference for a field the writer recomputes) belongs in `signature` itself, where it changes the published divergence signature and so is deferred to a change that can version it — see B47.
+
+### 3.92 What a review of the publication design measured, and why Rekor is being removed
+
+`docs/19` was reviewed against the code, against Rekor, GHCR and the OCI specifications, and for
+internal consistency. Every finding went to an independent verifier that tried to refute it: 55
+findings, 54 survived (34 as stated, 20 with a correction). The ones that decided
+[ADR-0014](adr/0014-git-evidence-store-without-rekor.md), all measured between 2026-09-17 and
+2026-09-23:
+
+- **A Rekor entry commits hashes and no field of the statement.** The committed body of an `intoto`
+  v0.0.1 entry is the envelope hash, the payload hash and the verification key or certificate
+  (staging index 56040866, decoded, commits a whole self-signed certificate; `Canonicalize()` in
+  Rekor's source). The previous `docs/19` §2.2's log entry "carrying" the outcome and set digest,
+  and the "full statement" row of its §3 table, could not have been built with any entry type that
+  takes an in-toto statement.
+- **Rekor v1 serves the full statement anyway.** Its uncommitted attestation store keeps a decoded
+  payload of 100 KiB or less and serves it: staging entry 56042318 returns a whole `equivalence/v1`,
+  whose sha256 equals the committed payload hash. `attest --rekor` never consulted
+  `publication::decide`, so a divergence published that way would have sat in full in storage we
+  cannot correct.
+- **The index claim in `docs/09` §3 and the previous `docs/19` §2.1 was wrong.** Querying Rekor's
+  index by the artifact's sha256 returns our entries (the chardet wheel returns two). The earlier
+  `[]` came from a fixture whose subject digest was a placeholder. Querying by the public key does
+  return `[]`, but because the search and the index spell the key's hash differently, not because of
+  Fulcio.
+- **Rekor v2 cannot take our statements.** GA 2025-10-10; `intoto` dropped, `dsse` dropped in
+  rekor-tiles v2.3.0 (2026-06-10), no attestation storage, no Signed Entry Timestamp, no search, and
+  `hashedrekord` rejects pure Ed25519, which is what Trigon signs with. The public instance keeps
+  Rekor v1 as its default log "for the foreseeable future".
+- **ADR-0011's time bound was never live.** `within_validity`, the check that would compare the
+  log's time with a certificate window, is called only from tests, and no certificate chain exists
+  to check against.
+- **GHCR has no OCI 1.1 referrers API.** `GET /v2/<name>/referrers/<digest>` returns 404 even for
+  manifests that exist. The spec's fallback, a `sha256-<hex>` tag naming an image index, works there
+  and is what GitHub's own attest action uses, and concurrent writers to one such tag drop entries
+  (miracum/.github#212). cosign and oras have no mode for attaching to a subject outside the
+  registry, which the previous `docs/19` §2.1 said they had.
+- **Nothing in the local store is publishable.** `decide` requires two agreeing attempts counted by
+  cache key, and 0 of 370 runs have one, because only worker jobs set it.
+- **Signed history is being overwritten.** Attestations are stored per target, so a later `attest`
+  overwrites an earlier one: 40 of 93 attestation paths are shared by more than one run.
+- **`POST /v1/check` leaks withheld verdicts.** It is anonymous and answers from
+  `Index::newest_for`, which ignores publication, so it reports a withheld divergence as divergent;
+  its doc comment says the opposite. Confirmed by reading `fleet.rs` and `index.rs`; the fix is
+  phase 0 of the build plan in `docs/19` §10.
+- **npm downloads are not verified against the registry.** The fetcher reads only a `sha256-`
+  integrity string and npm publishes sha512 and sha1, so `declared_sha256` is always absent. The
+  code says so rather than pretending, and the fix belongs with multi-digest subjects (`docs/19`
+  §5).
+
+`docs/19` was rewritten from these, and its build plan (§10) is ordered by them: close the gate
+bypass, accept the decisions, remove Rekor, change what the statements carry before anything is
+published, make a run publishable at all, and only then build the store.
+
+A second review of the git design, against GitHub's documentation, the C2SP specifications and `git`
+2.43 itself, changed it in these places:
+
+- **The checkpoint's time line would never have become third-party.** C2SP tlog-checkpoint calls
+  extension lines not recommended, an Ed25519 cosignature makes no statement about them, and an
+  ML-DSA-44 cosignature does not cover them. The time moved into every leaf, with a weekly heartbeat
+  leaf, and a source whose newest leaf is too old now answers unknown, because a host serving an old
+  but consistent log could otherwise turn a withdrawal back into a verdict.
+- **A sparse checkout alone still downloads every blob.** Measured: only `--filter=blob:none` keeps
+  `evidence/` out of a clone. A depth-1 clone cannot fast-forward, so a sync is a depth-1 fetch and
+  a hard reset, and a shallow clone is a copy of the log, not of the history.
+- **Two hex characters of fan-out would have put some 4,000 files in a directory** at a million
+  records. GitHub recommends at most 3,000, and its file browser lists 1,000. It is four everywhere.
+- **Classic branch protection exempts admins by default**, so the repository uses a ruleset with an
+  empty bypass list; a write deploy key never expires, so a fine-grained or GitHub App token is the
+  narrower credential; a release holds at most 1,000 assets; and unauthenticated clones are
+  rate-limited like any other request.
+- **The index was a way to hide a record.** Clients now resolve keys from the verified leaves, which
+  carry every digest and the purl, and read `index/` only for `--remote`, which proves inclusion
+  from the tiles.
+- **`publish` would have signed leaves it did not write.** A holder of the push credential could
+  plant leaves beyond the checkpoint for our next publication to sign. `publish` now builds only on
+  the leaves a verified checkpoint covers, and `log sign` checks every new leaf against a record it
+  can verify.

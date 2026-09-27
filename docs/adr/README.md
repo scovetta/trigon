@@ -18,3 +18,4 @@ considered, and the reasoning, so the reasoning outlasts the people who did the 
 | [0011](0011-keyed-signing-under-a-trusted-root.md) | Sign with a key under a trusted root, and log to Rekor anyway — not keyless |
 | [0012](0012-base-images-supply-bytes-not-decisions.md) | A base image supplies bytes, never decisions — few images, no version axis |
 | [0013](0013-a-cache-supplies-bytes-never-decisions.md) | A cache supplies bytes, never decisions — behind the mirror, three tiers, the index tier records its staleness |
+| [0014](0014-git-evidence-store-without-rekor.md) | **Proposed.** Publish evidence to a public git repository with a log we sign, and drop Rekor |
