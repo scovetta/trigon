@@ -26,7 +26,7 @@ per-phase timings and for `failed_in`:
 | `Compare` | One pass, six digests, structured notes | yes |
 | `Explain` | Classify remaining differences (deterministic rules, model fallback) | AI-assisted, advisory |
 | `Attest` | Build in-toto statements, sign in a separate process | yes |
-| `Publish` | Object store, metadata store, optional transparency log | yes |
+| `Publish` | Object store and metadata store, then an evidence repository with a log we sign ([`19`](19-distribution-and-lookup.md); planned) | yes |
 
 ```
                     ┌──────────────┐

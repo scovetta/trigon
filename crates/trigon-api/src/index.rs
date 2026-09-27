@@ -128,10 +128,10 @@ impl Entry {
 /// **Every field is named, on purpose.** The first version cleared three fields and left others
 /// saying the same thing: `rebuild`, whose digest equals `upstream`'s exactly when the run was
 /// `exact`, and whose `stored` flag after `attest --prune` is kept on a divergence and dropped on
-/// a match; and `transparency`, the log entry for the very statement `attestations` was cleared
-/// to hide. A list of fields to remove misses the next one, so the record is taken apart without
-/// `..`, and a field added to `RunRecord` does not compile here until somebody has decided whether
-/// an anonymous reader of a void may see it.
+/// a match; and the external log's entry for the very statement `attestations` was cleared to
+/// hide, a field since removed with the log (ADR-0014). A list of fields to remove misses the next
+/// one, so the record is taken apart without `..`, and a field added to `RunRecord` does not
+/// compile here until somebody has decided whether an anonymous reader of a void may see it.
 pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> RunRecord {
     if !(public && matches!(publication, Publication::Void { .. })) {
         return r;
@@ -175,10 +175,8 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         // Gone: the rebuilt artifact. See above: its digest and its retention both say the verdict.
         rebuild: _,
         // Gone: named by predicate (`divergence.intoto.json`), pointing at statements
-        // `/v1/runs/{id}/attestation` refuses this reader; and the log entry for the same
-        // statement, which says where to read it instead.
+        // `/v1/runs/{id}/attestation` refuses this reader.
         attestations: _,
-        transparency: _,
         // Gone: a model's reading of the diff, which is only ever asked of a divergence and so
         // names one by existing.
         diff_opinion: _,
@@ -224,7 +222,6 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         attestations: Vec::new(),
         non_builtin_stabilizer,
         diff_opinion: None,
-        transparency: None,
     }
 }
 

@@ -152,12 +152,17 @@ maintaining one whose shape is a guess. It arrives with M4.
       `rebuild/v1` already carries the SLSA shape but not the predicate type, and claiming
       conformance is worth doing only against the conformance suite.
 - [x] Signing works unsigned and with a local ed25519 key, with `trigon keygen` to make one.
-- [x] Statements publish to a Rekor transparency log (`--rekor`, `intoto` v0.0.1), and the log's
-      signed entry timestamp verifies offline in the `--no-default-features` verifier. Proven
-      against `rekor.sigstage.dev`.
-- [ ] A certificate chain to a pinned root, so the verified timestamp is checked against a validity
-      window and becomes load-bearing — [B21](17-backlog.md) steps 4-5. **Sigstore keyless is not
-      planned**; [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) has the reasoning.
+- [x] ~~Statements publish to a Rekor transparency log, and the log's signed entry timestamp
+      verifies offline in the `--no-default-features` verifier.~~ Built, measured against staging,
+      and removed by [ADR-0014](adr/0014-git-evidence-store-without-rekor.md): Rekor could not hold
+      what a published record has to carry, served divergences where we cannot correct them, and
+      its successor cannot take our signatures ([`16`](16-findings.md) §3.92). Publishing is now
+      [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md), an evidence repository with
+      a log of our own, and is planned rather than built.
+- [ ] A certificate chain to a pinned root — [B21](17-backlog.md) steps 4-5 — or key epochs sealed
+      in the evidence log instead, as docs/19 D6 decides. Either bounds a stolen key, which nothing
+      does today. **Sigstore keyless is not planned**;
+      [ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) has the reasoning.
 - [x] The attestor runs as a separate process and **re-derives the claim before signing**.
       `trigon attest` reads a store written by `trigon rebuild --store`, fetches every blob **by
       hash and checks it against that hash**, recomputes the claim from the artifact bytes, and

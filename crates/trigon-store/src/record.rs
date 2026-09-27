@@ -222,6 +222,10 @@ fn one() -> u32 {
 }
 
 /// Everything one run produced, with the large parts left in the blob store.
+///
+/// Deliberately without `deny_unknown_fields`: a store holds run files written by every earlier
+/// version, some carrying keys this struct has since dropped, and each must still read.
+/// `tests/old_run_files.rs` holds one such file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
     pub id: String,
@@ -416,20 +420,6 @@ pub struct RunRecord {
     /// `None` means no model, nothing to show, or the ask failed — never "the diff is fine".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_opinion: Option<trigon_core::DiffOpinion>,
-
-    /// What a transparency log said about this run's equivalence statement, where one was asked.
-    ///
-    /// The log index, the UUID, the instant, and the log's signature over all three. Kept on the
-    /// record rather than only in the log because it is what a verifier needs in order to check
-    /// *when* the statement was signed — the number a certificate's validity window is tested
-    /// against, and under [ADR-0011] the only thing bounding a compromise of a key we hold.
-    ///
-    /// `None` means no log was asked, which is the common case for a local run and is not the same
-    /// as a log that refused.
-    ///
-    /// [ADR-0011]: ../../../docs/adr/0011-keyed-signing-under-a-trusted-root.md
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transparency: Option<trigon_attest::LogEntry>,
 }
 
 impl RunRecord {
@@ -527,7 +517,6 @@ impl RunRecord {
             attestations: Vec::new(),
             non_builtin_stabilizer: None,
             diff_opinion: None,
-            transparency: None,
         }
     }
 

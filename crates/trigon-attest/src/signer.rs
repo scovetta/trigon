@@ -3,7 +3,7 @@
 //! Synchronous, which departs from `docs/09` §3. The reason is the verifier build: it links this
 //! crate and must contain no async runtime, and a synchronous trait can be called from an async
 //! context by whatever holds the runtime while the reverse needs an executor everywhere. Local and
-//! subprocess signers are the ones that exist; a network signer (sigstore, KMS) blocks in its own
+//! subprocess signers are the ones that exist; a network signer (a KMS) blocks in its own
 //! implementation or lives behind an async façade in a crate below the line.
 
 use base64::Engine as _;
@@ -36,7 +36,8 @@ impl Signer for Unsigned {
     }
 }
 
-/// An ed25519 key held in a file. Development and air-gapped use.
+/// An ed25519 key held in a file. Development and air-gapped use, and, until a root exists, the
+/// single pinned key records are published under (ADR-0014 Decision 8).
 pub struct LocalKey {
     key: SigningKey,
     key_id: String,
@@ -77,7 +78,9 @@ impl LocalKey {
         hex(self.key.verifying_key().as_bytes())
     }
 
-    /// The public key as SPKI PEM, which is what a transparency log takes.
+    /// The public key as SPKI PEM, which is what `openssl` and most other tools read, and the form
+    /// an evidence repository publishes its attestation key in (`keys/attestation.pub`, docs/19
+    /// §2.3).
     ///
     /// Hand-built rather than pulled from a PEM crate, because for ed25519 the SPKI DER is a fixed
     /// twelve-byte prefix and the thirty-two key bytes — `SEQUENCE { SEQUENCE { OID 1.3.101.112 },
@@ -168,15 +171,15 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod pem_tests {
     use base64::Engine as _;
+    use ed25519_dalek::pkcs8::DecodePublicKey as _;
 
     use super::LocalKey;
 
     #[test]
     fn the_public_pem_is_spki_and_round_trips_through_a_real_parser() {
         // Hand-built DER is exactly the kind of thing that looks right and is off by a byte, so it
-        // is checked against a parser that did not write it: `p256`'s SPKI decoder rejects the key
-        // type, and the error it gives says *which* — which is only possible if the structure
-        // parsed. A malformed prefix fails differently.
+        // is checked against a parser that did not write it: `ed25519-dalek`'s own SPKI decoder,
+        // which has to read the structure, the algorithm and the key back to the same key.
         let key = LocalKey::from_bytes(&[7u8; 32]).unwrap();
         let pem = key.public_pem();
         assert!(pem.starts_with("-----BEGIN PUBLIC KEY-----\n"));
@@ -195,5 +198,9 @@ mod pem_tests {
         // The OID for id-Ed25519, where RFC 8410 §4 puts it.
         assert_eq!(&der[4..9], &[0x06, 0x03, 0x2b, 0x65, 0x70]);
         assert_eq!(&der[12..], key.public_key().as_bytes());
+
+        let parsed = ed25519_dalek::VerifyingKey::from_public_key_pem(&pem)
+            .expect("a PEM decoder that did not write this reads it");
+        assert_eq!(parsed, key.public_key());
     }
 }

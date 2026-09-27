@@ -3739,3 +3739,66 @@ held-back package and its reason key were the accusation. An anonymous reader no
 `withheld`; a total is safe because every outcome can be awaiting confirmation. The operator view is
 unchanged. `an_anonymous_reader_gets_one_withheld_total_and_no_reason_that_only_a_divergence_has`
 holds it.
+
+### 3.94 Rekor and Sigstore removed, with the decisions accepted first
+
+`docs/19` §10 phases 0b and 1, on 2026-09-27.
+
+**The decisions came first, because the removal takes out a path an accepted ADR mandated.**
+[ADR-0014](adr/0014-git-evidence-store-without-rekor.md) is accepted. ADR-0011 says it is partly
+superseded, names the parts, and carries a short note at each so a reader of its body is not misled.
+ADR-0010 is amended, with an Amendments section ahead of its Decision: publishing is an explicit
+`trigon publish`; correction is by supersession; disagreeing attempts are withheld rather than void;
+safeguard 1 covers verdicts only; safeguard 4 is whatever D7 decides, and divergences are refused
+until then; and same-host confirmation stays a setting, `same_host_confirmation`, default `false`,
+because D8 has not accepted it. ADR-0008 gains the evidence store row, and its Signer row now says
+what exists, a local file key. Backlog B10 points at `docs/19` and takes its phases as its
+done-when; B21 is the chain alone, done when a statement under a real chain verifies in the verifier
+and the negatives fail, with the time check deferred to phase 7a and dropped if D6 chooses key
+epochs; and B29's three items about the log client are written off with the code they were about.
+
+The threat model keeps the operator — whoever passes the flags — out of scope, and gains A8, the
+operator of an evidence repository a client trusts, and A9, a host or mirror serving a stale or
+split view, both marked as adversaries of a store not yet built. A project's `.trigon/evidence.toml`
+is a §1.7 row, input chosen by the thing under test. The one transparency-log passage, §1.13's
+`--transparency` paragraph, is gone, and what it disclaimed is now D24: nothing bounds a stolen
+signing key. The sidecar generator's adversary list gained A8 and A9 and `docs/threat-model.yaml`
+was regenerated from the prose. **The prose census had drifted before this change**: it said 192
+documented tags, and the generator counted 195 at `d85ed4b`. It says 201 now, which is what the
+generator counts.
+
+**What was removed.** `trigon-attest`'s `transparency` module and everything it exported
+(`LogEntry`, `intoto_entry`, `known_log`, `log_key_id`, `payload_id`, `utc_rfc3339`,
+`within_validity`), and `p256`, which took ten crates out of `Cargo.lock`. The binary's log client
+and its tests, including the `TRIGON_LIVE` fetch from staging; the attest flag that logged a
+statement and its dry run; `verify-attestation`'s entry check, its log-key flag and the matching
+key of `--output json`; `RunRecord.transparency`, with the arm of `record_shown` that hid it from an
+anonymous reader of a void (phase 0's test lost it from the fields it checks are gone); the fifth
+column of `trigon runs`; the log options of `scripts/rebuild-and-attest.sh`, and the verify line it
+printed for them; six fixtures and two test files; and the two dry-run tests in
+`crates/trigon/tests/keys_and_dry_run.rs`. The prose followed: `README.md`, `docs/00`, `01`, `09`,
+`11`, `13` and `using-trigon.md`. `docs/09` §2's `buildobservation` row was wrong on its own
+account, and now says its subject is the upstream artifact and that every attested run emits one.
+`crates/trigon` keeps `reqwest`, which nothing in it calls now, for phases 5 and 6; its manifest
+says so.
+
+**What the greps show.** `git grep -i -e rekor -e sigstore -- crates scripts xtask` is empty, and
+so is `git grep -e '--rekor' -e '--transparency' -- README.md docs ':!docs/16-findings.md'
+':!docs/adr' ':!docs/19-distribution-and-lookup.md'`. `transparency` survives in `crates/` in one
+file, `crates/trigon-store/tests/old_run_files.rs`.
+
+**The archive.** One stored run, `1789588410-870c0fe1`, carried a `transparency` value, staging
+index 56044745, which its next rewrite drops. The file is copied byte for byte to
+`crates/trigon-store/tests/fixtures/run-1789588410-870c0fe1.json.gz`. It is gzipped because its
+`log` field names the removed log, and the first grep above has to come back empty over `crates/`;
+the test checks the decompressed bytes against the stored file's sha256, `d8e29e04…`, so the
+archive cannot quietly stop being that file. It reads the file through `Store::get_run`, as `trigon
+runs`, `attest` and `serve` do, and then writes it back: the key is gone and every other value is
+unchanged. `RunRecord`'s doc comment now says why it has no `deny_unknown_fields`.
+
+**Two small things found on the way.** The SPKI PEM test in `signer.rs` said it checked the
+hand-built DER "against a parser that did not write it", `p256`'s, and parsed nothing; it now reads
+the PEM back with `ed25519-dalek`'s own SPKI decoder and compares keys. And nothing pinned the keys
+of `verify-attestation --output json`, so the one removed here could have gone, or another come,
+without a test noticing; `verify_attestation_json_carries_exactly_the_keys_its_help_names` pins the
+five that remain, and `runs_prints_the_id_first_and_the_target_second` now fails on a fifth column.

@@ -30,10 +30,6 @@ usage: rebuild-and-attest.sh <purl> [options]
                     are a surprise. `replay:<transcript.json>` answers from a recording and opens
                     no socket, which is the form to use in a test.
   --prune           drop the rebuilt bytes after attesting, keeping the digests
-  --rekor <url>     publish the equivalence statement to a transparency log and record what it
-                    said. Needs --key. Use https://rekor.sigstage.dev while working things out:
-                    a log is append-only, so a production entry is there permanently.
-  --dry-run         with --rekor, print the exact entry that would be posted and post nothing
 USAGE
     exit 2
 }
@@ -49,8 +45,6 @@ EGRESS="mirror-only"
 IMAGE=""
 MODEL=""
 PRUNE=""
-REKOR=""
-DRYRUN=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -61,24 +55,10 @@ while [ $# -gt 0 ]; do
         --image)  IMAGE="$2";  shift 2 ;;
         --model)  MODEL="$2";  shift 2 ;;
         --prune)  PRUNE=1;     shift ;;
-        --rekor)  REKOR="$2";  shift 2 ;;
-        --dry-run) DRYRUN=1;   shift ;;
         -h|--help) usage ;;
         *) echo "unknown option: $1" >&2; usage ;;
     esac
 done
-
-# Checked here rather than after the rebuild: the attestor refuses this too, but by then a build has
-# already run, and finding out then costs minutes for a mistake visible now.
-if [ -n "$REKOR" ] && [ -z "$KEY" ]; then
-    echo "--rekor needs --key: a log entry for an unsigned statement records that nobody stands" >&2
-    echo "behind it, and the log is append-only. Make a key with: trigon keygen --out <path>" >&2
-    exit 2
-fi
-if [ -n "$DRYRUN" ] && [ -z "$REKOR" ]; then
-    echo "--dry-run previews the log entry, so it needs --rekor <url>" >&2
-    exit 2
-fi
 
 # Prefer a built binary over whatever is on PATH, so a checkout tests itself.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -211,8 +191,6 @@ say "attesting $LATEST"
 ATTEST_ARGS=(attest "$LATEST" --store "$STORE")
 [ -n "$KEY" ] && ATTEST_ARGS+=(--key "$KEY")
 [ -n "$PRUNE" ] && ATTEST_ARGS+=(--prune)
-[ -n "$REKOR" ] && ATTEST_ARGS+=(--rekor "$REKOR")
-[ -n "$DRYRUN" ] && ATTEST_ARGS+=(--dry-run)
 
 if ! "$TRIGON" "${ATTEST_ARGS[@]}"; then
     cat >&2 <<'WHY'
@@ -231,18 +209,6 @@ fi
 
 if [ -z "$KEY" ]; then
     printf '\n  note: written unsigned. Pass --key for an attributable statement.\n'
-fi
-
-# A dry run wrote nothing, so it must not close with the paths and the verify line a real run ends
-# on: the statements directory does not exist, and this script's own contract is that exit 0 means a
-# statement was written. Say what happened and stop.
-if [ -n "$DRYRUN" ]; then
-    printf '\n\033[1mdry run\033[0m — the entry above was not posted, and no statement was signed\n'
-    printf '  or stored. The rebuild before it is real and its record and blobs are in the store,\n'
-    printf '  which is what makes a later run able to attest without building again.\n\n'
-    printf '  Drop --dry-run to publish. The signature is deterministic, so the entry will be byte\n'
-    printf '  for byte the one you just read.\n'
-    exit 0
 fi
 
 say "done"
@@ -279,8 +245,8 @@ done
 
 # The claim's path, from the record the attestor just wrote rather than from a glob over the
 # glob over the store: a store accumulates runs, and the bundle this line should name is the one
-# this run produced. Read with sed because the record puts one path per line, so the script keeps
-# working on a machine without jq — the `--transparency` line below is the only part that needs it.
+# this run produced. Read with sed because the record puts one path per line, so the script needs
+# no jq.
 # **`equivalence` OR `divergence`.** A run that reproduces writes the first and a run that does not
 # writes the second, and this matched only the first — so every divergent run, which is exactly the
 # run someone most wants to check by hand, printed a placeholder for a bundle sitting in the store
@@ -315,16 +281,6 @@ else
     INCOMPLETE=1
 fi
 [ -n "$KEY" ] && printf ' \\\n                --public-key $(%s public-key %s)' "$TRIGON" "$KEY"
-# Only where there is an entry to check. Naming the flag after a run that never logged would send
-# someone looking for a file that was never written.
-[ -n "$REKOR" ] && [ -z "$DRYRUN" ] &&
-    if command -v jq >/dev/null 2>&1; then
-        printf ' \\\n                --transparency <(jq .transparency %s/runs/%s.json)' "$STORE" "$LATEST"
-    else
-        # Without jq the line would not run, and a command that does not run is not a command.
-        printf ' \\\n                --transparency <entry.json>   # the `transparency` field of'
-        printf '\n                                              # %s/runs/%s.json' "$STORE" "$LATEST"
-    fi
 printf '\n'
 if [ -n "$INCOMPLETE" ]; then
     # A placeholder in that line is a command nobody can paste, which is the whole reason the rest

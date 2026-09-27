@@ -725,6 +725,62 @@ fn attest_writes_a_bundle_that_verify_attestation_re_derives() {
 }
 
 #[test]
+fn verify_attestation_json_carries_exactly_the_keys_its_help_names() {
+    // Scripts read this with `jq`, so its keys are an interface. It lost one when ADR-0014 removed
+    // the external log, and the help says so; this pins what is left, so that a key going or
+    // coming is a decision somebody made rather than a diff nobody read.
+    let a = write_tgz("json-a.tgz", b"hello", 1_700_000_000);
+    let b = write_tgz("json-b.tgz", b"hello", 1_800_000_000);
+    let bundle = tmp().join("json.json");
+    let out = Command::new(bin())
+        .args(["verify"])
+        .arg(&a)
+        .arg(&b)
+        .arg("--attest")
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = Command::new(bin())
+        .args(["verify-attestation"])
+        .arg(&bundle)
+        .arg("--rerun-comparison")
+        .arg("--upstream")
+        .arg(&a)
+        .arg("--rebuild")
+        .arg(&b)
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("the output is JSON");
+    let mut keys: Vec<&str> = doc
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "outcome",
+            "predicateType",
+            "rederived",
+            "signature",
+            "subject"
+        ],
+        "{doc}"
+    );
+    assert_eq!(doc["rederived"]["holds"], true, "{doc}");
+}
+
+#[test]
 fn reading_an_attestation_is_not_checking_it_and_the_output_says_so() {
     // The distinction the whole subcommand exists for. Without `--rerun-comparison` we have
     // repeated what the statement says, which is worth nothing against a producer who lied.

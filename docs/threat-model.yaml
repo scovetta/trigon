@@ -11,11 +11,11 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:762aa2e06694a8dbee8dd8059be516dc924fbe2cc60d918c8e1b51b5eb3e3aea
+prose_version: docs/threat-model.md@sha256:d140bedfe9193e5af44c3d89d7cd2a62eca864ff29296f965d3edbccd7e10dbf
 model_status: unratified-draft
 triage_policy: strict
 confidence:
-  documented: 195
+  documented: 201
   maintainer: 0
   inferred: 5
   assumption: 3
@@ -553,6 +553,23 @@ entry_points:
     provenance:
       kind: documented
       source: docs/12-security.md §8
+- id: evidence sources — designed, not built (docs/19 §10 phase 6)
+  component: multiple
+  parameters:
+  - name: a project's .trigon/evidence.toml, read from the working directory
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - resource-name
+    - x-git-remote-url
+    caller_must_enforce: nothing; Trigon holds the file to less than the user's own configuration. It
+      may only add [[source]] entries, each under a new name, with both keys and an initial checkpoint
+      pinned and HTTPS URLs only; a file that tries anything else is refused whole; and every answer from
+      such a source names the file that added it. It can add a claim and cannot change what any other
+      source answers
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §2.4, §8
 contract_dimensions:
 - component: archive-parsing
   dimension: numeric-domain
@@ -1435,6 +1452,38 @@ adversaries:
   provenance:
     kind: documented
     source: docs/05-archive-and-normalization.md §1
+- name: evidence-repository-operator
+  scope: in
+  capabilities:
+  - hold-the-attestation-key
+  - hold-the-log-key
+  - hold-the-push-credential
+  - rewrite-repository-history
+  - serve-different-clients-different-logs
+  excluded_capabilities:
+  - change-a-checkpoint-a-client-already-holds
+  goals:
+  - publish-a-record-clients-accept
+  - silently-retract-a-record
+  - equivocate
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §8
+- name: stale-or-split-view-host
+  scope: in
+  capabilities:
+  - serve-an-old-clone
+  - withhold-a-newer-checkpoint
+  - serve-different-clients-different-histories
+  excluded_capabilities:
+  - sign-a-checkpoint
+  - sign-a-record
+  goals:
+  - turn-a-withdrawal-back-into-a-verdict
+  - split-view
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6.1, §7, §8
 - name: operator
   scope: out
   capabilities:
@@ -2352,6 +2401,19 @@ properties_disclaimed:
   provenance:
     kind: documented
     source: docs/12-security.md §8
+- id: D24
+  components:
+  - multiple
+  conditions: a key the operator holds
+  tier: security-critical
+  false_friend: false
+  statement: 'Any bound on a stolen signing key. A statement carries no third-party time, so a key stolen
+    today signs statements that verify like those it signed before the theft. The external log check once
+    meant to bound this was never enforced, and went with the log. docs/19 D6 chooses the bound: key epochs
+    sealed in the evidence log, or a certificate chain checked against witnessed or time-stamped time'
+  provenance:
+    kind: documented
+    source: ADR-0014 "What this costs"; docs/19-distribution-and-lookup.md §8, §10 phase 7a
 - id: FF1
   components:
   - multiple
@@ -2506,9 +2568,10 @@ downstream_responsibilities:
   component: multiple
   statement: Check the signing identity against your own policy with --public-key <hex> (trigon public-key
     <keyfile> prints it). Without it the tool still re-derives and tells you the signature was present
-    and unchecked, which is a different answer from unsigned. Where the run was logged, --transparency
-    <entry.j
-  enforces: []
+    and unchecked, which is a different answer from unsigned. A verified signature says which key signed,
+    never
+  enforces:
+  - D24
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13

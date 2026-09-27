@@ -29,9 +29,12 @@ trigon-attest.workspace = true
 trigon-politeness = { workspace = true, optional = true }
 trigon-sandbox = { workspace = true, optional = true }
 trigon-registry = { workspace = true, optional = true }
-# Publishing to a transparency log, which is the one thing the attestor does over a socket. Optional
-# and behind `build` for the reason everything else here is: the verifier is the
-# `--no-default-features` build and its whole claim is that it links no network client.
+# Nothing in this crate calls it yet, and it is kept on purpose. The external log client that used
+# it is gone (ADR-0014), and docs/19 §10 phases 5 and 6 need an HTTP client in this crate for
+# release assets and `lookup --remote`; this is the one the workspace already links, and pinning it
+# here keeps those phases from adding a second. Optional and behind `build` for the reason
+# everything else here is: the verifier is the `--no-default-features` build and its whole claim
+# is that it links no network client.
 reqwest = { workspace = true, optional = true }
 trigon-mirror = { workspace = true, optional = true }
 trigon-store = { workspace = true, optional = true }
@@ -65,8 +68,8 @@ wasm = ["dep:trigon-stabilize-wasm", "trigon-stabilize-wasm/host"]
 
 [dev-dependencies]
 tar = "0.4"
-# A store with a real run in it, so the `attest --dry-run` test previews an entry built from
-# artifact bytes rather than from a hand-written record.
+# A store with a real run in it, compared from artifact bytes rather than hand-written, for the
+# tests that read what `trigon runs` prints about it.
 trigon-store.workspace = true
 trigon-compare.workspace = true
 trigon-archive.workspace = true

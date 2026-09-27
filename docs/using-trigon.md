@@ -51,9 +51,8 @@ code path. It carries seven commands — `verify`, `verify-attestation`, `stabil
 `keygen` and `public-key` — and links no async runtime, no network client and no model code. The
 two key commands are here deliberately: making a signing key on a machine that has never had a
 socket open is a reasonable thing to want, and nothing about making one needs the build half.
-Checking a transparency log entry is in `verify-attestation` for the same reason — it is arithmetic
-over bytes already on disk, so it needs no network and gets none. You can check that
-yourself rather than take it on trust:
+Everything `verify-attestation` does is arithmetic over bytes already on disk, so it needs no
+network and gets none. You can check that yourself rather than take it on trust:
 
 ```
 $ cargo tree -p trigon --no-default-features --edges normal --prefix none | grep -Ei '^(tokio|reqwest|hyper) '
@@ -285,35 +284,12 @@ signature present (ed25519), not checked — pass --public-key to check it
 "Unsigned" and "signed by somebody you did not check" are different things, and the tool keeps them
 different.
 
-**Check the transparency log entry, where there is one.** A signature says who; it does not say
-when. `--transparency <entry.json>` takes a run record's `transparency` field
-(`jq .transparency <run>.json`) and checks it offline:
-
-```
-$ trigon verify-attestation left-pad.intoto.json \
-      --transparency ./entry.json
-
-logged    rekor.sigstage.dev index 56042318 at 2026-09-16T15:20:26Z (71d46696179fcd5d)
-          the log's timestamp verifies, and the entry is about this bundle
-```
-
-Both halves matter. The log's own signature over the entry verifies, which is what dates it — and
-the entry is about **this** bundle rather than some other statement logged at that instant. The
-second is the one easy to leave out, and leaving it out means every individual check passes while
-the result means nothing.
-
-No network is involved. The key is chosen by the `logID` the entry names, which is the SHA-256 of
-the log's own public key, so the keys compiled in for `rekor.sigstore.dev` and `rekor.sigstage.dev`
-are an index rather than an authority; `--log-key <pem>` covers any other log. Pin a log's key
-rather than fetching it at verification time, which would ask the log whose signature you are
-checking to vouch for itself.
-
-If the entry is for a different statement, that is a refusal and not a footnote:
-
-```
-Error: that log entry is about a different statement: the log recorded payload d8ee7745…, and this
-bundle's payload is 5be9935c…. The timestamp is real and it is not about this bundle.
-```
+**What a signature does not say.** It says who, never when. A statement carries no third-party
+time, so a key stolen today signs statements that verify exactly like the ones it signed before, and
+nothing yet bounds that ([threat model](threat-model.md) D24). An earlier version checked a
+transparency-log entry here to date a statement. Nothing ever compared that date with anything that
+bounds a key, and [ADR-0014](adr/0014-git-evidence-store-without-rekor.md) removed the check with
+the log; `--output json` no longer has the `transparency` key it reported.
 
 **One caveat worth stating plainly.** `--rerun-comparison` re-derives the *equivalence* claim from
 two artifacts you hold. If you obtained the rebuilt artifact from the same party that produced the

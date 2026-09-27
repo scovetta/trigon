@@ -1,7 +1,7 @@
 # 19. Publishing verdicts, and looking them up
 
 **Status: partly built, mostly planned.** [ADR-0014](adr/0014-git-evidence-store-without-rekor.md)
-(proposed) records the decisions this chapter argues for. §10 is the build plan, and §11 lists the
+(accepted) records the decisions this chapter argues for. §10 is the build plan, and §11 lists the
 decisions it waits on. What exists today:
 
 | | Status |
@@ -10,7 +10,7 @@ decisions it waits on. What exists today:
 | ADR-0010's publication gate (`publication::decide`) | built, and consulted by `trigon serve` only, not by any publishing path |
 | `verify-attestation --rerun-comparison`, `Match::is_at_least` | built |
 | A lockfile check by purl against the local store (`trigon check`, `POST /v1/check`) | built; §6 says what it lacks. §10 phase 0 closed its leak ([findings](16-findings.md) §3.93) |
-| Rekor publication (`attest --rekor`) and verification (`verify-attestation --transparency`) | built, measured, and **to be removed** (ADR-0014) |
+| Rekor publication (`attest --rekor`) and verification (`verify-attestation --transparency`) | built, measured, and **removed** (ADR-0014; §10 phase 1, [findings](16-findings.md) §3.94) |
 | The evidence repository, the evidence log, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
 
 ---

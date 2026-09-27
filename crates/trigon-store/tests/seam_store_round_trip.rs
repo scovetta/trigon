@@ -72,23 +72,6 @@ fn every_field_populated() -> RunRecord {
         declines: vec!["npm-heuristic: the registry declared no repository".into()],
         assumptions: vec!["the commit comes from a tag rather than from the registry".into()],
         confidence: Some("weak".into()),
-        // What the log said, every field set. The SET especially: a record that carries an index
-        // and an instant but loses the log's signature over them has kept the claim and dropped
-        // the only thing that makes it checkable.
-        //
-        // Real values from staging index 56041854, with `body` elided — this test is about the
-        // fields surviving a round trip and verifies no signature. The entry that really is
-        // verified offline lives in `trigon-attest/tests/transparency_live_entry.rs`.
-        transparency: Some(trigon_attest::LogEntry {
-            log: "https://rekor.sigstage.dev".into(),
-            uuid: "71d46696179fcd5d91e308b5d6453380e77da0647e5f7afbfa557fcf00c0f97172182ce03da97706".into(),
-            log_index: 56_041_854,
-            integrated_time: 1_789_568_827,
-            log_id: "d32f30a3c32d639c2b762205a21c7bb07788e68283a4ae6f42118723a1bea496".into(),
-            signed_entry_timestamp: "MEQCIGJAOvbuGC/JZnL7MCEqxbiyN5JUjurHTuccwv+9LIP/AiAfz0bt6mxmho7w2v5xBMbdSwTiU6VAMWT7vW+K95P82w=="
-                .into(),
-            body: "eyJhcGlWZXJzaW9uIjoiMC4wLjEiLCJraW5kIjoiaW50…".into(),
-        }),
         // The source half of the verdict. Every field set, `declared_url` included: it is the one
         // that says what the package pointed at before we trimmed it, and a record that drops it
         // cannot be checked against the registry.
@@ -362,7 +345,6 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "strategy_digest",
         "derivation",
         "source",
-        "transparency",
         "instructions",
         "upstream",
         "rebuild",

@@ -417,24 +417,9 @@ fn boot_of(page: &str) -> serde_json::Value {
     serde_json::from_str(island).expect("the boot island is JSON")
 }
 
-/// A log entry of the kind `attest --rekor` writes to `RunRecord::transparency`. Its uuid is the
-/// statement's address on a public log, which is the point: it says where the verdict can be read.
-fn logged(uuid: &str) -> trigon_attest::LogEntry {
-    trigon_attest::LogEntry {
-        log: "rekor.sigstore.dev".into(),
-        uuid: uuid.into(),
-        log_index: 1,
-        integrated_time: 1_700_000_001,
-        log_id: "bG9n".into(),
-        signed_entry_timestamp: "c2V0".into(),
-        body: "Ym9keQ==".into(),
-    }
-}
-
 /// What a run leaves on its record once it has compared, as `record_run`, `trigon attest` and a
 /// configured model write it: the rebuilt artifact, the comparison, the signed statement named by
-/// its predicate and its log entry, what it cost, and a reading of the diff with the exchange that
-/// produced it.
+/// its predicate, what it cost, and a reading of the diff with the exchange that produced it.
 ///
 /// The outcome decides the rest, as it does on a real run. An `exact` rebuild is the published
 /// artifact's own bytes, so its digest is `upstream`'s; `attest --prune` drops a match's rebuilt
@@ -472,7 +457,6 @@ fn compared(mut r: RunRecord) -> RunRecord {
     r.attestations = vec![format!(
         "attestations/pypi/requests/2.31.0/requests-2.31.0.tar.gz/{predicate}.intoto.json"
     )];
-    r.transparency = Some(logged(&format!("{predicate}-entry")));
     if divergent {
         r.diff_opinion = Some(trigon_core::DiffOpinion {
             verdict: trigon_core::DiffVerdict::Substantive,
@@ -671,14 +655,13 @@ async fn a_void_row_is_kept_with_its_reason_and_without_its_outcome() {
         "{doc}"
     );
     // `rebuild`: its digest against `upstream`'s says `exact` or not, and after a prune its
-    // `stored` says match or divergence. `transparency`: where the signed verdict can be read.
-    // `transcript` and `costs`: a model is asked about a diff only on a divergence, and the costs
-    // count the rebuild's bytes, the comparison's, and that model's tokens.
-    const GONE: [&str; 7] = [
+    // `stored` says match or divergence. `transcript` and `costs`: a model is asked about a diff
+    // only on a divergence, and the costs count the rebuild's bytes, the comparison's, and that
+    // model's tokens.
+    const GONE: [&str; 6] = [
         "outcome",
         "rebuild",
         "attestations",
-        "transparency",
         "diff_opinion",
         "transcript",
         "costs",

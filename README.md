@@ -32,7 +32,7 @@ records where building it proved the design wrong.
 |---|---|---|
 | **M0** the judgement half | done | differential against the reference implementation: 34 match, 24 deviate by a declared entry, **0 unexplained** |
 | **M1** first rebuilds | done | npm and PyPI rebuild end to end, under an enforced egress tier, against a time-filtered index |
-| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`; published to a Rekor transparency log and verified offline against it |
+| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`. Publishing them is [`docs/19`](docs/19-distribution-and-lookup.md), planned: an evidence repository with a log of our own, which replaced a Rekor client that was built, measured and removed ([ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md)) |
 | **M3** the search half | begun | the deterministic parts first — failure signatures, log compression, the repair-loop policy, the Builder |
 
 Tier-1 observability landed early, out of milestone order: every run at an enforced egress tier now
@@ -185,7 +185,7 @@ flowchart TB
     subgraph done["Done — a separate process, and the only one holding the signing key"]
         direction TB
         attest["Attest<br/>in-toto statement, DSSE"]
-        publish["Publish<br/>store, optional transparency log"]
+        publish["Publish<br/>store; an evidence repository, planned"]
         attest --> publish
     end
 
@@ -346,45 +346,20 @@ because "unsigned" and "signed by someone you do not trust" are different answer
 and the signature fails. Edit the claimed outcome and **the bytes refute it even with no key at
 all** — which is the property that makes an attestation from a rebuilder worth anything.
 
-### Putting it in a transparency log
+### Publishing it
 
-A signature says *who*. It does not say *when*, and with a long-lived key that is the gap that
-matters: a stolen key can sign anything, including something backdated. Add `--rekor` and the log
-answers the question the key cannot.
+Not yet. Signing is local: `trigon attest` writes into the store and opens no socket. Publishing is
+its own step, `trigon publish`, which will ask the publication gate about each run and write what it
+allows to a public git repository holding the signed records, the evidence to re-derive each one,
+and an append-only log we sign. Consumers clone that repository and answer a lockfile from their own
+copy. [`docs/19`](docs/19-distribution-and-lookup.md) is the design and its build plan, and
+[ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md) records why it replaced the Rekor
+client that used to be described here.
 
-```
-$ trigon attest --store ./store --key key.bin --rekor https://rekor.sigstage.dev
-rederived exact under wheel@58632c3c627d — signing
-logged at https://rekor.sigstage.dev index 56042318 (71d46696179fcd5d…)
-
-$ trigon runs --store ./store
-1789572025-1173b740  pkg:pypi/chardet@7.4.3   exact   attested   rekor.sigstage.dev index 56042318 on 2026-09-16
-```
-
-Use `rekor.sigstage.dev` (staging) while you are working things out. A transparency log is
-append-only: an entry published to production is there permanently, for everyone. `--dry-run` prints
-the exact entry and posts nothing, which is worth doing at least once — the signature is
-deterministic, so what you read is byte for byte what a real run would publish.
-
-Checking it needs no network and no faith in the log:
-
-```
-$ # scripts/rebuild-and-attest.sh prints this line with every path already filled in.
-$ trigon verify-attestation ./store/attestations/.../equivalence.intoto.json \
-      --transparency <(jq .transparency ./store/runs/1789572025-1173b740.json)
-
-logged    rekor.sigstage.dev index 56042318 at 2026-09-16T15:20:26Z (71d46696179fcd5d)
-          the log's timestamp verifies, and the entry is about this bundle
-```
-
-Two things, and the second is the one that is easy to omit. The log's signed timestamp verifies —
-against a key compiled in and selected by the `logID` the entry names, which *is* the SHA-256 of
-that key. And the entry is about **this** bundle: a verifying timestamp on an unrelated entry proves
-some statement existed at some instant, which is not a claim anyone wants to make.
-
-What this does not yet do is check that timestamp against a signing certificate's validity window,
-because the certificates arrive with [B21](docs/17-backlog.md) steps 4-5. Today the entry is an
-auditable public record of when we said what; it is not yet what bounds a key compromise.
+A signature says *who*, never *when*. A statement carries no third-party time, so nothing bounds
+what a stolen key can sign ([threat model](docs/threat-model.md) D24), and publishing will not change
+that until docs/19 D6 is decided. Keep the key where [`docs/12`](docs/12-security.md) §9 puts it:
+never in a worker that has executed a build.
 
 ### Comparing two files you already have
 

@@ -201,7 +201,10 @@ rule 7 applies first.
 present tense. A finding against behaviour that exists only in `docs/` is not a finding *(documented,
 docs/README.md "Status")*. The largest: the fleet, the write-only blob credential of
 `docs/12-security.md` §2.3, the two-agreeing-attempts confirmation policy *(documented,
-docs/16-findings.md §5)*, the divergence publication pipeline, and most of `docs/11-interfaces.md` §2.
+docs/16-findings.md §5)*, the evidence store and its publication pipeline — `trigon publish`,
+`trigon evidence`, `trigon lookup`, and a `trigon check` that answers from evidence repositories
+*(documented, docs/19-distribution-and-lookup.md, status and §10)* — and most of
+`docs/11-interfaces.md` §2.
 
 ---
 
@@ -366,6 +369,7 @@ a key file, a `--model` spec, a definitions ref — are **trusted** and not tabl
 | model prompt | README, CI config, manifests, build log | **yes** | data, x-build-log | **nothing prevents injection**; it is fenced, bounded and control-stripped, and accepted as residual risk | *(documented, docs/12-security.md §4)* |
 | model response | the proposed strategy | **the model's, and so indirectly the attacker's** | x-model-output | parsed and validated; the provenance cap bounds the damage | *(documented, docs/00-overview.md §3.1)* |
 | definitions repository | a `build.yaml` or a custom stabilizer | **yes, via a merged pull request** | data, x-shell-script, collaborator-implementation | two-party review, a mandatory prose `reason:`, and the corpus-wide impact preview | *(documented, docs/12-security.md §8)* |
+| evidence sources — designed, not built (docs/19 §10 phase 6) | a project's `.trigon/evidence.toml`, read from the working directory | **yes — chosen by the thing under test**: in CI on a pull request, by the pull request's author | data, resource-name, x-git-remote-url | nothing; Trigon holds the file to less than the user's own configuration. It may only add `[[source]]` entries, each under a new name, with both keys and an initial checkpoint pinned and HTTPS URLs only; a file that tries anything else is refused whole; and every answer from such a source names the file that added it. It can add a claim and cannot change what any other source answers | *(documented, docs/19-distribution-and-lookup.md §2.4, §8)* |
 
 **Coverage.** Every family's public surface is represented. Within a family the table names the
 operands that carry attacker power. **The remainder are believed operator-supplied or internal
@@ -569,11 +573,49 @@ stabilizers erase *(documented, docs/05 §1)*.
 Publishing one is a public accusation, so the false-mismatch rate is a safety property
 *(documented, docs/09-attestations.md §5; ADR-0010)*.
 
+A8 and A9 are adversaries of the evidence store ADR-0014 decides and
+`docs/19-distribution-and-lookup.md` designs, which is not built. They are recorded now so that
+each phase that builds it adds its properties against them. Until then a finding that needs either
+concerns behaviour that exists only in `docs/`, and routes by §1.3.
+
+**A8 — The operator of an evidence repository a client trusts.** Whoever holds a configured
+source's keys or its push credential: its operator — us, for our own repository — or a thief. What
+each holding can do differs, and the client is built around the difference *(documented,
+docs/19-distribution-and-lookup.md §8; ADR-0014 "What this costs")*:
+
+- **A stolen attestation key** alone produces records no client accepts, because a client requires
+  every record's leaf in the log it verified.
+- **A stolen log key** signs, for any one client, a tree that extends the newest checkpoint that
+  client holds and differs from the real log after it: a fork the client cannot detect alone, which
+  can omit a withdrawal or a supersession. It cannot forge a record. With both keys, the holder can
+  publish anything clients accept.
+- **A stolen push credential** can delete and withhold files, add or remove the kill-switch, write
+  unsigned feed entries, and plant files beyond the checkpoint. It cannot make a client accept a
+  record.
+- **Silent retraction or equivocation** by the operator itself: rewriting the repository's history,
+  deleting a record, or serving different clients different logs. Every client recomputes the whole
+  log, so a rewrite is provable by anyone holding an older checkpoint, and a record whose leaf is
+  logged and whose file is gone reads as deleted. Nothing *prevents* either until witnesses cosign
+  (docs/19 §10 phase 7b), and nothing bounds a stolen key in time (D24).
+
+**A9 — A host or mirror serving a stale or split view.** GitHub, a mirror, or anything between them
+and a client, holding no key. It can serve an old but consistent clone, withhold a newer
+checkpoint, or serve different clients different histories; it cannot sign a checkpoint or a record.
+A source whose newest leaf is older than `frozen_after` answers unknown, so an old state cannot turn
+a withdrawal back into a verdict; a client that syncs several mirrors of one source requires their
+checkpoints to be consistent and reports a mismatch as an equivocation; and a client with no state
+of its own, such as a fresh CI runner, detects a rollback only back to the checkpoint it was
+configured with *(documented, docs/19-distribution-and-lookup.md §6, §6.1, §7, §8)*.
+
 ### Out of scope
 
-- **The operator.** Anyone who can pass flags can name a local path as a source, point Trigon at any
-  registry, or hand it a key. `file://` is not dangerous; `file://` *chosen by the thing under test*
-  is, and the distinction is a constructor *(documented, docs/16-findings.md §3.7)*.
+- **The operator** — whoever passes the flags. Anyone who can pass flags can name a local path as a
+  source, point Trigon at any registry, or hand it a key. `file://` is not dangerous; `file://`
+  *chosen by the thing under test* is, and the distinction is a constructor *(documented,
+  docs/16-findings.md §3.7)*. The same line runs through evidence sources: the ones the operator
+  configures are trusted as far as the keys pinned for them, and a project's `.trigon/evidence.toml`
+  is input chosen by the thing under test (§1.7) *(documented, docs/19-distribution-and-lookup.md
+  §2.4, §8)*. This is not A8: an evidence repository's operator is not the person running Trigon.
 - **Anyone with code execution in the `trigon` process.** They have already won.
 - **A compromised control plane** *(documented, docs/12-security.md §11)*.
 - **A network attacker between Trigon and a registry**, beyond what TLS gives. Artifacts are checked
@@ -690,6 +732,7 @@ project has made.
 | **D20** | Confidentiality of package text from a model provider, or of a Copilot prompt from the host process table — the whole prompt is an `argv` argument. | when `--model` names a provider | correctness-only | *(documented, crates/trigon-ai/src/copilot.rs:133-134 — `.arg("-p").arg(self.prompt(req))`)* |
 | **D21** | Resource or capability bounds on an archived stabilizer set beyond wasmtime's own sandbox. The host sets no fuel limit, no epoch interruption and no memory limiter. | `wasm` feature | **security-critical** | *(documented, crates/trigon-stabilize-wasm/src/host.rs:56 — `Store::new(&engine, ())`)* |
 | **D22** | That a custom stabilizer from the definitions repository is bounded by anything but review and the provenance cap. | a merged definitions PR | **security-critical** | *(documented, docs/12-security.md §8)* |
+| **D24** | Any bound on a stolen signing key. A statement carries no third-party time, so a key stolen today signs statements that verify like those it signed before the theft. The external log check once meant to bound this was never enforced, and went with the log. docs/19 D6 chooses the bound: key epochs sealed in the evidence log, or a certificate chain checked against witnessed or time-stamped time. | a key the operator holds | **security-critical** | *(documented, ADR-0014 "What this costs"; docs/19-distribution-and-lookup.md §8, §10 phase 7a)* |
 
 ### Well-known attack classes left to the caller
 
@@ -722,12 +765,8 @@ docs/09-attestations.md §2.1)*.
    (`trigon public-key <keyfile>` prints it). Without it the tool still re-derives and tells you the
    signature was present and unchecked, which is a different answer from unsigned.
 
-   Where the run was logged, `--transparency <entry.json>` checks the log's signed timestamp *and*
-   that the entry is about that bundle, offline. The second half is not optional: a verifying
-   timestamp on an unrelated entry proves that some statement existed at some instant, with every
-   individual check passing. Note what this does **not** yet buy you — nothing checks the timestamp
-   against a certificate's validity window until [B21](17-backlog.md) steps 4-5, so it is an
-   auditable record of when we said what, not yet a bound on a key compromise.
+   A verified signature says which key signed, never when. Nothing bounds what a stolen key can sign
+   (D24), so a signature is evidence about the key and not about the time.
 3. **Set your own threshold** with `Match::is_at_least`. The default is not a recommendation.
 4. **Read the `applied` list.** If you reject a particular normalization you can see it fired, with
    its risk tier and provenance, and discard the result.
@@ -843,8 +882,9 @@ naming every claimed matrix row's owning property.
   selecting by sort order or mtime rather than by run. Today it is emptied before the first attempt
   and every retry *(documented, crates/trigon/src/main.rs:2218)*; that is what makes P14's guarantee
   about the *right* artifact and not merely a real one.
-- Verdicts are published for runtime lookup (`docs/19-distribution-and-lookup.md`), which adds a
-  consumer who never runs Trigon and never sees this document.
+- The evidence store is built (`docs/19-distribution-and-lookup.md` §10 phases 4–6, under ADR-0014).
+  It adds a consumer who never runs Trigon and never sees this document, makes A8 and A9 live, and
+  each phase adds its properties, side effects and disclaimers here (phase 8).
 - **A report that cannot be routed to exactly one §1.17 disposition.** Revise; do not improvise.
 
 ---
@@ -967,7 +1007,7 @@ emit unless every in-scope component has a row for all eight contract dimensions
 coverage check that would otherwise be somebody remembering.
 
 **Census** — claim tags only; the legend rows and prose mentions of a tag name are excluded:
-**192 documented / 0 maintainer / 3 assumption / 5 inferred**. Every assumption and inferred tag
+**201 documented / 0 maintainer / 3 assumption / 5 inferred**. Every assumption and inferred tag
 resolves to a question in §1.18.
 
 ---

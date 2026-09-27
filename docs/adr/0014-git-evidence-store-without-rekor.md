@@ -1,6 +1,6 @@
 # ADR-0014. Publish evidence to a public git repository with a log we sign, and drop Rekor
 
-**Status:** proposed. On acceptance it supersedes the transparency-log half of
+**Status:** accepted, 2026-09-27. It supersedes the transparency-log half of
 [ADR-0011](0011-keyed-signing-under-a-trusted-root.md): the third sentence of its Decision ("Publish
 every signature to a Rekor transparency log …"), "and log to Rekor anyway" in its title, "Combined
 with a log timestamp" in item 2 of "Why a certificate rather than a pinned public key", the Rekor
@@ -16,8 +16,8 @@ becomes whatever docs/19 D7 decides, with divergences refused until then. The re
 keyed-signing half stands.
 
 The design this records, and the build plan, are in
-[`19-distribution-and-lookup.md`](../19-distribution-and-lookup.md). Accepting this ADR is phase 0b
-of that plan, and comes before anything is removed.
+[`19-distribution-and-lookup.md`](../19-distribution-and-lookup.md). Accepting this ADR was phase 0b
+of that plan, and came before anything was removed.
 
 ## Decision
 

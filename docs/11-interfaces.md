@@ -39,8 +39,12 @@ construction. And there is no `serve`, `work` or `ingest` yet: those are M4.
 
 The intended surface. **Aspirational, not a changelog** — much of this is unbuilt, and the
 attestation lines in particular have been overtaken: what exists today is `trigon keygen` /
-`public-key` for keys, `trigon attest --key <file> [--rekor <url>] [--dry-run]`, and
-`trigon verify-attestation [--public-key <hex>] [--rerun-comparison] [--transparency <entry>]`.
+`public-key` for keys, `trigon attest --key <file> [--prune]`, and
+`trigon verify-attestation [--public-key <hex>] [--rerun-comparison] [--output text|json]`, whose
+JSON no longer has the `transparency` key it carried while a transparency-log check existed
+([ADR-0014](adr/0014-git-evidence-store-without-rekor.md) removed the check). Publishing is
+`trigon publish`, and looking a verdict up is `trigon lookup` and `trigon check` against evidence
+repositories, all designed in [`19`](19-distribution-and-lookup.md) and not built.
 `--sign kms://` and `--identity` below are the shape a fleet wants, and belong to
 [B21](17-backlog.md) steps 4-5. [`09-attestations.md`](09-attestations.md) §3 is the current
 account; `trigon --help` is the authority.

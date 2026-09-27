@@ -22,7 +22,7 @@ provenance fact and stays out of it.
 | `https://trigon.dev/rebuild/v1` | a build ran | the rebuilt artifact |
 | `https://trigon.dev/equivalence/v1` | a comparison ran | the **upstream** artifact |
 | `https://trigon.dev/divergence/v1` | the verdict is `Divergent` | the upstream artifact |
-| `https://trigon.dev/buildobservation/v1` | observability tier ≥ 1 | the rebuilt artifact |
+| `https://trigon.dev/buildobservation/v1` | a run is attested; its `tier` says what was observed | the **upstream** artifact |
 
 We **also** emit a conformant `https://slsa.dev/provenance/v1` statement alongside `rebuild/v1`, so
 existing SLSA tooling consumes our output without knowing anything about Trigon.
@@ -299,33 +299,31 @@ verifier build is why it is not. `trigon verify-attestation` links `trigon-attes
 no async runtime — that is the claim §7 makes checkable, and `xtask policy` enforces it — so an
 async method here would drag `tokio` across the judgement line for the benefit of signers that do
 not exist yet. A synchronous trait is callable from an async context by whoever holds the runtime;
-the reverse needs an executor everywhere. A network signer (sigstore, KMS) blocks in its own
+the reverse needs an executor everywhere. A network signer (a KMS) blocks in its own
 implementation, or lives behind an async façade in a crate below the line.
 
 | Implementation | Use | Built |
 |---|---|---|
-| **keyed, under a trusted root** — a key we hold, a certificate chaining to a published root, every signature logged to Rekor | The default for public instances ([ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md)) | partly — the envelope carries a chain and the log entry is real; nothing validates the chain to a root yet ([B21](17-backlog.md#b21-keyed-signing-under-a-trusted-root-and-the-rekor-client)) |
+| **keyed, under a trusted root** — a key we hold, a certificate chaining to a published root | The default for public instances once a root exists ([ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md)); whether one is built is [docs/19](19-distribution-and-lookup.md) D6 | partly — the envelope carries a chain; nothing validates it to a root yet ([B21](17-backlog.md#b21-keyed-signing-under-a-trusted-root)) |
 | **cloud KMS** (AWS, GCP, Azure) holding the intermediate | Where the chain above is issued from in a fleet | no |
-| **local file key** (`ed25519-dalek`) | Development and air-gapped use. Produces an *unchained* statement and says so. | **yes** |
+| **local file key** (`ed25519-dalek`) | Development and air-gapped use, and, until a root exists, the single pinned key records are published under ([ADR-0014](adr/0014-git-evidence-store-without-rekor.md) Decision 8). Produces an *unchained* statement and says so. | **yes** |
 | **unsigned** | We still emit statements, and they still help locally | **yes** |
 
 **Sigstore keyless is not the default and is not planned.** ADR-0011 has the reasoning; the short
 version is that a Fulcio certificate's identity is an email address or a CI workflow, and the claim
 an attestation makes is *"the attestor, at this version, re-derived this from these bytes"* — which
 that identity cannot say, and which would put a person's name on a public accusation about somebody
-else's package. We use Rekor and not Fulcio: the log, not the CA.
+else's package. Nor is any other part of Sigstore used:
+[ADR-0014](adr/0014-git-evidence-store-without-rekor.md) removed the transparency-log client that
+was built, and [`16-findings.md`](16-findings.md) §3.92 has the measurements behind it.
 
-**The transparency log is required rather than a bonus, and more so with a key we hold.** An
-ephemeral key bounds a compromise by construction; a long-lived one is bounded only by the log.
-Rekor returns a **Signed Entry Timestamp** — its own signature over "this entry existed at time T" —
-and verification checks that T falls inside the certificate's validity window. An attacker holding
-the key from today cannot forge a statement dated last year, because there is no entry for it and
-the log is append-only and publicly auditable. Skipping that check silently reduces the whole design
-to a pinned public key with extra ceremony.
-
-Rekor accepts an entry signed by any key or certificate and does not require Fulcio, which is what
-makes "their log, our CA" a coherent position rather than a hybrid. Staging confirmed it for the
-shape we actually emit: an ed25519 key under a self-issued certificate is accepted.
+**Nothing bounds a stolen key yet.** An ephemeral key bounds a compromise by construction; a
+long-lived one is bounded by whatever dates its signatures, and today nothing does. ADR-0011 meant a
+log's signed timestamp to do it, checked against a certificate's validity window; that check was
+never live, and the log is gone. [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md)
+D6 chooses what replaces it — key epochs sealed in our own evidence log, or a certificate chain
+checked against a witness's or a time-stamping authority's time — and until then no statement's
+validity depends on a time ([threat model](threat-model.md) D24).
 
 #### End to end
 
@@ -333,17 +331,15 @@ shape we actually emit: an ed25519 key under a self-issued certificate is accept
 # 1. A signing key, once. `trigon public-key <file>` prints the public half again later.
 trigon keygen --out ~/.trigon/signing.key
 
-# 2. Rebuild, attest and log, in one script that keeps the two processes separate.
-scripts/rebuild-and-attest.sh pkg:pypi/chardet@7.4.3 \
-    --key ~/.trigon/signing.key --rekor https://rekor.sigstage.dev
+# 2. Rebuild and attest, in one script that keeps the two processes separate.
+scripts/rebuild-and-attest.sh pkg:pypi/chardet@7.4.3 --key ~/.trigon/signing.key
 
-# 3. Check it, offline, with nothing trusted: the signature, the claim re-derived from the two
-#    files, and the log entry. Step 2 prints this command with every path filled in for the run it
-#    just did — the shape below is what those parts mean, not something to retype.
+# 3. Check it, offline, with nothing trusted: the signature, and the claim re-derived from the two
+#    files. Step 2 prints this command with every path filled in for the run it just did — the
+#    shape below is what those parts mean, not something to retype.
 trigon verify-attestation <store>/attestations/.../equivalence.intoto.json \
     --public-key "$(trigon public-key ~/.trigon/signing.key)" \
-    --rerun-comparison --upstream <published> --rebuild <rebuilt> \
-    --transparency <(jq .transparency <store>/runs/<run>.json)
+    --rerun-comparison --upstream <published> --rebuild <rebuilt>
 ```
 
 `<published>` and `<rebuilt>` are the two artifacts the rebuild left behind: the published one at
@@ -351,19 +347,17 @@ the top of the work directory, and the one Trigon built under
 `<work>/rebuild/<strategy>-<pid>/` with the same name. The script resolves that pair itself, and
 says so rather than printing a placeholder if it cannot.
 
-Step 3 prints all four results:
+Step 3 prints:
 
 ```
-logged    rekor.sigstage.dev index 56042318 at 2026-09-16T15:20:26Z (71d46696179fcd5d)
-          the log's timestamp verifies, and the entry is about this bundle
 subject   chardet-7.4.3-py3-none-any.whl (1173b74051570cf0…)
+predicate https://trigon.dev/equivalence/v1
 claims    exact
 signature verified
 rederived exact under wheel@58632c3c627d — the claim holds
 ```
 
-Add `--dry-run` to step 2 to see the log entry before it exists anywhere. The rebuild is real and
-its record stays in the store, so a later run attests without building again.
+The rebuild's record stays in the store, so a later `trigon attest` signs it again without building.
 
 At an enforced egress tier the image build has no network, so the base image must already carry
 what the strategy needs. A build that is missing something says which packages and prints the
@@ -391,108 +385,34 @@ trigon verify-attestation <bundle> --public-key <hex>
 ```
 
 That pinning is the whole point — an unpinned signature is worth exactly the bundle's
-re-derivation and no more. `--public-out` additionally writes SPKI PEM, the form a log entry
-carries.
+re-derivation and no more. `--public-out` additionally writes SPKI PEM, the form `openssl` reads
+and the one an evidence repository publishes its attestation key in (`keys/attestation.pub`,
+[`19`](19-distribution-and-lookup.md) §2.3).
 
 `keygen` is deliberately available in the `--no-default-features` verifier too, which links no
 runtime and no network client: generating a signing key on a machine that has never had a socket
 open is a reasonable thing to want. What it produces is a **bare** key, signing unchained
-statements; a public instance wants a key under a trusted root instead (B21 steps 4-5).
+statements that verify against a pinned public key and nothing else. Until a root exists, that is
+also the key records are published under: one attestation key, pinned by every client and named by
+key id in every record, rotated only by a key-change leaf that the old key and the new both sign
+([ADR-0014](adr/0014-git-evidence-store-without-rekor.md) Decision 8). Whether a root is built at
+all (B21 steps 4-5), or key epochs sealed in our own log take its place, is
+[`19`](19-distribution-and-lookup.md) D6.
 
-#### What exporting to the log looks like today
+#### Publishing
 
-`trigon attest --rekor <log-url>` publishes each envelope it signs, and needs `--key` — an unsigned
-statement has nothing for a log to be evidence about, and the flag errors rather than quietly
-logging nothing. The URL is required because there is no default: a default of
-`rekor.sigstore.dev` would make the append-only public log the thing you get by not thinking about
-it, and a malformed entry there is public and permanent. Reach for `https://rekor.sigstage.dev`
-until the entry shape is settled.
+Nothing in this section publishes. `trigon attest` signs into the store and opens no socket;
+publishing is a separate `trigon publish`, behind the publication gate, to an evidence repository —
+a public git repository holding the signed records, the evidence to re-derive each, and an
+append-only log we sign. It is designed in
+[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) and not built.
 
-The entry is `intoto` **v0.0.1**, not v0.0.2 — the envelope goes in as a serialized JSON *string*
-with the certificate as a sibling `spec.publicKey`. A duplicate submission returns `409` carrying
-the UUID of the existing entry, which we fetch and store, so retrying after a timeout is safe
-rather than a second entry for the same statement.
-
-**`--dry-run` shows the entry before it exists anywhere.** Publication to an append-only log is the
-one write here that cannot be taken back, so `trigon attest --rekor <url> --dry-run` prints the
-exact entry that would be POSTed, posts nothing, and writes nothing — not to the log and not to the
-store. Everything up to the POST really happens: the claim is re-derived from the artifact bytes and
-the envelope is really signed, so what you are shown is the entry rather than a rendering of one.
-ed25519 signatures are deterministic, so a real run afterwards signs the identical bytes, which is
-what makes the preview predictive rather than indicative. The statement inside the envelope is
-printed a second time in readable form, clearly marked as not part of the entry, because it is
-base64 twice over and a preview nobody can read is not a preview.
-
-What comes back is stored on the run as `RunRecord.transparency`: the log's URL, the entry UUID,
-`logIndex`, `integratedTime`, `logID`, the `signedEntryTimestamp`, and `body` verbatim as the log
-returned it. Verbatim matters — the SET covers the log's own serialization, and a re-encoding that
-differs by one byte verifies against nothing.
-
-**Verification of that SET is below the judgement line**, in `trigon-attest::transparency`, so the
-`--no-default-features` verifier checks it without linking a network client: it is ECDSA P-256 over
-RFC 8785 JCS of exactly `{body, integratedTime, logID, logIndex}`, and the log's public key should
-be pinned rather than fetched at verification time — fetching it from the log that produced the
-signature asks the log to vouch for itself.
-
-#### Reading an entry back
-
-`trigon runs` shows the log and index beside each run, so finding your own entry does not mean
-reading the store's JSON by hand:
-
-```
-run-4f2a  pkg:npm/demo@1.0.0   exact   attested   rekor.sigstage.dev index 56042173 on 2026-09-16
-```
-
-To check one rather than read it:
-
-```
-trigon verify-attestation <bundle> --transparency <entry.json>
-```
-
-where `entry.json` is a run record's `transparency` field (`jq .transparency runs/<id>.json`). Two
-things are checked, and the second is the one that is easy to leave out:
-
-1. **The SET verifies**, which is what says *when* this statement existed.
-2. **The entry is about this bundle**, by the payload hash the log recorded. A verifying timestamp
-   on an unrelated entry proves that some statement existed at some instant, which is not a claim
-   anyone wants to make. Rekor does not keep the envelope — the stored body has only hashes and the
-   public key — so the binding runs the other way: hash the statement you hold and check the log
-   recorded that one.
-
-No network, and it works in the `--no-default-features` verifier. The log's key is selected by the
-`logID` the entry names, which **is** the SHA-256 of that key — so the compiled-in table
-(`rekor.sigstore.dev`, `rekor.sigstage.dev`) is an index rather than an authority, and a wrong row
-cannot be chosen for an entry it does not belong to. `--log-key <pem>` covers any other log. A key
-should be pinned rather than fetched at verification time, because fetching it from the log whose
-signature is under test asks that log to vouch for itself.
-
-That identity check also fixed a real ambiguity: verifying against the wrong log's key used to
-surface as "the signature does not verify", which reads exactly like a forged entry. It is now
-refused by name, before any signature is checked.
-
-#### Finding an entry you did not record
-
-Measured against staging rather than assumed:
-
-| Search | Works |
-|---|---|
-| `GET /api/v1/log/entries?logIndex=N` | yes |
-| `GET /api/v1/log/entries/<uuid>` | yes |
-| `POST /api/v1/index/retrieve` with the **DSSE envelope hash** or **payload hash** | yes |
-| ...with the **public key** | **no** — returns `[]` |
-| ...with the **artifact's sha256** | **no** — returns `[]` |
-
-The last two matter. The index keys on Fulcio-style identity, and a self-issued certificate has
-none, so **our entries cannot be enumerated by key.** And Rekor indexes the envelope and payload
-hashes, not the statement's `subject` digest, so **a consumer holding the artifact cannot find our
-attestation** — they can only check one they were given. This confirms empirically what
-[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) takes from Rekor's maintainers:
-the log is an *audit* mechanism, not a *lookup* service. Discovery has to come from somewhere else.
-
-The gap worth naming: the SET yields a time, and **nothing consumes that time yet**, because
-certificate validity windows arrive with B21 steps 4-5. Until then the log entry is an auditable
-public record of when we said what, which is worth having, but it is not yet the thing that bounds
-a compromise of the signing key.
+Until 2026-09-27 this section described a Rekor client in `trigon attest`, which logged each
+equivalence statement at attest time, before any gate had been asked, and a check of the log's
+signed timestamp in `verify-attestation`. ADR-0014 removed both. Run records written while it
+existed may still carry a `transparency` key, which Trigon now ignores
+(`crates/trigon-store/tests/old_run_files.rs`), and `verify-attestation --output json` no longer
+has a `transparency` key.
 
 **We hand-write the attestation layer.** The Rust `in-toto` crate does not work, the `sigstore`
 crate is incomplete and churning, and RFC 8785 JCS canonicalization sits in the signing path, so we
@@ -542,6 +462,13 @@ We sign the transcript **digest**, which makes the derivation auditable and tamp
 
 ## 5. Publishing, including divergences
 
+> **Amended by [ADR-0014](adr/0014-git-evidence-store-without-rekor.md).** Publishing is an explicit
+> `trigon publish`, not automatic; a published record is corrected by superseding it; disagreeing
+> attempts are withheld rather than void; a void needs one attempt; and divergences are refused
+> until safeguard 4 has a channel. [ADR-0010](adr/0010-publish-divergences.md)'s Amendments and
+> [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §3 have the detail. The list
+> below is ADR-0010 as first written.
+
 Attestations publish automatically. A divergence makes a public claim about someone else's
 package, so the technical safeguards run strict:
 
@@ -565,17 +492,30 @@ accusation.
 
 ## 6. Storage layout
 
-Content-addressed and cloud-agnostic (`object_store` over S3, GCS, Azure, or a local filesystem):
+Content-addressed and cloud-agnostic (`object_store` over S3, GCS, Azure, or a local filesystem).
+As built:
 
 ```
-blobs/sha256/<aa>/<full-digest>                       artifacts, diff reports, logs, transcripts
-attestations/<eco>/<pkg>/<ver>/<artifact>/trigon.intoto.jsonl
-runs/<run-id>/manifest.json
-runs/<run-id>/{build.log.gz,network.jsonl,transcript.json}
+blobs/sha256/<aa>/<digest>                         artifacts, comparisons, logs, transcripts
+attestations/<eco>/<pkg>/<ver>/<artifact>/<predicate>.intoto.json    one DSSE envelope each
+runs/<run-id>.json                                 the run record, naming its blobs by digest
+stabilizers/sha256/<set-digest>.json               each set a claim was made under, as a manifest
+derived/comparison/sha256/<aa>/<digest>.json       a comparison re-derived by `trigon rederive`
+decompiled/sha256/<aa>/<digest>.cs                 decompiled .NET source, a reading aid only
 ```
+
+The design wrote one JSONL bundle per artifact (§8) and a directory per run; the store keeps one
+envelope per predicate, and one record per run that names its blobs by digest. Attestations are
+filed per target, so a later attest of the same target overwrites an earlier one;
+[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §10 phase 2 moves them to per run
+and append-only.
 
 Path-addressing matches the definitions repository layout, so a downstream analyzer parses an
 object-storage notification straight back into a `Target`.
+
+The store is the operator's own and nothing outside it reads it. What is published goes, one
+record per result, to an evidence repository whose layout is
+[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §2.3.
 
 **Retention:** on a match, store the rebuilt artifact's digests rather than the artifact. Keep bytes
 on divergence, where they are the evidence. That one rule accounts for most of the storage budget
@@ -584,22 +524,25 @@ on divergence, where they are the evidence. That one rule accounts for most of t
 ## 7. Verification
 
 ```
-trigon verify-attestation trigon.intoto.jsonl \
-    --identity 'https://github.com/trigon-dev/.github/workflows/sign.yml@refs/heads/main' \
-    --rerun-comparison
+trigon verify-attestation equivalence.intoto.json \
+    --public-key <hex> \
+    --rerun-comparison --upstream <published> --rebuild <rebuilt>
 ```
 
 Steps:
 
-1. **Decode** the JSONL bundle; verify each DSSE envelope.
-2. **Check the signing identity** against policy, whether a Fulcio certificate identity, a KMS key
-   id, or a pinned public key.
-3. **Check Rekor inclusion**, if the bundle claims it.
+1. **Decode** the envelope, and its in-toto statement.
+2. **Check the signature** against a pinned public key, where one is given with `--public-key`;
+   without one the signature is reported present and unchecked. A chain to a root replaces the
+   pinned key if [B21](17-backlog.md#b21-keyed-signing-under-a-trusted-root) is built.
+3. **Check the record's inclusion in the evidence log**, for a statement that came from an evidence
+   repository. Designed, not built: [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md)
+   §6 and §10 phase 4 (`--record <file> --evidence <dir>`).
 4. **Select statements** with a small typed filter (by predicate type, by build type, by subject
-   digest).
-5. **`--rerun-comparison`**: fetch the upstream artifact by digest and the rebuilt artifact by
-   digest, load the stabilizer set named in the attestation, run both through it, and check that the
-   stabilized digests match what the statement claims.
+   digest). Not built: the command takes one envelope.
+5. **`--rerun-comparison`**: take the upstream and the rebuilt artifacts, load the stabilizer set
+   named in the attestation, run both through it, and check that the stabilized digests match what
+   the statement claims.
 
 Step 5 is the flagship, and it explains several other decisions.
 
