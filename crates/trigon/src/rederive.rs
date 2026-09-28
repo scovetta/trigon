@@ -105,13 +105,31 @@ async fn one(store: &Store, id: &str, force: bool, dry_run: bool) -> Result<Done
     let Some(rebuilt) = r.rebuild.as_ref() else {
         return Ok(Done::Skipped("has no rebuilt artifact".into()));
     };
-    let (Ok(upstream), Ok(rebuild)) = (
-        store.blobs().get(&r.upstream.sha256).await,
-        store.blobs().get(&rebuilt.sha256).await,
-    ) else {
-        return Ok(Done::Skipped(
-            "one of the two artifacts is not in the store (pruned, or never stored)".into(),
-        ));
+    let (upstream, rebuild) = match (
+        store
+            .artifact(&r.id, "published artifact", &r.upstream)
+            .await,
+        store.artifact(&r.id, "rebuilt artifact", rebuilt).await,
+    ) {
+        (Ok(Some(u)), Ok(Some(b))) => (u, b),
+        // Kept by the record's word and gone from the store: missing, and said so, never taken
+        // for a run whose bytes were pruned on purpose.
+        (Err(e @ trigon_store::StoreError::Missing { .. }), _)
+        | (_, Err(e @ trigon_store::StoreError::Missing { .. })) => {
+            return Ok(Done::Skipped(format!("{e}")));
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            return Ok(Done::Skipped(format!(
+                "one of the two artifacts could not be read from the store: {e}"
+            )));
+        }
+        _ => {
+            return Ok(Done::Skipped(
+                "one of the two artifacts was not kept in the store: pruned after a match, or \
+                 never stored"
+                    .into(),
+            ));
+        }
     };
 
     let (set_id, set_digest) = &original.upstream.set;

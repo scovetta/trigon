@@ -17,6 +17,7 @@ pub mod log;
 mod rebuild;
 mod record;
 mod signer;
+pub mod state;
 mod statement;
 mod verdict;
 mod verify;

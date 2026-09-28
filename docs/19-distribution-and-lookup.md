@@ -13,7 +13,7 @@ decisions it waits on. What exists today:
 | Rekor publication (`attest --rekor`) and verification (`verify-attestation --transparency`) | built, measured, and **removed** (ADR-0014; §10 phase 1, [findings](16-findings.md) §3.94) |
 | Subjects with sha512, and sha1 for npm, beside sha256 (§5); fetchers that verify every digest their registry declares, and runs that record what was declared (§5); the strategy, guard manifest and building version kept on the run (§4.2 items 3, 7); attestations per run, append-only | built (§10 phase 2, first half; [findings](16-findings.md) §3.95) |
 | The v2 verdicts with every §4.2 field, `void/v1` and `withdrawal/v1`, the record file's types, the versioned purl canonicalisation, and a building version that names its git revision | built (§10 phase 2, second half; [findings](16-findings.md) §3.96) |
-| The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest`, `serve` and `worker` (§10 phases 2, 3); the commands that use the rest of it are phases 4 to 6 |
+| The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest`, `serve`, `worker`, `publish` and `trigon evidence` (§10 phases 2, 3, 5, 6); `lookup` and `check` are the rest of phase 6 |
 | A publishable run: every cache key built from the target, the strategy and the set, worker and CLI alike; attempts that agree on what the comparison found, not on its outcome string; `trigon rebuild --confirm <run>`, cold and re-pulled; each attempt's host, cache state and start; `decide`'s rules for a pair, from `same_host_confirmation` and `confirmation_interval`; and a worker's confirmation made on another machine unless `same_host_confirmation` allows its own | built (§10 phase 3, backlog B31; [findings](16-findings.md) §3.97) |
 | `rebuild --attest` signing through `attest`'s own code, so no path signs a verdict for a run the gate voids; `rebuild/v1` naming the model exchange a run kept; a `pkg1` key that is the package alone | built (§10 phase 3; [findings](16-findings.md) §3.97) |
 | The evidence log as pure code: C2SP signed notes and checkpoints, the log key in Go's format, RFC 6962 inclusion and consistency proofs, tiles and entry bundles and what an append writes, every leaf kind of §2.3, a log verified from its files, and key-change, log-end and log-continuation leaves followed as §8 says | built (§10 phase 4, first half; [findings](16-findings.md) §3.98) |
@@ -21,7 +21,8 @@ decisions it waits on. What exists today:
 | The evidence repository and its writer: `trigon log keygen`, `log init` and `log sign`, and `trigon publish` for runs, withdrawals and heartbeats, with `--dry-run` and `--reconcile` — the remote's log verified before anything is built on it, the gate asked through the index `serve` uses, one commit pushed without force, a lost race discarded and built again, `RunRecord.published`; and a logged verdict without its falsifying command, or a divergence without its dispute pointer, failing verification | built (§10 phase 5, first half; [findings](16-findings.md) §3.100) |
 | Rebuilt artifacts as release assets, uploaded before the commit that names them and reused on a retry; the divergence feed, regenerated from the log; `log key-change` and `log succeed`, followed by a fresh verification, with publishing going on into a successor in this repository or another; `publish --prune`, and `attest --prune` refusing a run not yet published; `serve`'s report of the repository's kill-switch beside its own | built (§10 phase 5, second half; [findings](16-findings.md) §3.101) |
 | The phase 5 spike against a scratch GitHub repository | written (`scripts/evidence-spike.sh`) and **not run**: it needs a repository of the owner's naming, which nothing here creates (§10 phase 5; [findings](16-findings.md) §3.101) |
-| `trigon evidence sync` and `trigon lookup` | planned (§10 phase 6) |
+| `trigon evidence add`, `list`, `remove` and `sync`: sources written into `evidence.toml` keeping its comments; a verified clone of every location in the cache, and each source's checkpoint, key history and last sync in the state directory, written only once everything verifies; a checkpoint that does not extend the accepted one, and a rollback, refused with both notes; mirrors held to one another; a successor in another repository followed as part of the source; trust on first use recorded and labelled, and read by `verify-attestation --record --source`; a lost state refused until `--accept-state-loss`, which starts over only what was lost; and the two freshness clocks, as the standing every command asking a source reads. `publish` reading the whole chain, from its first log, when it publishes into a successor elsewhere; pruning that keeps bytes another run still names, and takes turns with the writers that name them | built (§10 phase 6, first half; [findings](16-findings.md) §3.102) |
+| `trigon lookup`, `trigon check` against evidence repositories, `verify-attestation --lookup`, `--remote`, and `serve`'s view of a run's published record | planned (§10 phase 6, second half) |
 
 ---
 
@@ -730,7 +731,7 @@ trigon evidence add <name> <url>… --log-key <vkey> --attestation-key <key> \
     [--checkpoint <file>] [--required] [--trust-on-first-use]
 trigon evidence list
 trigon evidence remove <name>
-trigon evidence sync [--source <name>]… [--full-history]
+trigon evidence sync [--source <name>]… [--full-history] [--accept-state-loss <name>]…
 trigon lookup sha512-<base64>|sha256:<hex>|pkg:npm/left-pad@1.3.0|./left-pad-1.3.0.tgz \
     [--source <name>]… [--offline | --remote]
 trigon check ./package-lock.json [--min normalized] [--max-risk structural] \
@@ -758,7 +759,9 @@ trigon verify-attestation --record <file> --evidence <dir> --source <name> \
   `--full-history` keeps the whole git history, for anyone who wants to check commits as well as
   checkpoints. Unauthenticated clones and fetches count against GitHub's rate limits like any other
   request, so in CI the cache directory is what a cache step keeps between jobs, and a pipeline pays
-  for a fetch, not a clone.
+  for a fetch, not a clone — with the state directory beside it, always: the clones show a source
+  has synced before, so a cache restored without its state is a state lost, and refused until
+  `--accept-state-loss` (§6.1). A runner that keeps neither is a fresh client (§8).
 - **Freshness has two clocks.** A source is *stale* when its last successful sync is older than
   `stale_after` (a day, by default), and a command then syncs it first and says so. A source is
   *frozen* when its newest leaf's time is older than `frozen_after` (14 days, by default); a frozen
@@ -856,7 +859,10 @@ design treats each as a separate witness, never as one pool.
   other. Each source has its own clones under `$XDG_CACHE_HOME/trigon/evidence/<name>/`, and its
   last accepted checkpoint and key history under `$XDG_STATE_HOME/trigon/evidence/<name>/`, outside
   the clone. A clone whose checkpoint is older than the accepted one is refused as a rollback, and a
-  missing state file is reported rather than silently recreated.
+  missing state file is reported rather than silently recreated: `evidence sync --accept-state-loss
+  <name>` is how a user says it was lost, and only what was lost starts over — with the checkpoint
+  gone, the log is held only to its initial checkpoint, or to nothing, and keys a source trusts on
+  first use are kept; with those keys gone, they are read again, and must open the checkpoint kept.
 - **Mirrors are locations of one source.** Several URLs with one origin and one log key are one log
   served from several places. `sync` fetches every one of them, verifies each log, and requires them
   to be consistent: at the same size the roots must match, and at different sizes the smaller must

@@ -239,30 +239,177 @@ pub fn verify_log(
     }
     check_tiles(files, &tree, checkpoint.origin())?;
 
-    if let Some(a) = accepted {
-        let prefix = tree.root_at(a.size())?;
-        if prefix != *a.root() {
-            return Err(inconsistent(
-                format!(
-                    "the first {} leaves of `{}` hash to {}, and the checkpoint last accepted \
-                     signs {} for them",
-                    a.size(),
-                    checkpoint.origin(),
-                    b64(&prefix),
-                    b64(a.root())
-                ),
-                a,
-                &checkpoint,
-            ));
-        }
-    }
-
-    Ok(VerifiedLog {
+    let log = VerifiedLog {
         checkpoint,
         vkey: vkey.clone(),
         tree,
         leaves,
+    };
+    if let Some(a) = accepted {
+        log.check_prefix(a)?;
+    }
+    Ok(log)
+}
+
+impl VerifiedLog {
+    /// Check that this log extends `accepted`, a checkpoint of it accepted before: the note opens
+    /// under the log's key, it has no more leaves than the log, and the log's first leaves hash to
+    /// its root. Refused as [`LogError::Inconsistent`], with both signed notes, where it does not:
+    /// a log smaller than what was accepted is a rollback, and one whose first leaves are another
+    /// tree is a rewrite or a second log under one key (`docs/19` §8).
+    pub fn extends(&self, accepted: &SignedCheckpoint) -> Result<(), LogError> {
+        check_accepted_before(accepted, &self.checkpoint, &self.vkey)?;
+        self.check_prefix(accepted)
+    }
+
+    /// The part of [`Self::extends`] that needs the tree: the first `accepted.size()` leaves hash
+    /// to its root.
+    fn check_prefix(&self, accepted: &SignedCheckpoint) -> Result<(), LogError> {
+        let prefix = self.tree.root_at(accepted.size())?;
+        if prefix != *accepted.root() {
+            return Err(inconsistent(
+                format!(
+                    "the first {} leaves of `{}` hash to {}, and the checkpoint last accepted \
+                     signs {} for them",
+                    accepted.size(),
+                    self.origin(),
+                    b64(&prefix),
+                    b64(accepted.root())
+                ),
+                accepted,
+                &self.checkpoint,
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Why two verified copies of one log — the same origin, served from two places — are not one
+/// log, or `Ok` where they are (`docs/19` §6.1): at the same size their roots are one root, and at
+/// different sizes the smaller's root is the root of the larger's first leaves, recomputed from
+/// the larger's own tree rather than taken from any proof either served.
+pub fn same_log(a: &VerifiedLog, b: &VerifiedLog) -> Result<(), String> {
+    if a.origin() != b.origin() {
+        return Err(format!(
+            "one copy is of `{}` and the other of `{}`",
+            a.origin(),
+            b.origin()
+        ));
+    }
+    let (small, large) = if a.size() <= b.size() { (a, b) } else { (b, a) };
+    let prefix = large
+        .tree
+        .root_at(small.size())
+        .map_err(|e| e.to_string())?;
+    if prefix == *small.checkpoint.root() {
+        return Ok(());
+    }
+    Err(match small.size() == large.size() {
+        true => format!(
+            "both sign {} leaves of `{}`, and one signs the root {} and the other {}",
+            small.size(),
+            small.origin(),
+            b64(small.checkpoint.root()),
+            b64(large.checkpoint.root())
+        ),
+        false => format!(
+            "the first {} leaves of the copy of `{}` with {} hash to {}, and the copy with {} \
+             signs {} for them: the smaller is not a prefix of the larger",
+            small.size(),
+            small.origin(),
+            large.size(),
+            b64(&prefix),
+            small.size(),
+            b64(small.checkpoint.root())
+        ),
     })
+}
+
+/// Where two copies of one source's chain disagree: the log of each, by its place in its copy's
+/// chain, and why they are not one log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Disagreement {
+    pub first: usize,
+    pub second: usize,
+    pub why: String,
+}
+
+/// Hold two copies of one source's chain of logs — two mirrors, each verified whole — to being
+/// one chain (`docs/19` §6.1): every log both hold is one log ([`same_log`]). Where they are, how
+/// the first compares with the second: ahead where it reaches a later log of the chain, or more
+/// leaves of the same last log. Two consistent copies never branch, since a log's log-end is its
+/// last leaf and its successor is named in it, so the order is total.
+pub fn compare_chains(
+    first: &[&VerifiedLog],
+    second: &[&VerifiedLog],
+) -> Result<std::cmp::Ordering, Disagreement> {
+    for (i, a) in first.iter().enumerate() {
+        if let Some(j) = second.iter().position(|b| b.origin() == a.origin()) {
+            same_log(a, second[j]).map_err(|why| Disagreement {
+                first: i,
+                second: j,
+                why,
+            })?;
+        }
+    }
+    // A copy whose chain starts where the other's does not share a log is no copy of it.
+    if !first.is_empty()
+        && !second.is_empty()
+        && !first
+            .iter()
+            .any(|a| second.iter().any(|b| b.origin() == a.origin()))
+    {
+        return Err(Disagreement {
+            first: 0,
+            second: 0,
+            why: format!(
+                "one copy's chain is `{}` and the other's `{}`, and they share no log",
+                chain_said(first),
+                chain_said(second)
+            ),
+        });
+    }
+    let reach = |c: &[&VerifiedLog]| (c.len(), c.last().map_or(0, |l| l.size()));
+    Ok(reach(first).cmp(&reach(second)))
+}
+
+fn chain_said(chain: &[&VerifiedLog]) -> String {
+    chain
+        .iter()
+        .map(|l| l.origin())
+        .collect::<Vec<_>>()
+        .join(" → ")
+}
+
+/// Check the checkpoint last accepted for a source against its whole chain of logs, across every
+/// repository it has been followed into (`docs/19` §6.1): the log of the chain with its origin
+/// must extend it ([`VerifiedLog::extends`]). A chain that never reaches that origin is behind what
+/// was accepted, a rollback, unless it goes on somewhere not yet followed — `continues` — where
+/// the log may yet be; then it is not checked, and `false` says so.
+pub fn check_accepted(
+    chain: &[&VerifiedLog],
+    continues: bool,
+    accepted: &[u8],
+) -> Result<bool, LogError> {
+    let origin = Checkpoint::parse(SignedNote::parse(accepted)?.text())?.origin;
+    let Some(log) = chain.iter().find(|l| l.origin() == origin) else {
+        if continues {
+            return Ok(false);
+        }
+        let last = chain.last().map(|l| l.checkpoint().to_string());
+        return Err(inconsistent_notes(
+            format!(
+                "the checkpoint last accepted is for `{}`, and no log this source's chain reaches \
+                 has that origin: what is served is behind what was accepted",
+                printable(&origin)
+            ),
+            String::from_utf8_lossy(accepted).into_owned(),
+            last.unwrap_or_default(),
+        ));
+    };
+    let a = SignedCheckpoint::open(accepted, log.vkey())?;
+    log.extends(&a)?;
+    Ok(true)
 }
 
 /// The leaves of a tree of `size` leaves, as its entry bundles hold them, and the tree over them.
@@ -972,35 +1119,11 @@ pub fn verify_source(
     }
 
     let mut logs: Vec<ChainedLog> = vec![first];
-    let mut continues_at = None;
-    loop {
-        let prev = &logs.last().expect("the chain has its first log").log;
-        let Some(s) = prev.log_end().map(|e| e.successor.clone()) else {
-            break;
-        };
-        if !s.in_this_repository() {
-            continues_at = Some(s);
-            break;
-        }
-        if logs.iter().any(|c| c.dir == s.dir) {
-            return Err(LogError::Rotation(format!(
-                "a log-end names `{}` as its successor's directory, which holds an earlier log of \
-                 the chain",
-                s.dir
-            )));
-        }
-        let acc = accepted_under(&s.vkey()?)?;
+    let continues_at = walk(repo, &mut logs, &mut |vkey| {
+        let acc = accepted_under(vkey)?;
         accepted_checked |= acc.is_some();
-        let log = follow(prev, &DirFiles::in_repository(repo, &s.dir), acc.as_ref())?;
-        if logs.iter().any(|c| c.log.origin() == log.origin()) {
-            return Err(LogError::Rotation(format!(
-                "`{}` appears twice in this repository's chain of logs; a succession never \
-                 returns to an earlier log",
-                log.origin()
-            )));
-        }
-        logs.push(ChainedLog { dir: s.dir, log });
-    }
+        Ok(acc)
+    })?;
 
     if !accepted_checked && continues_at.is_none() {
         let last = &logs.last().expect("the chain has its first log").log;
@@ -1029,6 +1152,92 @@ pub fn verify_source(
         unnamed,
         refused,
         accepted_checked,
+    })
+}
+
+/// Follow the successors the chain's last log names in the same repository, each as [`follow`]
+/// allows and held to the checkpoint `accepted` gives for its key, until a log names none or names
+/// one in another repository, which is returned for the caller to follow there.
+fn walk(
+    repo: &Path,
+    logs: &mut Vec<ChainedLog>,
+    accepted: &mut dyn FnMut(&LogVkey) -> Result<Option<SignedCheckpoint>, LogError>,
+) -> Result<Option<Successor>, LogError> {
+    loop {
+        let prev = &logs.last().expect("the chain has its first log").log;
+        let Some(s) = prev.log_end().map(|e| e.successor.clone()) else {
+            return Ok(None);
+        };
+        if !s.in_this_repository() {
+            return Ok(Some(s));
+        }
+        if logs.iter().any(|c| c.dir == s.dir) {
+            return Err(LogError::Rotation(format!(
+                "a log-end names `{}` as its successor's directory, which holds an earlier log of \
+                 the chain",
+                s.dir
+            )));
+        }
+        let acc = accepted(&s.vkey()?)?;
+        let log = follow(prev, &DirFiles::in_repository(repo, &s.dir), acc.as_ref())?;
+        if logs.iter().any(|c| c.log.origin() == log.origin()) {
+            return Err(LogError::Rotation(format!(
+                "`{}` appears twice in this repository's chain of logs; a succession never \
+                 returns to an earlier log",
+                log.origin()
+            )));
+        }
+        logs.push(ChainedLog { dir: s.dir, log });
+    }
+}
+
+/// Verify the part of a source's chain that is in another repository (`docs/19` §8): the successor
+/// `prev`'s log-end names, at its directory in the repository at `repo` — a clone of one of the
+/// URLs the log-end gives — followed as [`follow`] allows, and every successor after it in that
+/// repository, until the chain ends or goes on in yet another.
+///
+/// Nothing is held to a checkpoint accepted before: that is for the caller holding the whole chain
+/// ([`check_accepted`]), since the checkpoint may be of a log in any repository of it. A successor
+/// `prev` names in its own repository is refused here, since [`verify_source`] follows those.
+pub fn verify_continuation(prev: &VerifiedLog, repo: &Path) -> Result<VerifiedSource, LogError> {
+    let end = prev.log_end().ok_or_else(|| {
+        LogError::Rotation(format!(
+            "`{}` has no log-end leaf, so it names no successor to follow",
+            prev.origin()
+        ))
+    })?;
+    let s = end.successor.clone();
+    if s.in_this_repository() {
+        return Err(LogError::Rotation(format!(
+            "`{}`'s log-end names its successor `{}` in its own repository, at `{}`, and a \
+             successor there is followed with the repository's own logs",
+            prev.origin(),
+            printable(&s.origin),
+            printable(&s.dir)
+        )));
+    }
+    let log = follow(prev, &DirFiles::in_repository(repo, &s.dir), None)?;
+    let mut logs = vec![ChainedLog {
+        dir: s.dir.clone(),
+        log,
+    }];
+    let continues_at = walk(repo, &mut logs, &mut |_| Ok(None))?;
+    let start: u64 = s
+        .dir
+        .strip_prefix("log/")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    let unnamed = numbered_logs(&repo.join("log"))?
+        .into_iter()
+        .filter(|(n, d)| *n > start && !logs.iter().any(|c| &c.dir == d))
+        .map(|(_, d)| d)
+        .collect();
+    Ok(VerifiedSource {
+        logs,
+        continues_at,
+        unnamed,
+        refused: Vec::new(),
+        accepted_checked: false,
     })
 }
 

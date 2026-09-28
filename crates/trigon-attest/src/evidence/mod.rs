@@ -12,7 +12,10 @@
 //! - [`Key`], [`Lookup`]: resolving a digest, a purl, a package or a file to the records the log
 //!   holds for it, never through `index/`, with every supersession the log records applied;
 //! - [`Repository`]: a directory with the `docs/19` §2.3 layout, its log verified under a source's
-//!   pinned keys, which the rest is asked through;
+//!   pinned keys, which the rest is asked through — or a source's whole chain, across every
+//!   repository it has gone on in;
+//! - [`Standing`], [`exit_code`]: whether a source can answer now, by the two clocks of `docs/19`
+//!   §6, and what several sources' answers about one package come to;
 //! - [`check_to_sign`]: what `trigon log sign` holds a new tree to before the log key signs it —
 //!   the writer's side, checked with the reader's code — and [`check_to_begin`], the same for a
 //!   successor's first tree.
@@ -28,6 +31,7 @@ mod lookup;
 pub mod paths;
 mod repository;
 mod sign;
+mod standing;
 
 pub use check::{
     EvidenceFile, EvidenceState, RecordFailure, RecordKind, VerifiedRecord, check_record,
@@ -39,3 +43,4 @@ pub use paths::{
 };
 pub use repository::{EVIDENCE_LIMIT, RECORD_LIMIT, Repository};
 pub use sign::{Unsignable, check_to_begin, check_to_sign};
+pub use standing::{Said, Standing, ago, exit_code, first_that_wins};

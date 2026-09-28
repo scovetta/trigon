@@ -668,3 +668,95 @@ async fn a_dll_member_is_served_as_decompiled_csharp_from_the_hook_or_the_precom
     assert_eq!(without["decompiled"], serde_json::json!(false), "{without}");
     assert_eq!(without["text"], serde_json::Value::Null, "no text view without a decompiler: {without}");
 }
+
+/// Bytes a run's record says are kept and the store no longer has — deleted from outside, or
+/// pruned for another run that shared the blob before pruning counted who else named it — are
+/// reported as missing on every route that reads by the record's word, never as there and never
+/// as dropped by retention.
+#[tokio::test]
+async fn bytes_the_record_says_are_kept_and_the_store_lost_are_reported_missing() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::sync::Arc;
+    use tower_service::Service as _;
+    use trigon_core::Digest;
+    use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
+
+    let store = Arc::new(Store::in_memory());
+    // Never stored under these digests: the record's `stored: true` is all there is.
+    let gone = Digest::from_bytes([7u8; 32]);
+    let mut r = RunRecord::new(
+        "1700000009-ee",
+        "pkg:npm/a@1.0.0",
+        ArtifactRef {
+            name: "a-1.0.0.tgz".into(),
+            sha256: gone,
+            bytes: 10,
+            stored: true,
+        },
+        Environment {
+            base_image: "x@sha256:0".into(),
+            derived_image: None,
+            egress: "mirror".into(),
+            isolation: "podman".into(),
+            attestable: true,
+            registry_moment: None,
+            pin: None,
+            guard_manifest: None,
+            guarded_members: None,
+        },
+        "2026-01-01T00:00:00Z",
+    );
+    r.state = RunState::Done;
+    r.outcome = Some("exact".into());
+    store.put_run(&r).await.unwrap();
+    let index = trigon_api::Index::new();
+    index
+        .refresh(&store, trigon_api::Switches::default())
+        .await
+        .unwrap();
+    let api = Arc::new(trigon_api::Api {
+        store,
+        queue: None,
+        index,
+        switches: trigon_api::Switches::default(),
+        unauthenticated: trigon_api::Principal::Operator,
+        decompiler: None,
+        member_reads: trigon_api::default_member_permits(),
+        repository_switch: None,
+    });
+    let mut router = trigon_api::router(api);
+    let mut get = async |uri: String| {
+        let res = router
+            .call(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let b = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&b).into_owned()
+    };
+
+    let raw = get(format!(
+        "/v1/runs/{}/member/raw?path=package%2Findex.js",
+        r.id
+    ))
+    .await;
+    assert!(raw.contains("\"missing\""), "{raw}");
+    assert!(raw.contains("the bytes are missing"), "{raw}");
+    assert!(
+        !raw.contains("not_kept"),
+        "reported as dropped by retention: {raw}"
+    );
+
+    let member = get(format!("/v1/runs/{}/member?path=package%2Findex.js", r.id)).await;
+    assert!(
+        member.contains("the record says this artifact was kept and the store would not return it"),
+        "{member}"
+    );
+
+    // And the run's row does not say it has its artifacts.
+    let run: serde_json::Value =
+        serde_json::from_str(&get(format!("/v1/runs/{}", r.id)).await).unwrap();
+    assert_eq!(run["entry"]["has"]["artifacts"], false, "{run}");
+}

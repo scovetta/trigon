@@ -412,7 +412,7 @@ impl std::fmt::Display for Answer {
 }
 
 /// `docs/19` §6: when several codes apply, the first in the order 5, 4, 1, 3, 2 wins.
-fn precedence(code: u8) -> u8 {
+pub(crate) fn precedence(code: u8) -> u8 {
     match code {
         5 => 5,
         4 => 4,

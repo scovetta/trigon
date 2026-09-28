@@ -187,11 +187,27 @@ pub enum ConfigError {
     #[error("no evidence source is named `{name}`; {}", configured(.known))]
     NoSuchSource { name: String, known: Vec<String> },
     #[error(
-        "the source `{name}` pins no {missing}: it trusts on first use, which a first `trigon \
-         evidence sync` settles by recording the keys it read. The network-free verifier checks \
-         only against keys it is given; pass --log-vkey and --attestation-key instead"
+        "the source `{name}` pins no {missing}: it trusts on first use, and no `trigon evidence \
+         sync` has recorded the keys it read yet ({} holds none). Sync it first, or pass \
+         --log-vkey and --attestation-key",
+        state.display()
     )]
-    Unpinned { name: String, missing: &'static str },
+    Unpinned {
+        name: String,
+        missing: &'static str,
+        state: PathBuf,
+    },
+    #[error(
+        "the source `{name}` has synced before, and the checkpoint last accepted for it, {}, is \
+         gone: without it the log would be held to nothing this client has seen before, and a \
+         rollback would not be caught. If it was lost, on a new machine or with a cleared \
+         directory, run `trigon evidence sync --accept-state-loss {name}` to say so and accept one \
+         again",
+        state.display()
+    )]
+    StateLost { name: String, state: PathBuf },
+    #[error("{0}")]
+    State(#[from] crate::state::StateError),
 }
 
 fn configured(known: &[String]) -> String {
@@ -217,6 +233,10 @@ pub struct Pins {
     /// Which file, or the environment, added the source: every answer from a source a project
     /// added names the file that added it (`docs/19` §2.4).
     pub added_by: AddedBy,
+    /// Where a key the source does not pin was read on its first sync, for a source that trusts
+    /// on first use: every answer from it says it rests on that (`docs/19` §2.4). `None` where
+    /// both keys are pinned.
+    pub first_use: Option<crate::state::FirstUse>,
 }
 
 impl ConfigError {
@@ -387,6 +407,12 @@ impl EvidenceConfig {
     /// regular file of at most [`PROJECT_FILE_LIMIT`] bytes. A file that breaks any rule is refused
     /// whole, with the rule, and every string of the project's a refusal quotes is escaped.
     pub fn load(env: &Env) -> Result<EvidenceConfig, ConfigError> {
+        Self::load_with(env, None)
+    }
+
+    /// [`Self::load`], with `user` as the text of the user's file in place of what is on disk:
+    /// how a change to the file is held to every rule before it is written.
+    fn load_with(env: &Env, user: Option<&str>) -> Result<EvidenceConfig, ConfigError> {
         let mut config = EvidenceConfig {
             publish: PublishConfig::default(),
             freshness: Freshness::default(),
@@ -398,17 +424,22 @@ impl EvidenceConfig {
         };
 
         if let Some(path) = config.user_config.clone() {
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    config.user_file(&path, &text, env)?;
-                    config.read.push(path);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    if env.evidence_config.is_some() {
-                        return Err(ConfigError::NamedFileMissing { path });
+            let text = match user {
+                Some(t) => Some(t.to_string()),
+                None => match std::fs::read_to_string(&path) {
+                    Ok(text) => Some(text),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        if env.evidence_config.is_some() {
+                            return Err(ConfigError::NamedFileMissing { path });
+                        }
+                        None
                     }
-                }
-                Err(source) => return Err(ConfigError::Read { path, source }),
+                    Err(source) => return Err(ConfigError::Read { path, source }),
+                },
+            };
+            if let Some(text) = text {
+                config.user_file(&path, &text, env)?;
+                config.read.push(path);
             }
         }
 
@@ -514,11 +545,15 @@ impl EvidenceConfig {
     /// checkpoint last accepted for it — the one in its state directory, or, before any sync has
     /// accepted one, its configured initial checkpoint.
     ///
-    /// Names are compared ignoring ASCII case, as everywhere a name is a directory. Refused, as bad
-    /// arguments, for a name no source has, and for a source that pins no key, which only trust on
-    /// first use allows and which the verifier, reading no repository's `keys/`, cannot settle. A
-    /// checkpoint file that is there and cannot be read is refused rather than passed over: it is
-    /// what a rollback is caught against.
+    /// Names are compared ignoring ASCII case, as everywhere a name is a directory. A key a source
+    /// trusting on first use does not pin is the one its first sync read and recorded in its state
+    /// directory, and [`Pins::first_use`] says where it came from; the verifier reads no
+    /// repository's `keys/` itself. Refused, as bad arguments, for a name no source has, and for a
+    /// source trusting on first use that no sync has recorded keys for. A checkpoint or key
+    /// history that is there and cannot be read is refused rather than passed over: it is what a
+    /// rollback is caught against. And so is a checkpoint that is gone from a source that has
+    /// synced before ([`crate::state::synced_before`]), which `trigon evidence sync` refuses until
+    /// `--accept-state-loss`: the initial checkpoint does not stand in for it.
     pub fn pins(&self, name: &str) -> Result<Pins, ConfigError> {
         let source = self
             .sources
@@ -528,14 +563,34 @@ impl EvidenceConfig {
                 name: printable(name),
                 known: self.sources.iter().map(|s| s.name.clone()).collect(),
             })?;
-        let (Some(log_key), Some(attestation_key)) = (&source.log_key, &source.attestation_key)
-        else {
-            return Err(ConfigError::Unpinned {
-                name: source.name.clone(),
-                missing: missing_keys(source.log_key.is_none(), source.attestation_key.is_none()),
-            });
+        let dir = self.source_state_dir(&source.name)?;
+        let (log_key, attestation_key, first_use) = match (&source.log_key, &source.attestation_key)
+        {
+            (Some(l), Some(a)) => (l.clone(), a.clone(), None),
+            (pinned_log, pinned_attestation) => {
+                let recorded = crate::state::KeysFile::read(&dir)?
+                    .filter(|k| k.first_use.is_some())
+                    .ok_or_else(|| ConfigError::Unpinned {
+                        name: source.name.clone(),
+                        missing: missing_keys(pinned_log.is_none(), pinned_attestation.is_none()),
+                        state: dir.join(crate::state::KEYS),
+                    })?;
+                let bad = |why: String| ConfigError::File {
+                    path: dir.join(crate::state::KEYS),
+                    message: why,
+                };
+                let log = match pinned_log {
+                    Some(l) => l.clone(),
+                    None => recorded.log_vkey().map_err(bad)?,
+                };
+                let attestation = match pinned_attestation {
+                    Some(a) => a.clone(),
+                    None => recorded.start_key().map_err(bad)?,
+                };
+                (log, attestation, recorded.first_use)
+            }
         };
-        let state = self.source_state_dir(&source.name)?;
+        let state = dir;
         let read = |path: &Path| -> Result<Vec<u8>, ConfigError> {
             read_limited(path, CHECKPOINT_FILE_LIMIT)
                 .map(String::into_bytes)
@@ -545,6 +600,15 @@ impl EvidenceConfig {
                 })
         };
         let last = state.join(ACCEPTED_CHECKPOINT);
+        // A source that has synced before and has no checkpoint lost it: refused, as `trigon
+        // evidence sync` refuses it, rather than checked as if nothing had ever been accepted.
+        let cache = self.cache_dir().ok().map(|c| c.join(&source.name));
+        if !last.exists() && crate::state::synced_before(&state, cache.as_deref())? {
+            return Err(ConfigError::StateLost {
+                name: source.name.clone(),
+                state: last,
+            });
+        }
         let accepted = if last.exists() {
             Some((last.clone(), read(&last)?))
         } else {
@@ -554,11 +618,12 @@ impl EvidenceConfig {
             }
         };
         Ok(Pins {
-            log_key: log_key.clone(),
-            attestation_key: attestation_key.clone(),
+            log_key,
+            attestation_key,
             accepted,
             state: last,
             added_by: source.added_by.clone(),
+            first_use,
         })
     }
 
@@ -907,6 +972,332 @@ impl EvidenceConfig {
             added_by: added_by.clone(),
         })
     }
+}
+
+/// A source as `trigon evidence add` is given it: the strings a user typed, relative paths taken
+/// from the working directory.
+#[derive(Clone, Debug, Default)]
+pub struct NewSource {
+    pub name: String,
+    pub urls: Vec<String>,
+    /// A C2SP verifier key; its name is the log's origin.
+    pub log_key: Option<String>,
+    /// 64 hex digits, or a path to a PEM file.
+    pub attestation_key: Option<String>,
+    /// A path to the initial checkpoint.
+    pub checkpoint: Option<String>,
+    pub required: bool,
+    pub trust_on_first_use: bool,
+}
+
+/// Add a `[[source]]` to the user's `evidence.toml` — or the file `TRIGON_EVIDENCE_CONFIG` names,
+/// made if it is not there — keeping every comment and the order of everything already in it
+/// (`docs/19` §6.1). Returns the file written, and the source as the configuration now loads it.
+///
+/// Held to every rule a source in the file is held to, and checked against the whole
+/// configuration — the file, the environment and the project's file — before anything is written:
+/// a name any source already has, ignoring case, is refused, as `env` is. A relative path, as a
+/// location, a PEM attestation key or the checkpoint, is written absolute, since the file reads a
+/// relative path from its own directory and the user typed it from the working directory. The
+/// checkpoint must open under the log key, where one is given, so that a pin that could never
+/// verify is refused now rather than on the first sync.
+pub fn add_source(env: &Env, new: &NewSource) -> Result<(PathBuf, Source), ConfigError> {
+    let path = env.user_config_path().ok_or(ConfigError::NoDirectory {
+        what: "configuration",
+        var: "TRIGON_EVIDENCE_CONFIG",
+    })?;
+    let refuse = |message: String| ConfigError::File {
+        path: path.clone(),
+        message,
+    };
+    // Named and not there: made, since the user said where it goes.
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: path.clone(),
+                source,
+            });
+        }
+    };
+    let before = EvidenceConfig::load_with(env, Some(&text))?;
+    source_name(&new.name).map_err(|m| refuse(format!("cannot add it: {m}")))?;
+    if same_name(&new.name, ENV_SOURCE) {
+        return Err(refuse(format!(
+            "cannot add `{}`: that name is TRIGON_EVIDENCE_REPO's, `{ENV_SOURCE}`, in any case",
+            new.name
+        )));
+    }
+    if let Some(s) = before
+        .sources
+        .iter()
+        .find(|s| same_name(&s.name, &new.name))
+    {
+        return Err(refuse(format!(
+            "cannot add `{}`: a source named `{}` is configured already, by {}. A source is one \
+             log; list a mirror as another URL of it, or choose another name",
+            new.name, s.name, s.added_by
+        )));
+    }
+    if new.urls.is_empty() {
+        return Err(refuse(format!(
+            "cannot add `{}`: it needs at least one location",
+            new.name
+        )));
+    }
+    let home = env.home.as_deref();
+    let at = |m: String| refuse(format!("cannot add `{}`: {m}", new.name));
+    let mut urls = Vec::new();
+    for u in &new.urls {
+        let l = Location::parse(u, &env.cwd, home).map_err(|e| at(e.to_string()))?;
+        urls.push(match l.transport() {
+            crate::location::Transport::LocalPath => l.as_git_arg().to_string(),
+            _ => l.written().to_string(),
+        });
+    }
+    let vkey = match &new.log_key {
+        Some(k) => Some(LogVkey::parse(k).map_err(|e| at(format!("--log-key: {e}")))?),
+        None => None,
+    };
+    let attestation = match &new.attestation_key {
+        Some(k) if AttestationKey::looks_like_hex(k) => {
+            AttestationKey::from_hex(k).map_err(|e| at(format!("--attestation-key: {e}")))?;
+            Some(k.clone())
+        }
+        Some(k) => {
+            let p = expand_path(k, &env.cwd, home)
+                .map_err(|m| at(format!("--attestation-key: {m}")))?;
+            attestation_key(&p.display().to_string(), &env.cwd, home)
+                .map_err(|m| at(format!("--attestation-key: {m}")))?;
+            Some(p.display().to_string())
+        }
+        None => None,
+    };
+    let checkpoint = match &new.checkpoint {
+        Some(c) => {
+            let p = expand_path(c, &env.cwd, home).map_err(|m| at(format!("--checkpoint: {m}")))?;
+            let note = read_limited(&p, CHECKPOINT_FILE_LIMIT)
+                .map_err(|why| at(format!("--checkpoint {}: it {why}", p.display())))?;
+            if let Some(v) = &vkey {
+                crate::log::SignedCheckpoint::open(note.as_bytes(), v).map_err(|e| {
+                    at(format!(
+                        "--checkpoint {} is not a checkpoint the log key opens: {e}",
+                        p.display()
+                    ))
+                })?;
+            }
+            Some(p.display().to_string())
+        }
+        None => None,
+    };
+    let unpinned = vkey.is_none() || attestation.is_none();
+    match (unpinned, new.trust_on_first_use) {
+        (true, false) => {
+            return Err(at(format!(
+                "it pins no {}. Give --log-key and --attestation-key, or --trust-on-first-use to \
+                 read them from the repository's keys/ on the first sync, which every answer from \
+                 it will then say it rests on",
+                missing_keys(vkey.is_none(), attestation.is_none())
+            )));
+        }
+        (false, true) => {
+            return Err(at(
+                "it pins both keys, so there is nothing to trust on first use; leave out \
+                 --trust-on-first-use"
+                    .into(),
+            ));
+        }
+        _ => {}
+    }
+
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| refuse(e.to_string()))?;
+    let mut table = toml_edit::Table::new();
+    table.insert("name", toml_edit::value(new.name.clone()));
+    table.insert(
+        "urls",
+        toml_edit::value(toml_edit::Array::from_iter(urls.iter().map(String::as_str))),
+    );
+    if let Some(v) = &vkey {
+        table.insert("log_key", toml_edit::value(v.to_string()));
+    }
+    if let Some(a) = &attestation {
+        table.insert("attestation_key", toml_edit::value(a.clone()));
+    }
+    if let Some(c) = &checkpoint {
+        table.insert("checkpoint", toml_edit::value(c.clone()));
+    }
+    if new.required {
+        table.insert("required", toml_edit::value(true));
+    }
+    if new.trust_on_first_use {
+        table.insert("trust_on_first_use", toml_edit::value(true));
+    }
+    match doc.get_mut("source") {
+        None => {
+            let mut sources = toml_edit::ArrayOfTables::new();
+            sources.push(table);
+            doc.insert("source", toml_edit::Item::ArrayOfTables(sources));
+        }
+        Some(toml_edit::Item::ArrayOfTables(sources)) => sources.push(table),
+        Some(_) => {
+            return Err(refuse(
+                "its sources are not written as `[[source]]` tables, so one cannot be added \
+                 beside them without rewriting the file; add it by hand"
+                    .into(),
+            ));
+        }
+    }
+    let written = doc.to_string();
+    let after = EvidenceConfig::load_with(env, Some(&written))?;
+    let source = after
+        .sources
+        .iter()
+        .find(|s| s.name == new.name)
+        .cloned()
+        .expect("the source just added loads");
+    write_config(&path, &written).map_err(|source| ConfigError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    Ok((path, source))
+}
+
+/// Remove the source `name` from the user's `evidence.toml`, keeping everything else in it as it
+/// is. Only a source that file added: one a project's `.trigon/evidence.toml` added is the
+/// project's to remove, and `env` is `TRIGON_EVIDENCE_REPO`'s, and each is refused saying so.
+/// Returns the file written and the source removed.
+pub fn remove_source(env: &Env, name: &str) -> Result<(PathBuf, Source), ConfigError> {
+    let config = EvidenceConfig::load(env)?;
+    let source = config
+        .sources
+        .iter()
+        .find(|s| same_name(&s.name, name))
+        .cloned()
+        .ok_or_else(|| ConfigError::NoSuchSource {
+            name: printable(name),
+            known: config.sources.iter().map(|s| s.name.clone()).collect(),
+        })?;
+    let path = match &source.added_by {
+        AddedBy::UserFile(p) => p.clone(),
+        AddedBy::ProjectFile(p) => {
+            return Err(ConfigError::File {
+                path: p.clone(),
+                message: format!(
+                    "`{}` was added by this project's own file, which is the project's to change: \
+                     `trigon evidence remove` edits only your own evidence.toml. To leave the \
+                     project's sources out of one run, set TRIGON_EVIDENCE_CONFIG, which turns \
+                     the project's file off",
+                    source.name
+                ),
+            });
+        }
+        AddedBy::Environment => {
+            return Err(ConfigError::Env {
+                var: "TRIGON_EVIDENCE_REPO",
+                message: format!(
+                    "adds `{}`, and no file does, so there is nothing to remove it from: unset \
+                     TRIGON_EVIDENCE_REPO",
+                    source.name
+                ),
+            });
+        }
+    };
+    let refuse = |message: String| ConfigError::File {
+        path: path.clone(),
+        message,
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| ConfigError::Read {
+        path: path.clone(),
+        source: e,
+    })?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e: toml_edit::TomlError| refuse(e.to_string()))?;
+    let Some(toml_edit::Item::ArrayOfTables(sources)) = doc.get_mut("source") else {
+        return Err(refuse(
+            "its sources are not written as `[[source]]` tables; remove it by hand".into(),
+        ));
+    };
+    let at = sources
+        .iter()
+        .position(|t| t.get("name").and_then(|n| n.as_str()) == Some(source.name.as_str()))
+        .ok_or_else(|| {
+            refuse(format!(
+                "no `[[source]]` table in it is named `{}`",
+                source.name
+            ))
+        })?;
+    sources.remove(at);
+    if sources.is_empty() {
+        doc.remove("source");
+    }
+    let written = doc.to_string();
+    EvidenceConfig::load_with(env, Some(&written))?;
+    write_config(&path, &written).map_err(|e| ConfigError::Read {
+        path: path.clone(),
+        source: e,
+    })?;
+    Ok((path, source))
+}
+
+/// Write the user's file whole or not at all, keeping its permissions: a temporary file beside
+/// it, renamed over it.
+///
+/// Beside the file the path leads to, where it is a link — a dotfiles manager keeps
+/// `~/.config/trigon/evidence.toml` as one into its own directory — since a rename over the link
+/// would replace the link with a file and leave the file the user keeps without the change. What
+/// was read, through the link, is what is written back there.
+fn write_config(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let resolved = link_target(path)?;
+    let path = resolved.as_path();
+    let dir = parent_of(path);
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        std::process::id()
+    ));
+    let written = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            std::fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// The file `path` leads to through however many links, followed one at a time rather than by
+/// `canonicalize`, so that a link to a file not made yet leads to where it is to be made. `path`
+/// itself where it is not a link.
+fn link_target(path: &Path) -> std::io::Result<PathBuf> {
+    // What `ELOOP` allows on Linux: past this, the links go round.
+    const MOST_LINKS: usize = 40;
+    let mut at = path.to_path_buf();
+    for _ in 0..MOST_LINKS {
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let to = std::fs::read_link(&at)?;
+                at = parent_of(&at).join(to);
+            }
+            _ => return Ok(at),
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "{} leads through more than {MOST_LINKS} links",
+        path.display()
+    )))
 }
 
 /// `"30s"`, `"15m"`, `"1h"`, `"7d"`: a whole number and one unit.

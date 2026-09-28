@@ -26,6 +26,9 @@ base64.workspace = true
 # `evidence.toml` (`config`), which the network-free verifier reads too. A parser, no I/O of its
 # own, and nothing below the judgement line.
 toml.workspace = true
+# Writing it: `trigon evidence add` and `remove` change the user's file in place, keeping its
+# comments and order. Already in the tree, through `toml`.
+toml_edit.workspace = true
 
 [dev-dependencies]
 tar = "0.4"

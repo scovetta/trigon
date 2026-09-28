@@ -29,6 +29,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+rustix.workspace = true
 sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]

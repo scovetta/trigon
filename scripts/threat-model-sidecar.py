@@ -46,7 +46,8 @@ KIND = {
     "P27": "correctness", "P28": "correctness", "P29": "resource-bound",
     "P30": "resource-bound", "P31": "integrity", "P32": "integrity", "P33": "integrity",
     "P34": "integrity", "P35": "integrity", "P36": "integrity", "P37": "integrity",
-    "P38": "confidentiality",
+    "P38": "confidentiality", "P39": "integrity", "P40": "integrity", "P41": "integrity",
+    "P42": "correctness",
 }
 
 ADVERSARIES = [
@@ -65,9 +66,9 @@ ADVERSARIES = [
      ["condition-payload-on-a-normalized-observable"], [], ["match-while-differing"],
      "docs/05-archive-and-normalization.md §1"),
     # A8 and A9 are adversaries of the evidence store docs/19 designs. Its reader is built as
-    # `verify-attestation --record` (P31-P33), and its writer as `trigon publish`, `trigon log
-    # sign`, `log key-change` and `log succeed` (P34-P38); §1.10 routes a finding against the rest
-    # by §1.3.
+    # `verify-attestation --record` (P31-P33), its writer as `trigon publish`, `trigon log sign`,
+    # `log key-change` and `log succeed` (P34-P38), and what syncs a source as `trigon evidence`
+    # (P39-P41); §1.10 routes a finding against the rest by §1.3.
     ("evidence-repository-operator", "in",
      ["hold-the-attestation-key", "hold-the-log-key", "hold-the-push-credential",
       "hold-the-github-token", "rewrite-repository-history",

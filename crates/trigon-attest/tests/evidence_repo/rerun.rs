@@ -257,7 +257,7 @@ fn evidence_read_again_to_be_judged_is_held_to_its_digest_again() {
     let bytes = r.read_record(&digest("a2")).unwrap().unwrap();
     let v = r.verify_record(&bytes).unwrap();
     let report = v.evidence.iter().find(|e| e.name == "comparison").unwrap();
-    let (state, read) = r.read_evidence_checked(report).unwrap();
+    let (state, read) = r.read_evidence_checked(v.pos, report).unwrap();
     assert_eq!(state, EvidenceState::Matches);
     assert_eq!(
         trigon_attest::Record::digest_of(&read.unwrap()),
@@ -268,14 +268,14 @@ fn evidence_read_again_to_be_judged_is_held_to_its_digest_again() {
         .path()
         .join(trigon_attest::evidence::evidence_path(&report.digest));
     std::fs::write(&path, b"a report that agrees with anything").unwrap();
-    let e = r.read_evidence_checked(report).unwrap_err();
+    let e = r.read_evidence_checked(v.pos, report).unwrap_err();
     assert!(
         matches!(e, trigon_attest::evidence::RecordFailure::Evidence(_)),
         "{e}"
     );
     std::fs::remove_file(&path).unwrap();
     assert_eq!(
-        r.read_evidence_checked(report).unwrap(),
+        r.read_evidence_checked(v.pos, report).unwrap(),
         (EvidenceState::Absent, None)
     );
 }

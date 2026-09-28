@@ -1031,3 +1031,195 @@ fn a_duration_is_a_whole_number_and_one_unit() {
             .contains("longer")
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// `trigon evidence add` and `remove`, and what a source trusting on first use is pinned by
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_source_is_added_to_the_file_named_made_where_it_is_not_there_and_removed_again() {
+    use trigon_attest::config::{NewSource, add_source, remove_source};
+    let r = root("add-named");
+    let named = r.join("elsewhere/evidence.toml");
+    let e = Env {
+        evidence_config: Some(named.clone()),
+        ..env(&r)
+    };
+    let new = NewSource {
+        name: "theirs".into(),
+        urls: vec!["https://example.org/theirs.git".into(), "../mirror".into()],
+        log_key: Some(vkey(ORIGIN)),
+        attestation_key: Some(key().public_hex()),
+        ..Default::default()
+    };
+    let (path, source) = add_source(&e, &new).unwrap();
+    assert_eq!(path, named);
+    assert_eq!(source.added_by, AddedBy::UserFile(named.clone()));
+    // A relative path is from the working directory, and written absolute: `..` is left for
+    // the filesystem to resolve, through whatever links are there, as every location's is.
+    let text = std::fs::read_to_string(&named).unwrap();
+    assert!(
+        text.contains(&format!("\"{}\"", r.join("project/../mirror").display())),
+        "{text}"
+    );
+    assert_eq!(loads(&e).source("theirs").unwrap().urls.len(), 2);
+    // The name is taken, whatever its case.
+    let again = NewSource {
+        name: "THEIRS".into(),
+        ..new.clone()
+    };
+    let m = add_source(&e, &again).unwrap_err().to_string();
+    assert!(m.contains("is configured already"), "{m}");
+    let (path, gone) = remove_source(&e, "Theirs").unwrap();
+    assert_eq!((path, gone.name.as_str()), (named.clone(), "theirs"));
+    assert!(loads(&e).sources().is_empty());
+}
+
+/// A user file kept as a link — a dotfiles manager keeps it in a directory of its own — is
+/// written where the link leads, and the link is kept, so adding and removing a source changes the
+/// file the user keeps. A link to a file not made yet makes it there.
+#[test]
+fn a_source_is_added_to_the_file_a_link_leads_to_and_the_link_is_kept() {
+    use trigon_attest::config::{NewSource, add_source, remove_source};
+    let r = root("add-link");
+    let kept = r.join("dotfiles/trigon/evidence.toml");
+    let original = "# mine\n[freshness]\nstale_after = \"12h\"\n";
+    write(&kept, original);
+    let link = user_file(&r);
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../../../dotfiles/trigon/evidence.toml", &link).unwrap();
+    let is_link = |p: &Path| {
+        std::fs::symlink_metadata(p)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    };
+    let e = env(&r);
+    let new = NewSource {
+        name: "theirs".into(),
+        urls: vec!["https://example.org/theirs.git".into()],
+        log_key: Some(vkey(ORIGIN)),
+        attestation_key: Some(key().public_hex()),
+        ..Default::default()
+    };
+    let (path, _) = add_source(&e, &new).unwrap();
+    assert_eq!(path, link, "said as the file configured");
+    assert!(is_link(&link), "the link is kept");
+    let text = std::fs::read_to_string(&kept).unwrap();
+    assert!(text.starts_with(original), "{text}");
+    assert!(text.contains("name = \"theirs\""), "{text}");
+    assert_eq!(loads(&e).source("theirs").unwrap().urls.len(), 1);
+    remove_source(&e, "theirs").unwrap();
+    assert!(is_link(&link));
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), original);
+
+    std::fs::remove_file(&kept).unwrap();
+    add_source(&e, &new).unwrap();
+    assert!(is_link(&link));
+    let text = std::fs::read_to_string(&kept).unwrap();
+    assert!(text.contains("name = \"theirs\""), "{text}");
+}
+
+#[test]
+fn a_source_trusting_on_first_use_is_pinned_by_the_keys_its_first_sync_recorded() {
+    use trigon_attest::state::{FirstUse, KeysFile};
+    let r = root("tofu-pins");
+    write(
+        &user_file(&r),
+        "[[source]]\nname = \"s\"\nurls = [\"https://example.org/r.git\"]\n\
+         trust_on_first_use = true\n",
+    );
+    let c = loads(&env(&r));
+    // Nothing recorded yet: the verifier has nothing to hold a record to, and says where it
+    // looked.
+    let e = c.pins("s").unwrap_err();
+    assert_eq!(e.exit_code(), 5);
+    let m = e.to_string();
+    assert!(m.contains("no `trigon evidence sync` has recorded"), "{m}");
+    assert!(m.contains("keys"), "{m}");
+
+    let log = trigon_attest::LogVkey::parse(&vkey(ORIGIN)).unwrap();
+    let attestation = trigon_attest::AttestationKey::from(key().public_key());
+    let first_use = FirstUse {
+        read_from: "https://example.org/r.git".into(),
+        at: 1_790_000_000,
+    };
+    let recorded = KeysFile {
+        schema: "trigon.evidence-keys/v1".into(),
+        log_key: log.to_string(),
+        attestation_key: attestation.to_hex(),
+        first_use: Some(first_use.clone()),
+        logs: Vec::new(),
+        attestation_keys: Vec::new(),
+    };
+    let state = c.source_state_dir("s").unwrap();
+    recorded.write(&state).unwrap();
+    // Recorded keys are a sync that got as far as writing its state, so a checkpoint that is not
+    // there was lost, and is refused as `evidence sync` refuses it rather than read as never
+    // accepted.
+    let e = c.pins("s").unwrap_err();
+    assert_eq!(e.exit_code(), 5);
+    let m = e.to_string();
+    assert!(m.contains("has synced before"), "{m}");
+    assert!(m.contains("--accept-state-loss s"), "{m}");
+    write(&state.join("checkpoint"), "a note\n");
+    let p = c.pins("s").unwrap();
+    assert_eq!(p.log_key, log);
+    assert_eq!(p.attestation_key, attestation);
+    assert_eq!(p.first_use, Some(first_use));
+    // A pinned source says nothing of first use, whatever its state holds.
+    write(
+        &user_file(&r),
+        &format!(
+            "[[source]]\nname = \"s\"\nurls = [\"https://example.org/r.git\"]\nlog_key = \"{}\"\n\
+             attestation_key = \"{}\"\n",
+            vkey(ORIGIN),
+            key().public_hex()
+        ),
+    );
+    assert_eq!(loads(&env(&r)).pins("s").unwrap().first_use, None);
+}
+
+#[test]
+fn a_key_history_says_where_it_disagrees_with_the_log_and_not_where_the_log_went_on() {
+    use trigon_attest::state::{ChainLog, Epoch, KeysFile, Place};
+    let epoch = |k: &str, from: Option<u64>| Epoch {
+        key_id: format!("id-{k}"),
+        public_key: k.repeat(64),
+        from: from.map(|index| Place {
+            log: 0,
+            origin: ORIGIN.into(),
+            index,
+        }),
+        until: None,
+    };
+    let file = |keys: Vec<Epoch>, logs: Vec<&str>| KeysFile {
+        schema: "trigon.evidence-keys/v1".into(),
+        log_key: vkey(ORIGIN),
+        attestation_key: "a".repeat(64),
+        first_use: None,
+        logs: logs
+            .into_iter()
+            .map(|o| ChainLog {
+                origin: o.into(),
+                log_key: format!("{o}+key"),
+            })
+            .collect(),
+        attestation_keys: keys,
+    };
+    let was = file(vec![epoch("a", None)], vec![ORIGIN]);
+    // The log went on: a key change and a succession since. Not a disagreement.
+    let grown = file(
+        vec![epoch("a", None), epoch("b", Some(4))],
+        vec![ORIGIN, "example.com/trigon-evidence/1"],
+    );
+    assert!(was.differences(&grown).is_empty());
+    // The log now lacks what was kept: a key change it once held.
+    let d = grown.differences(&was);
+    assert_eq!(d.len(), 2, "{d:?}");
+    assert!(d[0].contains("records the logs"), "{d:?}");
+    assert!(d[1].contains("records the attestation keys"), "{d:?}");
+    // Another key at the same place.
+    let other = file(vec![epoch("a", None), epoch("c", Some(4))], vec![ORIGIN]);
+    assert_eq!(grown.differences(&other).len(), 2);
+}

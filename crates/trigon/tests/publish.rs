@@ -110,6 +110,7 @@ impl World {
             .env("HOME", self.dir.join("home"))
             .env("XDG_CONFIG_HOME", self.dir.join("home/.config"))
             .env("XDG_STATE_HOME", self.dir.join("home/.local/state"))
+            .env("XDG_CACHE_HOME", self.dir.join("home/.cache"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_ALLOW_PROTOCOL", "file")
             .env_remove("GITHUB_TOKEN")
@@ -2107,6 +2108,19 @@ impl World {
         self.trigon(&all)
     }
 
+    /// A `[[source]]` for the chain this world's repository begins, from its first log's key and
+    /// the attestation key it starts at, named `chain`: how a publisher into a successor elsewhere
+    /// reads the logs before it.
+    fn chain_source(&self) -> String {
+        format!(
+            "\n[[source]]\nname = \"chain\"\nurls = [\"{}\"]\nlog_key = \"{}\"\n\
+             attestation_key = \"{}\"\n",
+            self.remote.display(),
+            self.vkey(),
+            attestation().public_hex()
+        )
+    }
+
     /// `trigon verify-attestation --record` of `record` from the clone at `clone`, pinned to the
     /// first log's key and the attestation key every chain here starts at, as a client pins them.
     fn verify_record(&self, clone: &Path, record: &trigon_core::Digest) -> Output {
@@ -2607,7 +2621,8 @@ fn a_succession_into_another_repository_is_begun_there_after_the_end_is_pushed()
         vkey2.to_string()
     );
 
-    // Switched to it, publishing goes on there.
+    // Switched to it, publishing goes on there, standing on the whole chain, which begins in the
+    // old repository: until an evidence source reaches it, a run is refused, saying how to add one.
     w.configure(
         SUCCESSOR,
         &next,
@@ -2615,7 +2630,26 @@ fn a_succession_into_another_repository_is_begun_there_after_the_end_is_pushed()
     );
     let pb = Package::new("b", false);
     let (b, _) = pair(&w, &pb, "bbbb");
-    ok(&w.trigon(&["publish", "--store", w.store.to_str().unwrap(), &b]));
+    let said = refused(&w.trigon(&["publish", "--store", w.store.to_str().unwrap(), &b]));
+    assert!(
+        said.contains("no evidence source configured here reaches it"),
+        "{said}"
+    );
+    assert!(said.contains("trigon evidence add"), "{said}");
+    w.configure(
+        SUCCESSOR,
+        &next,
+        &format!(
+            "repo = \"{}\"\n{}",
+            w.dir.join("successor.git").display(),
+            w.chain_source()
+        ),
+    );
+    let said = ok(&w.trigon(&["publish", "--store", w.store.to_str().unwrap(), &b]));
+    assert!(
+        said.contains("the whole chain is read, from the evidence source `chain`"),
+        "{said}"
+    );
     git(&there, &["pull", "--quiet", "--ff-only"]);
     let repo = Repository::open(&there, &vkey2, &pinned(), None).unwrap();
     let found = repo.lookup(&Key::Digest {
@@ -2623,6 +2657,290 @@ fn a_succession_into_another_repository_is_begun_there_after_the_end_is_pushed()
         hex: pb.sha256(),
     });
     assert_eq!(found.current().count(), 1);
+}
+
+/// Publishing into a successor in another repository reads the whole chain before step 2's
+/// refusals, through an evidence source that reaches the log it continues: a verdict for an
+/// artifact with a current record in the old repository is refused as a second current record,
+/// and published only as its supersession, which a client following the chain across both
+/// repositories applies; and a withdrawal of a record logged in the old repository is published
+/// into the successor.
+#[test]
+fn publishing_into_a_successor_elsewhere_reads_the_whole_chain() {
+    let w = World::new("whole-chain");
+    w.init(w.remote.to_str().unwrap());
+    let pa = Package::new("a", false);
+    let (a, _) = pair(&w, &pa, "aaaa");
+    let pb = Package::new("b", false);
+    let (b, _) = pair(&w, &pb, "bbbb");
+    ok(&w.publish(&[&a, &b]));
+    let first = w.run(&a).published.unwrap().record;
+    let withdrawn = w.run(&b).published.unwrap().record;
+    let old = w.clone_fresh("old");
+
+    let next = w.log_key_for(SUCCESSOR, "successor.key");
+    git(
+        &w.dir,
+        &["init", "--quiet", "--bare", "-b", "main", "successor.git"],
+    );
+    let successor = w.dir.join("successor.git");
+    let url = "https://github.com/owner/successor.git";
+    w.gitconfig(&format!(
+        "[url \"file://{}\"]\n\tinsteadOf = {url}\n",
+        successor.display()
+    ));
+    ok(&w.log_command(
+        "succeed",
+        &[
+            "--origin",
+            SUCCESSOR,
+            "--log-key",
+            next.to_str().unwrap(),
+            "--url",
+            url,
+        ],
+    ));
+    w.configure(
+        SUCCESSOR,
+        &next,
+        &format!("repo = \"{}\"\n{}", successor.display(), w.chain_source()),
+    );
+    let publish = |args: &[&str]| {
+        let mut all = vec!["publish", "--store", w.store.to_str().unwrap()];
+        all.extend_from_slice(args);
+        w.trigon(&all)
+    };
+
+    // Another pair of the same artifact, attested under the successor's origin: its artifact has
+    // a current record, in the old repository.
+    let (c, _) = pair(&w, &pa, "cccc");
+    let said = refused(&publish(&[&c]));
+    assert!(
+        said.contains(&format!(
+            "its artifact has a current record, sha256:{} at leaf 0 of `{ORIGIN}`",
+            first.to_hex()
+        )),
+        "{said}"
+    );
+    // Superseding it, it publishes.
+    let file = record_file(&old, &first);
+    ok(&w.trigon(&[
+        "attest",
+        &c,
+        "--store",
+        w.store.to_str().unwrap(),
+        "--key",
+        w.key.to_str().unwrap(),
+        "--supersedes",
+        file.to_str().unwrap(),
+        "--reason",
+        "set_changed",
+    ]));
+    let said = ok(&publish(&[&c]));
+    assert!(
+        said.contains("logged    leaf 1: run 1789000000-cccc0001"),
+        "{said}"
+    );
+
+    // A withdrawal of a record logged in the old repository goes into the successor.
+    let said = ok(&w.trigon(&[
+        "attest",
+        "--withdraw",
+        record_file(&old, &withdrawn).to_str().unwrap(),
+        "--reason",
+        "withdrawn",
+        "--store",
+        w.store.to_str().unwrap(),
+        "--key",
+        w.key.to_str().unwrap(),
+    ]));
+    let envelope = w.store.join(
+        said.lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("withdrawals/")
+                    .map(|r| format!("withdrawals/{r}"))
+            })
+            .unwrap_or_else(|| panic!("no withdrawal filed: {said}")),
+    );
+    ok(&publish(&["--withdrawal", envelope.to_str().unwrap()]));
+
+    // A client following the chain across both repositories applies both.
+    let there = w.dir.join("successor-clone");
+    git(
+        &w.dir,
+        &[
+            "clone",
+            "--quiet",
+            successor.to_str().unwrap(),
+            there.to_str().unwrap(),
+        ],
+    );
+    git(&old, &["pull", "--quiet", "--ff-only"]);
+    let head = trigon_attest::log::verify_source(&old, &w.vkey(), None).unwrap();
+    let prev = head.logs.last().unwrap().log.clone();
+    let tail = trigon_attest::log::verify_continuation(&prev, &there).unwrap();
+    let chain =
+        Repository::chain(vec![(old.clone(), head), (there, tail)], &pinned(), None).unwrap();
+    let found = chain.lookup(&Key::Digest {
+        algorithm: "sha256",
+        hex: pa.sha256(),
+    });
+    assert_eq!(found.found.len(), 2);
+    assert_eq!(
+        found.found[0].superseded_by.len(),
+        1,
+        "the old record is superseded"
+    );
+    let current: Vec<_> = found.current().collect();
+    assert_eq!(current.len(), 1);
+    assert_eq!(
+        current[0].pos.log, 1,
+        "and the current one is the successor's"
+    );
+    let found = chain.lookup(&Key::Digest {
+        algorithm: "sha256",
+        hex: pb.sha256(),
+    });
+    assert_eq!(
+        found.answer(Match::NormalizedWithCaveats),
+        Answer::Withdrawn
+    );
+}
+
+/// Publishing into a successor elsewhere reads the chain from its first log, and only from there:
+/// a source pinned partway through the succession — at a later log's key — reads part of the
+/// chain and is passed over, so a second current record for an artifact whose record is current in
+/// an earlier log is never published through it. A source synced before the log it reaches ended
+/// is synced again, however fresh, and then serves. A dry run syncs nothing.
+#[test]
+fn publishing_into_a_successor_elsewhere_reads_the_chain_from_its_first_log() {
+    const ELSEWHERE: &str = "example.com/trigon-evidence/2";
+    let w = World::new("chain-from-first");
+    w.init(w.remote.to_str().unwrap());
+    let pa = Package::new("a", false);
+    let (a, _) = pair(&w, &pa, "aaaa");
+    ok(&w.publish(&[&a]));
+    let first = w.run(&a).published.unwrap().record;
+    // The source that reads the chain from its first log, synced now, before the logs go on.
+    w.configure(ORIGIN, &w.log_key, &w.chain_source());
+    ok(&w.trigon(&["evidence", "sync"]));
+
+    // In place, to `…/1` at log/1; and from there into another repository, `…/2`.
+    let next = w.log_key_for(SUCCESSOR, "successor.key");
+    ok(&w.log_command(
+        "succeed",
+        &["--origin", SUCCESSOR, "--log-key", next.to_str().unwrap()],
+    ));
+    w.configure(SUCCESSOR, &next, &w.chain_source());
+    let last = w.log_key_for(ELSEWHERE, "elsewhere.key");
+    git(
+        &w.dir,
+        &["init", "--quiet", "--bare", "-b", "main", "elsewhere.git"],
+    );
+    let elsewhere = w.dir.join("elsewhere.git");
+    let url = "https://github.com/owner/elsewhere.git";
+    w.gitconfig(&format!(
+        "[url \"file://{}\"]\n\tinsteadOf = {url}\n",
+        elsewhere.display()
+    ));
+    ok(&w.log_command(
+        "succeed",
+        &[
+            "--origin",
+            ELSEWHERE,
+            "--log-key",
+            last.to_str().unwrap(),
+            "--url",
+            url,
+        ],
+    ));
+    let publish = |args: &[&str]| {
+        let mut all = vec!["publish", "--store", w.store.to_str().unwrap()];
+        all.extend_from_slice(args);
+        w.trigon(&all)
+    };
+
+    // Pinned at `…/1`'s key: its chain begins partway, without the log `a`'s record is in.
+    let partway = format!(
+        "\n[[source]]\nname = \"partway\"\nurls = [\"{}\"]\nlog_key = \"{}\"\n\
+         attestation_key = \"{}\"\n",
+        w.remote.display(),
+        LogSigner::from_file(&next).unwrap().vkey(),
+        attestation().public_hex()
+    );
+    w.configure(
+        ELSEWHERE,
+        &last,
+        &format!("repo = \"{}\"\n{partway}", elsewhere.display()),
+    );
+    let (c, _) = pair(&w, &pa, "cccc");
+    let begun = git(&elsewhere, &["rev-parse", "main"]);
+    let said = refused(&publish(&[&c]));
+    assert!(
+        said.contains(&format!(
+            "`partway` reaches it, and its chain begins at `{SUCCESSOR}`, which continues an \
+             earlier log"
+        )),
+        "{said}"
+    );
+    assert!(said.contains("pinned to the chain's first log key"), "{said}");
+    assert_eq!(
+        git(&elsewhere, &["rev-parse", "main"]),
+        begun,
+        "nothing is published"
+    );
+
+    // With the source from the first log too. A dry run syncs nothing: made stale, the source is
+    // read from its clone as it is, which is from before the logs went on, and its state is left.
+    w.configure(
+        ELSEWHERE,
+        &last,
+        &format!(
+            "repo = \"{}\"\n{partway}{}",
+            elsewhere.display(),
+            w.chain_source()
+        ),
+    );
+    let record = w.dir.join("home/.local/state/trigon/evidence/chain/sync");
+    let fresh = std::fs::read(&record).unwrap();
+    let mut stale: serde_json::Value = serde_json::from_slice(&fresh).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    stale["lastSuccess"] = serde_json::json!(now - 2 * 86_400);
+    std::fs::write(&record, serde_json::to_vec(&stale).unwrap()).unwrap();
+    let written = std::fs::read(&record).unwrap();
+    let said = refused(&publish(&["--dry-run", &c]));
+    assert!(said.contains("A dry run syncs nothing"), "{said}");
+    assert!(said.contains("`trigon evidence sync`"), "{said}");
+    assert_eq!(
+        std::fs::read(&record).unwrap(),
+        written,
+        "the dry run synced nothing"
+    );
+
+    // Fresh, and synced all the same, since the log it reaches has ended since: the chain is read
+    // whole, and `a`'s record in the first log is current.
+    std::fs::write(&record, &fresh).unwrap();
+    let said = refused(&publish(&[&c]));
+    assert!(
+        said.contains("source    `chain`: synced first: this command needs what it serves now"),
+        "{said}"
+    );
+    assert!(
+        said.contains("the whole chain is read, from the evidence source `chain`"),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "its artifact has a current record, sha256:{} at leaf 0 of `{ORIGIN}`",
+            first.to_hex()
+        )),
+        "{said}"
+    );
+    assert_eq!(git(&elsewhere, &["rev-parse", "main"]), begun);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3327,7 +3645,16 @@ fn a_rebuilt_artifact_is_pruned_only_once_its_run_is_published() {
         w.key.to_str().unwrap(),
         "--prune",
     ]));
-    assert!(said.contains("pruned the rebuilt artifact"), "{said}");
+    // Its reference goes, and the bytes stay: the second attempt rebuilt the same bytes, which
+    // are one blob, and its record still names them.
+    assert!(
+        said.contains(
+            "pruned this run's rebuilt artifact, and kept its bytes, which run \
+             1789007200-aaaa0002 still names"
+        ),
+        "{said}"
+    );
+    assert!(!w.run(&a).rebuild.unwrap().stored);
     // The second of a pair is never published once its first is, so no publication would upload
     // its artifact: attest prunes it, where holding it back would hold it for ever.
     let pq = Package::new("q", false);
@@ -3347,7 +3674,10 @@ fn a_rebuilt_artifact_is_pruned_only_once_its_run_is_published() {
     let said = refused(&w.publish_with(&gh, &[&q2, "--prune"]));
     assert!(said.contains("which is published"), "{said}");
     let said = ok(&prune(&q2));
-    assert!(said.contains("pruned the rebuilt artifact"), "{said}");
+    assert!(
+        said.contains("pruned this run's rebuilt artifact, and kept its bytes"),
+        "{said}"
+    );
     assert!(!w.run(&q2).rebuild.unwrap().stored);
     // A run the gate withholds, awaiting its confirmation, is refused, and says why.
     let store = Store::local(&w.store).unwrap();
@@ -3389,7 +3719,10 @@ fn a_rebuilt_artifact_is_pruned_only_once_its_run_is_published() {
         w.key.to_str().unwrap(),
         "--prune",
     ]));
-    assert!(said.contains("pruned the rebuilt artifact"), "{said}");
+    assert!(
+        said.contains("pruned this run's rebuilt artifact"),
+        "{said}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

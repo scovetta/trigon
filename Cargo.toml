@@ -106,7 +106,13 @@ serde_json = "1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "ansi", "std"] }
 proptest = "1"
 toml = "0.8"
+# Editing `evidence.toml` in place, keeping its comments and order (`trigon evidence add` and
+# `remove`). Already in the tree: `toml` parses with it.
+toml_edit = "0.22"
 regex = "1"
+# `flock` without unsafe code, for the store's blob lock (`trigon-store`, which forbids unsafe).
+# Already in the tree, with `fs`: `tar` reaches it through `xattr`.
+rustix = { version = "1", features = ["fs"] }
 
 [profile.release]
 debug = 1

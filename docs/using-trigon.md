@@ -630,6 +630,11 @@ artifact is uploaded from the store when it is published — including one the g
 which a confirmation can release later. A run no publication would ever upload an artifact for is
 pruned as it always was: an exact rebuild, a void run, and the second of two agreeing attempts
 whose first is published, which `publish` refuses. Anywhere else it prunes as it always did.
+Pruning drops the run's reference to its rebuilt artifact, and deletes the bytes only where no
+other run still names them: the two attempts of an agreeing pair rebuilt the same bytes, which the
+store keeps once, so pruning one keeps them for the other. A run whose record says its bytes are
+kept and whose store has lost them is reported as missing them, by `attest`, `rederive`, `serve`
+and `watch`, never as holding them.
 
 ### Rotating a key: `log key-change` and `log succeed`
 
@@ -693,10 +698,18 @@ and only a person removing the file in the successor's repository does.
 Then switch to the successor: set `[publish] origin` to its origin and `log_key` to its key — and
 `repo` to it, for another repository — and attest again whatever is still to be published, since a
 verdict signs the origin of the log it is published into. `publish` refuses to publish under the old
-origin once the log has ended, and says where publishing goes on. Keep the old log key: nothing more
-is appended to the old log, but its final checkpoint is what a client holding it checks the
-succession against. `keys/log.vkey` stays the first log's key, which clients pin; they follow the
-succession themselves.
+origin once the log has ended, and says where publishing goes on. Publishing runs or a withdrawal
+into a successor in another repository stands on the whole chain, so that an artifact with a current
+record in the old repository has one in the new: `publish` reads the logs before it through an
+evidence source whose chain reaches them from the chain's first log, synced first where it is
+stale, and refuses, saying how, where none does — `trigon evidence add <name> <the old repository>
+--log-key <its first log key> --attestation-key <key>` is the one to add. A source pinned to a later
+log's key reads the chain from partway, and is passed over. A source synced before the old log
+ended does not hold its end yet, so where none serves, `publish` syncs every source it did not just
+sync, however fresh, and looks again; `--dry-run` syncs nothing, and reads each source from its
+clone as it is. Keep the old log key: nothing more is appended to the old log, but its final
+checkpoint is what a client holding it checks the succession against. `keys/log.vkey` stays the
+first log's key, which clients pin; they follow the succession themselves.
 
 ### `trigon serve` and the repository's kill-switch
 
@@ -713,6 +726,117 @@ request, since each read runs `git`. It is on the page's header and in `/v1/heal
 `kill_switches`, where an anonymous reader is told the state and when, and not where it was read
 from.
 
+## Task: keep the evidence sources you trust
+
+A consumer asks evidence repositories — ours, other operators', mirrors of either — through
+**sources**: one log each, pinned by its log key, whose name is the log's origin, and its
+attestation key, and served from one or more locations ([`19`](19-distribution-and-lookup.md)
+§6.1). `trigon evidence` configures them and keeps a verified clone of each. The commands that
+answer from those clones — `trigon lookup`, a `trigon check` against evidence repositories,
+`verify-attestation --lookup` — are the next phase; `verify-attestation --record --source` already
+reads a source's pins and state.
+
+```
+$ trigon evidence add trigon https://github.com/owner/trigon-evidence.git \
+      https://codeberg.org/owner/trigon-evidence.git \
+      --log-key 'github.com/owner/trigon-evidence+1a2b3c4d+AR…' --attestation-key <64 hex>
+added     `trigon` to /home/you/.config/trigon/evidence.toml
+origin    github.com/owner/trigon-evidence, the log key's name
+url       https://github.com/owner/trigon-evidence.git (https)
+url       https://codeberg.org/owner/trigon-evidence.git (https)
+required  no
+next      trigon evidence sync --source trigon
+
+$ trigon evidence sync
+source    `trigon`, from /home/you/.config/trigon/evidence.toml
+synced    `github.com/owner/trigon-evidence`: 1204 leaves, newest leaf 2026-09-27T09:12:44Z
+url       https://github.com/owner/trigon-evidence.git (https): 1204 leaves, answering
+url       https://codeberg.org/owner/trigon-evidence.git (https): 1201 leaves, lagging
+note      https://codeberg.org/owner/trigon-evidence.git is lagging: it serves …
+```
+
+**Adding one.** `evidence add <name> <url>… --log-key <vkey> --attestation-key <key>` writes a
+`[[source]]` into your `evidence.toml` — or the file `TRIGON_EVIDENCE_CONFIG` names, made if it is
+not there — keeping every comment and the order of what is already in it. Every URL is a location
+of the one log: a mirror, which is how a split view is caught before witnesses exist. A relative
+path is taken from where you run the command, and written absolute. The name is the source's
+directory in the cache and the state directory, so a name any source already has is refused in any
+case, whichever file or variable added it. `--checkpoint <file>` pins an initial checkpoint, which
+must open under the log key; `--required` makes a check fail while the source cannot answer. A
+source that pins neither key, or one of them, is refused unless `--trust-on-first-use` (below).
+
+**Syncing.** `evidence sync` brings every source up to date in parallel, or those `--source <name>`
+names. Each location has its own clone, at `~/.cache/trigon/evidence/<name>/<sha256 of the
+location>/`: a remote is cloned shallow, partial and sparse, holding `keys/`, `log/` and
+`records/`, and a local path in full, since git ignores depth and filters there (`-v` says so). A
+later sync is a fetch and a reset, never a pull. Before anything is accepted, each clone is verified
+whole — the checkpoint under the log key, the root recomputed from every leaf, leaf times that never
+go back, every key change and succession followed, a successor in another repository cloned from
+the URLs its log-end names and followed there as part of the same source — and every location is
+held to every other: at one size one root, and at two sizes the smaller a prefix of the larger. The
+largest answers, and a smaller one is reported as lagging. Only then is the state written, in
+`~/.local/state/trigon/evidence/<name>/`: `checkpoint`, the one accepted; `keys`, the key history
+the log gives, which the next sync compares with the log and says so where they disagree; and
+`sync`, when it last worked. `--full-history` keeps each clone's whole git history, and says when
+a fetch is not a fast-forward.
+
+`evidence sync` exits 0 when every source synced and 4 when any did not. A source is **refused** —
+its clones and state kept exactly as they were — when it fails verification: a checkpoint that does
+not extend the one accepted, a clone rolled back behind it, or two locations that are not one log,
+each printed with both signed notes. A refused source answers nothing, and every command asking it
+exits 4, until a sync of it works. A source that could not be reached still answers from its clone
+until the clone is stale.
+
+**The first sync, and a lost state.** Without a checkpoint accepted or configured, the first sync
+accepts the first checkpoint that verifies under the log key, and says so; from then on every
+checkpoint must extend the one accepted. So the state directory is what a rollback is caught
+against: a source that has synced before — a clone of it that a sync accepted is in the cache, or
+its state records a sync that worked — and has lost its state is refused, never given a new one
+quietly, and `evidence sync --accept-state-loss <name>` is how you say the loss is known. Only what
+was lost starts over: with the checkpoint gone, the log is held only to its initial checkpoint, or
+to nothing but itself, and a source trusting on first use keeps the keys it first read; with those
+keys gone, they are read again from `keys/`, and the checkpoint that was kept must open under them.
+A sync stopped partway — killed, or timed out — leaves no clone that counts as one a sync accepted,
+and the next sync makes it again.
+
+**In CI**, keep `~/.cache/trigon/evidence` and `~/.local/state/trigon/evidence` together, in one
+cache step: the cache makes a job pay for a fetch and not a clone, and the state is what a rollback
+is caught against. A runner that restores the clones without the state has lost it, as far as
+Trigon can tell, and every sync is refused, exit 4, until `--accept-state-loss <name>`; one that
+keeps neither is a fresh client, and detects a rollback only back to the checkpoint it is
+configured with.
+
+**Trust on first use.** A source added with `--trust-on-first-use`, or `TRIGON_EVIDENCE_REPO` with
+`TRIGON_EVIDENCE_TOFU=1`, reads a key it does not pin from `keys/` of the first location reached on
+its first sync, and records it in its state; every later sync is held to that key, whatever `keys/`
+says afterwards. Whoever served that location at that moment chose the key, so every answer from
+the source says it rests on keys trusted on first use, and where and when they were read — `evidence
+list` does, and `verify-attestation --record --source <name>`, which reads the recorded keys, and
+refuses, as a sync does, a source that has synced before and lost its checkpoint.
+
+**Freshness.** Two clocks, from `[freshness]`: a source whose last successful sync is older than
+`stale_after` (a day) is stale, and a command that needs it syncs it first and says so, or answers
+unknown for it under `--offline` or when that sync fails; a source whose newest leaf is older than
+`frozen_after` (fourteen days) is frozen, and answers unknown whatever the sync did, so a host
+serving an old but consistent log cannot turn a withdrawal back into a verdict. A log with no leaf
+yet is frozen too. An unknown source fails a check only where it is required.
+
+**Listing and removing.** `evidence list` shows each source's origin, its locations and their
+transports, whether it is required, the file that added it, whether its keys are pinned or trusted
+on first use, when it last synced, the size of the checkpoint it answers from, when its newest leaf
+was logged, and how it stands now — fresh; usable from its clone after a failed sync, until it goes
+stale; unknown; frozen; refused — with each clone verified as a command asking it would, touching no
+network (`--output json` for a script); a source whose state files cannot be read says so on its
+own row and answers unknown, and the others are listed as they are. `evidence remove <name>` takes
+a source out of your file, with its clones and its state; a source the project's
+`.trigon/evidence.toml` or `TRIGON_EVIDENCE_REPO` added is refused, with why. `add` and `remove`
+write the file a symlinked `evidence.toml` leads to, and keep the link. A project's sources sync
+like any other, and everything said about one names the file that added it; a project's source is
+fetched over HTTPS only, and so is a successor its log names in another repository — one at any
+other location is refused.
+
+---
+
 ## Configuring where evidence goes: `evidence.toml`
 
 Publishing and looking up verdicts in an evidence repository
@@ -720,9 +844,9 @@ Publishing and looking up verdicts in an evidence repository
 in. `trigon attest`, `trigon publish`, `trigon log init`, `log key-change`, `log succeed`, `trigon
 serve` and `trigon worker` read the configuration today — `serve` and `worker` for
 `same_host_confirmation` and `confirmation_interval`, which decide when two attempts count as two,
-and `serve` for `[publish] repo` and `branch` too, to report the repository's kill-switch;
-`evidence sync` and `lookup` are the later phases that use the `[freshness]` and `[[source]]`
-tables.
+and `serve` for `[publish] repo` and `branch` too, to report the repository's kill-switch — and
+`trigon evidence` reads and writes the `[[source]]` tables and reads `[freshness]`, as the
+commands that answer from the sources' clones will.
 
 The file is `~/.config/trigon/evidence.toml` (`$XDG_CONFIG_HOME/trigon/evidence.toml`), or
 whatever `TRIGON_EVIDENCE_CONFIG` names instead. Every key, with its default:

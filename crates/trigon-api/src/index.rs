@@ -325,6 +325,9 @@ struct Inner {
     /// The full record, kept so a detail request costs no round trip. Records are small; the large
     /// parts of a run are digests.
     records: BTreeMap<String, RunRecord>,
+    /// Runs whose record says their published artifact is kept and whose store has no blob of it,
+    /// found when the record was read: shown as without artifacts, never as having them.
+    missing: std::collections::BTreeSet<String>,
 }
 
 impl Default for Index {
@@ -398,12 +401,27 @@ impl Index {
             }
         }
         let added = fetched.len();
+        // `stored: true` is the record's word, and a blob can go without the record saying so, so
+        // the store is asked, once per record read.
+        let mut missing = Vec::new();
+        for r in &fetched {
+            if r.upstream.stored && !store.kept(&r.upstream).await.unwrap_or(false) {
+                missing.push(r.id.clone());
+            }
+        }
 
         let mut g = self.write_or_recover();
         for r in fetched {
             g.records.insert(r.id.clone(), r);
         }
+        g.missing.extend(missing);
         g.entries = build(&g.records, switches);
+        let Inner {
+            entries, missing, ..
+        } = &mut *g;
+        for e in entries.iter_mut().filter(|e| missing.contains(&e.id)) {
+            e.has.artifacts = false;
+        }
         Ok(added)
     }
 

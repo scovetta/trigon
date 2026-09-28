@@ -55,7 +55,7 @@
 //! state directory, and one at a time in a store, under the store's.
 
 mod feed;
-mod git;
+pub(crate) mod git;
 mod init;
 mod lock;
 mod release;
@@ -84,7 +84,7 @@ use trigon_attest::{
     FalsifyingCommand, LogVkey, REBUILD, Record, Statement, VOID, WITHDRAWAL, evidence_key,
 };
 use trigon_core::Digest;
-use trigon_store::{Published, RunRecord, Store};
+use trigon_store::{Pruned, Published, RunRecord, Store};
 
 use crate::evidence_log::{NewestPublished, host_state};
 use crate::style;
@@ -202,6 +202,9 @@ struct Settings {
     heartbeat: Duration,
     confirmation: Confirmation,
     env: Env,
+    /// The whole configuration, for the evidence sources step 2 reads a chain through when it
+    /// goes on from another repository ([`whole_chain`]).
+    config: EvidenceConfig,
 }
 
 /// Where the publication is made.
@@ -695,6 +698,7 @@ fn settings(config: &EvidenceConfig, args: &Common, env: &Env, what: &What) -> R
         heartbeat: p.heartbeat,
         confirmation: Confirmation::from(p),
         env: env.clone(),
+        config: config.clone(),
     })
 }
 
@@ -944,6 +948,263 @@ fn verify(root: &Path, head: String, s: &Settings, newest: &NewestPublished) -> 
     })
 }
 
+/// The chain step 2 asks what is already published (`docs/19` §3): this repository's own, or,
+/// where it begins by continuing a log in another repository, the whole of it, which the earlier
+/// repositories' logs come first in.
+struct Chain<'a> {
+    repo: &'a Repository,
+    /// How many logs of it come before this repository's first.
+    before: usize,
+}
+
+impl<'a> Chain<'a> {
+    fn of(base: &'a Base, whole: Option<&'a Repository>) -> Chain<'a> {
+        match whole {
+            Some(w) => Chain {
+                repo: w,
+                before: w.logs().len() - base.repo.logs().len(),
+            },
+            None => Chain {
+                repo: &base.repo,
+                before: 0,
+            },
+        }
+    }
+
+    /// A leaf of the chain as this repository's own chain counts it, or `None` for one in an
+    /// earlier repository.
+    fn here(&self, pos: LeafPos) -> Option<LeafPos> {
+        pos.log.checked_sub(self.before).map(|log| LeafPos {
+            log,
+            index: pos.index,
+        })
+    }
+
+    /// Why a run whose record is logged in an earlier repository of the chain is not completed
+    /// here: its publication is recorded against the commit that logged it, which only that
+    /// repository's history holds.
+    fn logged_elsewhere(&self, record: Digest, pos: LeafPos) -> String {
+        format!(
+            "it is already published: its record sha256:{} is logged at leaf {} of `{}`, in {}, \
+             an earlier repository of this chain, and the run does not say so because a crash \
+             came between that push and recording it. Nothing is logged again",
+            record.to_hex(),
+            pos.index,
+            self.repo.origin(pos),
+            self.repo.root_of(pos).display()
+        )
+    }
+}
+
+/// Where this repository's chain of logs begins by continuing a log in another repository — a
+/// successor begun elsewhere by `trigon log succeed --url` — the whole chain, read the way `trigon
+/// evidence sync` reads a source's (`docs/19` §6.1, §8): through a configured evidence source whose
+/// chain reaches the log this one continues, synced first where it is stale, then this
+/// repository's own logs, followed from that log's end. `None` where the chain begins here.
+///
+/// So a verdict for an artifact with a current record earlier in the chain is refused as a second
+/// current record, as it would be in one repository, and a withdrawal may be of a record logged
+/// there. Refused where no configured source reaches the log continued from the chain's first
+/// log, since step 2 would otherwise judge by part of the chain: a source whose last sync was
+/// refused is not read, and nor is one pinned partway through the succession, whose chain begins
+/// by continuing a log it does not read. Where none serves, every source this has not just synced
+/// is synced now, whatever its age, and looked at once more: its clone may be from before the log
+/// it reaches ended, which is the usual order right after `log succeed --url`.
+///
+/// A dry run syncs nothing: every source is read from its clone as it is.
+fn whole_chain(base: &Base, s: &Settings, dry_run: bool) -> Result<Option<Repository>> {
+    use crate::evidence::{Mode, ready};
+    let first = &base.repo.source().logs[0];
+    let Some(Leaf::LogContinuation(c)) = first.log.leaf(0) else {
+        return Ok(None);
+    };
+    let held = c.old_checkpoint()?;
+    let config = &s.config;
+    let all: Vec<String> = config
+        .sources()
+        .iter()
+        .map(|src| src.name.clone())
+        .collect();
+    // The sources whose chain, as last synced, reaches the log continued, so that no other is
+    // synced for its age; every one where none is known to, since a source never synced may. A
+    // dry run syncs nothing, and reads them all.
+    let reaches = |name: &str| -> bool {
+        config
+            .source_state_dir(name)
+            .ok()
+            .and_then(|d| trigon_attest::state::KeysFile::read(&d).ok().flatten())
+            .is_some_and(|k| k.logs.iter().any(|l| l.origin == held.origin))
+    };
+    let mut asked: Vec<String> = all.iter().filter(|n| reaches(n)).cloned().collect();
+    if asked.is_empty() || dry_run {
+        asked = all.clone();
+    }
+    let now = crate::evidence::now();
+    let mode = match dry_run {
+        true => Mode::Offline,
+        false => Mode::Sync,
+    };
+    let found = match asked.is_empty() {
+        true => Vec::new(),
+        false => ready(config, &asked, mode, now, false)?,
+    };
+    // Why each source that reaches the log continued was passed over, by its name.
+    let mut passed_over: Vec<(String, String)> = Vec::new();
+    if let Some(whole) = chain_through(base, s, &held, &found, &mut passed_over, dry_run)? {
+        return Ok(Some(whole));
+    }
+    if !dry_run {
+        let synced: Vec<&str> = found
+            .iter()
+            .filter(|r| r.synced)
+            .map(|r| r.source.name.as_str())
+            .collect();
+        let behind: Vec<String> = all
+            .iter()
+            .filter(|n| !synced.contains(&n.as_str()))
+            .cloned()
+            .collect();
+        if !behind.is_empty() {
+            passed_over.retain(|(n, _)| !behind.contains(n));
+            let again = ready(config, &behind, Mode::Refresh, now, false)?;
+            if let Some(whole) =
+                chain_through(base, s, &held, &again, &mut passed_over, dry_run)?
+            {
+                return Ok(Some(whole));
+            }
+        }
+    }
+    let why: Vec<&str> = passed_over.iter().map(|(_, w)| w.as_str()).collect();
+    bail!(
+        "`{}` in {} continues `{}`, which is in another repository, and no evidence source \
+         configured here reaches it from the chain's first log{}{}. Publishing reads the whole \
+         chain before it refuses a second current record for an artifact (docs/19 §3): add the \
+         chain's first repository as a source, pinned to the chain's first log key — `trigon \
+         evidence add <name> <its location> --log-key <the first log's key> --attestation-key \
+         <key>` — and publish again",
+        first.log.origin(),
+        s.location,
+        held.origin,
+        match why.is_empty() {
+            true => String::new(),
+            false => format!(" that can be read ({})", why.join("; ")),
+        },
+        match dry_run {
+            true => ". A dry run syncs nothing, so each source was read from its clone as it \
+                 is: `trigon evidence sync` brings them up to date",
+            false => "",
+        }
+    )
+}
+
+/// The whole chain through the first of `found` that reaches the log `held` is the checkpoint of
+/// and names this repository's first log as its successor, from the chain's first log; `None`,
+/// with why each source that reaches it was passed over, where none does.
+fn chain_through(
+    base: &Base,
+    s: &Settings,
+    held: &Checkpoint,
+    found: &[crate::evidence::Ready],
+    passed_over: &mut Vec<(String, String)>,
+    dry_run: bool,
+) -> Result<Option<Repository>> {
+    let first = &base.repo.source().logs[0];
+    for r in found {
+        let name = &r.source.name;
+        for n in &r.notes {
+            println!("source    `{name}`: {n}");
+        }
+        let Some(o) = &r.opened else {
+            continue;
+        };
+        let logs = o.repo.logs();
+        let Some(k) = logs.iter().position(|l| l.origin() == held.origin) else {
+            continue;
+        };
+        if let trigon_attest::evidence::Standing::Refused { why } = &r.standing {
+            passed_over.push((
+                name.clone(),
+                format!(
+                    "`{name}` reaches it, and its last sync was refused: {}",
+                    printable(why)
+                ),
+            ));
+            continue;
+        }
+        // A source pinned at a log that itself continues another — a successor's key, in place or
+        // elsewhere — reads the chain from partway: a record current in a log before it would not
+        // be seen, and a second current record for its artifact would be published.
+        if let Some(Leaf::LogContinuation(_)) = logs[0].leaf(0) {
+            passed_over.push((
+                name.clone(),
+                format!(
+                    "`{name}` reaches it, and its chain begins at `{}`, which continues an earlier \
+                     log that it does not read: it is pinned partway through the succession, and \
+                     must be pinned to the chain's first log key",
+                    logs[0].origin()
+                ),
+            ));
+            continue;
+        }
+        let end = logs[k].log_end().map(|e| &e.successor);
+        let named = end.is_some_and(|e| {
+            e.origin == first.log.origin() && e.log_key == first.log.vkey().to_string()
+        });
+        if !named {
+            passed_over.push((
+                name.clone(),
+                format!(
+                    "`{name}` reaches `{}`, and {} `{}` under its log key{}",
+                    held.origin,
+                    match end {
+                        Some(_) => "its log-end does not name",
+                        None => "that log has not ended in its clone, naming",
+                    },
+                    first.log.origin(),
+                    match dry_run && !r.synced {
+                        true => ", as its clone holds it",
+                        false => "",
+                    }
+                ),
+            ));
+            continue;
+        }
+        trigon_attest::log::follow(
+            logs[k],
+            &DirFiles::in_repository(&base.root, &first.dir),
+            None,
+        )
+        .with_context(|| {
+            format!(
+                "`{}` in {} is not the successor `{}`'s log-end names",
+                first.log.origin(),
+                s.location,
+                held.origin
+            )
+        })?;
+        let mut parts = o.repo.parts_through(k);
+        parts.push((base.root.clone(), base.repo.source().clone()));
+        let whole = Repository::chain(parts, &o.keys.attestation, None).with_context(|| {
+            format!(
+                "the chain from the evidence source `{name}` through {} does not verify",
+                s.location
+            )
+        })?;
+        println!(
+            "chain     `{}` continues `{}`, in another repository: the whole chain is read, from \
+             the evidence source `{name}`{}",
+            first.log.origin(),
+            held.origin,
+            match (dry_run, r.synced) {
+                (true, _) => ", as its clone holds it: a dry run syncs nothing",
+                _ => "",
+            }
+        );
+        return Ok(Some(whole));
+    }
+    Ok(None)
+}
+
 fn plan(
     base: &Base,
     what: &What,
@@ -968,8 +1229,8 @@ fn plan(
     }
     let mut succession = None;
     let (entries, completions) = match what {
-        What::Runs(ids) => runs(base, ids, s, store, rt)?,
-        What::Withdrawal(path) => (withdrawal(base, path, s)?, Vec::new()),
+        What::Runs(ids) => runs(base, ids, s, store, rt, dry_run)?,
+        What::Withdrawal(path) => (withdrawal(base, path, s, dry_run)?, Vec::new()),
         What::Heartbeat => match heartbeat(base, s)? {
             Ok(entries) => (entries, Vec::new()),
             Err(why) => {
@@ -1068,6 +1329,7 @@ fn runs(
     s: &Settings,
     store: &Store,
     rt: &tokio::runtime::Runtime,
+    dry_run: bool,
 ) -> Result<(Vec<Entry>, Vec<Completion>)> {
     let index = trigon_api::Index::new();
     rt.block_on(index.refresh(
@@ -1080,6 +1342,11 @@ fn runs(
     .map_err(|e| anyhow!("reading the store: {e}"))?;
     let time = leaf_time(base);
     let key = base.repo.keys().current().clone();
+    // What is published is asked of the whole chain, which goes on from another repository where
+    // this one begins by continuing a log elsewhere: a record current there is current here. Read
+    // when the first run the gate releases asks what is published, and not for a publication the
+    // gate refuses whole, which needs nothing of it.
+    let mut whole: Option<Option<Repository>> = None;
     let mut refused: Vec<String> = Vec::new();
     let mut entries: Vec<Entry> = Vec::new();
     let mut completions: Vec<Completion> = Vec::new();
@@ -1136,8 +1403,12 @@ fn runs(
         // What the log already holds of this run, and of an attempt it agrees with, is asked by
         // the artifact the run is about and before its statements are read: a run published, or
         // the second of an agreeing pair, is refused whatever it was signed as.
+        if whole.is_none() {
+            whole = Some(whole_chain(base, s, dry_run)?);
+        }
+        let chain = Chain::of(base, whole.as_ref().and_then(Option::as_ref));
         let sha256 = r.upstream.sha256.to_hex();
-        let found = base
+        let found = chain
             .repo
             .lookup(&Key::Digest {
                 algorithm: "sha256",
@@ -1157,11 +1428,14 @@ fn runs(
         // Logged, and the run does not say so: a crash came after the push. Completed, never
         // logged again.
         if let Some((logged, pos)) = logged_run(&found, id) {
-            completions.push(Completion {
-                run: id.clone(),
-                record: logged,
-                pos,
-            });
+            match chain.here(pos) {
+                Some(pos) => completions.push(Completion {
+                    run: id.clone(),
+                    record: logged,
+                    pos,
+                }),
+                None => refused.push(refuse(chain.logged_elsewhere(logged, pos))),
+            }
             continue;
         }
         // Of two agreeing attempts, one is published (`docs/19` §3).
@@ -1263,12 +1537,15 @@ fn runs(
         let digest = Record::digest_of(&bytes);
         // Logged, and not found above because its file is not one this could read: completed as
         // a crash after the push leaves it, never logged again.
-        if let Some((pos, _)) = base.repo.record_leaves().find(|(_, l)| l.record == digest) {
-            completions.push(Completion {
-                run: id.clone(),
-                record: digest,
-                pos,
-            });
+        if let Some((pos, _)) = chain.repo.record_leaves().find(|(_, l)| l.record == digest) {
+            match chain.here(pos) {
+                Some(pos) => completions.push(Completion {
+                    run: id.clone(),
+                    record: digest,
+                    pos,
+                }),
+                None => refused.push(refuse(chain.logged_elsewhere(digest, pos))),
+            }
             continue;
         }
         if let Some(earlier) = subjects.get(&sha256) {
@@ -1278,7 +1555,7 @@ fn runs(
             )));
             continue;
         }
-        if let Err(why) = supersedes_what_is_current(st, &found, base) {
+        if let Err(why) = supersedes_what_is_current(st, &found, chain.repo) {
             refused.push(refuse(why));
             continue;
         }
@@ -1833,7 +2110,7 @@ fn recourse(st: &Statement, s: &Settings) -> Result<(), String> {
 fn supersedes_what_is_current(
     st: &Statement,
     found: &[trigon_attest::evidence::Found],
-    base: &Base,
+    chain: &Repository,
 ) -> Result<(), String> {
     let standing: Vec<&trigon_attest::evidence::Found> = found
         .iter()
@@ -1857,17 +2134,18 @@ fn supersedes_what_is_current(
     match (named, standing.first()) {
         (None, None) => Ok(()),
         (None, Some(one)) => Err(format!(
-            "its artifact has a current record, sha256:{} at leaf {}; {how}",
+            "its artifact has a current record, sha256:{} at leaf {} of `{}`; {how}",
             one.leaf.record.to_hex(),
-            one.pos.index
+            one.pos.index,
+            chain.origin(one.pos)
         )),
         (Some(d), Some(one)) if one.leaf.record == d => Ok(()),
         (Some(d), current) => {
-            let logged = base.repo.record_leaves().any(|(_, l)| l.record == d);
+            let logged = chain.record_leaves().any(|(_, l)| l.record == d);
             Err(match (logged, current) {
                 (false, _) => format!(
-                    "it supersedes sha256:{}, which this repository's log does not hold, so no \
-                     client would ever apply it",
+                    "it supersedes sha256:{}, which this repository's chain of logs does not \
+                     hold, so no client would ever apply it",
                     d.to_hex()
                 ),
                 (true, Some(one)) => format!(
@@ -1918,8 +2196,9 @@ fn client_accepts(
 
 /// Step 2 for `--withdrawal`: a record of the withdrawal a `trigon attest --withdraw` signed, of a
 /// record the log holds and nothing supersedes.
-fn withdrawal(base: &Base, path: &Path, s: &Settings) -> Result<Vec<Entry>> {
-    let _ = s;
+fn withdrawal(base: &Base, path: &Path, s: &Settings, dry_run: bool) -> Result<Vec<Entry>> {
+    let whole = whole_chain(base, s, dry_run)?;
+    let chain = Chain::of(base, whole.as_ref());
     let text = read_small(path, ENVELOPE_LIMIT)?
         .with_context(|| format!("{} is not there", path.display()))?;
     let env: Envelope = serde_json::from_str(&text)
@@ -1947,28 +2226,28 @@ fn withdrawal(base: &Base, path: &Path, s: &Settings) -> Result<Vec<Entry>> {
         .and_then(|v| v.strip_prefix("sha256:"))
         .and_then(|h| Digest::from_hex(h).ok())
         .context("the withdrawal names no record it withdraws")?;
-    let Some((pos, target)) = base.repo.record_leaves().find(|(_, l)| l.record == of) else {
+    let Some((pos, target)) = chain.repo.record_leaves().find(|(_, l)| l.record == of) else {
         bail!(
-            "the withdrawal is of sha256:{}, which this repository's log does not hold; a \
-             withdrawal is published only of a logged record",
+            "the withdrawal is of sha256:{}, which this repository's chain of logs does not hold; \
+             a withdrawal is published only of a logged record",
             of.to_hex()
         );
     };
     let record = Record::assemble(vec![env])?;
     let bytes = record.encode()?;
     let digest = Record::digest_of(&bytes);
-    if let Some((at, _)) = base.repo.record_leaves().find(|(_, l)| l.record == digest) {
+    if let Some((at, _)) = chain.repo.record_leaves().find(|(_, l)| l.record == digest) {
         bail!(
-            "this withdrawal is already logged, at leaf {} of {}: nothing to publish",
+            "this withdrawal is already logged, at leaf {} of `{}`: nothing to publish",
             at.index,
-            s.location
+            chain.repo.origin(at)
         );
     }
     let key = Key::Digest {
         algorithm: "sha256",
         hex: target.subject.get("sha256").cloned().unwrap_or_default(),
     };
-    let found = base.repo.lookup(&key).found;
+    let found = chain.repo.lookup(&key).found;
     if let Some(f) = found.iter().find(|f| f.leaf.record == of)
         && let Some(by) = f.superseded_by.first()
     {
@@ -1988,11 +2267,12 @@ fn withdrawal(base: &Base, path: &Path, s: &Settings) -> Result<Vec<Entry>> {
     )?;
     if leaf.subject != target.subject || leaf.purl != target.purl {
         bail!(
-            "the withdrawal is about {} ({}), and the record it withdraws, at leaf {}, is about \
-             {} ({}); a client applies a withdrawal only to a record of the same artifact",
+            "the withdrawal is about {} ({}), and the record it withdraws, at leaf {} of `{}`, is \
+             about {} ({}); a client applies a withdrawal only to a record of the same artifact",
             leaf.subject.get("sha256").map_or("nothing", String::as_str),
             printable(&leaf.purl),
             pos.index,
+            chain.repo.origin(pos),
             target
                 .subject
                 .get("sha256")
@@ -3036,8 +3316,18 @@ fn prune_published(
     }
     for run in runs {
         match rt.block_on(store.prune_rebuild(run)) {
-            Ok(true) => println!("pruned    run {run}'s rebuilt artifact; its digests remain"),
-            Ok(false) => println!(
+            Ok(Pruned::Deleted) => {
+                println!("pruned    run {run}'s rebuilt artifact; its digests remain")
+            }
+            Ok(Pruned::Shared(others)) => println!(
+                "pruned    run {run}'s rebuilt artifact, and kept its bytes, which {}; its \
+                 digests remain",
+                match others.is_empty() {
+                    true => "are the published artifact too".to_string(),
+                    false => format!("run {} still names", others.join(", ")),
+                }
+            ),
+            Ok(Pruned::Kept) => println!(
                 "kept      run {run}'s rebuilt artifact: a divergence keeps its bytes, and a run \
                  with none stored has none to drop"
             ),

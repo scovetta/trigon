@@ -167,7 +167,7 @@ fn pins(a: &Args<'_>) -> Result<Pinned, Stop> {
                 .and_then(|env| EvidenceConfig::load(&env))
                 .map_err(cannot)?;
             let p = config.pins(name).map_err(cannot)?;
-            let said = match &p.added_by {
+            let mut said = match &p.added_by {
                 AddedBy::ProjectFile(f) => format!(
                     "`{}`, added by the project's own {}",
                     printable(name),
@@ -175,6 +175,15 @@ fn pins(a: &Args<'_>) -> Result<Pinned, Stop> {
                 ),
                 other => format!("`{}`, from {other}", printable(name)),
             };
+            // Every answer from a source that trusts on first use says what it rests on.
+            if let Some(f) = &p.first_use {
+                said.push_str(&format!(
+                    ", resting on keys trusted on first use: read from {}'s keys/ at {} by its \
+                     first sync, and pinned since",
+                    printable(&f.read_from),
+                    crate::rfc3339_from_unix(f.at)
+                ));
+            }
             let unaccepted = format!(
                 "no checkpoint has been accepted for this source — {} is not there — and it \
                  configures no initial one, so its log is checked whole and not against anything \
@@ -510,7 +519,7 @@ fn rerun(a: &Args<'_>, repo: &Repository, v: &VerifiedRecord) -> Result<Rederiva
         (Some(e), Ok(d)) if e.state == EvidenceState::Matches => {
             // Read again to be judged, and held to its digest again: the file checked when the
             // record was verified may be other bytes by now.
-            match repo.read_evidence_checked(e) {
+            match repo.read_evidence_checked(v.pos, e) {
                 Err(failure) => Published::Failed(failure.to_string()),
                 Ok((state, None)) => Published::Unchecked(format!(
                     "unchecked: sha256:{} was there when the record was verified, and is {} now",

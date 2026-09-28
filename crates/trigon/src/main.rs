@@ -425,6 +425,16 @@ enum Cmd {
     /// socket open is a reasonable thing to want.
     #[command(subcommand)]
     Log(LogCmd),
+    /// The evidence sources this client trusts, and the clones every answer is read from
+    /// (`docs/19` §6, §6.1).
+    ///
+    /// A source is one log, pinned by its log key — whose name is its origin — and its attestation
+    /// key, and served from one or more locations. `sync` clones each, verifies each whole, holds
+    /// its mirrors to one another and its checkpoint to the one last accepted, and only then
+    /// accepts it.
+    #[cfg(feature = "build")]
+    #[command(subcommand)]
+    Evidence(EvidenceCmd),
     /// Sign what a stored run says, after re-deriving it from the bytes.
     ///
     /// A separate process from the one that ran the build, and that is the point: it reads blobs by
@@ -1171,6 +1181,74 @@ enum LogCmd {
     },
 }
 
+/// `trigon evidence …`.
+#[cfg(feature = "build")]
+#[derive(Subcommand, Debug)]
+enum EvidenceCmd {
+    /// Add a source to your evidence.toml (or the file TRIGON_EVIDENCE_CONFIG names), keeping its
+    /// comments and order.
+    ///
+    /// A source is one log: every URL is a location of it, a mirror. It is pinned by both keys
+    /// unless `--trust-on-first-use`, which reads a key it does not pin from the repository's
+    /// `keys/` on the first sync, records it, and has every answer from it say it rests on that.
+    /// Refuses a name any source has, ignoring case.
+    Add {
+        /// The source's name: its directory in the cache and the state directory.
+        name: String,
+        /// Its locations: any a git client can clone, HTTPS, SSH, git://, http://, file://, or a
+        /// path.
+        #[arg(required = true, value_name = "URL")]
+        urls: Vec<String>,
+        /// The log's C2SP verifier key; its name is the log's origin.
+        #[arg(long, value_name = "VKEY")]
+        log_key: Option<String>,
+        /// The key its records are signed with: 64 hex digits, or a PEM file.
+        #[arg(long, value_name = "KEY")]
+        attestation_key: Option<String>,
+        /// An initial checkpoint the log must extend: without one, the first sync accepts the
+        /// first checkpoint that verifies, and says so.
+        #[arg(long, value_name = "FILE")]
+        checkpoint: Option<PathBuf>,
+        /// Fail a check while this source cannot answer.
+        #[arg(long)]
+        required: bool,
+        /// Read a key the source does not pin from the repository's keys/ on the first sync.
+        #[arg(long)]
+        trust_on_first_use: bool,
+    },
+    /// Show every source: its origin, locations, whether it is required, which file added it,
+    /// what its last sync found, and how it stands now — fresh, stale, frozen or refused — with
+    /// its clones verified as a command asking it would verify them. Touches no network.
+    List {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output: OutputFormat,
+    },
+    /// Remove a source your evidence.toml added, with its clones and its state. A source a
+    /// project's `.trigon/evidence.toml` or TRIGON_EVIDENCE_REPO added is refused, saying why.
+    Remove { name: String },
+    /// Clone or fetch every location of every source, in parallel, and verify each whole before
+    /// anything from it is accepted.
+    ///
+    /// Exits 0 when every source synced, and 4 when any did not: refused, because it failed
+    /// verification — a checkpoint that does not extend the one accepted, a rollback, mirrors that
+    /// disagree, printed with both signed notes — or lost its state; or not reached, when it still
+    /// answers from its clone until it is stale.
+    Sync {
+        /// Sync only this source; may be given more than once.
+        #[arg(long = "source", value_name = "NAME")]
+        sources: Vec<String>,
+        /// Keep each clone's whole git history, and say when a fetch is not a fast-forward.
+        #[arg(long)]
+        full_history: bool,
+        /// Accept that this source's state is lost — its accepted checkpoint, or the keys it
+        /// trusted on first use — and sync it as a first sync would: its log is then held only to
+        /// its initial checkpoint, or to nothing. Refused without this, since the state is what a
+        /// rollback is caught against.
+        #[arg(long, value_name = "NAME")]
+        accept_state_loss: Vec<String>,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum StrategyCmd {
     /// Render a strategy to the scripts an executor would run.
@@ -1386,6 +1464,11 @@ mod evidence_log;
 /// `trigon publish` and `trigon log init`: the only writers of an evidence repository.
 #[cfg(feature = "build")]
 mod publish;
+
+/// `trigon evidence add`, `list`, `remove` and `sync`: the sources a consumer trusts, and their
+/// clones and state.
+#[cfg(feature = "build")]
+mod evidence;
 
 #[cfg(feature = "build")]
 mod decompile;
@@ -1956,6 +2039,39 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             store,
             repo,
             dry_run,
+        }),
+        #[cfg(feature = "build")]
+        Cmd::Evidence(EvidenceCmd::Add {
+            name,
+            urls,
+            log_key,
+            attestation_key,
+            checkpoint,
+            required,
+            trust_on_first_use,
+        }) => evidence::add(trigon_attest::config::NewSource {
+            name,
+            urls,
+            log_key,
+            attestation_key,
+            checkpoint: checkpoint.map(|p| p.display().to_string()),
+            required,
+            trust_on_first_use,
+        }),
+        #[cfg(feature = "build")]
+        Cmd::Evidence(EvidenceCmd::List { output }) => evidence::list(output, verbose),
+        #[cfg(feature = "build")]
+        Cmd::Evidence(EvidenceCmd::Remove { name }) => evidence::remove(&name),
+        #[cfg(feature = "build")]
+        Cmd::Evidence(EvidenceCmd::Sync {
+            sources,
+            full_history,
+            accept_state_loss,
+        }) => evidence::sync_command(evidence::SyncArgs {
+            sources,
+            full_history,
+            accept_state_loss,
+            verbose,
         }),
         #[cfg(feature = "build")]
         Cmd::Publish {
@@ -7074,6 +7190,10 @@ mod rebuild {
             let rb_bytes = std::fs::read(rebuilt).with_context(|| {
                 format!("reading the rebuilt artifact at {}", rebuilt.display())
             })?;
+            // Held from before the bytes go in until the record naming them as kept is written: a
+            // `put` of bytes another run already stored adds nothing, and a prune of that run in
+            // between would delete what this record is about to say is kept.
+            let keeping = store.keeping().await?;
             let up = store.blobs().put(up_bytes.clone()).await?;
             let rb = store.blobs().put(rb_bytes.clone()).await?;
             // The fetch hashed these bytes as they arrived. Confirmed against the bytes being
@@ -7265,6 +7385,7 @@ mod rebuild {
             record.confidence = args.confidence.clone();
             record.finished = Some(crate::now_rfc3339());
             store.put_run(&record).await?;
+            drop(keeping);
 
             // **Pre-compute the decompiled C# for the members a reader will want it for.** A
             // managed assembly's byte diff is unreadable, so the member view decompiles it — and
@@ -12170,11 +12291,11 @@ mod attestor {
             trigon_core::ArtifactId::new(record.upstream.name.clone()),
         );
         // The published bytes, where the store kept them, fetched by hash and checked against
-        // it. Every statement about the published artifact takes its subject from them.
-        let upstream_bytes = match record.upstream.stored {
-            true => Some(store.blobs().get(&record.upstream.sha256).await?),
-            false => None,
-        };
+        // it. Every statement about the published artifact takes its subject from them. Bytes the
+        // record says are kept and the store has lost are said to be missing, never read as there.
+        let upstream_bytes = store
+            .artifact(id, "published artifact", &record.upstream)
+            .await?;
         let upstream_subject = upstream_subject(
             &record,
             upstream_bytes.as_deref(),
@@ -12257,7 +12378,10 @@ mod attestor {
             let upstream = upstream_bytes
                 .clone()
                 .context("the published artifact is stored, as checked above")?;
-            let rebuild = store.blobs().get(&rebuilt.sha256).await?;
+            let rebuild = store
+                .artifact(id, "rebuilt artifact", rebuilt)
+                .await?
+                .context("the rebuilt artifact is stored, as checked above")?;
             rebuild_subject = Some(Subject::of_bytes(&rebuilt.name, &rebuild, false));
 
             // The record and the evidence it points at must agree. Re-derivation already
@@ -12462,8 +12586,18 @@ mod attestor {
 
         if prune {
             match store.prune_rebuild(id).await {
-                Ok(true) => println!("pruned the rebuilt artifact; its digests remain"),
-                Ok(false) => {
+                Ok(trigon_store::Pruned::Deleted) => {
+                    println!("pruned the rebuilt artifact; its digests remain")
+                }
+                Ok(trigon_store::Pruned::Shared(others)) => println!(
+                    "pruned this run's rebuilt artifact, and kept its bytes, which {}; its digests \
+                     remain",
+                    match others.is_empty() {
+                        true => "are the published artifact too".to_string(),
+                        false => format!("run {} still names", others.join(", ")),
+                    }
+                ),
+                Ok(trigon_store::Pruned::Kept) => {
                     println!("kept the rebuilt artifact: a divergence needs its bytes")
                 }
                 Err(e) => println!("did not prune: {e}"),

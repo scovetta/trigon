@@ -968,7 +968,11 @@ record per result, to an evidence repository whose layout is
 
 **Retention:** on a match, store the rebuilt artifact's digests rather than the artifact. Keep bytes
 on divergence, where they are the evidence. That one rule accounts for most of the storage budget
-([`10-scale.md`](10-scale.md) §2).
+([`10-scale.md`](10-scale.md) §2). Pruning a run drops its reference to the bytes, and deletes them
+only where no other run's record still names them as kept: blobs are content-addressed, and the two
+attempts of an agreeing pair rebuild the same bytes into one blob. A record that says its bytes are
+kept is read by that word only where the store bears it out, and bytes gone from under it are
+reported missing (`Store::artifact`, `StoreError::Missing`), never as there.
 
 ## 7. Verification
 
@@ -993,9 +997,12 @@ trigon verify-attestation --record <file> --evidence <dir> \
 keys from `evidence.toml` and the checkpoint last accepted for it from its state directory,
 `$TRIGON_EVIDENCE_STATE/<name>/checkpoint` or else
 `$XDG_STATE_HOME/trigon/evidence/<name>/checkpoint`, or, before any sync has accepted one, its
-configured initial checkpoint; the flags give the same for a source not configured. Where there is
-no checkpoint at all, the output says the log was checked whole and not against anything seen
-before.
+configured initial checkpoint; the flags give the same for a source not configured. A source that
+trusts on first use is checked against the keys its first `trigon evidence sync` read and recorded
+in `<state>/<name>/keys`, and the report says so. Where there is no checkpoint at all, the output
+says the log was checked whole and not against anything seen before. The clones `trigon evidence
+sync` keeps, at `$XDG_CACHE_HOME/trigon/evidence/<name>/<sha256 of the location>/`, are what `<dir>`
+usually is.
 
 Steps:
 

@@ -313,6 +313,9 @@ struct Sweep {
 /// rather than felt.
 struct Found {
     record: trigon_store::RunRecord,
+    /// Whether the store has the blob of a rebuilt artifact the record says is kept: the record's
+    /// word alone would show bytes the store has lost as present.
+    rebuild_kept: bool,
     read: usize,
     millis: u128,
 }
@@ -358,8 +361,13 @@ async fn find_record(store: &Path, purl: &str) -> Lookup {
         if let Ok(r) = opened.get_run(&id).await
             && r.target == purl
         {
+            let rebuild_kept = match &r.rebuild {
+                Some(b) => opened.kept(b).await.unwrap_or(false),
+                None => false,
+            };
             return Lookup::Found(Box::new(Found {
                 record: r,
+                rebuild_kept,
                 read,
                 millis: started.elapsed().as_millis(),
             }));
@@ -3128,11 +3136,16 @@ async fn store_panel(store: &Path, purl: &str) -> String {
             format!(
                 "<code>{}</code>{}",
                 esc(&b.sha256.to_hex()[..16]),
-                if b.stored {
-                    ""
-                } else {
-                    " · <span class=\"note\">bytes pruned; a match can be re-derived, and a \
-                       divergence keeps its bytes</span>"
+                match (b.stored, found.rebuild_kept) {
+                    (true, true) => "",
+                    (true, false) => {
+                        " · <span class=\"void\">bytes missing: the record says they are kept, \
+                         and the store has no blob of them</span>"
+                    }
+                    (false, _) => {
+                        " · <span class=\"note\">bytes pruned; a match can be re-derived, and a \
+                         divergence keeps its bytes</span>"
+                    }
                 }
             ),
         ),

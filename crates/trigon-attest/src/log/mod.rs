@@ -12,7 +12,8 @@
 //! - [`tiles`]: C2SP tlog-tiles — tile and entry-bundle paths, framing, what a tree of a size has,
 //!   what an append writes, and reading a proof's hashes from tiles;
 //! - [`leaf`]: the six leaf kinds, canonical JSON, decoded strictly;
-//! - [`verify`]: a log verified from its files, and a repository's chain of logs;
+//! - [`verify`]: a log verified from its files, a repository's chain of logs, a chain followed
+//!   into another repository, and copies of one chain held to being one;
 //! - [`rotation`]: following attestation-key changes.
 //!
 //! No network, no runtime, and no filesystem beyond reading the directory it is given: the
@@ -40,7 +41,8 @@ pub use note::{LogSigner, SignedNote};
 pub use rotation::{KeyChange, KeyEpoch, KeyHistory, LeafPos};
 pub use tiles::{Append, Bundle, Tile, TileHashes, plan_append};
 pub use verify::{
-    Beginning, ChainedLog, Extension, RefusedLog, VerifiedLog, VerifiedSource, find_predecessor,
-    follow, open_checkpoint, prove_inclusion_from_tiles, verify_beginning, verify_extension,
+    Beginning, ChainedLog, Disagreement, Extension, RefusedLog, VerifiedLog, VerifiedSource,
+    check_accepted, compare_chains, find_predecessor, follow, open_checkpoint,
+    prove_inclusion_from_tiles, same_log, verify_beginning, verify_continuation, verify_extension,
     verify_extension_from_tiles, verify_log, verify_source,
 };

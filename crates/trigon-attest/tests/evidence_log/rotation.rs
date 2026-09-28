@@ -48,7 +48,7 @@ pub fn continuation(time: u64) -> Leaf {
 }
 
 /// The first log, at `log/`: `leaves`, then a log-end at `end`.
-fn ended(repo: &Path, leaves: &[Leaf], end: Leaf) -> Writer {
+pub fn ended(repo: &Path, leaves: &[Leaf], end: Leaf) -> Writer {
     let mut w = Writer::init(&repo.join("log"), log_key());
     if !leaves.is_empty() {
         w.append(leaves);
@@ -58,7 +58,7 @@ fn ended(repo: &Path, leaves: &[Leaf], end: Leaf) -> Writer {
 }
 
 /// The old log's checkpoint as it stands, signed by `signers` in order.
-fn continuation_of(old: &Writer, time: u64, signers: &[LogSigner]) -> Leaf {
+pub fn continuation_of(old: &Writer, time: u64, signers: &[LogSigner]) -> Leaf {
     let body = old.checkpoint().checkpoint().body();
     let mut note = SignedNote::sign(&body, &signers[0]).unwrap();
     for s in &signers[1..] {
@@ -71,7 +71,7 @@ fn continuation_of(old: &Writer, time: u64, signers: &[LogSigner]) -> Leaf {
 }
 
 /// A successor at `dir`, signed by `signer`, whose leaves are `leaves`.
-fn successor_at(repo: &Path, dir: &str, signer: LogSigner, leaves: &[Leaf]) -> Writer {
+pub fn successor_at(repo: &Path, dir: &str, signer: LogSigner, leaves: &[Leaf]) -> Writer {
     let mut w = Writer::init(&repo.join(dir), signer);
     if !leaves.is_empty() {
         w.append(leaves);

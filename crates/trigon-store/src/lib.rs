@@ -99,6 +99,22 @@ pub enum StoreError {
     )]
     NoFreeAttestationPath { first: String, tried: usize },
 
+    /// A run's record says an artifact's bytes are kept, and the store has no blob of them.
+    ///
+    /// Said as missing, never read as there: the record's digests still stand, and what they are
+    /// digests of is gone — deleted from outside the store, or pruned for another run that named
+    /// the same bytes before pruning counted who else did.
+    #[error(
+        "run `{run}`'s record says its {what}, sha256:{digest}, is kept in the store, and the store \
+         has no blob of it: the bytes are missing. Its digests still stand; the bytes were removed \
+         from outside the store, or pruned for another run that named the same bytes"
+    )]
+    Missing {
+        run: String,
+        what: &'static str,
+        digest: String,
+    },
+
     #[error(transparent)]
     Object(#[from] object_store::Error),
 
@@ -124,6 +140,9 @@ impl Classify for StoreError {
             // true.
             StoreError::InconsistentSet { .. } => Fault::Bug,
             StoreError::NoSuchRun(_) | StoreError::NoSuchSet(_) | StoreError::Json(_) => Fault::Bug,
+            // Bytes a record says are kept and are not: the store lost data, which somebody should
+            // look at, as a blob that does not match its address is.
+            StoreError::Missing { .. } => Fault::Bug,
             // A record this store cannot address is a caller handing it something it should not
             // have: our own ids are `<unix>-<digest prefix>`.
             StoreError::Malformed(_) => Fault::Bug,
@@ -148,6 +167,8 @@ impl Classify for StoreError {
             | StoreError::InconsistentSet { .. }
             | StoreError::Malformed(_)
             | StoreError::Json(_) => false,
+            // Gone is gone: asking again finds it gone.
+            StoreError::Missing { .. } => false,
             // A record that is absent now may be present later, but nothing this process does will
             // make it so — the caller named a run that was never written.
             StoreError::NoSuchRun(_) | StoreError::NoSuchSet(_) => false,
@@ -205,6 +226,67 @@ fn name_statements(record: &mut RunRecord, written: &[String]) {
 pub struct Store {
     inner: Arc<dyn ObjectStore>,
     blobs: Blobs,
+    lock: BlobLock,
+}
+
+/// What a writer naming bytes as kept and a prune deleting them take turns on ([`Store::keeping`]).
+#[derive(Clone, Debug)]
+enum BlobLock {
+    /// `<root>/blobs.lock`, locked with `flock`: every process on the host that opens the store,
+    /// released when its holder exits however it exits.
+    File(std::path::PathBuf),
+    /// One process's own, for a store with no directory: one in memory. Held alone by writers
+    /// too, which there are rarely two of.
+    Memory(Arc<futures::lock::Mutex<()>>),
+}
+
+/// A hold on a store's blobs, released when it is dropped ([`Store::keeping`]).
+#[derive(Debug)]
+pub struct Keeping {
+    held: Held,
+}
+
+#[derive(Debug)]
+enum Held {
+    File(std::fs::File),
+    Memory(#[allow(dead_code, reason = "held for its drop")] futures::lock::OwnedMutexGuard<()>),
+}
+
+impl Drop for Keeping {
+    fn drop(&mut self) {
+        // Unlocked explicitly, not by the close alone: `flock` belongs to the open file
+        // description, which a child forked from another thread shares until it execs, and the
+        // close would leave the lock held that long.
+        if let Held::File(f) = &self.held {
+            let _ = rustix::fs::flock(f, rustix::fs::FlockOperation::Unlock);
+        }
+    }
+}
+
+impl BlobLock {
+    async fn hold(&self, alone: bool) -> Result<Keeping, StoreError> {
+        use rustix::fs::FlockOperation;
+        match self {
+            BlobLock::File(path) => {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(path)?;
+                let how = match alone {
+                    true => FlockOperation::LockExclusive,
+                    false => FlockOperation::LockShared,
+                };
+                rustix::fs::flock(&file, how).map_err(std::io::Error::from)?;
+                Ok(Keeping {
+                    held: Held::File(file),
+                })
+            }
+            BlobLock::Memory(m) => Ok(Keeping {
+                held: Held::Memory(m.clone().lock_owned().await),
+            }),
+        }
+    }
 }
 
 impl Store {
@@ -230,7 +312,10 @@ impl Store {
     pub fn local(root: &Path) -> Result<Self, StoreError> {
         std::fs::create_dir_all(root)?;
         let fs = object_store::local::LocalFileSystem::new_with_prefix(root)?;
-        Ok(Self::new(Arc::new(fs)))
+        Ok(Store {
+            lock: BlobLock::File(std::path::absolute(root)?.join("blobs.lock")),
+            ..Self::new(Arc::new(fs))
+        })
     }
 
     /// A store in memory. For tests, and for a run that must leave nothing behind.
@@ -242,7 +327,21 @@ impl Store {
         Store {
             blobs: Blobs::new(inner.clone()),
             inner,
+            lock: BlobLock::Memory(Arc::default()),
         }
+    }
+
+    /// Hold the store's blobs as they are, for a writer about to name bytes as kept.
+    ///
+    /// Taken before the bytes a new run record will name as kept are put, and held until that
+    /// record is written. [`Self::prune_rebuild`] deletes a blob only when no record names it,
+    /// and between a `put` that finds the bytes already there — another run's, as a confirming
+    /// attempt's are — and the record that names them, none does; a prune asking then would
+    /// delete the bytes the record is about to say are kept. So a prune holds this alone, from
+    /// asking who names a blob until it is deleted, and the two take turns. Shared between writers
+    /// of a store on disk, which never wait on one another. Waiting blocks the thread.
+    pub async fn keeping(&self) -> Result<Keeping, StoreError> {
+        self.lock.hold(false).await
     }
 
     pub fn blobs(&self) -> &Blobs {
@@ -686,27 +785,119 @@ impl Store {
     ///   answer it.
     /// - **The upstream artifact is never pruned here.** It is what a consumer already has and what
     ///   they would re-derive against.
-    pub async fn prune_rebuild(&self, id: &str) -> Result<bool, StoreError> {
+    ///
+    /// **And bytes another run still names stay.** Blobs are content-addressed, so two runs that
+    /// rebuilt byte-identical artifacts — the agreeing pair a confirmation is, exactly — share one
+    /// blob, and deleting it for one would leave the other's record saying `stored: true` over
+    /// nothing. So the blob is deleted only when no other run's record names it as kept, as its
+    /// published or its rebuilt artifact; otherwise only this run's reference is dropped
+    /// ([`Pruned::Shared`]). A record that cannot be read refuses the prune, since it may be one
+    /// that names the bytes.
+    ///
+    /// **Alone, from the question to the delete.** A run written meanwhile that names the same
+    /// bytes would not be counted and would lose them, so the prune holds the store's blobs alone
+    /// ([`Self::keeping`]), which every writer naming bytes as kept holds shared until its record
+    /// is written: it waits for any such writer to finish, and they for it.
+    pub async fn prune_rebuild(&self, id: &str) -> Result<Pruned, StoreError> {
+        let _alone = self.lock.hold(true).await?;
         let mut run = self.get_run(id).await?;
         if run.attestations.is_empty() {
             return Err(StoreError::NotAttested(id.to_string()));
         }
         if run.outcome.as_deref() == Some("divergent") || !run.is_evidence() {
-            return Ok(false);
+            return Ok(Pruned::Kept);
         }
+        let upstream = run.upstream.sha256;
         let Some(rebuild) = run.rebuild.as_mut() else {
-            return Ok(false);
+            return Ok(Pruned::Kept);
         };
         if !rebuild.stored {
-            return Ok(false);
+            return Ok(Pruned::Kept);
         }
+        let digest = rebuild.sha256;
+        let others = self.naming(&digest, id).await?;
         // Only when the two sides are genuinely distinct bytes. On an `exact` match they are the
         // same blob, and deleting it would take the upstream artifact with it.
-        if rebuild.sha256 != run.upstream.sha256 {
-            self.blobs.delete(&rebuild.sha256).await?;
+        let delete = digest != upstream && others.is_empty();
+        if delete {
+            self.blobs.delete(&digest).await?;
         }
         rebuild.stored = false;
         self.put_run(&run).await?;
-        Ok(true)
+        Ok(match delete {
+            true => Pruned::Deleted,
+            false => Pruned::Shared(others),
+        })
+    }
+
+    /// The runs other than `except` whose record names the blob `digest` as bytes it keeps: its
+    /// published artifact, or its rebuilt one.
+    pub async fn naming(&self, digest: &Digest, except: &str) -> Result<Vec<String>, StoreError> {
+        let mut out = Vec::new();
+        for id in self.list_runs().await? {
+            if id == except {
+                continue;
+            }
+            let r = self.get_run(&id).await?;
+            let names = (r.upstream.stored && r.upstream.sha256 == *digest)
+                || r.rebuild
+                    .as_ref()
+                    .is_some_and(|a| a.stored && a.sha256 == *digest);
+            if names {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// An artifact of `run`'s, as its record names it: its bytes, checked against their digest,
+    /// where the record says they are kept; `None` where it says they are not; and
+    /// [`StoreError::Missing`] where it says they are kept and the store has no blob of them —
+    /// reported as missing, never read as there. `what` names the artifact for that message.
+    pub async fn artifact(
+        &self,
+        run: &str,
+        what: &'static str,
+        a: &ArtifactRef,
+    ) -> Result<Option<bytes::Bytes>, StoreError> {
+        if !a.stored {
+            return Ok(None);
+        }
+        match self.blobs.get(&a.sha256).await {
+            Ok(b) => Ok(Some(b)),
+            Err(StoreError::Object(object_store::Error::NotFound { .. })) => {
+                Err(StoreError::Missing {
+                    run: run.to_string(),
+                    what,
+                    digest: a.sha256.to_hex(),
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether an artifact a record names is kept: the record says so, and the store has the blob.
+    /// A record that says so over a blob that is gone is not kept.
+    pub async fn kept(&self, a: &ArtifactRef) -> Result<bool, StoreError> {
+        Ok(a.stored && self.blobs.has(&a.sha256).await?)
+    }
+}
+
+/// What [`Store::prune_rebuild`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pruned {
+    /// Nothing: a divergence keeps its bytes, and a run with none kept has none to drop.
+    Kept,
+    /// The run's reference to its rebuilt artifact is dropped, and the bytes are deleted.
+    Deleted,
+    /// The run's reference is dropped, and the bytes stay: they are the published artifact too,
+    /// an exact match, or these other runs' records still name them as kept.
+    Shared(Vec<String>),
+}
+
+impl Pruned {
+    /// Whether the run's reference to its rebuilt artifact was dropped.
+    pub fn dropped(&self) -> bool {
+        !matches!(self, Pruned::Kept)
     }
 }

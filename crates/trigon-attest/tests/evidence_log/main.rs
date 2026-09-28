@@ -9,6 +9,7 @@
 //! `TRIGON_WRITE_GOLDEN=1 cargo test -p trigon-attest --test evidence_log`, and say why in the
 //! commit: every byte of it is signed, and a client already holding one will refuse another.
 
+mod chains;
 mod checkpoint;
 mod common;
 mod golden;

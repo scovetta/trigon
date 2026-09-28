@@ -231,7 +231,7 @@ pub(crate) async fn artifact_bytes(
     r: &trigon_store::RunRecord,
     side: &str,
 ) -> Result<(Vec<u8>, String), Response> {
-    let Some((digest, name)) = crate::member::side_digest(r, side) else {
+    let Some((_, name)) = crate::member::side_digest(r, side) else {
         return Err(refuse(
             StatusCode::NOT_FOUND,
             "no_such_side",
@@ -261,21 +261,30 @@ pub(crate) async fn artifact_bytes(
             ),
         ));
     }
-    let stored = match side {
-        "upstream" => r.upstream.stored,
-        _ => r.rebuild.as_ref().is_some_and(|a| a.stored),
+    let artifact = match side {
+        "upstream" => Some((&r.upstream, "published artifact")),
+        _ => r.rebuild.as_ref().map(|a| (a, "rebuilt artifact")),
     };
-    if !stored {
-        return Err(refuse(
+    let not_kept = || {
+        refuse(
             StatusCode::NOT_FOUND,
             "not_kept",
             "that artifact's bytes were not kept. Retention drops them on a match and keeps them \
              on a divergence, so the copies that could answer this question are the ones where \
              somebody would ask it.",
-        ));
-    }
-    match api.store.blobs().get(&digest).await {
-        Ok(b) => Ok((b.to_vec(), name)),
+        )
+    };
+    let Some((a, what)) = artifact else {
+        return Err(not_kept());
+    };
+    // Read by the record's word only where the store bears it out: bytes it says are kept and
+    // the store has lost are missing, and said so, never served as absent by policy.
+    match api.store.artifact(&r.id, what, a).await {
+        Ok(Some(b)) => Ok((b.to_vec(), name)),
+        Ok(None) => Err(not_kept()),
+        Err(e @ trigon_store::StoreError::Missing { .. }) => {
+            Err(refuse(StatusCode::NOT_FOUND, "missing", &e.to_string()))
+        }
         Err(e) => Err(refuse(
             StatusCode::NOT_FOUND,
             "no_such_blob",

@@ -1,7 +1,7 @@
 //! What the store has to guarantee for the attestor to be worth separating from the sandbox.
 
 use trigon_core::Digest;
-use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store, StoreError};
+use trigon_store::{ArtifactRef, Environment, Pruned, RunRecord, RunState, Store, StoreError};
 
 fn env() -> Environment {
     Environment {
@@ -147,7 +147,7 @@ async fn pruning_refuses_a_run_nothing_has_signed() {
     // Once something has signed for it, the bytes can go and the digests stay.
     r.attestations = vec!["attestations/npm/a/1/a.tgz/equivalence.intoto.json".into()];
     s.put_run(&r).await.unwrap();
-    assert!(s.prune_rebuild("0004").await.unwrap());
+    assert!(s.prune_rebuild("0004").await.unwrap().dropped());
     assert!(!s.blobs().has(&rb).await.unwrap());
 
     let back = s.get_run("0004").await.unwrap();
@@ -198,7 +198,7 @@ async fn a_model_assisted_run_keeps_the_exchange_it_came_out_of() {
     r.attestations = vec!["attestations/npm/a/1/a.tgz/equivalence.intoto.json".into()];
     s.put_run(&r).await.unwrap();
 
-    assert!(s.prune_rebuild("0009").await.unwrap());
+    assert!(s.prune_rebuild("0009").await.unwrap().dropped());
     assert!(!s.blobs().has(&rb).await.unwrap(), "the rebuild goes");
     assert!(
         s.blobs().has(&t).await.unwrap(),
@@ -222,7 +222,7 @@ async fn a_divergence_keeps_its_bytes() {
     r.attestations = vec!["attestations/npm/a/1/a.tgz/divergence.intoto.json".into()];
     s.put_run(&r).await.unwrap();
 
-    assert!(!s.prune_rebuild("0005").await.unwrap());
+    assert!(!s.prune_rebuild("0005").await.unwrap().dropped());
     assert!(s.blobs().has(&rb).await.unwrap());
 }
 
@@ -238,11 +238,191 @@ async fn an_exact_match_does_not_prune_the_one_blob_both_sides_share() {
     r.attestations = vec!["somewhere".into()];
     s.put_run(&r).await.unwrap();
 
-    assert!(s.prune_rebuild("0006").await.unwrap());
+    assert!(s.prune_rebuild("0006").await.unwrap().dropped());
     assert!(
         s.blobs().has(&d).await.unwrap(),
         "the shared blob is still the upstream artifact"
     );
+}
+
+/// Two attempts that rebuilt byte-identical artifacts — the agreeing pair a confirmation is — share
+/// one blob, since blobs are addressed by their bytes. Pruning one drops that run's reference and
+/// keeps the bytes the other still names; pruning the other then deletes them.
+#[tokio::test]
+async fn bytes_two_runs_share_are_kept_until_neither_names_them() {
+    let s = Store::in_memory();
+    let up = s.blobs().put(&b"upstream"[..]).await.unwrap();
+    let rb = s
+        .blobs()
+        .put(&b"the same rebuild, twice"[..])
+        .await
+        .unwrap();
+    for id in ["0010-a", "0011-b"] {
+        let mut r = RunRecord::new(id, "pkg:npm/a@1", artifact("a.tgz", &up, 8), env(), "t");
+        r.rebuild = Some(artifact("a.tgz", &rb, 23));
+        r.outcome = Some("normalized".into());
+        r.attestations = vec![format!(
+            "attestations/npm/a/1/a.tgz/{id}/equivalence.intoto.json"
+        )];
+        s.put_run(&r).await.unwrap();
+    }
+
+    assert_eq!(
+        s.prune_rebuild("0010-a").await.unwrap(),
+        Pruned::Shared(vec!["0011-b".into()])
+    );
+    assert!(
+        s.blobs().has(&rb).await.unwrap(),
+        "the bytes the other run names are still there"
+    );
+    let a = s.get_run("0010-a").await.unwrap();
+    let b = s.get_run("0011-b").await.unwrap();
+    assert!(
+        !a.rebuild.as_ref().unwrap().stored,
+        "this run's reference is dropped"
+    );
+    assert!(b.rebuild.as_ref().unwrap().stored, "the other's is not");
+    // And the other run's bytes read back as its record says they are.
+    let read = s
+        .artifact("0011-b", "rebuilt artifact", b.rebuild.as_ref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(read.as_deref(), Some(&b"the same rebuild, twice"[..]));
+    // The pruned run reads as not kept, which is not an error.
+    assert!(
+        s.artifact("0010-a", "rebuilt artifact", a.rebuild.as_ref().unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Once no run names them, pruning deletes them.
+    assert_eq!(s.prune_rebuild("0011-b").await.unwrap(), Pruned::Deleted);
+    assert!(!s.blobs().has(&rb).await.unwrap());
+    // A run whose rebuild is another run's published artifact keeps it too.
+    let other = s.blobs().put(&b"published elsewhere"[..]).await.unwrap();
+    let mut c = RunRecord::new(
+        "0012-c",
+        "pkg:npm/c@1",
+        artifact("c.tgz", &other, 19),
+        env(),
+        "t",
+    );
+    c.attestations = vec!["x".into()];
+    s.put_run(&c).await.unwrap();
+    let mut d = RunRecord::new(
+        "0013-d",
+        "pkg:npm/d@1",
+        artifact("d.tgz", &up, 8),
+        env(),
+        "t",
+    );
+    d.rebuild = Some(artifact("d.tgz", &other, 19));
+    d.outcome = Some("normalized".into());
+    d.attestations = vec!["y".into()];
+    s.put_run(&d).await.unwrap();
+    assert_eq!(
+        s.prune_rebuild("0013-d").await.unwrap(),
+        Pruned::Shared(vec!["0012-c".into()])
+    );
+    assert!(s.blobs().has(&other).await.unwrap());
+}
+
+/// A writer naming bytes as kept holds the store's blobs from before its `put` until its record is
+/// written, and a prune waits for it: asked in between who else names the bytes, it would miss the
+/// record about to, and delete them from under it. On disk, where the writer is another process,
+/// and in memory. The prune is given time to go ahead, and must not; nothing else waits.
+#[test]
+fn a_prune_waits_for_a_writer_naming_the_bytes_and_keeps_them() {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    let dir = tempfile::tempdir().unwrap();
+    let rt = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+    for s in [Store::local(dir.path()).unwrap(), Store::in_memory()] {
+        let here = rt();
+        let rebuilt = &b"one rebuild, byte for byte, twice"[..];
+        let (up, rb) = here.block_on(async {
+            let up = s.blobs().put(&b"upstream"[..]).await.unwrap();
+            let rb = s.blobs().put(rebuilt).await.unwrap();
+            let upstream = artifact("a.tgz", &up, 8);
+            let mut a = RunRecord::new("0020-a", "pkg:npm/a@1", upstream, env(), "t");
+            a.rebuild = Some(artifact("a.tgz", &rb, rebuilt.len() as u64));
+            a.outcome = Some("normalized".into());
+            a.attestations =
+                vec!["attestations/npm/a/1/a.tgz/0020-a/equivalence.intoto.json".into()];
+            s.put_run(&a).await.unwrap();
+            (up, rb)
+        });
+        // The confirming attempt: its `put` finds the bytes there and adds nothing, and its
+        // record is not written yet.
+        let keeping = here.block_on(s.keeping()).unwrap();
+        assert_eq!(here.block_on(s.blobs().put(rebuilt)).unwrap(), rb);
+        let (tx, rx) = channel();
+        let pruner = {
+            let s = s.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(rt().block_on(s.prune_rebuild("0020-a")));
+            })
+        };
+        assert!(
+            matches!(
+                rx.recv_timeout(std::time::Duration::from_millis(300)),
+                Err(RecvTimeoutError::Timeout)
+            ),
+            "a prune went ahead while a writer held the blobs"
+        );
+        let upstream = artifact("a.tgz", &up, 8);
+        let mut b = RunRecord::new("0021-b", "pkg:npm/a@1", upstream, env(), "t");
+        b.rebuild = Some(artifact("a.tgz", &rb, rebuilt.len() as u64));
+        b.outcome = Some("normalized".into());
+        here.block_on(s.put_run(&b)).unwrap();
+        drop(keeping);
+        assert_eq!(
+            rx.recv().unwrap().unwrap(),
+            Pruned::Shared(vec!["0021-b".into()])
+        );
+        pruner.join().unwrap();
+        assert!(here.block_on(s.kept(b.rebuild.as_ref().unwrap())).unwrap());
+    }
+}
+
+/// A store damaged before pruning counted who named a blob — or a blob deleted from outside —
+/// holds a record saying `stored: true` over nothing. Every read by the record's word asks the
+/// store, and reports those bytes as missing, never as there.
+#[tokio::test]
+async fn bytes_a_record_says_are_kept_and_the_store_lost_are_missing_never_present() {
+    let s = Store::in_memory();
+    let up = s.blobs().put(&b"upstream"[..]).await.unwrap();
+    let rb = s.blobs().put(&b"rebuilt"[..]).await.unwrap();
+    let mut r = RunRecord::new(
+        "0014-e",
+        "pkg:npm/e@1",
+        artifact("e.tgz", &up, 8),
+        env(),
+        "t",
+    );
+    r.rebuild = Some(artifact("e.tgz", &rb, 7));
+    s.put_run(&r).await.unwrap();
+    s.blobs().delete(&rb).await.unwrap();
+
+    let rebuilt = r.rebuild.as_ref().unwrap();
+    assert!(!s.kept(rebuilt).await.unwrap());
+    assert!(s.kept(&r.upstream).await.unwrap());
+    let e = s
+        .artifact("0014-e", "rebuilt artifact", rebuilt)
+        .await
+        .unwrap_err();
+    assert!(matches!(e, StoreError::Missing { .. }), "{e}");
+    let m = e.to_string();
+    assert!(m.contains("the bytes are missing"), "{m}");
+    assert!(m.contains(&rb.to_hex()) && m.contains("0014-e"), "{m}");
+    // The store lost data: somebody should look, and asking again changes nothing.
+    assert_eq!(trigon_core::Classify::fault(&e), trigon_core::Fault::Bug);
+    assert!(!trigon_core::Classify::is_retryable(&e));
 }
 
 #[tokio::test]

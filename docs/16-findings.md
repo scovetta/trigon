@@ -5045,3 +5045,246 @@ spike is written and has **not** been run.
 - **The spike measured less than it said, and guarded less.** The fetch was timed at the largest
   size only, git reads were not probed at all, and the guard took any repository with a `SPIKE.md`
   and never checked that the repository the API wrote releases to was the one it had read.
+
+### 3.102 `trigon evidence`: sources, their clones and state, and verification on sync
+
+`docs/19` §10 phase 6, first half, on 2026-09-28, with two things phase 5b left: pruning that
+counts who else names a blob, and `publish` reading a chain across repositories. The commands that
+answer from the clones — `lookup`, a `check` against evidence repositories, `verify-attestation
+--lookup`, `--remote` and `serve`'s record view — are the second half.
+
+**What changed.**
+
+- **`trigon evidence add <name> <url>… --log-key <vkey> --attestation-key <key> [--checkpoint
+  <file>] [--required] [--trust-on-first-use]`** writes a `[[source]]` into the user's
+  `evidence.toml`, or the file `TRIGON_EVIDENCE_CONFIG` names, made where it is not there, with
+  `toml_edit`, so every comment and the order of everything already there is kept
+  (`trigon_attest::config::add_source`). `toml_edit` was already in both builds' trees through
+  `toml`; it is a workspace dependency now, resolved offline from the local registry, and adds no
+  crate to either tree. The file as it would be is loaded under every rule — the environment's and
+  the project's sources included — before it is written, whole, by rename, keeping its
+  permissions. A relative path is taken from the working directory and written absolute; the
+  checkpoint must open under the log key; a name any source has, in any case, is refused, as is a
+  source that pins neither key without `--trust-on-first-use`, and one that pins both with it.
+  **`evidence remove <name>`** takes a source out of the user's file the same way, with its clones
+  and its state, and refuses one a project's file or `TRIGON_EVIDENCE_REPO` added, saying whose it
+  is to remove.
+- **`trigon evidence sync [--source <name>]… [--full-history] [--accept-state-loss <name>]…`**
+  (`crates/trigon/src/evidence/sync.rs`), every source on a thread of its own. Each location has a
+  clone at `<cache>/<name>/<sha256 of the location>/`: `git clone --depth 1 --filter=blob:none
+  --sparse --no-checkout`, then `sparse-checkout set keys log records`, for a remote, and a full
+  clone for a local path, which `-v` says; a sync is `git fetch --depth 1 origin <branch>` and
+  `reset --hard FETCH_HEAD`, then `clean`, never a pull. `git` is `publish`'s own
+  (`crate::publish::git`, now shared): never prompting, ssh in batch mode, no repository above the
+  clone, nothing of a credential on argv or in what is printed. Each clone is verified by itself
+  with the phase 4 code, a successor in another repository is cloned from the URLs its log-end
+  names and followed there (`log::verify_continuation`), every location is held to every other
+  (`log::compare_chains`, `same_log`), the largest answers, and the whole chain is held to the
+  checkpoint in `<state>/<name>/checkpoint` (`log::check_accepted`, `VerifiedLog::extends`,
+  `evidence::Repository::chain`). Only then are `keys`, `checkpoint` and `sync` written
+  (`trigon_attest::state`), each by rename. A refused sync puts back every clone it moved, removes
+  every one it made, records the refusal, and exits 4 with both signed notes; a source not reached
+  is recorded as failed and answers from its clone until it is stale. `--full-history` keeps each
+  clone's history and says when a fetch is not a fast-forward.
+- **A chain across repositories** (`evidence::Repository`) is now a list of repositories, each log
+  of the chain read from the one that holds it: records, evidence, lookup and `verify_record` read a
+  leaf's files from its own repository, and `read_evidence_checked` takes the record's leaf to know
+  which. `Repository::open` is as it was for one repository; `Repository::chain` puts parts
+  together, refuses a part its predecessor does not name or an origin twice, and holds the
+  checkpoint last accepted to whichever log of the whole chain it is of.
+- **The key history is kept** in `<state>/<name>/keys`: the log key and attestation key the chain
+  starts at, every log of the chain with its key, every attestation key with the leaves that made
+  and retired it, and for a source trusting on first use where and when its keys were read. Each
+  sync recomputes it from the log, writes the log's, and reports where the one kept disagreed — a
+  history the log has only gone on from is not a disagreement; one the log no longer holds is.
+- **Trust on first use.** A source that pins a key only under trust on first use reads it from
+  `keys/` of the first location reached on its first sync, and is held to it ever after. Every
+  answer says so: `evidence sync`, `evidence list`, the standing phase 6b reads, and
+  `verify-attestation --record --source`, which reads the recorded keys (`config::pins`,
+  `Pins::first_use`) instead of refusing the source as phase 4b did. Offline, a clone's own `keys/`
+  is never read as a key.
+- **A lost state is refused, not remade.** A source with a clone a sync accepted, or a record of a
+  sync that worked, whose checkpoint — or whose keys trusted on first use — is gone is refused until
+  `--accept-state-loss <name>`, which starts it over as a first sync. A new clone carries a marker
+  in its git directory until the state is written, so a sync killed before that leaves no clone
+  that reads as a sync that happened.
+- **Freshness** (`trigon_attest::evidence::Standing`, `Said`, `exit_code`): fresh; usable from the
+  clone after a failed sync until `stale_after`; unknown when stale or never synced; frozen when the
+  newest leaf is older than `frozen_after` or there is none; refused. `exit_code` is §6's
+  aggregation: the most severe answer that is not unknown, never checked only where no source that
+  answered holds a record, an unknown source 4 only where required, a refused one 4 always, none
+  able to answer 4, none configured 5. `crate::evidence::ready` is the typed value phase 6b
+  consumes: every source asked, a stale one synced first and said to be, each opened from its
+  clones with the same verification, with its standing, the file that added it and the keys it
+  rests on. `evidence list` reads it offline; `publish` reads it syncing.
+- **`publish` reads the whole chain** (the second carry-over). Where the repository's first log
+  continues a log in another repository, step 2 asks a configured source whose chain reaches that
+  log, syncs it where it is stale, follows this repository's first log from it, and asks every
+  refusal of the whole chain: a verdict for an artifact with a current record in the old repository
+  is refused as a second current record, a withdrawal may be of a record logged there, and a run
+  logged there is refused as published. Where no source reaches it, runs and withdrawals are
+  refused, saying which to add. D31 is gone from the threat model.
+- **Pruning counts who names a blob** (the first carry-over). `Store::prune_rebuild` deletes the
+  rebuilt artifact's blob only where no other run's record names it as kept, as a published or a
+  rebuilt artifact, and otherwise drops only this run's reference (`Pruned::Shared`); a record that
+  cannot be read refuses the prune. `Store::artifact` and `Store::kept` read by a record's word and
+  report bytes a record says are kept and the store has lost as `StoreError::Missing`, which the
+  attestor, `rederive`, `serve`'s member routes and run rows, and `watch`'s run page now use.
+- **Threat model**: P39–P42 and D32–D34; the side effects of the cache, the state directory and
+  `evidence.toml`; the repositories a sync clones, and keys trusted on first use, in the trust
+  table; D31 removed; the sidecar regenerated.
+
+**Decided here, and why.**
+
+- **Clones are verified where they are, and put back on a refusal**, rather than checked out into a
+  second tree first: the objects are in the clone either way, and `reset --hard <previous>` restores
+  what was accepted. A command that reads a clone verifies it against the state every time, so one
+  a kill left ahead of the state is still held to it.
+- **Every clone's `.git/info/attributes` unsets every attribute that changes bytes.** Measured: a
+  `.gitattributes` of `* text eol=crlf` in the repository makes a sparse checkout write
+  `log/checkpoint` with CRLF endings, and the signature then fails, blaming the source for what git
+  did on the client. `publish` refuses a branch naming attributes; a reader cannot refuse what it
+  reads, so it reads the blobs.
+- **Mirrors are verified without the accepted checkpoint, then held to one another, and only the
+  largest to the accepted one.** A mirror behind what was accepted, and a prefix of the largest, is
+  lagging and not a rollback; the largest behind it is a rollback.
+- **A location that fails verification refuses the whole source**, while one that cannot be reached
+  is reported and passed over: a mirror disagreeing is exactly the split view mirrors exist to
+  catch, and answering past it would hide it.
+- **A log with no leaf is frozen.** Its checkpoint of size 0 is the oldest consistent state there
+  is, which a host can serve for ever; §6's frozen clock exists for exactly that.
+- **`evidence sync` exits 0 or 4.** Any source not synced — refused, or not reached — is 4, and the
+  report says what each still answers from; bad arguments and configuration are 5.
+- **The state is written keys, then checkpoint, then the record of the sync**, so a sync stopped
+  between them is stale sooner, never fresher than what it accepted, and a key history ahead of the
+  checkpoint is the log's anyway.
+- **Syncs of one source take turns on a lock in its state directory, and wait**; a read takes it
+  shared, and makes no state directory where there is none.
+- **`publish` finds the chain through configured sources**, not through the host's own memory: the
+  log-continuation names no location for the log it continues, and configuration travels with a CI
+  job where the host's state directory may not. The refusal names the command that fixes it.
+- **`evidence list` verifies the clones, offline.** A standing read from the sync record alone
+  would call a clone rolled back on disk fresh.
+
+**What this does not do.**
+
+- **Phase 6b**: `lookup`, `check` against evidence repositories, `verify-attestation --lookup`,
+  `--remote`, the lockfile parser keeping integrity digests, and `serve`'s record view.
+- **The record form across repositories.** `verify-attestation --record --source` reads the
+  directory `--evidence` names and still answers unknown where the log continues in a repository
+  it does not hold; it does not look for the successor's clone in the cache.
+- **Sync over the network in a test.** Every sync test reaches a local bare repository, by a
+  `file://` URL, a path, or an HTTPS URL `url.<local>.insteadOf` rewrites, with
+  `GIT_ALLOW_PROTOCOL=file`.
+- **Remove a clone of a location no longer configured.** It stays in the cache, unread.
+
+**Found on the way.**
+
+- **Pruning one of an agreeing pair deleted the other's bytes.** The pair phase 3 builds rebuilds
+  byte-identical artifacts, which the store keeps as one blob, and `prune_rebuild` deleted it by
+  digest; the second run's record went on saying `stored: true`, and attesting it failed with an
+  object-store "not found". `publish.rs`'s own prune test pruned exactly that pair and asserted
+  success.
+- **A test world could write the developer's cache.** `publish.rs`'s `World` set `XDG_STATE_HOME`
+  and not `XDG_CACHE_HOME`, which a sync through a source now reaches; it sets both.
+
+**What review found in it.** Twenty-one findings, of sixteen defects — several found more than
+once: thirteen in the code, one in the documents, and two tests that could not see what they were
+named for. Each code defect now has a test that fails without its fix.
+
+- **A repository's default branch reached `git fetch` as a bare word.** A clone takes its branch
+  from the remote's `HEAD`, and `git fetch … origin <branch>` parses options after the remote, so a
+  branch named `--upload-pack=touch${IFS}$HOME/ran;git-upload-pack` — which `update-ref` and
+  `symbolic-ref` both accept — ran the command on every sync after the first, before anything was
+  verified; reproduced with git 2.43. The branch is refused unless `git check-ref-format --branch`
+  accepts it, which no name beginning with a dash passes, and is fetched as `refs/heads/<branch>`
+  after `--` (`a_branch_named_as_an_option_is_never_fetched`).
+- **A clone left marked by a stopped first sync stayed marked for good.** The marker came off only a
+  clone the sync made; one it fetched into kept it, so every later sync reported success while
+  every offline read called the location never synced and the source answered unknown, and the
+  marker hid a later loss of the state. §3.102 said a sync killed before its state was written left
+  no clone that read as a sync that happened; it left one that read as none ever would. A marked
+  clone is made again now, never fetched into — its contents were never accepted — and a clone is
+  made beside where it goes under a name beginning with a dot, marked, and only then moved into
+  place, so a kill while `git clone` runs no longer leaves an unmarked clone that reads as an
+  accepted one and refuses a source that never synced
+  (`a_sync_stopped_before_it_was_accepted_is_made_again_and_a_later_loss_refused`).
+- **`--accept-state-loss` threw away what survived.** Losing only the checkpoint of a source
+  trusting on first use dropped the keys it first read too, and `keys/` was read again from whatever
+  the repository served: a log under keys swapped in by a thief of the push credential alone, which
+  the recorded keys refused, was accepted once the user acknowledged a lost checkpoint. Losing only
+  the keys dropped the checkpoint that would have caught the swap. Only what is lost starts over
+  now, the refusal says what accepting will do, and `verify-attestation --record --source` refuses a
+  source that has synced before and lost its checkpoint, as the sync does, rather than checking the
+  log against nothing (`accepting_a_lost_state_keeps_what_survives_of_it`).
+- **`publish` into a successor elsewhere read the chain from partway** through a source pinned at a
+  later log's key — a successor's, in place or elsewhere — so a current record in a log before it
+  was missed and a second current record published. A source whose chain begins by continuing a log
+  is passed over, saying it must be pinned to the chain's first log key. The same test holds two
+  more: a source synced before the log it reaches ended, the usual order right after `log succeed
+  --url`, was fresh, so not synced, and `publish` refused with advice to add it; every source not
+  just synced is now synced again before a refusal. And `--dry-run` synced sources, writing their
+  clones and state; it reads each from its clone as it is
+  (`publishing_into_a_successor_elsewhere_reads_the_chain_from_its_first_log`).
+- **A project's source could be led anywhere by its own log-end.** The rule that a project's file
+  names HTTPS URLs only did not reach the successor a log-end names, which the project's own key
+  signs, so a pull request could have CI clone an `ssh://` or scp-form location with the runner's
+  identity, or fetch in plain text. A successor at any location but HTTPS is refused for a source a
+  project's file added (`a_projects_source_follows_its_successor_over_https_only`).
+- **Pruning asked who named a blob and deleted it with nothing between.** A confirming attempt that
+  rebuilt the same bytes and wrote its record in that gap lost them, which is the loss the first
+  carry-over was to prevent. The prune now holds `<store>/blobs.lock` alone, with `flock`, from the
+  question to the delete, and `record_run` holds it shared from before its first `put` until its
+  record is written (`a_prune_waits_for_a_writer_naming_the_bytes_and_keeps_them`, which lets the
+  prune try for 300 ms while a writer holds the lock, and fails without it).
+- **A sync whose record could not be written put its clones back behind the checkpoint it had just
+  written**, so every later read refused the source as a rollback of its own state, with exit 4.
+  Once the checkpoint is written the clones are kept; a record that cannot be written is said, and
+  the source is stale sooner, never later
+  (`a_sync_whose_record_cannot_be_written_keeps_the_clones_it_accepted`).
+- **One unreadable state file failed every source.** `ready` and `evidence list` stopped at the
+  first state file they could not read, so `list`, `publish`'s chain and phase 6b's commands failed
+  outright. That source answers unknown now, saying why, and the others answer
+  (`a_source_whose_state_cannot_be_read_is_unknown_and_the_others_answer`).
+- **`evidence add` and `remove` replaced a symlinked `evidence.toml` with a file**, leaving the file
+  a dotfiles manager keeps unchanged. The file is written beside where the link leads, the link
+  kept, and a link to a file not yet made makes it there
+  (`a_source_is_added_to_the_file_a_link_leads_to_and_the_link_is_kept`).
+- **The documents told CI to keep the cache and not said to keep the state beside it.** A cache
+  restored without the state is a lost state, refused until `--accept-state-loss`; `using-trigon.md`
+  and `docs/19` §6 say to keep both in one cache step.
+- **Two tests saw less than their names.** The attributes protection was checked by reading the
+  file it writes, and no test committed a `.gitattributes`: a tree with `* text eol=crlf ident` is
+  now cloned from a `file://` URL and a path, and fetched into clones made before it, and every
+  checkout is the blob byte for byte (`a_repositorys_own_attributes_never_change_what_is_verified`).
+  And the lost-state test removed only the checkpoint, so its detection by the last sync's record
+  hid the other path, a clone kept; the whole state directory is removed now, clones kept, and a
+  marked clone planted with no state is a first sync, not a refusal.
+
+**Decided in review, and why.**
+
+- **A marked clone is made again, not unmarked.** Its files were never accepted, and fetching into
+  it would carry forward whatever a killed sync, or whoever writes the cache, left there; a clone is
+  the cheap part of a sync.
+- **The branch is checked by `git check-ref-format --branch`**, which takes the argument after it
+  as the name whatever it begins with, so the rule is `git`'s own on every version; `--` and the
+  whole ref are there as well, so one check missed is not a command run.
+- **What survives a lost state is kept, and the loss is still refused until acknowledged.** Keys
+  first read are a source's only pin, and a checkpoint is what keys read again must open; neither
+  is worth less for the other having gone.
+- **Where no source serves the chain, every source not just synced is synced again**, not only one
+  whose last sync reached the log continued: that last sync may be from before the log went on. It
+  costs a fetch per source, once, on a publication that would otherwise be refused.
+- **The store's lock is `flock` on a file in the store**, through `rustix`, since `trigon-store`
+  has no unsafe code and the standard library's `File::lock` is newer than the declared MSRV;
+  `rustix` was in the tree already, with `fs`, through `tar`. Writers share the lock and never
+  wait on one another, and a store in memory has a lock of its own. Waiting blocks the thread,
+  which in `record_run` and `attest --prune` has nothing else to run.
+- **A project's successor at another transport is refused, not skipped.** A log-end naming a
+  location the project may not is the project's own signed statement, and answering past it would
+  hide it.
+
+**Left for the owner.** Whether a cache restored without its state should count as a fresh client,
+held only to its configured checkpoint as §8 describes a fresh CI runner, rather than as a state
+lost. Phase 6a's brief says a source whose clone exists and whose state is missing is reported, not
+silently recreated, and that is what is built; the documents now say to keep the two together.
