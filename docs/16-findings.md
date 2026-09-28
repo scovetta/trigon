@@ -4268,3 +4268,180 @@ For the owner:
   set and tool this binary has, so that a change of either starts new first attempts — for every
   target at once, on each such release, and decided by whichever binary enqueues. That trade is a
   scheduling policy, and it is not made here.
+
+### 3.98 The evidence log as pure code: notes, checkpoints, proofs, tiles, leaves, rotation
+
+`docs/19` §10 phase 4, first half, on 2026-09-28: the log's formats and its verification, in
+`trigon_attest::log`, with no network and no filesystem beyond the directory it is given. Nothing
+writes an evidence repository with it yet (phase 5), and nothing reads one: records verified
+against the log, lookup, index paths and `verify-attestation --record` are the second half.
+`docs/09` §2.10 has the formats as built.
+
+**What changed.**
+
+- **C2SP signed notes and the log key.** Notes are read as Go's `golang.org/x/mod/sumdb/note`
+  reads them, a line by a key not pinned read past; the log key's private half is Go's
+  `PRIVATE+KEY+<name>+<hash>+<keydata>`, its hash recomputed, and never quoted in a refusal.
+  Signing Go's example text with Go's example key gives Go's signature line byte for byte.
+- **C2SP checkpoints**: three lines and no extension lines when written, extension lines read past
+  when read, the origin required to be the key's name, and size 0 signing SHA-256 of nothing.
+- **RFC 6962 trees and RFC 9162 proofs**, generated and verified, over a tree held in memory as the
+  rows tiles hold, or over tiles read from files, with one generator for both.
+- **C2SP tiles**: paths, which tiles and bundles a tree of a size has, uint16 framing, what an
+  append writes and which `.p` directories it makes obsolete, and a reader that opens the tiles of
+  its checkpoint's size and nothing beside them.
+- **Every leaf kind of §2.3**, typed, canonical JSON, decoded strictly: unknown kind, unknown
+  field, broken rule or non-canonical bytes refused, the writer held to the same rules.
+- **`verify_log`**, **`verify_source`** and **`KeyHistory`**: a log verified whole from its files,
+  consistency with the checkpoint last accepted by the recomputed tree and, for a reader with only
+  tiles, by proof; a repository's chain of logs followed through log-end and log-continuation; and
+  attestation-key changes followed from the pinned key. A clone is written by whoever can push, so
+  it is read defensively: no file through a link out of the repository, a log directory that is
+  such a link included, nothing but regular files, and nothing longer than its format allows.
+- **Golden files** in `crates/trigon-attest/testdata/log/`: Go's note vectors, the RFC 6962 vectors,
+  one leaf of each kind, and a repository of two logs — the first grown by five publications until
+  it ends, its successor by two — with the proofs between the first's checkpoints. 110 tests in
+  `tests/evidence_log/`, property tests among them.
+
+**Checked against implementations that are not this one.** The repository was opened with Go's
+`note` and `tlog` (v0.40.0, from the module cache, offline): both checkpoints open; the roots
+`tlog` computes from the entry bundles are the signed ones; every tile, and every older partial
+still on disk, is `tlog`'s tile data at height 8; the consistency proofs pass `tlog.CheckTree` and
+the inclusion proofs `tlog.CheckRecord`; the continuation opens under both keys; and C2SP's tile
+paths are Go's with the height left out. The RFC 6962 vectors were computed in Python from the RFC,
+and their roots are the certificate-transparency constants. Python also verified the key-change and
+release signatures over the messages as `docs/09` writes them, and found every golden leaf equal
+to its own canonical JSON.
+
+**Found on the way.**
+
+- **The signed-note vector this phase was specified with is not Go's.** Its line, `— PeterNeumann
+  yvTSo2EF…BwA=`, begins with the key hash `caf4d2a3`, where PeterNeumann's key hashes to
+  `c74f20a3`, and its 64 signature bytes do not verify under that key over the text, with or
+  without its final newline. Go's own tests and example have `x08go/ZJku…JnAM=`, which starts with
+  `c74f20a3`, verifies, and is exactly what signing the text with Go's example private key gives,
+  since Ed25519 is deterministic. The tests pin Go's line, and pin the other as refused: it names
+  another key, so a note carrying only it is not signed by PeterNeumann, and given PeterNeumann's
+  hash its bytes fail.
+- **An inclusion proof binds the tree's size only by its shape.** Leaf 3's audit path in a tree of 7
+  leaves also verifies as leaf 3 of a tree of 5, 6 or 8 against the same root, because the paths
+  have one shape. That is RFC 9162, not a defect, and it means a client must check every proof
+  against the size of the signed checkpoint and never a size that came with the proof; the tests
+  say so where they found it.
+- **Go's reader is laxer than it needs to be in one place.** It verifies the first line by a known
+  key and skips any later line by the same key, so a note with a good line and a bad one by the
+  pinned key opens. Ed25519 is deterministic, so an honest signer writes one line; here every line
+  naming the pinned key must verify.
+
+**Decisions made here that the owner may want to revisit.** Everything below is signed into the
+tree once phase 5 publishes, so it is cheap to change now and expensive later.
+
+- **What each leaf holds, field by field** (`docs/09` §2.10). The record leaf is §2.3's example,
+  with `subject` requiring sha256, digests written `sha256:<hex>`, and only the four predicates
+  `publish` logs; a void's `stabilizerSet` is optional, since a build the guard stopped compared
+  under no set, as `void/v1` has it — `docs/19` §2.3 and §4.1 said a void's leaf always has one,
+  and now give it one only where its run compared.
+- **The key-change message**: `trigon.dev/key-change/v1`, the origin, the time, the old and new
+  keys in hex, a line each. Binding the origin stops a change being replayed into another source
+  that shares the key; binding the time stops it being moved within the log.
+- **The release leaf** — `name`, `version`, `artifacts` by file name with sha256 and optional
+  sha512, `keyId`, `signature` over `trigon.dev/release/v1`, the origin, the time and the canonical
+  JSON of the rest — fixed now so phase 9 has a format to write, and not written by anything yet.
+- **A log-end's successor** is `origin`, `logKey`, `urls` and `dir`; an empty `urls` means this
+  repository, so every mirror of it serves the successor too, and `dir` is `log/<n>`, or `log` in
+  another repository. A successor elsewhere is returned for the caller to clone and `follow`, since
+  this crate opens no socket.
+- **Times are at most 2^53 − 1**, the largest integer a JavaScript reader holds exactly.
+- **A key change from a key that is not current is read past and reported**, not refused: a client
+  pinned after a rotation sees the change that led to its pin that way. One from the current key
+  that does not verify under both keys refuses the source, since that is what a stolen log key
+  without the attestation key would write. A new key covers the leaves after its change, not the
+  change itself or anything before it.
+- **A `log/<n>` that no log-end names is reported as refused**, and the source still answers from
+  the logs that are named, rather than failing whole: whoever holds the push credential could
+  otherwise stop a source by planting a directory.
+- **Where a chain starts is the newest checkpoint the pinned key opens**, and the first directory
+  holding it whose files verify; every other directory claiming that log is reported in
+  `VerifiedSource::refused` and set aside. That includes a checkpoint signed by the log's key that
+  the newest tree does not extend — two trees under one key, which only the log key can make — so
+  such a fork found among a repository's directories is reported, not a refusal of the source. A
+  client's own accepted checkpoint is what refuses a fork (§8); making this one refuse too is a
+  choice for the owner.
+- **A client pinned to a successor's key starts at that log**, and does not read the logs before
+  it.
+- **`verify_log` checks every tile against the leaves**, which §6 does not list: a client with the
+  leaves does not need the tiles, but a `--remote` reader proves inclusion from them, and a full
+  monitor should catch tiles that would mislead it.
+- **A reader of tiles opens only the tiles of its checkpoint's size.** tlog-tiles lets a client
+  read a full tile in place of a partial; this one does not, so nothing a later publication or a
+  planted file put beside the partial is read. Phase 6's `--remote` may want the full tile as a
+  fallback when a partial disappears between fetching the checkpoint and the tile.
+- **A private key file is read whatever its permissions.** Refusing a world-readable key is a
+  policy for `trigon log sign` to set in phase 5.
+
+**What this does not do.**
+
+- Verify a record against its leaf, look a key up, apply supersessions, derive index paths, or give
+  the network-free verifier `--record`: the second half of phase 4, built on this.
+- Add the threat model's properties for inclusion and consistency verification (`docs/19` phase 8):
+  no command uses this code yet, so there is no shipped property to state, and they belong with the
+  record verification that makes them one. The deferral is recorded in `docs/19`'s status table
+  and in the threat model's §1.3, which routes a finding against the library there until then.
+- Keep a verified log small at scale: every leaf is held decoded, about a kilobyte each, so a
+  million leaves is on the order of a gigabyte in memory. Leaves are not also kept as bytes, since
+  a canonical leaf writes back to the bytes it was read from; streaming the rest is for when D2's
+  numbers say it is needed.
+
+**What review found in it.** Fourteen findings: eleven defects, each now with a test that fails
+without its fix; two places where the documents disagreed; and a gap in the tests.
+
+- **A bundle altered after signing was blamed on the log key.** `verify_log` decoded each leaf and
+  applied the log's rules before it compared the root, so a bundle rewritten by whoever can push
+  read as the signed log breaking its own rules (`Rule`), or as a leaf from a newer Trigon ("update
+  it"). The root is compared first now, and a leaf refused only once the checkpoint signs it
+  (`a_bundle_altered_after_signing_is_a_mismatch_whatever_its_leaves_say`).
+- **A damaged tile was reported as an equivocation.** `verify_extension_from_tiles` called every
+  failed consistency proof `Inconsistent`, whose text accuses the operator and offers two
+  consistent notes as evidence. A failed proof is an equivocation now only when its hashes lead to
+  the new signed root, which authenticates them; tiles that do not are a `Mismatch`
+  (`a_checkpoint_extends_the_accepted_one_by_its_tiles_alone`).
+- **A planted directory could stop a client pinned to a successor**, or move it onto an older
+  state: the chain started at the first directory whose checkpoint merely said the pinned origin.
+  It starts where the pinned key opens the newest checkpoint now, as the decision above says
+  (`a_planted_directory_does_not_move_or_stop_a_client_pinned_to_a_successor`).
+- **The writer accepted leaves every reader refuses.** `VerifiedLog::plan_append` did not check a
+  key change's signatures over its own log's origin, a log-end's successor origin, or a
+  continuation's signature by its own key, and the free `plan_append` did not check its tail
+  against the tree; each would have broken the log for good
+  (`a_verified_log_does_not_plan_a_leaf_every_reader_would_refuse`,
+  `an_append_whose_tail_is_not_the_trees_leaves_is_refused`).
+- **A record leaf under an earlier `purlCanon` would have stopped decoding** the day the rule
+  moved to 2, refusing every existing log. It is checked under its own rule, by the new
+  `trigon_core::purl::canonicalize_under`, which keeps each rule this build has had
+  (`every_rule_this_build_has_had_is_still_the_rule_it_was`,
+  `a_record_leaf_under_any_rule_this_build_has_reads`).
+- **Refusals carried raw control characters** from unsigned input: serde's text quoting an
+  unknown field or variant, a signature line's name, and the notes an equivocation shows, which it
+  now keeps as read and shows escaped (`a_refusal_never_carries_a_leafs_control_characters`,
+  `the_notes_a_refusal_shows_are_escaped_and_kept_as_read`,
+  `a_refusal_of_a_leaf_carries_none_of_its_control_characters`).
+- **A signer could be made under a name no verifier key can carry**, with DEL or a C1 control in
+  it, and `vkey()` then panicked; signer and verifier key share one rule now, and the signer holds
+  its verifier key (`a_signer_is_made_only_under_a_name_its_verifier_key_can_carry`, and a property
+  test that every signer's key reads back).
+- **A bare seed's first byte was shown** in the refusal of a key file missing its type byte. The
+  length is checked first and the type byte never shown
+  (`a_bare_seed_is_refused_without_showing_a_byte_of_it`).
+- **`prove_inclusion_from_tiles` took an unsigned checkpoint**, so nothing kept a caller from
+  proving against a root nobody signed. It takes a `SignedCheckpoint`.
+- **`trigon`'s fault report called a log that fails verification "a bug in trigon"**. It names
+  the evidence source now, as having failed verification, and one whose log could not be read as
+  the source's too (`a_log_that_fails_verification_is_the_sources_fault_and_not_trigons`).
+- **The documents**: `docs/19` said a void's leaf always carries a set digest, which `void/v1` does
+  not always have; and the threat model's inclusion and consistency properties, which phase 8
+  gives phase 4, were deferred in this entry only. `docs/19` §2.3, §4.1 and its status table, and
+  the threat model's §1.3, now say both.
+- **No test tampered with a tile above level 0 or read a proof from level 2.** `verify_log` is now
+  held to a full level-0 tile and a level-1 partial, and a tree of 65,836 leaves to the proofs its
+  level-2 tile gives (`a_tile_that_does_not_hold_the_leaves_hashes_is_refused`,
+  `hashes_read_from_tiles_are_the_trees_past_level_two`).

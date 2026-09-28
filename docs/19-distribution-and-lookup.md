@@ -16,7 +16,8 @@ decisions it waits on. What exists today:
 | The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest`, `serve` and `worker` (§10 phases 2, 3); the commands that use the rest of it are phases 4 to 6 |
 | A publishable run: every cache key built from the target, the strategy and the set, worker and CLI alike; attempts that agree on what the comparison found, not on its outcome string; `trigon rebuild --confirm <run>`, cold and re-pulled; each attempt's host, cache state and start; `decide`'s rules for a pair, from `same_host_confirmation` and `confirmation_interval`; and a worker's confirmation made on another machine unless `same_host_confirmation` allows its own | built (§10 phase 3, backlog B31; [findings](16-findings.md) §3.97) |
 | `rebuild --attest` signing through `attest`'s own code, so no path signs a verdict for a run the gate voids; `rebuild/v1` naming the model exchange a run kept; a `pkg1` key that is the package alone | built (§10 phase 3; [findings](16-findings.md) §3.97) |
-| The evidence repository, the evidence log, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
+| The evidence log as pure code: C2SP signed notes and checkpoints, the log key in Go's format, RFC 6962 inclusion and consistency proofs, tiles and entry bundles and what an append writes, every leaf kind of §2.3, a log verified from its files, and key-change, log-end and log-continuation leaves followed as §8 says | built (§10 phase 4, first half; [findings](16-findings.md) §3.98); nothing writes or reads an evidence repository with it yet, so the threat model's properties for inclusion and consistency verification (phase 8) are deferred to the second half, whose `verify-attestation --record` is the first command to reach this code |
+| Records verified against the log, lookup and supersession, index paths, `verify-attestation --record`, and the threat model's properties for record, inclusion and consistency verification (§10 phase 4, second half); the evidence repository, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
 
 ---
 
@@ -208,8 +209,9 @@ conforming tlog-tiles endpoint, so a generic tlog tool reads them from a clone.
   SHA-256(0x00 ‖ leaf). A `record` leaf holds the subject's digests; the canonical purl and its
   canonicalisation version; the predicate type and outcome; the stabilizer-set digest; the signing
   key's id; the record file's digest; and, for a supersession, the superseded record's digest and
-  the reason. A void's record leaf has the outcome `void` and its set digest; a withdrawal's has
-  neither. The other kinds are:
+  the reason. A void's record leaf has the outcome `void`, and its set digest where its run
+  compared, as `void/v1` has it — a build the guard stopped compared under no set; a withdrawal's
+  has neither. The other kinds are:
   - `heartbeat`, which carries only its time, and is appended when nothing else has been logged for
     a week (§7);
   - `key-change`, which names the old and new attestation keys and carries a signature by each (§8);
@@ -513,10 +515,11 @@ disagrees with its signed verdict fails verification. A rebuilt artifact is foun
 carries `supersedes` and `reason` inside its signed statement, not beside it.
 
 A void record has one statement, `void/v1`, and an evidence map holding at most the guard manifest,
-when the guard tripped. Its leaf has the outcome `void` and the set digest. A withdrawal record has
-one statement, `withdrawal/v1`, and an empty evidence map; its leaf has no outcome and no set
-digest, and carries `supersedes` and `reason`. Both are written like any other record, including an
-entry in every index file of the subject's keys.
+when the guard tripped. Its leaf has the outcome `void`, and the set digest where its run compared
+(a build the guard stopped names none). A withdrawal record has one statement, `withdrawal/v1`,
+and an empty evidence map; its leaf has no outcome and no set digest, and carries `supersedes` and
+`reason`. Both are written like any other record, including an entry in every index file of the
+subject's keys.
 
 And the index file a lockfile's npm integrity digest leads to — `index/sha512/1d/f6/1df6….json`:
 

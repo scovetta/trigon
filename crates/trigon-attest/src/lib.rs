@@ -12,6 +12,7 @@ mod dsse;
 mod error;
 mod keys;
 pub mod location;
+pub mod log;
 mod rebuild;
 mod record;
 mod signer;

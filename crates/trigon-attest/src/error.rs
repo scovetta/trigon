@@ -52,6 +52,10 @@ pub enum AttestError {
         actual: String,
     },
 
+    /// The evidence log, or one of its files, refused (`docs/19` §2.3, §8).
+    #[error(transparent)]
+    Log(#[from] crate::log::LogError),
+
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
@@ -73,6 +77,7 @@ impl Classify for AttestError {
                 Fault::Upstream
             }
             AttestError::Canonicalize(_) => Fault::Bug,
+            AttestError::Log(e) => e.fault(),
             AttestError::Io(_) => Fault::Infra,
         }
     }

@@ -567,6 +567,93 @@ one, and no version, no subpath and no other qualifier. A qualifier that names o
 `crates/trigon-core/testdata/purl-canon-v1.json`, are the rule's other definition: every writer and
 reader of these keys, a client in another language included, is held to them.
 
+### 2.10 The evidence log's formats
+
+The log of [`19`](19-distribution-and-lookup.md) §2.3, which is the design, as built in
+`trigon_attest::log`: pure code, no network, reading only the directory it is given. Nothing writes
+an evidence repository yet (`publish` is §10 phase 5), and no command reads one (phases 4b and 6).
+Golden files for every format are in `crates/trigon-attest/testdata/log/`, and were checked against
+Go's `golang.org/x/mod/sumdb/note` and `sumdb/tlog` ([`16-findings.md`](16-findings.md) §3.98).
+
+- **Checkpoint.** C2SP tlog-checkpoint, three lines — origin, decimal size, base64 root — and no
+  extension lines when we write one; a reader tolerates extension lines and keeps nothing of them.
+  It is a C2SP signed note under the log key, an Ed25519 key (type `0x01`) whose name is the
+  origin, and it opens only when a signature by the pinned key verifies and its first line is the
+  key's name. A log with no leaves signs SHA-256 of the empty string.
+- **Signed notes** are read as Go reads them: at most 100 signature lines, and a line by a key not
+  pinned read past, since a witness cosigns beside us. Two things are stricter: base64 must be
+  canonical, and every line naming the pinned key must verify, where Go checks only the first.
+- **The log key's private half** is a file in Go's format, `PRIVATE+KEY+<name>+<hash>+<keydata>`,
+  where `<hash>` is the verifier key's eight hex digits and `<keydata>` is base64 of `0x01` and the
+  32-byte seed; the hash is recomputed from the seed and a mismatch refused. No refusal quotes the
+  key, or any byte of it: the length is checked before the type byte, which is never shown, since
+  a bare seed's first byte is a byte of the secret. Its name is held to the verifier key's rule —
+  no space, no control character, no `+` — so no signer exists whose verifier key cannot.
+- **Tree and proofs.** RFC 6962: a leaf hashes as SHA-256(0x00 ‖ leaf), a node as SHA-256(0x01 ‖
+  left ‖ right). Inclusion and consistency proofs are generated as RFC 6962 defines them and
+  verified by RFC 9162's algorithms. A proof binds the tree's size only by its shape — leaf 3's path
+  is the same in trees of 5 to 8 leaves — so the size a proof is checked against is always the
+  signed checkpoint's.
+- **Tiles.** C2SP tlog-tiles, height 8: `tile/<L>/<N>[.p/<W>]` for hashes and
+  `tile/entries/<N>[.p/<W>]` for leaves, N in groups of three digits with every group but the last
+  prefixed `x`, and each leaf in a bundle framed by its length as a big-endian uint16, so a leaf
+  over 65,535 bytes is refused. A tree of N leaves has exactly the full tiles and partials that size
+  gives, and a reader opens those and no others: a full tile or wider partial beside them is beyond
+  the checkpoint and never read. An append writes each new tile and bundle, partials beside older
+  ones, and names the `.p` directory of every tile it fills, which the same commit removes.
+- **Leaves** are canonical JSON (`trigon_core::jcs`), each with `kind` and `time`, in Unix seconds
+  and at most 2^53 − 1, so a JavaScript client reads it exactly. Decoding is strict: an unknown
+  kind, an unknown field, a field that breaks a rule, or bytes not in canonical form are refused,
+  because these formats are ours and signed into the tree. A record leaf's `purl` is checked
+  against the canonicalisation rule its `purlCanon` names, any this build has
+  (`trigon_core::purl::canonicalize_under`), not only the newest: a leaf is never rewritten, and
+  one logged under rule 1 must still read once there is a rule 2. A refusal escapes whatever it
+  quotes of a leaf.
+
+| `kind` | Fields besides `time` |
+|---|---|
+| `record` | `subject` (`sha256`, and `sha512` and `sha1` where signed, lowercase hex); `purl`, canonical under `purlCanon`; `predicateType`, one of `equivalence/v2`, `divergence/v2`, `void/v1`, `withdrawal/v1`; `outcome`, the verdict's, `void` for a void, absent for a withdrawal; `stabilizerSet`, `sha256:<hex>`, on every verdict and on a void where its run compared; `keyId`; `record`, `sha256:<hex>` of the record file; `supersedes` and `reason` together, on a supersession and every withdrawal |
+| `heartbeat` | none |
+| `key-change` | `old` and `new`, each `keyId`, `publicKey` (hex) and `signature` (base64) over the message below |
+| `release` | `name`, `version`, `artifacts` (file name to `sha256` and optional `sha512`), `keyId`, `signature` by the release key |
+| `log-end` | `successor`: `origin`, `logKey` (its C2SP vkey, named by that origin), `urls` (empty for this repository), `dir` (`log/<n>`, or `log` in another repository) |
+| `log-continuation` | `checkpoint`: the old log's final checkpoint, a signed note carrying both log keys' signatures |
+
+Both keys of a `key-change` sign `trigon.dev/key-change/v1`, the origin of the log the leaf is in,
+the leaf's time, and the old and new public keys in hex, each on a line of its own and each line
+ending in a newline. The release key signs `trigon.dev/release/v1`, the origin, the time, and the
+canonical JSON of `name`, `version` and `artifacts`, likewise. The first line is a domain no other
+signature by those keys begins with; the origin keeps a change from being replayed into another
+log.
+
+**Verifying a log** (`verify_log`) checks, from its files: the checkpoint's signature and origin;
+every leaf of every bundle the checkpoint's tree has, hashed, and the root recomputed and compared
+first; then each leaf decoded, with times that never go backwards, a `log-end` only as the last
+leaf and a `log-continuation` only as the first; every tile, against the recomputed hashes, since a
+reader proving inclusion from tiles relies on them; and, given the checkpoint last accepted, that
+the new one is no smaller and its first leaves hash to the accepted root. The root comes before the
+leaves because a leaf that breaks a rule is the log key's doing only if the checkpoint signs it: a
+bundle altered after signing is refused as files that are not the signed tree, never as the log
+breaking its own rules. A refusal for not extending the accepted checkpoint carries both signed
+notes as read, and shows them escaped. A reader without the leaves asks the same of the tiles alone
+(`verify_extension_from_tiles`, and `prove_inclusion_from_tiles` against a signed checkpoint only).
+There a failed consistency proof is an equivocation only when its hashes lead to the new signed
+root, which authenticates them; tiles that do not are damaged or planted, and say nothing about the
+log key. `verify_source` walks a repository's chain, `log/` then each successor a `log-end` names,
+following one only when its first leaf is a `log-continuation` that holds the old log's final
+checkpoint, signed by both log keys, and reports every `log/<n>` that no `log-end` names as refused.
+The chain starts at the newest checkpoint the pinned key opens, in whichever directory holds it, and
+at the first such directory whose files verify: a directory is never chosen on what its checkpoint's
+text says, and any other claiming that log — unsigned, unreadable, an older state, a copy — is
+reported and set aside, so planting one neither stops the source nor moves it back. `KeyHistory`
+follows `key-change` leaves from the pinned attestation key: one from the current key counts only
+when both keys signed it over this log's origin, and from that leaf on a record signed by the old
+key is refused. The writer (`VerifiedLog::plan_append`) is held to what those readers check, as far
+as one log can know it — a key change signed over this log's origin, a `log-end` naming a successor
+with another origin, a `log-continuation` signed by this log's key and holding another log's
+checkpoint — and the free `plan_append` to a tail that is the tree's own leaves, because a leaf or a
+full bundle once written is there for good.
+
 ## 3. Signing
 
 ```rust
@@ -843,8 +930,10 @@ Steps:
    without one the signature is reported present and unchecked. A chain to a root replaces the
    pinned key if [B21](17-backlog.md#b21-keyed-signing-under-a-trusted-root) is built.
 3. **Check the record's inclusion in the evidence log**, for a statement that came from an evidence
-   repository. Designed, not built: [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md)
-   §6 and §10 phase 4 (`--record <file> --evidence <dir>`).
+   repository. The log's own checks are built (§2.10); the command that applies them to a record,
+   `--record <file> --evidence <dir>`, is not:
+   [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §6 and the second half of §10
+   phase 4.
 4. **Select statements** with a small typed filter (by predicate type, by build type, by subject
    digest). Not built: the command takes one envelope.
 5. **`--rerun-comparison`**: take the upstream and the rebuilt artifacts, load the stabilizer set

@@ -209,7 +209,11 @@ docs/README.md "Status")*. The largest: the fleet, the write-only blob credentia
 docs/16-findings.md §5)*, the evidence store and its publication pipeline — `trigon publish`,
 `trigon evidence`, `trigon lookup`, and a `trigon check` that answers from evidence repositories
 *(documented, docs/19-distribution-and-lookup.md, status and §10)* — and most of
-`docs/11-interfaces.md` §2.
+`docs/11-interfaces.md` §2. The evidence log's formats and its verification exist as library code,
+`trigon_attest::log`, that no command reaches: a finding against it needs A8 or A9, and routes here
+until `verify-attestation --record` reaches it, which is when this model gains the properties for
+record, inclusion and consistency verification *(documented, docs/19-distribution-and-lookup.md
+status and §10 phases 4 and 8; docs/16-findings.md §3.98)*.
 
 ---
 

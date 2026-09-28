@@ -132,10 +132,33 @@ pub enum PurlCanonError {
          Which one is meant is a guess, and a guessed key finds the wrong record"
     )]
     DuplicateQualifier { purl: String, key: String },
+    #[error(
+        "canonicalisation rule {0} is not one this build implements: it has rules 1 to \
+         {PURL_CANON}. A purl signed under a newer rule was written by a newer Trigon; update it"
+    )]
+    UnknownRule(u32),
 }
 
 /// The canonical form of `purl` under version [`PURL_CANON`].
 pub fn canonicalize(purl: &str) -> Result<CanonicalPurl, PurlCanonError> {
+    canonicalize_under(PURL_CANON, purl)
+}
+
+/// The canonical form of `purl` under rule `rule`, any of 1 to [`PURL_CANON`].
+///
+/// A purl is signed beside the rule it is canonical under, into leaves and statements that are
+/// never rewritten, so a reader checks each against its own rule and not today's: when the rule
+/// changes, every earlier one stays here, and a purl under one is still read. A rule after
+/// [`PURL_CANON`] is refused.
+pub fn canonicalize_under(rule: u32, purl: &str) -> Result<CanonicalPurl, PurlCanonError> {
+    match rule {
+        1 => rule_1(purl),
+        other => Err(PurlCanonError::UnknownRule(other)),
+    }
+}
+
+/// Rule 1, as the module's documentation describes it.
+fn rule_1(purl: &str) -> Result<CanonicalPurl, PurlCanonError> {
     if purl.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(PurlCanonError::Whitespace(purl.to_string()));
     }

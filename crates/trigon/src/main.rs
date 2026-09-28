@@ -1157,7 +1157,7 @@ fn main() -> Result<()> {
 /// policy we are enforcing. The classification was implemented and never used, which made it
 /// documentation rather than a control.
 fn report_fault(e: &anyhow::Error) {
-    use trigon_core::{Classify, Fault};
+    use trigon_core::Classify;
     let fault = e
         .downcast_ref::<trigon_compare::CompareError>()
         .map(|e| e.fault())
@@ -1174,6 +1174,13 @@ fn report_fault(e: &anyhow::Error) {
         // fault it was. A fault nobody reads is a comment.
         .or_else(|| {
             e.downcast_ref::<trigon_attest::AttestError>()
+                .map(|e| e.fault())
+        })
+        // A log that fails verification is `Bug`, not `Upstream`: a signature, tree or checkpoint
+        // that does not hold is a source that may be lying (`docs/19` §8), and has to say so
+        // louder than a file that would not parse. `whose` names the source for it, not trigon.
+        .or_else(|| {
+            e.downcast_ref::<trigon_attest::log::LogError>()
                 .map(|e| e.fault())
         });
     #[cfg(feature = "build")]
@@ -1197,14 +1204,74 @@ fn report_fault(e: &anyhow::Error) {
         .or_else(|| e.downcast_ref::<trigon_ai::LlmError>().map(|e| e.fault()));
     let Some(fault) = fault else { return };
     let retryable = retryable_of(e).unwrap_or_else(|| fault.is_retryable());
-    let whose = match fault {
+    tracing::error!(fault = ?fault, retryable, "{}", whose(fault, e));
+}
+
+/// Whose fault, in words.
+///
+/// A log that fails verification is classed `Bug`, as a signature that does not verify is, and
+/// it is not trigon's: telling the user to report a bug in trigon would point at the wrong party
+/// for a source that may be lying. `docs/19` §4.2 and §8 report it as failed verification, and so
+/// does this, until phase 6 gives it its exit code.
+fn whose(fault: trigon_core::Fault, e: &anyhow::Error) -> &'static str {
+    use trigon_attest::log::LogError;
+    use trigon_core::Fault;
+    let log = e.downcast_ref::<LogError>().or_else(|| {
+        match e.downcast_ref::<trigon_attest::AttestError>() {
+            Some(trigon_attest::AttestError::Log(l)) => Some(l),
+            _ => None,
+        }
+    });
+    match log {
+        Some(l) if l.fails_verification() => {
+            return "the evidence source's: it failed verification and may be lying, so nothing \
+                    it says is trusted";
+        }
+        // Not a published artifact, which is what `Upstream` says below.
+        Some(LogError::Malformed(_) | LogError::Missing { .. }) => {
+            return "the evidence source's: its log could not be read";
+        }
+        _ => {}
+    }
+    match fault {
         Fault::Infra => "ours: infrastructure, and retryable",
         Fault::Upstream => "the published artifact's",
         Fault::Build => "the package's own build",
         Fault::Policy => "a policy this run is enforcing",
         Fault::Bug => "a bug in trigon; please report it",
-    };
-    tracing::error!(fault = ?fault, retryable, "{whose}");
+    }
+}
+
+#[cfg(test)]
+mod fault_report {
+    use trigon_attest::log::LogError;
+    use trigon_core::{Classify, Fault};
+
+    use super::whose;
+
+    /// A source whose log does not verify is reported as the source's, never as a bug in trigon,
+    /// however the error reaches `main`; so is one whose log could not be read.
+    #[test]
+    fn a_log_that_fails_verification_is_the_sources_fault_and_not_trigons() {
+        let failed = || LogError::Mismatch("the entry bundles are not the leaves".into());
+        for e in [
+            anyhow::Error::new(failed()),
+            anyhow::Error::new(trigon_attest::AttestError::Log(failed())),
+        ] {
+            assert_eq!(failed().fault(), Fault::Bug);
+            let said = whose(Fault::Bug, &e);
+            assert!(said.contains("evidence source's"), "{said}");
+            assert!(!said.contains("bug in trigon"), "{said}");
+        }
+        let missing = LogError::Missing {
+            path: "log/checkpoint".into(),
+        };
+        let said = whose(missing.fault(), &anyhow::Error::new(missing));
+        assert_eq!(said, "the evidence source's: its log could not be read");
+        // Anything else that is a bug is still reported as one.
+        let e = anyhow::Error::new(trigon_attest::AttestError::Canonicalize("x".into()));
+        assert_eq!(whose(Fault::Bug, &e), "a bug in trigon; please report it");
+    }
 }
 
 /// Retryability as the error itself reports it.
@@ -1227,6 +1294,10 @@ fn retryable_of(e: &anyhow::Error) -> Option<bool> {
         })
         .or_else(|| {
             e.downcast_ref::<trigon_attest::AttestError>()
+                .map(Classify::is_retryable)
+        })
+        .or_else(|| {
+            e.downcast_ref::<trigon_attest::log::LogError>()
                 .map(Classify::is_retryable)
         });
     #[cfg(feature = "build")]

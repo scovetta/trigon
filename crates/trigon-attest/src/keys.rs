@@ -16,7 +16,7 @@ use crate::location::printable;
 
 /// The C2SP signed-note key type for Ed25519, the only one the witness network takes and the one
 /// `docs/19` §2.3 fixes for the log.
-const ED25519: u8 = 0x01;
+pub(crate) const ED25519: u8 = 0x01;
 
 /// A C2SP verifier key: `<name>+<hash>+<key>`.
 ///
@@ -54,8 +54,8 @@ impl LogVkey {
         if name.is_empty() {
             return Err(bad("its name, the log's origin, is empty"));
         }
-        if name.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            return Err(bad("its name contains whitespace"));
+        if !is_key_name(name) {
+            return Err(bad("its name contains whitespace or a control character"));
         }
         let hash = parse_hash(hash).ok_or_else(|| bad("its key hash is not eight hex digits"))?;
         let raw = base64::engine::general_purpose::STANDARD
@@ -91,6 +91,18 @@ impl LogVkey {
             hash,
             key,
         })
+    }
+
+    /// The verifier key of an Ed25519 key under a name, as [`crate::log::LogSigner`] derives its
+    /// own. The name is held to what [`Self::parse`] accepts, so the key it makes reads back.
+    pub fn new(name: &str, key: &VerifyingKey) -> Result<Self, AttestError> {
+        let mut raw = vec![ED25519];
+        raw.extend_from_slice(key.as_bytes());
+        Self::parse(&format!(
+            "{name}+{}+{}",
+            hex(&key_hash(name, key.as_bytes())),
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        ))
     }
 
     /// The log's origin: the key's name, which is also the first line of every checkpoint it signs.
@@ -176,10 +188,30 @@ impl AttestationKey {
     pub fn key_id(&self) -> String {
         hex(&Sha256::digest(self.key.as_bytes()))[..16].to_string()
     }
+
+    pub fn verifying_key(&self) -> &VerifyingKey {
+        &self.key
+    }
+}
+
+impl From<VerifyingKey> for AttestationKey {
+    fn from(key: VerifyingKey) -> Self {
+        AttestationKey { key }
+    }
+}
+
+/// Whether `name` can name a key this crate pins or makes: non-empty, and no Unicode space, no
+/// control character, and no `+`, which ends the name in a verifier key. One rule for both, so a
+/// log signer exists only under a name its verifier key can carry.
+pub(crate) fn is_key_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '+')
 }
 
 /// SHA-256(name || "\n" || 0x01 || key), first four bytes: the C2SP key hash of an Ed25519 key.
-fn key_hash(name: &str, key: &[u8; 32]) -> [u8; 4] {
+pub(crate) fn key_hash(name: &str, key: &[u8; 32]) -> [u8; 4] {
     let mut h = Sha256::new();
     h.update(name.as_bytes());
     h.update(b"\n");
@@ -200,7 +232,7 @@ fn parse_hash(s: &str) -> Option<[u8; 4]> {
     Some(out)
 }
 
-fn hex(b: &[u8]) -> String {
+pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 

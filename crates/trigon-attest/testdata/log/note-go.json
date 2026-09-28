@@ -1,0 +1,12 @@
+{
+  "about": "Signed-note vectors from Go's golang.org/x/mod/sumdb/note (v0.40.0: note_test.go and example_test.go), the reference implementation of C2SP signed-note. `note` is `text`, a blank line and PeterNeumann's signature line; `cosigned` adds EnochRoot's. `skey` is the private key in Go's format, whose signature over `text` is `peterLine` byte for byte (Ed25519 is deterministic). `notTheVector` is a signature line that was offered as this vector and is not it: its key hash is caf4d2a3, not PeterNeumann's c74f20a3, and its 64 signature bytes do not verify under PeterNeumann's key over `text`, so a verifier pinned to PeterNeumann must refuse a note that carries only it.",
+  "vkey": "PeterNeumann+c74f20a3+ARpc2QcUPDhMQegwxbzhKqiBfsVkmqq/LDE4izWy10TW",
+  "skey": "PRIVATE+KEY+PeterNeumann+c74f20a3+AYEKFALVFGyNhPJEMzD1QIDr+Y7hfZx09iUvxdXHKDFz",
+  "enochVkey": "EnochRoot+af0cfe78+ATtqJ7zOtqQtYqOo0CpvDXNlMhV3HeJDpjrASKGLWdop",
+  "text": "If you think cryptography is the answer to your problem,\nthen you don't know what your problem is.\n",
+  "peterLine": "— PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n",
+  "enochLine": "— EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5n2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ=\n",
+  "note": "If you think cryptography is the answer to your problem,\nthen you don't know what your problem is.\n\n— PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n",
+  "cosigned": "If you think cryptography is the answer to your problem,\nthen you don't know what your problem is.\n\n— PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n— EnochRoot rwz+eBzmZa0SO3NbfRGzPCpDckykFXSdeX+MNtCOXm2/5n2tiOHp+vAF1aGrQ5ovTG01oOTGwnWLox33WWd1RvMc+QQ=\n",
+  "notTheVector": "— PeterNeumann yvTSo2EF6Kf+i4GsM8y3lX57cBDhfkUJ0V1+XXvnNf/qtCFqqeyZIyz66Ghte1cSbzGfUN+9+lsoLl6WaZyFfDnrBwA=\n"
+}

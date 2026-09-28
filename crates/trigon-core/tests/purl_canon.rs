@@ -6,7 +6,7 @@
 //! change to either that the other does not follow fails here rather than as a lookup that
 //! silently misses.
 
-use trigon_core::purl::{PURL_CANON, canonicalize};
+use trigon_core::purl::{PURL_CANON, PurlCanonError, canonicalize, canonicalize_under};
 
 const VECTORS: &str = include_str!("../testdata/purl-canon-v1.json");
 
@@ -54,6 +54,35 @@ fn every_vector_canonicalises_as_the_file_says() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// A purl signed under rule 1 is in leaves and statements that are never rewritten, so rule 1 is
+/// read as its vectors say for good, whatever [`PURL_CANON`] becomes: bumping the rule must add
+/// one, and not change this one under every record already signed.
+#[test]
+fn every_rule_this_build_has_had_is_still_the_rule_it_was() {
+    let v = vectors();
+    let rule = u32::try_from(v["purlCanon"].as_u64().unwrap()).unwrap();
+    assert_eq!(rule, 1, "this file is rule 1's");
+    for case in v["vectors"].as_array().unwrap() {
+        let input = case["input"].as_str().unwrap();
+        let c = canonicalize_under(rule, input).unwrap();
+        assert_eq!(c.as_str(), case["canonical"].as_str().unwrap(), "{input}");
+        assert_eq!(c.package(), case["package"].as_str().unwrap(), "{input}");
+    }
+    for case in v["invalid"].as_array().unwrap() {
+        assert!(canonicalize_under(rule, case["input"].as_str().unwrap()).is_err());
+    }
+    for known in 1..=PURL_CANON {
+        canonicalize_under(known, "pkg:npm/left-pad@1.3.0").unwrap();
+    }
+    // A rule before the first, or after the newest this build has, is none it can check.
+    for unknown in [0, PURL_CANON + 1] {
+        assert_eq!(
+            canonicalize_under(unknown, "pkg:npm/left-pad@1.3.0"),
+            Err(PurlCanonError::UnknownRule(unknown))
+        );
+    }
 }
 
 #[test]
