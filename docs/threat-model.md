@@ -60,7 +60,12 @@ here and used everywhere:
 - `divergent` — the stabilized forms differ.
 
 A fifth state, **`void`**, sits outside all four: the run is not evidence of anything, because the
-artifact under test reached the build over the network. It is not a pass and not a failure.
+artifact under test reached the build over the network, the build had the whole network, or a
+stabilizer a person or a model wrote did the matching — the three clauses of the publication gate's
+safeguard 2. It is not a pass and not a failure, and `trigon attest` signs it as `void/v1`, never
+as a verdict (P6). `trigon rebuild --attest`, which signs in the process that ran the build, asks
+no gate and still signs a v1 verdict for a run voided by open egress or a stabilizer somebody wrote
+(Q2; docs/16-findings.md §3.96).
 
 Where the operator asks for one, a run also produces a signed in-toto attestation. **The attestation
 is the product.** Everything else exists to make it honest.
@@ -350,7 +355,7 @@ a key file, a `--model` spec, a definitions ref — are **trusted** and not tabl
 | `StabilizerSet` resolution | a set id, and the `.wasm` module it resolves to | **operator chooses the module; the id comes from an attestation** | resource-name, collaborator-implementation, x-wasm-module | **the operator decides which archived set to trust and run**; an id alone executes nothing | *(documented, docs/09-attestations.md §7.1)* |
 | `Registry::resolve` | registry response JSON | **yes** | data, size, serialized-state, object-topology | nothing; shape errors surface as `RegistryError` | *(documented, crates/trigon-registry/src/npm.rs — fields are read, not schema-validated)* |
 | `Registry::fetch` | `meta.url` | **yes — a package's metadata chooses the host this machine contacts** | resource-name | the operator accepts that resolving a package means contacting hosts that package names | *(inferred, Q5)* |
-| `Registry::fetch` | response body | **yes** | data, size | bytes are re-hashed and checked against the declared digest | *(documented, crates/trigon-registry/src/registry.rs)* |
+| `Registry::fetch` | response body | **yes** | data, size | hashed as it streams and checked against **every** digest the registry declares that this build can compute, and refused on the first mismatch: npm's whole `integrity` string and its `shasum`, PyPI's `digests`, crates.io's `checksum`, and NuGet's catalog `packageHash`. PyPI's `blake2b_256` is recorded as declared and unchecked; a NuGet version whose catalog carries no hash is recorded as declaring nothing, and a catalog that cannot be read refuses the download. The run records each declaration and what checking it found (`RunRecord.upstream_digests`) | *(documented, crates/trigon-registry/src/declared.rs; docs/16-findings.md §3.95)* |
 | `SourceCache::checkout` | `repo` | **yes** | resource-name, x-git-remote-url | **https only**, enforced here | *(documented, crates/trigon-registry/src/source.rs)* |
 | `SourceCache::checkout` | `commit` | **yes** | x-git-ref | **40 hex characters only**, so a ref cannot be an option or a path | *(documented, crates/trigon-registry/src/source.rs)* |
 | `Checkout::files` / `read` | repository contents | **yes** | data, object-topology | nothing — this is what the Builder reads | *(documented, docs/16-findings.md §3.7)* |
@@ -369,7 +374,7 @@ a key file, a `--model` spec, a definitions ref — are **trusted** and not tabl
 | model prompt | README, CI config, manifests, build log | **yes** | data, x-build-log | **nothing prevents injection**; it is fenced, bounded and control-stripped, and accepted as residual risk | *(documented, docs/12-security.md §4)* |
 | model response | the proposed strategy | **the model's, and so indirectly the attacker's** | x-model-output | parsed and validated; the provenance cap bounds the damage | *(documented, docs/00-overview.md §3.1)* |
 | definitions repository | a `build.yaml` or a custom stabilizer | **yes, via a merged pull request** | data, x-shell-script, collaborator-implementation | two-party review, a mandatory prose `reason:`, and the corpus-wide impact preview | *(documented, docs/12-security.md §8)* |
-| evidence sources — designed, not built (docs/19 §10 phase 6) | a project's `.trigon/evidence.toml`, read from the working directory | **yes — chosen by the thing under test**: in CI on a pull request, by the pull request's author | data, resource-name, x-git-remote-url | nothing; Trigon holds the file to less than the user's own configuration. It may only add `[[source]]` entries, each under a new name, with both keys and an initial checkpoint pinned and HTTPS URLs only; a file that tries anything else is refused whole; and every answer from such a source names the file that added it. It can add a claim and cannot change what any other source answers | *(documented, docs/19-distribution-and-lookup.md §2.4, §8)* |
+| evidence sources — the configuration is read (`trigon_attest::config`, docs/19 §10 phase 2); syncing is phase 6 | a project's `.trigon/evidence.toml`, read from the working directory | **yes — chosen by the thing under test**: in CI on a pull request, by the pull request's author | data, resource-name, x-git-remote-url | nothing; Trigon holds the file to less than the user's own configuration. It may only add `[[source]]` entries, each under a new name, with both keys and an initial checkpoint pinned and HTTPS URLs only, and any file it names — a PEM key, the checkpoint — must be inside the working directory once symlinks are followed, as must the file itself, which is also a regular file of at most 64 KiB; a file that tries anything else is refused whole, with the rule it broke and its strings escaped, and a parse error gives a line and column without quoting the file; and every answer from such a source names the file that added it. It can add a claim and cannot change what any other source answers | *(documented, docs/19-distribution-and-lookup.md §2.4, §8; crates/trigon-attest/tests/evidence_config.rs — `a_project_file_that_breaks_a_rule_is_refused_whole_with_the_rule`, `a_project_file_that_links_outside_the_project_is_not_read`)* |
 
 **Coverage.** Every family's public surface is represented. Within a family the table names the
 operands that carry attacker power. **The remainder are believed operator-supplied or internal
@@ -418,7 +423,7 @@ or §1.12 disclaimer that owns it; no claimed row exists only here.
 | comparison-and-verdict | concurrency-reentrancy | disclaimed | no statement is made | D8 |
 | comparison-and-verdict | resource-complexity | claimed | linear in members; each side is walked at most twice | P25 |
 | attestation | numeric-domain | N/A | no arithmetic on attacker-supplied values | — |
-| attestation | failure-atomicity | claimed | `trigon attest` refuses a void run rather than signing a weaker claim | P6 |
+| attestation | failure-atomicity | claimed | `trigon attest` signs a void run as `void/v1` alone, never as a verdict | P6 |
 | attestation | recursive-cyclic-topology | claimed | JCS refuses what another implementation might not reproduce | P9 |
 | attestation | callback-execution | claimed | `Signer` and `ArchivedSet` are operator-chosen collaborators, named on the command line | P26 |
 | attestation | serialization-reconstruction | claimed | canonical JSON is byte-stable; floats and non-ASCII keys are refused, not coerced | P9 |
@@ -618,9 +623,12 @@ configured with *(documented, docs/19-distribution-and-lookup.md §6, §6.1, §7
   §2.4, §8)*. This is not A8: an evidence repository's operator is not the person running Trigon.
 - **Anyone with code execution in the `trigon` process.** They have already won.
 - **A compromised control plane** *(documented, docs/12-security.md §11)*.
-- **A network attacker between Trigon and a registry**, beyond what TLS gives. Artifacts are checked
-  against the declared digest and re-hashed; the registry is trusted to say what it published
-  *(documented, crates/trigon-registry/src/registry.rs)*.
+- **A network attacker between Trigon and a registry**, beyond what TLS gives. An artifact from
+  npm, PyPI, crates.io or NuGet is hashed as it streams and checked against every digest its
+  registry declares that this build can compute, and a mismatch refuses it; PyPI's `blake2b_256` is
+  recorded unchecked, and a NuGet version whose catalog declares no hash is recorded as declaring
+  none (§1.7). The registry is trusted to say what it published *(documented,
+  crates/trigon-registry/src/declared.rs; docs/16-findings.md §3.95)*.
 - **A tenant of a shared installation.** There is no multi-tenancy to attack (§1.3).
 
 ---
@@ -637,7 +645,7 @@ attacker-controllable, is `VALID`.
 | **P3** | Stabilizers are total and idempotent: `stab(stab(x)) == stab(x)`, no `Result`, no half-stabilized state, and none allocates more than one member at a time. | — | a digest that depends on how many times a pass ran | **security-critical** *(documented, docs/05 §4)* |
 | **P4** | `compare` refuses to compare two sides stabilized under different sets, by set digest, and classifies the refusal `Fault::Bug`. | — | a verdict derived across incomparable sets | **security-critical** *(documented, docs/09-attestations.md §7)* |
 | **P5** | **Provenance-capped outcomes.** `normalized` is produced only when the stabilized digests are equal *and* every applied stabilizer is `Builtin` with risk ≤ `Metadata`. Anything else that matches is `normalized_with_caveats`. | — | a model- or human-authored normalization reported as clean | **security-critical** *(documented, docs/00-overview.md §3.1; crates/trigon-compare/src/lib.rs:166-181)* |
-| **P6** | `trigon attest` refuses to sign a void run. | the guard was armed | a signed statement about a run that fetched its own answer | **security-critical** *(documented, docs/12-security.md §2.4; crates/trigon/src/main.rs:4223)* |
+| **P6** | `trigon attest` never signs a verdict for a void run; it signs only `void/v1`. A void run is one the publication gate calls void (`trigon_api::publication::voided`, which is `decide`'s own answer): its guard tripped, whether or not it reached an outcome, or it reached an outcome at `open` egress or with a stabilizer a person or a model wrote. `void/v1` carries the reason and the facts that establish it, and no comparison outcome, difference data, comparison report or rebuilt-artifact digest. | the run was recorded, and the facts that void it are on its record | a signed `equivalence` or `divergence` about a run that fetched its own answer or had the whole network; a `void/v1` that says which way the comparison went | **security-critical** *(documented, docs/19-distribution-and-lookup.md §4.3; docs/16-findings.md §3.96; crates/trigon/tests/seam_attest_v2.rs — `a_guard_tripped_run_yields_void_v1_and_never_a_verdict`, `an_open_egress_run_yields_void_too`, `a_run_a_hand_written_stabilizer_applied_to_is_signed_as_void_and_only_void`, `a_verdict_is_not_signed_for_a_record_that_hides_a_hand_written_stabilizer`)* |
 | **P7** | Text reaching a model is bounded and control-stripped, and operator instructions travel in a system message, never spliced into package text. | every provider **except `copilot:`**, which has no system-role channel | a build log rewriting the operator's instructions | **security-critical** *(documented, docs/12-security.md §4.1; crates/trigon-ai/src/copilot.rs:35)* |
 | **P8** | Both artifacts receive an identical transform; the API has no way to stabilize one side differently. Enforced by the type signature. | — | an asymmetric normalization producing a false match | **security-critical** *(documented, docs/12-security.md §10)* |
 | **P9** | Canonical JSON refuses what another implementation might not reproduce: floats and non-ASCII object keys are type errors, not coerced values. | signing path | two implementations disagreeing on what was signed | **security-critical** *(documented, crates/trigon-core/src/jcs.rs)* |

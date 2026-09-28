@@ -67,12 +67,16 @@ pub struct RunFacts<'a> {
     /// is whether the published tarball corresponds to the *claimed source*, and a reader holding
     /// this statement could not tell which source was claimed.
     pub source: Option<SourceFacts<'a>>,
-    /// `definition`, `heuristic`, `ci_derived`, `model_assisted`.
+    /// `definition`, `heuristic`, `ci_derived`, `model_assisted`. `None` leaves the method out
+    /// of the statement rather than naming one nobody recorded.
     pub derivation: Option<&'a str>,
     /// Digest of the rendered instructions, which is what actually ran.
     pub instructions: Option<&'a str>,
     pub build_log: Option<&'a str>,
+    /// The Trigon signing the statement, which is what `builder.version.trigon` has always named.
+    /// The one that ran the build is signed in the verdict (`trigonVersion.builder`).
     pub trigon_version: &'a str,
+    /// The set the rebuilt artifact was judged under: `(id, digest)`.
     pub stabilizer_set: Option<(&'a str, &'a str)>,
     /// What the artifact guard refused or caught.
     pub guard_trips: &'a [String],
@@ -212,7 +216,6 @@ impl Statement {
             // Provenance, beside the claim rather than inside it. A consumer who wants to filter on
             // "no model touched this" can; offering that costs one field (`docs/09` §4).
             "derivation": {
-                "method": f.derivation.unwrap_or("heuristic"),
                 "transcript": Value::Null,
                 "reviewedBy": Value::Null,
             },
@@ -221,10 +224,20 @@ impl Statement {
             // stronger one.
             "attestable": f.attestable,
         });
+        // The method only where the run recorded one. This was `unwrap_or("heuristic")`, so a run
+        // with no recorded derivation was signed as heuristic: absence rendered as a value, and a
+        // consumer filtering on the method could not tell the two apart (`docs/19` §4.2 item 5).
+        if let Some(m) = f.derivation {
+            predicate["derivation"]["method"] = json!(m);
+        }
+        // The set the rebuilt artifact was judged under, in the shape the verdict names it. The
+        // field existed and the attestor passed no set, so no `rebuild` statement carried one
+        // (`docs/19` §4.2 item 2). Additive: `rebuild` stays v1, and a verifier that does not know
+        // the field reads past it.
         if let Some((id, digest)) = f.stabilizer_set {
             predicate["runDetails"]["builder"]["version"]["stabilizers"] =
                 json!(format!("sha256:{digest}"));
-            predicate["buildDefinition"]["internalParameters"]["stabilizerSet"] = json!(id);
+            predicate["stabilizerSet"] = json!({ "id": id, "digest": { "sha256": digest } });
         }
 
         Statement {
@@ -351,6 +364,49 @@ mod tests {
         );
         assert_eq!(s.predicate["derivation"]["method"], "heuristic");
         assert!(s.canonical().is_ok(), "it has to be signable");
+    }
+
+    #[test]
+    fn a_run_with_no_recorded_derivation_is_not_signed_as_heuristic() {
+        // Absence rendered as a value was the bug: `unwrap_or("heuristic")` signed a method nobody
+        // recorded, and a consumer filtering out model-assisted runs could not tell "we do not
+        // know" from "no model".
+        let d = Digest::from_bytes([6; 32]);
+        let s = Statement::rebuild(
+            Subject::new("a.tgz", &d),
+            &RunFacts {
+                derivation: None,
+                ..facts()
+            },
+        );
+        assert!(
+            s.predicate["derivation"].get("method").is_none(),
+            "{}",
+            s.predicate["derivation"]
+        );
+        // The rest of the block is still there, so a reader sees the method is what is missing.
+        assert!(s.predicate["derivation"]["transcript"].is_null());
+    }
+
+    #[test]
+    fn a_rebuild_statement_names_the_set_it_was_judged_under() {
+        // `docs/19` §4.2 item 2: the attestor passed no set, so no `rebuild` statement had one.
+        let d = Digest::from_bytes([5; 32]);
+        let s = Statement::rebuild(Subject::new("a.tgz", &d), &facts());
+        assert_eq!(s.predicate["stabilizerSet"]["id"], "npm-tarball");
+        assert_eq!(s.predicate["stabilizerSet"]["digest"]["sha256"], "2b7c4f");
+        assert_eq!(
+            s.predicate["runDetails"]["builder"]["version"]["stabilizers"],
+            "sha256:2b7c4f"
+        );
+        let none = Statement::rebuild(
+            Subject::new("a.tgz", &d),
+            &RunFacts {
+                stabilizer_set: None,
+                ..facts()
+            },
+        );
+        assert!(none.predicate.get("stabilizerSet").is_none());
     }
 
     #[test]

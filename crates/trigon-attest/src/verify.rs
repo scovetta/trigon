@@ -89,6 +89,16 @@ pub fn rederive_with(
     rebuild: Vec<u8>,
     archived: Option<&mut dyn ArchivedStabilizer>,
 ) -> Result<Rederived, AttestError> {
+    // A void or a withdrawal makes no comparison claim, and one read as though it did would fail
+    // on some missing field with a message about the field. Refused by what it is, and a verdict
+    // type this build does not know is refused the same way rather than read as a v1.
+    if !crate::verdict::is_verdict(&statement.predicate_type) {
+        return Err(AttestError::Malformed(format!(
+            "`{}` makes no comparison claim, so there is nothing to re-derive. \
+             `--rerun-comparison` checks an equivalence or a divergence statement, v1 or v2",
+            statement.predicate_type
+        )));
+    }
     let p = &statement.predicate;
     let claimed = p["outcome"]
         .as_str()

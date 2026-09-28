@@ -298,6 +298,128 @@ producing the rebuild yourself.
 
 ---
 
+## Task: sign what a stored run says
+
+`trigon rebuild … --store ./trigon-store` records a run; `trigon attest` signs it, in a separate
+process that runs no build and opens no socket. It reads the run's blobs back by hash, re-derives
+the claim from the two artifacts, and only then signs, into the store.
+
+```
+trigon attest [<run>] --store ./trigon-store --key ~/.trigon/signing.key [--prune]
+```
+
+What it signs depends on the run, and it says which:
+
+- **A run that compared** gets `equivalence/v2`, or `divergence/v2` for a divergence, with
+  `rebuild/v1` and `buildobservation/v1` beside it. The verdict carries the package's canonical
+  purl, the Trigon that built it and the one signing it, the egress tier, the derivation method
+  where one was recorded, and the digests of the evidence a third party fetches to re-derive it.
+  [`09-attestations.md`](09-attestations.md) §2.5 lists every field.
+- **A void run** — the artifact guard tripped, the build ran at `--egress open`, or a stabilizer a
+  person or a model wrote applied — gets `void/v1` and nothing else. It says why, and never which
+  way the comparison went:
+
+  ```
+  void      open_egress: the build ran with unrestricted network access, so nothing it produced is
+            evidence about the package.
+
+  signing void/v1 and nothing else: a void run gets no verdict, and no statement that says which way
+  its comparison went
+  ```
+
+**Correcting a published record.** A published record is never edited; it is superseded, with a
+reason from a closed list: `withdrawn`, `set_changed`, `attempts_disagree_later`, `pipeline_bug`.
+
+```
+trigon attest <run> --supersedes <record.json> --reason set_changed   # a verdict in its place
+trigon attest --withdraw <record.json> --reason withdrawn              # "we were wrong", no verdict
+```
+
+`<record.json>` is a record file, `trigon.record/v1`. A superseding verdict is refused unless the
+record is about the same artifact, digest for digest, and the same package. A withdrawal has no run,
+and is filed in the store at `withdrawals/sha256/<record>/withdrawal.intoto.json`.
+
+## Configuring where evidence goes: `evidence.toml`
+
+Publishing and looking up verdicts in an evidence repository
+([`19-distribution-and-lookup.md`](19-distribution-and-lookup.md)) are configured, never compiled
+in. `trigon attest` reads the configuration today; `publish`, `evidence sync` and `lookup` are the
+later phases that use the rest of it.
+
+The file is `~/.config/trigon/evidence.toml` (`$XDG_CONFIG_HOME/trigon/evidence.toml`), or
+whatever `TRIGON_EVIDENCE_CONFIG` names instead. Every key, with its default:
+
+```toml
+[publish]
+repo = "git@github.com:<owner>/trigon-evidence.git"   # https://, ssh://, git://, http://, file://,
+branch = "main"                                       #   user@host:path, or a path
+origin = "github.com/<owner>/trigon-evidence"         # the log's origin
+disputes = "https://github.com/<owner>/trigon-evidence/issues"
+log_key = "~/.config/trigon/log.key"                  # read only by `trigon log sign`
+divergences = "refuse"                                # or "feed"
+rebuilt_artifacts = "none"                            # or "github-release"
+same_host_confirmation = false
+confirmation_interval = "1h"                          # durations: <n>s, m, h or d
+heartbeat = "7d"
+
+[freshness]
+stale_after = "1d"
+frozen_after = "14d"
+
+[[source]]
+name = "trigon"
+urls = ["https://github.com/<owner>/trigon-evidence.git"]    # one log, and any mirrors of it
+log_key = "github.com/<owner>/trigon-evidence+1a2b3c4d+AR…"  # a C2SP verifier key
+attestation_key = "<64 hex>"                                 # or a path to a PEM
+checkpoint = "~/.config/trigon/trigon.checkpoint"            # optional
+required = false
+trust_on_first_use = false     # true only to read an unpinned key from the repository once
+```
+
+`attest` signs `origin` and `disputes` into every verdict's falsifying command and dispute pointer
+when **both** are set, and leaves both out when either is not — which is right for local use, and
+what `publish` will refuse.
+
+**An unknown key is an error**, and so is a value of the wrong kind, a pin that does not parse, or a
+source without both keys that does not ask for trust on first use: a typo in a security setting that
+was silently ignored would be a setting that is silently off. The error names the file and the key,
+and the command exits `5`:
+
+```
+$ trigon attest
+Error: /home/you/.config/trigon/evidence.toml: TOML parse error at line 2, column 1
+  |
+2 | orign = "github.com/owner/trigon-evidence"
+  | ^^^^^
+unknown field `orign`, expected one of `repo`, `branch`, `origin`, `disputes`, …
+```
+
+**Locations.** A URL is passed to `git` exactly as written, so credentials are `git`'s own — an SSH
+key, a credential helper — and a URL carrying a password is refused, as is an `https://`, `http://`
+or `git://` URL with any user name in it (`https://<token>@github.com/…` is how a token is written
+there); tell a credential helper the user with `git config credential.https://<host>.username`
+instead. An SSH user, `git@github.com:…`, names the account and is kept. A path is made absolute:
+`~/` is expanded, and a relative path is taken from the directory of the file that names it. `git`
+reads a colon before the first slash as SSH, so `backup:evidence` is refused; write
+`./backup:evidence`, `file://…`, or `ssh://backup/…` for a host alias.
+
+**The environment** overrides the files for one run: `TRIGON_PUBLISH_REPO` for `[publish] repo`;
+`TRIGON_EVIDENCE_REPO` (locations separated by spaces) adds a required source named `env`, pinned
+by `TRIGON_EVIDENCE_LOG_KEY` and `TRIGON_EVIDENCE_ATTESTATION_KEY` — refused without both unless
+`TRIGON_EVIDENCE_TOFU=1` — with `TRIGON_EVIDENCE_CHECKPOINT` as its optional checkpoint; and
+`TRIGON_EVIDENCE_CACHE` and `TRIGON_EVIDENCE_STATE` replace the directories clones and sync state
+are kept in (`~/.cache/trigon/evidence`, `~/.local/state/trigon/evidence`).
+
+**A project's own sources.** `.trigon/evidence.toml` in the working directory is read too, unless
+`TRIGON_EVIDENCE_CONFIG` is set. It is chosen by whoever controls the project — in CI, the author of
+the pull request — so it may only add `[[source]]` entries under new names, each with both keys and
+an initial checkpoint, HTTPS URLs only, and files inside the project. The file itself must be inside
+the project too, once symlinks are followed, a regular file of at most 64 KiB. Anything else refuses
+the whole file, with the rule it broke. Source names are compared ignoring case, in every file,
+since each is a directory under `~/.cache/trigon/evidence`.
+
+---
+
 ## What a run leaves behind
 
 Every terminal outcome writes `<work>/NNN/run.json`, whether the run reproduced, diverged, failed to

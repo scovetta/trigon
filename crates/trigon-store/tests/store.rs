@@ -401,6 +401,32 @@ async fn a_statement_filed_per_target_before_runs_had_their_own_still_reads() {
     assert_eq!(s.get_attestation(old).await.unwrap(), env);
 }
 
+#[tokio::test]
+async fn a_withdrawal_is_filed_under_the_record_it_withdraws_and_never_overwritten() {
+    // It has no run to be filed under (`docs/19` §3), so it goes under the record's digest, and a
+    // second, different withdrawal of the same record is written beside the first.
+    let s = Store::in_memory();
+    let record = Digest::from_bytes([0x7f; 32]);
+    let first = trigon_attest::Envelope::new(b"withdrawn", vec![]);
+    let path = s.put_withdrawal(&record, &first).await.unwrap();
+    assert_eq!(
+        path,
+        format!(
+            "withdrawals/sha256/{}/withdrawal.intoto.json",
+            record.to_hex()
+        )
+    );
+    assert_eq!(s.get_attestation(&path).await.unwrap(), first);
+
+    // The same bytes are the same statement.
+    assert_eq!(s.put_withdrawal(&record, &first).await.unwrap(), path);
+    let second = trigon_attest::Envelope::new(b"pipeline_bug", vec![]);
+    let beside = s.put_withdrawal(&record, &second).await.unwrap();
+    assert!(beside.ends_with("/withdrawal.2.intoto.json"), "{beside}");
+    assert_eq!(s.get_attestation(&path).await.unwrap(), first);
+    assert_eq!(s.get_attestation(&beside).await.unwrap(), second);
+}
+
 /// A run of `babel_core()` with nothing signed yet, written to `s`.
 async fn unattested(s: &Store, id: &str) -> RunRecord {
     let up = s.blobs().put(&b"core-7.24.0.tgz"[..]).await.unwrap();

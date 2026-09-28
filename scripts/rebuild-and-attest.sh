@@ -184,7 +184,9 @@ fi
 # ---------------------------------------------------------------------------------------------
 # The attestation. A separate invocation on purpose: it reads the blobs back by hash, checks each
 # against the hash it asked for, recomputes the equivalence claim from the artifact bytes, and
-# refuses if the record disagrees with its own evidence or if the guard tripped.
+# refuses if the record disagrees with its own evidence. A run the publication gate calls void —
+# the guard tripped, egress was open, or a stabilizer somebody wrote applied — is signed as
+# `void/v1` and nothing else, never as a verdict (docs/19 §4.3).
 # ---------------------------------------------------------------------------------------------
 
 say "attesting $LATEST"
@@ -197,8 +199,8 @@ if ! "$TRIGON" "${ATTEST_ARGS[@]}"; then
 
 The attestor refused, and its message above says which gate. All four are deliberate:
 
-  the guard tripped        the artifact reached the build over the network, so a match proves
-                           only that the build downloaded it
+  a void it cannot show    the record says the run is void for a reason its own evidence does
+                           not show, and a void is signed only on facts that hold
   artifacts pruned         the claim cannot be re-derived, so it will not be re-signed
   record disagrees         the record claims something its own comparison does not say
   re-derivation failed     the bytes give a different answer from the one recorded
@@ -255,6 +257,14 @@ done
 # nothing to re-derive from either.
 BUNDLE=""
 INCOMPLETE=""
+# A void has no claim to re-derive, so no verify line: say what was signed instead.
+if [ -f "$STORE/runs/$LATEST.json" ] &&
+   grep -q '/void\(\.[0-9]\+\)\?\.intoto\.json"' "$STORE/runs/$LATEST.json"; then
+    printf '\n  void        this run is evidence of nothing about the package, so its statement is\n'
+    printf '              void/v1, with the reason and no verdict; there is nothing to re-derive\n'
+    printf '  statements  %s/attestations/\n' "$STORE"
+    exit 0
+fi
 if [ -f "$STORE/runs/$LATEST.json" ]; then
     # `#` as the delimiter, not `|`. With `|` delimiting the s-command, the `\|` below reads as an
     # escaped delimiter rather than an alternation, so the expression matched nothing at all and

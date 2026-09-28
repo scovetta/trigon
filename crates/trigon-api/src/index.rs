@@ -651,11 +651,24 @@ fn build(records: &BTreeMap<String, RunRecord>, switches: Switches) -> Vec<Entry
 }
 
 fn corroboration(r: &RunRecord, attempts: &BTreeMap<&str, BTreeMap<&str, u32>>) -> Corroboration {
+    // From the record, where the run path writes it: the fact lives in the comparison blob and the
+    // index does not fetch blobs. `None` on a record written before the field existed reaches the
+    // gate as `None` and is treated as an unevaluated safeguard — which is what the previous
+    // `false` claimed to mean and could not, being a `bool`.
+    //
+    // **Whatever the attempts are.** It is a fact about this run, not about the other attempts at
+    // the same work, and it was carried only where there were some to count: a run with no cache
+    // key — every run the CLI records — reached the gate as "not known", so `serve` withheld as
+    // awaiting confirmation a run `trigon attest` signs as void.
+    let own = Corroboration {
+        non_builtin_stabilizer: r.non_builtin_stabilizer,
+        ..Corroboration::default()
+    };
     let (Some(k), Some(o)) = (r.cache_key.as_deref(), r.outcome.as_deref()) else {
-        return Corroboration::default();
+        return own;
     };
     let Some(by_outcome) = attempts.get(k) else {
-        return Corroboration::default();
+        return own;
     };
     Corroboration {
         agreeing_attempts: by_outcome.get(o).copied().unwrap_or(0),
@@ -664,11 +677,7 @@ fn corroboration(r: &RunRecord, attempts: &BTreeMap<&str, BTreeMap<&str, u32>>) 
             .filter(|(other, _)| **other != o)
             .map(|(_, n)| *n)
             .sum(),
-        // From the record, where the run path writes it: the fact lives in the comparison blob
-        // and the index does not fetch blobs. `None` on a record written before the field existed
-        // reaches the gate as `None` and is treated as an unevaluated safeguard — which is what
-        // the previous `false` claimed to mean and could not, being a `bool`.
-        non_builtin_stabilizer: r.non_builtin_stabilizer,
+        ..own
     }
 }
 
@@ -953,6 +962,62 @@ mod tests {
             )
             .withheld,
             2
+        );
+    }
+
+    #[test]
+    fn the_index_voids_exactly_the_runs_the_attestor_calls_void() {
+        // `trigon attest` asks `publication::voided` of the record alone; `serve` and `publish`
+        // ask the index. They must agree, and they did not for a run with no cache key: the
+        // index dropped its provenance bit, and withheld as awaiting confirmation a run the
+        // attestor signed as void.
+        let mut rs = Vec::new();
+        let mut n = 0;
+        for key in [None, Some("k1")] {
+            for outcome in [None, Some("exact"), Some("divergent")] {
+                for egress in ["open", "mirror-only"] {
+                    for guard in [false, true] {
+                        for non_builtin in [None, Some(false), Some(true)] {
+                            n += 1;
+                            let mut r = rec(&format!("17000{n:05}-x"), "pkg:npm/a@1", outcome, key);
+                            r.environment.egress = egress.into();
+                            r.non_builtin_stabilizer = non_builtin;
+                            if guard {
+                                r.guard_trips.push("tripped".into());
+                            }
+                            rs.push(r);
+                        }
+                    }
+                }
+            }
+        }
+        let ix = index_of(rs.clone());
+        for r in &rs {
+            let via_index = match ix.entry(&r.id).unwrap().publication {
+                Publication::Void { because } => Some(because),
+                _ => None,
+            };
+            assert_eq!(
+                crate::publication::voided(r),
+                via_index,
+                "key={:?} {:?} {} guard={} {:?}",
+                r.cache_key,
+                r.outcome,
+                r.environment.egress,
+                !r.guard_trips.is_empty(),
+                r.non_builtin_stabilizer
+            );
+        }
+        // The case that disagreed, by name.
+        let mut cli = rec("1800000001-cli", "pkg:npm/b@1", Some("exact"), None);
+        cli.environment.egress = "mirror-only".into();
+        cli.non_builtin_stabilizer = Some(true);
+        let ix = index_of(vec![cli]);
+        assert_eq!(
+            ix.entry("1800000001-cli").unwrap().publication,
+            Publication::Void {
+                because: crate::publication::Withheld::NonBuiltinStabilizer
+            }
         );
     }
 

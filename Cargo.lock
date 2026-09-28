@@ -3114,6 +3114,7 @@ dependencies = [
  "sha2",
  "tar",
  "thiserror",
+ "toml",
  "tracing",
  "trigon-archive",
  "trigon-compare",

@@ -160,7 +160,7 @@ doing right now, on this disk* — and the second is the one that has to survive
 | Evidence gateway | Authenticated, digest-addressed, class-gated fetch of blob bytes with retention bounds. | Serve a build log or network transcript anonymously. Return bytes without re-hashing them against the digest asked for. | **new**, inside `trigon-api` |
 | Publication gate | The ADR-0010 safeguards as one object with one producer: agreement, the `Void` rule, the dispute pointer, notification, the SLO kill-switch. | Let anything reach a public read path with `published` unset. | **new** — §7.1 |
 | `trigon watch` | The local, database-free, directory-rooted reader. Loopback. Survives the sweep's death. | Gain a write path, a database client, an auth layer, or a routable default bind. | exists, frozen in scope |
-| Attestor | Signing, unchanged: re-derives `RunFacts` from blob **bytes**; refuses a void run. | Take any fact from a database column. Sign a statement reassembled from rows. | exists; gains a DB *trigger*, never a DB *input* |
+| Attestor | Signing, unchanged: re-derives `RunFacts` from blob **bytes**; signs a void run as `void/v1` alone, never as a verdict. | Take any fact from a database column. Sign a statement reassembled from rows. | exists; gains a DB *trigger*, never a DB *input* |
 
 ## 4. The schema
 

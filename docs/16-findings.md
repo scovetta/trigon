@@ -3898,3 +3898,184 @@ their verification are in `crates/trigon-attest/tests/rederive.rs`; the store's 
 Two checks had no test: a declared sha384, which the fetch hashes only on demand, and
 `equivalence_for`'s sha512 comparison, the only check `rebuild --attest` and `verify --attest` make
 before signing. Both do now.
+
+### 3.96 What a published statement signs: v2 verdicts, void and withdrawal, and the configuration
+
+`docs/19` §10 phase 2, second half, on 2026-09-27. Everything here is signed, so it lands before the
+first publication; `publish` itself is phase 5.
+
+**What changed.**
+
+- **`equivalence/v2` and `divergence/v2`**, signed by `trigon attest`, carry every `docs/19` §4.2
+  field: the outcome and the stabilizer set as v1 had them, the run's id and times, the Trigon that
+  built it (`RunRecord.trigon_version`) and the one signing, the egress tier and `attestable`, the
+  derivation method where one was recorded, the evidence digests — the set manifest's file, the
+  comparison report, the rebuilt artifact, the strategy blob and the guard manifest — the canonical
+  purl with `purlCanon`, and, when `[publish] origin` and `disputes` are both set, the falsifying
+  command as argv and a typed dispute pointer. A v2 verdict is a v1 verdict with fields added, so
+  `rederive` reads both with one path. Field by field in `docs/09` §2.5.
+- **`void/v1`** is what `attest` signs, and all it signs, for a run the publication gate calls void:
+  the gate's reason (`because`), the guard's trips and manifest, any stabilizer a person or a model
+  wrote, the egress tier, and no outcome, difference data, comparison report or rebuilt-artifact
+  digest. The attestor asks `trigon_api::publication::voided`, which is `decide`'s own answer, so
+  it and `serve` cannot disagree about which runs are void. `GET /v1/runs/{id}/attestation` serves
+  an anonymous reader of a void run its `void/v1` and nothing else, and refuses one whose only
+  statements are verdicts.
+- **`withdrawal/v1`** (`attest --withdraw <record> --reason <code>`) names the record by sha256 and
+  a reason from the closed list, with the record's own subject and purl and no verdict; it is filed
+  at `withdrawals/sha256/<record>/`. **`attest <run> --supersedes <record> --reason <code>`** signs
+  `supersedes` and `reason` into the run's verdict or void, and refuses a record about another
+  artifact or purl, since a client would never apply it. `<record>` is a path to a record file,
+  whose types, `trigon.record/v1`, are in `trigon_attest::Record` with nothing but reading.
+- **`rebuild/v1`** names its stabilizer set, additively, and signs `derivation.method` only where
+  the run recorded one.
+- **The canonical purl, version 1** (`trigon_core::purl`), with its vectors in
+  `crates/trigon-core/testdata/purl-canon-v1.json`, which every writer and reader of the `purl1` and
+  `pkg1` keys is held to.
+- **The configuration of `docs/19` §2.4** (`trigon_attest::config`), in the crate the verifier
+  already links, so phase 4's `verify-attestation --source` reads the same code: the user's file or
+  `TRIGON_EVIDENCE_CONFIG`'s, the project's file under its rules, the environment, locations
+  classified by transport, C2SP log keys parsed and their key hash recomputed, attestation keys as
+  hex or PEM, and the error a command that needs a source and has none gives. A configuration error
+  exits 5.
+- **The building version names its build.** `build.rs` embeds `0.0.0+git.<rev>`, `.dirty` for a
+  tree with changes the commit does not have, `+git.unknown` outside a checkout; `--version` prints
+  it, runs record it, and statements sign it. `0.0.0` alone identified nothing.
+
+**Found on the way.**
+
+- **The gate withheld the very runs it voids.** `decide` read the outcome first and withheld a run
+  with none as `no_outcome`, and a tripped guard ends the build, so every real void run — no
+  comparison, no outcome — was withheld rather than shown as a void, and `attest` would have had no
+  void to sign. A guard trip is now the first clause, outcome or not; open egress and a
+  non-builtin stabilizer still void only a run that reached an outcome, since a build that failed
+  at open egress is a failed build. `voided_agrees_with_decide_whatever_it_cannot_see` holds the
+  attestor's question to the gate's answer over every combination.
+- **An open-egress run was signed as a verdict.** The attestor refused a tripped guard and nothing
+  else, so at `trigon rebuild`'s default `--egress open` every run was signed as `equivalence/v1`
+  or `divergence/v1`, and only the API's gate kept the divergence from an anonymous reader. None of
+  the 371 runs in the local store is affected — all are `mirror-only`, none tripped a guard, none
+  applied a non-builtin pass — but the README's own signing walkthrough ran at `open`, and now says
+  that such a run is signed as a void.
+- **`rebuild/v1` signed `heuristic` for a run that recorded no derivation**, and its
+  `stabilizer_set` was declared and never passed, so no statement named the set.
+- **`build.rs` baked in the workspace root at compile time.** Cargo reuses a compiled build script
+  across a moved tree, so a copy of the source without `.git` was stamped with the original
+  checkout's commit. It reads `CARGO_MANIFEST_DIR` at run time now, and a build from such a copy
+  says `+git.unknown`.
+
+**Decisions made here that the owner may want to revisit.**
+
+- PyPI names are normalised as PEP 503 says (runs of `-_.` become one `-`), stricter than the purl
+  specification's `_`-only rule, because PyPI resolves all those spellings to one project. Case is
+  folded only for the types the purl specification says are case-insensitive, so NuGet ids, Go
+  module paths and Maven coordinates keep their case, and `pkg1` keeps a purl's qualifiers, as "the
+  canonical purl without its version" reads.
+- A project's file may name files — its checkpoint, a PEM key — only inside the working directory,
+  once symlinks are followed, and its refusals print its strings with control characters escaped.
+  `docs/19` §2.4 did not say this; without it, a pull request's `.trigon/evidence.toml` could have
+  Trigon read any file on a CI runner as a "key".
+- A location with a colon before its first slash is SSH where the part before the colon is
+  `user@host`, a dotted name or a bracketed IPv6 address, and refused otherwise, with the advice to
+  write `./`, `file://` or `ssh://alias/…`. A URL with a password, an `https://`, `http://` or
+  `git://` URL with any user name (added in review, below), a git remote helper (`ext::` runs a
+  command) and any scheme but the five listed are refused.
+- `[[source]]` gained `trust_on_first_use`, the file form of `evidence add --trust-on-first-use`,
+  which the project rule "cannot turn on trust on first use" presupposes.
+
+**What this does not do.**
+
+- Nothing verifies a record file's signatures or checks its unsigned parts against them; that is
+  phase 4, and phase 6 resolves `<record>` by digest in a clone.
+- No command needs a source yet, so the no-source refusal and its exit 5 have no caller outside
+  their tests; phase 6 is the first.
+- `trigon rebuild --attest` and `trigon verify --attest` still write v1 bundles, the first in the
+  process that ran the build. `rebuild --attest` at `--egress open` therefore still signs a verdict
+  for a run the gate calls void: P6 as reworded covers `trigon attest`, and whether the in-process
+  path should sign a void, refuse, or go now that `attest` exists is a decision for the owner.
+- `rebuild/v1` signs `derivation.transcript` as `null` even where the run kept the model exchange:
+  24 of the 75 attested runs in the local store have a transcript digest nobody signed. Left as it
+  was, since changing it is outside this phase.
+- The build script re-runs on every build, because its `rerun-if-changed` paths for the mirror
+  (`crates/trigon-mirror`) are relative to the workspace and cargo reads them relative to the
+  package, so the file is "missing" every time. That also keeps the version's dirty flag current;
+  corrected, the flag would be as of the last change to `HEAD`, a ref or the index.
+
+Tests: `crates/trigon/tests/seam_attest_v2.rs` is the done-when through the binary — one assertion
+per §4.2 field, the v1 fixtures signed at `255d2f5` verifying, a guard-tripped run with and without
+a comparison and an open-egress run each yielding `void/v1` alone, the falsifying command and
+dispute pointer absent and present, supersession, withdrawal, and a bad configuration exiting 5.
+The same fields at the library in `crates/trigon-attest/tests/verdicts.rs`; the configuration in
+`evidence_config.rs` and locations in `locations.rs` beside it; the purl vectors in
+`crates/trigon-core/tests/purl_canon.rs`; the route in
+`crates/trigon-api/tests/seam_void_statement.rs` and the gate's new order in `publication.rs`; the
+withdrawal's filing in `crates/trigon-store/tests/store.rs`; and the build version in
+`build_version_tests` in `crates/trigon/src/main.rs`.
+
+**What review found in it.** Nine defects, each now with a test that fails without its fix; two
+things no test checked; a doc comment moved off its function; and two questions that are the
+owner's.
+
+- **A record could hide the stabilizer that voids it.** `attest` chose between void and verdict
+  from the record's `non_builtin_stabilizer` alone and checked it against nothing, with the
+  comparison in hand. A record saying `false`, or nothing (written before the bit existed), beside
+  a comparison in which a hand-written pass applied got a verdict, which the gate, reading the same
+  bit, would publish. It now refuses a record whose bit disagrees with `AuthoredPass::of` its
+  comparison, as it refuses one whose outcome does
+  (`a_verdict_is_not_signed_for_a_record_that_hides_a_hand_written_stabilizer`).
+- **The void whose facts come from the comparison had never been signed in a test**, only refused,
+  so a regression in `AuthoredPass::of` — counting built-in passes, dropping the dedupe — passed
+  everything (`a_run_a_hand_written_stabilizer_applied_to_is_signed_as_void_and_only_void`).
+- **`voided` and the index disagreed** for every run without a cache key, which is every run the
+  CLI records. `index::corroboration` returned `Corroboration::default()` there, dropping the
+  record's provenance bit, so `serve` withheld as awaiting confirmation a run `attest` signed as
+  void. The bit is a fact about the record and is carried whatever the attempts; the new test
+  `the_index_voids_exactly_the_runs_the_attestor_calls_void` compares the two through the index,
+  where `voided_agrees_with_decide_whatever_it_cannot_see` built the corroboration by hand.
+- **A project's `.trigon/evidence.toml` was read through symlinks**, with no size or type check,
+  and toml's error quotes the offending line: a link to a runner's secrets file, or to
+  `/proc/self/environ`, printed it into the CI log, and one to `/dev/zero` read without end. The
+  file is held to the rule the files it names are — inside the project once links are followed —
+  and must be a regular file of at most 64 KiB; a parse error gives its line and column and toml's
+  description, escaped, and not the line.
+- **Some refusals still printed a project's control characters**: a name refused as a name, a log
+  key, a PEM's path. Each is escaped where the message is written, and `project_file` escapes what
+  `source_from` says once more.
+- **Source names were unique only case-sensitively**, and a name is a directory: on macOS's default
+  filesystem a project's `Trigon` would have shared the user's `trigon`'s checkpoint and key
+  history once phase 6 writes them. Names, and the reserved `env`, are compared ignoring ASCII case.
+- **`https://<token>@github.com/…` was accepted**, which is how GitHub takes a token, and would have
+  been printed wherever the location is named. Any user name in an `https://`, `http://` or
+  `git://` URL is refused, with how to tell a credential helper the user instead; an SSH user
+  stays. Every refusal of a URL shows its user part as `***`, which the password refusal did not.
+- **The canonical purl was not a fixed point** for an encoded dot segment. `.` and `..` were dropped
+  before decoding, so `#%2E%2E/a` became `#../a`, which canonicalises to `#a`: two keys for one
+  purl, and a record its own writer produced that phase 4's check would refuse. Segments are
+  dropped by what they decode to, the vectors pin it, and a sweep over awkward spellings holds the
+  fixed point beyond them.
+- **Lowercasing was Unicode's**, so `%E2%84%AAeras` (KELVIN SIGN) canonicalised to `keras`, and
+  full and simple case mapping disagree across languages (`İ`). It is ASCII only now, which changes
+  no name any of these registries accepts; vectors pin both characters.
+- **The build script's `git status` took the index lock** on every build, so a `git commit` at the
+  moment an editor's background `cargo check` ran could fail on it. It runs with
+  `GIT_OPTIONAL_LOCKS=0` (`asking_whether_the_tree_is_dirty_writes_nothing`). And nothing checked
+  that the binary embeds a revision: every assertion passed for `+git.unknown`. Built from a
+  checkout with git to ask, `this_binary_names_the_revision_it_was_built_from` requires forty hex
+  digits.
+- The withdrawal test was inserted between `unattested`'s doc comment and the function, and took
+  the comment. It is back where it belongs.
+
+For the owner:
+
+- **`trigon rebuild --attest` still signs a v1 verdict for a run the gate calls void** — at
+  `--egress open`, its default, or for a hand-written stabilizer — as this entry says above. What
+  review added is that the code and the docs said otherwise: its comment said every void returned
+  before it, and `docs/09` and the threat model said without qualification that a void is never
+  signed as a verdict. The comment, the flag's help, `docs/09` §2 and §2.5, and threat model §1.1
+  now say what it does. Whether it refuses, signs `void/v1`, or goes is threat model Q2.
+- **`pkg1` keeps qualifiers**, so a purl with a qualifier that names one version — `file_name`,
+  `checksum`, `download_url` — has a `pkg1` key per version, where `docs/19` §2.3 says the key is
+  "every version". Dropping every qualifier would merge a package across `repository_url`s, the
+  merge that keeping case exists to avoid; dropping only the version-bearing ones is a list that
+  becomes protocol. The vectors are protocol too, so this is decided before the first record is
+  published.

@@ -11,7 +11,7 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:d140bedfe9193e5af44c3d89d7cd2a62eca864ff29296f965d3edbccd7e10dbf
+prose_version: docs/threat-model.md@sha256:cc5dfa46175cfee91cf705a34168941b0e363c1fbe1ea515c88fc6b94d80f8ae
 model_status: unratified-draft
 triage_policy: strict
 confidence:
@@ -335,10 +335,15 @@ entry_points:
     control_kinds:
     - data
     - size
-    caller_must_enforce: bytes are re-hashed and checked against the declared digest
+    caller_must_enforce: 'hashed as it streams and checked against every digest the registry declares
+      that this build can compute, and refused on the first mismatch: npm''s whole integrity string and
+      its shasum, PyPI''s digests, crates.io''s checksum, and NuGet''s catalog packageHash. PyPI''s blake2b_256
+      is recorded as declared and unchecked; a NuGet version whose catalog carries no hash is recorded
+      as declaring nothing, and a catalog that cannot be read refuses the download. The run records each
+      declaration and what checking it found (RunRecord.upstream_digests)'
     provenance:
       kind: documented
-      source: crates/trigon-registry/src/registry.rs
+      source: crates/trigon-registry/src/declared.rs; docs/16-findings.md §3.95
 - id: SourceCache::checkout
   component: multiple
   parameters:
@@ -553,7 +558,8 @@ entry_points:
     provenance:
       kind: documented
       source: docs/12-security.md §8
-- id: evidence sources — designed, not built (docs/19 §10 phase 6)
+- id: evidence sources — the configuration is read (trigon_attest::config, docs/19 §10 phase 2); syncing
+    is phase 6
   component: multiple
   parameters:
   - name: a project's .trigon/evidence.toml, read from the working directory
@@ -564,12 +570,16 @@ entry_points:
     - x-git-remote-url
     caller_must_enforce: nothing; Trigon holds the file to less than the user's own configuration. It
       may only add [[source]] entries, each under a new name, with both keys and an initial checkpoint
-      pinned and HTTPS URLs only; a file that tries anything else is refused whole; and every answer from
-      such a source names the file that added it. It can add a claim and cannot change what any other
-      source answers
+      pinned and HTTPS URLs only, and any file it names — a PEM key, the checkpoint — must be inside the
+      working directory once symlinks are followed, as must the file itself, which is also a regular file
+      of at most 64 KiB; a file that tries anything else is refused whole, with the rule it broke and
+      its strings escaped, and a parse error gives a line and column without quoting the file; and every
+      answer from such a source names the file that added it. It can add a claim and cannot change what
+      any other source answers
     provenance:
       kind: documented
-      source: docs/19-distribution-and-lookup.md §2.4, §8
+      source: docs/19-distribution-and-lookup.md §2.4, §8; crates/trigon-attest/tests/evidence_config.rs
+        — `a_project_file_that_breaks_a_rule_is_refused_whole_with_the_rule`, `a_project_file_that_links_outside_the_project_is_not_read`
 contract_dimensions:
 - component: archive-parsing
   dimension: numeric-domain
@@ -850,7 +860,7 @@ contract_dimensions:
 - component: attestation
   dimension: failure-atomicity
   status: claimed
-  conditions: trigon attest refuses a void run rather than signing a weaker claim
+  conditions: trigon attest signs a void run as void/v1 alone, never as a verdict
   property_id: P6
   provenance:
     kind: documented
@@ -1808,13 +1818,20 @@ properties_claimed:
   components:
   - attestation
   tier: security-critical
-  conditions: the guard was armed
+  conditions: the run was recorded, and the facts that void it are on its record
   violation_symptoms:
-  - a signed statement about a run that fetched its own answer
-  statement: trigon attest refuses to sign a void run
+  - a signed equivalence or divergence about a run that fetched its own answer or had the whole network
+  - a void/v1 that says which way the comparison went
+  statement: 'trigon attest never signs a verdict for a void run; it signs only void/v1. A void run is
+    one the publication gate calls void (trigon_api::publication::voided, which is decide''s own answer):
+    its guard tripped, whether or not it reached an outcome, or it reached an outcome at open egress or
+    with a stabilizer a person or a model wrote. void/v1 carries the reason and the facts that establish
+    it, and n'
   provenance:
     kind: documented
-    source: docs/12-security.md §2.4; crates/trigon/src/main.rs:4223
+    source: docs/19-distribution-and-lookup.md §4.3; docs/16-findings.md §3.96; crates/trigon/tests/seam_attest_v2.rs
+      — `a_guard_tripped_run_yields_void_v1_and_never_a_verdict`, `an_open_egress_run_yields_void_too`,
+      `a_run_a_hand_written_stabilizer_applied_to_is_signed_as_void_and_only_void`, `a_verdict_is_not_signed_for_a_record_that_hides_a_hand_written_stabilizer`
 - id: P7
   kind: integrity
   components:

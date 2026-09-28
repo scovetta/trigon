@@ -12,7 +12,8 @@ decisions it waits on. What exists today:
 | A lockfile check by purl against the local store (`trigon check`, `POST /v1/check`) | built; §6 says what it lacks. §10 phase 0 closed its leak ([findings](16-findings.md) §3.93) |
 | Rekor publication (`attest --rekor`) and verification (`verify-attestation --transparency`) | built, measured, and **removed** (ADR-0014; §10 phase 1, [findings](16-findings.md) §3.94) |
 | Subjects with sha512, and sha1 for npm, beside sha256 (§5); fetchers that verify every digest their registry declares, and runs that record what was declared (§5); the strategy, guard manifest and building version kept on the run (§4.2 items 3, 7); attestations per run, append-only | built (§10 phase 2, first half; [findings](16-findings.md) §3.95) |
-| The v2 verdicts with every §4.2 field, `void/v1` and `withdrawal/v1` | planned (§10 phase 2, second half) |
+| The v2 verdicts with every §4.2 field, `void/v1` and `withdrawal/v1`, the record file's types, the versioned purl canonicalisation, and a building version that names its git revision | built (§10 phase 2, second half; [findings](16-findings.md) §3.96) |
+| The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest` (§10 phase 2); the commands that use the rest of it are phases 4 to 6 |
 | The evidence repository, the evidence log, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
 
 ---
@@ -276,7 +277,13 @@ Trigon passes a URL to `git` unchanged, so anything `git` accepts is accepted an
 is worked around. A local path is made absolute first: `~/` is expanded, and a relative path is
 taken from the directory of the configuration file that names it, or from the working directory when
 it comes from the environment or the command line. A path with a colon before its first slash is
-read by `git` as an SSH location, so such a path is written with a leading `./` or as `file://`.
+read by `git` as an SSH location, so such a path is written with a leading `./` or as `file://`;
+the scp form is taken as SSH where the part before the colon is `user@host`, a name with a dot, or
+a bracketed IPv6 address, and anything else before a colon is refused with that advice (a host
+alias is written `ssh://alias/…`). A URL carrying a password, an `https://`, `http://` or
+`git://` URL naming any user — the place a token goes, so a name there is refused as a token would
+be — a git remote helper (`<transport>::…`) and any other scheme are refused, and a refusal prints
+the location with its user part as `***`.
 Plain-text transports (`git://`, `http://`) are allowed, because integrity rests on the signatures
 and the log rather than on the transport, and Trigon says which transport it used. **Credentials are
 `git`'s own** — SSH keys, a credential helper, `GIT_ASKPASS` — and Trigon never reads, stores, logs
@@ -319,15 +326,30 @@ log_key = "github.com/<owner>/trigon-evidence+1a2b3c4d+AR…"   # C2SP vkey; its
 attestation_key = "…hex, or a path to a PEM…"
 checkpoint = "~/.config/trigon/trigon.checkpoint"             # optional initial checkpoint
 required = true                                               # its unknown fails a check (§6)
+trust_on_first_use = false          # true: read an unpinned key from keys/ on the first sync
 ```
+
+Every table rejects a key it does not know, so a misspelt security setting is an error rather than a
+setting silently off. Durations are a whole number and one unit, `s`, `m`, `h` or `d`. A source
+without both keys is refused unless `trust_on_first_use = true`, the file form of
+`--trust-on-first-use`. The values shown for `branch`, `divergences`, `rebuilt_artifacts`,
+`same_host_confirmation`, `confirmation_interval`, `heartbeat`, `stale_after` and `frozen_after`
+are their defaults; `required` and `trust_on_first_use` default to `false`, and `repo`, `origin`,
+`disputes`, `log_key` and `checkpoint` to unset.
 
 **A project's own sources.** `.trigon/evidence.toml` in the working directory is read too, unless
 `TRIGON_EVIDENCE_CONFIG` is set. It is chosen by whoever controls the project — in CI on a pull
 request, by the pull request's author — so it is held to less. It may only add `[[source]]` entries,
 each under a new name, with both keys and an initial checkpoint pinned, and with HTTPS URLs only. It
 cannot add a URL to a source that already exists, change or remove one, turn on trust on first use,
-set `required`, or change any other setting, and a file that tries is refused whole. Every answer
-from such a source names the file that added it.
+set `required`, or change any other setting, and a file that tries is refused whole. A file it names
+— the checkpoint, a PEM attestation key — must be inside the working directory once symlinks are
+followed, so a project cannot have Trigon read a file of the host's by calling it a key, and so must
+`.trigon/evidence.toml` itself, which must also be a regular file of at most 64 KiB; its refusals
+quote its strings escaped, and a parse error gives the line and column without quoting the line.
+A source's name is its directory under the cache and state directories, so names are compared
+ignoring ASCII case, in every file: on a case-insensitive filesystem `Trigon` is `trigon`'s
+directory. Every answer from such a source names the file that added it.
 
 **Environment.** Each variable overrides the files for one run:
 
@@ -592,17 +614,17 @@ Absence rendered as a zero is a bug this project has already shipped (`docs/18-m
 ### 4.3 Void
 
 A void run — the artifact guard tripped, egress was open, or a non-builtin stabilizer fired — must
-never be published as a verdict. Today only a guard-tripped run goes unsigned, because the attestor
-refuses it (threat-model property P6). An open-egress or non-builtin run is still signed as
-`equivalence/v1` or `divergence/v1`, and the API withholds that statement from anonymous callers
-only. So a void is published as a leaf and a record whose only statement is `void/v1`, new. It
-carries the outcome `void`, the reason, the facts that establish it (which guarded members tripped,
-which egress tier, which stabilizer), and **no comparison outcome and no difference data**: "we
-looked, and could not tell, for this reason". `trigon attest` signs `void/v1` for a run `decide`
-calls void, and still refuses to sign a verdict for it, so P6 becomes "`trigon attest` never signs a
-verdict for a void run; it signs only `void/v1`". Clients treat void as its own state and not as a
-rung of `Match`, which has none, and the exit codes (§6) give it code 3, shared only with a result
-below the threshold.
+never be published as a verdict. Until §10 phase 2 only a guard-tripped run went unsigned, because
+the attestor refused it (threat-model property P6); an open-egress or non-builtin run was still
+signed as `equivalence/v1` or `divergence/v1`, and the API withheld that statement from anonymous
+callers only. So a void is published as a leaf and a record whose only statement is `void/v1`,
+new. It carries the outcome `void`, the reason, the facts that establish it (which guarded members
+tripped, which egress tier, which stabilizer), and **no comparison outcome and no difference
+data**: "we looked, and could not tell, for this reason". `trigon attest` signs `void/v1` for a run
+`decide` calls void, and still refuses to sign a verdict for it, so P6 becomes "`trigon attest`
+never signs a verdict for a void run; it signs only `void/v1`". Clients treat void as its own state
+and not as a rung of `Match`, which has none, and the exit codes (§6) give it code 3, shared only
+with a result below the threshold. `docs/09-attestations.md` §2.6 has the predicate as built.
 
 ---
 
@@ -627,8 +649,10 @@ annotated with nothing a client trusts: it narrows a search, and the log is the 
 exists (§8). Paths have no length limit worth the name, so every digest is stored whole — no
 truncation, no collision class. Purl characters are not path-safe, so purls are hashed; the
 canonicalisation — case, qualifier order, percent-encoding — becomes part of the lookup protocol,
-ships with test vectors shared by the writer and every reader, and the digit in `purl1` and `pkg1`
-is its version, so changing the rule starts new paths rather than silently missing old ones.
+ships with test vectors shared by the writer and every reader
+(`crates/trigon-core/testdata/purl-canon-v1.json`, rules in `docs/09-attestations.md` §2.9), and the
+digit in `purl1` and `pkg1` is its version, so changing the rule starts new paths rather than
+silently missing old ones.
 
 **Subjects carry every sha256, sha512 and sha1 the ecosystem publishes.** npm publishes sha512, as
 the `integrity` string, and sha1, as `shasum`, and never sha256. NuGet's catalog carries a sha512

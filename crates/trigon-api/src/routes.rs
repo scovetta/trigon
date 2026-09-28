@@ -688,22 +688,23 @@ pub async fn network_summary(State(api): S, Path(id): Path<String>) -> Response 
 /// and this one served 13 KB of signed statement asserting the divergence. Observed against a real
 /// run in a real store, not reasoned about: see `seam_public_surface.rs`.
 ///
-/// `Void` is refused too, and that is not over-caution. Safeguard 2 says such a run is shown *as a
-/// void and never as a divergence*; a signed statement asserting one is that divergence in its most
-/// quotable form, and it would contradict the page it sits behind.
+/// **A void run serves its `void/v1` and nothing else.** Safeguard 2 says such a run is shown *as a
+/// void and never as a divergence*, and a verdict envelope signed for it — which `trigon attest`
+/// signed for an open-egress run until `docs/19` §10 phase 2 — is that divergence in its most
+/// quotable form, contradicting the page it sits behind. So an anonymous reader of a void run is
+/// served only statements whose predicate is `void/v1`, which carry no outcome and no difference
+/// data, and one with no such statement is refused.
 pub async fn attestation(State(api): S, Path(id): Path<String>) -> Response {
     let Some((r, entry)) = run_for(&api, &id) else {
         return no_such_run(&api);
     };
-    // A withheld run was refused above, as an absent one is; what reaches here unpublished is a
-    // void, which is shown and has no statement to show.
-    if api.principal() == Principal::Anonymous && entry.publication != Publication::Published {
-        return refuse(
-            StatusCode::NOT_FOUND,
-            "no_such_run",
-            "no run by that id has a published statement",
-        );
-    }
+    // A withheld run was refused above, as an absent one is, so what reaches here unpublished is a
+    // void; the arm for a withheld one is there so this cannot come to serve one if that changes.
+    let void = match (api.principal(), entry.publication) {
+        (Principal::Anonymous, Publication::Void { because }) => Some(because),
+        (Principal::Anonymous, Publication::Withheld { .. }) => return no_such_run(&api),
+        _ => None,
+    };
     if r.attestations.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,
@@ -715,11 +716,29 @@ pub async fn attestation(State(api): S, Path(id): Path<String>) -> Response {
     let mut envelopes = Vec::new();
     for path in &r.attestations {
         match api.store.get_attestation(path).await {
-            Ok(e) => envelopes.push(e),
+            Ok(e) if void.is_none() || is_void(&e) => envelopes.push(e),
+            // A void run's other statements, which for a run attested before voids were signed
+            // are its verdicts. Chosen by the predicate the envelope carries, never by the name it
+            // is filed under: the name is the store's, and the statement is what a reader is
+            // handed.
+            Ok(_) => {}
             Err(e) => {
                 tracing::warn!(run = %id, path = %path, error = %e, "unreadable attestation");
             }
         }
+    }
+    if let Some(because) = void
+        && envelopes.is_empty()
+    {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "no_void_statement",
+            &format!(
+                "this run is published as void, and no void statement has been signed for it: {} \
+                 `trigon attest` signs one, and signs nothing else for a void run.",
+                because.sentence()
+            ),
+        );
     }
     if envelopes.is_empty() {
         return refuse(
@@ -729,6 +748,15 @@ pub async fn attestation(State(api): S, Path(id): Path<String>) -> Response {
         );
     }
     json(envelopes)
+}
+
+/// Whether an envelope's statement is a `void/v1`. One that does not decode is not.
+fn is_void(e: &trigon_attest::Envelope) -> bool {
+    let Ok(payload) = e.decoded_payload() else {
+        return false;
+    };
+    serde_json::from_slice::<trigon_attest::Statement>(&payload)
+        .is_ok_and(|st| st.predicate_type == trigon_attest::VOID)
 }
 
 /// Lookup by the digest of the **published** artifact.
@@ -933,7 +961,7 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/runs/{id}/attestation",
         "get",
-        "The signed statement. Anonymous",
+        "The signed statements. Anonymous; a void run's `void/v1` alone",
     ),
     (
         "/v1/runs/{id}/log",

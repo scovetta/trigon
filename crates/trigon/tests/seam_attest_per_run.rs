@@ -116,6 +116,17 @@ async fn compared_run(store: &Store, id: &str, bytes: &[u8]) -> RunRecord {
 
 fn attest(store: &Path, id: &str, key: Option<&Path>) -> Output {
     let mut c = Command::new(bin());
+    // Away from the developer's own `evidence.toml`, which `attest` reads for `[publish]`, and
+    // from any project file where the tests happen to run.
+    let home = store.parent().unwrap();
+    c.current_dir(home)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"));
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("TRIGON_") {
+            c.env_remove(k);
+        }
+    }
     c.args(["attest", id, "--store"]).arg(store);
     if let Some(k) = key {
         c.arg("--key").arg(k);
@@ -272,7 +283,7 @@ fn an_npm_statement_is_about_every_digest_of_the_upstream_bytes_and_verifies() {
         checked,
         [
             trigon_attest::BUILD_OBSERVATION,
-            trigon_attest::EQUIVALENCE,
+            trigon_attest::EQUIVALENCE_V2,
             trigon_attest::REBUILD
         ]
     );

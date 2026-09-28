@@ -202,6 +202,40 @@ pub struct Corroboration {
     pub non_builtin_stabilizer: Option<bool>,
 }
 
+/// Whether [`decide`] calls this run void, and why, for a caller holding the one record.
+///
+/// `trigon attest` asks this, and signs `void/v1` and no verdict for a run it answers: the answer
+/// is `decide`'s own, because every clause that voids a run reads the record alone — the index
+/// hands `decide` the record's own provenance bit, for a run with no cache key as for any other —
+/// so the attempts at the same work and the kill-switch, which it cannot see, cannot change it.
+/// The index's test `the_index_voids_exactly_the_runs_the_attestor_calls_void` holds the two to
+/// each other through the index itself, not through a `Corroboration` built by hand.
+pub fn voided(r: &RunRecord) -> Option<Withheld> {
+    void_clause(r, r.non_builtin_stabilizer)
+}
+
+/// Safeguard 2's clauses, in order.
+///
+/// **A guard trip first, and whether or not the run reached an outcome.** A tripped guard ends
+/// the build, so a real void run has no outcome, and asking for one first withheld it as
+/// `NoOutcome`: a run that is publishable as a void — it makes no claim a second attempt could
+/// confirm — was not published at all, and `trigon attest` could not sign the void it is. The
+/// other two clauses describe a comparison that reached an outcome, and a run that reached none
+/// is not voided by them: a build that failed at open egress is a failed build, not a void.
+fn void_clause(r: &RunRecord, non_builtin_stabilizer: Option<bool>) -> Option<Withheld> {
+    if !r.guard_trips.is_empty() {
+        return Some(Withheld::GuardTripped);
+    }
+    r.outcome.as_ref()?;
+    if r.environment.egress.eq_ignore_ascii_case("open") {
+        return Some(Withheld::OpenEgress);
+    }
+    if non_builtin_stabilizer == Some(true) {
+        return Some(Withheld::NonBuiltinStabilizer);
+    }
+    None
+}
+
 /// The five safeguards, in the order they can each stop a row, for one run.
 ///
 /// **Order is load-bearing.** Safeguard 2's clauses are checked before safeguard 1's, because a run
@@ -210,29 +244,16 @@ pub struct Corroboration {
 /// "awaiting confirmation" a run that we already know can never be a divergence, and the reader
 /// would be told to wait for something that would not change the answer.
 pub fn decide(r: &RunRecord, c: Corroboration, s: Switches) -> Publication {
+    // Safeguard 2. Each clause converts a divergence into a void rather than suppressing it.
+    if let Some(because) = void_clause(r, c.non_builtin_stabilizer) {
+        return Publication::Void { because };
+    }
     let Some(outcome) = r.outcome.as_deref() else {
         return Publication::Withheld {
             because: Withheld::NoOutcome,
         };
     };
     let accusatory = outcome == "divergent";
-
-    // Safeguard 2. Each clause converts a divergence into a void rather than suppressing it.
-    if !r.guard_trips.is_empty() {
-        return Publication::Void {
-            because: Withheld::GuardTripped,
-        };
-    }
-    if r.environment.egress.eq_ignore_ascii_case("open") {
-        return Publication::Void {
-            because: Withheld::OpenEgress,
-        };
-    }
-    if c.non_builtin_stabilizer == Some(true) {
-        return Publication::Void {
-            because: Withheld::NonBuiltinStabilizer,
-        };
-    }
 
     // Safeguard 1. Two agreeing attempts, divergences and matches alike — the ADR says "alike" and
     // means it, because a false `Reproduced` published from one lucky build is still wrong.
@@ -687,6 +708,86 @@ mod tests {
                 because: Withheld::NoOutcome
             }
         );
+        // Nor is a build that failed at open egress void: it is a failed build.
+        let r = record(None, "open");
+        assert_eq!(
+            decide(&r, confirmed(), Switches::default()),
+            Publication::Withheld {
+                because: Withheld::NoOutcome
+            }
+        );
+        assert_eq!(voided(&r), None);
+    }
+
+    #[test]
+    fn a_run_the_guard_stopped_is_void_though_it_reached_no_outcome() {
+        // What a real void run looks like: the guard ended the build, so there is no comparison
+        // and no outcome. It was withheld as `NoOutcome`, so nothing could publish it as the void
+        // it is, and `trigon attest` had no void to sign.
+        let mut r = record(None, "mirror-only");
+        r.guard_trips
+            .push("the artifact under test arrived from registry.npmjs.org".into());
+        for c in [Corroboration::default(), confirmed()] {
+            assert_eq!(
+                decide(&r, c, Switches::default()),
+                Publication::Void {
+                    because: Withheld::GuardTripped
+                }
+            );
+        }
+        assert_eq!(voided(&r), Some(Withheld::GuardTripped));
+    }
+
+    /// `voided` is `decide`'s answer about voidness, whatever the attempts and the switches: the
+    /// attestor asks it without an index, and signs a void or a verdict on the answer.
+    #[test]
+    fn voided_agrees_with_decide_whatever_it_cannot_see() {
+        let corroborations = [
+            Corroboration::default(),
+            confirmed(),
+            Corroboration {
+                agreeing_attempts: 1,
+                disagreeing_attempts: 1,
+                ..Default::default()
+            },
+        ];
+        for outcome in [None, Some("exact"), Some("divergent")] {
+            for egress in ["open", "mirror-only"] {
+                for guard in [false, true] {
+                    for non_builtin in [None, Some(false), Some(true)] {
+                        let mut r = record(outcome, egress);
+                        r.non_builtin_stabilizer = non_builtin;
+                        if guard {
+                            r.guard_trips.push("tripped".into());
+                        }
+                        for c in corroborations {
+                            for stop in [false, true] {
+                                let c = Corroboration {
+                                    non_builtin_stabilizer: r.non_builtin_stabilizer,
+                                    ..c
+                                };
+                                let d = decide(
+                                    &r,
+                                    c,
+                                    Switches {
+                                        stop_divergences: stop,
+                                    },
+                                );
+                                let via_decide = match d {
+                                    Publication::Void { because } => Some(because),
+                                    _ => None,
+                                };
+                                assert_eq!(
+                                    voided(&r),
+                                    via_decide,
+                                    "{outcome:?} {egress} guard={guard} {non_builtin:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

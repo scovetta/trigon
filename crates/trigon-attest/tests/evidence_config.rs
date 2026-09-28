@@ -1,0 +1,1033 @@
+//! `evidence.toml` and the environment, resolved: `docs/19` §2.4, key by key and rule by rule.
+//!
+//! Each test states the environment it means as an `Env` value and writes its files under a
+//! directory of its own, so nothing here reads or changes the process's environment or the
+//! developer's own configuration.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use base64::Engine as _;
+use sha2::Digest as _;
+use trigon_attest::LocalKey;
+use trigon_attest::config::{
+    AddedBy, ConfigError, Divergences, Env, EvidenceConfig, RebuiltArtifacts, parse_duration,
+};
+use trigon_attest::location::Transport;
+
+const ORIGIN: &str = "github.com/owner/trigon-evidence";
+
+/// A fresh directory with `home/` and `project/` under it.
+fn root(what: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!(
+        "trigon-evidence-config-{}-{what}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("home")).unwrap();
+    std::fs::create_dir_all(d.join("project")).unwrap();
+    d
+}
+
+fn env(root: &Path) -> Env {
+    Env {
+        cwd: root.join("project"),
+        home: Some(root.join("home")),
+        ..Default::default()
+    }
+}
+
+fn write(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+fn user_file(root: &Path) -> PathBuf {
+    root.join("home/.config/trigon/evidence.toml")
+}
+
+fn project_file(root: &Path) -> PathBuf {
+    root.join("project/.trigon/evidence.toml")
+}
+
+fn key() -> LocalKey {
+    LocalKey::from_bytes(&[9u8; 32]).unwrap()
+}
+
+/// A C2SP verifier key for `origin`, computed here from a key this test holds.
+fn vkey(origin: &str) -> String {
+    let pk = key().public_key();
+    let mut raw = vec![0x01];
+    raw.extend_from_slice(pk.as_bytes());
+    let mut h = sha2::Sha256::new();
+    h.update(origin.as_bytes());
+    h.update(b"\n");
+    h.update(&raw);
+    let hash: String = h.finalize()[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!(
+        "{origin}+{hash}+{}",
+        base64::engine::general_purpose::STANDARD.encode(raw)
+    )
+}
+
+fn load(env: &Env) -> Result<EvidenceConfig, String> {
+    EvidenceConfig::load(env).map_err(|e| e.to_string())
+}
+
+fn loads(env: &Env) -> EvidenceConfig {
+    EvidenceConfig::load(env).unwrap_or_else(|e| panic!("{e}"))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Nothing configured
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn with_nothing_configured_every_setting_has_its_default() {
+    let r = root("defaults");
+    let c = loads(&env(&r));
+    let p = c.publish();
+    assert_eq!(p.repo, None);
+    assert_eq!(p.branch, "main");
+    assert_eq!(p.origin, None);
+    assert_eq!(p.disputes, None);
+    assert_eq!(p.log_key, None);
+    assert_eq!(
+        p.divergences,
+        Divergences::Refuse,
+        "D7's conservative default"
+    );
+    assert_eq!(p.rebuilt_artifacts, RebuiltArtifacts::None, "D4's");
+    assert!(!p.same_host_confirmation, "D8's");
+    assert_eq!(p.confirmation_interval, Duration::from_secs(3600));
+    assert_eq!(p.heartbeat, Duration::from_secs(7 * 86_400));
+    assert_eq!(c.freshness().stale_after, Duration::from_secs(86_400));
+    assert_eq!(c.freshness().frozen_after, Duration::from_secs(14 * 86_400));
+    assert!(c.sources().is_empty());
+    assert!(c.files_read().is_empty());
+    assert_eq!(p.namespace(), None);
+}
+
+#[test]
+fn a_command_that_needs_a_source_and_has_none_says_how_to_configure_one() {
+    let r = root("no-source");
+    let c = loads(&env(&r));
+    let e = c.require_sources().unwrap_err();
+    // `docs/19` §6: 5 is the tool failing, which having nothing to ask is.
+    assert_eq!(e.exit_code(), 5);
+    let m = e.to_string();
+    assert!(m.contains("no evidence source is configured"), "{m}");
+    assert!(m.contains("[[source]]"), "{m}");
+    assert!(m.contains(&user_file(&r).display().to_string()), "{m}");
+    assert!(m.contains("TRIGON_EVIDENCE_REPO"), "{m}");
+    assert!(m.contains("TRIGON_EVIDENCE_LOG_KEY"), "{m}");
+}
+
+#[test]
+fn the_directories_default_under_home_and_follow_xdg_and_the_environment() {
+    let r = root("dirs");
+    let mut e = env(&r);
+    let c = loads(&e);
+    assert_eq!(
+        c.cache_dir().unwrap(),
+        r.join("home/.cache/trigon/evidence")
+    );
+    assert_eq!(
+        c.state_dir().unwrap(),
+        r.join("home/.local/state/trigon/evidence")
+    );
+
+    e.xdg_cache_home = Some(r.join("xdg-cache"));
+    e.xdg_state_home = Some(r.join("xdg-state"));
+    let c = loads(&e);
+    assert_eq!(c.cache_dir().unwrap(), r.join("xdg-cache/trigon/evidence"));
+    assert_eq!(c.state_dir().unwrap(), r.join("xdg-state/trigon/evidence"));
+
+    // A relative XDG value names no fixed place, and the XDG specification says to ignore it.
+    e.xdg_cache_home = Some(PathBuf::from("relative/cache"));
+    assert_eq!(
+        loads(&e).cache_dir().unwrap(),
+        r.join("home/.cache/trigon/evidence")
+    );
+
+    // The two variables replace both, and a relative one is taken from the working directory.
+    e.evidence_cache = Some(PathBuf::from("clones"));
+    e.evidence_state = Some(r.join("state"));
+    let c = loads(&e);
+    assert_eq!(c.cache_dir().unwrap(), r.join("project/clones"));
+    assert_eq!(c.state_dir().unwrap(), r.join("state"));
+
+    // No HOME and nothing set: said, rather than a clone written somewhere arbitrary.
+    let bare = Env {
+        cwd: r.join("project"),
+        ..Default::default()
+    };
+    let c = loads(&bare);
+    let m = c.cache_dir().unwrap_err().to_string();
+    assert!(m.contains("TRIGON_EVIDENCE_CACHE"), "{m}");
+    let m = c.state_dir().unwrap_err().to_string();
+    assert!(m.contains("TRIGON_EVIDENCE_STATE"), "{m}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The user's file
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn every_key_of_the_documented_example_is_read() {
+    let r = root("example");
+    let pem = r.join("home/.config/trigon/attestation.pub");
+    write(&pem, &key().public_pem());
+    write(
+        &user_file(&r),
+        &format!(
+            r#"
+[publish]
+repo = "git@github.com:owner/trigon-evidence.git"
+branch = "evidence"
+origin = "{ORIGIN}"
+disputes = "https://github.com/owner/trigon-evidence/issues"
+log_key = "~/.config/trigon/log.key"
+divergences = "feed"
+rebuilt_artifacts = "github-release"
+same_host_confirmation = true
+confirmation_interval = "30m"
+heartbeat = "3d"
+
+[freshness]
+stale_after = "2h"
+frozen_after = "7d"
+
+[[source]]
+name = "trigon"
+urls = ["https://github.com/owner/trigon-evidence.git",
+        "https://codeberg.org/owner/trigon-evidence.git"]
+log_key = "{vk}"
+attestation_key = "{hex}"
+checkpoint = "~/.config/trigon/trigon.checkpoint"
+required = true
+
+[[source]]
+name = "private"
+urls = ["./private-evidence"]
+log_key = "{vk}"
+attestation_key = "attestation.pub"
+"#,
+            vk = vkey(ORIGIN),
+            hex = key().public_hex()
+        ),
+    );
+    let c = loads(&env(&r));
+    let p = c.publish();
+    let repo = p.repo.as_ref().unwrap();
+    assert_eq!(repo.transport(), Transport::Ssh);
+    assert_eq!(
+        repo.as_git_arg(),
+        "git@github.com:owner/trigon-evidence.git"
+    );
+    assert_eq!(p.branch, "evidence");
+    assert_eq!(p.origin.as_deref(), Some(ORIGIN));
+    assert_eq!(
+        p.disputes.as_deref(),
+        Some("https://github.com/owner/trigon-evidence/issues")
+    );
+    assert_eq!(
+        p.log_key.as_deref(),
+        Some(r.join("home/.config/trigon/log.key").as_path())
+    );
+    assert_eq!(p.divergences, Divergences::Feed);
+    assert_eq!(p.rebuilt_artifacts, RebuiltArtifacts::GithubRelease);
+    assert!(p.same_host_confirmation);
+    assert_eq!(p.confirmation_interval, Duration::from_secs(30 * 60));
+    assert_eq!(p.heartbeat, Duration::from_secs(3 * 86_400));
+    assert_eq!(
+        p.namespace(),
+        Some((ORIGIN, "https://github.com/owner/trigon-evidence/issues"))
+    );
+    assert_eq!(c.freshness().stale_after, Duration::from_secs(2 * 3600));
+    assert_eq!(c.freshness().frozen_after, Duration::from_secs(7 * 86_400));
+
+    let s = c.source("trigon").unwrap();
+    assert_eq!(s.urls.len(), 2, "one log, served from two places");
+    assert!(s.urls.iter().all(|u| u.transport() == Transport::Https));
+    assert_eq!(s.log_key.as_ref().unwrap().origin(), ORIGIN);
+    assert_eq!(
+        s.attestation_key.as_ref().unwrap().to_hex(),
+        key().public_hex()
+    );
+    assert_eq!(
+        s.checkpoint.as_deref(),
+        Some(r.join("home/.config/trigon/trigon.checkpoint").as_path())
+    );
+    assert!(s.required);
+    assert!(!s.trust_on_first_use);
+    assert_eq!(s.added_by, AddedBy::UserFile(user_file(&r)));
+
+    // Relative to the file that named them: the location and the PEM beside it.
+    let s = c.source("private").unwrap();
+    assert_eq!(s.urls[0].transport(), Transport::LocalPath);
+    assert_eq!(
+        s.urls[0].local_path(),
+        Some(r.join("home/.config/trigon/private-evidence").as_path())
+    );
+    assert_eq!(
+        s.attestation_key.as_ref().unwrap().to_hex(),
+        key().public_hex(),
+        "read from the PEM keygen --public-out writes"
+    );
+    assert!(!s.required, "`required` defaults to false");
+    assert_eq!(c.files_read(), [user_file(&r)]);
+    assert_eq!(c.require_sources().unwrap().len(), 2);
+}
+
+#[test]
+fn an_unknown_key_is_an_error_in_every_table() {
+    // A typo in a security setting that is silently ignored is a setting that is silently off.
+    let r = root("unknown");
+    let source = format!(
+        "name = \"s\"\nurls = [\"https://example.org/r.git\"]\nlog_key = \"{}\"\n\
+         attestation_key = \"{}\"\n",
+        vkey(ORIGIN),
+        key().public_hex()
+    );
+    for (text, key) in [
+        ("[publish]\nrepos = \"x\"\n".to_string(), "repos"),
+        (
+            "[publish]\nsame_host_confirmations = true\n".into(),
+            "same_host_confirmations",
+        ),
+        ("[freshness]\nstale = \"1d\"\n".into(), "stale"),
+        (format!("[[source]]\n{source}requried = true\n"), "requried"),
+        ("[publsh]\norigin = \"x\"\n".into(), "publsh"),
+        ("divergences = \"feed\"\n".into(), "divergences"),
+    ] {
+        write(&user_file(&r), &text);
+        let e = EvidenceConfig::load(&env(&r)).unwrap_err();
+        assert_eq!(e.exit_code(), 5);
+        let m = e.to_string();
+        assert!(m.contains(key), "{text}: {m}");
+        assert!(m.contains("unknown field"), "{text}: {m}");
+        assert!(
+            m.contains(&user_file(&r).display().to_string()),
+            "{text}: {m}"
+        );
+    }
+}
+
+#[test]
+fn a_value_of_the_wrong_kind_is_refused_with_the_key_and_the_file() {
+    let r = root("values");
+    for (text, says) in [
+        ("[publish]\ndivergences = \"publish\"\n", "refuse"),
+        (
+            "[publish]\nrebuilt_artifacts = \"github\"\n",
+            "github-release",
+        ),
+        (
+            "[publish]\nsame_host_confirmation = \"yes\"\n",
+            "same_host_confirmation",
+        ),
+        (
+            "[publish]\nconfirmation_interval = \"1 hour\"\n",
+            "confirmation_interval",
+        ),
+        ("[publish]\nheartbeat = \"1w\"\n", "heartbeat"),
+        ("[freshness]\nstale_after = \"1.5d\"\n", "stale_after"),
+        ("[freshness]\nfrozen_after = \"-14d\"\n", "frozen_after"),
+        (
+            "[publish]\norigin = \"https://github.com/owner/r\"\n",
+            "schema-less",
+        ),
+        ("[publish]\norigin = \"github.com/o+r\"\n", "`+`"),
+        (
+            "[publish]\ndisputes = \"http://github.com/o/r/issues\"\n",
+            "https://",
+        ),
+        (
+            "[publish]\ndisputes = \"github.com/o/r/issues\"\n",
+            "https://",
+        ),
+        ("[publish]\nrepo = \"backup:evidence\"\n", "SSH"),
+        (
+            "[publish]\nrepo = \"https://u:p@github.com/o/r\"\n",
+            "password",
+        ),
+        ("[publish]\nbranch = \"-f\"\n", "branch"),
+        ("[publish]\nlog_key = \"~root/log.key\"\n", "only `~/`"),
+        ("[publish\n", "TOML"),
+    ] {
+        write(&user_file(&r), text);
+        let m = load(&env(&r)).unwrap_err();
+        assert!(m.contains(says), "{text}: {m}");
+        assert!(
+            m.contains(&user_file(&r).display().to_string()),
+            "{text}: {m}"
+        );
+    }
+}
+
+#[test]
+fn a_source_is_checked_as_it_is_read() {
+    let r = root("sources");
+    let good = |name: &str| {
+        format!(
+            "[[source]]\nname = \"{name}\"\nurls = [\"https://example.org/r.git\"]\n\
+             log_key = \"{}\"\nattestation_key = \"{}\"\n",
+            vkey(ORIGIN),
+            key().public_hex()
+        )
+    };
+    // One hex digit of the key hash changed, so it names another key.
+    let mut bad_vkey = vkey(ORIGIN);
+    let at = bad_vkey.find('+').unwrap() + 1;
+    let flipped = if &bad_vkey[at..at + 1] == "0" {
+        "1"
+    } else {
+        "0"
+    };
+    bad_vkey.replace_range(at..at + 1, flipped);
+    for (text, says) in [
+        (format!("{}{}", good("a"), good("a")), "configured twice"),
+        (good("env"), "TRIGON_EVIDENCE_REPO"),
+        (good("../escape"), "not a source name"),
+        (good(""), "not a source name"),
+        (good("-x"), "not a source name"),
+        (
+            good("s").replace("urls = [\"https://example.org/r.git\"]", "urls = []"),
+            "`urls` is empty",
+        ),
+        (
+            good("s").replace(
+                "urls = [\"https://example.org/r.git\"]",
+                "urls = [\"https://example.org/r.git\", \"https://example.org/r.git\"]",
+            ),
+            "listed twice",
+        ),
+        (
+            good("s").replace(&vkey(ORIGIN), &bad_vkey),
+            "names a key other than",
+        ),
+        (good("s").replace(&vkey(ORIGIN), "not-a-vkey"), "C2SP"),
+        (
+            good("s").replace(&key().public_hex(), "missing.pem"),
+            "neither 64 hex digits nor a PEM file",
+        ),
+        (
+            good("s").replace(&format!("log_key = \"{}\"\n", vkey(ORIGIN)), ""),
+            "does not pin a log key",
+        ),
+        (
+            good("s").replace(
+                &format!("attestation_key = \"{}\"\n", key().public_hex()),
+                "",
+            ),
+            "an attestation key",
+        ),
+        (
+            good("s").replace(
+                "urls = [\"https://example.org/r.git\"]",
+                "urls = \"https://example.org/r.git\"",
+            ),
+            "sequence",
+        ),
+    ] {
+        write(&user_file(&r), &text);
+        let m = load(&env(&r)).unwrap_err();
+        assert!(m.contains(says), "{text}\n{m}");
+    }
+}
+
+#[test]
+fn a_file_source_without_both_keys_needs_trust_on_first_use_and_says_it_rests_on_it() {
+    let r = root("tofu-file");
+    write(
+        &user_file(&r),
+        "[[source]]\nname = \"s\"\nurls = [\"https://example.org/r.git\"]\n\
+         trust_on_first_use = true\n",
+    );
+    let c = loads(&env(&r));
+    let s = c.source("s").unwrap();
+    assert!(s.trust_on_first_use);
+    assert_eq!(s.log_key, None);
+    assert_eq!(s.attestation_key, None);
+
+    // Both keys pinned: trust on first use has nothing to trust, and the source does not say it
+    // rests on keys it read.
+    write(
+        &user_file(&r),
+        &format!(
+            "[[source]]\nname = \"s\"\nurls = [\"https://example.org/r.git\"]\nlog_key = \"{}\"\n\
+             attestation_key = \"{}\"\ntrust_on_first_use = true\n",
+            vkey(ORIGIN),
+            key().public_hex()
+        ),
+    );
+    assert!(!loads(&env(&r)).source("s").unwrap().trust_on_first_use);
+}
+
+#[test]
+fn trigon_evidence_config_names_the_file_instead_and_turns_off_the_projects() {
+    let r = root("named");
+    write(&user_file(&r), "[publish]\nbranch = \"from-user-file\"\n");
+    let named = r.join("elsewhere/evidence.toml");
+    write(&named, "[publish]\nbranch = \"from-named-file\"\n");
+    write(
+        &project_file(&r),
+        "[publish]\nbranch = \"a project may not set this, and is not read\"\n",
+    );
+    let mut e = env(&r);
+    e.evidence_config = Some(named.clone());
+    let c = loads(&e);
+    assert_eq!(c.publish().branch, "from-named-file");
+    assert_eq!(c.files_read(), [named]);
+
+    // A name that names nothing is an error: the user asked for that file.
+    e.evidence_config = Some(r.join("nowhere.toml"));
+    let m = load(&e).unwrap_err();
+    assert!(
+        m.contains("TRIGON_EVIDENCE_CONFIG") && m.contains("nowhere.toml"),
+        "{m}"
+    );
+
+    // Relative to the working directory.
+    write(
+        &r.join("project/cfg.toml"),
+        "[publish]\nbranch = \"relative\"\n",
+    );
+    e.evidence_config = Some(PathBuf::from("cfg.toml"));
+    assert_eq!(loads(&e).publish().branch, "relative");
+}
+
+#[test]
+fn the_default_file_is_under_xdg_config_home_when_it_is_set() {
+    let r = root("xdg-config");
+    write(
+        &r.join("xdg/trigon/evidence.toml"),
+        "[publish]\nbranch = \"xdg\"\n",
+    );
+    let mut e = env(&r);
+    e.xdg_config_home = Some(r.join("xdg"));
+    assert_eq!(loads(&e).publish().branch, "xdg");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The environment
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn trigon_publish_repo_replaces_the_files_repo_for_one_run() {
+    let r = root("publish-repo");
+    write(
+        &user_file(&r),
+        "[publish]\nrepo = \"https://github.com/o/r.git\"\n",
+    );
+    let mut e = env(&r);
+    e.publish_repo = Some("../bare.git".into());
+    let c = loads(&e);
+    let repo = c.publish().repo.as_ref().unwrap();
+    assert_eq!(repo.transport(), Transport::LocalPath);
+    // From the working directory, since the environment named it.
+    assert_eq!(
+        repo.as_git_arg(),
+        r.join("project/../bare.git").to_str().unwrap()
+    );
+
+    e.publish_repo = Some("ftp://example.org/r".into());
+    let m = load(&e).unwrap_err();
+    assert!(m.contains("TRIGON_PUBLISH_REPO"), "{m}");
+}
+
+#[test]
+fn trigon_evidence_repo_adds_a_required_source_named_env() {
+    let r = root("env-source");
+    write(&r.join("project/keys/attestation.pub"), &key().public_pem());
+    let mut e = env(&r);
+    e.evidence_repo = Some(
+        "https://github.com/o/trigon-evidence.git  https://codeberg.org/o/trigon-evidence.git \
+         ./mirror"
+            .into(),
+    );
+    e.evidence_log_key = Some(vkey(ORIGIN));
+    e.evidence_attestation_key = Some("keys/attestation.pub".into());
+    e.evidence_checkpoint = Some("trigon.checkpoint".into());
+    let c = loads(&e);
+    let s = c.source("env").unwrap();
+    assert!(s.required, "a source named in the environment is required");
+    assert_eq!(s.added_by, AddedBy::Environment);
+    assert_eq!(s.urls.len(), 3);
+    assert_eq!(
+        s.urls[2].local_path(),
+        Some(r.join("project/mirror").as_path())
+    );
+    assert_eq!(s.log_key.as_ref().unwrap().origin(), ORIGIN);
+    assert_eq!(
+        s.attestation_key.as_ref().unwrap().to_hex(),
+        key().public_hex()
+    );
+    assert_eq!(
+        s.checkpoint.as_deref(),
+        Some(r.join("project/trigon.checkpoint").as_path())
+    );
+    assert!(!s.trust_on_first_use);
+}
+
+#[test]
+fn trigon_evidence_repo_without_both_keys_is_refused_unless_trust_on_first_use() {
+    let r = root("env-tofu");
+    let mut e = env(&r);
+    e.evidence_repo = Some("https://github.com/o/r.git".into());
+    let m = load(&e).unwrap_err();
+    assert!(m.contains("TRIGON_EVIDENCE_REPO"), "{m}");
+    assert!(m.contains("TRIGON_EVIDENCE_TOFU=1"), "{m}");
+
+    e.evidence_log_key = Some(vkey(ORIGIN));
+    let m = load(&e).unwrap_err();
+    assert!(m.contains("without an attestation key"), "{m}");
+
+    e.evidence_tofu = Some("1".into());
+    let c = loads(&e);
+    let s = c.source("env").unwrap();
+    assert!(s.trust_on_first_use);
+    assert!(
+        s.log_key.is_some(),
+        "the key that was given is still pinned"
+    );
+    assert_eq!(s.attestation_key, None);
+
+    e.evidence_tofu = Some("yes".into());
+    let m = load(&e).unwrap_err();
+    assert!(m.contains("TRIGON_EVIDENCE_TOFU"), "{m}");
+
+    e.evidence_tofu = Some("0".into());
+    assert!(load(&e).is_err(), "0 is off");
+}
+
+#[test]
+fn a_pin_with_nothing_to_pin_is_an_error_rather_than_ignored() {
+    let r = root("env-orphan");
+    for set in [
+        |e: &mut Env| e.evidence_log_key = Some(vkey(ORIGIN)),
+        |e: &mut Env| e.evidence_attestation_key = Some(key().public_hex()),
+        |e: &mut Env| e.evidence_checkpoint = Some("cp".into()),
+        |e: &mut Env| e.evidence_tofu = Some("1".into()),
+    ] {
+        let mut e = env(&r);
+        set(&mut e);
+        let m = load(&e).unwrap_err();
+        assert!(m.contains("TRIGON_EVIDENCE_REPO is not"), "{m}");
+    }
+}
+
+#[test]
+fn a_bad_value_in_the_environment_names_the_variable() {
+    let r = root("env-bad");
+    let mut e = env(&r);
+    e.evidence_repo = Some("https://github.com/o/r.git".into());
+    e.evidence_log_key = Some("nope".into());
+    e.evidence_attestation_key = Some(key().public_hex());
+    let m = load(&e).unwrap_err();
+    assert!(m.starts_with("TRIGON_EVIDENCE_LOG_KEY"), "{m}");
+
+    e.evidence_log_key = Some(vkey(ORIGIN));
+    e.evidence_repo = Some("backup:r".into());
+    let m = load(&e).unwrap_err();
+    assert!(m.starts_with("TRIGON_EVIDENCE_REPO"), "{m}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// A project's own file
+// ---------------------------------------------------------------------------------------------
+
+/// A project source that keeps every rule, with its checkpoint in the project.
+fn project_source(r: &Path, name: &str) -> String {
+    write(&r.join("project/.trigon/ours.checkpoint"), "checkpoint\n");
+    format!(
+        "[[source]]\nname = \"{name}\"\nurls = [\"https://example.org/theirs.git\"]\n\
+         log_key = \"{}\"\nattestation_key = \"{}\"\ncheckpoint = \"ours.checkpoint\"\n",
+        vkey("example.org/theirs"),
+        key().public_hex()
+    )
+}
+
+#[test]
+fn a_project_file_that_keeps_the_rules_adds_its_sources_and_says_so() {
+    let r = root("project-ok");
+    write(
+        &r.join("project/.trigon/attestation.pub"),
+        &key().public_pem(),
+    );
+    let mut second = project_source(&r, "second");
+    second = second.replace(&key().public_hex(), "attestation.pub");
+    write(
+        &project_file(&r),
+        &format!("{}{second}", project_source(&r, "theirs")),
+    );
+    let c = loads(&env(&r));
+    assert_eq!(c.sources().len(), 2);
+    let s = c.source("theirs").unwrap();
+    // Every answer from it names the file that added it.
+    assert_eq!(s.added_by, AddedBy::ProjectFile(project_file(&r)));
+    assert!(s.added_by.to_string().contains("the project's own"));
+    assert!(!s.required);
+    assert!(!s.trust_on_first_use);
+    assert_eq!(
+        s.checkpoint.as_deref(),
+        Some(r.join("project/.trigon/ours.checkpoint").as_path())
+    );
+    assert_eq!(c.files_read(), [project_file(&r)]);
+}
+
+#[test]
+fn a_project_file_that_breaks_a_rule_is_refused_whole_with_the_rule() {
+    let r = root("project-rules");
+    write(
+        &user_file(&r),
+        &format!(
+            "[[source]]\nname = \"trigon\"\nurls = [\"https://github.com/o/r.git\"]\n\
+             log_key = \"{}\"\nattestation_key = \"{}\"\n",
+            vkey(ORIGIN),
+            key().public_hex()
+        ),
+    );
+    write(&r.join("outside.checkpoint"), "not the project's\n");
+    let ok = project_source(&r, "theirs");
+    let hex = key().public_hex();
+    let checkpoint_line = "checkpoint = \"ours.checkpoint\"\n";
+    for (bad, rule) in [
+        (
+            "[publish]\norigin = \"example.org/x\"\n".to_string(),
+            "[publish]",
+        ),
+        (
+            "[freshness]\nfrozen_after = \"3650d\"\n".into(),
+            "[freshness]",
+        ),
+        (format!("{ok}required = true\n"), "`required`"),
+        (format!("{ok}required = false\n"), "`required`"),
+        (
+            format!("{ok}trust_on_first_use = true\n"),
+            "trust_on_first_use",
+        ),
+        (
+            ok.replace(
+                &format!("log_key = \"{}\"\n", vkey("example.org/theirs")),
+                "",
+            ),
+            "both `log_key` and `attestation_key`",
+        ),
+        (
+            ok.replace(&format!("attestation_key = \"{hex}\"\n"), ""),
+            "both `log_key` and `attestation_key`",
+        ),
+        (ok.replace(checkpoint_line, ""), "`checkpoint`"),
+        (
+            ok.replace(
+                "https://example.org/theirs.git",
+                "git@example.org:theirs.git",
+            ),
+            "HTTPS only",
+        ),
+        (
+            ok.replace(
+                "https://example.org/theirs.git",
+                "http://example.org/theirs.git",
+            ),
+            "HTTPS only",
+        ),
+        (
+            ok.replace("https://example.org/theirs.git", "./theirs"),
+            "HTTPS only",
+        ),
+        (ok.replace("\"theirs\"", "\"trigon\""), "already configured"),
+        (format!("{ok}{ok}"), "already configured"),
+        (
+            ok.replace(
+                checkpoint_line,
+                "checkpoint = \"../../outside.checkpoint\"\n",
+            ),
+            "outside the project",
+        ),
+        (
+            ok.replace(
+                checkpoint_line,
+                &format!(
+                    "checkpoint = \"{}\"\n",
+                    r.join("outside.checkpoint").display()
+                ),
+            ),
+            "not a path inside the project",
+        ),
+        (
+            ok.replace(checkpoint_line, "checkpoint = \"~/cp\"\n"),
+            "not a path inside the project",
+        ),
+        (
+            ok.replace(&hex, "../../outside.checkpoint"),
+            "outside the project",
+        ),
+    ] {
+        // One good source and one bad in the same file: the good one is not added either.
+        let text = format!("{}{bad}", project_source(&r, "fine"));
+        write(&project_file(&r), &text);
+        let e = EvidenceConfig::load(&env(&r)).unwrap_err();
+        assert_eq!(e.exit_code(), 5);
+        let m = e.to_string();
+        assert!(m.contains(rule), "{bad}\n{m}");
+        assert!(
+            m.contains(&project_file(&r).display().to_string()),
+            "{bad}\nthe refusal names the file: {m}"
+        );
+        assert!(
+            matches!(e, ConfigError::ProjectRule { .. }),
+            "{bad}\nrefused as a project rule: {m}"
+        );
+    }
+}
+
+#[test]
+fn a_project_cannot_reach_outside_itself_through_a_symlink() {
+    // The project controls its symlinks too, so the check follows them.
+    let r = root("project-symlink");
+    write(&r.join("secret"), "the host's, not the project's\n");
+    std::fs::create_dir_all(r.join("project/.trigon")).unwrap();
+    std::os::unix::fs::symlink(r.join("secret"), r.join("project/.trigon/cp")).unwrap();
+    let text = project_source(&r, "theirs").replace("ours.checkpoint", "cp");
+    write(&project_file(&r), &text);
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("outside the project"), "{m}");
+}
+
+#[test]
+fn a_project_cannot_reuse_the_environments_source_name() {
+    let r = root("project-env");
+    write(&project_file(&r), &project_source(&r, "env"));
+    let mut e = env(&r);
+    e.evidence_repo = Some("https://github.com/o/r.git".into());
+    e.evidence_log_key = Some(vkey(ORIGIN));
+    e.evidence_attestation_key = Some(key().public_hex());
+    let m = load(&e).unwrap_err();
+    assert!(m.contains("already configured"), "{m}");
+}
+
+#[test]
+fn a_projects_refusal_prints_its_strings_escaped() {
+    // Every place a refusal quotes something the project wrote: a name refused by a project rule,
+    // a name refused as a name, a log key, the path of a PEM that is not one, a key toml does not
+    // know, and a value toml cannot parse.
+    let r = root("project-escape");
+    let ok = project_source(&r, "x");
+    let pem = "k\u{1b}[2J.pem";
+    write(&r.join("project/.trigon").join(pem), "not a key\n");
+    // Each with whether the refusal quotes the string, and so shows the character escaped.
+    for (bad, quoted) in [
+        (
+            format!(
+                "{}required = true\n",
+                ok.replace("name = \"x\"", "name = \"x\\u001b[2J\"")
+            ),
+            true,
+        ),
+        (ok.replace("name = \"x\"", "name = \"x\\u001b[2J\""), true),
+        (
+            ok.replace(&vkey("example.org/theirs"), "a\\u001b[2J+033de0ae+AAAA"),
+            true,
+        ),
+        (ok.replace(&key().public_hex(), "k\\u001b[2J.pem"), true),
+        (
+            format!("{ok}\"\\u001b]0;pwned\\u0007\\u001b[2J\" = 1\n"),
+            true,
+        ),
+        // Raw, which toml refuses without quoting it.
+        (format!("{ok}\u{1b}[2J = 1\n"), false),
+        ("[[source]]\nname = \"\u{1b}[2J\"\n".into(), false),
+    ] {
+        write(&project_file(&r), &bad);
+        let m = load(&env(&r)).unwrap_err();
+        assert!(
+            !m.contains('\u{1b}') && !m.contains('\u{7}'),
+            "{bad}\n{m:?}"
+        );
+        if quoted {
+            assert!(
+                m.contains(r"\u{1b}"),
+                "the character is shown escaped: {bad}\n{m}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_project_file_that_links_outside_the_project_is_not_read() {
+    // A pull request writes its symlinks too. A `.trigon/evidence.toml` that is a link to a file of
+    // the runner's was read, failed to parse, and had toml quote the line into the CI log.
+    let r = root("project-file-link");
+    let secret = "GITHUB_TOKEN=ghs_SUPERSECRETVALUE";
+    write(
+        &r.join("host/secrets"),
+        &format!("{secret} PATH=/usr/bin\n"),
+    );
+    write(&r.join("host/evidence.toml"), &format!("{secret}\n"));
+    std::fs::create_dir_all(r.join("project/.trigon")).unwrap();
+    std::os::unix::fs::symlink(r.join("host/secrets"), project_file(&r)).unwrap();
+    let e = EvidenceConfig::load(&env(&r)).unwrap_err();
+    let m = e.to_string();
+    assert!(matches!(e, ConfigError::ProjectRule { .. }), "{m}");
+    assert!(m.contains("outside the project"), "{m}");
+    assert!(
+        !m.contains("ghs_"),
+        "the host's file reached the message: {m}"
+    );
+
+    // So is one reached through a linked `.trigon`.
+    std::fs::remove_dir_all(r.join("project/.trigon")).unwrap();
+    std::os::unix::fs::symlink(r.join("host"), r.join("project/.trigon")).unwrap();
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("outside the project"), "{m}");
+    assert!(!m.contains("ghs_"), "{m}");
+
+    // And a device, the size of which is no limit on what reading it yields.
+    std::fs::remove_file(r.join("project/.trigon")).unwrap();
+    std::fs::create_dir_all(r.join("project/.trigon")).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", project_file(&r)).unwrap();
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("outside the project"), "{m}");
+
+    // A link to nothing is a file that is there and cannot be read, not an absent one.
+    std::fs::remove_file(project_file(&r)).unwrap();
+    std::os::unix::fs::symlink(r.join("host/nothing"), project_file(&r)).unwrap();
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("cannot be resolved"), "{m}");
+}
+
+#[test]
+fn a_project_file_that_links_inside_the_project_is_read() {
+    let r = root("project-file-link-inside");
+    write(
+        &r.join("project/config/evidence.toml"),
+        &project_source(&r, "theirs"),
+    );
+    std::os::unix::fs::symlink(r.join("project/config/evidence.toml"), project_file(&r)).unwrap();
+    assert!(loads(&env(&r)).source("theirs").is_some());
+}
+
+#[test]
+fn a_project_file_that_is_not_a_small_regular_file_is_refused() {
+    let r = root("project-file-shape");
+    std::fs::create_dir_all(project_file(&r)).unwrap();
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("not a regular file"), "{m}");
+
+    std::fs::remove_dir(project_file(&r)).unwrap();
+    let limit = trigon_attest::config::PROJECT_FILE_LIMIT as usize;
+    let mut big = project_source(&r, "theirs");
+    big.push_str(&"#".repeat(limit + 1 - big.len()));
+    write(&project_file(&r), &big);
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("larger than"), "{m}");
+    // One byte less is read.
+    big.pop();
+    write(&project_file(&r), &big);
+    assert!(loads(&env(&r)).source("theirs").is_some());
+}
+
+#[test]
+fn a_projects_parse_error_says_where_and_does_not_quote_the_file() {
+    let r = root("project-parse");
+    write(
+        &project_file(&r),
+        "[[source]]\nname = \"a\"\nGITHUB_TOKEN=ghs_SECRET PATH\n",
+    );
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("line 3, column"), "{m}");
+    assert!(!m.contains("ghs_SECRET"), "{m}");
+}
+
+#[test]
+fn a_source_name_is_one_whatever_its_case() {
+    // A name is the source's directory, and on a case-insensitive filesystem `Trigon` and `trigon`
+    // are one: a project's `Trigon` would share the user's source's checkpoint and key history.
+    let r = root("name-case");
+    write(
+        &user_file(&r),
+        &format!(
+            "[[source]]\nname = \"trigon\"\nurls = [\"https://github.com/o/r.git\"]\n\
+             log_key = \"{}\"\nattestation_key = \"{}\"\n",
+            vkey(ORIGIN),
+            key().public_hex()
+        ),
+    );
+    write(&project_file(&r), &project_source(&r, "Trigon"));
+    let e = EvidenceConfig::load(&env(&r)).unwrap_err();
+    assert!(matches!(e, ConfigError::ProjectRule { .. }), "{e}");
+    assert!(e.to_string().contains("already configured"), "{e}");
+
+    // Two in one project file, and two in the user's.
+    write(
+        &project_file(&r),
+        &format!(
+            "{}{}",
+            project_source(&r, "theirs"),
+            project_source(&r, "THEIRS")
+        ),
+    );
+    assert!(load(&env(&r)).unwrap_err().contains("already configured"));
+    std::fs::remove_file(project_file(&r)).unwrap();
+    let user = std::fs::read_to_string(user_file(&r)).unwrap();
+    write(
+        &user_file(&r),
+        &format!("{user}{}", user.replace("\"trigon\"", "\"TriGon\"")),
+    );
+    assert!(load(&env(&r)).unwrap_err().contains("configured twice"));
+
+    // And the environment's name is reserved in every case.
+    write(&user_file(&r), &user.replace("\"trigon\"", "\"ENV\""));
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("TRIGON_EVIDENCE_REPO"), "{m}");
+}
+
+#[test]
+fn an_unknown_key_in_a_project_file_is_refused_too() {
+    let r = root("project-unknown");
+    write(
+        &project_file(&r),
+        &format!("{}mirror = true\n", project_source(&r, "theirs")),
+    );
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("unknown field") && m.contains("mirror"), "{m}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Durations
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_duration_is_a_whole_number_and_one_unit() {
+    for (s, secs) in [
+        ("30s", 30),
+        ("15m", 900),
+        ("1h", 3600),
+        ("7d", 604_800),
+        ("0s", 0),
+        ("014d", 14 * 86_400),
+    ] {
+        assert_eq!(parse_duration(s), Ok(Duration::from_secs(secs)), "{s}");
+    }
+    for s in [
+        "", "1", "h", "1.5h", "-1h", "+1h", "1w", "1 h", " 1h", "1H", "1hh", "1dd",
+    ] {
+        let e = parse_duration(s).unwrap_err();
+        assert!(e.contains("`1h`"), "{s:?}: {e}");
+    }
+    assert!(
+        parse_duration("99999999999999999999d").is_err(),
+        "too large to count is refused, not wrapped"
+    );
+    assert!(
+        parse_duration("213503982334602d")
+            .unwrap_err()
+            .contains("longer")
+    );
+}

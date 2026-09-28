@@ -166,9 +166,11 @@ maintaining one whose shape is a guess. It arrives with M4.
 - [x] The attestor runs as a separate process and **re-derives the claim before signing**.
       `trigon attest` reads a store written by `trigon rebuild --store`, fetches every blob **by
       hash and checks it against that hash**, recomputes the claim from the artifact bytes, and
-      refuses in four cases: a void run, a record that disagrees with the comparison it points at,
-      a re-derivation that does not hold, and a blob whose content no longer matches its address.
-      It runs no build and opens no socket.
+      refuses in three cases: a record that disagrees with the comparison it points at, a
+      re-derivation that does not hold, and a blob whose content no longer matches its address. A
+      void run — which it used to refuse outright — is signed as `void/v1` and nothing else, never
+      as a verdict ([`19`](19-distribution-and-lookup.md) §4.3). It runs no build and opens no
+      socket.
 - [x] **`trigon verify-attestation --rerun-comparison`** re-derives the claim from the bundle and
       two files, with no network and no trust in the producer — including from a checkout that
       shares no state with the producer. `scripts/cross-machine-verify.sh` runs it: a fresh clone, a

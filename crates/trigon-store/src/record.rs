@@ -328,8 +328,10 @@ pub struct RunRecord {
     /// `internalParameters` names. See `strategy` above for why it is not a file digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_digest: Option<String>,
-    /// The Trigon that ran the build: the crate version, and the git revision too if a build ever
-    /// embeds one. None does today, so this is the version alone.
+    /// The Trigon that ran the build: the crate version and the git revision the binary was built
+    /// from, as `0.0.0+git.<40 hex>`, with `.dirty` after it for a tree with uncommitted changes
+    /// and `+git.unknown` for a build outside a checkout. Runs recorded before builds embedded the
+    /// revision carry `0.0.0` alone, which identifies nothing.
     ///
     /// Recorded because the only version signed anywhere was the *attestor's*, in `rebuild`, and a
     /// run attested by a later binary claimed that binary had built it (`docs/19` §4.2 item 3).

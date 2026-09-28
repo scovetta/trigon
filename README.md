@@ -325,6 +325,15 @@ hash it asked for, recomputed the comparison, and would have refused to sign had
 The statements are filed under the run's id, so signing another run of the same package, or this
 run again, adds statements beside these and never replaces them.
 
+**That transcript is from before 2026-09-27, and this run is signed differently today.** It ran at
+`--egress open`, where nothing the build produced is evidence about the package, and the
+publication gate calls such a run void. `trigon attest` now signs a void run as `void/v1` — the
+reason, the facts that establish it, and no verdict — and nothing else, so attesting this run today
+prints `void      open_egress: …` and files `void.intoto.json`. A run at `--egress mirror-only` or
+`deny-all` is signed as `equivalence/v2` or `divergence/v2`, which carry everything a published
+record needs ([`docs/09`](docs/09-attestations.md) §2.5). The `equivalence/v1` statement written
+then still verifies exactly as below.
+
 Anyone holding the two artifacts can now check that claim without trusting us, and without a
 network:
 

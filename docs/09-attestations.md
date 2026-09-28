@@ -19,10 +19,14 @@ provenance fact and stays out of it.
 
 | Predicate type | Emitted when | Subject |
 |---|---|---|
-| `https://trigon.dev/rebuild/v1` | a build ran | the rebuilt artifact: sha256 and sha512 |
-| `https://trigon.dev/equivalence/v1` | a comparison ran | the **upstream** artifact: sha256, sha512, and sha1 for npm |
-| `https://trigon.dev/divergence/v1` | the verdict is `Divergent` | the upstream artifact, as above |
-| `https://trigon.dev/buildobservation/v1` | a run is attested; its `tier` says what was observed | the **upstream** artifact, as above |
+| `https://trigon.dev/rebuild/v1` | a run that is not void is attested, and a build ran | the rebuilt artifact: sha256 and sha512 |
+| `https://trigon.dev/equivalence/v2` | `trigon attest`, for a run that compared and is not void (§2.5) | the **upstream** artifact: sha256, sha512, and sha1 for npm |
+| `https://trigon.dev/divergence/v2` | as `equivalence/v2`, when the verdict is `Divergent` | the upstream artifact, as above |
+| `https://trigon.dev/equivalence/v1` | `trigon verify --attest`, which compares two files with no run behind it; `trigon rebuild --attest`, which signs in the process that ran the build and asks no publication gate, so it signs a verdict even for a run voided by open egress or a stabilizer somebody wrote; `trigon attest` before 2026-09-27 | the upstream artifact, as above |
+| `https://trigon.dev/divergence/v1` | as `equivalence/v1`, when the verdict is `Divergent` | the upstream artifact, as above |
+| `https://trigon.dev/buildobservation/v1` | a run that is not void is attested; its `tier` says what was observed | the **upstream** artifact, as above |
+| `https://trigon.dev/void/v1` | `trigon attest`, for a run the publication gate calls void, and nothing else is signed for it (§2.6) | the upstream artifact, as above |
+| `https://trigon.dev/withdrawal/v1` | `trigon attest --withdraw`: a published record is withdrawn (§2.7) | the withdrawn record's own subject |
 
 **A subject carries every digest a consumer might hold the artifact by**, because a lookup key that
 is not in the subject finds nothing ([`19`](19-distribution-and-lookup.md) §5). An npm lockfile
@@ -175,6 +179,18 @@ Three details of the source entry are load-bearing:
 The strategy is also listed among `byproducts`, not only hashed in `internalParameters`: a digest of
 a blob the statement does not offer is not something a reader can check.
 
+**As built, two things differ from the example above.** `rebuild/v1` names the stabilizer set the
+rebuilt artifact was judged under, as `stabilizerSet: {"id", "digest": {"sha256"}}` in the verdict's
+shape, beside `runDetails.builder.version.stabilizers`; the field was declared and the attestor
+passed no set, so no statement carried one ([`19`](19-distribution-and-lookup.md) §4.2 item 2). It
+is additive, and the predicate stays v1: nothing that reads a statement rejects a field it does not
+know, and a test holds `Statement` and `Envelope` to that. And `derivation.method` is present only
+where the run recorded a derivation. It used to be signed as `heuristic` for a run that recorded
+none, which is absence rendered as a value; `transcript` and `reviewedBy` stay, as `null`.
+`runDetails.builder.version.trigon` is the attestor's version, which since the same change names the
+git revision it was built from (`0.0.0+git.<rev>`); the version that ran the build is in the
+verdict.
+
 ### 2.2 `equivalence/v1`
 
 The load-bearing one.
@@ -296,8 +312,248 @@ and no model prose.
 }
 ```
 
-`artifactHashCheck.matched: true` means the upstream artifact entered the sandbox. In that case we
-emit no `equivalence/v1` and no `divergence/v1` statement, and the verdict is `Void`.
+`artifactHashCheck.matched: true` means the upstream artifact entered the sandbox. The run is then
+void, and `trigon attest` signs `void/v1` (§2.6) and nothing else: no verdict, and not this
+statement either.
+
+### 2.5 `equivalence/v2` and `divergence/v2`
+
+What `trigon attest` signs since [`19`](19-distribution-and-lookup.md) §10 phase 2: the verdict a
+published record carries. **A v2 verdict is a v1 verdict with fields added**, never one with a field
+moved, so `outcome`, `stabilizerSet`, `archiveFormat`, `artifacts`, `stabilized`, `applied`,
+`provenanceCap`, `container`, `members` and `differences` are where §2.2 and §2.3 put them, and
+`verify-attestation --rerun-comparison` reads both versions through one path. The subject is the
+upstream artifact, with every digest §2 describes. A divergence is `divergence/v2`, an outcome of
+anything else `equivalence/v2`.
+
+```json
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    { "name": "left-pad-1.3.0.tgz",
+      "digest": { "sha1": "5b8a3a77…", "sha256": "e9f1a3b0…", "sha512": "5c8e4c3f…" } }
+  ],
+  "predicateType": "https://trigon.dev/equivalence/v2",
+  "predicate": {
+    "outcome": "normalized",
+    "stabilizerSet": { "id": "tar-gzip", "digest": { "sha256": "4598411b…" } },
+    "…": "every v1 field, unchanged",
+    "purl": "pkg:npm/left-pad@1.3.0",
+    "purlCanon": 1,
+    "run": { "id": "1789000000-870c0fe1",
+             "startedOn": "2026-09-27T00:00:00Z", "finishedOn": "2026-09-27T00:03:00Z" },
+    "trigonVersion": { "builder": "0.0.0+git.255d2f57…", "attestor": "0.0.0+git.9c41e0aa…" },
+    "egressTier": "mirror-only",
+    "attestable": true,
+    "derivation": { "method": "heuristic" },
+    "evidence": {
+      "stabilizerSetManifest": { "sha256": "51d0…" },
+      "comparison": { "sha256": "3d88…" },
+      "strategy": { "sha256": "b02f…" },
+      "guardManifest": { "sha256": "e5c9…" },
+      "rebuiltArtifact": { "sha256": "a91c…" }
+    },
+    "falsifyingCommand": { "argv": ["trigon", "verify-attestation",
+      "--lookup", "sha256:e9f1a3b0…", "--predicate", "https://trigon.dev/equivalence/v2",
+      "--origin", "github.com/<owner>/trigon-evidence", "--rerun-comparison",
+      "--upstream", "<file>"] },
+    "disputePointer": { "kind": "url",
+                        "url": "https://github.com/<owner>/trigon-evidence/issues" }
+  }
+}
+```
+
+| Field | What it is | Present | `docs/19` §4.2 |
+|---|---|---|---|
+| `outcome` | `exact`, `normalized`, `normalized_with_caveats` or `divergent`, a string | always | 1 |
+| `stabilizerSet.id`, `.digest.sha256` | the set the comparison was made under | always | 2 |
+| `run.id`, `.startedOn`, `.finishedOn` | the run, and when it ran | always; `finishedOn` where the run recorded it | 3 |
+| `trigonVersion.builder` | the Trigon that ran the build, from `RunRecord.trigon_version` | where the run recorded it | 3 |
+| `trigonVersion.attestor` | the Trigon signing this statement | always | 3 |
+| `egressTier`, `attestable` | in the verdict itself, where they were only in `buildobservation` and `rebuild` | always | 4 |
+| `derivation.method` | `definition`, `heuristic`, `ci_derived`, `model_assisted` | only where the run recorded one; absent stays absent | 5 |
+| `falsifyingCommand.argv` | the command that would falsify this verdict | only when `[publish] origin` and `disputes` are both set | 6 |
+| `disputePointer` | `{"kind": "url", "url": …}`, where a dispute goes | as `falsifyingCommand` | 6 |
+| `evidence.stabilizerSetManifest` | sha256 of the set manifest's canonical JSON — a file, and not the set digest, which hashes the manifest's rows | always | 7 |
+| `evidence.comparison` | the comparison report the run stored | always | 7 |
+| `evidence.rebuiltArtifact` | the rebuilt artifact | always | 7 |
+| `evidence.strategy` | the strategy blob (`RunRecord.strategy`), fetched and recomputed before it is signed | where the run stored its strategy | 7 |
+| `evidence.guardManifest` | the manifest the artifact guard was armed with | where the guard was armed **and** the store holds the manifest | 7 |
+| `purl`, `purlCanon` | the package's canonical purl (§2.9) and the canonicalisation version | always | 8 |
+| `supersedes`, `reason` | `sha256:<record>` and one of `withdrawn`, `set_changed`, `attempts_disagree_later`, `pipeline_bug` | on a superseding verdict (`attest --supersedes`) | 9 |
+
+**The falsifying command is argv, not a shell line.** A client runs it without parsing one out of
+a signed document, and renders it by joining with spaces, which gives exactly `trigon
+verify-attestation --lookup sha256:<subject> --predicate <type> --origin <origin>
+--rerun-comparison --upstream <file>`. It cannot name its own record's digest, which is the digest
+of the file that contains it, so it names the subject, the predicate type and the log's origin and
+the client resolves the current record through the log. `<file>` is the upstream artifact the reader
+holds; where rebuilt artifacts are not published (D4), the client asks for `--rebuild <file>` too.
+
+**Both or neither.** `attest` signs the falsifying command and the dispute pointer only when
+`[publish] origin` and `disputes` are both set in `evidence.toml`, and leaves both out — absent,
+never empty — when either is missing, and says so. A statement made for local use names no
+repository, and `publish` will refuse it.
+
+**Every evidence digest names a blob the attestor read.** The set manifest is written to the store
+as a blob of its canonical JSON (`trigon_attest::set_manifest_file`) when the verdict is signed, so
+its digest names bytes a record can carry; the strategy is fetched by hash and its `strategyDigest`
+recomputed; a guard manifest the store does not hold, which is every run recorded before manifests
+were kept, is left out of `evidence` and the attestor says so, while `buildobservation` still names
+its digest for what the guard was armed with. The names are shared with the record file's `evidence`
+map (§2.8, `trigon_attest::evidence_key`), so the two compare key for key.
+
+**v1 is still signed, and still verifies.** `trigon verify --attest` compares two files with no run
+behind them — no purl, no strategy, no building version — and writes `equivalence/v1` and
+`divergence/v1`. `trigon rebuild --attest` writes them too, from the process that ran the build:
+it has a run behind it, and signs what the comparison says without asking the publication gate,
+so a run the gate calls void at `--egress open` (its default) or for a stabilizer somebody wrote
+is signed there as a verdict. P6 is `trigon attest`'s; whether the in-process path should refuse,
+sign the void, or go is open ([`16-findings.md`](16-findings.md) §3.96). Every v1 statement
+verifies exactly as it did, through `verify-attestation`, `--rerun-comparison` and
+`GET /v1/runs/{id}/attestation`; bundles signed before v2 existed are kept as fixtures and checked
+(`crates/trigon/tests/fixtures/v1-statements/`).
+
+### 2.6 `void/v1`
+
+What `trigon attest` signs, **and all it signs**, for a run the publication gate calls void:
+`trigon_api::publication::voided`, which is `decide`'s own answer. The artifact guard tripped —
+whether or not the run reached an outcome, since a tripped guard ends the build — or the run
+reached an outcome at `open` egress, or a stabilizer a person or a model wrote applied. It is "we
+looked, and could not tell, for this reason".
+
+```json
+{
+  "predicateType": "https://trigon.dev/void/v1",
+  "predicate": {
+    "outcome": "void",
+    "because": "guard_tripped",
+    "facts": {
+      "artifactHashCheck": {
+        "performed": true,
+        "trips": ["the artifact under test arrived from registry.npmjs.org"],
+        "guardManifest": { "sha256": "e5c9…" },
+        "guardedMembers": 34
+      }
+    },
+    "egressTier": "mirror-only",
+    "attestable": true,
+    "purl": "pkg:npm/left-pad@1.3.0",
+    "purlCanon": 1,
+    "run": { "id": "1789000000-870c0fe1", "startedOn": "…" },
+    "trigonVersion": { "builder": "…", "attestor": "…" },
+    "evidence": { "guardManifest": { "sha256": "e5c9…" } }
+  }
+}
+```
+
+- `because` is the gate's reason, `guard_tripped`, `open_egress` or `non_builtin_stabilizer`, as
+  `Withheld::key` spells it.
+- `facts` holds what establishes it: `artifactHashCheck`, which says whether the guard ran and what
+  tripped it, and `authoredStabilizers` — each non-builtin pass that applied, by id, risk and
+  provenance — where there were any. The third fact, the egress tier, is `egressTier` at the top
+  level, where every statement about a run has it. The attestor checks each against the store:
+  a record that says a hand-written pass applied, over a comparison in which none did, is refused.
+- `stabilizerSet` is present where the run compared; a build the guard stopped names no set.
+- `evidence` holds at most the guard manifest (§2.8).
+- `supersedes` and `reason`, as §2.5, where `attest --supersedes` names a record.
+
+**No comparison outcome and no difference data**: no `artifacts`, `stabilized`, `applied`,
+`members`, `differences`, `container` or `provenanceCap`, no comparison report and no rebuilt
+artifact digest — beside the upstream's, the rebuilt artifact's digest says whether the rebuild was
+`exact`. Anything that says which way the run went is an outcome published without the safeguards
+an outcome needs, and for a divergence it is the accusation the gate exists to stop. There is no
+falsifying command, because there is no claim to falsify, and `--rerun-comparison` refuses a void as
+"makes no comparison claim".
+
+`GET /v1/runs/{id}/attestation` serves an anonymous reader of a void run its `void/v1` envelopes and
+nothing else, chosen by the predicate each envelope carries; a void run whose only statements are
+verdicts — every open-egress run attested before this — is refused with the gate's reason. An
+operator is served every statement the run names.
+
+### 2.7 `withdrawal/v1`
+
+"We were wrong", with no verdict in its place, signed by `trigon attest --withdraw <record>
+--reason <code>`. There is no run behind it.
+
+```json
+{
+  "subject": [ "…the withdrawn record's signed subject, digest for digest…" ],
+  "predicateType": "https://trigon.dev/withdrawal/v1",
+  "predicate": {
+    "purl": "pkg:npm/left-pad@1.3.0",
+    "purlCanon": 1,
+    "supersedes": "sha256:7f3a…c2",
+    "reason": "withdrawn",
+    "trigonVersion": { "attestor": "…" }
+  }
+}
+```
+
+The subject and `purl` are the withdrawn record's own, as its signed statement names them, so a
+client that finds the withdrawal under a key finds it under every key the record had. `supersedes`
+is the sha256 of the record file; `reason` is one of the closed list. There is no `outcome`. The
+envelope is filed in the store under the record it withdraws, append-only as statements are:
+`withdrawals/sha256/<record>/withdrawal.intoto.json`, then `.2`, `.3`.
+
+`<record>`, for `--withdraw` and `--supersedes` alike, is a path to a record file for now. Nothing
+checks its signatures yet ([`19`](19-distribution-and-lookup.md) §10 phase 4 defines that, and
+phase 6 adds resolving a record by digest in a clone); what is taken from it is its name, the sha256
+of its bytes, and what its own statement says it is about. A superseding verdict must be about the
+same artifact, digest for digest, and the same canonical purl, since a client drops a superseded
+record only for one that is, and `attest` refuses one that is not.
+
+### 2.8 The record file, `trigon.record/v1`
+
+One published result, as [`19`](19-distribution-and-lookup.md) §4.1 lays it out:
+`trigon_attest::Record`, plain types that later phases verify.
+
+```json
+{
+  "schema": "trigon.record/v1",
+  "subject": { "purl": "pkg:npm/left-pad@1.3.0",
+               "digests": { "sha512": "1df6…", "sha1": "0e7c…", "sha256": "8b2e…" } },
+  "statements": [ "…the verdict, void or withdrawal envelope, then rebuild and buildobservation…" ],
+  "evidence": { "stabilizerSetManifest": "sha256:51d0…", "comparison": "sha256:3d88…" }
+}
+```
+
+The record's own name is the sha256 of its bytes. `Record::statement` finds the one statement that
+is its result — a verdict, a void or a withdrawal — by predicate type, not by position. Reading a
+record refuses a file that is not one (another `schema`, not this shape) and checks nothing else;
+unknown keys are read past, as everywhere a verifier reads.
+
+### 2.9 The canonical purl
+
+Every v2 verdict, void and withdrawal signs its package's purl in canonical form beside
+`purlCanon`, the version of the rule, which is also the digit in the `purl1` and `pkg1` index paths.
+Version 1 is `trigon_core::purl::canonicalize`:
+
+- the scheme is `pkg` in any case, and slashes after it are ignored; the type is lowercased, and
+  `crates.io` and `rubygems` become `cargo` and `gem`;
+- every component is percent-decoded and re-encoded: ASCII letters, digits and `-._~:` as
+  themselves, `/` as itself inside a version or a qualifier value, and every other byte `%XX` in
+  uppercase hex; an unencoded npm scope, `@babel/core`, reads as `%40babel/core`;
+- empty namespace segments are dropped; namespace and name are lowercased where the purl
+  specification says the type is case-insensitive — both for `alpm`, `apk`, `bitbucket`,
+  `composer`, `deb`, `github` and `hex`, the namespace for `rpm`, the name for `bitnami`, `npm` and
+  `oci` — and nowhere else, so Go, Maven, NuGet and crate names keep their case;
+- lowercasing is of the ASCII letters `A`–`Z` only. Every type above spells its names in ASCII, and
+  Unicode case mapping would merge names that are different (KELVIN SIGN lowercases to `k`) and is
+  not one mapping across languages (full and simple mapping disagree on `İ`);
+- a PyPI name is normalised as PEP 503 says — lowercased, each run of `-`, `_` and `.` one `-` —
+  which is stricter than the purl specification's `_`-only rule, because PyPI resolves all of those
+  spellings to one project;
+- qualifier keys are lowercased, an empty value drops its pair, a key given twice is refused, and
+  pairs are sorted; a subpath segment that decodes to nothing, `.` or `..` is dropped, so `%2E%2E`
+  is dropped as `..` is, and the canonical form canonicalises to itself;
+- whitespace, a malformed escape and bytes that are not UTF-8 are refused.
+
+The versionless form, the `pkg1` key, is the same string without `@<version>`; its qualifiers
+stay, including one that names a version, such as `file_name`, and whether those should go is open
+([`16-findings.md`](16-findings.md) §3.96). The test vectors,
+`crates/trigon-core/testdata/purl-canon-v1.json`, are the rule's other definition: every writer and
+reader of these keys, a client in another language included, is held to them.
 
 ## 3. Signing
 
@@ -365,7 +621,7 @@ Step 3 prints:
 
 ```
 subject   chardet-7.4.3-py3-none-any.whl (1173b74051570cf0…)
-predicate https://trigon.dev/equivalence/v1
+predicate https://trigon.dev/equivalence/v2
 claims    exact
 signature verified
 rederived exact under wheel@58632c3c627d — the claim holds

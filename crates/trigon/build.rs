@@ -10,9 +10,17 @@
 //! happens to be on the disk it is run from.
 
 include!("src/mirror_source.rs");
+include!("src/build_version.rs");
 
 fn main() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Read when the script runs, not baked in when it was compiled. Cargo reuses a compiled build
+    // script across a tree that has moved — its hash for a path package is relative to the
+    // workspace — and `env!` would then point it at wherever the tree was when it was compiled:
+    // a copy without `.git` was stamped with the original checkout's commit.
+    let manifest = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"),
+    );
+    let root = manifest
         .parent()
         .and_then(|p| p.parent())
         .expect("crates/trigon has a workspace root two levels up")
@@ -31,4 +39,13 @@ fn main() {
         "unknown".to_string()
     });
     println!("cargo:rustc-env=TRIGON_MIRROR_SOURCE={digest}");
+
+    // Which Trigon this is, for every run it records and every statement it signs. A checkout's
+    // revision, or `+git.unknown` where there is no checkout, which is a build from a source
+    // archive and must still compile.
+    let (version, watch) = build_version(env!("CARGO_PKG_VERSION"), &root);
+    for p in watch {
+        println!("cargo:rerun-if-changed={}", p.display());
+    }
+    println!("cargo:rustc-env=TRIGON_BUILD_VERSION={version}");
 }

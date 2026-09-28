@@ -19,6 +19,7 @@ mod note;
 mod opinion;
 mod outcome;
 mod path;
+pub mod purl;
 mod target;
 
 pub use declared::{CheckResult, DeclaredDigest, DigestCheck};

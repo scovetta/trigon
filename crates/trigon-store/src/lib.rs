@@ -355,8 +355,6 @@ impl Store {
         predicate: &str,
         envelope: &trigon_attest::Envelope,
     ) -> Result<String, StoreError> {
-        /// How many statements of one predicate a run may accumulate before this refuses.
-        const MOST: usize = 1000;
         if !Self::addressable(run_id) {
             return Err(StoreError::Malformed(format!(
                 "`{run_id}` is not a run id this store writes, so a statement cannot be filed \
@@ -370,6 +368,34 @@ impl Store {
             target.reference.registry_name(),
             target.reference.version,
         );
+        self.put_beside(&dir, short, envelope).await
+    }
+
+    /// File a signed `withdrawal/v1` under the record it withdraws, append-only as statements are.
+    ///
+    /// A withdrawal has no run behind it (`docs/19` §3), so it cannot be filed under one, and it is
+    /// about one record, so it is filed under that record's digest:
+    /// `withdrawals/sha256/<record>/withdrawal.intoto.json`, then `.2`, `.3` for another. `trigon
+    /// publish --withdrawal` reads it from there (§10 phase 5).
+    pub async fn put_withdrawal(
+        &self,
+        record: &Digest,
+        envelope: &trigon_attest::Envelope,
+    ) -> Result<String, StoreError> {
+        let dir = format!("withdrawals/sha256/{}", record.to_hex());
+        self.put_beside(&dir, "withdrawal", envelope).await
+    }
+
+    /// Write `envelope` as `<dir>/<short>.intoto.json`, or beside a different one already there as
+    /// `.2`, `.3` and so on, never over it. The same bytes again answer the path they are at.
+    async fn put_beside(
+        &self,
+        dir: &str,
+        short: &str,
+        envelope: &trigon_attest::Envelope,
+    ) -> Result<String, StoreError> {
+        /// How many statements of one predicate a run may accumulate before this refuses.
+        const MOST: usize = 1000;
         let body = serde_json::to_vec_pretty(envelope)?;
         for n in 1..=MOST {
             let path = match n {
