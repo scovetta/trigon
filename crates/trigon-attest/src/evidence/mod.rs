@@ -14,7 +14,8 @@
 //! - [`Repository`]: a directory with the `docs/19` §2.3 layout, its log verified under a source's
 //!   pinned keys, which the rest is asked through;
 //! - [`check_to_sign`]: what `trigon log sign` holds a new tree to before the log key signs it —
-//!   the writer's side, checked with the reader's code.
+//!   the writer's side, checked with the reader's code — and [`check_to_begin`], the same for a
+//!   successor's first tree.
 //!
 //! **The log wins, and the disagreement is shown** (`docs/19` §8). A record file no leaf names is
 //! unlogged and fails verification, and one the log holds at two leaves fails at both; a leaf
@@ -37,4 +38,4 @@ pub use paths::{
     IndexEntry, IndexFile, IndexKey, evidence_path, index_files, index_files_after, record_path,
 };
 pub use repository::{EVIDENCE_LIMIT, RECORD_LIMIT, Repository};
-pub use sign::{Unsignable, check_to_sign};
+pub use sign::{Unsignable, check_to_begin, check_to_sign};

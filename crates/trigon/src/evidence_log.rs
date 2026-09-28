@@ -17,15 +17,25 @@
 //! on it would be a second root, under the same key, for a size already published. What is kept is
 //! what was published, never merely signed: a checkpoint signed for a push that lost, or for one a
 //! kill stopped, never left the host, and holding the key to it would stop the log for good.
+//!
+//! **A succession takes both log keys, twice** (`docs/19` §8). `trigon log succeed` writes the
+//! log-end, and `log sign --successor-key` signs the final checkpoint with the log's key and
+//! cosigns it with the successor's, which only a holder of both can do; the final checkpoint is
+//! written with both signatures, and the successor's log-continuation holds that note. Then `log
+//! sign --continuing` begins the successor under its own key, only as the log the predecessor's
+//! log-end names, and only where every client would follow the pair.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use sha2::Digest as _;
 use trigon_attest::config::{Env, check_origin, read_attestation_key};
-use trigon_attest::evidence::check_to_sign;
+use trigon_attest::evidence::{check_to_begin, check_to_sign};
 use trigon_attest::location::printable;
-use trigon_attest::log::{Checkpoint, DirFiles, LogFiles as _, LogSigner, SignedCheckpoint};
+use trigon_attest::log::{
+    Checkpoint, DirFiles, KeyChangeLeaf, KeyHistory, Leaf, LogFiles as _, LogSigner,
+    SignedCheckpoint, find_predecessor, verify_source,
+};
 use trigon_attest::{AttestationKey, LogVkey};
 
 use crate::{field, style};
@@ -81,6 +91,39 @@ pub(crate) fn keygen(origin: &str, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `trigon log public-key <file>`: the verifier key of a log key, as `keygen` printed it.
+///
+/// What a client pins, and what `trigon log succeed` names a successor by: it runs this as a child
+/// process, so that the process that pushes never opens a log key.
+pub(crate) fn public_key(key: &Path) -> Result<()> {
+    println!("{}", LogSigner::from_file(key)?.vkey());
+    Ok(())
+}
+
+/// `trigon log key-change-leaf`: the key-change leaf from the attestation key in `key` to the one
+/// in `new_key`, logged at `time` in the log `origin`, signed by both and printed as the log holds
+/// it (`docs/19` §8).
+///
+/// `trigon log key-change` runs this as a child process, as `publish` runs `log sign`: the
+/// attestation key is opened by a process that opens no socket, as `trigon attest` is, and never by
+/// the one that fetches and pushes, which checks what this prints before it logs it.
+pub(crate) fn key_change_leaf(key: &Path, new_key: &Path, origin: &str, time: u64) -> Result<()> {
+    check_origin(origin).map_err(anyhow::Error::msg)?;
+    let old = crate::load_key(key).context("--key")?;
+    let new = crate::load_key(new_key).context("--new-key")?;
+    if old.public_hex() == new.public_hex() {
+        bail!(
+            "--key and --new-key are one key, {}: a key change hands over to another",
+            AttestationKey::from(old.public_key()).key_id()
+        );
+    }
+    // Said as what it is, the operator's mistake, and never as a log that could not be read.
+    let leaf = KeyChangeLeaf::sign(origin, time, &old, &new)
+        .map_err(|e| anyhow::anyhow!("the key change could not be signed: {e}"))?;
+    println!("{}", String::from_utf8(Leaf::KeyChange(leaf).encode()?)?);
+    Ok(())
+}
+
 /// What `trigon log sign` is given.
 pub(crate) struct SignArgs {
     pub tree: PathBuf,
@@ -91,9 +134,14 @@ pub(crate) struct SignArgs {
     pub log: String,
     pub attestation_key: Option<String>,
     pub init: bool,
+    /// The successor's log key, where the tree ends the log with a log-end naming it.
+    pub successor_key: Option<PathBuf>,
+    /// The tree holding the log this one continues: begin this log as its successor.
+    pub continuing: Option<PathBuf>,
 }
 
-/// `trigon log sign`: check the tree and sign its checkpoint, or, with `--init`, begin a log.
+/// `trigon log sign`: check the tree and sign its checkpoint; with `--init`, begin a log; with
+/// `--continuing`, begin a successor.
 pub(crate) fn sign(args: SignArgs) -> Result<()> {
     let numbered = args.log.strip_prefix("log/").is_some_and(|n| {
         !n.is_empty() && !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit())
@@ -115,10 +163,18 @@ pub(crate) fn sign(args: SignArgs) -> Result<()> {
     let Some(size) = args.size else {
         bail!("--size says how many leaves the tree to sign has; it is needed unless --init");
     };
+    if let Some(from) = &args.continuing {
+        return continue_log(&args.tree, &args.log, size, &signer, from, &env);
+    }
+    let successor = match &args.successor_key {
+        Some(p) => Some(LogSigner::from_file(p).context("--successor-key")?),
+        None => None,
+    };
     let current = match &args.attestation_key {
         Some(k) => read_attestation_key(k, &env.cwd, env.home.as_deref())
             .map_err(|e| anyhow::anyhow!("--attestation-key: {e}"))?,
-        None => tree_attestation_key(&args.tree)?,
+        None if args.log == "log" => tree_attestation_key(&args.tree)?,
+        None => chain_attestation_key(&args.tree, &args.log)?,
     };
     let ext = check_to_sign(
         &args.tree,
@@ -127,6 +183,7 @@ pub(crate) fn sign(args: SignArgs) -> Result<()> {
         size,
         &current,
         published.as_ref(),
+        successor.as_ref().map(LogSigner::vkey).as_ref(),
     )
     .with_context(|| {
         format!(
@@ -136,21 +193,125 @@ pub(crate) fn sign(args: SignArgs) -> Result<()> {
         )
     })?;
     let signed = ext.sign(&signer)?;
+    // A final checkpoint is cosigned by the successor's key, which `check_to_sign` held to the one
+    // the log-end names: the note the successor's log-continuation holds, written here too, where
+    // a reader of the old log sees the successor vouch for its end. A reader of this log ignores
+    // the second line, as it ignores a witness's.
+    let note = match &successor {
+        Some(s) => signed.note().cosign(s)?.to_string(),
+        None => signed.to_string(),
+    };
     // The checkpoint the tree extends is the repository's as `publish` verified it, and this one
     // extends it; kept, so that a tree built later on anything older is refused. The new one is
     // not: it is published only once `publish` has pushed it.
     newest.advance(ext.base(), &signer.vkey())?;
     replace(
         &args.tree.join(&args.log).join("checkpoint"),
+        note.as_bytes(),
+    )?;
+    println!(
+        "signed    {} at {} leaves, extending {}{}",
+        signed.origin(),
+        signed.size(),
+        ext.base().size(),
+        match &successor {
+            Some(s) => format!(", its final checkpoint, cosigned by {}", s.name()),
+            None => String::new(),
+        }
+    );
+    Ok(())
+}
+
+/// Begin the log at `dir` in `tree` as the successor of a log of the chain in `from` — the same
+/// tree, or the old repository's for a successor elsewhere — whose log-end names `signer`'s key:
+/// its first checkpoint, over its log-continuation leaf alone, signed only where
+/// [`check_to_begin`] finds every rule a client follows a succession by holds.
+///
+/// The predecessor is found from `from`'s `keys/log.vkey`, and anchored by the continuation it
+/// must hold: its final checkpoint signed by both log keys, which only `log sign
+/// --successor-key` makes, and only for a log-end it checked. It must extend the newest checkpoint
+/// of it this host has published; and a log this host has published is never begun again.
+fn continue_log(
+    tree: &Path,
+    dir: &str,
+    size: u64,
+    signer: &LogSigner,
+    from: &Path,
+    env: &Env,
+) -> Result<()> {
+    let newest = NewestPublished::of(env, signer.name())?;
+    if let Some(p) = newest.open(&signer.vkey())?.filter(|p| p.size() > 0) {
+        bail!(
+            "this host has published `{}` at {} leaves ({}), and it is begun once: a successor \
+             begun again would sign a second root for every size up to that",
+            p.origin(),
+            p.size(),
+            newest.path().display()
+        );
+    }
+    let files = DirFiles::new(from);
+    let pinned = files
+        .read("keys/log.vkey", KEY_FILE_LIMIT)?
+        .with_context(|| {
+            format!(
+                "{} is not there, so the chain the successor continues cannot be read",
+                files.shown("keys/log.vkey")
+            )
+        })?;
+    let pinned = String::from_utf8(pinned)
+        .map_err(|_| anyhow::anyhow!("{} is not text", files.shown("keys/log.vkey")))?;
+    let pinned = LogVkey::parse(pinned.trim())
+        .with_context(|| format!("reading {}", files.shown("keys/log.vkey")))?;
+    let refusing = || format!("refusing to begin `{}`", signer.name());
+    let pred = find_predecessor(from, &pinned, &signer.vkey()).with_context(refusing)?;
+    let published = NewestPublished::of(env, pred.origin())?.open(pred.vkey())?;
+    let begun = check_to_begin(tree, dir, &signer.vkey(), size, &pred, published.as_ref())
+        .with_context(refusing)?;
+    let signed = begun
+        .sign(signer, &DirFiles::in_repository(tree, dir))
+        .with_context(refusing)?;
+    replace(
+        &tree.join(dir).join("checkpoint"),
         signed.to_string().as_bytes(),
     )?;
     println!(
-        "signed    {} at {} leaves, extending {}",
+        "signed    {} at {} leaves, beginning it as the successor of {} at {} leaves",
         signed.origin(),
         signed.size(),
-        ext.base().size()
+        pred.origin(),
+        pred.size()
     );
     Ok(())
+}
+
+/// The attestation key current at the end of the chain of logs a tree holds, for a successor's
+/// tree at `dir`: the tree's `keys/attestation.pub`, the key the chain starts at, followed through
+/// every key change of every log before it and of its own signed leaves. `check_to_sign` follows
+/// the successor's again, and finds them applied.
+fn chain_attestation_key(tree: &Path, dir: &str) -> Result<AttestationKey> {
+    let pinned = tree_attestation_key(tree)?;
+    let files = DirFiles::new(tree);
+    let vkey = files
+        .read("keys/log.vkey", KEY_FILE_LIMIT)?
+        .with_context(|| {
+            format!(
+                "{} is not there, so the chain `{dir}` is in cannot be read",
+                files.shown("keys/log.vkey")
+            )
+        })?;
+    let vkey = LogVkey::parse(String::from_utf8_lossy(&vkey).trim())
+        .with_context(|| format!("reading {}", files.shown("keys/log.vkey")))?;
+    let source = verify_source(tree, &vkey, None)
+        .with_context(|| format!("verifying the chain of logs `{dir}` is in"))?;
+    if source.logs.last().map(|c| c.dir.as_str()) != Some(dir) {
+        bail!(
+            "`{}` is not the last log of the chain keys/log.vkey begins, and only the last log of a \
+             chain is extended",
+            printable(dir)
+        );
+    }
+    let (history, _) = KeyHistory::from_source(pinned, &source)?;
+    Ok(history.current().clone())
 }
 
 /// The attestation key the tree names as current: its `keys/attestation.pub`, read inside the

@@ -40,7 +40,7 @@ pub use note::{LogSigner, SignedNote};
 pub use rotation::{KeyChange, KeyEpoch, KeyHistory, LeafPos};
 pub use tiles::{Append, Bundle, Tile, TileHashes, plan_append};
 pub use verify::{
-    ChainedLog, Extension, RefusedLog, VerifiedLog, VerifiedSource, follow, open_checkpoint,
-    prove_inclusion_from_tiles, verify_extension, verify_extension_from_tiles, verify_log,
-    verify_source,
+    Beginning, ChainedLog, Extension, RefusedLog, VerifiedLog, VerifiedSource, find_predecessor,
+    follow, open_checkpoint, prove_inclusion_from_tiles, verify_beginning, verify_extension,
+    verify_extension_from_tiles, verify_log, verify_source,
 };

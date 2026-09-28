@@ -364,7 +364,8 @@ step, `trigon publish`, which asks the publication gate about each run and write
 a git repository holding the signed records, the evidence to re-derive each one, and an append-only
 log we sign — one commit per publication, pushed without force, its checkpoint signed by `trigon log
 sign`, the only thing that holds the log's key ([`docs/using-trigon.md`](docs/using-trigon.md)).
-Consumers will clone that repository and answer a lockfile from their own copy; that half is not
+Rotating either key is a leaf of that log too, which every client follows (`trigon log
+key-change`, `trigon log succeed`). Consumers will clone that repository and answer a lockfile from their own copy; that half is not
 built yet. [`docs/19`](docs/19-distribution-and-lookup.md) is the design and its build plan, and
 [ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md) records why it replaced the Rekor
 client that used to be described here.

@@ -45,6 +45,7 @@ pub async fn health(State(api): S) -> Response {
             Principal::Operator => "operator",
         },
         "divergence_publication": if api.switches.stop_divergences { "stopped" } else { "running" },
+        "kill_switches": api.kill_switches(),
     }))
 }
 
@@ -916,7 +917,8 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/health",
         "get",
-        "Liveness, corpus size, and which gate the site is behind",
+        "Liveness, corpus size, which gate the site is behind, and both kill-switches: this \
+         server's, and the evidence repository's",
     ),
     (
         "/v1/stats",

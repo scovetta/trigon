@@ -160,6 +160,7 @@ fn health_boot(api: &Api, public: bool) -> serde_json::Value {
         "runs": api.index.len(),
         "principal": if public { "anonymous" } else { "operator" },
         "divergence_publication": if api.switches.stop_divergences { "stopped" } else { "running" },
+        "kill_switches": api.kill_switches(),
     })
 }
 

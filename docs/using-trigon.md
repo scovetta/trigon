@@ -346,6 +346,10 @@ the claim from the two artifacts, and only then signs, into the store.
 trigon attest [<run>] --store ./trigon-store --key ~/.trigon/signing.key [--prune]
 ```
 
+`--prune` drops the rebuilt artifact's bytes afterwards, keeping its digests; where rebuilt
+artifacts are published as release assets, it waits until the run is published (see *Pruning, once
+published*, below).
+
 What it signs depends on the run, and it says which:
 
 - **A run that compared** gets `equivalence/v2`, or `divergence/v2` for a divergence, with
@@ -484,7 +488,8 @@ written, `publish`:
 - **asks the publication gate** about every run, as `trigon serve` does, with the repository's
   `kill-switch` file as safeguard 5. A withheld run is refused with its reason; a void one is
   published only as its `void/v1`; a divergence is refused while `divergences = "refuse"`, the
-  default until [`19`](19-distribution-and-lookup.md) D7 decides how a maintainer is told;
+  default until [`19`](19-distribution-and-lookup.md) D7 decides how a maintainer is told, and
+  published with its entry in the divergence feed under `"feed"` (below);
 - **refuses** a run already published, the second of two agreeing attempts whose first is, a record
   for an artifact that already has a current one unless it supersedes it (`trigon attest <run>
   --supersedes <record> --reason <code>`), and a verdict without the falsifying command naming
@@ -500,8 +505,9 @@ written, `publish`:
 
 - **checks every record it would write as every client will**, and `trigon log sign` checks the
   tree again from disk before it signs: it extends a checkpoint the log key itself verifies, and the
-  newest checkpoint of the log this host has published, and every new leaf is a heartbeat or names
-  a record file whose envelopes verify under `keys/attestation.pub` and agree with the leaf.
+  newest checkpoint of the log this host has published, and every new leaf is a heartbeat, a key
+  change, a log-end, or names a record file whose envelopes verify under the attestation key the
+  log has at that leaf and agree with the leaf.
 
 A push that loses to another writer is never forced: the commit and the checkpoint signed for it
 are discarded, and the publication is built again on what the other writer pushed. A publisher
@@ -559,19 +565,164 @@ checkpoint, unsigned:
 commit    publish: 1 record, tree 0 → 1
 ```
 
-Not built yet ([`19`](19-distribution-and-lookup.md) §10 phase 5): rebuilt artifacts as release
-assets — `rebuilt_artifacts = "github-release"` is refused rather than publishing records that name
-assets nobody uploaded — the divergence feed, so `divergences = "feed"` still refuses divergences,
-key rotation and log succession (`log key-change`, `log succeed`), and `--prune`.
+### Rebuilt artifacts as release assets
+
+With `rebuilt_artifacts = "github-release"` ([`19`](19-distribution-and-lookup.md) D4), every
+verdict's rebuilt artifact is published beside its record, so that `verify-attestation
+--rerun-comparison` needs nothing from the person running it but the published artifact. It is a
+release asset of the evidence repository, never a file in git: named `sha256-<hex>` by the digest
+the verdict signs, in the month's release, `rebuilt-2026-09`, continued as `rebuilt-2026-09.2` and
+so on once a release holds GitHub's 1,000 assets.
+
+```
+$ GITHUB_TOKEN=… trigon publish 1789000000-aaaa0001 --store ./trigon-store
+repository https://github.com/<owner>/trigon-evidence.git (main)
+asset     sha256-8b2e… in release rebuilt-2026-09 of <owner>/trigon-evidence
+logged    leaf 12: run 1789000000-aaaa0001: equivalence/v2 normalized, pkg:npm/demo-a@1.0.0
+commit    …
+```
+
+The asset is uploaded, or found, before the commit that names it; a publication that fails after
+an upload leaves an asset nobody names, which is harmless, and the next attempt finds it by its name
+and reuses it — once its size, and the digest GitHub reports for it, are the artifact's. An asset
+of that name that is not the artifact is refused rather than taken for it; one GitHub left
+unfinished, or reports no digest for, is removed and uploaded again from the store, since its size
+alone cannot tell it from another artifact's. No asset goes into a draft release, which only the
+repository's writers can see: where a draft has the month's tag, `publish` is refused and says so.
+An exact rebuild is the published artifact byte for byte, which is not ours to redistribute, and is
+not uploaded; a void has none. An artifact not under GitHub's 2 GiB is refused before anything is
+written, and so is one the store no longer holds that no release has yet.
+
+It is GitHub's REST API, not git, so it takes a credential of its own: a token with contents-write
+on the repository — a fine-grained token, or a workflow's own `GITHUB_TOKEN` — from `GITHUB_TOKEN`,
+or else `GH_TOKEN`, in the environment. Never on the command line or in a file, never printed —
+not even where a server quotes it back — sent only in a request's header, and only to the API and
+the upload host it names. Without one,
+`publish` is refused before anything is written. The repository is the publish location's, which
+must be on github.com — `https://github.com/<owner>/<repo>.git` or
+`git@github.com:<owner>/<repo>.git`; any other location is refused with this mode on. `--dry-run`
+says where each asset would go, and uploads nothing. `TRIGON_GITHUB_API` replaces
+`https://api.github.com`, for a test server; it must be HTTPS, or HTTP to this machine.
+
+### The divergence feed
+
+With `divergences = "feed"` ([`19`](19-distribution-and-lookup.md) D7), a confirmed divergence is
+published, with its entry in `feed/divergences.atom` in the same commit: an Atom feed that
+maintainers and registry security teams can subscribe to, holding the most recent 200 divergences,
+newest first — the log holds every one, and the README says so. Each entry names its record by
+digest, links the record file and the dispute pointer it signs, and carries the command that would
+falsify it. The feed is regenerated from the log whole each time a divergence, or a record
+superseding one, is published, and by `--reconcile`: a withdrawal marks its entry superseded, and an
+entry anybody else wrote into the file is gone at the next. Under the default, `divergences =
+"refuse"`, divergences are refused as before.
+
+### Pruning, once published
+
+```
+trigon publish <run>… --prune
+```
+
+`--prune` drops each published run's rebuilt artifact from the store, keeping its digests, once the
+publication is pushed and recorded on the run; a divergence keeps its bytes, as `attest --prune`
+keeps them. Where a publish repository is configured with `rebuilt_artifacts = "github-release"`,
+`trigon attest --prune` refuses a run that is not published yet, before signing anything, since the
+artifact is uploaded from the store when it is published — including one the gate withholds now,
+which a confirmation can release later. A run no publication would ever upload an artifact for is
+pruned as it always was: an exact rebuild, a void run, and the second of two agreeing attempts
+whose first is published, which `publish` refuses. Anywhere else it prunes as it always did.
+
+### Rotating a key: `log key-change` and `log succeed`
+
+A rotation is logged, and every client follows it from the keys it pinned
+([`19`](19-distribution-and-lookup.md) §8). Both go through `publish`'s own steps — the remote's
+log verified first, `log sign` checking the tree, one commit pushed without force — and take
+`--store`, `--repo` and `--dry-run` as `publish` does. A dry run signs nothing: `log key-change
+--dry-run` shows the leaf with both signatures empty, and the files it would write by path — their
+bytes, and the checkpoint's root, cover the signatures — since a signed leaf printed by a preview,
+in a CI log say, would be a hand-over anyone holding the log key could append.
+
+**The attestation key.** `trigon log key-change` logs a key-change leaf signed by the key current
+now and the new one:
+
+```
+$ trigon log key-change --key ~/.trigon/signing.key --new-key ~/.trigon/signing-2.key
+logged    leaf 40: key change: the attestation key 51e4f091d48fee98 hands over to 8702836caee10b5f
+commit    bf670c4b… (publish: key change, tree 40 → 41)
+```
+
+From that leaf on, `trigon publish` publishes only records signed by the new key, and every client
+refuses a record signed by the old one whose leaf comes later. To switch: sign with the new key —
+`trigon attest <run> --key <new key file>`, and `trigon rebuild --attest --key` with the same — and
+attest again, with it, any run attested with the old key that is still to be published; `publish`
+refuses such a run and says so. Nothing in `evidence.toml` names the key a record is signed with,
+so nothing there changes: a `[[source]]` pinning this repository, yours or anyone's, keeps pinning
+the key its chain starts at and follows the change from the log, and the repository's
+`keys/attestation.pub` stays that key too. Its README gains an account of the change. Only the key
+current now can hand over, and a key the log has retired is never current again.
+
+**The log key.** `trigon log succeed` ends the log with a log-end leaf naming its successor — its
+origin, its log key, where it is — and begins the successor with a log-continuation leaf holding the
+old log's final checkpoint, signed by both log keys:
+
+```
+$ trigon log keygen --origin example.com/trigon-evidence/1 --out ~/.config/trigon/log-1.key
+$ trigon log succeed --origin example.com/trigon-evidence/1 --log-key ~/.config/trigon/log-1.key
+logged    leaf 1: log-end: `example.com/trigon-evidence` is succeeded by `example.com/trigon-evidence/1`, at log/1 in this repository
+commit    fa79a80c… (log succeed: `example.com/trigon-evidence` ends, tree 1 → 2; …)
+checkpoint example.com/trigon-evidence 2 OtzRAIHy1wtwB6fU8gT6iZ6kBKMKGEpo7GE8rld54NE=
+checkpoint example.com/trigon-evidence/1 1 tKNVlIvtcFjtrmngQj8s5yxsVXAlTTumQpxcaN1wZBA=
+```
+
+`publish` never opens a log key, so the successor's is named by `trigon log public-key <file>`, run
+as a child, and `trigon log sign` is run twice: once with `--successor-key`, holding both keys, to
+sign the final checkpoint and cosign it with the successor's — it signs a log-end only then, and
+only for the key it names — and once with `--continuing`, to begin the successor only as the log
+that log-end names. By default the successor is at the next free `log/<n>` of the same repository,
+and both leaves are one commit. With `--url <location>`, repeatable, it is in another repository,
+at `log` unless `--dir` says otherwise: the old log's end is pushed first, and the successor is
+begun as the first commit of the repository at the first URL; stopped in between, the old log
+refuses anything more, and the same `log succeed` run again begins the successor from the final
+checkpoint already published. A log-end is for good, so before it is written that repository is
+cloned and looked at: `log succeed` refuses, with nothing written, a first URL that names the
+evidence repository itself, one git cannot reach, one holding `keys/`, `log/` or the successor's
+directory, one whose branch names git attributes, and one that would not take a push, which `git
+push --dry-run` asks. Where the old repository's `kill-switch` is set, the successor's first commit
+sets it too, with the same words, and `log succeed` says so: a succession never clears safeguard 5,
+and only a person removing the file in the successor's repository does.
+
+Then switch to the successor: set `[publish] origin` to its origin and `log_key` to its key — and
+`repo` to it, for another repository — and attest again whatever is still to be published, since a
+verdict signs the origin of the log it is published into. `publish` refuses to publish under the old
+origin once the log has ended, and says where publishing goes on. Keep the old log key: nothing more
+is appended to the old log, but its final checkpoint is what a client holding it checks the
+succession against. `keys/log.vkey` stays the first log's key, which clients pin; they follow the
+succession themselves.
+
+### `trigon serve` and the repository's kill-switch
+
+With a publish repository configured, `trigon serve` reports the repository's `kill-switch` beside
+its own `--stop-divergences`, and says which is set: the repository's stops what `trigon publish`
+publishes, the server's what it shows, and neither stands in for the other. It is read from the
+working clone `publish` keeps in the store `serve` reads, as of that clone's last fetch that
+succeeded, with when that was: a fetch that fails — the remote unreachable, a credential expired —
+changes neither, so a report whose time stops moving is one to look into. It is set wherever the
+branch has anything named `kill-switch`, and clear only where git lists nothing of that name; with
+no working clone yet, no record of a fetch that succeeded, or a tree git cannot read, it is
+`unknown`, never clear. `serve` reads it when it starts and every ten seconds after, never for a
+request, since each read runs `git`. It is on the page's header and in `/v1/health` as
+`kill_switches`, where an anonymous reader is told the state and when, and not where it was read
+from.
 
 ## Configuring where evidence goes: `evidence.toml`
 
 Publishing and looking up verdicts in an evidence repository
 ([`19-distribution-and-lookup.md`](19-distribution-and-lookup.md)) are configured, never compiled
-in. `trigon attest`, `trigon publish`, `trigon log init`, `trigon serve` and `trigon worker` read
-the configuration today — `serve` and `worker` for `same_host_confirmation` and
-`confirmation_interval`, which decide when two attempts count as two; `evidence sync` and `lookup`
-are the later phases that use the `[freshness]` and `[[source]]` tables.
+in. `trigon attest`, `trigon publish`, `trigon log init`, `log key-change`, `log succeed`, `trigon
+serve` and `trigon worker` read the configuration today — `serve` and `worker` for
+`same_host_confirmation` and `confirmation_interval`, which decide when two attempts count as two,
+and `serve` for `[publish] repo` and `branch` too, to report the repository's kill-switch;
+`evidence sync` and `lookup` are the later phases that use the `[freshness]` and `[[source]]`
+tables.
 
 The file is `~/.config/trigon/evidence.toml` (`$XDG_CONFIG_HOME/trigon/evidence.toml`), or
 whatever `TRIGON_EVIDENCE_CONFIG` names instead. Every key, with its default:
@@ -583,8 +734,8 @@ branch = "main"                                       #   user@host:path, or a p
 origin = "github.com/<owner>/trigon-evidence"         # the log's origin
 disputes = "https://github.com/<owner>/trigon-evidence/issues"
 log_key = "~/.config/trigon/log.key"                  # read only by `trigon log sign`
-divergences = "refuse"                                # or "feed"
-rebuilt_artifacts = "none"                            # or "github-release"
+divergences = "refuse"                                # or "feed": published, with the Atom feed
+rebuilt_artifacts = "none"                            # or "github-release": as release assets
 same_host_confirmation = false
 confirmation_interval = "1h"                          # durations: <n>s, m, h or d
 heartbeat = "7d"
@@ -635,7 +786,9 @@ reads a colon before the first slash as SSH, so `backup:evidence` is refused; wr
 by `TRIGON_EVIDENCE_LOG_KEY` and `TRIGON_EVIDENCE_ATTESTATION_KEY` — refused without both unless
 `TRIGON_EVIDENCE_TOFU=1` — with `TRIGON_EVIDENCE_CHECKPOINT` as its optional checkpoint; and
 `TRIGON_EVIDENCE_CACHE` and `TRIGON_EVIDENCE_STATE` replace the directories clones and sync state
-are kept in (`~/.cache/trigon/evidence`, `~/.local/state/trigon/evidence`).
+are kept in (`~/.cache/trigon/evidence`, `~/.local/state/trigon/evidence`). With `rebuilt_artifacts
+= "github-release"`, `publish` reads its GitHub token from `GITHUB_TOKEN`, or else `GH_TOKEN`, and
+nowhere else.
 
 **A project's own sources.** `.trigon/evidence.toml` in the working directory is read too, unless
 `TRIGON_EVIDENCE_CONFIG` is set. It is chosen by whoever controls the project — in CI, the author of

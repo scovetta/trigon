@@ -510,6 +510,205 @@ pub fn verify_extension(
     })
 }
 
+/// A successor log's first tree, before any checkpoint of it is signed: the tree `trigon log
+/// succeed` writes and `trigon log sign` begins the log with (`docs/19` §8, §10 phase 5).
+///
+/// There is no checkpoint to extend, so the anchor is the predecessor instead: the log whose
+/// log-end names this log's key and directory. The tree is the log-continuation alone, holding
+/// that log's final checkpoint signed by both log keys, logged no earlier than the log-end.
+#[derive(Clone, Debug)]
+pub struct Beginning {
+    predecessor: VerifiedLog,
+    vkey: LogVkey,
+    tree: Tree,
+}
+
+impl Beginning {
+    pub fn origin(&self) -> &str {
+        self.vkey.origin()
+    }
+
+    /// The log this one continues.
+    pub fn predecessor(&self) -> &VerifiedLog {
+        &self.predecessor
+    }
+
+    /// The first checkpoint of the successor, unsigned.
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            origin: self.vkey.origin().to_string(),
+            size: self.tree.size(),
+            root: self.tree.root(),
+        }
+    }
+
+    /// Sign the first checkpoint with the successor's own key, and hold the result to [`follow`]
+    /// over `files`, the successor's directory, with the checkpoint staged: the succession is
+    /// signed only where every client would follow it.
+    pub fn sign(
+        &self,
+        signer: &LogSigner,
+        files: &dyn LogFiles,
+    ) -> Result<SignedCheckpoint, LogError> {
+        if signer.vkey() != self.vkey {
+            return Err(LogError::Unverified(format!(
+                "the successor named is {}, and the key given to begin it is {}",
+                self.vkey,
+                signer.vkey()
+            )));
+        }
+        let signed = SignedCheckpoint::sign(&self.checkpoint(), signer)?;
+        let staged = std::collections::BTreeMap::from([(
+            CHECKPOINT.to_string(),
+            signed.to_string().into_bytes(),
+        )]);
+        follow(
+            &self.predecessor,
+            &super::files::Staged::new(&staged, files),
+            None,
+        )?;
+        Ok(signed)
+    }
+}
+
+/// Verify the files of a successor log that has no checkpoint yet as a first tree of `size`
+/// leaves, under its own key `vkey`, continuing `predecessor` (see [`Beginning`]).
+///
+/// Refused where the directory holds a checkpoint already, since a log is begun once; where the
+/// predecessor's log-end does not name this key; where the tree is not the log-continuation alone;
+/// and where the continuation is not what [`follow`] requires. Nothing past `size` is read.
+pub fn verify_beginning(
+    files: &dyn LogFiles,
+    vkey: &LogVkey,
+    size: u64,
+    predecessor: &VerifiedLog,
+) -> Result<Beginning, LogError> {
+    let origin = vkey.origin();
+    if files.read(CHECKPOINT, CHECKPOINT_LIMIT)?.is_some() {
+        return Err(LogError::Rule(format!(
+            "`{}` already holds a checkpoint, so `{origin}` is already begun; a log is begun once, \
+             and extended after that",
+            files.shown(CHECKPOINT)
+        )));
+    }
+    let end = predecessor.log_end().ok_or_else(|| {
+        LogError::Rotation(format!(
+            "`{}` has not ended, so it names no successor, and `{origin}` is begun only as the \
+             successor its log-end names",
+            predecessor.origin()
+        ))
+    })?;
+    if end.successor.log_key != vkey.to_string() {
+        return Err(LogError::Rotation(format!(
+            "`{}`'s log-end names the successor `{}` under the log key {}, and the key given is \
+             {vkey}: a successor it does not name is refused",
+            predecessor.origin(),
+            printable(&end.successor.origin),
+            printable(&end.successor.log_key)
+        )));
+    }
+    if size != 1 {
+        return Err(LogError::Rule(format!(
+            "a successor is begun with its log-continuation leaf alone, and {size} leaves were \
+             offered; what comes after it is published into the log like into any other"
+        )));
+    }
+    let Read {
+        tree,
+        leaves,
+        refused,
+    } = read_leaves(files, size)?;
+    if let Some(e) = refused {
+        return Err(e);
+    }
+    check_tiles(files, &tree, origin)?;
+    let Some(Leaf::LogContinuation(c)) = leaves.first() else {
+        return Err(LogError::Rotation(format!(
+            "the first leaf of `{origin}` is not a log-continuation, and a successor begins with \
+             the one that holds the final checkpoint of the log it continues"
+        )));
+    };
+    check_for_readers(&leaves[0], 0, origin, vkey)?;
+    let held = c.old_checkpoint()?;
+    if held != *predecessor.checkpoint().checkpoint() {
+        return Err(LogError::Rotation(format!(
+            "`{origin}`'s log-continuation holds a checkpoint of `{}` of {} leaves, and that \
+             log's final checkpoint is of {} leaves with another root, or of another log",
+            printable(&held.origin),
+            held.size,
+            predecessor.size()
+        )));
+    }
+    c.note()?.verify(predecessor.vkey()).map_err(|e| {
+        LogError::Rotation(format!(
+            "`{origin}`'s log-continuation is not signed by the log key of `{}`, {}: {e}",
+            predecessor.origin(),
+            predecessor.vkey()
+        ))
+    })?;
+    if c.time < end.time {
+        return Err(LogError::Rule(format!(
+            "`{origin}`'s log-continuation is logged at {}, before `{}`'s log-end at {}; a \
+             leaf's time never goes backwards, across a succession too",
+            c.time,
+            predecessor.origin(),
+            end.time
+        )));
+    }
+    Ok(Beginning {
+        predecessor: predecessor.clone(),
+        vkey: vkey.clone(),
+        tree,
+    })
+}
+
+/// The log of the repository at `repo` whose log-end names the log key `successor`: its first
+/// log, `log/`, verified under `pinned` — the key `keys/log.vkey` names — and each successor in
+/// the same repository followed as [`follow`] allows, until one ends naming `successor`.
+///
+/// For `trigon log sign` beginning a successor, which the predecessor anchors. Refused where no
+/// log of the chain ends naming it, where the chain goes on in another repository first, and where
+/// the chain would return to a directory it has read.
+pub fn find_predecessor(
+    repo: &Path,
+    pinned: &LogVkey,
+    successor: &LogVkey,
+) -> Result<VerifiedLog, LogError> {
+    let mut log = verify_log(&DirFiles::in_repository(repo, "log"), pinned, None)?;
+    let mut seen = vec!["log".to_string()];
+    loop {
+        let Some(end) = log.log_end() else {
+            return Err(LogError::Rotation(format!(
+                "no log of the chain in {} ends naming the log key {successor}: `{}` is its last, \
+                 and has not ended. A successor is begun only as the one a log-end names",
+                repo.display(),
+                log.origin()
+            )));
+        };
+        let named = end.successor.clone();
+        if named.log_key == successor.to_string() {
+            return Ok(log);
+        }
+        if !named.in_this_repository() {
+            return Err(LogError::Rotation(format!(
+                "the chain in {} goes on in another repository, `{}`, before any log of it names \
+                 the log key {successor}",
+                repo.display(),
+                printable(&named.origin)
+            )));
+        }
+        if seen.contains(&named.dir) {
+            return Err(LogError::Rotation(format!(
+                "a log-end names `{}` as its successor's directory, which holds an earlier log of \
+                 the chain",
+                named.dir
+            )));
+        }
+        seen.push(named.dir.clone());
+        log = follow(&log, &DirFiles::in_repository(repo, &named.dir), None)?;
+    }
+}
+
 /// Verify a log's checkpoint, and that it extends the one last accepted, from its tiles alone: a
 /// consistency proof built from the tiles the new checkpoint's tree has, verified against both
 /// signed roots.

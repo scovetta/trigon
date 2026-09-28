@@ -11,11 +11,11 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:0ec77f8a11d361ffffeff1888f4d092087e9df49aadf1ffbb96b56eb73287eaf
+prose_version: docs/threat-model.md@sha256:e664947136cc951cf0a2f5a8b2a8ea46b8e8383a76cdf50990364cf9711fac51
 model_status: unratified-draft
 triage_policy: strict
 confidence:
-  documented: 222
+  documented: 236
   maintainer: 0
   inferred: 5
   assumption: 3
@@ -129,9 +129,9 @@ host_side_effects:
   conditions: 'only paths the operator named: the stabilize output, the --attest file, the key file keygen
     or log keygen makes — created 0600, never over a file already there — and under trigon log sign, the
     named tree''s log/checkpoint, replaced by a rename from a file made new beside it, and with --init
-    its keys/log.vkey; and the newest checkpoint of the log it has built on, in the host''s state directory
-    ($XDG_STATE_HOME/trigon/publish/). SpillFile exists as a type and is never constructed, so nothing
-    spills'
+    its keys/log.vkey, and with --continuing a successor''s first checkpoint at the --log it names; and
+    the newest checkpoint of the log it has built on, in the host''s state directory ($XDG_STATE_HOME/trigon/publish/).
+    SpillFile exists as a type and is never constructed, so nothing spills'
   provenance:
     kind: documented
     source: 'verified: no construction of `Body::Spilled` anywhere in `crates/`; crates/trigon/src/evidence_log.rs'
@@ -142,8 +142,10 @@ host_side_effects:
     the files of the evidence directory it names — checkpoints, tiles, entry bundles, records and evidence,
     each inside the directory once links are followed, a regular file, and no longer than its kind can
     be — and under --source, evidence.toml, the working directory's .trigon/evidence.toml, and the source's
-    state checkpoint; and under trigon log sign, the log key file, the newest checkpoint of its log kept
-    in the host's state directory, and the files of the tree it names, read the same way
+    state checkpoint; and under trigon log sign, the log key file — with --successor-key, the successor's
+    too — the newest checkpoint of its log kept in the host's state directory, and the files of the tree
+    it names, and with --continuing of the tree whose chain it continues, read the same way; and under
+    trigon log public-key and trigon log key-change-leaf, the key files named
   provenance:
     kind: documented
     source: crates/trigon/src/main.rs — every other read path is a CLI argument; crates/trigon-attest/src/log/files.rs;
@@ -199,10 +201,13 @@ host_side_effects:
 - effect: Pushing to an evidence repository
   stance: conditional
   components: []
-  conditions: 'only trigon publish and trigon log init: one commit, pushed without force to the repository
-    --repo, TRIGON_PUBLISH_REPO or [publish] repo names, over whatever transport that location names.
-    A publication''s signed checkpoint leaves the host only in that push; a push that loses is discarded,
-    never forced (P34, D26)'
+  conditions: 'only trigon publish, trigon log init, trigon log key-change and trigon log succeed: one
+    commit, pushed without force to the repository --repo, TRIGON_PUBLISH_REPO or [publish] repo names,
+    over whatever transport that location names. A publication''s signed checkpoint leaves the host only
+    in that push; a push that loses is discarded, never forced (P34, D26). log succeed --url first clones
+    the repository its first URL names into the temporary directory and asks it git push --dry-run, which
+    sends nothing, and then, only once the old log''s end is pushed, pushes a second commit there, the
+    successor''s first (P37, D31)'
   provenance:
     kind: documented
     source: crates/trigon/src/publish/mod.rs; docs/19-distribution-and-lookup.md §10 phase 5
@@ -219,14 +224,41 @@ host_side_effects:
   provenance:
     kind: documented
     source: crates/trigon-attest/src/location.rs; crates/trigon/src/publish/git.rs — `scrub`
+- effect: Outbound HTTPS to GitHub's REST API
+  stance: conditional
+  components: []
+  conditions: 'only trigon publish of runs with [publish] rebuilt_artifacts = "github-release": to https://api.github.com,
+    or the server TRIGON_GITHUB_API names (HTTPS, or HTTP to loopback only), and to the upload URL it
+    names on GitHub''s upload host or that server — listing the repository''s releases and their assets,
+    creating a release rebuilt-YYYY-MM or the next of its series, uploading each rebuilt artifact as sha256-<hex>,
+    and removing an asset of that name GitHub left unfinished or reports no digest for, to upload it again
+    — before the commit that names them. Redirects are not followed (P36)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/release.rs
+- effect: Reading a GitHub token
+  stance: conditional
+  components: []
+  conditions: 'only then: GITHUB_TOKEN, else GH_TOKEN, from the environment and nowhere else — never argv,
+    never a file — and missing, the publication is refused before anything is written. It is sent only
+    as the Authorization header, only to the API and to an upload URL on GitHub''s upload host or the
+    overridden API''s own origin, and is in no URL, message or Debug print (P38, D28)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/release.rs — `Token`, `may_carry_token`
 - effect: Spawning trigon log sign
   stance: conditional
   components: []
-  conditions: publish and log init run it as a child of the same binary; it, and not publish, opens the
-    log key (P35)
+  conditions: publish, log init, log key-change and log succeed run it as a child of the same binary —
+    log succeed twice, with --successor-key to sign the final checkpoint and cosign it, and with --continuing
+    to begin the successor; it, and not they, opens a log key. log succeed names the successor by trigon
+    log public-key, a child too, and log key-change has trigon log key-change-leaf, a child that opens
+    no socket, open the two attestation keys and sign the leaf — or, in a dry run, trigon public-key,
+    a child that signs nothing, read their public halves — so the process that fetches and pushes opens
+    neither kind of key (P35, P37)
   provenance:
     kind: documented
-    source: crates/trigon/src/publish/mod.rs — `sign`
+    source: crates/trigon/src/publish/mod.rs — `sign`, `key_change_leaf`, `public_key_of`
 - effect: Spawning podman
   stance: present
   components: []
@@ -272,18 +304,40 @@ host_side_effects:
 - effect: Writing <store>/publish/
   stance: conditional
   components: []
-  conditions: 'only trigon publish: the working clone of each repository it publishes to, and the store''s
-    lock; and in a working tree published into in place, a lock file in its git directory'
+  conditions: 'only trigon publish, log key-change and log succeed: the working clone of each repository
+    they publish to, and the store''s lock; and in a working tree published into in place, a lock file
+    in its git directory'
   provenance:
     kind: documented
     source: crates/trigon/src/publish/mod.rs; docs/19-distribution-and-lookup.md §2.4
+- effect: Dropping a rebuilt artifact from the store
+  stance: conditional
+  components: []
+  conditions: trigon attest --prune, as it always has, and trigon publish --prune, for each run it published,
+    once the publication is pushed and recorded on the run; a divergence keeps its bytes. Where a publish
+    repository is configured with rebuilt_artifacts = "github-release", attest --prune refuses, before
+    signing anything, a run not yet published whose publication would upload its artifact — not an exact
+    rebuild, not one the gate calls void, and not the second of an agreeing pair whose first is published
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/mod.rs — `prune_published`; crates/trigon/src/main.rs — `refuse_prune_before_publication`
+- effect: trigon serve reading the publisher's working clone
+  stance: conditional
+  components: []
+  conditions: 'where a publish repository is configured: git rev-parse and git ls-tree in <store>/publish/<…>/clone,
+    read-only, and the commit and time publish records in its .git/trigon-fetched once a fetch succeeds,
+    to report the repository''s kill-switch — on starting and every ten seconds after, on a blocking thread,
+    never for a request; with no clone, or no record of a fetch that succeeded, the report is unknown'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/switch.rs; crates/trigon-api/src/lib.rs — `cached_switch`
 - effect: Writing $XDG_STATE_HOME/trigon/publish/
   stance: conditional
   components: []
-  conditions: 'only trigon publish and trigon log sign: the host''s lock, which keeps one publish at a
-    time on the host whatever store it runs from, and the newest checkpoint of each log the host has published
-    or verified, named by the log''s origin, which every later publication and signature there must extend
-    (P34, P35)'
+  conditions: 'only trigon publish, log key-change, log succeed and trigon log sign: the host''s lock,
+    which keeps one publish at a time on the host whatever store it runs from, and the newest checkpoint
+    of each log the host has published or verified, named by the log''s origin, which every later publication
+    and signature there must extend (P34, P35)'
   provenance:
     kind: documented
     source: crates/trigon/src/evidence_log.rs — `NewestPublished`; docs/19-distribution-and-lookup.md
@@ -602,19 +656,22 @@ entry_points:
 - id: trigon publish
   component: multiple
   parameters:
-  - name: 'the evidence repository it fetches: keys/, log/, records/, evidence/, index/, kill-switch'
+  - name: 'the evidence repository it fetches: keys/, log/, records/, evidence/, index/, feed/, kill-switch,
+      README.md'
     attacker_controllable: true
     control_kinds:
     - data
     - size
     - object-topology
     - resource-name
-    caller_must_enforce: 'nothing — P34: keys/log.vkey must name [publish] origin; a branch that names
-      git attributes is refused before it is checked out; the log is verified whole under it, and against
-      the newest checkpoint of the log this host has published or verified, whatever store or spelling
-      of the location, before anything is built on it; nothing past the checkpoint is read; a file at
-      a path a publication writes is replaced, never written through, and a link where it writes a directory,
-      or planted as index, is refused; its .gitignore changes nothing committed'
+    caller_must_enforce: 'nothing — P34: the chain of logs keys/log.vkey begins must end, in this repository,
+      at [publish] origin''s log; the feed and the README''s account of rotations are regenerated from
+      the log, never edited; a branch that names git attributes is refused before it is checked out; the
+      log is verified whole under it, and against the newest checkpoint of the log this host has published
+      or verified, whatever store or spelling of the location, before anything is built on it; nothing
+      past the checkpoint is read; a file at a path a publication writes is replaced, never written through,
+      and a link where it writes a directory, or planted as index, is refused; its .gitignore changes
+      nothing committed'
     provenance:
       kind: documented
       source: docs/19-distribution-and-lookup.md §2.4, §8, §10 phase 5; crates/trigon/tests/publish.rs
@@ -629,11 +686,66 @@ entry_points:
     - object-topology
     caller_must_enforce: 'nothing — P35: it signs only a tree extending a checkpoint its own key opens
       and the newest checkpoint of the log published from this host, whose every new leaf names a record
-      every client would accept, and reads nothing past the size it is told to sign; the checkpoint it
-      writes is renamed over the old from a file made new, never written through a link'
+      every client would accept, is a heartbeat, a key change from the current key signed by both, or
+      a log-end naming the key --successor-key holds, and reads nothing past the size it is told to sign;
+      the checkpoint it writes is renamed over the old from a file made new, never written through a link'
     provenance:
       kind: documented
       source: crates/trigon-attest/src/evidence/sign.rs; crates/trigon-attest/tests/evidence_repo/sign.rs
+- id: trigon log sign --continuing
+  component: multiple
+  parameters:
+  - name: the tree holding the log it continues, and the successor's first tree
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - object-topology
+    caller_must_enforce: 'nothing — P37: a successor is begun only as the log a verified chain''s log-end
+      names by its key, from a log-continuation holding that log''s final checkpoint signed by both log
+      keys and logged no earlier than the log-end, extending what this host published of the old log,
+      and held to follow before it is signed'
+    provenance:
+      kind: documented
+      source: crates/trigon-attest/src/evidence/sign.rs — `check_to_begin`; crates/trigon-attest/tests/evidence_repo/sign.rs
+        — `a_successor_is_begun_only_as_the_one_its_predecessor_names`
+- id: trigon publish of rebuilt artifacts
+  component: multiple
+  parameters:
+  - name: 'GitHub''s answers: the releases and assets it lists, the upload URL a release names, an uploaded
+      asset''s state, size and digest'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - resource-name
+    caller_must_enforce: 'nothing — P36, P38: an asset of an artifact''s name is taken for it only where
+      GitHub reports its digest and its size and digest are the artifact''s, one of another size or digest
+      is refused, and one GitHub reports no digest for is uploaded again in its place; no asset is put
+      in a draft release; the token is sent to an upload URL only on GitHub''s upload host, or the overridden
+      API''s own origin, no redirect is followed, and a refusal that quotes the token back has it taken
+      out; nothing GitHub says reaches the log or a record, which names the asset by the digest its verdict
+      signs'
+    provenance:
+      kind: documented
+      source: crates/trigon/src/publish/release.rs — `the_token_goes_only_to_the_apis_upload_host`, `the_token_is_in_no_print_and_no_refusal`;
+        crates/trigon/tests/publish.rs — `a_rebuilt_artifact_is_a_release_asset_uploaded_before_its_record_is_committed`,
+        `an_asset_is_reused_on_retry_and_a_full_release_continues_its_series`, `an_asset_of_the_artifacts_name_is_taken_for_it_only_when_it_is_it`,
+        `the_token_goes_to_no_other_host_and_no_asset_into_a_draft`
+- id: trigon serve
+  component: multiple
+  parameters:
+  - name: the kill-switch of the publish repository, as the publisher's working clone last fetched it
+    attacker_controllable: true
+    control_kinds:
+    - data
+    caller_must_enforce: 'nothing: it is reported as set wherever git lists anything of that name, clear
+      only where it lists nothing, and unknown where nothing could be read, with when the fetch that succeeded
+      began; it gates nothing serve shows, which only --stop-divergences does; where it is read from is
+      shown to an operator only; and it is read on a timer, never for a request'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §3; crates/trigon-api/tests/seam_kill_switches.rs; crates/trigon/tests/publish.rs
+        — `serve_reports_the_repositorys_kill_switch_beside_its_own`, `serve_reports_the_switch_as_of_the_last_fetch_that_succeeded`
 - id: trigon watch GET /run/{index}
   component: multiple
   parameters:
@@ -1087,6 +1199,16 @@ contract_dimensions:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.7
+- component: attestation
+  dimension: x-rotation
+  status: claimed
+  conditions: a key change is logged only from the current key, signed by both; a log ends only where
+    the step signing holds the successor's key, and a successor is begun only as the log its predecessor's
+    log-end names
+  property_id: P37
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
 - component: strategy-rendering
   dimension: numeric-domain
   status: not-applicable
@@ -1405,6 +1527,23 @@ contract_dimensions:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-release-assets
+  status: claimed
+  conditions: a rebuilt artifact is found or uploaded, by the digest its verdict signs, before the commit
+    that names it
+  property_id: P36
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-credential
+  status: claimed
+  conditions: the GitHub token is read from the environment and sent only to GitHub, in a header
+  property_id: P38
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
 - component: definitions
   dimension: numeric-domain
   status: not-applicable
@@ -1678,6 +1817,7 @@ adversaries:
   - hold-the-attestation-key
   - hold-the-log-key
   - hold-the-push-credential
+  - hold-the-github-token
   - rewrite-repository-history
   - serve-different-clients-different-logs
   excluded_capabilities:
@@ -2431,9 +2571,10 @@ properties_claimed:
   - two records for one run
   - a partial publication visible
   statement: 'trigon publish builds only on a remote log it has verified, and publishes only what the
-    gate releases, as one commit pushed without force. Before anything is written: the repository''s keys/log.vkey
-    must name [publish] origin; its log is verified whole under that key and against the newest checkpoint
-    of the log this host has published or verified, kept by the log''s origin in the host''s state direct'
+    gate releases, as one commit pushed without force. Before anything is written: the repository''s chain
+    of logs, from the one its keys/log.vkey names and through every succession in the repository, must
+    end at [publish] origin''s log, which a publication appends to, and one that ended in favour of a
+    successor else'
   provenance:
     kind: documented
     source: docs/19-distribution-and-lookup.md §2.2, §3, §10 phase 5; docs/16-findings.md §3.100; crates/trigon/tests/publish.rs
@@ -2444,14 +2585,18 @@ properties_claimed:
       `a_branch_that_names_git_attributes_is_refused_before_it_is_checked_out`, `the_operators_git_configuration_changes_nothing_that_is_committed`,
       `a_working_clone_without_its_git_directory_is_made_again_and_never_the_checkout_around_it`, `one_publish_runs_at_a_time_on_a_host_whatever_store_it_runs_from`,
       `a_push_the_remote_took_is_published_even_when_the_connection_goes_before_it_answers`, `reconcile_never_reads_through_a_link_planted_as_index`,
-      `a_run_completed_after_its_record_file_was_removed_names_the_commit_that_logged_it`
+      `a_run_completed_after_its_record_file_was_removed_names_the_commit_that_logged_it`, `a_divergence_is_published_with_its_feed_entry_in_the_same_commit`,
+      `the_kill_switch_withholds_a_divergence_the_feed_would_publish`, `a_run_logged_before_a_succession_is_completed_against_its_own_log`,
+      `a_key_change_is_followed_and_publish_then_expects_the_new_key`, `a_rebuilt_artifact_is_pruned_only_once_its_run_is_published`;
+      docs/16-findings.md §3.101
 - id: P35
   kind: integrity
   components:
   - attestation
   tier: security-critical
   conditions: the tree's keys/attestation.pub, or --attestation-key, names the attestation key current
-    at the checkpoint the tree extends
+    at the checkpoint the tree extends; for a successor's tree, the chain keys/log.vkey begins is followed
+    from it
   violation_symptoms:
   - the log key signing a leaf nobody checked, a rewrite of what it signed, or a second tree begun over
     a log
@@ -2463,9 +2608,69 @@ properties_claimed:
   provenance:
     kind: documented
     source: docs/19-distribution-and-lookup.md §8, §10 phase 5 step 5; crates/trigon-attest/tests/evidence_repo/sign.rs
-      — `a_tree_that_does_not_extend_what_was_published_is_not_signed`; crates/trigon/tests/publish.rs
-      — `log_sign_is_its_own_step_and_what_it_refuses_is_never_committed`, `a_remote_rolled_back_behind_what_this_host_published_is_refused`,
-      `the_repository_named_each_way_publishes`
+      — `a_tree_that_does_not_extend_what_was_published_is_not_signed`, `a_log_end_is_signed_only_with_the_successor_key_it_names`,
+      `a_key_change_is_signed_only_from_the_current_key`; crates/trigon/tests/publish.rs — `log_sign_is_its_own_step_and_what_it_refuses_is_never_committed`,
+      `a_remote_rolled_back_behind_what_this_host_published_is_refused`, `the_repository_named_each_way_publishes`
+- id: P36
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: rebuilt_artifacts = "github-release"; the API is GitHub's, or the one the operator names
+  violation_symptoms:
+  - a record naming an asset nobody uploaded
+  - an asset of another artifact taken for it
+  statement: A rebuilt artifact is a release asset uploaded before its record, named by the digest its
+    verdict signs. With rebuilt_artifacts = "github-release", publish refuses, before anything is read
+    or written, a location that is not a repository on github.com and a run with no token in GITHUB_TOKEN
+    or GH_TOKEN; and at step 2, a verdict whose run's rebuilt artifact is not the one its verdict signs,
+    or is no
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.3, §10 phase 5 step 3; crates/trigon/src/publish/release.rs
+      — `a_github_location_names_its_repository_and_no_other_does`; crates/trigon/tests/publish.rs — `a_rebuilt_artifact_is_a_release_asset_uploaded_before_its_record_is_committed`,
+      `an_asset_is_reused_on_retry_and_a_full_release_continues_its_series`, `an_asset_of_the_artifacts_name_is_taken_for_it_only_when_it_is_it`,
+      `the_token_goes_to_no_other_host_and_no_asset_into_a_draft`
+- id: P37
+  kind: integrity
+  components:
+  - attestation
+  tier: security-critical
+  conditions: the operator runs the rotation, holding the keys it takes
+  violation_symptoms:
+  - a record signed by a retired key accepted
+  - a succession clients do not follow, or one they follow to a log nobody named
+  - a key opened by the process that pushes
+  statement: 'A rotation is logged only as every client follows it, and the processes that fetch and push
+    hold no key. trigon log key-change logs a key-change leaf only from the attestation key the log has
+    now, to one it has never had, signed by both over the log''s origin and the leaf''s time; the leaf
+    is signed by trigon log key-change-leaf, a child that opens no socket, and held by the parent to everything
+    it '
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §8, §10 phase 5; ADR-0014 Decision 8; crates/trigon-attest/tests/evidence_repo/sign.rs
+      — `a_successor_is_begun_only_as_the_one_its_predecessor_names`; crates/trigon/tests/publish.rs —
+      `a_key_change_is_followed_and_publish_then_expects_the_new_key`, `a_succession_is_followed_and_publish_continues_into_the_successor`,
+      `a_successor_the_log_end_does_not_name_is_refused`, `a_succession_into_another_repository_is_begun_there_after_the_end_is_pushed`,
+      `a_log_is_ended_only_naming_a_place_its_successor_can_be_begun`, `a_run_logged_before_a_succession_is_completed_against_its_own_log`
+- id: P38
+  kind: confidentiality
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: rebuilt_artifacts = "github-release"
+  violation_symptoms:
+  - the token on argv or in a message, or sent to another host
+  statement: The GitHub token that uploads rebuilt artifacts is read from the environment and sent only
+    to GitHub. It is GITHUB_TOKEN, else GH_TOKEN, and never read from argv or a file; without one, a publication
+    that would upload is refused before anything is written. It is held in a type whose Debug prints ,
+    sent only as the Authorization header, only to the API — https://api.github.com, or under TRIGON_GITH
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, §10 phase 5; crates/trigon/src/publish/release.rs
+      — `the_token_is_in_no_print_and_no_refusal`, `the_api_is_https_or_loopback_and_names_no_user`, `the_token_goes_only_to_the_apis_upload_host`;
+      crates/trigon/tests/publish.rs — `a_rebuilt_artifact_is_a_release_asset_uploaded_before_its_record_is_committed`,
+      `the_token_goes_to_no_other_host_and_no_asset_into_a_draft`
 - id: P30
   kind: resource-bound
   components:
@@ -2785,6 +2990,60 @@ properties_disclaimed:
   provenance:
     kind: documented
     source: docs/19-distribution-and-lookup.md §2.4, §8
+- id: D28
+  components:
+  - multiple
+  conditions: rebuilt_artifacts = "github-release"
+  tier: correctness-only
+  false_friend: false
+  statement: 'That a release asset is still the artifact its record names, or is there at all. GitHub,
+    and whoever holds a token with contents-write on the repository — which can push to it as well — can
+    replace or delete an asset, or the release that holds it; the log commits to an artifact''s digest,
+    which its verdict signs, and to nothing about where it is. A reader must hold what it fetches to that
+    digest: -'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.3, §4.1, §8
+- id: D29
+  components:
+  - multiple
+  conditions: divergences = "feed"
+  tier: security-critical
+  false_friend: false
+  statement: 'That anyone is told of a divergence. Under divergences = "feed" a divergence is published
+    with its entry in feed/divergences.atom, in the same commit, and nobody is notified: ADR-0010 safeguard
+    4 becomes "published at publish time", as docs/19 D7 proposes. The feed holds the 200 most recent
+    divergences, and the log every one. Between publications, whoever can push can edit it; the next publication'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §3, D7
+- id: D30
+  components:
+  - multiple
+  conditions: a publish repository configured
+  tier: correctness-only
+  false_friend: false
+  statement: That the repository's kill-switch trigon serve reports is current. It is read from the publisher's
+    working clone as of that clone's last fetch that succeeded, and says when that fetch began; a fetch
+    that fails changes neither, so a time that stops moving is the sign the remote is not being read.
+    The repository may have changed since, and a store with no clone, or no record of a fetch that succeede
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §3
+- id: D31
+  components:
+  - multiple
+  conditions: log succeed --url
+  tier: correctness-only
+  false_friend: false
+  statement: That a succession into another repository is one step, or that publishing there sees the
+    old repository's records. The old log's end is pushed first and the successor begun there after; stopped
+    between, the old log refuses to be published into and a client following it finds no successor, until
+    log succeed is run again. Publishing into the successor elsewhere reads that repository's chain only,
+    so
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6.1, §8, D2
 - id: D24
   components:
   - multiple
@@ -3083,7 +3342,10 @@ downstream_responsibilities:
   enforces:
   - D26
   - D27
+  - D28
   - P35
+  - P37
+  - P38
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13

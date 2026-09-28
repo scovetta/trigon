@@ -122,6 +122,7 @@ async fn each_run_is_served_its_own_statement_in_either_layout() {
         unauthenticated: Principal::Operator,
         decompiler: None,
         member_reads: trigon_api::default_member_permits(),
+        repository_switch: None,
     });
 
     let served = |body: &str| -> Vec<trigon_attest::Envelope> {
@@ -198,6 +199,7 @@ async fn a_run_attested_again_is_served_its_own_statements_and_not_a_shared_per_
         unauthenticated: Principal::Operator,
         decompiler: None,
         member_reads: trigon_api::default_member_permits(),
+        repository_switch: None,
     });
     let served = |body: &str| -> Vec<trigon_attest::Envelope> {
         serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body}"))

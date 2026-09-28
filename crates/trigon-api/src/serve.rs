@@ -19,6 +19,8 @@ pub struct Config {
     pub refresh_seconds: u64,
     /// The decompiler the member view uses for managed assemblies, where the binary supplied one.
     pub decompiler: Option<crate::Decompiler>,
+    /// Reads the evidence repository's kill-switch, where a publish repository is configured.
+    pub repository_switch: Option<crate::RepositorySwitchReader>,
 }
 
 /// Serve until interrupted.
@@ -45,6 +47,11 @@ pub async fn run(store: trigon_store::Store, cfg: Config) -> Result<(), String> 
     };
     let index = Index::new();
     let n = index.refresh(&store, cfg.switches).await?;
+    // Read with `git`, which no request waits on or multiplies: once here, and on a timer after.
+    let repository_switch = match cfg.repository_switch.clone() {
+        Some(read) => Some(crate::cached_switch(read, crate::SWITCH_EVERY).await),
+        None => None,
+    };
 
     let api = Arc::new(Api {
         store: store.clone(),
@@ -54,6 +61,7 @@ pub async fn run(store: trigon_store::Store, cfg: Config) -> Result<(), String> 
         switches: cfg.switches,
         unauthenticated: cfg.unauthenticated,
         member_reads: crate::default_member_permits(),
+        repository_switch: repository_switch.clone(),
     });
 
     if cfg.refresh_seconds > 0 {
@@ -77,6 +85,11 @@ pub async fn run(store: trigon_store::Store, cfg: Config) -> Result<(), String> 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await
         .map_err(|e| format!("binding {}: {e}", cfg.bind))?;
+    // The address bound, not the one asked for: `:0` asks for any port, and a caller that asked
+    // for one needs to be told which.
+    let bound = listener
+        .local_addr()
+        .map_or_else(|_| cfg.bind.clone(), |a| a.to_string());
 
     let mode = match cfg.unauthenticated {
         Principal::Anonymous => {
@@ -88,13 +101,29 @@ pub async fn run(store: trigon_store::Store, cfg: Config) -> Result<(), String> 
              loopback"
         }
     };
-    println!("serving {n} run(s) on http://{}  ({mode})", cfg.bind);
+    println!("serving {n} run(s) on http://{bound}  ({mode})");
     match &queue {
         Some(_) => println!("  requests go to {}", cfg.queue.as_deref().unwrap_or("")),
         None => println!("  no queue: this instance reads a corpus and accepts no requests"),
     }
     if cfg.switches.stop_divergences {
         println!("  divergence publication is STOPPED (ADR-0010 safeguard 5)");
+    }
+    // Beside this server's own switch, never in its place: each stops only what it says.
+    if let Some(read) = &repository_switch {
+        let r = read();
+        let state = match r.state {
+            crate::SwitchState::Set => "SET: `trigon publish` publishes no divergence to it",
+            crate::SwitchState::Clear => "clear",
+            crate::SwitchState::Unknown => "unknown",
+        };
+        println!(
+            "  the kill-switch of the evidence repository {} is {state}{} ({}). It stops what is \
+             published there; --stop-divergences stops what this server shows",
+            r.repository,
+            r.as_of.map(|t| format!(", as of {t}")).unwrap_or_default(),
+            r.detail
+        );
     }
     // What a confirmation is here, said once, because it decides what the page withholds and it
     // comes from a file the reader of this line may not know was read.

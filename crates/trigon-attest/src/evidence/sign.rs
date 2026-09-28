@@ -17,12 +17,23 @@
 //!    envelopes verify under the attestation key current at that leaf and which passes every
 //!    check a client makes of it ([`check_record`]), with every piece of evidence it names beside
 //!    it but the rebuilt artifact, which is a release asset;
-//! 4. every other new leaf is a heartbeat, or a key change from the current key signed by both
-//!    keys over this log. A release, log-end or log-continuation leaf is written by no command of
-//!    this build, and is refused rather than signed on `publish`'s word.
+//! 4. every other new leaf is a heartbeat, a key change from the current key signed by both keys
+//!    over this log, or a log-end, which is signed only where the successor's log key is in hand
+//!    too and is the one it names ([`check_to_sign`]'s `successor`): the final checkpoint a
+//!    successor continues from is cosigned by that key, and a log ended in favour of a key nobody
+//!    holds is a log nobody can continue. A release leaf is written by no command of this build,
+//!    and a log-continuation only ever begins a successor ([`check_to_begin`]); either is refused
+//!    rather than signed on `publish`'s word.
 //!
 //! Nothing past the size it is told to sign is read, so a bundle or a tile planted beyond it by
 //! whoever can push is never signed.
+//!
+//! [`check_to_begin`] is the same step for a successor's first tree, which has no checkpoint of
+//! its own to extend: it holds the log-continuation leaf alone, and is signed only where that leaf
+//! holds the final checkpoint of the log whose log-end names this key, signed by both keys, as
+//! [`follow`] requires of every client.
+//!
+//! [`follow`]: crate::log::follow
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -35,8 +46,8 @@ use super::repository::RECORD_LIMIT;
 use crate::AttestationKey;
 use crate::LogVkey;
 use crate::log::{
-    DirFiles, Extension, KeyChange, KeyHistory, Leaf, LeafPos, LogError, LogFiles,
-    SignedCheckpoint, verify_extension,
+    Beginning, DirFiles, Extension, KeyChange, KeyHistory, Leaf, LeafPos, LogError, LogFiles,
+    SignedCheckpoint, VerifiedLog, verify_beginning, verify_extension,
 };
 
 /// Why `trigon log sign` will not sign a tree.
@@ -61,6 +72,12 @@ pub enum Unsignable {
 /// `keys/attestation.pub`, or a key its operator names. A key change among the new leaves moves it,
 /// and a record after that change is held to the new key. `published` is the newest checkpoint of
 /// the log known to have been published, which the new tree must extend as well as its own base.
+///
+/// `successor` is the log key of the successor the tree's last leaf, a log-end, names: in hand
+/// because the step signing the final checkpoint holds that key too, and cosigns it with it. A
+/// new log-end is refused without it, or with another key than the one it names; and one given
+/// where the tree does not end with a log-end naming it is refused, so that a successor key is
+/// never used to cosign anything but a final checkpoint.
 pub fn check_to_sign(
     repo: &Path,
     dir: &str,
@@ -68,6 +85,7 @@ pub fn check_to_sign(
     size: u64,
     current: &AttestationKey,
     published: Option<&SignedCheckpoint>,
+    successor: Option<&LogVkey>,
 ) -> Result<Extension, Unsignable> {
     let ext = verify_extension(&DirFiles::in_repository(repo, dir), vkey, size)?;
     if let Some(p) = published {
@@ -79,6 +97,22 @@ pub fn check_to_sign(
         origin: origin.clone(),
         why,
     };
+    if let Some(s) = successor {
+        let names = |l: &Leaf| matches!(l, Leaf::LogEnd(e) if e.successor.log_key == s.to_string());
+        match ext.leaves().last() {
+            Some((_, l)) if names(l) => {}
+            last => {
+                return Err(refuse(
+                    last.map_or(size, |(i, _)| i),
+                    format!(
+                        "a successor's log key, {s}, was given, and the tree does not end with a \
+                         log-end naming it; a successor's key cosigns only the final checkpoint \
+                         of the log that names it"
+                    ),
+                ));
+            }
+        }
+    }
     // Every file a record names is read inside the repository and nowhere else, as a client reads
     // it: a record or an evidence file that is a link out of the tree reads nothing.
     let files = DirFiles::new(repo);
@@ -166,18 +200,100 @@ pub fn check_to_sign(
                 }
             }
             Leaf::Heartbeat(_) => {}
-            Leaf::Release(_) | Leaf::LogEnd(_) | Leaf::LogContinuation(_) if new => {
+            // Both keys present, and the one given is the one named: `trigon log sign` cosigns the
+            // final checkpoint with it, which is what the successor's log-continuation holds.
+            Leaf::LogEnd(end) if new => {
+                let named = &end.successor;
+                match successor {
+                    Some(s) if s.to_string() == named.log_key => {}
+                    Some(s) => {
+                        return Err(refuse(
+                            index,
+                            format!(
+                                "it is a log-end naming the successor `{}` under the log key {}, \
+                                 and the successor's key given is {s}",
+                                named.origin, named.log_key
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err(refuse(
+                            index,
+                            format!(
+                                "it is a log-end naming the successor `{}`, and a log is ended \
+                                 only by a `trigon log sign` that holds the successor's log key \
+                                 too (--successor-key), to cosign the final checkpoint the \
+                                 successor continues from: a log ended in favour of a key nobody \
+                                 has shown is held is a log nobody may be able to continue",
+                                named.origin
+                            ),
+                        ));
+                    }
+                }
+            }
+            Leaf::LogContinuation(_) if new => {
                 return Err(refuse(
                     index,
-                    format!(
-                        "it is a {} leaf, which no command of this build writes; the log key signs \
-                         one only once a command that checks it does",
-                        leaf.kind()
-                    ),
+                    "it is a log-continuation, which begins a successor and is signed only as \
+                     that log's first tree (`trigon log sign --continuing`), never appended to a \
+                     log with a checkpoint of its own"
+                        .into(),
+                ));
+            }
+            Leaf::Release(_) if new => {
+                return Err(refuse(
+                    index,
+                    "it is a release leaf, which no command of this build writes; the log key \
+                     signs one only once a command that checks it does (docs/19 §10 phase 9)"
+                        .into(),
                 ));
             }
             Leaf::Release(_) | Leaf::LogEnd(_) | Leaf::LogContinuation(_) => {}
         }
     }
     Ok(ext)
+}
+
+/// Check the first tree of a successor log, at `dir` in the repository at `repo`, for signing
+/// under its own log key `vkey`: the tree `trigon log succeed` writes, of `size` leaves, which is
+/// one — the log-continuation alone, since everything after it is published into the log like
+/// into any other.
+///
+/// `predecessor` is the log whose log-end names this one, verified by the caller from where it is
+/// (`find_predecessor`); `published` the newest checkpoint of it known to have been published,
+/// which it must extend, so that a successor is never begun from a predecessor rolled back. The
+/// continuation must hold the predecessor's final checkpoint signed by both log keys, and the
+/// checkpoint [`Beginning::sign`] makes is held to [`follow`] before it is returned: what every
+/// client asks of a succession is asked here first, with the client's own code.
+///
+/// [`follow`]: crate::log::follow
+pub fn check_to_begin(
+    repo: &Path,
+    dir: &str,
+    vkey: &LogVkey,
+    size: u64,
+    predecessor: &VerifiedLog,
+    published: Option<&SignedCheckpoint>,
+) -> Result<Beginning, Unsignable> {
+    if let Some(p) = published {
+        let extends = p.origin() == predecessor.origin()
+            && p.size() <= predecessor.size()
+            && predecessor.tree().root_at(p.size()).ok().as_ref() == Some(p.root());
+        if !extends {
+            return Err(Unsignable::Log(LogError::Rotation(format!(
+                "the log `{}` this would continue has {} leaves, and does not extend the \
+                 checkpoint of {} leaves of it published from this host: a successor is begun \
+                 only from the log as it was published",
+                predecessor.origin(),
+                predecessor.size(),
+                p.size()
+            ))));
+        }
+    }
+    Ok(verify_beginning(
+        &DirFiles::in_repository(repo, dir),
+        vkey,
+        size,
+        predecessor,
+    )?)
 }

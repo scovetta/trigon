@@ -46,6 +46,9 @@ axum = { workspace = true, optional = true }
 trigon-stabilize-wasm = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 anyhow.workspace = true
+# The divergence feed names each record by an RFC 6920 `ni:` URI, which is base64url. Already in
+# the tree through trigon-attest.
+base64.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -76,4 +79,6 @@ trigon-archive.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 zip_crate = { package = "zip", version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
-base64.workspace = true
+# The divergence feed is tested by parsing it as XML, with a parser that knows nothing of how it
+# was written.
+roxmltree = "0.20"

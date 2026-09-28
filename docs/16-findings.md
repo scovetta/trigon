@@ -4846,3 +4846,202 @@ its fix.
 - **D27, new**: a host with no memory of the log — a fresh CI runner — is held only to what the
   repository holds, and on one rolled back its log key signs a second root. The ruleset is what
   forbids the rollback, and keeping the state directory between runs is what catches one.
+
+### 3.101 The rest of `trigon publish`: release assets, the feed, rotation, pruning, and the switch
+
+`docs/19` §10 phase 5, second half, on 2026-09-28. Everything phase 5a refused rather than
+half-honoured is built: `rebuilt_artifacts = "github-release"`, `divergences = "feed"`, a log that
+has ended, and the release, log-end and log-continuation leaves `log sign` would not sign. The
+spike is written and has **not** been run.
+
+**What changed.**
+
+- **Rebuilt artifacts as release assets** (`crates/trigon/src/publish/release.rs`). Step 3 finds or
+  uploads each verdict's rebuilt artifact as the asset `sha256-<hex>` of the digest the verdict
+  signs, in the month's release `rebuilt-YYYY-MM`, continued as `.2`, `.3` once a release holds
+  1,000 assets, before anything that names it is written. An asset of the name already in this
+  month's or last month's series is reused only where GitHub reports its digest and its size and
+  digest are the artifact's, and refused where either is another's; one GitHub left unfinished, or
+  reports no digest for, is removed and uploaded again from the store, once the store has yielded
+  the bytes to put in its place. No asset goes into a draft release. An exact rebuild, the published
+  artifact itself, is not uploaded, and a void has none. Refused before anything is written: a
+  location that is not a github.com repository, a missing token, an artifact not under 2 GiB, and a
+  run whose stored rebuilt artifact is not the one its verdict signs. GitHub's REST API over the
+  `reqwest` client the crate already links, with the shared User-Agent; the token comes from
+  `GITHUB_TOKEN` or `GH_TOKEN` only, prints as `***`, rides only in the `Authorization` header, and
+  goes only to the API and to an upload URL on GitHub's upload host — or, under `TRIGON_GITHUB_API`,
+  which must be HTTPS or loopback, to that server's own origin. No redirect is followed, and a
+  refusal that quotes the token back has it taken out. A dry run says where each asset would go and
+  uploads nothing, token or not.
+- **The divergence feed** (`publish/feed.rs`). Under `divergences = "feed"` a divergence is
+  published, and `feed/divergences.atom` is regenerated from the log whole in the same commit — and
+  in the commit of any record superseding a divergence, and by `--reconcile`, which also removes
+  anything else under `feed/`. The most recent 200 divergences, newest first; each entry's id is
+  its record's digest as an RFC 6920 `ni:` URI, it links the record file and the dispute pointer
+  the record signs, carries the falsifying command, and says so where its record is superseded,
+  missing or failing verification. Written by hand, escaped for XML with the characters XML cannot
+  carry replaced, and tested by parsing it with `roxmltree`, a dev-dependency that knows nothing of
+  how it was written. `log init`'s README states the count.
+- **`trigon log key-change --key <current> --new-key <new>`** logs a key-change leaf through
+  publish's steps 1 and 4 to 6. The leaf is signed by `trigon log key-change-leaf`, a hidden child
+  that opens no socket, as `attest` is, and held by the parent to the origin, time and keys it asked
+  for; the parent refuses a `--key` that is not the key the log has now, and a new key the log has
+  retired. From that leaf on, `publish` refuses a record not signed by the current key, with the key
+  it needs, and says after the change how to switch: `trigon attest --key <new key>`; nothing in
+  `evidence.toml` names the signing key, and `keys/attestation.pub` stays the key the chain starts
+  at. `--dry-run` signs nothing: the keys' public halves come from `trigon public-key`, a child, and
+  the leaf is shown with its signatures empty.
+- **`trigon log succeed --origin <o> --log-key <file> [--url <location>]… [--dir <dir>]`** logs a
+  log-end naming the successor's origin, log key, URLs and directory — the next free `log/<n>` by
+  default — and begins the successor with its log-continuation. `publish` learns the successor's
+  key from `trigon log public-key <file>`, new and in both builds, run as a child; `log sign
+  --successor-key` signs the final checkpoint and cosigns it with the successor's key, which is
+  written as the old log's `checkpoint` with both signatures; `publish` writes the continuation,
+  holding that note and logged at the log-end's time, and `log sign --continuing <tree>` signs the
+  successor's first checkpoint. In the same repository all of it is one commit. With `--url`, the
+  repository at the first URL is cloned and looked at before the log-end is written — refused with
+  nothing written where it is the evidence repository itself, cannot be reached, holds `keys/`,
+  `log/` or the successor's directory, names git attributes, or would not take a push, which `git
+  push --dry-run` asks — then the old log's end is pushed and the successor begun as that
+  repository's first commit, carrying the old repository's `kill-switch` where it is set. A
+  publisher stopped between (`TRIGON_PUBLISH_DIE_AT=ended`) leaves an ended log that refuses every
+  publication, and the same `log succeed` run again begins the successor from the final checkpoint
+  published. Both rotations regenerate the README's account of key changes and successors from the
+  log.
+- **`log sign`** accepts the new leaves under the rules phase 4a's rotation code applies
+  (`trigon_attest::evidence::check_to_sign`, which now takes the successor's key, and the new
+  `check_to_begin`, over `log::verify_beginning` and `log::find_predecessor`): a log-end only with
+  the successor's key in hand and equal to the one named, and a successor key never for a tree that
+  does not end naming it; a successor's first tree only as its log-continuation alone, holding the
+  predecessor's final checkpoint signed by both keys, logged no earlier than the log-end, from a
+  predecessor extending what this host published of it, and only once `follow` — the client's own
+  code — accepts the pair over the checkpoint staged before it is written. For a successor's later
+  trees it follows the whole chain's key changes from `keys/attestation.pub`. A release leaf is
+  still refused.
+- **`publish` into a chain.** The chain of logs `keys/log.vkey` begins must end, in the repository,
+  at `[publish] origin`'s log, which a publication appends to; `RunRecord.published.log` names
+  `log/<n>`. Publishing under the ended log's origin is refused with where publishing goes on.
+- **Pruning.** `publish --prune` prunes the rebuilt artifact of each run it published or completed,
+  with the store's own prune, after step 7. `attest --prune` refuses, before signing anything, a
+  run not yet published where a publish repository is configured with `rebuilt_artifacts =
+  "github-release"` and a publication would upload its artifact — one the gate withholds now
+  included, since a confirmation can release it — and prunes as it always did an exact rebuild, a
+  void run, the second of an agreeing pair whose first is published, and anything anywhere else.
+- **`trigon serve`** reports the repository's kill-switch beside `--stop-divergences`
+  (`publish/switch.rs`, injected into `trigon-api` as the decompiler is): read with `git ls-tree`
+  from the commit the working clone's last fetch that succeeded brought the branch to, as of when
+  that fetch began, both of which `publish` records in the clone's git directory
+  (`trigon-fetched`) only once a fetch succeeds; from the branch itself for a working tree
+  published into. Set wherever git lists anything named `kill-switch`, as `publish` counts it;
+  clear only where it lists nothing; and `unknown`, never clear, with no clone, no record of a
+  fetch, or a tree git cannot read. `serve` reads it on starting and every ten seconds after, on a
+  blocking thread, and hands every request the last reading (`trigon_api::cached_switch`).
+  `/v1/health` and the page's boot island carry `kill_switches`, each with what it stops; an
+  anonymous reader is told the state and when, not the repository or the clone's path. The header
+  shows both. `serve` now prints the address it bound, so `--bind 127.0.0.1:0` says which port.
+- **The spike** is `scripts/evidence-spike.sh`: with `TRIGON_LIVE=1`, against a scratch repository
+  its user names, it grows synthetic records shaped as §7 sizes them to each of 10⁴ and 10⁵,
+  timing each growth push, the consumer's partial shallow sparse clone at each size, and that
+  clone's fetch after a publication-sized push at that size; times further publication-sized
+  pushes of a few hundred files, paced under GitHub's six pushes a minute, with the largest
+  clone's fetch after each; makes unauthenticated git reads of the public URL above GitHub's
+  advice of about 15 a second — `ls-remote`s and shallow blobless fetches into empty repositories —
+  and records what each answered; uploads small assets and one large one to a release and times
+  listing them, and with `--probe-asset-limit` tries a 1,001st; and records the repository's size
+  and the API's rate limits. Before anything is pushed it refuses a push or clone URL that does
+  not name the repository, a branch other than `main`, a release it did not make, and a `main`
+  holding anything but its own `SPIKE.md`, `keys/`, `log/`, `records/` and `index/`. It never
+  force-pushes or deletes, and keeps its token off every command line. Its record
+  generator was run offline (8 KB records, 200-byte index files, bundles and tiles in tlog-tiles
+  paths); **the spike itself has not been run**: it needs a GitHub repository this environment
+  must not create. Its results belong here, and in D2, when it is.
+
+**Decided here, and why.**
+
+- **`keys/` stays the keys the chain starts at.** Every client pins them, and follows each change
+  from them; rewriting `keys/attestation.pub` on a key change would have `publish`'s own
+  verification refuse every record signed before it, and rewriting `keys/log.vkey` on a succession
+  would start its chain at the successor and hide the old log's records from the supersession
+  check. The README, regenerated from the log, names the keys after each rotation.
+- **The final checkpoint carries the successor's cosignature in the old log's `checkpoint` file
+  too.** It makes the continuation reproducible from what was published, which is what lets a
+  succession into another repository be finished after a stop between its two pushes without the
+  old key signing anything twice; a reader of the old log ignores the second line, as it ignores a
+  witness's.
+- **The processes that push hold no key.** `publish` never opened the log key; now neither
+  `log succeed`, which asks `log public-key` for the successor's verifier key, nor `log key-change`,
+  which has a socketless child sign the leaf with both attestation keys. Only `attest`,
+  `key-change-leaf` and `log sign` open a key, and none of them opens a socket.
+- **An asset is found across two months of releases, not every release.** A retry is minutes
+  after the attempt it retries; a duplicate asset in a later month's release is harmless, since no
+  record names a release, and listing every release's every asset on every publication would grow
+  without bound.
+- **A token is required whenever the mode is on and runs are published**, even when every run named
+  turns out to be void: the refusal is before anything is read, which is where a missing credential
+  is cheapest to hear about.
+- **An exact rebuild is not uploaded.** Its bytes are the published artifact's, which docs/19 §4.1
+  says is not ours to redistribute and which every reader of the record already holds.
+
+**What this does not do.**
+
+- **Run the spike.** Above; `docs/19`'s status table says so too.
+- **Notify anyone of a divergence.** The feed is published; safeguard 4 becomes "published at
+  publish time", as D7 proposes, and D29 says what that is and is not.
+- **See across repositories.** A successor in another repository is published into on its own
+  chain, so a verdict for an artifact with a current record in the old repository is not refused
+  there as a second current record (D31); following a chain across repositories is phase 6's.
+- **Run a live test against GitHub in CI.** `live_an_asset_is_uploaded_to_github_and_reused` runs
+  only with `TRIGON_LIVE=1` and `TRIGON_LIVE_GITHUB_REPO`, and skips otherwise; every other test of
+  the release path speaks to a server on `127.0.0.1:0` that serves the five endpoints used, and to
+  a git repository reached by a GitHub URL through `url.<local>.insteadOf`, with
+  `GIT_ALLOW_PROTOCOL=file` so that nothing could reach the network if the rewrite failed.
+
+**Found on the way.**
+
+- **A test world inherited the developer's GitHub token.** `World::command` removed every
+  `TRIGON_*` and nothing else, so a `GITHUB_TOKEN` in the shell running the tests would have reached
+  a publish with no `TRIGON_GITHUB_API` — `api.github.com`. It removes `GITHUB_TOKEN` and `GH_TOKEN`
+  now, and every test git is let reach files only.
+- **An operator's mistake read as the evidence source's fault.** A key-change signed with one key
+  twice surfaced as a `LogError`, which the fault report labels "the evidence source's: its log
+  could not be read". The child says what it is, in the operator's words, and so does `succeed` of
+  a `--dir` no log-end can name.
+- **`serve` printed the address it was asked for**, `127.0.0.1:0`, not the one it bound.
+
+**Found in review, and fixed.**
+
+- **`serve` stamped an old switch with a new time.** The report was as of `FETCH_HEAD`'s time, and
+  a fetch that fails rewrites `FETCH_HEAD` too: with the remote unreachable and a daily heartbeat
+  failing, a switch set meanwhile read "clear, as of today". The time and the commit are now
+  recorded by `publish` only after a fetch succeeds.
+- **"Clear" meant "git said no".** `cat-file -e` failing for any reason — a spawn that failed, an
+  unreadable object, a `kill-switch` committed as a submodule entry whose commit the clone does not
+  hold, which `publish` counts as set — read as clear. It is `ls-tree` now, and only an empty
+  listing is clear.
+- **Every request forked `git`.** `/v1/health` and every page read the switch on the request path,
+  four `git` processes blocking a runtime worker, for anonymous readers too. Read on a timer now.
+- **A log could be ended naming a place no successor could be begun.** `log succeed --url` pushed
+  the log-end before looking at the URL; naming the evidence repository itself, or any repository
+  with a log, ended the log for good with nowhere to go, and every later `log succeed` refused the
+  same way. Looked at first now, with nothing written on a refusal.
+- **A succession elsewhere cleared the kill-switch.** The successor's first commit carried no
+  `kill-switch`, so switching `[publish] repo` to it published divergences again although nobody
+  had cleared safeguard 5. It is carried over now.
+- **A run completed after a succession was completed against the wrong log.** Its leaf was looked
+  for in the last log's history under the last log's key; it is looked for in the log of the chain
+  that holds it, which `published.log` now names.
+- **An asset was reused on its size alone where GitHub reported no digest**, and a failed release
+  creation could fall back on a draft of the same tag, uploading into a release the public cannot
+  see. The first is uploaded again, and the second refused.
+- **`log key-change --dry-run` signed the leaf with both keys and printed it**, though its help said
+  it signs nothing; a preview left in a CI log was a hand-over anyone holding the log key could
+  append.
+- **`attest --prune` refused for ever** a run no publication would upload an artifact for, such as
+  the second of an agreeing pair whose first is published.
+- **Nothing tested the checks the release path's security rests on**: the kill-switch stopping a
+  divergence the feed would publish, an asset of the artifact's name that is not the artifact, one
+  left unfinished, an upload URL on another host, a server quoting the token back, and the API
+  base's own rules. Each has a test now that fails when the check is removed.
+- **The spike measured less than it said, and guarded less.** The fetch was timed at the largest
+  size only, git reads were not probed at all, and the guard took any repository with a `SPIKE.md`
+  and never checked that the repository the API wrote releases to was the one it had read.

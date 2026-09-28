@@ -450,7 +450,10 @@ enum Cmd {
         /// Sign with an ed25519 key held in this file. Without one the statements are unsigned.
         #[arg(long)]
         key: Option<PathBuf>,
-        /// Drop the rebuilt artifact's bytes afterwards, keeping its digests.
+        /// Drop the rebuilt artifact's bytes afterwards, keeping its digests. Refused for a run not
+        /// published yet where a publish repository is configured with `rebuilt_artifacts =
+        /// "github-release"`, which uploads the artifact from the store: `trigon publish --prune`
+        /// prunes it once it is published.
         #[arg(long)]
         prune: bool,
         /// A published record file this run's statement supersedes. It is signed into the
@@ -488,9 +491,11 @@ enum Cmd {
     /// building on it; asks the gate about every run, through the index `trigon serve` uses, with
     /// the kill-switch read from the repository; publishes a run the gate calls void only as
     /// `void/v1`, and a withheld run not at all; refuses divergences while `[publish] divergences`
-    /// is "refuse"; has `trigon log sign`, a child process that holds the log key, sign the new
-    /// checkpoint; and pushes one commit, never forced. The repository is `--repo`, else
-    /// `TRIGON_PUBLISH_REPO`, else `[publish] repo`.
+    /// is "refuse", and publishes each with its entry in `feed/divergences.atom` under "feed";
+    /// uploads each verdict's rebuilt artifact as a release asset first where `rebuilt_artifacts =
+    /// "github-release"`, with a token from GITHUB_TOKEN or GH_TOKEN; has `trigon log sign`, a
+    /// child process that holds the log key, sign the new checkpoint; and pushes one commit, never
+    /// forced. The repository is `--repo`, else `TRIGON_PUBLISH_REPO`, else `[publish] repo`.
     #[cfg(feature = "build")]
     Publish {
         /// Runs to publish, by id; their leaves are logged in the order given.
@@ -516,9 +521,14 @@ enum Cmd {
         /// run no `trigon log sign`, and leave the repository and the working clone as they are.
         #[arg(long)]
         dry_run: bool,
-        /// Rebuild `index/` from the log, in one commit.
+        /// Rebuild `index/`, and the divergence feed, from the log, in one commit.
         #[arg(long)]
         reconcile: bool,
+        /// Once each run is published and its publication recorded, drop its rebuilt artifact's
+        /// bytes from the store, keeping its digests, as `trigon attest --prune` does. A
+        /// divergence keeps them.
+        #[arg(long, conflicts_with_all = ["withdrawal", "heartbeat", "reconcile", "dry_run"])]
+        prune: bool,
     },
     /// Score a sweep against a labelled corpus.
     ///
@@ -1034,8 +1044,11 @@ enum LogCmd {
     /// holds the log key.
     ///
     /// Signs only a tree whose first leaves hash to the checkpoint it holds, which must verify
-    /// under this key, and whose every new leaf is a heartbeat or names a record file in the tree
-    /// that every client would accept, with its evidence beside it. Reads nothing past `--size`.
+    /// under this key, and whose every new leaf is a heartbeat, a key change signed by the current
+    /// attestation key and the new one, a log-end naming the key `--successor-key` holds, or names
+    /// a record file in the tree that every client would accept, with its evidence beside it.
+    /// Reads nothing past `--size`. With `--continuing`, begins a successor instead, only as the
+    /// log its predecessor's log-end names.
     Sign {
         /// The repository's working tree.
         #[arg(long)]
@@ -1057,6 +1070,104 @@ enum LogCmd {
         /// has neither.
         #[arg(long, conflicts_with_all = ["size", "attestation_key"])]
         init: bool,
+        /// The successor's log key, where the tree ends the log with a log-end naming it: the
+        /// final checkpoint is signed with `--key` and cosigned with this, as the successor's
+        /// log-continuation leaf holds it. Refused unless the log-end names this key.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["init", "continuing"])]
+        successor_key: Option<PathBuf>,
+        /// Begin the log at `--log` as a successor instead: sign its first checkpoint, over its
+        /// log-continuation leaf alone, where a log of the chain in this tree — the old
+        /// repository's, for a successor in another — ends naming `--key`.
+        #[arg(long, value_name = "TREE", conflicts_with_all = ["init", "attestation_key"])]
+        continuing: Option<PathBuf>,
+    },
+    /// Print the verifier key of a log key: the line `keygen` printed, which a client pins.
+    ///
+    /// Reads the private key and computes; nothing is written.
+    PublicKey {
+        /// The log key file, as `trigon log keygen` wrote it.
+        key: PathBuf,
+    },
+    /// Sign a key-change leaf with the current attestation key and the new one, and print it: run
+    /// by `trigon log key-change` as a child process, so that the process that fetches and pushes
+    /// never opens an attestation key. Opens no socket, and writes nothing.
+    #[command(hide = true)]
+    KeyChangeLeaf {
+        /// The attestation key current now.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        /// The attestation key to change to.
+        #[arg(long, value_name = "FILE")]
+        new_key: PathBuf,
+        /// The origin of the log the leaf is logged in, which both signatures cover.
+        #[arg(long)]
+        origin: String,
+        /// When the leaf is logged, in Unix seconds, which both signatures cover.
+        #[arg(long)]
+        time: u64,
+    },
+    /// Rotate the attestation key: log a key-change leaf signed by the current key and the new
+    /// one, as one commit (`docs/19` §8).
+    ///
+    /// From that leaf on, `trigon publish` publishes only records signed by the new key, and
+    /// every client refuses a record signed by the old one whose leaf comes later. Sign with the
+    /// new key from then on: `trigon attest --key <new key>`. The repository's
+    /// `keys/attestation.pub`, and every client's pinned key, stay the key the chain starts at.
+    #[cfg(feature = "build")]
+    KeyChange {
+        /// The attestation key current now, whose private half signs the change.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        /// The attestation key to change to, as `trigon keygen` wrote it.
+        #[arg(long, value_name = "FILE")]
+        new_key: PathBuf,
+        /// The store whose `publish/` holds the working clone and the lock, as for `publish`.
+        #[arg(long, default_value = "./trigon-store")]
+        store: PathBuf,
+        /// The evidence repository. Else `TRIGON_PUBLISH_REPO`, else `[publish] repo`.
+        #[arg(long, value_name = "LOCATION")]
+        repo: Option<String>,
+        /// Print the leaf and the files it would write, and sign nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// End the log, and begin its successor under a new log key (`docs/19` §8).
+    ///
+    /// Writes a log-end leaf naming the successor — its origin, its log key, where it is — and
+    /// the successor's first leaf, a log-continuation holding the old log's final checkpoint
+    /// signed by both log keys. In this repository, at `log/<n>`, both are one commit; in another
+    /// (`--url`), that repository is looked at first — one that is this repository, holds a log,
+    /// or cannot be reached or pushed to is refused with nothing written — then the old log's end
+    /// is pushed and the successor begun there after, with this repository's kill-switch where it
+    /// is set, and running this again finishes a succession stopped between the two. Then set
+    /// `[publish] origin` and `log_key` to the successor's.
+    #[cfg(feature = "build")]
+    Succeed {
+        /// The successor's origin, as its log key names it.
+        #[arg(long)]
+        origin: String,
+        /// The successor's log key, made with `trigon log keygen --origin <origin>`. Read only
+        /// by the `trigon log sign` this runs.
+        #[arg(long, value_name = "FILE")]
+        log_key: PathBuf,
+        /// Where the successor is cloned from, when it is in another repository: the first is
+        /// where it is begun, and every one is named in the log-end. Without any, it is in this
+        /// repository.
+        #[arg(long = "url", value_name = "LOCATION")]
+        urls: Vec<String>,
+        /// The successor's directory: `log/<n>`, the next free one by default, in this
+        /// repository; `log` by default in another.
+        #[arg(long)]
+        dir: Option<String>,
+        /// The store whose `publish/` holds the working clone and the lock, as for `publish`.
+        #[arg(long, default_value = "./trigon-store")]
+        store: PathBuf,
+        /// The evidence repository. Else `TRIGON_PUBLISH_REPO`, else `[publish] repo`.
+        #[arg(long, value_name = "LOCATION")]
+        repo: Option<String>,
+        /// Print the log-end and the files it would write, and sign nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -1795,6 +1906,8 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             log,
             attestation_key,
             init,
+            successor_key,
+            continuing,
         }) => evidence_log::sign(evidence_log::SignArgs {
             tree,
             key,
@@ -1802,6 +1915,47 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             log,
             attestation_key,
             init,
+            successor_key,
+            continuing,
+        }),
+        Cmd::Log(LogCmd::PublicKey { key }) => evidence_log::public_key(&key),
+        Cmd::Log(LogCmd::KeyChangeLeaf {
+            key,
+            new_key,
+            origin,
+            time,
+        }) => evidence_log::key_change_leaf(&key, &new_key, &origin, time),
+        #[cfg(feature = "build")]
+        Cmd::Log(LogCmd::KeyChange {
+            key,
+            new_key,
+            store,
+            repo,
+            dry_run,
+        }) => publish::key_change(publish::KeyChangeArgs {
+            key,
+            new_key,
+            store,
+            repo,
+            dry_run,
+        }),
+        #[cfg(feature = "build")]
+        Cmd::Log(LogCmd::Succeed {
+            origin,
+            log_key,
+            urls,
+            dir,
+            store,
+            repo,
+            dry_run,
+        }) => publish::succeed(publish::SucceedArgs {
+            origin,
+            log_key,
+            urls,
+            dir,
+            store,
+            repo,
+            dry_run,
         }),
         #[cfg(feature = "build")]
         Cmd::Publish {
@@ -1812,6 +1966,7 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             heartbeat,
             dry_run,
             reconcile,
+            prune,
         } => publish::run(publish::Args {
             runs,
             store,
@@ -1820,6 +1975,7 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             heartbeat,
             dry_run,
             reconcile,
+            prune,
         }),
         Cmd::PublicKey { key, pem } => {
             let k = load_key(&key)?;
@@ -3489,7 +3645,8 @@ fn serve_corpus(
     refresh_seconds: u64,
     queue: Option<String>,
 ) -> Result<()> {
-    let store = trigon_store::Store::local(store)?;
+    let store_path = store;
+    let store = trigon_store::Store::local(store_path)?;
     // The gate's confirmation settings, from where every other command reads them (`docs/19`
     // §2.4): `serve` answers anonymous readers from the gate, and a gate that counted two attempts
     // differently here than `publish` does would show a run as published that is never published.
@@ -3519,6 +3676,9 @@ fn serve_corpus(
                 .then(|| crate::decompile::sources(a, b))
                 .flatten()
         })),
+        // The evidence repository's own kill-switch, beside this server's (`docs/19` §3), read
+        // from the working clone `trigon publish` keeps in this store.
+        repository_switch: publish::repository_switch(store_path, &evidence),
     };
     // Loudly, not in a doc comment nobody reads at three in the morning. A store bound to a
     // routable address without `--public` serves build logs that were never redacted, and D14 says
@@ -11818,6 +11978,9 @@ mod attestor {
                     .next()
                     .context("this store holds no runs")?,
             };
+            if args.prune {
+                refuse_prune_before_publication(&store, &id, &config).await?;
+            }
             let signed = sign_run(&store, &id, &config, signer.as_ref(), superseded).await?;
             finish(
                 &store,
@@ -11830,6 +11993,69 @@ mod attestor {
             )
             .await
         })
+    }
+
+    /// `attest --prune`, where the rebuilt artifact is published from the store: refused, before
+    /// anything is signed, for a run that is not published yet and whose publication would upload
+    /// it (`docs/19` §10 phase 5 step 7).
+    ///
+    /// With a publish repository configured and `rebuilt_artifacts = "github-release"`, `trigon
+    /// publish` uploads each verdict's rebuilt artifact from the store as a release asset; pruned
+    /// first, it has nothing to upload, and the record would name an asset nobody can fetch. Once
+    /// the run is published, `trigon publish --prune` prunes it, and so does this. A run no
+    /// publication ever uploads an artifact for is pruned as it always was, since holding its
+    /// bytes back would hold them for ever: an exact rebuild, which is the published artifact
+    /// itself; a run the gate calls void, published only as `void/v1`; and the second of two
+    /// agreeing attempts whose first is published, which `publish` refuses whole. A run the gate
+    /// withholds now is refused, since a confirmation can release it later. Anywhere else, pruning
+    /// is as it always was.
+    async fn refuse_prune_before_publication(
+        store: &Store,
+        id: &str,
+        config: &EvidenceConfig,
+    ) -> Result<()> {
+        let p = config.publish();
+        if p.repo.is_none()
+            || p.rebuilt_artifacts != trigon_attest::config::RebuiltArtifacts::GithubRelease
+        {
+            return Ok(());
+        }
+        let record = store.get_run(id).await?;
+        if record.published.is_some() || record.outcome.as_deref() == Some("exact") {
+            return Ok(());
+        }
+        // Asked of the gate `publish` asks, through the index `trigon serve` builds.
+        let index = trigon_api::Index::new();
+        index
+            .refresh(
+                store,
+                trigon_api::Switches {
+                    stop_divergences: false,
+                    confirmation: trigon_api::Confirmation::from(p),
+                },
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("reading the store: {e}"))?;
+        let now = index.entry(id).map(|e| e.publication);
+        if matches!(now, Some(trigon_api::Publication::Void { .. }))
+            || index.agreeing(id).iter().any(|o| o.published.is_some())
+        {
+            return Ok(());
+        }
+        let withheld = match now {
+            Some(trigon_api::Publication::Withheld { because }) => format!(
+                " The publication gate withholds it now ({}), and a confirmation can release it \
+                 later.",
+                because.key()
+            ),
+            _ => String::new(),
+        };
+        bail!(
+            "refusing --prune: run `{id}` is not published yet, and with `[publish] \
+             rebuilt_artifacts = \"github-release\"` its rebuilt artifact is uploaded from the \
+             store when it is.{withheld} Attest it without --prune, and `trigon publish {id} \
+             --prune` prunes it once it is published. Nothing was signed"
+        );
     }
 
     /// What signs for `rebuild --attest`: the key in `key`, or nothing, and then the statement is

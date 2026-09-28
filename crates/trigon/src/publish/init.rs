@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use trigon_attest::config::{Env, EvidenceConfig, check_origin, read_attestation_key};
-use trigon_attest::location::{Location, Transport};
+use trigon_attest::location::Location;
 use trigon_attest::log::{Checkpoint, SignedCheckpoint};
 use trigon_attest::{AttestationKey, LogVkey};
 
@@ -282,7 +282,7 @@ impl Drop for Unwind<'_> {
 
 /// The README of a new evidence repository: `docs/19` §2.3 and §10 phase 5 say it states the
 /// origin, the keys, the checkpoint rate and how to report a dispute.
-fn readme(
+pub(super) fn readme(
     origin: &str,
     vkey: &LogVkey,
     attestation: &AttestationKey,
@@ -328,10 +328,18 @@ fn readme(
          \n\
          To dispute a record, report it there with the record's digest, the name of its file\n\
          under `records/`, and what you believe is wrong. A record is never deleted: a correction\n\
-         is a new record that supersedes it, and both stay in the log.\n",
+         is a new record that supersedes it, and both stay in the log.\n\
+         \n\
+         ## Divergence feed\n\
+         \n\
+         Where this repository publishes divergences, `feed/divergences.atom` is an Atom feed of\n\
+         the most recent {} of them, newest first, each linking its record and where to dispute\n\
+         it. It is regenerated from the log in the commit that publishes each divergence; the\n\
+         log holds every one.\n",
         attestation.to_hex(),
         attestation.key_id(),
         human(heartbeat),
+        super::feed::ENTRIES,
     )
 }
 
@@ -375,17 +383,7 @@ fn github_repository(origin: &str, location: &Location) -> Option<String> {
     if let Some(path) = origin.strip_prefix("github.com/") {
         return from(path);
     }
-    let url = location.as_git_arg();
-    let path = match location.transport() {
-        Transport::Https | Transport::Http => url
-            .split_once("://")
-            .and_then(|(_, r)| r.strip_prefix("github.com/")),
-        Transport::Ssh => url
-            .strip_prefix("git@github.com:")
-            .or_else(|| url.strip_prefix("ssh://git@github.com/")),
-        _ => None,
-    }?;
-    from(path)
+    super::release::on_github(location)
 }
 
 #[cfg(test)]

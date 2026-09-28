@@ -123,6 +123,7 @@ async fn api_over(
         unauthenticated: who,
         decompiler: None,
         member_reads: trigon_api::default_member_permits(),
+        repository_switch: None,
     })
 }
 

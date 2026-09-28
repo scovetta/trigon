@@ -663,7 +663,11 @@ key is refused. The writer (`VerifiedLog::plan_append`) is held to what those re
 as one log can know it — a key change signed over this log's origin, a `log-end` naming a successor
 with another origin, a `log-continuation` signed by this log's key and holding another log's
 checkpoint — and the free `plan_append` to a tail that is the tree's own leaves, because a leaf or a
-full bundle once written is there for good.
+full bundle once written is there for good. The signer is held to more: `check_to_sign` signs a
+`log-end` only for a `log sign` holding the successor's log key it names, which cosigns the final
+checkpoint, and `check_to_begin` signs a successor's first tree, its `log-continuation` alone, only
+as the log a verified chain's `log-end` names and only once `follow` accepts the pair
+([`16-findings.md`](16-findings.md) §3.101).
 
 ### 2.11 The evidence repository's paths, and the index
 
@@ -681,7 +685,11 @@ first four hex characters of the name, everywhere, and every digest is whole.
 
 `<n>` is the canonicalisation rule the record's leaf names (§2.9), so a record is filed under the
 rule it was logged under, and a reader looking a purl up tries every rule it has. The rebuilt
-artifact is never in the repository: it is a release asset, if D4 publishes it.
+artifact is never in the repository: it is a release asset, if D4 publishes it, named
+`sha256-<hex>` by the digest its verdict signs, in a release `rebuilt-YYYY-MM` or the next of that
+month's series. The divergence feed, where one is published, is `feed/divergences.atom`: Atom, its
+entries' ids each record's digest as an RFC 6920 `ni:///sha-256;…` URI, derived from the log as the
+index is.
 
 An index file is canonical JSON, `{"key": …, "records": [{"record": "sha256:…", "leaf": 1203}]}`,
 with `"log": "log/<n>"` on an entry whose leaf is in a successor log. Its `key` is the index
@@ -816,8 +824,12 @@ and heartbeats (§10 phase 5): `publish` verifies the repository's log before bu
 the gate about every run, checks every record it would write as a client will, has `trigon log
 sign` — a child process, and the only thing that opens the log key — check the new tree again and
 sign its checkpoint, and pushes one commit, never forced ([`using-trigon.md`](using-trigon.md)).
-Rebuilt artifacts as release assets, the divergence feed and key rotation are the phase's second
-half.
+Its second half is built too: where configured, a verdict's rebuilt artifact is uploaded as a
+release asset named by the digest the verdict signs, before the commit that names it, and a
+divergence is published with its entry in a feed regenerated from the log; and `trigon log
+key-change` rotates the attestation key with a key-change leaf both keys sign — signed in a child
+process that opens no socket, as `attest` is — while `trigon log succeed` ends a log in favour of a
+successor under a new log key, as §2.10 describes the leaves a client follows.
 
 Until 2026-09-27 this section described a Rekor client in `trigon attest`, which logged each
 equivalence statement at attest time, before any gate had been asked, and a check of the log's

@@ -185,6 +185,7 @@ async fn a_member_with_no_bytes_says_which_of_the_three_reasons_it_is() {
             unauthenticated: trigon_api::Principal::Operator,
             decompiler: None,
             member_reads: trigon_api::default_member_permits(),
+            repository_switch: None,
         });
         let mut router = trigon_api::router(api);
         let res = router
@@ -321,6 +322,7 @@ async fn an_artifact_too_large_is_refused_without_reading_it() {
         unauthenticated: trigon_api::Principal::Operator,
         decompiler: None,
         member_reads: trigon_api::default_member_permits(),
+        repository_switch: None,
     });
 
     use axum::body::Body;
@@ -556,6 +558,7 @@ async fn a_dll_member_is_served_as_decompiled_csharp_from_the_hook_or_the_precom
             unauthenticated: trigon_api::Principal::Operator,
             decompiler,
             member_reads: trigon_api::default_member_permits(),
+            repository_switch: None,
         });
         let mut router = trigon_api::router(api);
         let res = router

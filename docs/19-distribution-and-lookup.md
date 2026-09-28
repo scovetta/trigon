@@ -19,7 +19,8 @@ decisions it waits on. What exists today:
 | The evidence log as pure code: C2SP signed notes and checkpoints, the log key in Go's format, RFC 6962 inclusion and consistency proofs, tiles and entry bundles and what an append writes, every leaf kind of §2.3, a log verified from its files, and key-change, log-end and log-continuation leaves followed as §8 says | built (§10 phase 4, first half; [findings](16-findings.md) §3.98) |
 | Records verified against the log, lookup over its leaves with every supersession applied, the paths of records, evidence and the index, and the index derived from the log; `verify-attestation --record` in the network-free verifier, with keys and checkpoint from `--source` or from flags, showing every §4.2 field; `--rerun-comparison` re-deriving what a verdict says the comparison found and holding the published report to it; two trees under one log key refused as an equivocation; and the threat model's properties for record, inclusion and consistency verification (P31–P33) | built (§10 phase 4, second half; [findings](16-findings.md) §3.99) |
 | The evidence repository and its writer: `trigon log keygen`, `log init` and `log sign`, and `trigon publish` for runs, withdrawals and heartbeats, with `--dry-run` and `--reconcile` — the remote's log verified before anything is built on it, the gate asked through the index `serve` uses, one commit pushed without force, a lost race discarded and built again, `RunRecord.published`; and a logged verdict without its falsifying command, or a divergence without its dispute pointer, failing verification | built (§10 phase 5, first half; [findings](16-findings.md) §3.100) |
-| Rebuilt artifacts as release assets, the divergence feed, `log key-change` and `log succeed`, `--prune`, `serve`'s report of the repository's kill-switch, and the spike | planned (§10 phase 5, second half) |
+| Rebuilt artifacts as release assets, uploaded before the commit that names them and reused on a retry; the divergence feed, regenerated from the log; `log key-change` and `log succeed`, followed by a fresh verification, with publishing going on into a successor in this repository or another; `publish --prune`, and `attest --prune` refusing a run not yet published; `serve`'s report of the repository's kill-switch beside its own | built (§10 phase 5, second half; [findings](16-findings.md) §3.101) |
+| The phase 5 spike against a scratch GitHub repository | written (`scripts/evidence-spike.sh`) and **not run**: it needs a repository of the owner's naming, which nothing here creates (§10 phase 5; [findings](16-findings.md) §3.101) |
 | `trigon evidence sync` and `trigon lookup` | planned (§10 phase 6) |
 
 ---
@@ -153,8 +154,9 @@ consumer checks both.
 
 ```
 trigon-evidence/                          main: a ruleset forbids force-push and deletion
-├── README.md                             origin, keys, checkpoint rate, how to dispute
-├── keys/                                 copies for people, and for trust on first use (§2.4)
+├── README.md                             origin, keys, checkpoint rate, how to dispute, rotations
+├── keys/                                 copies for people, and for trust on first use (§2.4);
+│   │                                       the keys the chain starts at, whatever rotated since
 │   ├── log.vkey                          C2SP verifier key for the log
 │   └── attestation.pub                   ed25519 SPKI PEM
 ├── log/                                  C2SP tlog-tiles
@@ -183,7 +185,7 @@ trigon-evidence/                          main: a ruleset forbids force-push and
 │   ├── purl1/c4/19/c419….json            sha256 of "pkg:npm/left-pad@1.3.0"
 │   └── pkg1/a0/5d/a05d….json             sha256 of "pkg:npm/left-pad": every version
 ├── feed/
-│   └── divergences.atom                  if D7 chooses a feed; recent entries only
+│   └── divergences.atom                  if D7 chooses a feed; the most recent 200 entries
 └── kill-switch                           present only while divergence publishing is stopped
 ```
 
@@ -194,6 +196,14 @@ fan-out is four hex characters, `<aa>/<bb>/`, everywhere, so at a million record
 some fifteen files; GitHub recommends at most 3,000 entries in a directory, and its file browser
 lists only the first 1,000. A consumer's default clone checks out `keys/`, `log/` and `records/`;
 `index/`, `evidence/` and the release assets are fetched only when a command needs them (§6).
+
+A rotation (§8) leaves `keys/` as it is: the keys there are the ones the chain of logs starts at,
+which is what a client pins and what trust on first use reads, and a client follows every key
+change and succession from them itself. The README's account of key changes and successors is
+regenerated from the log with each rotation, and names the keys after them. A successor in the same
+repository is at `log/<n>/`, laid out as `log/` is. The old log's final checkpoint, in its
+`checkpoint` file as in the successor's first leaf, carries the successor's cosignature beside its
+own key's, which a reader of the old log ignores as it ignores a witness's.
 
 The log is C2SP tlog-tiles with a C2SP tlog-checkpoint from its first leaf, so nothing about it
 changes when witnesses are added (§10 phase 7b). The files are laid out as tlog-tiles specifies, but
@@ -295,7 +305,8 @@ Plain-text transports (`git://`, `http://`) are allowed, because integrity rests
 and the log rather than on the transport, and Trigon says which transport it used. **Credentials are
 `git`'s own** — SSH keys, a credential helper, `GIT_ASKPASS` — and Trigon never reads, stores, logs
 or passes a git credential. The one exception is uploading rebuilt artifacts, if D4 publishes them,
-which is GitHub's REST API rather than git and takes a token from the environment (§10 phase 5).
+which is GitHub's REST API rather than git and takes a token from the environment, `GITHUB_TOKEN`
+or `GH_TOKEN` (§10 phase 5).
 
 **Local paths.** For syncing, a local path is cloned like any remote, so only what is committed
 there counts, and it is verified exactly like a remote. For publishing, a local path to a bare
@@ -952,7 +963,11 @@ timestamp, and freshness can rest on that instead.
   rollover, ends the old log with a `log-end` leaf naming the successor's origin, log vkey and
   location, and starts the successor with a `log-continuation` leaf holding the old log's final
   checkpoint, cosigned by the new key. A client follows that pair only when both verify, and a
-  successor that is not named by the old log's `log-end` is refused.
+  successor that is not named by the old log's `log-end` is refused. `trigon log key-change` writes
+  the first, which a child process that opens no socket signs with both attestation keys; `trigon
+  log succeed` writes the second pair, and `trigon log sign` signs a log-end only holding the
+  successor's log key as well, which it cosigns the final checkpoint with, and begins a successor
+  only as the one a log-end names.
 - **The push credential is a third secret.** Alone it cannot make a client accept a record. It can
   delete and withhold files, add or remove the kill-switch, write unsigned feed entries, plant
   files beyond the checkpoint, and commit a `.gitignore` or a `.gitattributes`. So `publish`
@@ -1226,7 +1241,9 @@ times for a commit of a few hundred files; the practical limits on release asset
 behaviour for a repository growing by thousands of files a day, including its limits for
 unauthenticated clones and fetches, which GitHub advises keeping to about 15 git reads a second, and
 its advice of at most 6 pushes a minute to one repository. The results go into `16-findings.md` and
-feed D2.
+feed D2. The spike is `scripts/evidence-spike.sh`, which runs only with `TRIGON_LIVE=1`, against a
+scratch repository the person running it names and that holds nothing else; it has not been run,
+and `16-findings.md` §3.101 says so until it is.
 
 **Done when** a run publishes to a local bare repository in one commit and a fresh clone verifies
 it; `publish` refuses a withheld run and publishes a void run only as `void/v1`; two concurrent

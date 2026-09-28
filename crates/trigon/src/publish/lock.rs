@@ -15,10 +15,22 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 
-/// Held for as long as the guard lives. Dropping it closes the descriptor, which releases the lock.
+/// Held for as long as the guard lives. Dropping it releases the lock, then closes the descriptor.
 #[derive(Debug)]
 pub(crate) struct Lock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // Unlocked explicitly, not by the close alone. `flock` belongs to the open file
+        // description, and a child forked from another thread (git, which publish runs) shares that
+        // description until it execs; the close would leave the lock held for that moment, and a
+        // publish taking it straight after would be refused in this one's name. `LOCK_UN` on any
+        // descriptor of the description releases it whoever else still has it open.
+        // SAFETY: the descriptor is owned by `self.file`, which is still open here.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 impl Lock {
@@ -60,7 +72,7 @@ impl Lock {
         file.set_len(0)?;
         file.rewind()?;
         writeln!(file, "{holder}").with_context(|| format!("writing {}", path.display()))?;
-        Ok(Lock { _file: file })
+        Ok(Lock { file })
     }
 }
 
@@ -79,6 +91,23 @@ mod tests {
         assert!(e.contains("One publish runs at a time"), "{e}");
         drop(first);
         let _second = Lock::take(&path, "pid 2").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_lock_goes_with_its_guard_while_a_forked_child_still_shares_the_descriptor() {
+        // A child forked from another thread has the lock's open file description until it execs,
+        // which made the test above fail now and then; a duplicate descriptor is that child, held
+        // for as long as the test likes rather than for a moment it cannot choose.
+        let dir = std::env::temp_dir()
+            .join(format!("trigon-publish-lock-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("lock");
+        let first = Lock::take(&path, "pid 1").unwrap();
+        let child = first.file.try_clone().unwrap();
+        drop(first);
+        let _second = Lock::take(&path, "pid 2").unwrap();
+        drop(child);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

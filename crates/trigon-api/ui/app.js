@@ -230,10 +230,12 @@ function paintMode() {
     pill.textContent = stopped
       ? 'divergence publication stopped'
       : HEALTH.principal === 'anonymous' ? 'public view' : 'operator view';
-    pill.title = HEALTH.principal === 'anonymous'
+    pill.title = (HEALTH.principal === 'anonymous'
       ? 'You are seeing only what the publication gate released: two agreeing attempts, a restricted egress tier, and no stabilizer a person or a model wrote.'
-      : 'You are reading a store directly. Everything is shown, including runs the publication gate would hold back from a public reader.';
+      : 'You are reading a store directly. Everything is shown, including runs the publication gate would hold back from a public reader.')
+      + `\n\nThis server's kill-switch is ${stopped ? 'set' : 'clear'}. It stops ${HEALTH.kill_switches?.serve?.stops ?? 'what this server shows'}.`;
   }
+  paintRepositorySwitch();
   const nav = document.getElementById?.('nav');
   if (nav) {
     nav.replaceChildren(
@@ -244,6 +246,35 @@ function paintMode() {
       el('a', { href: '/account', text: ME?.principal ? ME.principal : 'sign in' }),
     );
   }
+}
+
+// The evidence repository's kill-switch, beside this server's own and never in its place: each
+// stops only what it says (docs/19 §3). Where no publish repository is configured there is none to
+// show; where it could not be read it is shown as unknown, never as clear.
+const repositorySwitchText = {
+  set: 'repository kill-switch set',
+  clear: 'repository kill-switch clear',
+  unknown: 'repository kill-switch unknown',
+};
+
+function paintRepositorySwitch() {
+  const pill = document.getElementById?.('repo-switch');
+  const r = HEALTH?.kill_switches?.repository;
+  if (!pill) return;
+  if (!r) { pill.hidden = true; return; }
+  const state = repositorySwitchText[r.state] ? r.state : 'unknown';
+  pill.hidden = false;
+  pill.className = `mode${state === 'set' ? ' stopped' : state === 'unknown' ? ' unknown' : ''}`;
+  pill.textContent = repositorySwitchText[state];
+  const when = r.as_of ? `, as of ${r.as_of}` : '';
+  const what = {
+    set: `The evidence repository's kill-switch is set${when}: it stops ${r.stops}.`,
+    clear: `The evidence repository's kill-switch is clear${when}. When set, it stops ${r.stops}.`,
+    unknown: `The evidence repository's kill-switch could not be read, so it is not known whether it is set. When set, it stops ${r.stops}.`,
+  }[state];
+  const where = [r.repository && `Repository: ${r.repository}.`, r.detail && `${r.detail}.`]
+    .filter(Boolean).join(' ');
+  pill.title = `${what} It is not this server's switch, which stops ${HEALTH.kill_switches?.serve?.stops ?? 'what this server shows'}.${where ? `\n\n${where}` : ''}`;
 }
 
 /* ---- the credential, and what it can do --------------------------------- */

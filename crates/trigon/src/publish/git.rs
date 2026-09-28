@@ -569,6 +569,50 @@ pub(crate) fn push(dir: &Path, branch: &str, base: &str, pushed: &str) -> Result
     }
 }
 
+/// Whether `origin` would take a push of a commit on top of `parent` to `branch` — `None` for a
+/// branch it does not have — asked with `push --dry-run`, which connects and authenticates as a
+/// push does and sends nothing. The commit is an empty one, made in the clone at `dir` only to be
+/// named, and left there.
+pub(crate) fn would_take_a_push(dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
+    let tree = text(Some(dir), &["mktree"])?;
+    let mut args = vec![
+        "commit-tree",
+        tree.as_str(),
+        "-m",
+        "trigon: can this be pushed?",
+    ];
+    if let Some(p) = parent {
+        args.extend(["-p", p]);
+    }
+    let out = command(Some(dir))
+        .args(&args)
+        .env("GIT_AUTHOR_NAME", COMMITTER.0)
+        .env("GIT_AUTHOR_EMAIL", COMMITTER.1)
+        .env("GIT_COMMITTER_NAME", COMMITTER.0)
+        .env("GIT_COMMITTER_EMAIL", COMMITTER.1)
+        .output()
+        .map_err(|e| anyhow!("running git: {e}"))?;
+    if !out.status.success() {
+        bail!(
+            "git commit-tree failed: {}",
+            scrub(String::from_utf8_lossy(&out.stderr).trim())
+        );
+    }
+    let probe = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    run_network(
+        Some(dir),
+        &[
+            "push",
+            "--dry-run",
+            "--quiet",
+            "--no-signed",
+            "origin",
+            &format!("{probe}:refs/heads/{branch}"),
+        ],
+    )
+    .map(|_| ())
+}
+
 /// The commit `branch` is at on `origin`, asked of the remote itself; `None` where it has no such
 /// branch. `ls-remote` matches a pattern against the end of every ref, so the one line whose ref
 /// is exactly the branch is the answer: `refs/heads/a/refs/heads/main` is some other branch.

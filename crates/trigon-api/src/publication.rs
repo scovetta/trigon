@@ -1301,6 +1301,34 @@ mod tests {
         }
     }
 
+    /// Every state the evidence repository's kill-switch can be in has a row in the page that
+    /// paints it, so that none is drawn as another — `unknown` least of all as `clear`.
+    #[test]
+    fn every_repository_switch_state_has_a_row_in_the_page_that_paints_it() {
+        let js = include_str!("../ui/app.js");
+        let table = js
+            .split_once("const repositorySwitchText")
+            .expect("the page still paints the repository's switch")
+            .1;
+        let table = &table[..table.find("};").expect("the table is an object literal")];
+        for s in [
+            crate::SwitchState::Set,
+            crate::SwitchState::Clear,
+            crate::SwitchState::Unknown,
+        ] {
+            let key = serde_json::to_value(s).unwrap();
+            let key = key.as_str().unwrap();
+            assert!(
+                table.contains(&format!("{key}:")),
+                "`{key}` is a state the repository's switch can be in, and the page has no row \
+                 for it"
+            );
+        }
+        // Painted beside this server's own, never in its place.
+        assert!(js.contains("paintRepositorySwitch();"));
+        assert!(include_str!("../ui/index.html").contains("id=\"repo-switch\""));
+    }
+
     /// Every reason the gate can give has a row in the page that renders it.
     ///
     /// `key()`'s own doc warns about "a legend ending up with a row nothing ever matches"; this is
