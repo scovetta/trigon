@@ -18,14 +18,14 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use trigon_core::{
-    ArtifactId, Claim, Confidence, Digest, Ecosystem, Evidence, Intrinsics, RegistryMoment,
+    ArtifactId, Claim, Confidence, Ecosystem, Evidence, Intrinsics, RegistryMoment,
     SourceDiscovery, SourceProvenance, TargetRef,
 };
 
 use crate::client::Client;
+use crate::declared::fetch_verified;
 use crate::error::RegistryError;
-use crate::model::{ArtifactMeta, BlobSink, ResolvedTarget};
-use crate::npm::fetch_verified;
+use crate::model::{ArtifactMeta, BlobSink, Fetched, ResolvedTarget};
 use crate::registry::Registry;
 
 const ECO: &str = "cargo";
@@ -119,12 +119,21 @@ impl Registry for CratesIoRegistry {
                 )
             });
 
-        // crates.io publishes sha256 for every version, so unlike npm there is always something to
-        // check the bytes against.
-        let declared_sha256 = version
-            .get("checksum")
-            .and_then(Value::as_str)
-            .and_then(|h| Digest::from_hex(h).ok());
+        // crates.io publishes sha256 for every version, so there is always something to check the
+        // bytes against. A checksum that is not a sha256 is refused rather than dropped: dropping
+        // it, as this did, made a malformed declaration read as no declaration.
+        let checksum = match version.get("checksum").and_then(Value::as_str) {
+            Some(h) => vec![
+                crate::declared::from_hex("sha256", h, "cargo:checksum").map_err(|detail| {
+                    RegistryError::Malformed {
+                        ecosystem: ECO.into(),
+                        what: format!("{name} {}", target.version),
+                        detail,
+                    }
+                })?,
+            ],
+            None => Vec::new(),
+        };
 
         let publish_time = version
             .get("created_at")
@@ -186,7 +195,8 @@ impl Registry for CratesIoRegistry {
             artifacts: vec![ArtifactMeta {
                 id: ArtifactId::new(file),
                 url: dl,
-                declared_sha256,
+                declared: checksum,
+                declared_note: None,
                 size: version.get("crate_size").and_then(Value::as_u64),
             }],
             intrinsics: Intrinsics {
@@ -213,7 +223,7 @@ impl Registry for CratesIoRegistry {
         &self,
         meta: &ArtifactMeta,
         sink: &mut (dyn BlobSink + Send),
-    ) -> Result<Digest, RegistryError> {
+    ) -> Result<Fetched, RegistryError> {
         fetch_verified(&self.client, ECO, meta, sink).await
     }
 }

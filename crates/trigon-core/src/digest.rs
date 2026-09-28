@@ -52,7 +52,9 @@ fn hexval(c: u8) -> Option<u8> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseDigestError {
-    #[error("expected 64 hex characters, got {0}")]
+    /// One enum for all three widths, so the message names the length found rather than one
+    /// expected: sha256 wants 64 hex characters, sha512 128, and sha1 40.
+    #[error("{0} hex characters is the wrong length for this digest")]
     Length(usize),
     #[error("non-hex character in digest")]
     Char,
@@ -131,6 +133,60 @@ mod hex64 {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
         let s = String::deserialize(d)?;
         super::Sha512::from_hex(&s)
+            .map(|x| x.0)
+            .map_err(D::Error::custom)
+    }
+}
+
+/// A SHA-1 digest. Recorded only where an ecosystem publishes one, which is npm's `dist.shasum`.
+///
+/// **A lookup key, never an identity.** SHA-1 is collision-broken, and nothing in Trigon addresses
+/// anything by it. It is carried because an npm lockfile old enough to predate `integrity` names an
+/// artifact by nothing else, and a consumer holding one can only ask by what they hold.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Sha1(#[serde(with = "hex20")] pub [u8; 20]);
+
+impl Sha1 {
+    pub fn to_hex(self) -> String {
+        let mut s = String::with_capacity(40);
+        for b in self.0 {
+            use fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+        }
+        s
+    }
+
+    pub fn from_hex(s: &str) -> Result<Self, ParseDigestError> {
+        if s.len() != 40 {
+            return Err(ParseDigestError::Length(s.len()));
+        }
+        let mut out = [0u8; 20];
+        for (i, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
+            let hi = hexval(chunk[0]).ok_or(ParseDigestError::Char)?;
+            let lo = hexval(chunk[1]).ok_or(ParseDigestError::Char)?;
+            out[i] = (hi << 4) | lo;
+        }
+        Ok(Self(out))
+    }
+}
+
+impl fmt::Debug for Sha1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Sha1({})", self.to_hex())
+    }
+}
+
+mod hex20 {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(v: &[u8; 20], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&super::Sha1(*v).to_hex())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 20], D::Error> {
+        let s = String::deserialize(d)?;
+        super::Sha1::from_hex(&s)
             .map(|x| x.0)
             .map_err(D::Error::custom)
     }

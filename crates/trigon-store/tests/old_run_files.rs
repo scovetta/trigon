@@ -76,11 +76,34 @@ async fn a_run_file_with_a_transparency_key_still_reads_and_the_next_write_drops
     assert_eq!(run.attestations.len(), 3, "{:?}", run.attestations);
     assert!(run.is_evidence());
 
+    // The fields added since read as absent — not known — rather than as a value nobody recorded:
+    // no digests beyond sha256, no declaration either way, no strategy blob, no building version.
+    assert_eq!(run.upstream_digests, None);
+    assert_eq!(run.strategy, None);
+    assert_eq!(run.trigon_version, None);
+    // And its statements were filed per target, one level above where a run's own go now. A path
+    // on the record is what reads them, so they read as they did.
+    let per_target = |p: &String| {
+        p.starts_with("attestations/npm/left-pad/1.3.0/left-pad-1.3.0.tgz/")
+            && p.matches('/').count() == 5
+    };
+    assert!(
+        run.attestations.iter().all(per_target),
+        "{:?}",
+        run.attestations
+    );
+
     // The next write drops the key, which is why the archive above exists, and drops nothing else:
     // every other value the old file held is written back unchanged.
     store.put_run(&run).await.unwrap();
     let new: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert!(new.get("transparency").is_none(), "{new}");
+    for absent in ["upstream_digests", "trigon_version", "strategy"] {
+        assert!(
+            new.get(absent).is_none(),
+            "`{absent}` was invented on the rewrite: {new}"
+        );
+    }
     for (key, value) in old.as_object().unwrap() {
         if key != "transparency" {
             assert_eq!(&new[key], value, "`{key}` changed on the rewrite");

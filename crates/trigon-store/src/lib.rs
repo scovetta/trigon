@@ -14,8 +14,14 @@
 //! ```text
 //! blobs/sha256/<aa>/<digest>
 //! runs/<run-id>.json
-//! attestations/<eco>/<name>/<version>/<artifact>/<predicate>.intoto.json
+//! attestations/<eco>/<name>/<version>/<artifact>/<run-id>/<predicate>.intoto.json
 //! ```
+//!
+//! Attestations are filed per run and never overwritten ([`Store::put_attestation`]). Runs attested
+//! before `docs/19` §10 phase 2 name statements one level up, per target, and still read: a run
+//! record names its statements by path, and nothing about reading one depends on the layout. A run
+//! attested again since sets those paths aside ([`Store::record_attestations`]), because another
+//! run of the same target may have written over any of them.
 //!
 //! **The queue arrived with M4** and lives in [`queue`], behind a feature flag, for the reason
 //! ADR-0005 gives: `enqueue` and the run-state write must share one `sqlx::Transaction`, and a
@@ -36,13 +42,14 @@ pub use blobs::{Blobs, digest_of};
 pub use queue::{Backend, HostBudget, Job, JobState, NewJob, Principal, Queue, Requested, Tier};
 pub use record::{
     ArtifactRef, Costs, DerivedImage, Environment, PinEvidence, RunRecord, RunState, Tokens,
+    UpstreamDigests,
 };
 
 use std::path::Path;
 use std::sync::Arc;
 
 use futures::TryStreamExt as _;
-use object_store::{ObjectStore, ObjectStoreExt as _, PutPayload, path::Path as ObjPath};
+use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutPayload, path::Path as ObjPath};
 use trigon_core::{Classify, Digest, Fault};
 
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +81,18 @@ pub enum StoreError {
     )]
     NotAttested(String),
 
+    /// Every name beside a statement already holds a different statement for the same run.
+    ///
+    /// Statements are append-only, so a re-attestation that differs from what is there is written
+    /// alongside it as `<predicate>.2.intoto.json`, `.3`, and so on. A thousand of them for one run
+    /// is not a history, it is something attesting in a loop.
+    #[error(
+        "{first} and the {tried} names after it all hold other statements for this run, and \
+         statements are never overwritten. Something is re-attesting this run in a loop: find \
+         what, rather than clearing the store."
+    )]
+    NoFreeAttestationPath { first: String, tried: usize },
+
     #[error(transparent)]
     Object(#[from] object_store::Error),
 
@@ -91,6 +110,9 @@ impl Classify for StoreError {
             // should not have, or the store lost data. Either way somebody should look now.
             StoreError::Corrupt { .. } => Fault::Bug,
             StoreError::NotAttested(_) => Fault::Policy,
+            // Nothing a store does on its own produces a thousand differing statements for one
+            // run; a caller in a loop does.
+            StoreError::NoFreeAttestationPath { .. } => Fault::Bug,
             // A manifest that does not describe its own digest is the same class of problem as a
             // blob that does not hash to its own address: something wrote a document that cannot be
             // true.
@@ -125,6 +147,8 @@ impl Classify for StoreError {
             StoreError::NoSuchRun(_) | StoreError::NoSuchSet(_) => false,
             // A refusal we issued on purpose answers the same way every time.
             StoreError::NotAttested(_) => false,
+            // The names that are taken stay taken.
+            StoreError::NoFreeAttestationPath { .. } => false,
         }
     }
 }
@@ -143,6 +167,30 @@ fn predicate_name(predicate: &str) -> &str {
         segments.next().unwrap_or(last)
     } else {
         last
+    }
+}
+
+/// Append `written` to what a record names, and set its per-target paths aside once it names a
+/// statement filed under its own id. See [`Store::record_attestations`].
+fn name_statements(record: &mut RunRecord, written: &[String]) {
+    for p in written {
+        if !record.attestations.contains(p) {
+            record.attestations.push(p.clone());
+        }
+    }
+    // The directory a statement sits in is the run it was filed under; a per-target path's is the
+    // artifact's.
+    let own = |p: &String| p.rsplit('/').nth(1) == Some(record.id.as_str());
+    if !record.attestations.iter().any(own) {
+        return;
+    }
+    let (own, per_target): (Vec<String>, Vec<String>) =
+        record.attestations.drain(..).partition(|p| own(p));
+    record.attestations = own;
+    for p in per_target {
+        if !record.per_target_attestations.contains(&p) {
+            record.per_target_attestations.push(p);
+        }
     }
 }
 
@@ -273,30 +321,154 @@ impl Store {
         Ok(out)
     }
 
-    /// File a signed statement where a consumer holding the *published* artifact can find it.
+    /// File a signed statement under the run it is about, and never over one that is already there.
     ///
-    /// Keyed by the target rather than by the run, because that is the question people actually
-    /// ask: "is there an attestation for the thing I just downloaded". A layout keyed on our run id
-    /// would be findable only by someone who already had our run id, which is nobody.
+    /// **Per run, because per target destroyed signed history.** Statements were filed at
+    /// `…/<artifact>/<predicate>.intoto.json`, so attesting a second run of a target overwrote the
+    /// first run's statement, and the first run's record went on naming a path that now held
+    /// somebody else's claim: 40 of the 93 attestation paths in the local store were shared by
+    /// more than one run when this was measured (`docs/19` §10 phase 2). The run id is the
+    /// directory now.
+    ///
+    /// The target stays in the path above it, so everything signed about one artifact still lists
+    /// under one prefix, and the layout still parses back into a `Target` as `docs/09` §6 says.
+    ///
+    /// **Append-only, by writing alongside rather than refusing.** A run is attested again on
+    /// purpose — `docs/09` §3 says a stored run can be signed again without building, with a key it
+    /// was first signed without, or by a binary that signs a newer predicate — and a refusal would
+    /// make that impossible. So the store does what it does for re-derived comparisons, which sit
+    /// beside the original and never replace it: the first statement keeps its name, and one that
+    /// differs is written as `<predicate>.2.intoto.json`, `.3`, and so on. Identical bytes are the
+    /// same statement — ed25519 signs deterministically, so re-attesting unchanged evidence with
+    /// the same key reproduces them — and are answered with the path they are already at, as the
+    /// blob store answers bytes it already holds.
+    ///
+    /// Each write is a create that fails if the name is taken, not a check followed by a write, so
+    /// two attestors racing on one run cannot overwrite each other's statement files. The record's
+    /// list of them is a separate write, and [`Self::record_attestations`] says how far that one is
+    /// protected.
     pub async fn put_attestation(
         &self,
         target: &trigon_core::Target,
+        run_id: &str,
         artifact: &str,
         predicate: &str,
         envelope: &trigon_attest::Envelope,
     ) -> Result<String, StoreError> {
+        /// How many statements of one predicate a run may accumulate before this refuses.
+        const MOST: usize = 1000;
+        if !Self::addressable(run_id) {
+            return Err(StoreError::Malformed(format!(
+                "`{run_id}` is not a run id this store writes, so a statement cannot be filed \
+                 under it. Attest a run the store holds."
+            )));
+        }
         let short = predicate_name(predicate);
-        let path = format!(
-            "attestations/{}/{}/{}/{artifact}/{short}.intoto.json",
+        let dir = format!(
+            "attestations/{}/{}/{}/{artifact}/{run_id}",
             target.reference.ecosystem.purl_type(),
             target.reference.registry_name(),
             target.reference.version,
         );
         let body = serde_json::to_vec_pretty(envelope)?;
-        self.inner
-            .put(&ObjPath::from(path.clone()), PutPayload::from(body))
-            .await?;
-        Ok(path)
+        for n in 1..=MOST {
+            let path = match n {
+                1 => format!("{dir}/{short}.intoto.json"),
+                n => format!("{dir}/{short}.{n}.intoto.json"),
+            };
+            let location = ObjPath::from(path.clone());
+            let written = self
+                .inner
+                .put_opts(
+                    &location,
+                    PutPayload::from(body.clone()),
+                    PutMode::Create.into(),
+                )
+                .await;
+            match written {
+                Ok(_) => return Ok(path),
+                Err(object_store::Error::AlreadyExists { .. }) => {
+                    let there = self.inner.get(&location).await?.bytes().await?;
+                    if there[..] == body[..] {
+                        return Ok(path);
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(StoreError::NoFreeAttestationPath {
+            first: format!("{dir}/{short}.intoto.json"),
+            tried: MOST - 1,
+        })
+    }
+
+    /// Name newly written statements on a run's record, merged into the record as it is now.
+    ///
+    /// **Merged, never written back.** The attestor reads the record, spends seconds re-deriving
+    /// and signing, and used to write back the copy it had read: a second attestor finishing in
+    /// between had its paths dropped from the record, its signed files still on disk and named by
+    /// nothing a reader goes by. So the record is read again here and `written` appended to what it
+    /// holds by then. Where the backend has conditional writes — object storage, and the in-memory
+    /// store — the write succeeds only over the version read, and is retried when another writer
+    /// got there first, so two attestors cannot drop each other's paths. The local filesystem has
+    /// none (`object_store` does not implement `PutMode::Update` for it), and there the window is
+    /// the gap between this read and this write, not the whole attestation. It is not zero.
+    ///
+    /// **Per-target paths are set aside once the run has statements of its own.** A run attested
+    /// before statements were filed per run names paths every run of its target shared, and a
+    /// later run may have written over any of them. Kept in `attestations` beside the run's own,
+    /// they were served as this run's; they move to `per_target_attestations`, which nothing
+    /// serves, so that re-attesting a run is how it stops being served another run's claims.
+    ///
+    /// Returns the record as written.
+    pub async fn record_attestations(
+        &self,
+        run_id: &str,
+        written: &[String],
+    ) -> Result<RunRecord, StoreError> {
+        /// How often a conditional write may lose to another writer before this gives up. Each
+        /// loss means another attestor wrote this run's record in between, which is rare; this
+        /// many in a row means something is writing it in a loop.
+        const ATTEMPTS: usize = 16;
+        let location = Self::run_path(run_id);
+        let mut attempt = 1;
+        loop {
+            let got = match self.inner.get(&location).await {
+                Ok(g) => g,
+                Err(object_store::Error::NotFound { .. }) => {
+                    return Err(StoreError::NoSuchRun(run_id.to_string()));
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let version = object_store::UpdateVersion {
+                e_tag: got.meta.e_tag.clone(),
+                version: got.meta.version.clone(),
+            };
+            let mut record: RunRecord = serde_json::from_slice(&got.bytes().await?)?;
+            name_statements(&mut record, written);
+            let body = serde_json::to_vec_pretty(&record)?;
+            let put = self
+                .inner
+                .put_opts(
+                    &location,
+                    PutPayload::from(body.clone()),
+                    PutMode::Update(version).into(),
+                )
+                .await;
+            match put {
+                Ok(_) => return Ok(record),
+                // Somebody else wrote the record since it was read. Read it again, with their
+                // change in it; the last loss is returned like any other failed write.
+                Err(object_store::Error::Precondition { .. }) if attempt < ATTEMPTS => {
+                    attempt += 1;
+                }
+                Err(object_store::Error::NotImplemented { .. }) => {
+                    self.inner.put(&location, PutPayload::from(body)).await?;
+                    return Ok(record);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     /// Publish a stabilizer set's manifest, addressed by the set digest.
@@ -435,6 +607,10 @@ impl Store {
         }
     }
 
+    /// Read a statement back by the path a run record names it by.
+    ///
+    /// Either layout: the per-run one [`Self::put_attestation`] writes, and the per-target one runs
+    /// attested before it still name. The path is the record's, so nothing here has to know which.
     pub async fn get_attestation(&self, path: &str) -> Result<trigon_attest::Envelope, StoreError> {
         let bytes = self.inner.get(&ObjPath::from(path)).await?.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)

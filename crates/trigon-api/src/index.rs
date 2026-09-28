@@ -151,9 +151,11 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         refused_artifact,
         environment,
         non_builtin_stabilizer,
-        // Kept: what was built, and from where. All of it is decided before the comparison runs.
+        // Kept: what was built, and from where, and by which Trigon. All of it is decided before
+        // the comparison runs.
         strategy,
         strategy_digest,
+        trigon_version,
         derivation,
         source,
         instructions,
@@ -163,8 +165,11 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         timings,
         failure,
         terminal,
-        // Kept: the published artifact, which is what a reader holding it looks the run up by.
+        // Kept: the published artifact, which is what a reader holding it looks the run up by —
+        // by any of its digests — and what its registry declared about it. All of it is settled
+        // at fetch, before anything is built.
         upstream,
+        upstream_digests,
         // Kept: digests of blobs this reader is refused by class. A digest is not a verdict, and
         // the class table is where the control on the bytes lives.
         comparison,
@@ -177,6 +182,8 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         // Gone: named by predicate (`divergence.intoto.json`), pointing at statements
         // `/v1/runs/{id}/attestation` refuses this reader.
         attestations: _,
+        // Gone, for the same reason, and because they may name another run's claims besides.
+        per_target_attestations: _,
         // Gone: a model's reading of the diff, which is only ever asked of a divergence and so
         // names one by existing.
         diff_opinion: _,
@@ -203,10 +210,12 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         environment,
         strategy,
         strategy_digest,
+        trigon_version,
         derivation,
         source,
         instructions,
         upstream,
+        upstream_digests,
         rebuild: None,
         comparison,
         build_log,
@@ -220,6 +229,7 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         network_transcript,
         costs: None,
         attestations: Vec::new(),
+        per_target_attestations: Vec::new(),
         non_builtin_stabilizer,
         diff_opinion: None,
     }

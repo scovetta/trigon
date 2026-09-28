@@ -11,6 +11,8 @@ decisions it waits on. What exists today:
 | `verify-attestation --rerun-comparison`, `Match::is_at_least` | built |
 | A lockfile check by purl against the local store (`trigon check`, `POST /v1/check`) | built; §6 says what it lacks. §10 phase 0 closed its leak ([findings](16-findings.md) §3.93) |
 | Rekor publication (`attest --rekor`) and verification (`verify-attestation --transparency`) | built, measured, and **removed** (ADR-0014; §10 phase 1, [findings](16-findings.md) §3.94) |
+| Subjects with sha512, and sha1 for npm, beside sha256 (§5); fetchers that verify every digest their registry declares, and runs that record what was declared (§5); the strategy, guard manifest and building version kept on the run (§4.2 items 3, 7); attestations per run, append-only | built (§10 phase 2, first half; [findings](16-findings.md) §3.95) |
+| The v2 verdicts with every §4.2 field, `void/v1` and `withdrawal/v1` | planned (§10 phase 2, second half) |
 | The evidence repository, the evidence log, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
 
 ---
@@ -534,8 +536,8 @@ acute. Every record must carry, and every client that shows a record must render
    asks what to do about that.
 3. **When, and which Trigon version.** Signed today only in `rebuild`, whose subject is the
    *rebuilt* artifact, so a lookup by the upstream digest never reaches it. And the version it signs
-   is the attestor's own, not the version that ran the build, which the run record does not keep.
-   Record the building version on the run, and put both in the verdict.
+   is the attestor's own, not the version that ran the build, which the run record did not keep
+   until §10 phase 2 (`RunRecord.trigon_version`). Put both in the verdict.
 4. **The egress tier, and whether the run was `attestable`.** The egress tier is signed today in
    `buildobservation`, whose subject is the upstream artifact; `attestable` only in `rebuild`. Put
    both in the verdict, so that one statement answers.
@@ -557,11 +559,11 @@ acute. Every record must carry, and every client that shows a record must render
    the set manifest file and the strategy. Two of these need a digest that does not exist yet. The
    stabilizer-set digest (`StabilizerSet::digest`) is a hash over sorted `id|stage|risk|provenance`
    rows, not the digest of the manifest file, so the verdict signs the manifest file's digest beside
-   it. `rebuild`'s `strategy.json` byproduct names `strategyDigest`, which is a domain-separated
+   it. `rebuild`'s `strategy.json` byproduct named `strategyDigest`, which is a domain-separated
    hash over the canonical strategy and the tools it reaches, not the digest of any file;
-   `RunRecord.strategy` exists for the blob digest of the strategy's canonical JSON, and nothing
-   writes it (0 of 371 stored runs). The run is to store the strategy as a blob and set that field,
-   and the record's strategy evidence is bound by it.
+   `RunRecord.strategy` existed for the blob digest of the strategy's canonical JSON, and nothing
+   wrote it (0 of 371 stored runs). Since §10 phase 2 the run stores the strategy as a blob and sets
+   that field, the byproduct names that blob, and the record's strategy evidence is bound by it.
 8. **The package's purl**, canonical under a named canonicalisation version. No statement carries
    one today. A record found under a purl is accepted only if its signed purl canonicalises to it.
 9. **`supersedes` and `reason`**, on a superseding record, equal to its leaf's.
@@ -631,14 +633,18 @@ is its version, so changing the rule starts new paths rather than silently missi
 **Subjects carry every sha256, sha512 and sha1 the ecosystem publishes.** npm publishes sha512, as
 the `integrity` string, and sha1, as `shasum`, and never sha256. NuGet's catalog carries a sha512
 `packageHash` for some entries and not others, and its flat container publishes none beside the
-download URL (`crates/trigon-registry/src/nuget.rs`). Today `Subject::new` carries sha256 only, and
-the npm fetcher verifies nothing, because it reads only a `sha256-` integrity string and npm never
-sends one. The fix is one change with two effects: decode what the ecosystem declares, verify the
-download against it where it is declared and record its absence where it is not, and put every
-sha256, sha512 and sha1 in the subject. Other algorithms — PyPI's md5 and blake2b_256, a pip
-`--hash=sha384:` — are verified on download where declared, and are not keys. sha512 of the upstream
-is already computed on every run and already signed inside the predicate, so this is smaller than it
-sounds. sha1 is collision-broken; npm accepts that risk for its oldest entries, and a client that
+download URL (`crates/trigon-registry/src/nuget.rs`). Until §10 phase 2 `Subject::new` carried
+sha256 only, and the npm fetcher verified nothing, because it read only a `sha256-` integrity string
+and npm never sends one. The fix was one change with two effects: decode what the ecosystem
+declares, verify the download against it where it is declared and record its absence where it is
+not, and put every sha256, sha512 and sha1 in the subject (`Subject::with_digests`). Absence is
+recorded only where the declaration was read and is absent: a NuGet registration or catalog leaf
+that cannot be read refuses the download, retried where the failure was transient, rather than
+recording that NuGet declared nothing. Other algorithms — PyPI's md5 and blake2b_256, a pip
+`--hash=sha384:` — are verified on download where declared and this build can compute them, and are
+not keys; blake2b_256, which it cannot, is recorded as declared and unchecked. sha512 of the
+upstream was already computed on every run and signed inside the predicate, so this was smaller than
+it sounds. sha1 is collision-broken; npm accepts that risk for its oldest entries, and a client that
 matched on sha1 says so.
 
 **The index is derived data.** `publish` writes a record's index entries in the same commit as the

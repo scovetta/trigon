@@ -13,15 +13,15 @@
 
 use async_trait::async_trait;
 use serde_json::{Map, Value};
-use sha2::{Digest as _, Sha256};
 use trigon_core::{
-    ArtifactId, Claim, Confidence, Digest, Ecosystem, Evidence, Intrinsics, RegistryMoment,
+    ArtifactId, Claim, Confidence, DeclaredDigest, Ecosystem, Evidence, Intrinsics, RegistryMoment,
     SourceDiscovery, SourceProvenance, TargetRef,
 };
 
 use crate::client::Client;
+use crate::declared::fetch_verified;
 use crate::error::RegistryError;
-use crate::model::{ArtifactMeta, BlobSink, ResolvedTarget};
+use crate::model::{ArtifactMeta, BlobSink, Fetched, ResolvedTarget};
 use crate::registry::Registry;
 
 const ECO: &str = "npm";
@@ -81,13 +81,17 @@ impl Registry for NpmRegistry {
             .to_string();
 
         let file = url.rsplit('/').next().unwrap_or("artifact.tgz").to_string();
+        let (declared, declared_note) =
+            declared_digests(dist).map_err(|detail| RegistryError::Malformed {
+                ecosystem: ECO.into(),
+                what: format!("{name}@{}", target.version),
+                detail,
+            })?;
         let artifact = ArtifactMeta {
             id: ArtifactId::new(file),
             url,
-            // npm publishes sha1 in `dist.shasum` and, for newer entries, a subresource-integrity
-            // string that is usually sha512. Neither is sha256, so there is nothing to compare the
-            // computed digest against, and saying so beats a check that always passes.
-            declared_sha256: integrity_sha256(dist),
+            declared,
+            declared_note,
             size: dist.get("unpackedSize").and_then(Value::as_u64),
         };
 
@@ -184,9 +188,35 @@ impl Registry for NpmRegistry {
         &self,
         meta: &ArtifactMeta,
         sink: &mut (dyn BlobSink + Send),
-    ) -> Result<Digest, RegistryError> {
+    ) -> Result<Fetched, RegistryError> {
         fetch_verified(&self.client, ECO, meta, sink).await
     }
+}
+
+/// Every digest npm declares for a version's tarball.
+///
+/// `dist.integrity` is a Subresource Integrity string — sha512 for anything published since
+/// 2017, `sha1-` before that — and `dist.shasum` is the tarball's sha1 in hex, on every version.
+/// **Neither is sha256**, and this used to read a `sha256-` integrity string alone, which npm never
+/// sends: so every npm download was checked against nothing, and the code said it was careful.
+///
+/// Both fields are kept, each as its own declaration: they are two claims, and an old entry that
+/// carries `sha1-` in both is two chances to find that one of them is wrong.
+fn declared_digests(dist: &Value) -> Result<(Vec<DeclaredDigest>, Option<String>), String> {
+    let mut out = Vec::new();
+    if let Some(integrity) = dist.get("integrity").and_then(Value::as_str) {
+        out.extend(crate::declared::sri(integrity, "npm:dist.integrity")?);
+    }
+    if let Some(shasum) = dist.get("shasum").and_then(Value::as_str) {
+        let sha1 = crate::declared::from_hex("sha1", shasum, "npm:dist.shasum")?;
+        out.push(sha1);
+    }
+    let note = out.is_empty().then(|| {
+        "npm declared neither `dist.integrity` nor `dist.shasum` for this version, so the \
+         tarball was checked against nothing"
+            .to_string()
+    });
+    Ok((out, note))
 }
 
 impl NpmRegistry {
@@ -397,77 +427,9 @@ pub(crate) fn subdir_from_view(url: &str) -> Option<String> {
     safe.then_some(joined)
 }
 
-/// A sha256 out of npm's subresource-integrity string, when it happens to be one.
-fn integrity_sha256(dist: &Value) -> Option<Digest> {
-    let integrity = dist.get("integrity").and_then(Value::as_str)?;
-    let b64 = integrity.strip_prefix("sha256-")?;
-    let bytes = base64_decode(b64)?;
-    Some(Digest::from_bytes(
-        <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
-    ))
-}
-
-/// Enough base64 to read an integrity string. Standard alphabet, padding optional.
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::new();
-    let mut acc: u32 = 0;
-    let mut bits = 0;
-    for c in s.bytes().filter(|c| *c != b'=') {
-        let v = ALPHABET.iter().position(|a| *a == c)? as u32;
-        acc = (acc << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
-}
-
 /// Percent-encode the one character that matters: the `/` in a scoped name.
 fn encode(name: &str) -> String {
     name.replace('/', "%2f")
-}
-
-/// Stream an artifact, hashing as it goes, and check the result against what was declared.
-pub(crate) async fn fetch_verified(
-    client: &Client,
-    ecosystem: &str,
-    meta: &ArtifactMeta,
-    sink: &mut (dyn BlobSink + Send),
-) -> Result<Digest, RegistryError> {
-    let mut response = client.get(&meta.url, ecosystem).await?;
-    let mut hasher = Sha256::new();
-    let mut bytes = 0u64;
-
-    // Streamed rather than buffered: an artifact can be gigabytes, and a worker that holds one in
-    // memory to hash it has a memory profile indistinguishable from a build failure.
-    while let Some(chunk) = response.chunk().await? {
-        hasher.update(&chunk);
-        sink.write(&chunk)?;
-        bytes += chunk.len() as u64;
-    }
-    let actual = Digest::from_bytes(hasher.finalize().into());
-
-    if let Some(expected) = &meta.declared_sha256
-        && *expected != actual
-    {
-        return Err(RegistryError::DigestMismatch {
-            name: meta.id.to_string(),
-            artifact: meta.id.to_string(),
-            expected: expected.to_string(),
-            actual: actual.to_string(),
-        });
-    }
-    tracing::debug!(
-        artifact = %meta.id,
-        bytes,
-        sha256 = %actual,
-        verified = meta.declared_sha256.is_some(),
-        "fetched"
-    );
-    Ok(actual)
 }
 
 /// A build this package declares and its packaging tool will not run.

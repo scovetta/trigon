@@ -7,7 +7,7 @@
 //! format is named explicitly, and a set digest that does not match today's is refused rather than
 //! papered over.
 
-use sha2::{Digest as _, Sha256};
+use sha2::{Digest as _, Sha256, Sha512};
 use trigon_archive::Limits;
 use trigon_compare::compare_bytes;
 use trigon_core::{Digest, Format, Match};
@@ -154,32 +154,50 @@ pub fn rederive_with(
     // lie" are not the same finding. It also closes a real hole: two artifacts can differ in raw
     // bytes and stabilize to the same form — that is the normal case, and it means the stabilized
     // check alone would accept a substituted artifact as proof of the claim.
+    //
+    // **Every digest the subject names, not only sha256.** A subject carries sha512, and sha1 for
+    // npm, because those are what a consumer looks the artifact up by (`docs/19` §5). Checking one
+    // and trusting the rest would let a statement be found under a digest of some other file and
+    // then verify against this one. A statement signed before subjects carried more than sha256
+    // names sha256 alone, and verifies exactly as it did.
     let subject = statement
         .subject
         .first()
-        .and_then(|s| s.digest.get("sha256"))
+        .filter(|s| s.digest.contains_key("sha256"))
         .ok_or_else(|| AttestError::Malformed("the statement names no subject digest".into()))?;
-    for (side, expected, bytes) in [
-        ("upstream", Some(subject.as_str()), &upstream),
-        (
-            "rebuild",
-            p["artifacts"]["rebuild"]["sha256"].as_str(),
-            &rebuild,
-        ),
-    ] {
-        let Some(expected) = expected else {
-            return Err(AttestError::Malformed(format!(
-                "predicate has no raw digest for the {side} artifact"
-            )));
-        };
-        let got = hex(&Sha256::digest(bytes));
-        if expected != got {
+    // sha256 first, so a different file is reported by the digest every statement has.
+    let mut named: Vec<(&String, &String)> = subject.digest.iter().collect();
+    named.sort_by_key(|(algorithm, _)| algorithm.as_str() != "sha256");
+    for (algorithm, expected) in named {
+        let got = digest_hex(algorithm, &upstream).ok_or_else(|| {
+            AttestError::Malformed(format!(
+                "the subject names a {algorithm} digest, which this verifier cannot compute, so \
+                 it cannot say the file in hand is the one the statement is about. Trigon writes \
+                 sha256, sha512 and sha1 only."
+            ))
+        })?;
+        if *expected != got {
             return Err(AttestError::WrongArtifact {
-                side,
-                expected: expected.to_string(),
+                side: "upstream",
+                algorithm: algorithm.clone(),
+                expected: expected.clone(),
                 got,
             });
         }
+    }
+    let Some(expected) = p["artifacts"]["rebuild"]["sha256"].as_str() else {
+        return Err(AttestError::Malformed(
+            "predicate has no raw digest for the rebuild artifact".into(),
+        ));
+    };
+    let got = hex(&Sha256::digest(&rebuild));
+    if expected != got {
+        return Err(AttestError::WrongArtifact {
+            side: "rebuild",
+            algorithm: "sha256".into(),
+            expected: expected.to_string(),
+            got,
+        });
     }
 
     let (outcome, up_stab, rb_stab) = match archived {
@@ -259,6 +277,16 @@ pub fn subject_sha256(statement: &Statement) -> Option<Digest> {
         .first()
         .and_then(|s| s.digest.get("sha256"))
         .and_then(|h| Digest::from_hex(h).ok())
+}
+
+/// A digest of `bytes` under an algorithm a subject may name, or `None` for one this does not know.
+fn digest_hex(algorithm: &str, bytes: &[u8]) -> Option<String> {
+    Some(match algorithm {
+        "sha256" => hex(&Sha256::digest(bytes)),
+        "sha512" => hex(&Sha512::digest(bytes)),
+        "sha1" => hex(&sha1::Sha1::digest(bytes)),
+        _ => return None,
+    })
 }
 
 fn hex(b: &[u8]) -> String {

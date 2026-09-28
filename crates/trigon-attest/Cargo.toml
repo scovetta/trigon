@@ -18,6 +18,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+# A subject carries sha1 where the ecosystem publishes one (npm). See `Subject::of_bytes`.
+sha1.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
 base64.workspace = true

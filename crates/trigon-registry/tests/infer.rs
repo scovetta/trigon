@@ -44,7 +44,8 @@ fn npm_target(with_toolchain: bool) -> ResolvedTarget {
         artifacts: vec![ArtifactMeta {
             id: ArtifactId::new("left-pad-1.3.0.tgz"),
             url: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".into(),
-            declared_sha256: None,
+            declared: Vec::new(),
+            declared_note: None,
             size: None,
         }],
         intrinsics: Intrinsics {
@@ -181,7 +182,8 @@ fn with_artifacts(names: &[&str]) -> ResolvedTarget {
         .map(|n| ArtifactMeta {
             id: ArtifactId::new(*n),
             url: format!("https://files/{n}"),
-            declared_sha256: None,
+            declared: Vec::new(),
+            declared_note: None,
             size: None,
         })
         .collect();
@@ -258,7 +260,8 @@ fn pypi_target(generator: Option<(&str, &str)>) -> ResolvedTarget {
         artifacts: vec![ArtifactMeta {
             id: ArtifactId::new("sniffio-1.3.1-py3-none-any.whl"),
             url: "https://files.pythonhosted.org/sniffio-1.3.1-py3-none-any.whl".into(),
-            declared_sha256: None,
+            declared: Vec::new(),
+            declared_note: None,
             size: None,
         }],
         intrinsics: Intrinsics {

@@ -1643,11 +1643,21 @@ mod registry {
                     .max()
                     .unwrap_or(0);
                 for a in &resolved.artifacts {
-                    let digest = match &a.declared_sha256 {
-                        Some(d) => style::ident(&format!("sha256:{}", &d.to_hex()[..16])),
-                        // Said plainly. npm publishes sha1 and sometimes sha512, so for most of it
-                        // there is nothing to check the bytes against.
-                        None => style::muted("no sha256 declared"),
+                    // Every algorithm the registry declared, not only sha256: npm declares sha512
+                    // and sha1 and never sha256, and printing "no sha256 declared" for it read as
+                    // though npm vouched for nothing.
+                    let digest = if a.declared.is_empty() {
+                        style::muted(a.declared_note.as_deref().unwrap_or("no digest declared"))
+                    } else {
+                        let named: Vec<String> = a
+                            .declared
+                            .iter()
+                            .map(|d| {
+                                let shown = &d.value[..16.min(d.value.len())];
+                                format!("{}:{shown}", d.algorithm)
+                            })
+                            .collect();
+                        style::ident(&named.join("  "))
                     };
                     println!("    {:<w$}  {digest}", a.id.as_str());
                 }
@@ -1667,20 +1677,201 @@ mod registry {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from(meta.id.as_str()));
 
-        let mut file =
-            std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-        let digest = rt.block_on(registry.fetch(meta, &mut file))?;
+        let fetched = keep_if_fetched(&path, |file| rt.block_on(registry.fetch(meta, file)))?;
 
         println!("{}", style::heading(&path.display().to_string()));
-        field("sha256", style::ident(&short(&digest.to_hex())));
-        field(
-            "checked",
-            match &meta.declared_sha256 {
-                Some(_) => style::good("matches the digest the registry declared"),
-                None => style::muted("the registry declared no sha256, so nothing was checked"),
-            },
-        );
+        field("sha256", style::ident(&short(&fetched.sha256.to_hex())));
+        // One line per declaration: which algorithm, from which field, and what came of it. A
+        // single "checked" line could not say that npm declares two digests and PyPI three.
+        for c in &fetched.checks {
+            let what = format!("{} ({})", c.declared.algorithm, c.declared.source);
+            match c.result {
+                trigon_core::CheckResult::Matched => {
+                    field("checked", style::good(&format!("{what} matches")))
+                }
+                trigon_core::CheckResult::Unchecked => field(
+                    "declared",
+                    style::muted(&format!("{what}, which this build cannot compute")),
+                ),
+            }
+        }
+        // The note whenever nothing was checked, and not only when nothing was declared: a file
+        // whose every declaration is of an algorithm this build cannot compute was checked against
+        // nothing too, and the lines above alone do not say so.
+        let matched = fetched
+            .checks
+            .iter()
+            .any(|c| c.result == trigon_core::CheckResult::Matched);
+        if !matched && let Some(note) = &fetched.note {
+            field("checked", style::muted(note));
+        }
         Ok(())
+    }
+
+    /// Stream a download to `path` through `fetch`, and keep it only if `fetch` succeeds.
+    ///
+    /// **Refused means not kept.** Bytes the registry does not vouch for, or half a download, left
+    /// under the artifact's own name are one `ls` away from being mistaken for it. So a download to
+    /// a regular file, or to a name nothing holds yet, is written beside it under a name of its own
+    /// and renamed onto it once the checks hold. A failed one removes only that staging file, which
+    /// this command created, and leaves whatever was at `path` as it was rather than truncated.
+    ///
+    /// Anything else at `path` — `/dev/stdout`, a FIFO, a symlink — is written in place and never
+    /// removed. The first version unlinked `path` on any error, and `--out /dev/null` run as root
+    /// with the registry unreachable deleted `/dev/null`; renaming onto one would replace it too.
+    pub(crate) fn keep_if_fetched<T>(
+        path: &Path,
+        fetch: impl FnOnce(&mut std::fs::File) -> Result<T, trigon_registry::RegistryError>,
+    ) -> Result<T> {
+        let regular = match std::fs::symlink_metadata(path) {
+            Ok(m) => m.file_type().is_file(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        if !regular {
+            let mut file = std::fs::File::create(path)
+                .with_context(|| format!("opening {}", path.display()))?;
+            return fetch(&mut file).with_context(|| {
+                format!(
+                    "{} is not a regular file, so the download was written to it in place and it \
+                     is left as it is: whatever it received is not bytes the registry vouched for",
+                    path.display()
+                )
+            });
+        }
+
+        let name = path
+            .file_name()
+            .with_context(|| format!("{} names no file to write", path.display()))?;
+        let staging = path.with_file_name(format!(
+            ".{}.{}.partial",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .with_context(|| format!("creating {}", staging.display()))?;
+        let fetched = fetch(&mut file);
+        drop(file);
+        let kept = fetched.map_err(anyhow::Error::from).and_then(|f| {
+            std::fs::rename(&staging, path)
+                .with_context(|| format!("moving the download onto {}", path.display()))?;
+            Ok(f)
+        });
+        if kept.is_err() {
+            let _ = std::fs::remove_file(&staging);
+        }
+        kept
+    }
+
+    #[cfg(test)]
+    mod keep_if_fetched_tests {
+        use super::keep_if_fetched;
+        use trigon_registry::{BlobSink as _, RegistryError};
+
+        fn dir(what: &str) -> std::path::PathBuf {
+            let d = std::env::temp_dir().join(format!(
+                "trigon-keep-if-fetched-{}-{what}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        fn refused() -> RegistryError {
+            RegistryError::Http {
+                ecosystem: "npm".into(),
+                url: "http://127.0.0.1:0/x".into(),
+                status: 503,
+            }
+        }
+
+        fn names(d: &std::path::Path) -> Vec<String> {
+            let mut n: Vec<String> = std::fs::read_dir(d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            n.sort();
+            n
+        }
+
+        #[test]
+        fn a_download_that_holds_lands_under_its_name_and_nothing_else_is_left() {
+            let d = dir("kept");
+            let path = d.join("left-pad-1.3.0.tgz");
+            keep_if_fetched(&path, |f| {
+                f.write(b"the bytes").map_err(RegistryError::from)
+            })
+            .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"the bytes");
+            assert_eq!(names(&d), ["left-pad-1.3.0.tgz"]);
+        }
+
+        #[test]
+        fn a_refused_download_leaves_nothing_new_and_what_was_there_untouched() {
+            let d = dir("refused");
+            let fresh = d.join("fresh.tgz");
+            let e = keep_if_fetched(&fresh, |f| {
+                f.write(b"half a download")?;
+                Err::<(), _>(refused())
+            })
+            .unwrap_err();
+            assert!(e.to_string().contains("503"), "{e}");
+            assert!(names(&d).is_empty(), "{:?}", names(&d));
+
+            // An earlier download under the same name is not truncated by a later one that fails.
+            let earlier = d.join("earlier.tgz");
+            std::fs::write(&earlier, b"an earlier, good download").unwrap();
+            keep_if_fetched(&earlier, |f| {
+                f.write(b"bytes nobody vouched for")?;
+                Err::<(), _>(refused())
+            })
+            .unwrap_err();
+            assert_eq!(
+                std::fs::read(&earlier).unwrap(),
+                b"an earlier, good download"
+            );
+            assert_eq!(names(&d), ["earlier.tgz"]);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn what_is_not_a_regular_file_is_written_in_place_and_never_removed() {
+            // Standing in for `/dev/null` or `/dev/stdout`, which a test cannot safely risk: a
+            // path this command did not create as a file. The error path must not unlink it.
+            let d = dir("in-place");
+            let target = d.join("target");
+            std::fs::write(&target, b"").unwrap();
+            let link = d.join("link.tgz");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+
+            let e = keep_if_fetched(&link, |f| {
+                f.write(b"partial")?;
+                Err::<(), _>(refused())
+            })
+            .unwrap_err();
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "the error path removed a path it did not create"
+            );
+            assert!(format!("{e:#}").contains("not a regular file"), "{e:#}");
+            assert_eq!(names(&d), ["link.tgz", "target"]);
+
+            keep_if_fetched(&link, |f| f.write(b"whole").map_err(RegistryError::from)).unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), b"whole");
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
     }
 }
 
@@ -2395,13 +2586,18 @@ fn verify(
     let a = std::fs::read(upstream).with_context(|| format!("reading {}", upstream.display()))?;
     let b = std::fs::read(rebuild).with_context(|| format!("reading {}", rebuild.display()))?;
 
-    let c = compare_bytes(a, b, fmt, &set, &Limits::default())?;
-    if let Some(path) = attest.to {
+    // Computed before the comparison takes the bytes. No sha1: two files name no ecosystem, and a
+    // sha1 is carried only where one publishes it.
+    let subject = attest.to.map(|_| {
         let name = attest
             .subject
             .map(str::to_string)
             .unwrap_or_else(|| file_name(upstream));
-        write_bundle(path, attest.key, &name, &c)?;
+        trigon_attest::Subject::of_bytes(name, &a, false)
+    });
+    let c = compare_bytes(a, b, fmt, &set, &Limits::default())?;
+    if let (Some(path), Some(subject)) = (attest.to, subject) {
+        write_bundle(path, attest.key, subject, &c)?;
     }
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&c)?),
@@ -4041,11 +4237,60 @@ mod rebuild {
         // build can ask the mirror for anything.
         let upstream_path = args.work.join(meta.id.as_str());
         let mut file = std::fs::File::create(&upstream_path)?;
-        let upstream_digest = match rt.block_on(registry.fetch(&meta, &mut file)) {
-            Ok(d) => d,
-            Err(e) => return Ok(classify(&e).into()),
+        let fetched = match rt.block_on(registry.fetch(&meta, &mut file)) {
+            Ok(f) => f,
+            Err(e) => {
+                // Refused means not kept. Bytes the registry does not vouch for — or half a
+                // download — left at the top of the work directory under the artifact's own name
+                // are exactly what a later run reusing the directory would pick up.
+                drop(file);
+                let _ = std::fs::remove_file(&upstream_path);
+                return Ok(classify(&e).into());
+            }
         };
         drop(file);
+        let upstream_digest = fetched.sha256;
+        if verbose {
+            // What the registry vouched for, said once, because "fetched" alone reads the same
+            // whether the bytes were checked against two declarations or against none.
+            let checked: Vec<String> = fetched
+                .checks
+                .iter()
+                .map(|c| {
+                    let algorithm = &c.declared.algorithm;
+                    match c.result {
+                        trigon_core::CheckResult::Matched => format!("{algorithm} matches"),
+                        trigon_core::CheckResult::Unchecked => {
+                            format!("{algorithm} declared, not computable here")
+                        }
+                    }
+                })
+                .collect();
+            // The note wherever nothing matched: declarations of algorithms this build cannot
+            // compute are a list that checked nothing, and the list alone does not say so.
+            let matched = fetched
+                .checks
+                .iter()
+                .any(|c| c.result == trigon_core::CheckResult::Matched);
+            let said = match (matched, &fetched.note) {
+                (true, _) => checked.join(", "),
+                (false, Some(note)) => note.clone(),
+                (false, None) => "nothing declared".into(),
+            };
+            field(
+                "declared",
+                style::muted(&style::wrap(&said, style::VALUE_COL)),
+            );
+        }
+        // Kept for the record, whichever way it ends. The sha512 and sha1 are what a statement's
+        // subject carries, and a run that reaches no verdict does not keep the bytes to recompute
+        // them from; sha1 only where the ecosystem publishes one.
+        let upstream_digests = trigon_store::UpstreamDigests {
+            sha512: fetched.sha512,
+            sha1: target.ecosystem.publishes_sha1().then_some(fetched.sha1),
+            declared: fetched.checks.clone(),
+            note: fetched.note.clone(),
+        };
         // From here on every terminal outcome is about a package and can be recorded as one. A
         // failure before this point is a resolve or a fetch — ours or the registry's — and has no
         // artifact to be a record *about*, which is also what the run id is built from.
@@ -4171,6 +4416,11 @@ mod rebuild {
             isolation: String::new(),
             guard_manifest: None,
             guarded_members: None,
+            guard_bytes: None,
+            // Filled per attempt in the build loop, beside `strategy_digest`.
+            strategy: None,
+            // Known now, and true of the run however it ends: the fetch is behind us.
+            upstream_digests: Some(upstream_digests.clone()),
             purl: args.purl.clone(),
             work: args.work.clone(),
             image: args.image.clone(),
@@ -4420,6 +4670,15 @@ mod rebuild {
             .to_hex()
         });
         let guarded_members = armed.then_some(guard.members.len() as u64);
+        // And the manifest's bytes, under the same condition, for the store. A run that ends
+        // without a verdict — a void above all, where the guard is the whole story — is recorded
+        // from `rec`, so it learns them here rather than at the end.
+        let guard_kept = armed.then(|| guard_bytes.clone());
+        if let Some(i) = rec.inputs.as_mut() {
+            i.guard_manifest = guard_manifest.clone();
+            i.guarded_members = guarded_members;
+            i.guard_bytes = guard_kept.clone();
+        }
 
         // Evidence the registry pin bound something, filled in once the mirror is torn down.
         let mut pin: Option<trigon_mirror::Observed> = None;
@@ -4450,13 +4709,21 @@ mod rebuild {
         // The build that produced `judged`, kept so a later failed repair does not describe the
         // run by the attempt that failed. See the fallback below the loop.
         let mut judged_built: Option<crate::build::Built> = None;
+        // And the strategy it came from, as `(strategy_digest, canonical JSON)`, for the same
+        // reason: the record names the recipe that produced the verdict, and a failed repair
+        // after it is a different recipe. Stashed and cleared with `judged_built`.
+        let mut judged_strategy: Option<(Option<String>, Option<String>)> = None;
+        // The canonical JSON of the strategy the current attempt runs, beside `strategy_digest`.
+        // Uninitialized for the reason `produced` is: every attempt assigns it before anything
+        // reads it.
+        let mut strategy_json: Option<String>;
         let mut compare_error: Option<Outcome> = None;
         // What the last attempt built, carried out of the loop because the guard is read again
         // after it and asks a question only this file can answer. Uninitialized on purpose: every
         // path out of the loop runs the assignment below first, and saying so here means a future
         // early `break` fails to compile rather than silently voiding against a stale `None`.
         let mut produced: Option<PathBuf>;
-        let (mut built, strategy_digest) = loop {
+        let (mut built, mut strategy_digest) = loop {
             // **The verdict's bytes have to outlive the attempt that follows it.**
             //
             // `judged` is deliberately carried across an iteration so a failed repair still
@@ -4491,6 +4758,13 @@ mod rebuild {
                 .and_then(|tools| trigon_strategy::strategy_digest(&strategy, &tools))
                 .ok();
             report.strategy_digest = strategy_digest.clone();
+            // The strategy itself, from the same value in the same place, so the blob a record
+            // names and the digest beside it describe one attempt. Canonical JSON, as the digest
+            // hashes it, so the file a reader fetches is the strategy and not a YAML rendering.
+            strategy_json = trigon_strategy::canonical(&strategy).ok();
+            if let Some(i) = rec.inputs.as_mut() {
+                i.strategy = strategy_json.clone();
+            }
             let built = crate::build::run_with(
                 &strategy_file,
                 false,
@@ -4575,7 +4849,17 @@ mod rebuild {
                 let Some(rebuilt) = produced.clone() else {
                     break (built, strategy_digest);
                 };
-                let comparison = match judge(&upstream_path, &rebuilt) {
+                let judgement = judge(&upstream_path, &rebuilt);
+                // This attempt reached its own comparison, and whatever came of it is what the run
+                // reports: every arm below keeps a verdict in `judged`, and a comparison that
+                // failed is returned as the outcome. So a build and strategy stashed for an
+                // earlier attempt's comparison describe nothing any more. Left in place, the
+                // record described a repaired run that went on to reproduce by the build and
+                // recipe of the divergence before it — and, when the repair's comparison failed,
+                // blamed that failure on the recipe whose build had compared cleanly.
+                judged_built = None;
+                judged_strategy = None;
+                let comparison = match judgement {
                     Ok(c) => c,
                     Err(outcome) => {
                         compare_error = Some(outcome);
@@ -4610,6 +4894,7 @@ mod rebuild {
                         .push("deterministic: .NET assembly version reconstruction".into());
                     judged = Some((rebuilt, comparison));
                     judged_built = built.as_ref().ok().cloned();
+                    judged_strategy = Some((strategy_digest.clone(), strategy_json.clone()));
                     strategy = next;
                     continue;
                 }
@@ -4726,6 +5011,8 @@ mod rebuild {
                                     // transcript, which reads as "no build ran" rather than "the
                                     // second one did not".
                                     judged_built = built.as_ref().ok().cloned();
+                                    judged_strategy =
+                                        Some((strategy_digest.clone(), strategy_json.clone()));
                                     strategy = next;
                                     continue;
                                 }
@@ -5197,6 +5484,14 @@ mod rebuild {
         if let Some(b) = judged_built {
             built = Ok(b);
         }
+        if let Some((digest, json)) = judged_strategy {
+            strategy_digest = digest;
+            strategy_json = json;
+            report.strategy_digest = strategy_digest.clone();
+            if let Some(i) = rec.inputs.as_mut() {
+                i.strategy = strategy_json.clone();
+            }
+        }
 
         mark("judge");
         // 5. The comparison the loop already made, with the same code path `verify` uses.
@@ -5280,12 +5575,15 @@ mod rebuild {
         // about a run that is evidence of nothing. That is a property of the control flow rather
         // than a check somebody has to remember to write.
         if let Some(path) = &args.attest {
-            crate::write_bundle(
-                path,
-                args.key.as_deref(),
-                &crate::file_name(&upstream_path),
-                &comparison,
-            )?;
+            // The digests the fetch computed over these bytes, sha1 included where the ecosystem
+            // publishes one; `write_bundle` refuses them if they are not the comparison's.
+            let subject = trigon_attest::Subject::with_digests(
+                crate::file_name(&upstream_path),
+                &upstream_digest,
+                &upstream_digests.sha512,
+                upstream_digests.sha1.as_ref(),
+            );
+            crate::write_bundle(path, args.key.as_deref(), subject, &comparison)?;
         }
         if let Some(dir) = &args.store {
             // A failure here does not fail the run. The comparison already happened and its verdict
@@ -5324,6 +5622,10 @@ mod rebuild {
                     .unwrap_or_default(),
                 guard_manifest: guard_manifest.clone(),
                 guarded_members,
+                guard_bytes: guard_kept.clone(),
+                // The recipe that produced this comparison, restored above where a failed repair
+                // ran after it.
+                strategy: strategy_json.clone(),
                 network_transcript: built.as_ref().ok().and_then(|b| b.transcript.clone()),
                 // What the run's own counters say, not what a budget allowed. `docs/03` §3 puts
                 // costs beside the timings for one reason: the number that decides where money
@@ -5438,6 +5740,18 @@ mod rebuild {
         /// because only the arming site knows them, and it is eight hundred lines from here.
         guard_manifest: Option<String>,
         guarded_members: Option<u64>,
+        /// The manifest itself, exactly the bytes `guard_manifest` is the digest of, and only where
+        /// the guard was armed. Stored as a blob so the digest names something a reader can fetch;
+        /// it lived in the work directory and was lost with it.
+        guard_bytes: Option<Vec<u8>>,
+        /// The strategy the recorded attempt ran, as the canonical JSON the store keeps: the blob
+        /// `RunRecord.strategy` names. Computed beside `strategy_digest`, from the same value, so
+        /// the two describe one attempt; and never mistaken for it, since that digest also covers
+        /// the tools the strategy reaches.
+        strategy: Option<String>,
+        /// What the fetch computed over the published bytes beyond sha256, and what the registry
+        /// declared and whether it held. See [`trigon_store::UpstreamDigests`].
+        upstream_digests: Option<trigon_store::UpstreamDigests>,
         /// Everything that crossed the network into the build, or `None` where no complete account
         /// exists. An empty `Some` is stored as an empty blob and means nothing crossed; flattening
         /// it to `None` would turn "we looked and it was clean" into "we never looked".
@@ -5499,6 +5813,21 @@ mod rebuild {
             })?;
             let up = store.blobs().put(up_bytes.clone()).await?;
             let rb = store.blobs().put(rb_bytes.clone()).await?;
+            // The fetch hashed these bytes as they arrived. Confirmed against the bytes being
+            // stored, because the record is about to say both describe one artifact, and a file
+            // rewritten between the two would make that false with nothing to show it.
+            if let Some(d) = &args.upstream_digests {
+                let sha512 = trigon_attest::sha512_of(&up_bytes);
+                let sha1 = d.sha1.map(|_| trigon_attest::sha1_of(&up_bytes));
+                if sha512 != d.sha512 || sha1 != d.sha1 {
+                    bail!(
+                        "the published artifact at {} is not the bytes the fetch hashed: it \
+                         changed on disk between the fetch and the record. Nothing was recorded; \
+                         run it again in a work directory nothing else writes to.",
+                        upstream_path.display()
+                    );
+                }
+            }
 
             // Everything this run adds to the store, counted as each blob goes in rather than
             // estimated afterwards. `docs/10-scale.md` §1 budgets ~3 MB a run and ~270 GB a sweep,
@@ -5550,6 +5879,10 @@ mod rebuild {
                 None => None,
             };
 
+            let (strategy, guard_bytes) = keep_strategy_and_guard(&store, args).await?;
+            blob_bytes += guard_bytes;
+            blob_bytes += args.strategy.as_ref().map_or(0, |j| j.len() as u64);
+
             // Time-ordered, so listing a store gives the most recent run first without reading
             // every record to sort them.
             let id = format!(
@@ -5596,7 +5929,10 @@ mod rebuild {
                 crate::now_rfc3339(),
             );
             record.state = RunState::Done;
+            record.strategy = strategy;
             record.strategy_digest = args.strategy_digest.clone();
+            record.trigon_version = Some(building_version());
+            record.upstream_digests = args.upstream_digests.clone();
             record.derivation = args.derivation.clone();
             record.source = args.source.clone();
             record.outcome = Some(c.outcome.to_string());
@@ -5748,6 +6084,50 @@ mod rebuild {
         })
     }
 
+    /// The Trigon that ran this build, for its record.
+    ///
+    /// The crate version alone, because no build of this binary embeds a git revision; where one
+    /// does, it belongs here beside the version (`docs/19` §4.2 item 3). Not the attestor's
+    /// version, which is what `rebuild` signs and may be a later binary altogether.
+    fn building_version() -> String {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+
+    /// Store the strategy that ran and the guard manifest the mirror was armed with, as blobs.
+    ///
+    /// Returns the strategy blob's digest, for `RunRecord.strategy`, and the guard manifest's size
+    /// for the cost block. Both used to be thrown away with the work directory:
+    /// `RunRecord.strategy` was declared and written by nothing (0 of 371 stored runs), and the
+    /// guard manifest's digest was signed into `buildobservation` naming bytes nobody kept (none
+    /// of the 167 stored runs that carry one has the manifest in the store).
+    ///
+    /// The guard's digest was computed where it was armed, from these same bytes, and the record
+    /// carries that one; the store's own digest of them is checked against it, so a record can
+    /// never name a manifest the store holds under another name.
+    async fn keep_strategy_and_guard(
+        store: &trigon_store::Store,
+        args: &RecordInputs,
+    ) -> Result<(Option<trigon_core::Digest>, u64)> {
+        let strategy = match &args.strategy {
+            Some(json) => Some(store.blobs().put(json.clone().into_bytes()).await?),
+            None => None,
+        };
+        let mut guard_bytes = 0;
+        if let Some(bytes) = &args.guard_bytes {
+            let stored = store.blobs().put(bytes.clone()).await?.to_hex();
+            if args.guard_manifest.as_deref() != Some(stored.as_str()) {
+                bail!(
+                    "the guard manifest stored as {stored} is not the one the run was armed with \
+                     ({}). Refusing to record a run whose guard digest names other bytes; this is \
+                     a bug in the run path.",
+                    args.guard_manifest.as_deref().unwrap_or("none")
+                );
+            }
+            guard_bytes = bytes.len() as u64;
+        }
+        Ok((strategy, guard_bytes))
+    }
+
     /// A record for a run that never reached a comparison.
     ///
     /// The other three quarters of a corpus. A `no-strategy`, a build that failed, a guard that
@@ -5815,11 +6195,18 @@ mod rebuild {
                         toolchain_requests: o.toolchain_requests,
                         rejected: o.rejected,
                     }),
-                    guard_manifest: None,
-                    guarded_members: None,
+                    // From the arming site, where the guard was armed. These were `None` on every
+                    // record this path wrote, so a void run — the one run whose whole story is the
+                    // guard — said the guard had not been armed.
+                    guard_manifest: inputs.guard_manifest.clone(),
+                    guarded_members: inputs.guarded_members,
                 },
                 &report.started,
             );
+            let (strategy, guard_bytes) = keep_strategy_and_guard(&store, inputs).await?;
+            record.strategy = strategy;
+            record.trigon_version = Some(building_version());
+            record.upstream_digests = inputs.upstream_digests.clone();
             record.state = RunState::Done;
             record.cache_key = inputs.cache_key.clone();
             record.attempt = inputs.attempt;
@@ -5886,8 +6273,11 @@ mod rebuild {
                     (!read.is_empty()).then(|| read.iter().sum())
                 },
                 egress_bytes: report.network_bytes,
-                // Nothing was put in the store, and that is a measurement rather than a gap.
-                blob_bytes: Some(0),
+                // The strategy and the guard manifest, and nothing else: no artifact and no log
+                // went into the store, and those zeroes are measurements rather than gaps.
+                blob_bytes: Some(
+                    guard_bytes + inputs.strategy.as_ref().map_or(0, |j| j.len() as u64),
+                ),
                 artifact_bytes: Some(0),
                 log_bytes: Some(0),
             });
@@ -5895,6 +6285,252 @@ mod rebuild {
             tracing::debug!(run = %id, "recorded a run that reached no verdict");
             anyhow::Ok(Some(id))
         })
+    }
+
+    #[cfg(test)]
+    mod record_keeps_what_the_run_threw_away {
+        //! `docs/19` §10 phase 2: the strategy, the guard manifest, the building version and the
+        //! published artifact's other digests, which the run computed and then dropped with the
+        //! work directory.
+        use super::*;
+
+        const STRATEGY: &str = r#"
+schema: 1
+kind: flow
+location:
+  repo: https://github.com/stevemao/left-pad
+  ref: ff8e7ba8b4122829cf66125ca8445cac7f073bce
+src:
+- uses: git-checkout
+build:
+- runs: npm pack
+output_path: '*.tgz'
+"#;
+
+        fn tmpdir(tag: &str) -> PathBuf {
+            let d =
+                std::env::temp_dir().join(format!("trigon-record-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        fn tgz() -> Vec<u8> {
+            let mut b = ::tar::Builder::new(Vec::new());
+            let body = b"module.exports = leftPad;\n";
+            let mut h = ::tar::Header::new_ustar();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_mtime(1_700_000_000);
+            h.set_cksum();
+            b.append_data(&mut h, "package/index.js", &body[..])
+                .unwrap();
+            let tar = b.into_inner().unwrap();
+            let mut gz = Vec::new();
+            {
+                use std::io::Write as _;
+                let mut e = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
+                e.write_all(&tar).unwrap();
+                e.finish().unwrap();
+            }
+            gz
+        }
+
+        /// What a run that fetched `bytes` from npm, which declared nothing, knows about them.
+        fn fetched(bytes: &[u8]) -> trigon_store::UpstreamDigests {
+            trigon_store::UpstreamDigests {
+                sha512: trigon_attest::sha512_of(bytes),
+                sha1: Some(trigon_attest::sha1_of(bytes)),
+                declared: Vec::new(),
+                note: Some("npm declared neither `dist.integrity` nor `dist.shasum`".into()),
+            }
+        }
+
+        /// The inputs a run that got as far as arming the guard carries, with everything else at
+        /// the value a run starts with.
+        fn inputs(work: &Path, strategy: &trigon_strategy::Strategy, guard: &[u8]) -> RecordInputs {
+            let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+            RecordInputs {
+                purl: "pkg:npm/left-pad@1.3.0".into(),
+                work: work.to_path_buf(),
+                image: "localhost/trigon-base@sha256:7cdd".into(),
+                derived_image: None,
+                egress: "mirror-only".into(),
+                timewarp: None,
+                strategy_digest: Some(trigon_strategy::strategy_digest(strategy, &tools).unwrap()),
+                derivation: Some("heuristic".into()),
+                source: None,
+                diff_opinion: None,
+                pin: None,
+                attestable: true,
+                isolation: "user_ns".into(),
+                guard_manifest: Some(trigon_store::digest_of(guard).to_hex()),
+                guarded_members: Some(1),
+                guard_bytes: Some(guard.to_vec()),
+                strategy: Some(trigon_strategy::canonical(strategy).unwrap()),
+                upstream_digests: None,
+                network_transcript: Some(Vec::new()),
+                inference_seconds: None,
+                tokens: Vec::new(),
+                timings: Vec::new(),
+                transcript: None,
+                cache_key: None,
+                attempt: 1,
+                declines: Vec::new(),
+                assumptions: Vec::new(),
+                confidence: None,
+            }
+        }
+
+        fn store(dir: &Path) -> (tokio::runtime::Runtime, trigon_store::Store) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            (rt, trigon_store::Store::local(dir).unwrap())
+        }
+
+        #[test]
+        fn a_compared_run_stores_its_strategy_and_guard_and_names_both_by_digest() {
+            let work = tmpdir("compared");
+            let bytes = tgz();
+            let (up, rb) = (work.join("left-pad-1.3.0.tgz"), work.join("kept.tgz"));
+            std::fs::write(&up, &bytes).unwrap();
+            std::fs::write(&rb, &bytes).unwrap();
+            let c = trigon_compare::compare_bytes(
+                bytes.clone(),
+                bytes.clone(),
+                trigon_core::Format::TarGz,
+                &trigon_stabilize::profile("tar-gzip").unwrap(),
+                &trigon_archive::Limits::default(),
+            )
+            .unwrap();
+            let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
+            let guard = br#"{"artifact":"870c0fe1","members":["ab"]}"#;
+            let mut args = inputs(&work, &strategy, guard);
+            args.upstream_digests = Some(fetched(&bytes));
+            let dir = work.join("store");
+
+            let id = record_run(&dir, &args, &up, &rb, &c, false).unwrap();
+            let (rt, store) = store(&dir);
+            let r = rt.block_on(store.get_run(&id)).unwrap();
+
+            // The strategy: a blob of its canonical JSON, named by that blob's own digest, which
+            // is a file digest and therefore not `strategy_digest`.
+            let blob = r.strategy.expect("the strategy is kept");
+            let json = trigon_strategy::canonical(&strategy).unwrap();
+            assert_eq!(blob, trigon_store::digest_of(json.as_bytes()));
+            assert_eq!(
+                &rt.block_on(store.blobs().get(&blob)).unwrap()[..],
+                json.as_bytes()
+            );
+            assert_ne!(
+                Some(blob.to_hex()),
+                r.strategy_digest,
+                "the blob digest and the cache digest are different digests"
+            );
+            assert_eq!(r.strategy_digest, args.strategy_digest);
+
+            // The guard manifest: the bytes the guard was armed with, under the digest the record
+            // already carried, so `buildobservation`'s `guardManifest` names something fetchable.
+            let named = r.environment.guard_manifest.clone().expect("armed");
+            let d = trigon_core::Digest::from_hex(&named).unwrap();
+            assert_eq!(&rt.block_on(store.blobs().get(&d)).unwrap()[..], &guard[..]);
+
+            assert_eq!(r.trigon_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+            assert_eq!(r.upstream_digests, args.upstream_digests);
+            // Counted, because a budget with nothing measuring it is a wish.
+            let costs = r.costs.unwrap();
+            assert_eq!(
+                costs.blob_bytes,
+                Some(
+                    2 * bytes.len() as u64
+                        + serde_json::to_vec(&c).unwrap().len() as u64
+                        + guard.len() as u64
+                        + json.len() as u64
+                )
+            );
+        }
+
+        #[test]
+        fn a_record_whose_fetched_digests_are_not_of_the_stored_bytes_is_not_written() {
+            // The sha512 is what a subject will carry. One that is not of the bytes the store keeps
+            // would be signed about some other file.
+            let work = tmpdir("drifted");
+            let bytes = tgz();
+            let up = work.join("left-pad-1.3.0.tgz");
+            std::fs::write(&up, &bytes).unwrap();
+            let c = trigon_compare::compare_bytes(
+                bytes.clone(),
+                bytes.clone(),
+                trigon_core::Format::TarGz,
+                &trigon_stabilize::profile("tar-gzip").unwrap(),
+                &trigon_archive::Limits::default(),
+            )
+            .unwrap();
+            let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
+            let mut args = inputs(&work, &strategy, b"{}");
+            args.upstream_digests = Some(fetched(b"some other bytes"));
+            let e = record_run(&work.join("store"), &args, &up, &up, &c, false).unwrap_err();
+            assert!(e.to_string().contains("changed on disk"), "{e:#}");
+        }
+
+        #[test]
+        fn a_void_run_records_the_guard_it_tripped_the_strategy_and_the_declared_absence() {
+            // The run whose whole story is the guard. This path wrote `guard_manifest: None` for
+            // every run it recorded, so a void said the guard had never been armed.
+            let work = tmpdir("void");
+            let bytes = tgz();
+            let up = work.join("left-pad-1.3.0.tgz");
+            std::fs::write(&up, &bytes).unwrap();
+            let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
+            let guard = br#"{"artifact":"870c0fe1","members":["cd"]}"#;
+            let mut args = inputs(&work, &strategy, guard);
+            args.upstream_digests = Some(fetched(&bytes));
+            let rec = Recording {
+                inputs: Some(args.clone()),
+                upstream: Some((
+                    up.clone(),
+                    trigon_store::digest_of(&bytes),
+                    bytes.len() as u64,
+                )),
+                record_id: None,
+            };
+            let mut report = crate::progress::RunReport::new("pkg:npm/left-pad@1.3.0");
+            report.strategy_digest = args.strategy_digest.clone();
+            let reason = "the artifact under test arrived from registry.npmjs.org".to_string();
+            let out = Ok(Ran::from(Outcome::Void {
+                reason: reason.clone(),
+            }));
+            let dir = work.join("store");
+
+            let id = record_terminal(&dir, &rec, &report, &out).unwrap().unwrap();
+            let (rt, store) = store(&dir);
+            let r = rt.block_on(store.get_run(&id)).unwrap();
+            assert_eq!(r.guard_trips, [reason]);
+            assert!(!r.is_evidence());
+
+            let named = r.environment.guard_manifest.expect("the guard was armed");
+            assert_eq!(r.environment.guarded_members, Some(1));
+            let d = trigon_core::Digest::from_hex(&named).unwrap();
+            assert_eq!(&rt.block_on(store.blobs().get(&d)).unwrap()[..], &guard[..]);
+
+            let blob = r.strategy.expect("the strategy that ran is kept too");
+            assert_eq!(
+                &rt.block_on(store.blobs().get(&blob)).unwrap()[..],
+                trigon_strategy::canonical(&strategy).unwrap().as_bytes()
+            );
+            assert_eq!(r.trigon_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+
+            // The bytes are not kept on this path, so the digests the fetch computed are what a
+            // statement's subject will be built from. And npm declared nothing here, which reads
+            // as an empty list and a reason, never as a check that passed.
+            let digests = r.upstream_digests.expect("kept");
+            assert_eq!(digests.sha512, trigon_attest::sha512_of(&bytes));
+            assert!(digests.declared.is_empty());
+            assert!(digests.note.unwrap().contains("declared neither"));
+            assert!(!r.upstream.stored);
+        }
     }
 
     /// Bytes, at the precision a person reading a cost line needs.
@@ -8861,15 +9497,20 @@ fn load_key(path: &Path) -> Result<trigon_attest::LocalKey> {
     Ok(trigon_attest::LocalKey::from_bytes(&bytes)?)
 }
 
+/// Sign an equivalence statement about `subject` and write it to `path`.
+///
+/// The subject is the caller's, computed over the upstream bytes, because only the caller knows
+/// whether the ecosystem publishes a sha1 for it. It is refused if it is not the comparison's
+/// upstream artifact.
 fn write_bundle(
     path: &Path,
     key: Option<&Path>,
-    subject: &str,
+    subject: trigon_attest::Subject,
     c: &trigon_compare::Comparison,
 ) -> Result<()> {
     use trigon_attest::Signer as _;
 
-    let st = trigon_attest::Statement::equivalence(subject, c);
+    let st = trigon_attest::Statement::equivalence_for(subject, c)?;
     let env = match key {
         Some(k) => {
             let key = load_key(k)?;
@@ -9319,7 +9960,7 @@ fn verify_attestation(
 mod attestor {
     use anyhow::{Context, Result, bail};
     use std::path::Path;
-    use trigon_attest::{RunFacts, Statement};
+    use trigon_attest::{RunFacts, Statement, Subject};
     use trigon_store::{RunRecord, Store};
 
     pub struct Args {
@@ -9344,7 +9985,7 @@ mod attestor {
                     .next()
                     .context("this store holds no runs")?,
             };
-            let mut record = store.get_run(&id).await?;
+            let record = store.get_run(&id).await?;
             println!("run       {id}");
             println!("target    {}", record.target);
 
@@ -9367,6 +10008,29 @@ mod attestor {
             let mut written = Vec::new();
             let mut published_set: Option<String> = None;
 
+            let reference = record.target.parse::<trigon_core::TargetRef>()?;
+            let target = trigon_core::Target::new(
+                reference.clone(),
+                trigon_core::ArtifactId::new(record.upstream.name.clone()),
+            );
+            // The published bytes, where the store kept them, fetched by hash and checked against
+            // it. Every statement about the published artifact takes its subject from them.
+            let upstream_bytes = match record.upstream.stored {
+                true => Some(store.blobs().get(&record.upstream.sha256).await?),
+                false => None,
+            };
+            let upstream_subject = upstream_subject(
+                &record,
+                upstream_bytes.as_deref(),
+                reference.ecosystem.publishes_sha1(),
+            )?;
+            // The rebuilt artifact's, from its bytes when step 1 has them in hand.
+            let mut rebuild_subject: Option<Subject> = None;
+            // The blobs whose content the statements below vouch for — the network transcript,
+            // counted, and the strategy, recomputed — read before anything is signed, so that a
+            // refusal over either leaves no statement behind it: step 1 files one.
+            let hex = Hex::of(&store, &record).await?;
+
             // 1. The equivalence (or divergence) claim, re-derived from the bytes.
             if let Some(comparison_digest) = record.comparison {
                 let bytes = store.blobs().get(&comparison_digest).await?;
@@ -9386,8 +10050,11 @@ mod attestor {
 
                 // Fetched by hash and checked against it. The attestor trusts the digest, never the
                 // process that wrote the bytes.
-                let upstream = store.blobs().get(&record.upstream.sha256).await?;
+                let upstream = upstream_bytes
+                    .clone()
+                    .context("the published artifact is stored, as checked above")?;
                 let rebuild = store.blobs().get(&rebuilt.sha256).await?;
+                rebuild_subject = Some(Subject::of_bytes(&rebuilt.name, &rebuild, false));
 
                 // The record and the evidence it points at must agree. Re-derivation already
                 // catches a forged *comparison*, because it recomputes from the artifact bytes —
@@ -9415,7 +10082,12 @@ mod attestor {
                     }
                 }
 
-                let statement = Statement::equivalence(&record.upstream.name, &comparison);
+                // The subject computed over the bytes above, not the one the comparison blob
+                // carries: that blob was written by the process that ran the build. The two are
+                // checked against each other here and against the bytes again by `rederive`.
+                let statement =
+                    Statement::equivalence_for(upstream_subject.clone(), &comparison)
+                        .context("the comparison is not about the run's published artifact")?;
                 let checked = trigon_attest::rederive(&statement, upstream.into(), rebuild.into())
                     .context("re-deriving the claim before signing it")?;
                 if !checked.holds() {
@@ -9430,41 +10102,43 @@ mod attestor {
                     checked.actual, checked.stabilizer_set
                 );
 
-                let env = trigon_attest::sign_statement(&statement, signer.as_ref())?;
-
-                let target = record.target.parse::<trigon_core::TargetRef>()?;
-                let target = trigon_core::Target::new(
-                    target,
-                    trigon_core::ArtifactId::new(record.upstream.name.clone()),
-                );
-                written.push(
-                    store
-                        .put_attestation(
-                            &target,
-                            &record.upstream.name,
-                            &statement.predicate_type,
-                            &env,
-                        )
-                        .await?,
-                );
+                written.push(put(&store, &target, &record, &statement, signer.as_ref()).await?);
             }
 
             // 2. How the rebuild came to exist, and what the build was observed to do.
-            let hex = Hex::of(&store, &record).await?;
             let facts = facts(&record, &hex);
             if let Some(rebuilt) = &record.rebuild {
-                let st = Statement::rebuild(&rebuilt.name, &rebuilt.sha256, &facts);
-                written.push(put(&store, &record, &st, signer.as_ref()).await?);
+                // sha256 alone only where the rebuilt bytes were not in hand, which a run with a
+                // comparison never reaches: step 1 refuses one whose bytes are gone.
+                let subject = rebuild_subject
+                    .take()
+                    .unwrap_or_else(|| Subject::new(&rebuilt.name, &rebuilt.sha256));
+                let st = Statement::rebuild(subject, &facts);
+                written.push(put(&store, &target, &record, &st, signer.as_ref()).await?);
             }
-            let obs = Statement::build_observation(
-                &record.upstream.name,
-                &record.upstream.sha256,
-                &facts,
-            );
-            written.push(put(&store, &record, &obs, signer.as_ref()).await?);
+            let obs = Statement::build_observation(upstream_subject, &facts);
+            written.push(put(&store, &target, &record, &obs, signer.as_ref()).await?);
 
-            record.attestations = written.clone();
-            store.put_run(&record).await?;
+            // **Appended, never replaced.** Statements are filed under this run and never
+            // overwritten, and the record names every one of them: an earlier attest's statements
+            // are the history of what was claimed about this run, and dropping their paths here
+            // would lose them as surely as overwriting the files did. Merged into the record as it
+            // is now rather than written back from the copy read above, so another attestor that
+            // finished meanwhile keeps its paths; and per-target paths from before statements were
+            // filed per run are set aside, since another run may have written over any of them.
+            let named = store.record_attestations(&id, &written).await?;
+            let set_aside = record
+                .attestations
+                .iter()
+                .filter(|p| named.per_target_attestations.contains(p))
+                .count();
+            if set_aside > 0 {
+                println!(
+                    "set aside {set_aside} statement path(s) filed per target, which any run of \
+                     this target may have written over; the record now names only statements \
+                     filed under this run"
+                );
+            }
 
             println!();
             for p in &written {
@@ -9495,21 +10169,62 @@ mod attestor {
         })
     }
 
+    /// Sign a statement and file it under this run.
     async fn put(
         store: &Store,
+        target: &trigon_core::Target,
         record: &RunRecord,
         st: &Statement,
         signer: &dyn trigon_attest::Signer,
     ) -> Result<String> {
         let env = trigon_attest::sign_statement(st, signer)?;
-        let reference = record.target.parse::<trigon_core::TargetRef>()?;
-        let target = trigon_core::Target::new(
-            reference,
-            trigon_core::ArtifactId::new(record.upstream.name.clone()),
-        );
         Ok(store
-            .put_attestation(&target, &record.upstream.name, &st.predicate_type, &env)
+            .put_attestation(
+                target,
+                &record.id,
+                &record.upstream.name,
+                &st.predicate_type,
+                &env,
+            )
             .await?)
+    }
+
+    /// The subject of every statement about the published artifact.
+    ///
+    /// **Computed over the bytes wherever the store kept them**, which is every run with a
+    /// comparison: sha256 and sha512, and sha1 where the ecosystem publishes one, so a consumer
+    /// holding an npm lockfile's `integrity` or an old one's `shasum` finds the statement
+    /// (`docs/19` §5). The digests the run recorded at fetch must agree, or the record and its
+    /// bytes describe different artifacts and nothing is signed.
+    ///
+    /// Where the bytes are gone — a run that reached no verdict keeps none — the recorded digests
+    /// are what the fetch computed over them; and a run recorded before it kept any is named by
+    /// sha256 alone, which is all anybody knows about it.
+    fn upstream_subject(r: &RunRecord, bytes: Option<&[u8]>, with_sha1: bool) -> Result<Subject> {
+        let name = r.upstream.name.as_str();
+        let Some(bytes) = bytes else {
+            return Ok(match &r.upstream_digests {
+                Some(d) => {
+                    Subject::with_digests(name, &r.upstream.sha256, &d.sha512, d.sha1.as_ref())
+                }
+                None => Subject::new(name, &r.upstream.sha256),
+            });
+        };
+        let subject = Subject::of_bytes(name, bytes, with_sha1);
+        if let Some(d) = &r.upstream_digests {
+            let named = |algorithm: &str| subject.digest.get(algorithm).cloned();
+            let agrees = named("sha512") == Some(d.sha512.to_hex())
+                && d.sha1.is_none_or(|h| named("sha1") == Some(h.to_hex()));
+            if !agrees {
+                bail!(
+                    "run `{}` recorded digests for its published artifact that the stored bytes do \
+                     not hash to, so the record and the bytes describe different artifacts. \
+                     Refusing to sign a subject for either.",
+                    r.id
+                );
+            }
+        }
+        Ok(subject)
     }
 
     /// The hex forms [`RunFacts`] borrows.
@@ -9524,6 +10239,8 @@ mod attestor {
         network_transcript: Option<(String, u64, u64)>,
         build_log: Option<String>,
         instructions: Option<String>,
+        /// The strategy blob's digest, which is what the `strategy.json` byproduct names.
+        strategy: Option<String>,
     }
 
     impl Hex {
@@ -9553,12 +10270,79 @@ mod attestor {
                 }
                 None => None,
             };
+            let strategy = match &r.strategy {
+                Some(blob) => Some(checked_strategy(store, r, blob).await?),
+                None => None,
+            };
             Ok(Hex {
                 network_transcript,
                 build_log: r.build_log.map(|d| d.to_hex()),
                 instructions: r.instructions.map(|d| d.to_hex()),
+                strategy,
             })
         }
+    }
+
+    /// The strategy blob a run names, fetched and checked before its digest is signed.
+    ///
+    /// The `strategy.json` byproduct names this blob, and `strategyDigest` beside it names the
+    /// strategy with the tools it reaches; `docs/19` §4.2 item 7 binds the record's strategy
+    /// evidence by the blob. Copied out of the record, as it was, the pair could name a file the
+    /// store does not hold, or one that is not the strategy the digest describes, and no reader
+    /// could fetch the one or match the other. So the blob is fetched by hash, which refuses one
+    /// that is missing or does not hash to its name; read as a strategy, and required to be that
+    /// strategy's canonical JSON, the only form a run writes; and its `strategyDigest` recomputed
+    /// under this binary's tools and held to the record's.
+    ///
+    /// **The last can refuse an honest record.** `strategyDigest` covers the definitions of the
+    /// tools the strategy reaches, so a binary in which one of them has changed since the build
+    /// recomputes another digest. Refused all the same: the attestor cannot tell that from an
+    /// altered record, and a digest it could not reproduce is a digest it was told.
+    async fn checked_strategy(
+        store: &Store,
+        r: &RunRecord,
+        blob: &trigon_core::Digest,
+    ) -> Result<String> {
+        let bytes = store.blobs().get(blob).await.with_context(|| {
+            format!(
+                "reading the strategy blob run `{}` names. Refusing to sign a `strategy.json` \
+                 byproduct nobody could fetch.",
+                r.id
+            )
+        })?;
+        let not_a_strategy = |why: String| {
+            anyhow::anyhow!(
+                "the strategy blob run `{}` names is not a strategy as a run writes one ({why}). \
+                 Refusing to sign it as the strategy that ran.",
+                r.id
+            )
+        };
+        let text = std::str::from_utf8(&bytes).map_err(|e| not_a_strategy(e.to_string()))?;
+        let strategy =
+            trigon_strategy::from_yaml(text).map_err(|e| not_a_strategy(e.to_string()))?;
+        if trigon_strategy::canonical(&strategy)? != text {
+            return Err(not_a_strategy(
+                "it is not the strategy's canonical JSON".into(),
+            ));
+        }
+        if let Some(recorded) = &r.strategy_digest {
+            let tools = trigon_strategy::ToolRegistry::builtin()?;
+            let recomputed = trigon_strategy::strategy_digest(&strategy, &tools)?;
+            if &recomputed != recorded {
+                bail!(
+                    "run `{}` records strategyDigest {recorded}, and the strategy blob it names \
+                     recomputes to {recomputed} under this binary's tools. Either the record was \
+                     altered, or a tool the strategy uses has changed since Trigon {} built it. \
+                     Refusing to sign a digest that cannot be reproduced; attest with the Trigon \
+                     that ran the build.",
+                    r.id,
+                    r.trigon_version
+                        .as_deref()
+                        .unwrap_or("(version not recorded)")
+                );
+            }
+        }
+        Ok(blob.to_hex())
     }
 
     fn facts<'a>(r: &'a RunRecord, hex: &'a Hex) -> RunFacts<'a> {
@@ -9584,6 +10368,7 @@ mod attestor {
                 .pin
                 .map(|p| (p.index_requests, p.versions_withheld)),
             strategy_digest: r.strategy_digest.as_deref(),
+            strategy_blob: hex.strategy.as_deref(),
             source: r.source.as_ref().map(|s| trigon_attest::SourceFacts {
                 repo: &s.repo_url,
                 commit: &s.commit,
@@ -9690,11 +10475,14 @@ mod attestor {
                 network_transcript: None,
                 build_log: None,
                 instructions: None,
+                strategy: None,
             };
             let f = facts(&r, &hex);
             let s = trigon_attest::Statement::build_observation(
-                "once-1.4.0.tgz",
-                &trigon_core::Digest::from_bytes([7u8; 32]),
+                Subject::new(
+                    "once-1.4.0.tgz",
+                    &trigon_core::Digest::from_bytes([7u8; 32]),
+                ),
                 &f,
             );
             let check = &s.predicate["artifactHashCheck"];
@@ -9716,13 +10504,139 @@ mod attestor {
                 network_transcript: None,
                 build_log: None,
                 instructions: None,
+                strategy: None,
             };
             let s = trigon_attest::Statement::build_observation(
-                "once-1.4.0.tgz",
-                &trigon_core::Digest::from_bytes([7u8; 32]),
+                Subject::new(
+                    "once-1.4.0.tgz",
+                    &trigon_core::Digest::from_bytes([7u8; 32]),
+                ),
                 &facts(&r, &hex),
             );
             assert_eq!(s.predicate["artifactHashCheck"]["performed"], false);
+        }
+    }
+
+    #[cfg(test)]
+    mod the_strategy_is_checked_before_it_is_signed {
+        use super::*;
+        use trigon_store::{ArtifactRef, Environment, RunRecord};
+
+        const STRATEGY: &str = r#"
+schema: 1
+kind: flow
+location:
+  repo: https://github.com/stevemao/left-pad
+  ref: ff8e7ba8b4122829cf66125ca8445cac7f073bce
+src:
+- uses: git-checkout
+build:
+- runs: npm pack
+output_path: '*.tgz'
+"#;
+
+        fn rt() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        }
+
+        /// A record naming the strategy blob `json` would be, with `strategy_digest` beside it,
+        /// and the store holding the blob when `stored`.
+        fn run(store: &Store, json: &str, digest: Option<String>, stored: bool) -> RunRecord {
+            let blob = match stored {
+                true => rt()
+                    .block_on(store.blobs().put(json.as_bytes().to_vec()))
+                    .unwrap(),
+                false => trigon_store::digest_of(json.as_bytes()),
+            };
+            let mut r = RunRecord::new(
+                "1789000000-5a175a17",
+                "pkg:npm/left-pad@1.3.0",
+                ArtifactRef {
+                    name: "left-pad-1.3.0.tgz".into(),
+                    sha256: trigon_core::Digest::from_bytes([7u8; 32]),
+                    bytes: 3619,
+                    stored: false,
+                },
+                Environment {
+                    base_image: "localhost/trigon-base@sha256:7cdd".into(),
+                    derived_image: None,
+                    egress: "mirror-only".into(),
+                    isolation: "user_ns".into(),
+                    attestable: true,
+                    registry_moment: None,
+                    pin: None,
+                    guard_manifest: None,
+                    guarded_members: None,
+                },
+                "2026-09-27T00:00:00Z",
+            );
+            r.strategy = Some(blob);
+            r.strategy_digest = digest;
+            r.trigon_version = Some("0.0.0".into());
+            r
+        }
+
+        fn canonical() -> (String, String) {
+            let s = trigon_strategy::from_yaml(STRATEGY).unwrap();
+            let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+            (
+                trigon_strategy::canonical(&s).unwrap(),
+                trigon_strategy::strategy_digest(&s, &tools).unwrap(),
+            )
+        }
+
+        #[test]
+        fn a_stored_strategy_that_recomputes_to_its_digest_is_named_by_its_blob() {
+            let store = Store::in_memory();
+            let (json, digest) = canonical();
+            let r = run(&store, &json, Some(digest), true);
+            let hex = rt().block_on(Hex::of(&store, &r)).unwrap();
+            assert_eq!(hex.strategy, r.strategy.map(|d| d.to_hex()));
+
+            // A record from before `strategyDigest` was kept beside it has only the blob to check.
+            let r = run(&store, &json, None, true);
+            assert!(rt().block_on(Hex::of(&store, &r)).is_ok());
+        }
+
+        #[test]
+        fn a_strategy_the_store_does_not_hold_is_not_signed() {
+            // The byproduct would name a file nobody can fetch.
+            let store = Store::in_memory();
+            let (json, digest) = canonical();
+            let r = run(&store, &json, Some(digest), false);
+            let e = rt().block_on(Hex::of(&store, &r)).err().expect("it signed");
+            assert!(format!("{e:#}").contains("strategy blob"), "{e:#}");
+        }
+
+        #[test]
+        fn a_strategy_digest_the_blob_does_not_recompute_to_is_not_signed() {
+            // The record and the file it names describe different recipes: signing both would be
+            // signing whichever a reader happened to check.
+            let store = Store::in_memory();
+            let (json, _) = canonical();
+            let r = run(&store, &json, Some("ab".repeat(32)), true);
+            let e = rt().block_on(Hex::of(&store, &r)).err().expect("it signed");
+            let msg = format!("{e:#}");
+            assert!(msg.contains("recomputes to"), "{msg}");
+            assert!(msg.contains(&"ab".repeat(32)), "{msg}");
+        }
+
+        #[test]
+        fn a_blob_that_is_not_a_strategy_in_canonical_form_is_not_signed() {
+            let store = Store::in_memory();
+            let (json, digest) = canonical();
+            let yaml = STRATEGY.to_string();
+            for bad in ["not a strategy at all", "{}", yaml.as_str()] {
+                let r = run(&store, bad, Some(digest.clone()), true);
+                let e = rt().block_on(Hex::of(&store, &r)).err().expect("it signed");
+                assert!(format!("{e:#}").contains("not a strategy"), "{bad}: {e:#}");
+            }
+            // The YAML above is the same strategy, and still refused: a run writes canonical JSON,
+            // so a blob in any other form was not written by one.
+            assert_ne!(yaml, json);
         }
     }
 }
@@ -9867,6 +10781,60 @@ output_dir: trigon-pack
             !src.contains(propagates),
             "a validation failure must discard the proposal, not end the run"
         );
+    }
+
+    #[test]
+    fn an_attempt_that_reaches_a_comparison_lets_go_of_the_one_before() {
+        // The other half of the stash above. It keeps a divergence's build and strategy so a
+        // repair that fails cannot lose them, and it was never let go of: a repair that went on
+        // to reproduce was recorded with the divergent attempt's isolation, transcript and
+        // attestability, restored after the loop over the attempt that actually answered. Every
+        // arm after a comparison keeps that comparison, so reaching one is the moment the stash
+        // stops describing anything.
+        //
+        // Read out of the source, like the check above, because the property is about the order
+        // of lines in a loop that needs a container runtime to execute.
+        //
+        // Both ways a comparison can end, not only success. A comparison that fails is the run's
+        // outcome, returned after the loop; with the stash cleared only on success, that failure
+        // was recorded with the strategy and build of the earlier, divergent attempt, whose own
+        // comparison had worked. So the clearing sits between the call and the failure arm.
+        let src = include_str!("main.rs");
+        let judged = concat!("let judgement = judge(&upstream_path,", " &rebuilt);");
+        let at = src
+            .find(judged)
+            .expect("the comparison inside the loop moved");
+        let after = &src[at..];
+        let failed = after
+            .find(concat!("compare_error = Some", "(outcome);"))
+            .expect("the failure arm moved");
+        let kept = after
+            .find(concat!("if comparison.outcome", " != "))
+            .unwrap();
+        assert!(
+            failed < kept,
+            "the failure arm is handled before any verdict is kept"
+        );
+        for cleared in [
+            concat!("judged_built", " = None;"),
+            concat!("judged_strategy", " = None;"),
+        ] {
+            assert!(
+                after[..failed].contains(cleared),
+                "`{cleared}` must follow the comparison and precede both its failure arm and any \
+                 arm that keeps its verdict"
+            );
+        }
+        // And the strategy travels with the build wherever the build is stashed.
+        let stash = concat!("judged_built = built", ".as_ref().ok().cloned();");
+        let with = concat!("judged_strategy", " =");
+        for (i, _) in src.match_indices(stash) {
+            let next: String = src[i..].lines().take(3).collect();
+            assert!(
+                next.contains(with),
+                "a build stashed at byte {i} without the strategy that made it"
+            );
+        }
     }
 
     #[test]

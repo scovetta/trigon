@@ -21,6 +21,7 @@ use std::path::{Path as FsPath, PathBuf};
 use trigon_core::{Classify as _, Digest, Ecosystem, Fault, TargetRef};
 use trigon_store::{
     ArtifactRef, Costs, Environment, PinEvidence, RunRecord, RunState, Store, StoreError, Tokens,
+    UpstreamDigests,
 };
 
 /// Every file under `root`, relative and slash-separated.
@@ -136,8 +137,12 @@ fn every_field_populated() -> RunRecord {
                 rejected: 7,
             }),
         },
+        // Two different values, because they are two different digests: the blob's, and the
+        // domain-separated hash over the strategy and its tools. A record that swapped them, or
+        // wrote one into both, is the confusion `docs/19` §4.2 item 7 names.
         strategy: Some(Digest::from_bytes([1; 32])),
-        strategy_digest: Some(Digest::from_bytes([1; 32]).to_hex()),
+        strategy_digest: Some(Digest::from_bytes([0x11; 32]).to_hex()),
+        trigon_version: Some("0.0.0".into()),
         derivation: Some("model_assisted".into()),
         instructions: Some(Digest::from_bytes([2; 32])),
         upstream: ArtifactRef {
@@ -146,6 +151,32 @@ fn every_field_populated() -> RunRecord {
             bytes: 1_234_567,
             stored: true,
         },
+        // Every part populated: a sha1 (this is npm, which publishes one), a declaration that was
+        // checked and one that could not be, and a note. `unchecked` is the value a dropped serde
+        // attribute would most plausibly lose, and it must never come back as `matched`.
+        upstream_digests: Some(UpstreamDigests {
+            sha512: trigon_core::Sha512([0x5a; 64]),
+            sha1: Some(trigon_core::Sha1([0x1a; 20])),
+            declared: vec![
+                trigon_core::DigestCheck {
+                    declared: trigon_core::DeclaredDigest {
+                        algorithm: "sha512".into(),
+                        value: "5a".repeat(64),
+                        source: "npm:dist.integrity".into(),
+                    },
+                    result: trigon_core::CheckResult::Matched,
+                },
+                trigon_core::DigestCheck {
+                    declared: trigon_core::DeclaredDigest {
+                        algorithm: "blake2b_256".into(),
+                        value: "b2".repeat(32),
+                        source: "pypi:digests.blake2b_256".into(),
+                    },
+                    result: trigon_core::CheckResult::Unchecked,
+                },
+            ],
+            note: Some("blake2b_256 was declared and could not be checked".into()),
+        }),
         rebuild: Some(ArtifactRef {
             name: "core-7.24.0.tgz".into(),
             sha256: Digest::from_bytes([4; 32]),
@@ -204,6 +235,10 @@ fn every_field_populated() -> RunRecord {
         attestations: vec![
             "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/equivalence.intoto.json".into(),
             "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/rebuild.intoto.json".into(),
+        ],
+        per_target_attestations: vec![
+            "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/buildobservation.intoto.json"
+                .into(),
         ],
     }
 }
@@ -267,6 +302,20 @@ async fn every_field_of_a_run_record_survives_the_file_it_is_written_to() {
     assert_eq!(back.derivation, record.derivation, "derivation");
     assert_eq!(back.instructions, record.instructions, "instructions");
     assert_eq!(back.upstream, record.upstream, "upstream");
+    assert_eq!(
+        back.upstream_digests, record.upstream_digests,
+        "upstream_digests: a subject's sha512 and sha1 for a run whose bytes are not kept, and \
+         what the registry declared"
+    );
+    assert_eq!(
+        back.upstream_digests.as_ref().unwrap().declared[1].result,
+        trigon_core::CheckResult::Unchecked,
+        "upstream_digests.declared: an unchecked declaration must not come back as a matched one"
+    );
+    assert_eq!(
+        back.trigon_version, record.trigon_version,
+        "trigon_version: the binary that built, which no statement carried"
+    );
     let rebuild = back.rebuild.clone().expect("rebuild");
     assert_eq!(rebuild, record.rebuild.clone().unwrap(), "rebuild");
     assert!(
@@ -305,6 +354,10 @@ async fn every_field_of_a_run_record_survives_the_file_it_is_written_to() {
          well-cached run look more expensive than a cold one"
     );
     assert_eq!(back.attestations, record.attestations, "attestations");
+    assert_eq!(
+        back.per_target_attestations, record.per_target_attestations,
+        "per_target_attestations: set aside, and still the run's history"
+    );
 
     // And the whole thing, which catches anything the list above forgot to name.
     assert_eq!(back, record);
@@ -343,10 +396,12 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "environment",
         "strategy",
         "strategy_digest",
+        "trigon_version",
         "derivation",
         "source",
         "instructions",
         "upstream",
+        "upstream_digests",
         "rebuild",
         "comparison",
         "build_log",
@@ -357,6 +412,7 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "network_transcript",
         "costs",
         "attestations",
+        "per_target_attestations",
         "non_builtin_stabilizer",
         "diff_opinion",
     ]
@@ -422,6 +478,34 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
             .collect::<BTreeSet<&str>>(),
         "ArtifactRef changed shape"
     );
+    let digest_keys: BTreeSet<&str> = json
+        .get("upstream_digests")
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
+    assert_eq!(
+        digest_keys,
+        ["sha512", "sha1", "declared", "note"]
+            .into_iter()
+            .collect::<BTreeSet<&str>>(),
+        "UpstreamDigests changed shape"
+    );
+    let check_keys: BTreeSet<&str> = json["upstream_digests"]["declared"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
+    assert_eq!(
+        check_keys,
+        ["algorithm", "value", "source", "result"]
+            .into_iter()
+            .collect::<BTreeSet<&str>>(),
+        "DigestCheck changed shape"
+    );
 
     // The state is a name on the wire, never an ordinal, for the same reason the outcome is.
     assert_eq!(json.get("state").unwrap(), "judging");
@@ -472,6 +556,7 @@ async fn a_record_with_nothing_optional_in_it_reads_back_as_nothing_rather_than_
         "finished",
         "strategy",
         "strategy_digest",
+        "trigon_version",
         "derivation",
         "instructions",
         "rebuild",
@@ -484,6 +569,7 @@ async fn a_record_with_nothing_optional_in_it_reads_back_as_nothing_rather_than_
         "network_transcript",
         "costs",
         "attestations",
+        "per_target_attestations",
     ] {
         assert!(
             json.get(absent).is_none(),
@@ -671,6 +757,7 @@ async fn an_attestation_path_built_from_a_package_name_cannot_climb_out_of_the_s
     let path = store
         .put_attestation(
             &target,
+            "1789000000-0a1b2c3d",
             "../../../../../evil.tgz",
             "https://trigon.dev/equivalence/v1",
             &envelope,
@@ -746,7 +833,13 @@ async fn each_predicate_an_artifact_carries_is_filed_where_the_others_cannot_ove
     for p in predicates {
         let envelope = trigon_attest::Envelope::new(p.as_bytes(), vec![]);
         let path = store
-            .put_attestation(&target, "core-7.24.0.tgz", p, &envelope)
+            .put_attestation(
+                &target,
+                "1789000000-0a1b2c3d",
+                "core-7.24.0.tgz",
+                p,
+                &envelope,
+            )
             .await
             .unwrap();
         written.push((p, path, envelope));

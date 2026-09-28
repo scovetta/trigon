@@ -263,29 +263,313 @@ async fn runs_list_most_recent_first() {
     assert_eq!(s.list_runs().await.unwrap(), ["0003-c", "0002-b", "0001-a"]);
 }
 
-#[tokio::test]
-async fn an_attestation_is_filed_where_someone_with_the_published_artifact_would_look() {
-    // Keyed by target, not by run id. A layout keyed on our run id is findable only by someone who
-    // already has our run id, which is nobody.
-    let s = Store::in_memory();
+fn babel_core() -> trigon_core::Target {
     let reference: trigon_core::TargetRef = "pkg:npm/@babel/core@7.24.0".parse().unwrap();
-    let target =
-        trigon_core::Target::new(reference, trigon_core::ArtifactId::new("core-7.24.0.tgz"));
+    trigon_core::Target::new(reference, trigon_core::ArtifactId::new("core-7.24.0.tgz"))
+}
+
+const EQUIVALENCE: &str = "https://trigon.dev/equivalence/v1";
+
+#[tokio::test]
+async fn an_attestation_is_filed_under_its_target_and_then_its_run() {
+    // Under the target, so everything signed about one artifact lists under one prefix; under the
+    // run below that, so a second run's statement cannot land on the first's.
+    let s = Store::in_memory();
     let env = trigon_attest::Envelope::new(b"payload", vec![]);
     let path = s
         .put_attestation(
-            &target,
+            &babel_core(),
+            "1789000000-0a1b2c3d",
             "core-7.24.0.tgz",
-            "https://trigon.dev/equivalence/v1",
+            EQUIVALENCE,
             &env,
         )
         .await
         .unwrap();
     assert_eq!(
         path,
-        "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/equivalence.intoto.json"
+        "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/1789000000-0a1b2c3d/\
+         equivalence.intoto.json"
     );
     assert_eq!(s.get_attestation(&path).await.unwrap(), env);
+}
+
+#[tokio::test]
+async fn attesting_one_target_twice_leaves_both_runs_statements_readable() {
+    // The overwrite this layout exists to end. Filed per target, the second attest wrote over the
+    // first, and the first run's record went on naming a path that held the second run's claim:
+    // 40 of 93 attestation paths in the local store were shared by more than one run.
+    let s = Store::in_memory();
+    let first = trigon_attest::Envelope::new(b"the first run's statement", vec![]);
+    let second = trigon_attest::Envelope::new(b"the second run's statement", vec![]);
+    let a = s
+        .put_attestation(
+            &babel_core(),
+            "1789000000-aa",
+            "core-7.24.0.tgz",
+            EQUIVALENCE,
+            &first,
+        )
+        .await
+        .unwrap();
+    let b = s
+        .put_attestation(
+            &babel_core(),
+            "1789000100-bb",
+            "core-7.24.0.tgz",
+            EQUIVALENCE,
+            &second,
+        )
+        .await
+        .unwrap();
+    assert_ne!(a, b);
+    assert_eq!(s.get_attestation(&a).await.unwrap(), first);
+    assert_eq!(s.get_attestation(&b).await.unwrap(), second);
+}
+
+#[tokio::test]
+async fn a_run_attested_again_keeps_what_it_signed_before() {
+    // Re-attesting a stored run is a supported thing to do: with a key it was first signed without,
+    // or by a binary that signs a newer predicate. The earlier statement is history and stays.
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::local(dir.path()).unwrap();
+    let unsigned = trigon_attest::Envelope::new(b"the claim", vec![]);
+    let signed = trigon_attest::Envelope::new(
+        b"the claim",
+        vec![trigon_attest::Signature {
+            keyid: "8238c7031caabae5".into(),
+            sig: "c2ln".into(),
+            ..Default::default()
+        }],
+    );
+    let run = "1789000000-cc";
+    let put = |e: &trigon_attest::Envelope| {
+        let (s, e) = (s.clone(), e.clone());
+        async move {
+            s.put_attestation(&babel_core(), run, "core-7.24.0.tgz", EQUIVALENCE, &e)
+                .await
+                .unwrap()
+        }
+    };
+
+    let first = put(&unsigned).await;
+    let second = put(&signed).await;
+    assert!(
+        first.ends_with(&format!("/{run}/equivalence.intoto.json")),
+        "{first}"
+    );
+    assert!(
+        second.ends_with(&format!("/{run}/equivalence.2.intoto.json")),
+        "{second}"
+    );
+    assert_eq!(s.get_attestation(&first).await.unwrap(), unsigned);
+    assert_eq!(s.get_attestation(&second).await.unwrap(), signed);
+
+    // The same bytes again are the same statement, and answered with the path they are at: an
+    // unchanged re-attest adds nothing, rather than a third copy.
+    assert_eq!(put(&signed).await, second);
+    assert_eq!(put(&unsigned).await, first);
+    let files = walk(dir.path());
+    assert_eq!(files.len(), 2, "{files:?}");
+}
+
+#[tokio::test]
+async fn a_statement_filed_per_target_before_runs_had_their_own_still_reads() {
+    // Runs attested before the per-run layout name their statements one level up. A record names
+    // its statements by path, so reading one is the same call whichever layout wrote it.
+    let dir = tempfile::tempdir().unwrap();
+    let old = "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/equivalence.intoto.json";
+    let env = trigon_attest::Envelope::new(b"attested before phase 2", vec![]);
+    let file = dir.path().join(old);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, serde_json::to_vec_pretty(&env).unwrap()).unwrap();
+
+    let s = Store::local(dir.path()).unwrap();
+    assert_eq!(s.get_attestation(old).await.unwrap(), env);
+
+    // And a new statement about the same target does not disturb it.
+    let new = trigon_attest::Envelope::new(b"attested after", vec![]);
+    s.put_attestation(
+        &babel_core(),
+        "1789000200-dd",
+        "core-7.24.0.tgz",
+        EQUIVALENCE,
+        &new,
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.get_attestation(old).await.unwrap(), env);
+}
+
+/// A run of `babel_core()` with nothing signed yet, written to `s`.
+async fn unattested(s: &Store, id: &str) -> RunRecord {
+    let up = s.blobs().put(&b"core-7.24.0.tgz"[..]).await.unwrap();
+    let mut r = RunRecord::new(
+        id,
+        "pkg:npm/@babel/core@7.24.0",
+        artifact("core-7.24.0.tgz", &up, 15),
+        env(),
+        "2026-09-27T00:00:00Z",
+    );
+    r.state = RunState::Done;
+    r.outcome = Some("exact".into());
+    s.put_run(&r).await.unwrap();
+    r
+}
+
+async fn file(s: &Store, run: &str, predicate: &str, payload: &[u8]) -> String {
+    let env = trigon_attest::Envelope::new(payload, vec![]);
+    s.put_attestation(&babel_core(), run, "core-7.24.0.tgz", predicate, &env)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn statements_are_named_on_the_record_as_it_is_now_not_as_the_attestor_read_it() {
+    // The attestor reads the record, re-derives and signs, and used to write back the copy it had
+    // read. Two attestors on one run each wrote their own statement file, and the second's write
+    // of the record dropped the first's path: the file on disk, named by nothing a reader uses.
+    // The merge reads the record again, so the second call cannot lose the first's path.
+    let s = Store::in_memory();
+    let run = "1789000000-ab";
+    let stale = unattested(&s, run).await;
+    let first = file(&s, run, EQUIVALENCE, b"unsigned").await;
+    let second = file(&s, run, EQUIVALENCE, b"signed").await;
+
+    s.record_attestations(run, std::slice::from_ref(&first))
+        .await
+        .unwrap();
+    let back = s
+        .record_attestations(run, std::slice::from_ref(&second))
+        .await
+        .unwrap();
+    assert!(stale.attestations.is_empty(), "both attestors read this");
+    assert_eq!(back.attestations, [first.clone(), second.clone()]);
+    assert_eq!(s.get_run(run).await.unwrap(), back);
+
+    // The same path again adds nothing.
+    let again = s.record_attestations(run, &[first]).await.unwrap();
+    assert_eq!(again.attestations.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attestors_racing_on_one_run_all_end_up_named_where_writes_are_conditional() {
+    // In memory, as on object storage, the record's write is conditional on the version read and
+    // retried when it lost. Eight writers at once, and every path survives.
+    let s = Store::in_memory();
+    let run = "1789000000-cd";
+    unattested(&s, run).await;
+    let mut paths = Vec::new();
+    for n in 0..8 {
+        let predicate = format!("https://trigon.dev/racer{n}/v1");
+        paths.push(file(&s, run, &predicate, b"x").await);
+    }
+    let writers: Vec<_> = paths
+        .iter()
+        .map(|p| {
+            let (s, p) = (s.clone(), p.clone());
+            tokio::spawn(async move { s.record_attestations(run, &[p]).await })
+        })
+        .collect();
+    for w in writers {
+        w.await.unwrap().unwrap();
+    }
+    let mut named = s.get_run(run).await.unwrap().attestations;
+    named.sort();
+    paths.sort();
+    assert_eq!(named, paths);
+}
+
+#[tokio::test]
+async fn a_local_store_names_statements_without_a_conditional_write() {
+    // `object_store` has no `PutMode::Update` for the local filesystem, which is where the owner's
+    // store lives. It still merges from a fresh read rather than refusing.
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::local(dir.path()).unwrap();
+    let run = "1789000000-ef";
+    unattested(&s, run).await;
+    let a = file(&s, run, EQUIVALENCE, b"a").await;
+    let b = file(&s, run, "https://trigon.dev/rebuild/v1", b"b").await;
+    s.record_attestations(run, std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    s.record_attestations(run, std::slice::from_ref(&b))
+        .await
+        .unwrap();
+    assert_eq!(s.get_run(run).await.unwrap().attestations, [a, b]);
+
+    let e = s
+        .record_attestations("1789000000-00", &[])
+        .await
+        .unwrap_err();
+    assert!(matches!(e, StoreError::NoSuchRun(_)), "{e}");
+}
+
+#[tokio::test]
+async fn a_run_attested_again_sets_its_per_target_paths_aside_and_names_only_its_own() {
+    // A per-target path was shared by every run of the target, and a later run may have written
+    // over it: what it holds is whoever attested last. Left beside the run's own statements, it
+    // went on being served as this run's.
+    let s = Store::in_memory();
+    let run = "1789000000-0f";
+    let mut r = unattested(&s, run).await;
+    let per_target = [
+        "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/equivalence.intoto.json".to_string(),
+        "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/buildobservation.intoto.json"
+            .to_string(),
+    ];
+    r.attestations = per_target.to_vec();
+    s.put_run(&r).await.unwrap();
+
+    let own = file(&s, run, EQUIVALENCE, b"filed under the run").await;
+    let back = s
+        .record_attestations(run, std::slice::from_ref(&own))
+        .await
+        .unwrap();
+    assert_eq!(back.attestations, [own]);
+    assert_eq!(
+        back.per_target_attestations, per_target,
+        "kept, and not served"
+    );
+
+    // A run with no statement of its own yet keeps what it names: nothing replaces it.
+    let other = "1789000100-1f";
+    let mut o = unattested(&s, other).await;
+    o.attestations = per_target.to_vec();
+    s.put_run(&o).await.unwrap();
+    let back = s.record_attestations(other, &[]).await.unwrap();
+    assert_eq!(back.attestations, per_target);
+    assert!(back.per_target_attestations.is_empty());
+}
+
+#[tokio::test]
+async fn a_statement_is_not_filed_under_a_run_id_the_store_would_not_write() {
+    // The run id is now a path segment. One the store refuses for a run record it refuses here.
+    let s = Store::in_memory();
+    let env = trigon_attest::Envelope::new(b"x", vec![]);
+    for bad in ["", "../escape", ".hidden", "a b"] {
+        let e = s
+            .put_attestation(&babel_core(), bad, "core-7.24.0.tgz", EQUIVALENCE, &env)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, StoreError::Malformed(_)), "{bad:?}: {e}");
+    }
+}
+
+fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
 
 #[tokio::test]

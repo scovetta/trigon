@@ -19,10 +19,24 @@ provenance fact and stays out of it.
 
 | Predicate type | Emitted when | Subject |
 |---|---|---|
-| `https://trigon.dev/rebuild/v1` | a build ran | the rebuilt artifact |
-| `https://trigon.dev/equivalence/v1` | a comparison ran | the **upstream** artifact |
-| `https://trigon.dev/divergence/v1` | the verdict is `Divergent` | the upstream artifact |
-| `https://trigon.dev/buildobservation/v1` | a run is attested; its `tier` says what was observed | the **upstream** artifact |
+| `https://trigon.dev/rebuild/v1` | a build ran | the rebuilt artifact: sha256 and sha512 |
+| `https://trigon.dev/equivalence/v1` | a comparison ran | the **upstream** artifact: sha256, sha512, and sha1 for npm |
+| `https://trigon.dev/divergence/v1` | the verdict is `Divergent` | the upstream artifact, as above |
+| `https://trigon.dev/buildobservation/v1` | a run is attested; its `tier` says what was observed | the **upstream** artifact, as above |
+
+**A subject carries every digest a consumer might hold the artifact by**, because a lookup key that
+is not in the subject finds nothing ([`19`](19-distribution-and-lookup.md) §5). An npm lockfile
+names a package by its sha512 `integrity`, and an old one by its sha1 `shasum`, and neither is
+sha256. So the upstream subject carries sha256 and sha512 always, and sha1 where the ecosystem
+publishes one, which is npm alone (`Ecosystem::publishes_sha1`); the rebuilt artifact is ours and
+nobody looks it up by sha1. Every digest is **computed over the bytes**, by the attestor from the
+blob it fetched by hash, and never copied from what a registry declared: a declaration is a claim
+the fetch checked, and is recorded on the run instead (`RunRecord.upstream_digests`). Where a run
+kept no bytes — one that reached no verdict — the subject uses the digests the fetch computed and
+recorded; a run recorded before those existed is named by sha256 alone. `verify-attestation
+--rerun-comparison` checks every digest a subject names against the file in hand, and a statement
+signed before subjects carried more than sha256 verifies exactly as it did. Signed statements from
+before 2026-09-27 carry sha256 only.
 
 We **also** emit a conformant `https://slsa.dev/provenance/v1` statement alongside `rebuild/v1`, so
 existing SLSA tooling consumes our output without knowing anything about Trigon.
@@ -34,7 +48,7 @@ existing SLSA tooling consumes our output without knowing anything about Trigon.
   "_type": "https://in-toto.io/Statement/v1",
   "subject": [
     { "name": "rebuild/left-pad-1.3.0.tgz",
-      "digest": { "sha256": "b1946ac92492d2347c6235b4d2611184…" } }
+      "digest": { "sha256": "b1946ac92492d2347c6235b4d2611184…", "sha512": "…" } }
   ],
   "predicateType": "https://trigon.dev/rebuild/v1",
   "predicate": {
@@ -170,7 +184,7 @@ The load-bearing one.
   "_type": "https://in-toto.io/Statement/v1",
   "subject": [
     { "name": "left-pad-1.3.0.tgz",
-      "digest": { "sha256": "e9f1a3b0…" } }
+      "digest": { "sha1": "5b8a3a77…", "sha256": "e9f1a3b0…", "sha512": "5c8e4c3f…" } }
   ],
   "predicateType": "https://trigon.dev/equivalence/v1",
   "predicate": {
@@ -496,8 +510,9 @@ Content-addressed and cloud-agnostic (`object_store` over S3, GCS, Azure, or a l
 As built:
 
 ```
-blobs/sha256/<aa>/<digest>                         artifacts, comparisons, logs, transcripts
-attestations/<eco>/<pkg>/<ver>/<artifact>/<predicate>.intoto.json    one DSSE envelope each
+blobs/sha256/<aa>/<digest>                         artifacts, comparisons, logs, transcripts,
+                                                   strategies and guard manifests
+attestations/<eco>/<pkg>/<ver>/<artifact>/<run-id>/<predicate>.intoto.json   one DSSE envelope
 runs/<run-id>.json                                 the run record, naming its blobs by digest
 stabilizers/sha256/<set-digest>.json               each set a claim was made under, as a manifest
 derived/comparison/sha256/<aa>/<digest>.json       a comparison re-derived by `trigon rederive`
@@ -505,10 +520,34 @@ decompiled/sha256/<aa>/<digest>.cs                 decompiled .NET source, a rea
 ```
 
 The design wrote one JSONL bundle per artifact (§8) and a directory per run; the store keeps one
-envelope per predicate, and one record per run that names its blobs by digest. Attestations are
-filed per target, so a later attest of the same target overwrites an earlier one;
-[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §10 phase 2 moves them to per run
-and append-only.
+envelope per predicate, and one record per run that names its blobs by digest.
+
+**Attestations are filed per run, and never overwritten.** They were filed per target, so a later
+attest of the same target overwrote an earlier one, and the earlier run's record went on naming a
+path that held the later run's claim: 40 of the 93 attestation paths in the local store were shared
+by more than one run. Since [`19`](19-distribution-and-lookup.md) §10 phase 2 the run id is a
+directory below the artifact. Attesting one run again — with a key it was first signed without, or
+by a binary that signs something newer — writes a statement that differs beside the one already
+there, as `<predicate>.2.intoto.json`, `.3` and so on, and the run record lists every one; the same
+bytes again are the same statement and add nothing. A run attested before the change still names
+its per-target paths, which still read, since a record names its statements by path. Attested
+again, it names only the statements filed under its own id, and its per-target paths move to
+`per_target_attestations`, which nothing serves: another run of the same target may have written
+over any of them, and neither a build observation nor an equivalence statement says which run it is
+about. The attestor merges its paths into the record as it stands when it finishes, not into the
+copy it read before signing, and the write is conditional on that version where the backend has
+conditional writes, so two attestors on one run do not drop each other's paths. The local
+filesystem has none, and there a window of one read and one write remains.
+
+The run also keeps, since that phase, what a published record needs and the work directory used to
+take with it: the strategy that ran, as a blob of its canonical JSON named by `RunRecord.strategy`
+(the file digest, distinct from `strategy_digest`, which also covers the tools the strategy
+reaches); the guard manifest the mirror was armed with, as a blob under the digest
+`environment.guard_manifest` already carried; the Trigon version that ran the build; and the
+upstream artifact's sha512 and sha1 beside what its registry declared. The attestor signs the
+strategy blob's digest only after fetching it by hash, reading it as the strategy's canonical JSON,
+and recomputing `strategy_digest` from it under its own tools; a blob that is missing, is not that,
+or does not recompute refuses the attestation before any statement is filed.
 
 Path-addressing matches the definitions repository layout, so a downstream analyzer parses an
 object-storage notification straight back into a `Target`.

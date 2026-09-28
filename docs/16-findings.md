@@ -3802,3 +3802,99 @@ the PEM back with `ed25519-dalek`'s own SPKI decoder and compares keys. And noth
 of `verify-attestation --output json`, so the one removed here could have gone, or another come,
 without a test noticing; `verify_attestation_json_carries_exactly_the_keys_its_help_names` pins the
 five that remain, and `runs_prints_the_id_first_and_the_target_second` now fails on a fifth column.
+
+### 3.95 Every digest in the subject, every declaration checked, and what a run threw away
+
+`docs/19` §10 phase 2, first half, on 2026-09-27. The statements' predicates are unchanged; the
+second half moves them to v2.
+
+**What was measured first.** The npm fetcher checked nothing: it read only a `sha256-` integrity
+string, npm sends sha512 and sha1, and the one field the fetch compared against was empty for
+every npm package. PyPI's md5 and blake2b_256 were never read, and a crates.io `checksum` that was
+not a sha256 was dropped, which reads the same as none. NuGet's registration `catalogEntry` carries
+no hash; the catalog leaf it names by `@id` does, as a base64 sha512 `packageHash`, and for
+Newtonsoft.Json 13.0.3 and 3.5.8 (published 2011) it is the sha512 of the bytes the flat container
+serves. In the local store, 0 of 371 runs had `strategy`; 167 carried a guard manifest digest and
+none had the manifest in the store; and 40 of 93 attestation paths were shared by more than one
+run, so each of those runs' records names a statement a later run wrote over.
+
+**What changed.**
+
+- `Subject::with_digests` carries sha256 and sha512, and sha1 where the ecosystem publishes one
+  (`Ecosystem::publishes_sha1`, npm alone); `Subject::of_bytes` computes all three. The attestor
+  computes the upstream subject from the blob it fetched by hash and checks it against what the
+  run recorded; `equivalence_for` refuses a subject the comparison is not about; and `rederive`
+  checks every digest a subject names, so a statement signed with sha256 alone verifies as before.
+  The rebuilt artifact's subject is sha256 and sha512.
+- Every fetcher hands its declarations to one verifier (`trigon-registry/src/declared.rs`) that
+  checks each one this build can compute and refuses on the first that does not hold, naming the
+  algorithm, the field and both values. npm's `integrity` and `shasum`, PyPI's whole `digests`
+  object, crates.io's `checksum`, and NuGet's `packageHash` from the catalog leaf. A refused or
+  broken download is deleted rather than left under the artifact's name. Declarations all of
+  algorithms this build cannot compute are recorded as a download checked against nothing.
+- `RunRecord.upstream_digests` holds the upstream's sha512 and sha1, computed at fetch, and one
+  entry per declaration with its source field and `matched` or `unchecked`. Nothing declared is an
+  empty list and a note. The record also keeps the strategy as a blob of its canonical JSON
+  (`RunRecord.strategy`, distinct from `strategy_digest`), the guard manifest as a blob under the
+  digest it already carried, and `trigon_version`. `rebuild`'s `strategy.json` byproduct now names
+  the blob, and is left out for a run that stored none.
+- Statements are filed at `…/<artifact>/<run-id>/<predicate>.intoto.json`, created only if the
+  name is free. One that differs from what is there is written beside it as `.2`, `.3`, and the run
+  record lists every path; the same bytes again are the same statement. Readers go by the paths a
+  record names, so runs attested before this still read. A run attested again names only what is
+  filed under it and sets its per-target paths aside in `per_target_attestations`, which nothing
+  serves, since another run may have written over any of them.
+
+**Found on the way.** The build loop kept the build of a divergence while a repair ran, so that a
+repair that failed would not lose it, and never let go of it: a repair that went on to reproduce was
+recorded with the divergent attempt's isolation, transcript and attestability, and every run's
+strategy digest described the last attempt even where the verdict came from an earlier one. The
+stash is now cleared when an attempt reaches its own comparison, whether the comparison succeeds or
+fails, and carries the strategy beside the build. `record_terminal` wrote `guard_manifest: None`
+for every run it recorded, so a void — the one run whose story is the guard — said the guard had
+not been armed. And the digest length error said "expected 64 hex characters" for a sha512 too.
+
+**What this does not do.** blake2b_256 is recorded and not checked, because nothing in the
+workspace implements it and adding a crate for it is a dependency decision. `trigon_version` is the
+crate version alone, since no build embeds a git revision. The 40 overwritten per-target paths
+cannot be repaired: each still reads, as whichever run attested last, and only `rebuild`'s
+`invocationId` says which run that was.
+
+Tests: `crates/trigon-registry/tests/declared_digests.rs` runs each fetcher against a registry on
+loopback, the npm case pinned to left-pad 1.3.0's real version document and tarball; subjects and
+their verification are in `crates/trigon-attest/tests/rederive.rs`; the store's layout in
+`crates/trigon-store/tests/store.rs`, the old run file in `old_run_files.rs`, the route in
+`crates/trigon-api/tests/seam_attestation_layouts.rs`, the attestor end to end in
+`crates/trigon/tests/seam_attest_per_run.rs`, and what `record_run` and `record_terminal` keep in
+`record_keeps_what_the_run_threw_away` in `crates/trigon/src/main.rs`, beside
+`an_attempt_that_reaches_a_comparison_lets_go_of_the_one_before`, which pins the stash's order.
+
+**What review found in it.** Six defects, each now with a test that fails without its fix.
+
+- The NuGet fetcher read an unreadable catalog as an empty one. A registration or leaf that
+  answered 503, or 429 past the retries, came back as "no catalog entry for this version", so the
+  download went ahead checked against nothing and the run recorded that NuGet had declared nothing.
+  It now refuses the resolve (`RegistryError::CatalogUnreadable`, retried where the failure was
+  transient), and "no catalog entry" is recorded only for an index that was read and does not list
+  the version (`declared_digests.rs`, against a catalog on loopback whose documents fail).
+- A repair whose comparison failed was recorded with the strategy and build of the divergent
+  attempt before it, whose own comparison had worked: the stash was cleared on success only.
+- The attestor wrote back the copy of the record it had read before signing, so a second attestor
+  finishing in between dropped the first's paths. `Store::record_attestations` merges into the
+  record as it is now, under a conditional write where the backend has one; the local filesystem
+  has none, and a window of one read and one write remains there.
+- Appending without ever removing kept a run's per-target paths beside its per-run ones, so a
+  re-attested run went on being served whatever a later run had written over them, possibly a
+  withheld divergence. Those paths are now set aside, as above.
+- The attestor signed the `strategy.json` byproduct's digest as the record gave it. It now fetches
+  the blob by hash, requires it to be the strategy's canonical JSON, and recomputes
+  `strategy_digest` from it, before any statement is filed. A binary whose definition of a tool the
+  strategy reaches has changed since the build refuses an honest record too; the attestor cannot
+  tell that from an altered one.
+- `trigon fetch --out` unlinked whatever `--out` named on any error, `/dev/null` included. It now
+  stages a regular file beside the target and renames it into place on success, and writes in
+  place, never removing, anything that is not a regular file.
+
+Two checks had no test: a declared sha384, which the fetch hashes only on demand, and
+`equivalence_for`'s sha512 comparison, the only check `rebuild --attest` and `verify --attest` make
+before signing. Both do now.

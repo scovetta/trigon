@@ -18,7 +18,9 @@ pub use dsse::{Envelope, PAYLOAD_TYPE, Signature, pae};
 pub use error::AttestError;
 pub use rebuild::{BUILD_OBSERVATION, REBUILD, RunFacts, SourceFacts, TranscriptRef};
 pub use signer::{LocalKey, Signer, Unsigned, verify as verify_signature};
-pub use statement::{DIVERGENCE, EQUIVALENCE, STATEMENT_TYPE, Statement, Subject};
+pub use statement::{
+    DIVERGENCE, EQUIVALENCE, STATEMENT_TYPE, Statement, Subject, sha1_of, sha512_of,
+};
 pub use verify::{
     ArchivedStabilizer, Rederived, rederive, rederive_with, sign_statement, subject_sha256,
 };

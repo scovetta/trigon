@@ -112,7 +112,8 @@ fn target(
         artifacts: vec![ArtifactMeta {
             id: ArtifactId::new(format!("{name}-{version}-py3-none-any.whl")),
             url: String::new(),
-            declared_sha256: None,
+            declared: Vec::new(),
+            declared_note: None,
             size: None,
         }],
         intrinsics: Intrinsics {

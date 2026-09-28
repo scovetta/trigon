@@ -825,7 +825,8 @@ mod tests {
             artifacts: vec![ArtifactMeta {
                 id: ArtifactId::new("left-pad-1.3.0.tgz"),
                 url: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".into(),
-                declared_sha256: None,
+                declared: Vec::new(),
+                declared_note: None,
                 size: None,
             }],
             intrinsics: Intrinsics {

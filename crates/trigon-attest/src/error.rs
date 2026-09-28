@@ -31,10 +31,14 @@ pub enum AttestError {
 
     #[error(
         "the {side} artifact given is not the one this statement is about: it names \
-         {expected} and this file is {got}"
+         {algorithm} {expected} and this file is {got}"
     )]
     WrongArtifact {
         side: &'static str,
+        /// Which digest disagreed. A subject names several, and "sha1 differs, sha256 agrees"
+        /// is a different finding from a different file: it is a statement whose digests were
+        /// not all computed over the same bytes.
+        algorithm: String,
         expected: String,
         got: String,
     },

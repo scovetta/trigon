@@ -131,9 +131,11 @@ doing right now, on this disk* — and the second is the one that has to survive
 - `Provenance::Human { reviewer }` is not the right variant for an ADR-0006 model-proposed
   stabilizer a human approved. That is `Model { model_id, run_id }` with an approval reference.
   Provenance is hashed into the set digest, so a misattribution here is permanent.
-- `put_attestation` overwrites one file per predicate, contradicting
-  [`09-attestations.md`](09-attestations.md) §8's appendable JSONL. Fixed with the `attestations`
-  table, not after it.
+- `put_attestation` overwrote one file per predicate, per target, contradicting
+  [`09-attestations.md`](09-attestations.md) §8's appendable JSONL. Since
+  [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §10 phase 2 statements are filed
+  per run and never overwritten ([`09-attestations.md`](09-attestations.md) §6). The `attestations`
+  table and the JSONL bundle are still to come, and land together.
 - The `runs/<run-id>/` write-only blob credential **cannot be expressed** by a content-addressed
   store — every writer writes under `blobs/sha256/`. The document's own fallback, a sidecar that
   holds the credential and derives the path from the bytes, is what gets built, and
@@ -177,7 +179,7 @@ scalars**, every payload over 8 KB in blob storage addressed by content hash.
 | `runs` written **live** and on **every terminal outcome** | `record_run` has one call site, past the early return that unwraps the comparison. A browse page over today's store reports a 100 % reproduction rate on a sweep where nothing built. `RunState::Queued` gets a producer. |
 | `target_digests(target_id, algorithm, digest)` replacing singular `targets.upstream_digest` | The lookup key is the published artifact's digest, and an npm consumer holds sha1 and sha512 and never sha256. Must land before anything is signed at scale. |
 | `run_events`, `host_budget` as separate tables | ADR-0005: heartbeats and progress off the queue's hot path. `host_budget` is the only carrier fleet-global backoff can have — the mirror runs in a per-run container with no route to a database. |
-| `attestations(...)`, append-only | Attestations are keyed by purl path and **overwritten** today, against [`09-attestations.md`](09-attestations.md) §8. The object layout becomes JSONL-append at the same time. |
+| `attestations(...)`, append-only | Attestations were keyed by purl path and **overwritten**, against [`09-attestations.md`](09-attestations.md) §8; since [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §10 phase 2 they are filed per run and never overwritten ([`09-attestations.md`](09-attestations.md) §6). The object layout becomes JSONL-append when this table lands. |
 | `proposals`, `approvals`, `overlays` | The write half. The approval record copies `PrebuiltStrategy { approved_by, reason }` rather than inventing a shape. |
 | `publications` | §7.1: the ADR-0010 gate, and the only thing that may set `verdicts.published`. |
 | `explanations(comparison_digest, model_id, text, created)` | The one thing an ADR puts in the database by name: ADR-0010, "stays in the database and the UI, unsigned, with its model id attached". Improvise it at the UI layer and the model id is what gets dropped. |

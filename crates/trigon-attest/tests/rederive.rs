@@ -7,8 +7,8 @@
 
 use trigon_archive::Limits;
 use trigon_attest::{
-    Envelope, LocalKey, Signer, Statement, Unsigned, rederive, sign_statement, subject_sha256,
-    verify_signature,
+    Envelope, LocalKey, Signer, Statement, Subject, Unsigned, rederive, sign_statement,
+    subject_sha256, verify_signature,
 };
 use trigon_compare::compare_bytes;
 use trigon_core::{Format, Match};
@@ -301,4 +301,151 @@ fn canonical_bytes_do_not_depend_on_how_the_statement_was_built() {
     // signature covers, so two spellings of one statement must hash identically.
     let reparsed: Statement = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
     assert_eq!(st.canonical().unwrap(), reparsed.canonical().unwrap());
+}
+
+// --- Subjects carry every digest a consumer might hold (docs/19 §5) ------------------------------
+
+#[test]
+fn a_subject_carries_sha512_beside_sha256_and_both_are_of_the_upstream_bytes() {
+    // An npm lockfile names a package by its sha512 `integrity`, and a statement keyed on sha256
+    // alone is unfindable from it. Both digests are computed over the bytes, never copied from a
+    // registry's declaration.
+    use sha2::Digest as _;
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let st = Statement::equivalence("pkg-1.0.0.tar", &comparison(&u, &r));
+    let d = &st.subject[0].digest;
+    assert_eq!(
+        d.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["sha256", "sha512"],
+        "no sha1: this caller named no ecosystem that publishes one"
+    );
+    assert_eq!(d["sha256"], hex(&sha2::Sha256::digest(&u)));
+    assert_eq!(d["sha512"], hex(&sha2::Sha512::digest(&u)));
+    assert!(rederive(&st, u, r).unwrap().holds());
+}
+
+#[test]
+fn a_subject_for_an_ecosystem_that_publishes_sha1_carries_it_and_it_is_checked() {
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let subject = Subject::of_bytes("pkg-1.0.0.tgz", &u, true);
+    let st = Statement::equivalence_for(subject, &comparison(&u, &r)).unwrap();
+    let d = &st.subject[0].digest;
+    assert_eq!(
+        d.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["sha1", "sha256", "sha512"]
+    );
+    assert_eq!(d["sha1"], trigon_attest::sha1_of(&u).to_hex());
+    assert!(rederive(&st, u.clone(), r.clone()).unwrap().holds());
+
+    // A sha1 that is not of these bytes is a statement whose digests were not all computed over
+    // one file, and it is refused by name rather than trusted because sha256 agreed.
+    let mut wrong = st.clone();
+    wrong.subject[0]
+        .digest
+        .insert("sha1".into(), "00".repeat(20));
+    let e = rederive(&wrong, u, r).unwrap_err();
+    assert!(
+        matches!(
+            &e,
+            trigon_attest::AttestError::WrongArtifact { side: "upstream", algorithm, .. }
+                if algorithm == "sha1"
+        ),
+        "{e}"
+    );
+    assert!(e.to_string().contains("sha1"), "{e}");
+}
+
+#[test]
+fn a_tampered_sha512_in_the_subject_is_refused_even_though_sha256_agrees() {
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let mut st = Statement::equivalence("pkg-1.0.0.tar", &comparison(&u, &r));
+    st.subject[0]
+        .digest
+        .insert("sha512".into(), "ab".repeat(64));
+    let e = rederive(&st, u, r).unwrap_err();
+    assert!(
+        matches!(
+            &e,
+            trigon_attest::AttestError::WrongArtifact { side: "upstream", algorithm, .. }
+                if algorithm == "sha512"
+        ),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_statement_signed_with_a_sha256_only_subject_still_verifies() {
+    // Every statement signed before subjects carried more than sha256. A verifier checks the
+    // digests a subject names and no others, so the old shape verifies exactly as it did.
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let mut st = Statement::equivalence("pkg-1.0.0.tar", &comparison(&u, &r));
+    st.subject = vec![Subject::new("pkg-1.0.0.tar", &subject_sha256(&st).unwrap())];
+    let key = LocalKey::generate();
+    let env = sign_statement(&st, &key).unwrap();
+    verify_signature(&env.pae().unwrap(), &env.signatures[0], &key.public_hex()).unwrap();
+    let back: Statement = serde_json::from_slice(&env.decoded_payload().unwrap()).unwrap();
+    assert_eq!(back.subject[0].digest.len(), 1);
+    assert!(rederive(&back, u, r).unwrap().holds());
+}
+
+#[test]
+fn a_subject_about_other_bytes_is_refused_before_it_can_be_signed() {
+    // `equivalence_for` takes the subject from the caller. One computed over some other file would
+    // make a statement whose subject and whose `artifacts.upstream` disagree.
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let other = Subject::of_bytes("pkg-1.0.0.tgz", &tar(5, 0), true);
+    let e = Statement::equivalence_for(other, &comparison(&u, &r)).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            trigon_attest::AttestError::WrongArtifact {
+                side: "upstream",
+                ..
+            }
+        ),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_subject_whose_sha512_is_of_other_bytes_is_refused_though_its_sha256_agrees() {
+    // `rebuild --attest` and `verify --attest` sign what `equivalence_for` returns without
+    // re-deriving, so this comparison is the only check there. A subject carrying the right sha256
+    // beside another file's sha512 would be found by a consumer holding that other file's npm
+    // `integrity`, and tell them about bytes they do not have.
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let c = comparison(&u, &r);
+    let other = trigon_attest::sha512_of(&tar(5, 0));
+    let subject = Subject::with_digests("pkg-1.0.0.tar", &c.upstream.raw.sha256, &other, None);
+    let e = Statement::equivalence_for(subject, &c).unwrap_err();
+    assert!(
+        matches!(
+            &e,
+            trigon_attest::AttestError::WrongArtifact { side: "upstream", algorithm, .. }
+                if algorithm == "sha512"
+        ),
+        "{e}"
+    );
+
+    // And the subject computed over the right bytes is accepted, so the refusal above is about
+    // the sha512 and nothing else.
+    let right = Subject::of_bytes("pkg-1.0.0.tar", &u, true);
+    assert!(Statement::equivalence_for(right, &c).is_ok());
+}
+
+#[test]
+fn a_subject_digest_the_verifier_cannot_compute_is_not_passed_over() {
+    // Absent a way to check it, a digest is reported as unchecked, never taken as agreeing.
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let mut st = Statement::equivalence("pkg-1.0.0.tar", &comparison(&u, &r));
+    st.subject[0]
+        .digest
+        .insert("blake2b_256".into(), "00".repeat(32));
+    let e = rederive(&st, u, r).unwrap_err();
+    assert!(matches!(e, trigon_attest::AttestError::Malformed(_)), "{e}");
+    assert!(e.to_string().contains("blake2b_256"), "{e}");
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }

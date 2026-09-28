@@ -64,9 +64,25 @@ async fn npm_fetches_and_the_digest_is_computed_not_taken_on_trust() {
     let meta = resolved.sole_artifact().unwrap();
 
     let mut bytes: Vec<u8> = Vec::new();
-    let digest = r.fetch(meta, &mut bytes).await.expect("fetches");
+    let fetched = r.fetch(meta, &mut bytes).await.expect("fetches");
+    let digest = fetched.sha256;
 
     assert_eq!(&bytes[..2], &[0x1f, 0x8b], "a gzip member");
+
+    // And it was checked against what npm declares, which is sha512 and sha1 and never sha256.
+    // The fetcher used to read only a `sha256-` integrity string, so this list was always empty.
+    let checked: Vec<(&str, trigon_core::CheckResult)> = fetched
+        .checks
+        .iter()
+        .map(|c| (c.declared.algorithm.as_str(), c.result))
+        .collect();
+    assert_eq!(
+        checked,
+        [
+            ("sha512", trigon_core::CheckResult::Matched),
+            ("sha1", trigon_core::CheckResult::Matched)
+        ]
+    );
 
     // The returned digest is of what we received, not what we were told. That is the property the
     // run key and the attestation rest on, and it holds whatever the registry serves.
@@ -124,9 +140,9 @@ async fn pypi_resolves_every_artifact_of_a_release() {
         .artifact("sniffio-1.3.1-py3-none-any.whl")
         .expect("the wheel");
     // PyPI publishes sha256 for every file, so there is always something to check against.
-    assert!(whl.declared_sha256.is_some());
+    assert!(whl.declared_sha256().is_some());
     assert_eq!(
-        whl.declared_sha256.unwrap().to_hex(),
+        whl.declared_sha256().unwrap().to_hex(),
         "2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2"
     );
 
@@ -148,11 +164,11 @@ async fn pypi_verifies_the_declared_digest() {
     let meta = resolved.artifact("sniffio-1.3.1-py3-none-any.whl").unwrap();
 
     let mut bytes: Vec<u8> = Vec::new();
-    let digest = r
+    let fetched = r
         .fetch(meta, &mut bytes)
         .await
         .expect("fetches and verifies");
-    assert_eq!(&digest, meta.declared_sha256.as_ref().unwrap());
+    assert_eq!(fetched.sha256, meta.declared_sha256().unwrap());
     assert_eq!(&bytes[..2], b"PK");
 }
 
@@ -170,7 +186,9 @@ async fn a_tampered_digest_is_refused() {
         .artifact("sniffio-1.3.1-py3-none-any.whl")
         .unwrap()
         .clone();
-    meta.declared_sha256 = Some(trigon_core::Digest::from_bytes([0xab; 32]));
+    for d in meta.declared.iter_mut().filter(|d| d.algorithm == "sha256") {
+        d.value = "ab".repeat(32);
+    }
 
     let mut bytes: Vec<u8> = Vec::new();
     let err = r.fetch(&meta, &mut bytes).await.expect_err("must refuse");

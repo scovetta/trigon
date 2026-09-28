@@ -259,8 +259,12 @@ if [ -f "$STORE/runs/$LATEST.json" ]; then
     # `#` as the delimiter, not `|`. With `|` delimiting the s-command, the `\|` below reads as an
     # escaped delimiter rather than an alternation, so the expression matched nothing at all and
     # every run printed a placeholder — including the ones that did reproduce.
-    REL="$(sed -n 's#.*"\(attestations/[^"]*/\(equivalence\|divergence\)\.intoto\.json\)".*#\1#p' \
-           "$STORE/runs/$LATEST.json" | head -1)"
+    # **The last match, and an optional `.N`.** Statements are filed per run and never overwritten
+    # (docs/19 §10 phase 2): attesting a run again writes `equivalence.2.intoto.json` beside the
+    # first, and the record lists paths in the order they were written, so the newest is last.
+    CLAIM='\(equivalence\|divergence\)\(\.[0-9]\+\)\?\.intoto\.json'
+    REL="$(sed -n 's#.*"\(attestations/[^"]*/'"$CLAIM"'\)".*#\1#p' \
+           "$STORE/runs/$LATEST.json" | tail -1)"
     [ -n "$REL" ] && [ -f "$STORE/$REL" ] && BUNDLE="$STORE/$REL"
 fi
 

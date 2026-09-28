@@ -16,8 +16,8 @@ use trigon_core::{
     ArtifactId, Classify, Confidence, Ecosystem, Fault, Intrinsics, SourceDiscovery, TargetRef,
 };
 use trigon_registry::{
-    ArtifactMeta, Candidate, DefinitionsInferrer, Derivation, RegistryError, ResolvedTarget,
-    StrategyInferrer, climb,
+    ArtifactMeta, Candidate, DefinitionsInferrer, Derivation, DigestMismatch, RegistryError,
+    ResolvedTarget, StrategyInferrer, climb,
 };
 use trigon_strategy::{Strategy, from_yaml};
 
@@ -142,7 +142,8 @@ fn target(artifacts: &[&str]) -> ResolvedTarget {
             .map(|id| ArtifactMeta {
                 id: ArtifactId::new(*id),
                 url: format!("https://files.pythonhosted.org/{id}"),
-                declared_sha256: None,
+                declared: Vec::new(),
+                declared_note: None,
                 size: None,
             })
             .collect(),
@@ -348,12 +349,14 @@ fn a_registry_failure_is_upstreams_and_a_refusal_is_ours() {
         ),
         (http(404), Fault::Upstream),
         (
-            RegistryError::DigestMismatch {
-                name: "widget".into(),
+            RegistryError::DigestMismatch(Box::new(DigestMismatch {
+                ecosystem: "pypi".into(),
                 artifact: "widget-1.2.3.tar.gz".into(),
-                expected: "aa".into(),
-                actual: "bb".into(),
-            },
+                algorithm: "sha256".into(),
+                field: "pypi:digests.sha256".into(),
+                declared: "aa".into(),
+                computed: "bb".into(),
+            })),
             Fault::Upstream,
         ),
         (
@@ -415,12 +418,14 @@ fn only_a_failure_that_could_go_differently_is_retried() {
             ecosystem: "npm".into(),
             name: "widget".into(),
         },
-        RegistryError::DigestMismatch {
-            name: "widget".into(),
+        RegistryError::DigestMismatch(Box::new(DigestMismatch {
+            ecosystem: "pypi".into(),
             artifact: "widget-1.2.3.tar.gz".into(),
-            expected: "aa".into(),
-            actual: "bb".into(),
-        },
+            algorithm: "sha256".into(),
+            field: "pypi:digests.sha256".into(),
+            declared: "aa".into(),
+            computed: "bb".into(),
+        })),
         RegistryError::Malformed {
             ecosystem: "npm".into(),
             what: "the packument".into(),

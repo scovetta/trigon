@@ -312,9 +312,9 @@ $ trigon attest --store ./store --key key.bin
 target    pkg:pypi/chardet@7.6.0
 rederived exact under wheel@58632c3c627d — signing
 
-  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/equivalence.intoto.json
-  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/rebuild.intoto.json
-  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/buildobservation.intoto.json
+  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/equivalence.intoto.json
+  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/rebuild.intoto.json
+  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/buildobservation.intoto.json
 
 signed with key 8238c7031caabae5
 ```
@@ -322,13 +322,15 @@ signed with key 8238c7031caabae5
 `rederived exact … — signing` is the load-bearing line. The attestor did not take the run record's
 word for the outcome: it fetched both artifacts from the store **by hash**, checked each against the
 hash it asked for, recomputed the comparison, and would have refused to sign had the answer differed.
+The statements are filed under the run's id, so signing another run of the same package, or this
+run again, adds statements beside these and never replaces them.
 
 Anyone holding the two artifacts can now check that claim without trusting us, and without a
 network:
 
 ```
 $ trigon verify-attestation \
-      ./store/attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/equivalence.intoto.json \
+      ./store/attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/equivalence.intoto.json \
       --rerun-comparison \
       --upstream ./work-py/chardet-7.6.0-py3-none-any.whl \
       --rebuild ./work-py/rebuild/*/chardet-7.6.0-py3-none-any.whl \

@@ -3110,6 +3110,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tar",
  "thiserror",
@@ -3199,10 +3200,12 @@ name = "trigon-registry"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "md-5",
  "reqwest",
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "sha1",
  "sha2",
  "tempfile",
  "thiserror",

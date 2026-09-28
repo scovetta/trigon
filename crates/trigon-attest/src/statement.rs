@@ -16,8 +16,9 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 use trigon_compare::Comparison;
-use trigon_core::Digest;
+use trigon_core::{Digest, Sha1, Sha512};
 
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 pub const EQUIVALENCE: &str = "https://trigon.dev/equivalence/v1";
@@ -33,11 +34,82 @@ pub struct Subject {
 }
 
 impl Subject {
+    /// A subject named by sha256 alone.
+    ///
+    /// What every statement carried before subjects carried each digest a consumer might hold, and
+    /// still the honest subject where sha256 is all that is known: a run recorded before its other
+    /// digests were, whose bytes are no longer in the store. Such statements still verify, because
+    /// a verifier checks the digests a subject names and no others.
     pub fn new(name: impl Into<String>, sha256: &Digest) -> Self {
         Subject {
             name: name.into(),
             digest: BTreeMap::from([("sha256".to_string(), sha256.to_hex())]),
         }
+    }
+
+    /// A subject carrying sha256 and sha512, and sha1 where the ecosystem publishes one.
+    ///
+    /// **Every digest a consumer might look the artifact up by, because a lookup key that is not
+    /// in the subject finds nothing** (`docs/19` §5). An npm lockfile names a package by its sha512
+    /// `integrity`, and an old one by its sha1 `shasum`; neither is sha256, so a statement keyed on
+    /// sha256 alone is unfindable from the one thing an npm consumer holds.
+    ///
+    /// The digests are the caller's to compute **over the bytes**, never to copy from what a
+    /// registry declared: a declaration is a claim the fetch checked, and a subject is what the
+    /// signature is about. [`Self::of_bytes`] computes them; this is for a caller that already
+    /// has them, such as a comparison that hashed the same bytes.
+    pub fn with_digests(
+        name: impl Into<String>,
+        sha256: &Digest,
+        sha512: &Sha512,
+        sha1: Option<&Sha1>,
+    ) -> Self {
+        let mut digest = BTreeMap::from([
+            ("sha256".to_string(), sha256.to_hex()),
+            ("sha512".to_string(), sha512.to_hex()),
+        ]);
+        if let Some(d) = sha1 {
+            digest.insert("sha1".to_string(), d.to_hex());
+        }
+        Subject {
+            name: name.into(),
+            digest,
+        }
+    }
+
+    /// A subject whose every digest is computed here, over these bytes.
+    ///
+    /// `with_sha1` is whether the artifact's ecosystem publishes one
+    /// ([`trigon_core::Ecosystem::publishes_sha1`]).
+    pub fn of_bytes(name: impl Into<String>, bytes: &[u8], with_sha1: bool) -> Self {
+        let sha256 = Digest::from_bytes(sha2::Sha256::digest(bytes).into());
+        let sha1 = with_sha1.then(|| sha1_of(bytes));
+        Subject::with_digests(name, &sha256, &sha512_of(bytes), sha1.as_ref())
+    }
+}
+
+/// The sha512 of some bytes, as a subject carries it.
+///
+/// Public so a caller recording an artifact's digests computes them the way a subject does, rather
+/// than with a second implementation that could disagree about one.
+pub fn sha512_of(bytes: &[u8]) -> Sha512 {
+    Sha512(sha2::Sha512::digest(bytes).into())
+}
+
+/// The sha1 of some bytes, as a subject carries it. See [`Sha1`] for why it exists at all.
+pub fn sha1_of(bytes: &[u8]) -> Sha1 {
+    Sha1(sha1::Sha1::digest(bytes).into())
+}
+
+/// A subject for the upstream side of a comparison, from the digests the comparison computed.
+///
+/// `summarize` hashes the raw bytes with sha512 beside sha256, so a comparison made by this code
+/// always has both. One deserialized from a blob written before it did has sha256 alone, and the
+/// subject says exactly that much.
+fn upstream_subject(name: &str, c: &Comparison) -> Subject {
+    match &c.upstream.raw.sha512 {
+        Some(sha512) => Subject::with_digests(name, &c.upstream.raw.sha256, sha512, None),
+        None => Subject::new(name, &c.upstream.raw.sha256),
     }
 }
 
@@ -58,11 +130,54 @@ impl Statement {
     /// published: a consumer holding a package from a registry looks it up by the digest they
     /// already have, and a statement keyed on our rebuild would be unfindable by anyone who did not
     /// already have our rebuild.
+    ///
+    /// The subject carries the sha256 and sha512 the comparison computed over the upstream bytes.
+    /// A caller that knows the ecosystem, and so whether a sha1 belongs in it too, uses
+    /// [`Self::equivalence_for`].
     pub fn equivalence(upstream_name: &str, c: &Comparison) -> Self {
+        Self::equivalence_with(upstream_subject(upstream_name, c), c)
+    }
+
+    /// The equivalence statement about a subject the caller computed over the upstream bytes.
+    ///
+    /// Refused when the subject is not the comparison's upstream artifact: a statement whose
+    /// subject and whose `artifacts.upstream` name different bytes is about nothing in particular,
+    /// and signing one would be signing whichever half a reader happened to look at.
+    pub fn equivalence_for(subject: Subject, c: &Comparison) -> Result<Self, crate::AttestError> {
+        if !subject.digest.contains_key("sha256") {
+            return Err(crate::AttestError::Malformed(
+                "an equivalence subject must name the upstream artifact's sha256, which is what \
+                 the comparison is keyed on"
+                    .into(),
+            ));
+        }
+        // Every algorithm both sides know. sha1 is not among them: the comparison never computes
+        // one, and `rederive` checks it against the bytes before anything is signed.
+        let compared = [
+            ("sha256", Some(c.upstream.raw.sha256.to_hex())),
+            ("sha512", c.upstream.raw.sha512.map(|d| d.to_hex())),
+        ];
+        for (algorithm, compared) in compared {
+            let (Some(named), Some(compared)) = (subject.digest.get(algorithm), compared) else {
+                continue;
+            };
+            if *named != compared {
+                return Err(crate::AttestError::WrongArtifact {
+                    side: "upstream",
+                    algorithm: algorithm.to_string(),
+                    expected: named.clone(),
+                    got: compared,
+                });
+            }
+        }
+        Ok(Self::equivalence_with(subject, c))
+    }
+
+    fn equivalence_with(subject: Subject, c: &Comparison) -> Self {
         let predicate = equivalence_predicate(c);
         Statement {
             type_: STATEMENT_TYPE.into(),
-            subject: vec![Subject::new(upstream_name, &c.upstream.raw.sha256)],
+            subject: vec![subject],
             predicate_type: if c.outcome == trigon_core::Match::Divergent {
                 DIVERGENCE.into()
             } else {
@@ -205,5 +320,33 @@ fn provenance_name(p: &trigon_core::Provenance) -> &'static str {
         trigon_core::Provenance::Builtin => "builtin",
         trigon_core::Provenance::Human { .. } => "human",
         trigon_core::Provenance::Model { .. } => "model",
+    }
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::*;
+
+    #[test]
+    fn a_subject_computed_over_bytes_carries_the_published_vectors() {
+        // FIPS 180 test vectors for "abc", so a digest that is merely self-consistent — computed
+        // the same wrong way on both sides of a check — cannot pass.
+        let s = Subject::of_bytes("abc.tgz", b"abc", true);
+        assert_eq!(
+            s.digest["sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            s.digest["sha512"],
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+             2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+        assert_eq!(s.digest["sha1"], "a9993e364706816aba3e25717850c26c9cd0d89d");
+
+        // Where the ecosystem publishes no sha1, the subject carries none: it is a lookup key for
+        // npm and nothing else.
+        let s = Subject::of_bytes("abc.whl", b"abc", false);
+        assert!(!s.digest.contains_key("sha1"), "{:?}", s.digest);
+        assert_eq!(s.digest.len(), 2);
     }
 }

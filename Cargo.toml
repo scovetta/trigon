@@ -49,6 +49,11 @@ trigon-stabilize-wasm = { path = "crates/trigon-stabilize-wasm", version = "0.0.
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 sha2 = "0.10"
+# sha1 is collision-broken and is never an identity here: it is computed only because npm publishes
+# one (`dist.shasum`) and a consumer may hold an artifact by it. md5 likewise, for PyPI's
+# declarations. Both are RustCrypto crates on the same `digest` traits as `sha2`.
+sha1 = "0.10"
+md-5 = "0.10"
 crc32fast = "1"
 bytes = "1"
 memmap2 = "0.9"

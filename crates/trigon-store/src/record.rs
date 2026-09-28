@@ -12,7 +12,7 @@
 //! predicate nobody can regenerate.
 
 use serde::{Deserialize, Serialize};
-use trigon_core::{Digest, FailureSignature};
+use trigon_core::{Digest, DigestCheck, FailureSignature, Sha1, Sha512};
 
 /// How far a run got. The five persisted states of `docs/03` §1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +72,10 @@ pub struct Environment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<PinEvidence>,
     /// The digest of the guard manifest the mirror was armed with, where it was armed.
+    ///
+    /// The manifest itself is stored as a blob under this digest by every run recorded since
+    /// `docs/19` §10 phase 2, so the digest names bytes a reader can fetch; it used to be left in
+    /// the work directory and lost with it.
     ///
     /// **`None` means nobody looked, and that is why it is recorded rather than inferred.** The
     /// signed `artifactHashCheck` block derives `performed` from this field being present, so a
@@ -142,6 +146,35 @@ impl PinEvidence {
     pub fn bound(&self) -> bool {
         self.index_requests > 0
     }
+}
+
+/// Every digest of the published bytes beyond `upstream.sha256`: what the run computed over them,
+/// and what the registry declared and whether the bytes agreed.
+///
+/// **Computed, then declared, and never one standing in for the other.** `sha512` and `sha1` are
+/// hashed from the bytes as they were fetched, and are what a statement's subject carries: a
+/// consumer holding an npm lockfile has the sha512 and nothing else, and a subject that lacks it is
+/// unfindable (`docs/19` §5). `declared` is what the registry claimed, which the fetch checked and
+/// would have refused on a mismatch. Kept on the run rather than recomputed at attest time because
+/// a run that reached no verdict does not keep the bytes, and its statement still needs a subject.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamDigests {
+    pub sha512: Sha512,
+    /// Only where the ecosystem publishes one, which is npm's `dist.shasum`: a lookup key there and
+    /// nowhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha1: Option<Sha1>,
+    /// One entry per digest the registry declared, with the field it came from and what checking
+    /// it found: `matched`, or `unchecked` for an algorithm this build cannot compute.
+    ///
+    /// **Written even when empty.** An empty list is a finding — the registry declared nothing —
+    /// and `note` says so; a missing key would read as a record from before this field existed.
+    #[serde(default)]
+    pub declared: Vec<DigestCheck>,
+    /// Why `declared` is empty, or which of it went unchecked, in words. `None` when every
+    /// declaration was checked and held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// What one run cost, in the units `docs/03-pipeline-and-run-record.md` §3 asks for.
@@ -280,12 +313,29 @@ pub struct RunRecord {
     pub cache_key: Option<String>,
 
     pub environment: Environment,
-    /// Canonical JSON of the strategy, and its digest. The digest is what a cache key is built from
-    /// and what the attestation names; the blob is what a person reads.
+    /// The blob holding the strategy that ran, as canonical JSON (`trigon_core::jcs`): the digest
+    /// of a file a reader can fetch, and what a published record binds its strategy evidence by
+    /// (`docs/19` §4.2 item 7).
+    ///
+    /// **Not `strategy_digest`**, and the two must not be confused. This is the sha256 of the
+    /// file's bytes; that one is a domain-separated hash over the canonical strategy *and every
+    /// tool it reaches*, which is what a cache key needs and is the digest of no file. The field
+    /// was declared long before anything wrote it — none of 371 stored runs had it — so `None`
+    /// means a run recorded before `docs/19` §10 phase 2, or one that never chose a strategy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<Digest>,
+    /// `strategyDigest`: what a cache key is built from and what the `rebuild` statement's
+    /// `internalParameters` names. See `strategy` above for why it is not a file digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_digest: Option<String>,
+    /// The Trigon that ran the build: the crate version, and the git revision too if a build ever
+    /// embeds one. None does today, so this is the version alone.
+    ///
+    /// Recorded because the only version signed anywhere was the *attestor's*, in `rebuild`, and a
+    /// run attested by a later binary claimed that binary had built it (`docs/19` §4.2 item 3).
+    /// `None` on a record written before the run kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigon_version: Option<String>,
     /// How the strategy was arrived at: `definition`, `heuristic`, `ci_derived`, `model_assisted`.
     /// A provenance fact beside the claim, never inside it (`docs/09` §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,6 +357,14 @@ pub struct RunRecord {
     pub instructions: Option<Digest>,
 
     pub upstream: ArtifactRef,
+    /// The published artifact's other digests, and what its registry declared. See
+    /// [`UpstreamDigests`].
+    ///
+    /// `None` on a record written before the fetch kept them, and on one whose fetch never
+    /// finished, which are both "not known" and never "nothing declared": that is an empty
+    /// `declared` with a note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_digests: Option<UpstreamDigests>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebuild: Option<ArtifactRef>,
 
@@ -397,6 +455,17 @@ pub struct RunRecord {
     /// discard the bytes a signature is about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attestations: Vec<String>,
+    /// Statements this run named in the per-target layout, set aside when it was attested again
+    /// under its own id ([`crate::Store::record_attestations`]).
+    ///
+    /// Kept so the history is not lost, and **served by nothing**. A per-target path was shared by
+    /// every run of the target, so what it holds now is whichever run attested last — 40 of the
+    /// 93 in the local store were shared when this was measured — and neither a build observation
+    /// nor an equivalence statement says which run it is about. Left in `attestations`, a re-attest
+    /// went on serving another run's statements, possibly a withheld divergence, as this run's.
+    /// Empty on every run that was never attested under both layouts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub per_target_attestations: Vec<String>,
     /// Whether any stabilizer that actually fired carried non-`Builtin` provenance.
     ///
     /// ADR-0010 safeguard 2's provenance clause needs this, and the fact lives in the comparison
@@ -498,10 +567,12 @@ impl RunRecord {
             environment,
             strategy: None,
             strategy_digest: None,
+            trigon_version: None,
             derivation: None,
             source: None,
             instructions: None,
             upstream,
+            upstream_digests: None,
             rebuild: None,
             comparison: None,
             build_log: None,
@@ -515,6 +586,7 @@ impl RunRecord {
             network_transcript: None,
             costs: None,
             attestations: Vec::new(),
+            per_target_attestations: Vec::new(),
             non_builtin_stabilizer: None,
             diff_opinion: None,
         }

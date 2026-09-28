@@ -39,16 +39,29 @@ pub enum RegistryError {
     #[error("refusing to read the source at `{repo}`: {detail}")]
     SourceRefused { repo: String, detail: String },
 
+    /// Bytes that do not match a digest the registry declared for them.
+    ///
+    /// Boxed because it carries six strings, and inline they would make every
+    /// `Result<_, RegistryError>` in the crate that wide, on the path that succeeds as much as on
+    /// this one, which is rare.
+    #[error("{0}")]
+    DigestMismatch(Box<DigestMismatch>),
+
+    /// A catalog document that could not be read, where it is the only place the artifact's digest
+    /// is declared: NuGet's registration index, one of its pages, or a catalog leaf.
+    ///
+    /// Its own variant rather than the failure inside it, because the message has to say what was
+    /// at stake. Whether the package declares a digest is then unknown, and recording that as "the
+    /// catalog declared none" is the absence-read-as-a-fact error `docs/19` §4.2 warns about.
+    /// Classified as the failure inside it, so a busy catalog is retried and a 404 is not.
     #[error(
-        "{name} declares sha256 {expected} for {artifact}, and the bytes we fetched hash to \
-         {actual}. Refusing: a run against bytes the registry does not vouch for proves nothing \
-         about what it published."
+        "could not read {what}: {cause}. Whether the catalog declares a `packageHash` for this \
+         package is therefore unknown, and it is not fetched unchecked, which would record a \
+         catalog nobody read as one that declared nothing. Try again once the catalog answers."
     )]
-    DigestMismatch {
-        name: String,
-        artifact: String,
-        expected: String,
-        actual: String,
+    CatalogUnreadable {
+        what: String,
+        cause: Box<RegistryError>,
     },
 
     #[error("{ecosystem} answered {status} for {url}")]
@@ -84,6 +97,31 @@ pub enum RegistryError {
     Io(#[from] std::io::Error),
 }
 
+/// What [`RegistryError::DigestMismatch`] says: bytes that do not match a digest the registry
+/// declared for them.
+///
+/// Names the algorithm and both values, because "the digest did not match" with neither is a
+/// sentence nobody can act on: whoever reads it has to tell a registry serving other bytes from
+/// metadata declaring the wrong digest, and the two values are how.
+#[derive(Debug, Error)]
+#[error(
+    "{ecosystem} declares {algorithm} {declared} for {artifact} (`{field}`), and the bytes we \
+     fetched hash to {computed}. Refusing: a run against bytes the registry does not vouch for \
+     proves nothing about what it published. Retrying will not change this unless whatever \
+     served the bytes, or the metadata, changes; compare them with a download from another \
+     network to tell which is wrong."
+)]
+pub struct DigestMismatch {
+    pub ecosystem: String,
+    pub artifact: String,
+    pub algorithm: String,
+    /// The field the declaration came from, as `<ecosystem>:<field>`. Not `source`, which
+    /// `thiserror` reads as the error this one wraps.
+    pub field: String,
+    pub declared: String,
+    pub computed: String,
+}
+
 fn suggestion(available: &[String]) -> String {
     if available.is_empty() {
         return String::new();
@@ -107,12 +145,13 @@ impl Classify for RegistryError {
             RegistryError::NoSuchPackage { .. }
             | RegistryError::NoSuchVersion { .. }
             | RegistryError::NoSuchArtifact { .. }
-            | RegistryError::DigestMismatch { .. }
+            | RegistryError::DigestMismatch(_)
             | RegistryError::Malformed { .. }
             | RegistryError::Http { .. }
             | RegistryError::RateLimited { .. }
             | RegistryError::Transport(_) => Fault::Upstream,
             RegistryError::Unsupported { .. } => Fault::Policy,
+            RegistryError::CatalogUnreadable { cause, .. } => cause.fault(),
             // A repository that will not fetch is upstream's, the same as a registry that will
             // not answer.
             RegistryError::Source { .. } => Fault::Upstream,
@@ -127,12 +166,15 @@ impl Classify for RegistryError {
             // Transient: the registry was busy or the connection broke.
             RegistryError::RateLimited { .. } | RegistryError::Transport(_) => true,
             RegistryError::Http { status, .. } => *status >= 500,
+            // As whatever stopped the read: a catalog that was busy may answer, and one that said
+            // 404 will say it again.
+            RegistryError::CatalogUnreadable { cause, .. } => cause.is_retryable(),
             // Facts. A package that does not exist will not exist on the next attempt, and a
             // digest mismatch means the bytes and the metadata disagree, which retrying cannot fix.
             RegistryError::NoSuchPackage { .. }
             | RegistryError::NoSuchVersion { .. }
             | RegistryError::NoSuchArtifact { .. }
-            | RegistryError::DigestMismatch { .. }
+            | RegistryError::DigestMismatch(_)
             | RegistryError::Malformed { .. }
             | RegistryError::Unsupported { .. } => false,
             // A fetch can fail for a moment and succeed after it. A reference we declined cannot.
