@@ -573,11 +573,16 @@ commit    publish: 1 record, tree 0 → 1
 ### Rebuilt artifacts as release assets
 
 With `rebuilt_artifacts = "github-release"` ([`19`](19-distribution-and-lookup.md) D4), every
-verdict's rebuilt artifact is published beside its record, so that `verify-attestation
---rerun-comparison` needs nothing from the person running it but the published artifact. It is a
-release asset of the evidence repository, never a file in git: named `sha256-<hex>` by the digest
-the verdict signs, in the month's release, `rebuilt-2026-09`, continued as `rebuilt-2026-09.2` and
-so on once a release holds GitHub's 1,000 assets.
+verdict's rebuilt artifact but an exact one's is published beside its record, so that
+`verify-attestation --rerun-comparison` needs nothing from the person running it but the published
+artifact. An exact verdict's rebuilt artifact is the published artifact byte for byte, and is never
+uploaded (below): its falsifying command asks for it as `--rebuild <file>`, which the published
+artifact is. It is a release asset of the evidence repository, never a file in git: named
+`sha256-<hex>` by the digest the verdict signs, in the month's release, `rebuilt-2026-09`, continued
+as `rebuilt-2026-09.2` and so on once a release holds GitHub's 1,000 assets. The setting says what
+`publish` uploads and nothing else: `verify-attestation --lookup` looks for a record's rebuilt
+artifact in the repository that holds the record whatever your own setting is, since another
+operator's repository publishes what its operator chose.
 
 ```
 $ GITHUB_TOKEN=… trigon publish 1789000000-aaaa0001 --store ./trigon-store
@@ -1004,11 +1009,24 @@ to be, where your own sources hold that origin; two of your own that give it to 
 refused as ambiguous, `5`. Every source it asks is weighed as `lookup` weighs it, so a required
 source that cannot answer fails it though another holds the record. A void has no claim to
 re-derive, and is reported as the void it is, `3`. The rebuilt artifact is `--rebuild <file>`, the
-output of rebuilding under the record's published strategy; where the operator publishes rebuilt
-artifacts, set `rebuilt_artifacts = "github-release"` and leave it out, and the release asset the
-verdict names is downloaded from the GitHub repository that holds the record — a successor's, after
-a succession into another repository — into a directory only you can enter, and held to the digest
-the verdict signs.
+output of rebuilding under the record's published strategy, and given, nothing is fetched for it.
+Left out, it is looked for in the repository that holds the record, whatever your own `[publish]
+rebuilt_artifacts` — that says what you publish, not what the source does: the release asset
+`sha256-<hex>` of the digest the verdict signs, in the `rebuilt-YYYY-MM` releases of that
+repository on GitHub, named by an HTTPS or an SSH location — a successor's, after a succession into
+another repository — asked of GitHub's API without a token, and then in those of any other source
+of yours that holds the record; a source a project's `.trigon/evidence.toml` added is not asked
+where one of yours resolved it. Only the series of the month the record was logged in and the
+months either side are listed, which is where `publish` puts it, so a lookup costs a few of the
+sixty requests an hour GitHub allows without a token. It is downloaded into a file of its own, in a
+directory made for it that only you can enter, and held to that digest: other bytes in the
+repository of the source that resolved the record are refused, `4`; in another source's, they are
+that repository's, and the next is asked. Downloading it names the artifact to GitHub, and the
+report says so however it ended. An exact verdict's rebuilt artifact is the published artifact
+itself, never uploaded, so GitHub is asked nothing: pass the upstream file as `--rebuild` too.
+There, where no repository that holds the record is on github.com, which asks GitHub nothing, where
+none holds such an asset, or where GitHub refuses or cannot be reached, the check is not made, `5`,
+and it asks for `--rebuild <file>`.
 
 `verify-attestation --record <file> --source <name>` without `--evidence` reads the same clones,
 following the source's chain into every repository its log has gone on in; it is in the verifier
@@ -1038,7 +1056,7 @@ origin = "github.com/<owner>/trigon-evidence"         # the log's origin
 disputes = "https://github.com/<owner>/trigon-evidence/issues"
 log_key = "~/.config/trigon/log.key"                  # read only by `trigon log sign`
 divergences = "refuse"                                # or "feed": published, with the Atom feed
-rebuilt_artifacts = "none"                            # or "github-release": as release assets
+rebuilt_artifacts = "none"                            # or "github-release": `publish` uploads them
 same_host_confirmation = false
 confirmation_interval = "1h"                          # durations: <n>s, m, h or d
 heartbeat = "7d"

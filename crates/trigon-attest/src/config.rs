@@ -259,6 +259,9 @@ pub enum Divergences {
 }
 
 /// `rebuilt_artifacts`, docs/19 D4: whether a rebuilt artifact is published beside its record.
+/// It says what this host's `publish` uploads, and nothing else: `verify-attestation --lookup`
+/// looks for a record's rebuilt artifact where the record's own repository would hold it, since
+/// another operator's repository publishes what that operator chose.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RebuiltArtifacts {

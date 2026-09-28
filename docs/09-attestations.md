@@ -393,7 +393,9 @@ verify-attestation --lookup sha256:<subject> --predicate <type> --origin <origin
 --rerun-comparison --upstream <file>`. It cannot name its own record's digest, which is the digest
 of the file that contains it, so it names the subject, the predicate type and the log's origin and
 the client resolves the current record through the log. `<file>` is the upstream artifact the reader
-holds; where rebuilt artifacts are not published (D4), the client asks for `--rebuild <file>` too.
+holds; where the repository that holds the record does not publish its rebuilt artifact as a release
+asset (D4), or the verdict is exact, whose rebuilt artifact is that upstream artifact and is never
+published, the client asks for `--rebuild <file>` too.
 
 **Both or neither.** `attest` signs the falsifying command and the dispute pointer only when
 `[publish] origin` and `disputes` are both set in `evidence.toml`, and leaves both out — absent,
@@ -1063,13 +1065,27 @@ required and unknown, or says withdrawn, is never dropped because another holds 
 subject whose current record is a withdrawal, or that has none, is reported with its answer and that
 answer's code; a current void asked to re-derive is reported as the void it is, exit 3, and said not
 to have been re-derived. The evidence the record names is read from the clone's objects, fetched
-from its remote where the clone is partial, and the report says so; the rebuilt artifact is
-`--rebuild <file>`, or, where the operator publishes rebuilt artifacts (`rebuilt_artifacts =
-"github-release"`) and none is given, the release asset `sha256-<hex>` of the GitHub repository that
-holds the record's leaf — a successor's, after a succession into another repository — found by name
-in its releases without a token, downloaded into a directory made for it that only the user can
-enter, and held to the digest the verdict signs as it is written: one that is other bytes fails,
-exit 4.
+from its remote where the clone is partial, and the report says so. The rebuilt artifact is
+`--rebuild <file>` where one is given, and nothing is fetched for it. Otherwise it is looked for by
+the record and its sources alone, never by the client's own `[publish] rebuilt_artifacts`, which
+says what that host publishes and nothing of another operator's repository: the release asset
+`sha256-<hex>` of the digest the verdict signs, found by name through GitHub's API without a token
+in the `rebuilt-YYYY-MM` releases of the repository that holds the record's leaf — a successor's,
+after a succession into another repository — by any location of it on github.com, HTTPS or SSH;
+then in those of every other source that holds the record, but never one a project's
+`.trigon/evidence.toml` added where the record was resolved in the user's own (`19` §8). Only the
+series of the month the record was logged in and the months either side are listed, where
+`publish` puts the asset, and only an upload GitHub finished is taken; a download that fails goes
+on to the next release that holds it. It is downloaded into a new `0600` file in a directory made
+for it under a random name that only the user can enter, and held to that digest as it is written:
+other bytes in the repository of the source the record was resolved in fail, exit 4, and in another
+source's are that repository's, and the next is asked. A download names the artifact to GitHub, and
+the report says so however it ended. An exact verdict's rebuilt artifact is the upstream artifact
+itself, which no repository publishes again, so GitHub is asked nothing for it, and neither is it
+for a record no repository of which is on github.com; there, where no repository asked holds the
+asset, where GitHub refuses or cannot be reached, or where the verdict signs no rebuilt artifact,
+the check is not made, exit 5, and it asks for `--rebuild <file>` — the upstream file, for an exact
+verdict; no other artifact is guessed at.
 
 `trigon lookup <key>` and `trigon check <lockfile>` answer from the same clones, and report every
 record with the fields below; `19` §6 has them. `--remote` on either reads one question's files

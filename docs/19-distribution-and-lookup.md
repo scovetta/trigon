@@ -24,7 +24,7 @@ today:
 | Rebuilt artifacts as release assets, uploaded before the commit that names them and reused on a retry; the divergence feed, regenerated from the log; `log key-change` and `log succeed`, followed by a fresh verification, with publishing going on into a successor in this repository or another; `publish --prune`, and `attest --prune` refusing a run not yet published; `serve`'s report of the repository's kill-switch beside its own | built (§10 phase 5, second half; [findings](16-findings.md) §3.101) |
 | The phase 5 spike against a scratch GitHub repository | written (`scripts/evidence-spike.sh`) and **not run**: it needs a repository of the owner's naming, which nothing here creates (§10 phase 5; [findings](16-findings.md) §3.101) |
 | `trigon evidence add`, `list`, `remove` and `sync`: sources written into `evidence.toml` keeping its comments; a verified clone of every location in the cache, and each source's checkpoint, key history and last sync in the state directory, written only once everything verifies; a checkpoint that does not extend the accepted one, and a rollback, refused with both notes; mirrors held to one another; a successor in another repository followed as part of the source; trust on first use recorded and labelled, and read by `verify-attestation --record --source`; a lost state refused until `--accept-state-loss`, which starts over only what was lost; and the two freshness clocks, as the standing every command asking a source reads. `publish` reading the whole chain, from its first log, when it publishes into a successor elsewhere; pruning that keeps bytes another run still names, and takes turns with the writers that name them | built (§10 phase 6, first half; [findings](16-findings.md) §3.102) |
-| `trigon lookup` over the verified leaves of every source, per source and never merged, with every §4.2 field and state, supersessions struck through, and sources that disagree said to; `trigon check` against the sources — one sync and then no request, by digest first and purl second, every package of an SBOM kept, `--min`, `--max-risk`, `--require`, §6's exit codes, per-source detail in text, JSON and SARIF — with `--store` keeping the old check; the lockfile parser keeping npm's `integrity` and `resolved`, `--hash`, and SBOM `checksums`; `verify-attestation --lookup`, resolved in the source of its origin, its evidence fetched on demand from the partial clone and its rebuilt artifact from a release asset or `--rebuild`; `--record --source` reading the source's clones across repositories; `--remote`, proving each leaf from the tiles; a sync removing clones of locations no longer configured; and `serve` showing a run's published record, and `/v1/artifacts/{alg}:{digest}` honouring its algorithm over every run | built (§10 phase 6, second half; [findings](16-findings.md) §3.103) |
+| `trigon lookup` over the verified leaves of every source, per source and never merged, with every §4.2 field and state, supersessions struck through, and sources that disagree said to; `trigon check` against the sources — one sync and then no request, by digest first and purl second, every package of an SBOM kept, `--min`, `--max-risk`, `--require`, §6's exit codes, per-source detail in text, JSON and SARIF — with `--store` keeping the old check; the lockfile parser keeping npm's `integrity` and `resolved`, `--hash`, and SBOM `checksums`; `verify-attestation --lookup`, resolved in the source of its origin, its evidence fetched on demand from the partial clone and its rebuilt artifact from `--rebuild` or else the release asset of the GitHub repository that holds the record, whatever the client's own `rebuilt_artifacts`; `--record --source` reading the source's clones across repositories; `--remote`, proving each leaf from the tiles; a sync removing clones of locations no longer configured; and `serve` showing a run's published record, and `/v1/artifacts/{alg}:{digest}` honouring its algorithm over every run | built (§10 phases 6, second half, and 6c; [findings](16-findings.md) §3.103) |
 
 ---
 
@@ -602,10 +602,16 @@ acute. Every record must carry, and every client that shows a record must render
    that contains it. It names the subject, the predicate type and the log's origin, and the client
    resolves the current record through the log and its supersessions: `trigon verify-attestation
    --lookup sha256:<subject> --predicate <type> --origin <origin> --rerun-comparison --upstream
-   <file>`. A client with no source of that origin says so rather than resolving elsewhere. If D4
-   publishes rebuilt artifacts, the command fetches the rebuilt artifact itself; otherwise it takes
-   `--rebuild <file>`, the output of re-running the build under the record's published strategy, so
-   the same signed command works either way. The dispute pointer is a typed object, such as
+   <file>`. A client with no source of that origin says so rather than resolving elsewhere. Where
+   the repository that holds the record publishes its rebuilt artifact (D4) — a release asset of a
+   repository on github.com, named by the digest the verdict signs — the command fetches it itself
+   and holds it to that digest; otherwise it takes `--rebuild <file>`, the output of re-running the
+   build under the record's published strategy, so the same signed command works either way. Which
+   it is depends on the record and its source alone: the client's own `[publish]
+   rebuilt_artifacts` says what the client's host publishes, and nothing of another operator's
+   repository. An exact verdict's rebuilt artifact is the published artifact byte for byte, which
+   no repository publishes again (§4.1), so for one the command asks nothing, and takes `--rebuild
+   <file>`, which the upstream file is. The dispute pointer is a typed object, such as
    `{"kind": "url", "url": …}`, pointing at the repository's issues. Both carry the namespace, so D3
    is decided before either is signed.
 7. **The digests of the evidence the record names**: the comparison report, the rebuilt artifact,
@@ -791,7 +797,22 @@ trigon verify-attestation --record <file> --source <name> \
 - **`verify-attestation --lookup`**, which is also the form of a record's falsifying command (§4.2
   item 6), resolves the current record in the clone of the source whose origin `--origin` names, and
   fetches the evidence it names, so `--rerun-comparison` needs only the upstream artifact from the
-  user, and the rebuilt artifact too unless D4 publishes it.
+  user, and the rebuilt artifact too unless the repository that holds the record publishes it (D4),
+  which no repository does for an exact verdict. Without `--rebuild <file>` it looks for the release
+  asset `sha256-<hex>` of the digest the verdict signs in that repository's `rebuilt-YYYY-MM`
+  releases, where the repository is on github.com by an HTTPS or an SSH location, asking GitHub's
+  API without a token; then in those of every other source that holds the record, but never one a
+  project's `.trigon/evidence.toml` added where the record was resolved in the user's own (§8). It
+  lists only the series of the month the record was logged in and the months either side, where
+  `publish` puts the asset, so that finding it costs a few of the sixty requests an hour GitHub
+  allows a client with no token, however many releases of other months the repository has. It holds
+  what it downloads to that digest: other bytes in the repository of the source the record was
+  resolved in fail, exit 4, and in another source's are that repository's, and the next is asked. A
+  repository elsewhere is asked nothing, and neither is GitHub for an exact verdict; there, where no
+  such asset exists, or where GitHub refuses or cannot be reached, the check is not made, exit 5,
+  and it asks for `--rebuild <file>`, never guessing at another artifact. With `--rebuild <file>` it
+  fetches nothing for the rebuilt artifact. The client's own `[publish] rebuilt_artifacts` plays no
+  part: it governs what `publish` uploads.
 - **The network-free verifier** (`--no-default-features`) takes `--record <file> --evidence <dir>`
   for one source, with that source's keys and last accepted checkpoint from `--source <name>` (read
   from `evidence.toml` and the state directory) or given as `--log-vkey`, `--attestation-key` and
@@ -902,8 +923,9 @@ design treats each as a separate witness, never as one pool.
 **The clone is the privacy story.** A per-dependency lookup would tell the host, and every CDN on
 the path, the full dependency graph of whoever ran it. Cloning tells GitHub only that somebody
 cloned the repository; every question after that is answered locally. Two things still reach the
-network with a package in them: fetching a record's evidence for `--rerun-comparison`, which names
-that record to GitHub, and `--remote`. Both say so when they are used.
+network with a package in them: fetching a record's evidence for `--rerun-comparison`, and its
+rebuilt artifact's release asset where no `--rebuild` is given, which name that record to GitHub;
+and `--remote`. Each says so when it is used.
 
 **Size.** A leaf is canonical JSON of roughly 500 to 700 bytes. A published verdict adds its record
 file (the three envelopes, some 7 to 15 KB), five index entries, which the default clone does not
@@ -1292,14 +1314,37 @@ entry was removed is still found; a superseded record is shown superseded; a che
 not extend the stored one is refused, and so is a clone rolled back behind the state directory; a
 record with one byte changed fails verification with exit 4; a withdrawn record reads as withdrawn;
 `verify-attestation --lookup … --rerun-comparison` re-derives a published verdict from the upstream
-file and, unless D4 publishes rebuilt artifacts, the rebuilt one; a source is configured by
-`evidence.toml`, by `TRIGON_EVIDENCE_REPO`, and by `evidence add`, with an HTTPS URL, a `file://`
-URL and a local path each; a project's `.trigon/evidence.toml` that tries to add a URL to an
-existing source is refused; and, with two sources configured, a divergence in either fails the check
-and the disagreement is printed, an unreachable source that is not required leaves only its own
-answers missing, a mirror whose checkpoint does not extend its source's is reported as an
-equivocation, and a record signed with one source's key is refused when found in another's
-repository.
+file and, where the repository that holds the record does not publish rebuilt artifacts (D4) or the
+verdict is exact, the rebuilt one; a source is configured by `evidence.toml`, by
+`TRIGON_EVIDENCE_REPO`, and by `evidence add`, with an HTTPS URL, a `file://` URL and a local path
+each; a project's `.trigon/evidence.toml` that tries to add a URL to an existing source is refused;
+and, with two sources configured, a divergence in either fails the check and the disagreement is
+printed, an unreachable source that is not required leaves only its own answers missing, a mirror
+whose checkpoint does not extend its source's is reported as an equivocation, and a record signed
+with one source's key is refused when found in another's repository.
+
+### Phase 6c — the rebuilt artifact by the record's source
+
+A follow-up to phase 6, settling the first owner item of [findings](16-findings.md) §3.103.
+`verify-attestation --lookup … --rerun-comparison` decided whether to fetch the rebuilt artifact
+from the consumer's own `[publish] rebuilt_artifacts`, which says what the consumer's host
+publishes and nothing of what the source being checked publishes. It now depends on the record and
+its source alone (§4.2 item 6, §6), and the setting governs only what `publish` uploads.
+
+**Done when**, against a server on `127.0.0.1:0`: an asset of the verdict's digest in the
+`rebuilt-YYYY-MM` releases of the source's GitHub repository is used; one of other bytes is refused,
+exit 4; no such asset, including one only in a release outside the series, is exit 5 with the advice
+to pass `--rebuild <file>`; a source not on github.com is the same, with no request made;
+`--rebuild` given makes no request; and the consumer's own setting, unset or either value, changes
+none of it. Built ([findings](16-findings.md) §3.103), and its review added: an exact verdict makes
+no request, exit 5, and names the upstream file as its rebuilt artifact; only the series of the
+record's month and the months either side are listed, so that full releases of other months cost
+nothing; an unfinished upload is passed over, and a failed download goes on to the next release;
+GitHub refusing or failing is exit 5, never a refutation, and a download asked for is said to have
+named the artifact however it ended; plain HTTP is followed nowhere but loopback; a source on
+github.com by SSH is on github.com; and every repository that holds the record is asked, the source
+it was resolved in first, other bytes in another source's being exit 5, and a project's source never
+where the user's own resolved it.
 
 ### Phase 7a — bounding a compromised attestation key (D6)
 

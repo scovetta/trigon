@@ -697,12 +697,25 @@ pub(crate) fn month_of(time: u64) -> String {
     crate::rfc3339_from_unix(time)[..7].to_string()
 }
 
-fn previous_month(month: &str) -> String {
+/// The month before `month`, whose series `put` reads too, and `verify-attestation --lookup`
+/// looks in.
+pub(crate) fn previous_month(month: &str) -> String {
     let (y, m) = month.split_once('-').unwrap_or(("1970", "01"));
     let (y, m): (i64, i64) = (y.parse().unwrap_or(1970), m.parse().unwrap_or(1));
     match m {
         1 => format!("{:04}-12", y - 1),
         _ => format!("{y:04}-{:02}", m - 1),
+    }
+}
+
+/// The month after `month`, where a publication whose time was read after its leaves' had crossed
+/// into, and put its assets: `verify-attestation --lookup` looks there too.
+pub(crate) fn next_month(month: &str) -> String {
+    let (y, m) = month.split_once('-').unwrap_or(("1970", "01"));
+    let (y, m): (i64, i64) = (y.parse().unwrap_or(1970), m.parse().unwrap_or(1));
+    match m {
+        12 => format!("{:04}-01", y + 1),
+        _ => format!("{y:04}-{:02}", m + 1),
     }
 }
 
@@ -714,8 +727,10 @@ pub(crate) fn tag(month: &str, n: u32) -> String {
     }
 }
 
-/// The month and number of a release of a series, from its tag.
-fn series_of(tag: &str) -> Option<(String, u32)> {
+/// The month and number of a release of a series, from its tag. `None` for any other release,
+/// which holds nothing a record names: `verify-attestation --lookup` looks for an asset in the
+/// series alone.
+pub(crate) fn series_of(tag: &str) -> Option<(String, u32)> {
     let rest = tag.strip_prefix(SERIES)?;
     let (month, n) = match rest.split_once('.') {
         Some((m, n)) if !n.starts_with('0') => (m, n.parse::<u32>().ok().filter(|n| *n >= 2)?),
@@ -787,6 +802,8 @@ mod tests {
         }
         assert_eq!(previous_month("2026-01"), "2025-12");
         assert_eq!(previous_month("2026-09"), "2026-08");
+        assert_eq!(next_month("2025-12"), "2026-01");
+        assert_eq!(next_month("2026-09"), "2026-10");
     }
 
     /// The client for `api`, as `for_location` makes it, with a token of its own.

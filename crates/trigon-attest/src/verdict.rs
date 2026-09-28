@@ -144,9 +144,10 @@ impl Supersession {
 /// signed document, and renders it for a person with [`Self::render`]. It names the subject, the
 /// predicate type and the log's origin, and not the record's own digest, which is the digest of
 /// the file that contains it (`docs/19` §4.2 item 6). The client resolves the current record
-/// through the log. `<file>` is the upstream artifact the reader holds; if rebuilt artifacts are
-/// not published (docs/19 D4) the client also asks for `--rebuild <file>`, so the same signed
-/// command works either way.
+/// through the log. `<file>` is the upstream artifact the reader holds; where the repository that
+/// holds the record does not publish its rebuilt artifact (docs/19 D4), or the verdict is exact and
+/// its rebuilt artifact is that upstream artifact, the client also asks for `--rebuild <file>`, so
+/// the same signed command works either way.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FalsifyingCommand {
     pub argv: Vec<String>,

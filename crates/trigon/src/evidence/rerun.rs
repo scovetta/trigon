@@ -25,14 +25,23 @@
 //! names the record to the host, as nothing a clone does otherwise, and it is said when it happens
 //! (`docs/19` §7).
 //!
-//! **The rebuilt artifact** is the release asset the verdict names by digest where the operator
-//! publishes them (`[publish] rebuilt_artifacts = "github-release"`, D4) — found by name in the
-//! releases of the GitHub repository that holds the record's leaf, which after a succession into
-//! another repository is that one, downloaded without a token into a directory only this user can
-//! enter, and held to the digest the verdict signs as it is written — and `--rebuild <file>`
-//! otherwise, or where given. Then the record is checked and its claim re-derived exactly as the
-//! record form does (`crate::verify_record::report`). A void makes no claim to re-derive: it is
-//! reported, with its code, and said not to have been.
+//! **The rebuilt artifact** is `--rebuild <file>` where given, and nothing is fetched for it.
+//! Otherwise it is looked for by the record and its sources alone: the release asset
+//! `sha256-<hex>` of the digest the verdict signs, in the `rebuilt-YYYY-MM` releases of the
+//! GitHub repository that holds the record's leaf — the source's own, by any location of it on
+//! github.com, or after a succession into another repository that one — for the month the record
+//! was logged in and the months either side, where `publish` puts it; then in those of every other
+//! source that holds the record, but never one a project's `.trigon/evidence.toml` added where the
+//! record was resolved in a source of the user's. Downloaded without a token into a directory made
+//! for it that only this user can enter, and held to that digest as it is written. What this host
+//! publishes (`[publish] rebuilt_artifacts`) says nothing of what another operator's repository
+//! holds, so it plays no part. An exact verdict's rebuilt artifact is the published one, which no
+//! repository publishes again, so nothing is asked for it; there, where no repository that holds
+//! the record is on github.com, where none holds such an asset, or where GitHub cannot be asked,
+//! the check is not made, exit 5, and the user is asked for `--rebuild <file>`: another artifact
+//! is never guessed at. Then the record is checked and its claim re-derived exactly as the record
+//! form does (`crate::verify_record::report`). A void makes no claim to re-derive: it is reported,
+//! with its code, and said not to have been.
 
 use std::cell::RefCell;
 use std::io::Write as _;
@@ -41,11 +50,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, anyhow, bail};
 use serde::Deserialize;
 use sha2::Digest as _;
-use trigon_attest::config::{AddedBy, Env, EvidenceConfig, RebuiltArtifacts};
+use trigon_attest::config::{AddedBy, Env, EvidenceConfig};
 use trigon_attest::evidence::{
     Answer, Key, RECORD_LIMIT, RecordKind, Said, exit_code, first_that_wins, record_path,
 };
-use trigon_attest::location::{Location, Transport, printable};
+use trigon_attest::location::{Location, printable};
 use trigon_attest::log::{DirFiles, LeafPos, LogError, LogFiles};
 use trigon_attest::state::KeysFile;
 
@@ -236,25 +245,10 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
         notes.extend(unanswered.iter().cloned());
         notes.extend(aside.iter().cloned());
         let void = v.kind() == RecordKind::Void;
-        // The rebuilt artifact, from its release asset where one is published and none is given;
-        // removed when this record's report is done.
+        // The rebuilt artifact, from its release asset where none is given; removed when this
+        // record's report is done.
         let asset = match a.rerun && a.files.rebuild.is_none() && !void {
-            true => {
-                // Released by the repository that holds the record's leaf, in whichever source
-                // holding the record names one on GitHub.
-                let holding: Vec<(&Ready, LeafPos)> = named
-                    .iter()
-                    .copied()
-                    .filter_map(|n| {
-                        let o = n.opened.as_ref()?;
-                        o.repo
-                            .record_leaves()
-                            .find(|(_, l)| l.record == f.leaf.record)
-                            .map(|(pos, _)| (n, pos))
-                    })
-                    .collect();
-                Some(rebuilt_asset(&config, &holding, v)?)
-            }
+            true => Some(rebuilt_asset(r, &named, f, v)?),
             false => None,
         };
         let files = crate::Rerun {
@@ -541,18 +535,15 @@ impl Download {
     /// A new directory for one download, made here and nowhere a path already was: made `0700`,
     /// by `mkdir`, which follows no link and fails where anything is in the way, so no other user
     /// of the machine can put a link where the asset is written, or change it between its digest
-    /// being checked and its bytes being read.
+    /// being checked and its bytes being read. Its name is 128 random bits, so no other user can
+    /// know it beforehand to take it first either.
     fn new(digest: &trigon_core::Digest) -> anyhow::Result<Download> {
         let tmp = std::env::temp_dir();
-        for attempt in 0..16u32 {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0);
-            let dir = tmp.join(format!(
-                "trigon-rebuilt-{}-{nanos:08x}{attempt:x}",
-                std::process::id()
-            ));
+        for _ in 0..16u32 {
+            let mut random = [0u8; 16];
+            crate::getrandom(&mut random)?;
+            let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
+            let dir = tmp.join(format!("trigon-rebuilt-{name}"));
             let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
@@ -587,92 +578,279 @@ impl Download {
 struct Release {
     id: u64,
     tag_name: String,
+    #[serde(default)]
+    draft: bool,
 }
 
 #[derive(Deserialize)]
 struct Asset {
     name: String,
     size: u64,
+    /// `uploaded` once its upload finished. One begun and never finished stays under its name
+    /// until it is removed, and is nothing to download.
+    #[serde(default)]
+    state: String,
     browser_download_url: String,
 }
 
+/// A release asset found and downloaded: the release it is in, its size, and the sha256 of the
+/// bytes written.
+struct Fetched {
+    release: String,
+    size: u64,
+    digest: trigon_core::Digest,
+}
+
+/// A GitHub repository the rebuilt artifact is looked for in, and the source that names it: `own`
+/// where that is the source the record was resolved in.
+struct Candidate {
+    repository: String,
+    source: String,
+    own: bool,
+}
+
+/// What the user is asked for wherever the rebuilt artifact cannot be had from a release asset.
+const GIVE_REBUILD: &str = "give it with --rebuild <file>, the output of re-running the build \
+                            under the record's published strategy";
+
+/// What asking for the asset by name told GitHub, which is said whatever came of it.
+const NAMED_TO_GITHUB: &str = "the artifact, and so the record, to GitHub (docs/19 §7)";
+
 /// The rebuilt artifact a verdict names, for `--rerun-comparison` without `--rebuild`: the release
-/// asset `sha256-<hex>` of the GitHub repository that holds the record's leaf, where the operator
-/// publishes rebuilt artifacts (`rebuilt_artifacts = "github-release"`), held to the digest the
-/// verdict signs. `holding` is each source that holds the record, with where. Refused, as bad
-/// arguments, where they are not published: `--rebuild <file>` is then how the rebuilt artifact
-/// is given.
+/// asset `sha256-<hex>`, in a `rebuilt-YYYY-MM` release of a GitHub repository that holds the
+/// record's leaf, held to the digest the verdict signs. `r` is the source the record `f` was
+/// resolved in, and `named` every source asked. Found by the record and its sources alone, never
+/// by this host's own `[publish] rebuilt_artifacts`, which says what this host publishes and
+/// nothing of another operator's repository.
+///
+/// `r`'s own repository is asked first, and then that of every other source that holds the
+/// record, so that a mirror with no releases hides nothing; [`candidates`] says which. An exact
+/// verdict, a verdict that signs no rebuilt artifact, and a record no repository of which is on
+/// github.com — all asked nothing — and one that no repository asked holds such an asset for, or
+/// that GitHub cannot be asked about, are a check not made, exit 5, and the user is asked for
+/// `--rebuild <file>`: no other artifact is guessed at. An asset of the name that is other bytes
+/// is the evidence failing, exit 4, since an asset is named by its digest, where it is in `r`'s own
+/// repository; in another source's it is that repository's, not the record's, and the next is
+/// asked.
 fn rebuilt_asset(
-    config: &EvidenceConfig,
-    holding: &[(&Ready, LeafPos)],
+    r: &Ready,
+    named: &[&Ready],
+    f: &trigon_attest::evidence::Found,
     v: &trigon_attest::evidence::VerifiedRecord,
 ) -> Result<Download, Stop> {
-    if config.publish().rebuilt_artifacts != RebuiltArtifacts::GithubRelease {
+    let digest = asset_digest(
+        v.kind(),
+        &v.statement.predicate,
+        f.leaf.subject.get("sha256").map(String::as_str),
+    )?;
+    let (candidates, considered, aside) = candidates(r, named, &f.leaf.record);
+    let aside = match aside.is_empty() {
+        true => String::new(),
+        false => format!(" ({})", aside.join("; ")),
+    };
+    if candidates.is_empty() {
         return Err(cannot(anyhow!(
-            "--rerun-comparison needs the rebuilt artifact: rebuilt artifacts are not published \
-             as release assets here (`[publish] rebuilt_artifacts` is \"none\"), so give it with \
-             --rebuild <file>, the output of rebuilding under the record's published strategy"
+            "--rerun-comparison needs the rebuilt artifact, and no repository that holds the \
+             record, in {}, is on github.com, so none has releases to look for it in, and \
+             nothing was asked of GitHub{aside}; {GIVE_REBUILD}",
+            considered.join(" and ")
         )));
     }
-    let digest = v
-        .statement
-        .predicate
-        .pointer("/artifacts/rebuild/sha256")
-        .and_then(|h| h.as_str())
-        .and_then(|h| trigon_core::Digest::from_hex(h).ok())
-        .ok_or_else(|| {
-            failed(anyhow!(
-                "the verdict signs no rebuilt artifact's sha256, so no release asset can be found \
-                 for it; give it with --rebuild <file>"
-            ))
-        })?;
-    let repository = holding
-        .iter()
-        .find_map(|(r, pos)| github_repository_of(r, *pos))
-        .ok_or_else(|| {
-            cannot(anyhow!(
-                "the repository that holds the record in {} has no https://github.com/<owner>/<repo> \
-                 URL, so no releases are known to hold the rebuilt artifact; give it with \
-                 --rebuild <file>",
-                holding
-                    .iter()
-                    .map(|(r, _)| format!("`{}`", r.source.name))
-                    .collect::<Vec<_>>()
-                    .join(" and ")
-            ))
-        })?;
     let name = format!("sha256-{}", digest.to_hex());
+    let logged = crate::publish::release::month_of(f.leaf.time);
+    let months = months_around(&logged);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(cannot)?;
     let mut download = Download::new(&digest).map_err(cannot)?;
-    // Hashed as it is written, so the digest held to is that of the bytes that were written, and
-    // nothing reads the file between the two.
-    let (size, got) = rt
-        .block_on(fetch_asset(&repository, &name, &download.path))
-        .map_err(|e| failed(e.context(format!("the rebuilt artifact {name} of {repository}"))))?;
-    if got != digest {
-        return Err(failed(anyhow!(
-            "the release asset {name} of {repository} is not the rebuilt artifact the verdict \
-             signs: its sha256 is {}, and an asset is named by the digest of what it holds",
-            got.to_hex()
-        )));
+    // Whether a download was asked for: that names the artifact to GitHub, which is said whether
+    // or not it was had.
+    let mut asked = false;
+    let mut before: Vec<String> = Vec::new();
+    let mut unreachable = false;
+    for c in &candidates {
+        // Hashed as it is written, so the digest held to is that of the bytes that were written,
+        // and nothing reads the file between the two.
+        let fetched = rt.block_on(fetch_asset(
+            &c.repository,
+            &name,
+            &months,
+            &download.path,
+            &mut asked,
+        ));
+        let whose = match c.own {
+            true => String::new(),
+            false => format!(" (`{}`'s, which holds the record too)", c.source),
+        };
+        match fetched {
+            Err(e) => {
+                unreachable = true;
+                before.push(format!("{}{whose} did not give it: {e:#}", c.repository));
+            }
+            Ok(None) => before.push(format!(
+                "no `rebuilt-YYYY-MM` release of {}{whose} holds an asset named {name}",
+                c.repository
+            )),
+            Ok(Some(got)) if got.digest == digest => {
+                download.said = format!(
+                    "the rebuilt artifact is the release asset {name} of {}{whose}, in release {}, \
+                     {} bytes, downloaded without a token and held to the digest the verdict \
+                     signs; asking GitHub for it names {NAMED_TO_GITHUB}{}",
+                    c.repository,
+                    printable(&got.release),
+                    got.size,
+                    match before.is_empty() {
+                        true => String::new(),
+                        false => format!(". Before it, {}", before.join("; ")),
+                    }
+                );
+                return Ok(download);
+            }
+            Ok(Some(got)) if c.own => {
+                return Err(failed(anyhow!(
+                    "the release asset {name} of {}, in release {}, is not the rebuilt artifact \
+                     the verdict signs: its sha256 is {}, and an asset is named by the digest of \
+                     what it holds. Asking GitHub for it named {NAMED_TO_GITHUB}",
+                    c.repository,
+                    printable(&got.release),
+                    got.digest.to_hex()
+                )));
+            }
+            // Another source's repository, which the record was not resolved in: what it holds
+            // under the name is its own, and says nothing of the record's evidence.
+            Ok(Some(got)) => before.push(format!(
+                "the release asset {name} of {}{whose}, in release {}, is other bytes, sha256 {}, \
+                 which are that repository's and not the record's, resolved in `{}`",
+                c.repository,
+                printable(&got.release),
+                got.digest.to_hex(),
+                r.source.name
+            )),
+        }
     }
-    download.said = format!(
-        "the rebuilt artifact is the release asset {name} of {repository}, {size} bytes, \
-         downloaded and held to the digest the verdict signs; asking for it names the record to \
-         GitHub"
-    );
-    Ok(download)
+    Err(cannot(anyhow!(
+        "--rerun-comparison needs the rebuilt artifact, and it could not be had: {}{aside}. It is \
+         looked for in the series of {} to {}, where `publish` puts the rebuilt artifact of a \
+         record logged in {logged}, and no other artifact is guessed at; {}{GIVE_REBUILD}{}",
+        before.join("; "),
+        months[1],
+        months[2],
+        match unreachable {
+            true => "run it again later, or ",
+            false => "",
+        },
+        match asked {
+            true => format!(". Asking GitHub for it by name named {NAMED_TO_GITHUB}"),
+            false => String::new(),
+        }
+    )))
 }
 
-/// The `owner/repo` on GitHub of the repository that holds leaf `pos` of `r`'s chain, where it
-/// has one: the source's own locations for the repository its chain starts in, and for one its
-/// chain went on in, the locations the log-end that led there names — which is where a successor's
-/// publisher uploads its release assets.
-fn github_repository_of(r: &Ready, pos: LeafPos) -> Option<String> {
-    let o = r.opened.as_ref()?;
+/// The digest a verdict of `kind` signs for its rebuilt artifact, in `predicate`, which names the
+/// release asset to look for; or, where no asset is to be looked for, the check not made, exit 5,
+/// and nothing asked of GitHub. A verdict that signs none has nothing to find an asset by. An exact
+/// one's rebuilt artifact is the published artifact itself, byte for byte — its sha256 is the
+/// subject's, `subject` — which `publish` never uploads (`docs/19` §4.1): asking for it would
+/// spend the anonymous rate limit, and name the record to GitHub, for an asset that cannot be
+/// there.
+fn asset_digest(
+    kind: RecordKind,
+    predicate: &serde_json::Value,
+    subject: Option<&str>,
+) -> Result<trigon_core::Digest, Stop> {
+    let digest = predicate
+        .pointer("/artifacts/rebuild/sha256")
+        .and_then(|h| h.as_str())
+        .and_then(|h| trigon_core::Digest::from_hex(h).ok())
+        .ok_or_else(|| {
+            cannot(anyhow!(
+                "--rerun-comparison needs the rebuilt artifact, and the verdict signs no rebuilt \
+                 artifact's sha256 to find a release asset by, so none is looked for, and nothing \
+                 was asked of GitHub; {GIVE_REBUILD}"
+            ))
+        })?;
+    if kind == RecordKind::Verdict(trigon_core::Match::Exact)
+        || subject.is_some_and(|s| s == digest.to_hex())
+    {
+        return Err(cannot(anyhow!(
+            "--rerun-comparison needs the rebuilt artifact, and this verdict is exact: its rebuilt \
+             artifact is the published artifact itself, byte for byte, which no evidence \
+             repository publishes again as a release asset (docs/19 §4.1), so nothing was asked \
+             of GitHub; {GIVE_REBUILD} — for an exact verdict, the upstream file itself"
+        )));
+    }
+    Ok(digest)
+}
+
+/// The GitHub repositories the rebuilt artifact of `record` is looked for in, `r`'s own first and
+/// then those of every other source in `named` that holds the record; each source whose
+/// repositories were, by name; and what was set aside, and why.
+///
+/// A source a project's `.trigon/evidence.toml` added is set aside where `r` is a source of the
+/// user's or the environment's: it is input chosen by the thing under test (`docs/19` §8), and
+/// asked, it would choose the repository a genuine verdict's rebuilt artifact is fetched from, and
+/// could hold it to other bytes, or have GitHub asked where the record's own repository is not on
+/// github.com. Where `r` is itself a project's source, no source of the user's or the
+/// environment's holds the record, which is the project's own claim, and each that holds it is
+/// asked.
+fn candidates(
+    r: &Ready,
+    named: &[&Ready],
+    record: &trigon_core::Digest,
+) -> (Vec<Candidate>, Vec<String>, Vec<String>) {
+    let project = |s: &Ready| matches!(s.source.added_by, AddedBy::ProjectFile(_));
+    let mut out: Vec<Candidate> = Vec::new();
+    let mut considered = Vec::new();
+    let mut aside = Vec::new();
+    let others = named.iter().copied().filter(|n| !std::ptr::eq(*n, r));
+    for n in std::iter::once(r).chain(others) {
+        let Some(pos) = n.opened.as_ref().and_then(|o| {
+            o.repo
+                .record_leaves()
+                .find(|(_, l)| l.record == *record)
+                .map(|(pos, _)| pos)
+        }) else {
+            continue;
+        };
+        let own = std::ptr::eq(n, r);
+        let repositories = github_repositories_of(n, pos);
+        if !own && project(n) && !project(r) {
+            if !repositories.is_empty() {
+                aside.push(format!(
+                    "`{}`, {}, holds the record too, and {} was not asked: a project's source \
+                     cannot change what another source's record is held to (docs/19 §8)",
+                    n.source.name,
+                    super::added_by(&n.source.added_by),
+                    repositories.join(" and ")
+                ));
+            }
+            continue;
+        }
+        considered.push(format!("`{}`", n.source.name));
+        for repository in repositories {
+            if !out.iter().any(|c| c.repository == repository) {
+                out.push(Candidate {
+                    repository,
+                    source: n.source.name.clone(),
+                    own,
+                });
+            }
+        }
+    }
+    (out, considered, aside)
+}
+
+/// Each `owner/repo` on GitHub of the repository that holds leaf `pos` of `r`'s chain: the
+/// source's own locations on github.com for the repository its chain starts in, and for one its
+/// chain went on in, those of the locations the log-end that led there names — which is where a
+/// successor's publisher uploads its release assets. HTTPS and SSH alike, as `publish` takes them:
+/// the API is asked over HTTPS whatever git reaches the repository by, and the location only names
+/// it.
+fn github_repositories_of(r: &Ready, pos: LeafPos) -> Vec<String> {
+    let Some(o) = r.opened.as_ref() else {
+        return Vec::new();
+    };
     let logs = &o.repo.source().logs;
     let elsewhere = logs[..pos.log.min(logs.len())].iter().rev().find_map(|c| {
         c.log
@@ -680,26 +858,53 @@ fn github_repository_of(r: &Ready, pos: LeafPos) -> Option<String> {
             .map(|e| &e.successor)
             .filter(|s| !s.in_this_repository())
     });
-    match elsewhere {
-        None => super::remote::github_repository(&r.source),
-        Some(s) => s.urls.iter().find_map(|u| {
-            let l = Location::parse(u, Path::new("/"), None).ok()?;
-            (l.transport() == Transport::Https)
-                .then(|| on_github(&l))
-                .flatten()
-        }),
+    let found: Vec<String> = match elsewhere {
+        None => r.source.urls.iter().filter_map(on_github).collect(),
+        Some(s) => s
+            .urls
+            .iter()
+            .filter_map(|u| Location::parse(u, Path::new("/"), None).ok())
+            .filter_map(|l| on_github(&l))
+            .collect(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for f in found {
+        if !out.contains(&f) {
+            out.push(f);
+        }
     }
+    out
 }
 
-/// Find the asset `name` in any release of `repository`, and download it to `to`: its size, and
-/// the sha256 of the bytes written. Anonymous, since the repository is public and nothing is
-/// written; the API is GitHub's, or the one `TRIGON_GITHUB_API` names, and a download is followed
-/// only to HTTPS, or to that API's own host where it is on this machine.
+/// The months whose series `publish` may have put the rebuilt artifact of a record logged in
+/// `month` in: that month, where it is uploaded; the month before, whose series `publish` reads
+/// too and reuses an asset of the name from; and the month after, where the publication's time,
+/// read after its leaves', had crossed into it. In the order they are asked.
+fn months_around(month: &str) -> [String; 3] {
+    use crate::publish::release::{next_month, previous_month};
+    [month.to_string(), previous_month(month), next_month(month)]
+}
+
+/// Find the asset `name` in the `rebuilt-YYYY-MM` releases of `repository` for `months` — the
+/// series `publish` uploads to, and no other release, whose assets are nothing a record names —
+/// and download it to `to`. `None` where no release of them holds a finished asset of the name;
+/// an error where GitHub could not be asked, or where every release that holds one failed to give
+/// it. `asked` is set once a download is asked for, which names the asset to GitHub. Anonymous,
+/// since the repository is public and nothing is written; the API is GitHub's, or the one
+/// `TRIGON_GITHUB_API` names, and a download or a redirect is followed only to HTTPS, or where
+/// that API is on this machine, to this machine.
+///
+/// Only those months' releases are listed, never the whole series: every request counts against
+/// GitHub's sixty an hour for a client with no token, and a release holds up to ten pages of
+/// assets, so a search through every release of a repository that has published for a while
+/// would run out of them before it reached an older record's.
 async fn fetch_asset(
     repository: &str,
     name: &str,
+    months: &[String],
     to: &Path,
-) -> anyhow::Result<(u64, trigon_core::Digest)> {
+    asked: &mut bool,
+) -> anyhow::Result<Option<Fetched>> {
     let api = crate::publish::release::api_base()?;
     let loopback = api.scheme() == "http";
     let client = reqwest::Client::builder()
@@ -707,7 +912,7 @@ async fn fetch_asset(
         .redirect(reqwest::redirect::Policy::custom(move |a| {
             if a.previous().len() > 5 {
                 a.error("too many redirects")
-            } else if a.url().scheme() == "https" || loopback {
+            } else if a.url().scheme() == "https" || (loopback && on_loopback(a.url())) {
                 a.follow()
             } else {
                 a.stop()
@@ -724,6 +929,8 @@ async fn fetch_asset(
             .send()
     };
     let base = api.as_str().trim_end_matches('/').to_string();
+    // The releases of those months' series, by the order of `months` and then by number.
+    let mut series: Vec<(usize, u32, Release)> = Vec::new();
     for page in 1..=PAGES {
         let url = format!("{base}/repos/{repository}/releases?per_page=100&page={page}");
         let resp = get(url.clone())
@@ -736,57 +943,87 @@ async fn fetch_asset(
             );
         }
         let releases: Vec<Release> = resp.json().await?;
-        for rel in &releases {
-            for apage in 1..=PAGES {
-                let url = format!(
-                    "{base}/repos/{repository}/releases/{}/assets?per_page=100&page={apage}",
-                    rel.id
-                );
-                let resp = get(url.clone())
-                    .await
-                    .map_err(|e| anyhow!("{url}: {}", shown(e)))?;
-                if !resp.status().is_success() {
-                    bail!(
-                        "listing the assets of release {}: GitHub answered {}",
-                        rel.tag_name,
-                        resp.status()
-                    );
-                }
-                let assets: Vec<Asset> = resp.json().await?;
-                if let Some(asset) = assets.iter().find(|x| x.name == name) {
-                    return download(&client, asset, to, loopback).await;
-                }
-                if assets.len() < 100 {
-                    break;
-                }
+        let last = releases.len() < 100;
+        for rel in releases {
+            if let Some((month, n)) = crate::publish::release::series_of(&rel.tag_name)
+                && !rel.draft
+                && let Some(i) = months.iter().position(|m| *m == month)
+            {
+                series.push((i, n, rel));
             }
         }
-        if releases.len() < 100 {
+        if last {
             break;
         }
     }
-    bail!(
-        "no release of {repository} holds an asset named {name}: the operator publishes rebuilt \
-         artifacts, and this one is not there. Give it with --rebuild <file>"
-    )
+    series.sort_by_key(|(i, n, _)| (*i, *n));
+    let mut failures: Vec<String> = Vec::new();
+    for (_, _, rel) in &series {
+        for apage in 1..=PAGES {
+            let url = format!(
+                "{base}/repos/{repository}/releases/{}/assets?per_page=100&page={apage}",
+                rel.id
+            );
+            let resp = get(url.clone())
+                .await
+                .map_err(|e| anyhow!("{url}: {}", shown(e)))?;
+            if !resp.status().is_success() {
+                bail!(
+                    "listing the assets of release {}: GitHub answered {}",
+                    printable(&rel.tag_name),
+                    resp.status()
+                );
+            }
+            let assets: Vec<Asset> = resp.json().await?;
+            // A finished upload only: one left unfinished may sit under the name in one release
+            // while another of the series holds the finished copy.
+            if let Some(asset) = assets
+                .iter()
+                .find(|x| x.name == name && x.state == "uploaded")
+            {
+                match download(&client, asset, to, loopback, asked).await {
+                    Ok((size, digest)) => {
+                        return Ok(Some(Fetched {
+                            release: rel.tag_name.clone(),
+                            size,
+                            digest,
+                        }));
+                    }
+                    // Another release of the series may hold it too, and give it.
+                    Err(e) => {
+                        failures.push(format!(
+                            "downloading it from release {}: {e:#}",
+                            printable(&rel.tag_name)
+                        ));
+                        break;
+                    }
+                }
+            }
+            if assets.len() < 100 {
+                break;
+            }
+        }
+    }
+    match failures.is_empty() {
+        true => Ok(None),
+        false => Err(anyhow!("{}", failures.join("; "))),
+    }
 }
 
-/// Download `asset` to `to`, a file that must not exist yet, streaming, refusing more than
-/// GitHub's limit on one asset: its size, and the sha256 of what was written, hashed as it was.
+/// Download `asset` to `to`, streaming, refusing more than GitHub's limit on one asset: its size,
+/// and the sha256 of what was written, hashed as it was. `asked` is set as the request is sent.
+/// Whatever an earlier attempt left at `to`, in the directory made for this download alone, is
+/// removed first, and the file is then made where nothing is.
 async fn download(
     client: &reqwest::Client,
     asset: &Asset,
     to: &Path,
     loopback: bool,
+    asked: &mut bool,
 ) -> anyhow::Result<(u64, trigon_core::Digest)> {
     let url = reqwest::Url::parse(&asset.browser_download_url)
         .map_err(|e| anyhow!("its download URL is not one ({e})"))?;
-    let plain_to_loopback = url.scheme() == "http"
-        && loopback
-        && url
-            .host_str()
-            .is_some_and(|h| matches!(h, "127.0.0.1" | "localhost" | "[::1]"));
-    if url.scheme() != "https" && !plain_to_loopback {
+    if url.scheme() != "https" && !(loopback && on_loopback(&url)) {
         bail!(
             "its download URL, {}, is not https://",
             printable(url.as_str())
@@ -798,6 +1035,7 @@ async fn download(
             asset.size
         );
     }
+    *asked = true;
     let mut resp = client
         .get(url.clone())
         .timeout(std::time::Duration::from_secs(3600))
@@ -805,7 +1043,12 @@ async fn download(
         .await
         .map_err(|e| anyhow!("{url}: {}", shown(e)))?;
     if !resp.status().is_success() {
-        bail!("downloading it: {url} answered {}", resp.status());
+        bail!("{url} answered {}", resp.status());
+    }
+    match std::fs::remove_file(to) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => bail!("removing {}, left by an earlier attempt: {e}", to.display()),
     }
     let mut file = new_file(to)?;
     let mut h = sha2::Sha256::new();
@@ -827,6 +1070,17 @@ async fn download(
         written,
         trigon_core::Digest::from_bytes(h.finalize().into()),
     ))
+}
+
+/// Whether `url` is plain HTTP to this machine: followed only where `TRIGON_GITHUB_API` names a
+/// server on this machine itself, as the tests' own is, and nowhere else over plain text.
+fn on_loopback(url: &reqwest::Url) -> bool {
+    url.scheme() == "http"
+        && url.host_str().is_some_and(|h| {
+            matches!(h, "localhost" | "[::1]")
+                || h.parse::<std::net::Ipv4Addr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
 }
 
 /// A file at `to` that nothing was at: made `0600`, and never opened through a link or over a
@@ -854,7 +1108,8 @@ mod tests {
     /// A rebuilt artifact is downloaded into a directory of its own, made for it, that only this
     /// user can enter, and into a file nothing was at: at a predictable path in the shared
     /// temporary directory, another user could put a link there to have it written through, or a
-    /// file of theirs to change between its digest being checked and its bytes being read.
+    /// file of theirs to change between its digest being checked and its bytes being read, or
+    /// take the name first.
     #[test]
     fn a_download_is_made_where_no_other_user_can_reach_it() {
         let digest = trigon_core::Digest::from_bytes([7; 32]);
@@ -862,6 +1117,15 @@ mod tests {
         let b = Download::new(&digest).unwrap();
         assert_ne!(a.dir, b.dir, "each download has a directory of its own");
         assert_eq!(a.path.parent(), Some(a.dir.as_path()));
+        assert_eq!(a.dir.parent(), Some(std::env::temp_dir().as_path()));
+        // Named by 128 random bits, and nothing a process id or a clock would let another user
+        // work out beforehand.
+        for d in [&a.dir, &b.dir] {
+            let name = d.file_name().unwrap().to_str().unwrap();
+            let random = name.strip_prefix("trigon-rebuilt-").unwrap();
+            assert_eq!(random.len(), 32, "{name}");
+            assert!(random.bytes().all(|c| c.is_ascii_hexdigit()), "{name}");
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -882,10 +1146,94 @@ mod tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"theirs");
         let fresh = new_file(&a.path);
         assert!(fresh.is_ok());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&a.path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
         // Dropped, the directory goes with what was downloaded into it.
         let dir = a.dir.clone();
         drop(fresh);
         drop(a);
         assert!(!dir.exists());
+    }
+
+    /// Where no release asset is to be looked for, nothing is asked of GitHub and the check is not
+    /// made, exit 5, with the rebuilt artifact asked for — never exit 4, which would blame the
+    /// evidence: a verdict that signs no rebuilt artifact, and an exact one, whose rebuilt artifact
+    /// is the published one and is never uploaded, by its outcome or by its digest being the
+    /// subject's. Any other verdict names its asset by the digest it signs.
+    #[test]
+    fn an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects() {
+        use trigon_core::Match;
+        let rebuilt = "ab".repeat(32);
+        let subject = "cd".repeat(32);
+        let signing = serde_json::json!({"artifacts": {"rebuild": {"sha256": rebuilt}}});
+        for kind in [Match::Normalized, Match::NormalizedWithCaveats, Match::Divergent] {
+            let d = asset_digest(RecordKind::Verdict(kind), &signing, Some(&subject))
+                .unwrap_or_else(|s| panic!("{kind:?}: {:#}", s.error));
+            assert_eq!(d.to_hex(), rebuilt, "{kind:?}");
+        }
+        let cases = [
+            (
+                RecordKind::Verdict(Match::Normalized),
+                serde_json::json!({"artifacts": {"upstream": {"sha256": subject}}}),
+                Some(subject.as_str()),
+                "signs no rebuilt artifact's sha256",
+            ),
+            (
+                RecordKind::Verdict(Match::Normalized),
+                serde_json::json!({"artifacts": {"rebuild": {"sha256": "not hex"}}}),
+                Some(subject.as_str()),
+                "signs no rebuilt artifact's sha256",
+            ),
+            (
+                RecordKind::Verdict(Match::Exact),
+                signing.clone(),
+                Some(subject.as_str()),
+                "this verdict is exact",
+            ),
+            (
+                RecordKind::Verdict(Match::Normalized),
+                serde_json::json!({"artifacts": {"rebuild": {"sha256": subject}}}),
+                Some(subject.as_str()),
+                "this verdict is exact",
+            ),
+        ];
+        for (kind, predicate, subject, said) in cases {
+            let Err(stop) = asset_digest(kind, &predicate, subject) else {
+                panic!("{kind:?} {predicate}: an asset was looked for");
+            };
+            let e = format!("{:#}", stop.error);
+            assert_eq!(stop.code, 5, "{e}");
+            assert!(e.contains(said), "{e}");
+            assert!(e.contains("nothing was asked of GitHub"), "{e}");
+            assert!(e.contains(GIVE_REBUILD), "{e}");
+        }
+    }
+
+    /// Plain HTTP is followed only to this machine, where the tests' own API is: never to a host
+    /// that only begins like one, and never to anything else.
+    #[test]
+    fn plain_http_is_followed_to_this_machine_alone() {
+        let url = |u: &str| reqwest::Url::parse(u).unwrap();
+        for here in [
+            "http://127.0.0.1:8123/download/x",
+            "http://127.1.2.3/x",
+            "http://localhost/x",
+            "http://[::1]:9/x",
+        ] {
+            assert!(on_loopback(&url(here)), "{here}");
+        }
+        for elsewhere in [
+            "https://127.0.0.1/x",
+            "http://127.0.0.1.example.com/x",
+            "http://localhost.example.com/x",
+            "http://github.com/x",
+            "http://10.0.0.1/x",
+        ] {
+            assert!(!on_loopback(&url(elsewhere)), "{elsewhere}");
+        }
     }
 }

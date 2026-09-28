@@ -5339,7 +5339,8 @@ record, and the phase's done-when.
   a blob a partial clone does not hold from its remote, and the report says so), and takes the
   rebuilt artifact from `--rebuild`, or, under `rebuilt_artifacts = "github-release"` with none
   given, from the release asset `sha256-<hex>` of the source's GitHub repository, listed and
-  downloaded without a token and held to the verdict's digest. It then reports as `--record` does:
+  downloaded without a token and held to the verdict's digest — whatever that setting says, since
+  phase 6c (*Left for the owner*, below). It then reports as `--record` does:
   `verify_record::report`, which now takes a borrowed `Reading` and an evidence reader, and returns
   the report for printing. In the verifier build `--lookup` is refused, exit 5, since it fetches.
 - **`verify-attestation --record <file> --source <name>`** without `--evidence` reads the source's
@@ -5391,6 +5392,7 @@ record, and the phase's done-when.
   its leaf. Two of one origin and different keys are not one log (below).
 - **A consumer's `[publish] rebuilt_artifacts` says whether assets are fetched.** It is D4's
   setting, and the only one there is; a per-source setting would be the finer answer (below).
+  Undone in phase 6c: no setting says it, and the record and its source decide (below).
 - **`check` reads nothing a lockfile names**: `resolved` is kept and shown, never followed.
 
 **What this does not do.**
@@ -5428,7 +5430,44 @@ record, and the phase's done-when.
 - **Whether `rebuilt_artifacts` should also be a per-source setting.** A consumer reads the one
   `[publish]` setting to decide whether `--lookup` fetches a release asset, which fits a consumer
   who also publishes and asks one repository; one asking another operator's repository would want
-  the setting of that source.
+  the setting of that source. **Settled by the lead on 2026-09-28, and built as `docs/19` §10
+  phase 6c: neither.** What a consumer's host publishes says nothing of what the source it checks
+  publishes, so `--lookup` reads no setting for it, and `[publish] rebuilt_artifacts` governs only
+  what `publish` uploads. With `--rebuild <file>` nothing is fetched. Without it, for a verdict
+  that signs its rebuilt artifact and is not exact, the release asset `sha256-<hex>` is looked for
+  through GitHub's API without a token in the `rebuilt-YYYY-MM` releases of the repository that
+  holds the record in the source it was resolved in, by any location of it on github.com, HTTPS or
+  SSH, and then in those of every other source that holds the record, but never one a project's
+  `.trigon/evidence.toml` added where the record was resolved in the user's own; only in the series
+  of the month the record was logged in and the months either side, where `publish` puts it, and
+  in no other release, which holds nothing a record names and was listed before. Only an upload
+  GitHub finished is taken, and one release's failed download goes on to the next. It is
+  downloaded into a new `0600` file in a `0700` directory named by 128 random bits (it was named by
+  the process id and the clock), held to the signed digest as it is written, and said to have named
+  the artifact to GitHub however the download ended. Other bytes in the resolving source's
+  repository are the evidence failing, exit 4; in another source's they are that repository's, and
+  the next is asked. An exact verdict, whose rebuilt artifact is the upstream artifact and is never
+  uploaded, asks GitHub nothing, and neither does a record no repository of which is on github.com;
+  there, where no repository asked holds the asset, where GitHub refuses or cannot be reached, or
+  where the verdict signs no rebuilt artifact, the check is not made, exit 5, asking for `--rebuild
+  <file>` and guessing at nothing: the last three were exit 4, which blamed the evidence for GitHub
+  being down or the asset never having been published. Plain HTTP is followed only to loopback,
+  and only where `TRIGON_GITHUB_API` is there; it was followed anywhere under a loopback API. Held
+  by `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone` — each case under the
+  consumer's setting unset, `"none"` and `"github-release"` —
+  `the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`,
+  `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`, which refuses and fails the
+  listings and the download under each setting,
+  `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`,
+  `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`, and `rerun::tests`. Phase
+  6c's review, below, found what the first cut of it missed.
+- **Whether an exact verdict's falsifying command should take `--upstream` as its rebuilt
+  artifact.** An exact verdict signs a rebuilt artifact whose sha256 is the subject's, so the
+  upstream file the command is given, which is held to the subject, is that artifact byte for byte,
+  and the signed command could run as written. It asks for `--rebuild <file>` instead, exit 5, and
+  says the upstream file is it: whether a falsifying command should re-derive a claim from one file
+  given once and used twice is a decision, not an inference, and `docs/19` §4.2 item 6 says the
+  command takes `--rebuild` where the rebuilt artifact is not published.
 - **Whether `--remote` should refuse a source it cannot hold to a key history**, rather than answer
   under the pinned key alone and say so. Built: it answers, fails any record under a changed key,
   and says why.
@@ -5507,3 +5546,48 @@ fails without the fix (`crates/trigon/tests/lookup.rs` unless named):
   and a check the environment's required source fails. It found that a source whose URL changed
   since its last sync, fresh, answered unknown — no location it named had a clone — until synced by
   hand; a command syncs such a source first now, as it does one never synced.
+
+**Phase 6c's review, and what it changed.** A review of phase 6c found these, each fixed with a
+test that fails without the fix (`crates/trigon/tests/lookup.rs`):
+
+- **An exact verdict's falsifying command asked GitHub for an asset that cannot exist.** `publish`
+  never uploads an exact verdict's rebuilt artifact (`docs/19` §4.1), and the lookup listed every
+  series release and every page of its assets on the anonymous rate limit, then exited 5 saying
+  the repository did not publish it. It asks nothing now, and says the upstream file is the
+  rebuilt artifact (`an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`);
+  whether to take it without being asked is left for the owner (above).
+- **Every series release was searched**, each up to ten pages of assets, against the sixty requests
+  an hour GitHub allows a client with no token, so a record behind six full releases could not be
+  reached, and every lookup that found nothing spent the hour's quota. Only the series of the
+  record's month and the months either side are listed now — where `publish` puts the asset: this
+  month's, the month before's that it reuses from, and the month after's that its time, read after
+  the leaves', can have crossed into — three requests to find it past six full releases of other
+  months. An upload GitHub left unfinished under the name hid the finished copy in another release,
+  and a failed download ended the search; the first is passed over, and the second goes on to the
+  next release (`the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`).
+- **A source on github.com by SSH was not on github.com**, and exit 5 said the repository had no
+  releases, though `publish` uploads to one so configured
+  (`the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`).
+- **Only the first GitHub repository among the sources that hold the record was asked**: a mirror
+  with no releases, configured first, hid the operator's asset, and a repository a project's
+  `.trigon/evidence.toml` added was taken where the user's own was not on github.com over HTTPS,
+  so the thing under test chose which bytes a genuine verdict was held to, could fail it, exit 4,
+  and had GitHub asked where no source of the user's is on github.com. The source the record was
+  resolved in is asked first, then every other that holds it, never a project's where the user's
+  own resolved it; other bytes in another source's repository are that repository's, exit 5, not
+  the record failing (`the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`).
+- **A download that failed, or gave other bytes, did not say it had named the artifact to
+  GitHub**, which `docs/19` §7 promises whenever it does; both say so now
+  (`the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`,
+  `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`).
+- **GitHub refusing or failing, and plain HTTP off this machine, were untested.** A 403 or a 500
+  on the release listing, an asset listing or the download is exit 5 with the advice, never a
+  refutation; a redirect to plain HTTP off loopback is not followed, and such a download URL is not
+  asked, which the test shows with `0.0.0.0` — not loopback, and reaching the test's own server,
+  which would see the request (`the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`). A
+  verdict that signs no rebuilt artifact, exit 5 too, is held by `rerun::tests`
+  (`an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects`), since `publish` signs
+  no such verdict to test it through. `docs/19` §6 says GitHub refusing or unreachable is exit 5,
+  which it had left out.
+- **The falsifying-command test resolved its record in a source not on github.com** and held
+  another source's asset to it; it removes that source first now, as it meant to.

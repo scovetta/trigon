@@ -11,7 +11,7 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:9e721e22147f677865a384bea9682e3cc0bfa6d0baacc5578559b38cf45556ce
+prose_version: docs/threat-model.md@sha256:2029072fe23bc529ed8dc262ca4f87a47b361cf9f5626208fd77eaa3953f5593
 model_status: unratified-draft
 triage_policy: strict
 confidence:
@@ -330,19 +330,33 @@ host_side_effects:
 - effect: Outbound HTTPS to GitHub's REST API, anonymously
   stance: conditional
   components: []
-  conditions: 'only verify-attestation --lookup --rerun-comparison given no --rebuild, where [publish]
-    rebuilt_artifacts = "github-release": listing the releases, and each release''s assets, of the GitHub
-    repository that holds the resolved record''s leaf — the source''s own, or the successor''s its chain
-    went on in — from https://api.github.com or the server TRIGON_GITHUB_API names, with no token; and
-    downloading the asset sha256-<hex> the verdict names from the download URL GitHub gives, HTTPS only
-    — or that server''s own host on loopback — redirects followed to HTTPS only, streamed into a new 0600
-    file in a directory made 0700 for it in the temporary directory, refused past GitHub''s 2 GiB, hashed
-    as it is written and held to the verdict''s digest, and removed with its directory when the command
-    ends. It names the record to GitHub, and says so (P45, D35)'
+  conditions: only verify-attestation --lookup --rerun-comparison given no --rebuild, for a verdict that
+    signs its rebuilt artifact's sha256 and is not exact, where a repository that holds the resolved record's
+    leaf — the source's own, or the successor's its chain went on in, and then every other source's that
+    holds the record, but never one a project's .trigon/evidence.toml added where the record was resolved
+    in the user's own — has a location on github.com, HTTPS or SSH; whatever this host's own [publish]
+    rebuilt_artifacts, which governs only what publish uploads. Listing each such repository's releases,
+    and the assets of the releases of its rebuilt-YYYY-MM series for the month the record was logged in
+    and the months either side, where publish puts the asset, and of no other release, from https://api.github.com
+    or the server TRIGON_GITHUB_API names (HTTPS, or HTTP to loopback only), with no token; and downloading
+    the finished asset sha256-<hex> the verdict names from the download URL GitHub gives, HTTPS only —
+    or, where that server is on loopback, loopback — redirects followed to the same, streamed into a new
+    0600 file, created exclusively, in a directory made 0700 for it under a name of 128 random bits in
+    the temporary directory, refused past GitHub's 2 GiB, hashed as it is written and held to the verdict's
+    digest, and removed with its directory when the command ends; a download that fails goes on to the
+    next release that holds the asset. A download names the artifact, and so the record, to GitHub, and
+    says so whether or not it was had (P45, D35). An exact verdict, a repository with no github.com location,
+    and --rebuild <file> given make no request; GitHub refusing or unreachable is a check not made, exit
+    5
   provenance:
     kind: documented
-    source: crates/trigon/src/evidence/rerun.rs — `rebuilt_asset`, `fetch_asset`, `Download`, `a_download_is_made_where_no_other_user_can_reach_it`;
-      crates/trigon/tests/lookup.rs — `the_falsifying_command_re_derives_a_published_verdict`, `the_falsifying_command_across_a_succession_and_for_a_void`
+    source: crates/trigon/src/evidence/rerun.rs — `rebuilt_asset`, `asset_digest`, `candidates`, `fetch_asset`,
+      `Download`, `a_download_is_made_where_no_other_user_can_reach_it`, `plain_http_is_followed_to_this_machine_alone`,
+      `an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects`; crates/trigon/tests/lookup.rs
+      — `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`, `the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`,
+      `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`, `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`,
+      `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`, `the_falsifying_command_re_derives_a_published_verdict`,
+      `the_falsifying_command_across_a_succession_and_for_a_void`
 - effect: Reading a GitHub token
   stance: conditional
   components: []
@@ -928,14 +942,20 @@ entry_points:
     - size
     - resource-name
     caller_must_enforce: 'nothing — P45: each evidence file is held to the digest the signed statement
-      names, and one that is other bytes fails the record; the release asset is held to the rebuilt artifact''s
-      digest the verdict signs as it is written, and one that is other bytes is refused, exit 4; a project''s
+      names, and one that is other bytes fails the record; the release asset — looked for only in the
+      rebuilt-YYYY-MM releases, of the record''s month and the months either side, of the repositories
+      that hold the record, never by the consumer''s own setting, and never in the repository of a source
+      a project''s .trigon/evidence.toml added where the record was resolved in the user''s own — is held
+      to the rebuilt artifact''s digest the verdict signs as it is written, and one that is other bytes
+      is refused: exit 4 in the repository of the source the record was resolved in, and in another source''s
+      a check not made, exit 5, since those bytes are that repository''s and not the record''s; a project''s
       source that gives the origin to a key of its own is set aside where the user''s own sources hold
       it, and sources that give it to two keys otherwise are refused as ambiguous'
     provenance:
       kind: documented
       source: crates/trigon/tests/lookup.rs — `the_falsifying_command_re_derives_a_published_verdict`,
-        `the_falsifying_command_is_answered_in_its_origins_log_alone`
+        `the_falsifying_command_is_answered_in_its_origins_log_alone`, `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`,
+        `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`
 - id: trigon publish of rebuilt artifacts
   component: multiple
   parameters:
@@ -3155,6 +3175,10 @@ properties_claimed:
   - a falsifying command answered from another source, or from a project's source that gives the origin
     to a key of its own
   - an evidence file or a release asset of other bytes used
+  - a release asset looked for outside the repositories that hold the record and their series, or in a
+    project's source's repository where the user's own resolved the record, or an artifact guessed at
+    where it has none
+  - GitHub failing or refusing reported as the record failing
   - a withdrawn artifact reported as a verdict
   - a source asked and then dropped from the answer
   statement: A falsifying command is answered only where it was signed to be, from files held to what
@@ -3166,7 +3190,9 @@ properties_claimed:
     kind: documented
     source: docs/19-distribution-and-lookup.md §4.2 item 6, §6; crates/trigon/tests/lookup.rs — `the_falsifying_command_re_derives_a_published_verdict`,
       `the_falsifying_command_is_answered_in_its_origins_log_alone`, `the_falsifying_command_weighs_every_source_it_asks`,
-      `the_falsifying_command_across_a_succession_and_for_a_void`
+      `the_falsifying_command_across_a_succession_and_for_a_void`, `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`,
+      `the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`, `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`,
+      `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`, `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`
 - id: P30
   kind: resource-bound
   components:

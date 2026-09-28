@@ -228,10 +228,12 @@ enum Cmd {
         /// The published artifact. Required by `--rerun-comparison`.
         #[arg(long, requires = "rerun_comparison")]
         upstream: Option<PathBuf>,
-        /// The rebuilt artifact. Required by `--rerun-comparison`, except with `--lookup` where
-        /// the operator publishes rebuilt artifacts as release assets (`rebuilt_artifacts =
-        /// "github-release"`): the one the verdict names is then downloaded and held to its
-        /// digest.
+        /// The rebuilt artifact. Required by `--rerun-comparison`, except with `--lookup`, where
+        /// without it the one the verdict names is looked for as a release asset of the GitHub
+        /// repository that holds the record, downloaded, and held to its digest; where that
+        /// repository is not on github.com or does not publish it, or the verdict is exact, whose
+        /// rebuilt artifact is the upstream file itself, it is asked for. Given, it is used, and
+        /// nothing is fetched for it.
         #[arg(long, requires = "rerun_comparison")]
         rebuild: Option<PathBuf>,
         /// The stabilizer set the attestation was made under: a published `.json` manifest, or a
