@@ -13,7 +13,9 @@ decisions it waits on. What exists today:
 | Rekor publication (`attest --rekor`) and verification (`verify-attestation --transparency`) | built, measured, and **removed** (ADR-0014; §10 phase 1, [findings](16-findings.md) §3.94) |
 | Subjects with sha512, and sha1 for npm, beside sha256 (§5); fetchers that verify every digest their registry declares, and runs that record what was declared (§5); the strategy, guard manifest and building version kept on the run (§4.2 items 3, 7); attestations per run, append-only | built (§10 phase 2, first half; [findings](16-findings.md) §3.95) |
 | The v2 verdicts with every §4.2 field, `void/v1` and `withdrawal/v1`, the record file's types, the versioned purl canonicalisation, and a building version that names its git revision | built (§10 phase 2, second half; [findings](16-findings.md) §3.96) |
-| The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest` (§10 phase 2); the commands that use the rest of it are phases 4 to 6 |
+| The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest`, `serve` and `worker` (§10 phases 2, 3); the commands that use the rest of it are phases 4 to 6 |
+| A publishable run: every cache key built from the target, the strategy and the set, worker and CLI alike; attempts that agree on what the comparison found, not on its outcome string; `trigon rebuild --confirm <run>`, cold and re-pulled; each attempt's host, cache state and start; `decide`'s rules for a pair, from `same_host_confirmation` and `confirmation_interval`; and a worker's confirmation made on another machine unless `same_host_confirmation` allows its own | built (§10 phase 3, backlog B31; [findings](16-findings.md) §3.97) |
+| `rebuild --attest` signing through `attest`'s own code, so no path signs a verdict for a run the gate voids; `rebuild/v1` naming the model exchange a run kept; a `pkg1` key that is the package alone | built (§10 phase 3; [findings](16-findings.md) §3.97) |
 | The evidence repository, the evidence log, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
 
 ---
@@ -621,10 +623,13 @@ callers only. So a void is published as a leaf and a record whose only statement
 new. It carries the outcome `void`, the reason, the facts that establish it (which guarded members
 tripped, which egress tier, which stabilizer), and **no comparison outcome and no difference
 data**: "we looked, and could not tell, for this reason". `trigon attest` signs `void/v1` for a run
-`decide` calls void, and still refuses to sign a verdict for it, so P6 becomes "`trigon attest`
-never signs a verdict for a void run; it signs only `void/v1`". Clients treat void as its own state
-and not as a rung of `Match`, which has none, and the exit codes (§6) give it code 3, shared only
-with a result below the threshold. `docs/09-attestations.md` §2.6 has the predicate as built.
+`decide` calls void, and still refuses to sign a verdict for it; since §10 phase 3 `trigon rebuild
+--attest` signs through the same code, so P6 holds without a qualification: no path signs a verdict
+for a run the gate calls void. (`trigon verify --attest` compares two local files, with no run
+behind them, and signs a v1 comparison claim that `publish` does not accept.) Clients treat void as
+its own state and not as a rung of `Match`, which has none, and the exit codes (§6) give it code 3,
+shared only with a result below the threshold. `docs/09-attestations.md` §2.6 has the predicate as
+built.
 
 ---
 
@@ -641,7 +646,7 @@ under every key its subject carries, as a file under `index/`:
 | sha512 | `index/sha512/<aa>/<bb>/<128 hex>.json` |
 | sha1 | `index/sha1/<aa>/<bb>/<40 hex>.json` |
 | purl, with version | `index/purl1/<aa>/<bb>/<sha256 of the canonical purl>.json` |
-| purl, without version | `index/pkg1/<aa>/<bb>/<sha256 of the canonical purl without its version>.json` |
+| the package, every version | `index/pkg1/<aa>/<bb>/<sha256 of the package's versionless form>.json` |
 
 `<aa>/<bb>` are the key's first four hex characters, so no directory holds more than a few dozen
 entries. An index file lists the record digests for its key with their leaf indices, and is
@@ -653,6 +658,15 @@ ships with test vectors shared by the writer and every reader
 (`crates/trigon-core/testdata/purl-canon-v1.json`, rules in `docs/09-attestations.md` §2.9), and the
 digit in `purl1` and `pkg1` is its version, so changing the rule starts new paths rather than
 silently missing old ones.
+
+**The versionless form names the package and nothing about one version of it**:
+`pkg:<type>/<namespace>/<name>` in canonical form, with the `repository_url` qualifier where the
+purl has one, and no version, no subpath and no other qualifier. Most qualifiers name one version's
+files — `file_name`, `checksum`, `download_url` — and a form that kept them gave every version its
+own `pkg1` key, where the key exists to find every version. `repository_url` stays because it
+changes which package this is: the same name on another registry is another package, and merging
+the two is the answer for the wrong package that keeping case exists to avoid. This is `purlCanon`
+1; nothing had been published under it when the rule was fixed.
 
 **Subjects carry every sha256, sha512 and sha1 the ecosystem publishes.** npm publishes sha512, as
 the `integrity` string, and sha1, as `shasum`, and never sha256. NuGet's catalog carries a sha512

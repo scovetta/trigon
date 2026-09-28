@@ -88,6 +88,23 @@ cached attempt.
 Concretely, the scheduler admits a new attempt when the cache key has no terminal verdict, or when it
 has fewer agreeing attempts than the publication policy requires, or when an operator asked.
 
+**As built** ([`19`](19-distribution-and-lookup.md) §10 phase 3), the key a run records is
+`trigon_store::cache_key` over the target — its canonical purl and the artifact's name — the
+strategy digest and the stabilizer-set digest, built by the run once it knows them, worker and CLI
+alike. The upstream artifact's digest is held to instead where two attempts are compared: they agree
+only on one agreement digest (`Comparison::agreement`), which covers the published artifact's raw
+digest as well as both sides' stabilized digests, so attempts against different upstream bytes
+disagree rather than confirm each other — even bytes the set makes one, such as a republished
+tarball whose timestamps alone changed — and `rebuild --confirm` refuses a registry that now serves
+other bytes before it builds. The base image and comparator digests are not in it.
+
+A queue job's own key names the request — the target's canonical purl, `trigon_store::request_key`
+— because nothing that enqueues knows the strategy. So **re-asking for a target is deduplicated by
+the target alone**, whatever set or strategy it would now be judged under: a first attempt that is
+on the queue, or done, answers a new request for it, and the scheduler does not yet admit a new
+attempt because the set or the strategy changed. Whether the request key should carry something
+that changes when they do is open ([`16`](16-findings.md) §3.97).
+
 Two details matter:
 
 - **`upstream_artifact_digest` belongs in the key.** crates.io is immutable. npm dist-tags and CDN

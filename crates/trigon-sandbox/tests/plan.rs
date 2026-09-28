@@ -543,3 +543,38 @@ fn a_localhost_digest_reference_names_something_podman_cannot_fetch() {
         .is_ok()
     );
 }
+
+/// A confirming attempt pulls its base image again only where a registry can serve it by digest,
+/// and says why not everywhere else, so "re-pulled" is never written about an image that was not.
+#[test]
+fn only_a_registry_image_pinned_by_digest_can_be_pulled_again() {
+    let hex = "a".repeat(64);
+    assert!(trigon_sandbox::repullable(&format!("docker.io/library/debian@sha256:{hex}")).is_ok());
+    for (image, why) in [
+        ("docker.io/library/debian:bookworm", "digest"),
+        (
+            &*format!("localhost/trigon-base@sha256:{hex}"),
+            "only in this machine",
+        ),
+        (&*format!("sha256:{hex}"), "digest"),
+        (&*format!("debian@sha256:{hex}"), "only in this machine"),
+        (
+            "docker.io/library/debian@sha256:abc",
+            "only in this machine",
+        ),
+    ] {
+        let e = trigon_sandbox::repullable(image).unwrap_err();
+        assert!(e.contains(why), "{image}: {e}");
+    }
+}
+
+/// And a pull that could not happen is an error, never a quiet success: with no podman to run,
+/// the answer is that it was not pulled.
+#[test]
+fn a_pull_that_could_not_run_is_not_reported_as_one() {
+    let image = format!("docker.io/library/debian@sha256:{}", "b".repeat(64));
+    let e = trigon_sandbox::repull("/nonexistent/podman", &image).unwrap_err();
+    assert!(e.contains("could not be run"), "{e}");
+    let e = trigon_sandbox::repull("/nonexistent/podman", "localhost/x@sha256:00").unwrap_err();
+    assert!(e.contains("only in this machine"), "{e}");
+}

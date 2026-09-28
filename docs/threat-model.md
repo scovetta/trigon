@@ -62,10 +62,10 @@ here and used everywhere:
 A fifth state, **`void`**, sits outside all four: the run is not evidence of anything, because the
 artifact under test reached the build over the network, the build had the whole network, or a
 stabilizer a person or a model wrote did the matching — the three clauses of the publication gate's
-safeguard 2. It is not a pass and not a failure, and `trigon attest` signs it as `void/v1`, never
-as a verdict (P6). `trigon rebuild --attest`, which signs in the process that ran the build, asks
-no gate and still signs a v1 verdict for a run voided by open egress or a stabilizer somebody wrote
-(Q2; docs/16-findings.md §3.96).
+safeguard 2. It is not a pass and not a failure, and it is signed as `void/v1`, never as a
+verdict, by `trigon attest` and by `trigon rebuild --attest`, which signs through the same code: no
+path signs a verdict for a run the gate voids (P6; docs/16-findings.md §3.97). `trigon verify
+--attest` signs a v1 claim about two local files with no run behind them, which is not publishable.
 
 Where the operator asks for one, a run also produces a signed in-toto attestation. **The attestation
 is the product.** Everything else exists to make it honest.
@@ -241,8 +241,9 @@ boundaries that hold today are narrower.
 The container boundary is real and enforced: attacker code runs inside it, and the egress tier bounds
 what it reaches *(documented, docs/08-execution.md §5)*. **The attestor is not a separate process in
 the built system**, so the design's "the attestor never executes sandbox-derived code" does not hold
-for a local `trigon rebuild --attest`. The separable path is `trigon rebuild --store` followed by
-`trigon attest` *(inferred, Q2)*.
+for a local `trigon rebuild --attest`, which runs `trigon attest`'s signing code in the process that
+ran the build. It signs what `trigon attest` would; where it signs is the difference. The separable
+path is `trigon rebuild --store` followed by `trigon attest` *(inferred, Q2)*.
 
 **Reachability preconditions.** A finding matters only if it meets its family's condition.
 
@@ -423,7 +424,7 @@ or §1.12 disclaimer that owns it; no claimed row exists only here.
 | comparison-and-verdict | concurrency-reentrancy | disclaimed | no statement is made | D8 |
 | comparison-and-verdict | resource-complexity | claimed | linear in members; each side is walked at most twice | P25 |
 | attestation | numeric-domain | N/A | no arithmetic on attacker-supplied values | — |
-| attestation | failure-atomicity | claimed | `trigon attest` signs a void run as `void/v1` alone, never as a verdict | P6 |
+| attestation | failure-atomicity | claimed | no path signs a void run as anything but `void/v1`: `trigon attest` and `rebuild --attest` share the code | P6 |
 | attestation | recursive-cyclic-topology | claimed | JCS refuses what another implementation might not reproduce | P9 |
 | attestation | callback-execution | claimed | `Signer` and `ArchivedSet` are operator-chosen collaborators, named on the command line | P26 |
 | attestation | serialization-reconstruction | claimed | canonical JSON is byte-stable; floats and non-ASCII keys are refused, not coerced | P9 |
@@ -645,7 +646,7 @@ attacker-controllable, is `VALID`.
 | **P3** | Stabilizers are total and idempotent: `stab(stab(x)) == stab(x)`, no `Result`, no half-stabilized state, and none allocates more than one member at a time. | — | a digest that depends on how many times a pass ran | **security-critical** *(documented, docs/05 §4)* |
 | **P4** | `compare` refuses to compare two sides stabilized under different sets, by set digest, and classifies the refusal `Fault::Bug`. | — | a verdict derived across incomparable sets | **security-critical** *(documented, docs/09-attestations.md §7)* |
 | **P5** | **Provenance-capped outcomes.** `normalized` is produced only when the stabilized digests are equal *and* every applied stabilizer is `Builtin` with risk ≤ `Metadata`. Anything else that matches is `normalized_with_caveats`. | — | a model- or human-authored normalization reported as clean | **security-critical** *(documented, docs/00-overview.md §3.1; crates/trigon-compare/src/lib.rs:166-181)* |
-| **P6** | `trigon attest` never signs a verdict for a void run; it signs only `void/v1`. A void run is one the publication gate calls void (`trigon_api::publication::voided`, which is `decide`'s own answer): its guard tripped, whether or not it reached an outcome, or it reached an outcome at `open` egress or with a stabilizer a person or a model wrote. `void/v1` carries the reason and the facts that establish it, and no comparison outcome, difference data, comparison report or rebuilt-artifact digest. | the run was recorded, and the facts that void it are on its record | a signed `equivalence` or `divergence` about a run that fetched its own answer or had the whole network; a `void/v1` that says which way the comparison went | **security-critical** *(documented, docs/19-distribution-and-lookup.md §4.3; docs/16-findings.md §3.96; crates/trigon/tests/seam_attest_v2.rs — `a_guard_tripped_run_yields_void_v1_and_never_a_verdict`, `an_open_egress_run_yields_void_too`, `a_run_a_hand_written_stabilizer_applied_to_is_signed_as_void_and_only_void`, `a_verdict_is_not_signed_for_a_record_that_hides_a_hand_written_stabilizer`)* |
+| **P6** | No path signs a verdict for a void run; it is signed as `void/v1` and only that, by `trigon attest` and by `trigon rebuild --attest`, which signs through the same code (`sign_run`). A void run is one the publication gate calls void (`trigon_api::publication::voided`, which is `decide`'s own answer): its guard tripped, whether or not it reached an outcome, or it reached an outcome at `open` egress or with a stabilizer a person or a model wrote. `void/v1` carries the reason and the facts that establish it, and no comparison outcome, difference data, comparison report or rebuilt-artifact digest. `trigon verify --attest` signs `equivalence/v1` or `divergence/v1` about two local files with no run behind them, which is a comparison claim and not publishable. | the run was recorded, and the facts that void it are on its record | a signed `equivalence` or `divergence` about a run that fetched its own answer or had the whole network; a `void/v1` that says which way the comparison went | **security-critical** *(documented, docs/19-distribution-and-lookup.md §4.3; docs/16-findings.md §3.96, §3.97; crates/trigon/tests/seam_attest_v2.rs — `a_guard_tripped_run_yields_void_v1_and_never_a_verdict`, `an_open_egress_run_yields_void_too`, `a_run_a_hand_written_stabilizer_applied_to_is_signed_as_void_and_only_void`, `a_verdict_is_not_signed_for_a_record_that_hides_a_hand_written_stabilizer`; crates/trigon/src/main.rs — `rebuild_attest_at_open_egress_signs_void_and_never_a_verdict`)* |
 | **P7** | Text reaching a model is bounded and control-stripped, and operator instructions travel in a system message, never spliced into package text. | every provider **except `copilot:`**, which has no system-role channel | a build log rewriting the operator's instructions | **security-critical** *(documented, docs/12-security.md §4.1; crates/trigon-ai/src/copilot.rs:35)* |
 | **P8** | Both artifacts receive an identical transform; the API has no way to stabilize one side differently. Enforced by the type signature. | — | an asymmetric normalization producing a false match | **security-critical** *(documented, docs/12-security.md §10)* |
 | **P9** | Canonical JSON refuses what another implementation might not reproduce: floats and non-ASCII object keys are type errors, not coerced values. | signing path | two implementations disagreeing on what was signed | **security-critical** *(documented, crates/trigon-core/src/jcs.rs)* |
@@ -964,7 +965,8 @@ absence turned out to be checkable in the crate, so each became a *(documented)*
 - **Q1.** Is everything shipped in the binary in the model, with `xtask`, `fuzz/`, `corpora/` and
   `scripts/` out? *Proposed: yes.* → §1.2, §1.3
 - **Q2.** `docs/12-security.md` §3 says the attestor never executes sandbox-derived code. In the
-  built system `trigon rebuild --attest` signs in the process that ran the build. Is `--store` then
+  built system `trigon rebuild --attest` signs in the process that ran the build — what `trigon
+  attest` signs, through the same code, since docs/19 §10 phase 3. Is `--store` then
   `trigon attest` the supported path for a claim that matters? *Proposed: yes, and `--attest` on a
   run that built is dev convenience.* → §1.4
 - **Q15.** `--egress open` is the shipped default for `rebuild` and `sweep`. Supported production

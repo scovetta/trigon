@@ -3159,6 +3159,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "trigon-attest",
  "trigon-core",
  "trigon-store",
 ]

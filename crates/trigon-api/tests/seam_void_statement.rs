@@ -223,9 +223,17 @@ async fn a_published_runs_v1_statement_is_still_served_and_still_verifies() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = record("1789000200-cccccccc", "mirror-only");
     let mut b = record("1789000300-cccccccc", "mirror-only");
-    for r in [&mut a, &mut b] {
+    for (r, host, started) in [
+        (&mut a, "machine-id:one", "2026-01-01T00:00:00Z"),
+        (&mut b, "machine-id:two", "2026-01-02T00:00:00Z"),
+    ] {
         r.cache_key = Some("k".into());
         r.outcome = Some("normalized".into());
+        // What both runs found, and where and when each ran: a day apart on two machines.
+        r.agreement = Some(Digest::from_bytes([9u8; 32]));
+        r.host = Some(host.into());
+        r.started = started.into();
+        r.cache = Some(trigon_store::CacheState::default());
     }
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../trigon/tests/fixtures/v1-statements");

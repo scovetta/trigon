@@ -32,14 +32,20 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+mod attempt;
 mod blobs;
 #[cfg(feature = "queue")]
 pub mod queue;
 mod record;
 
+pub use attempt::{
+    CACHE_KEY_VERSION, CacheState, cache_key, host_id, host_id_from, names_a_machine,
+};
 pub use blobs::{Blobs, digest_of};
 #[cfg(feature = "queue")]
-pub use queue::{Backend, HostBudget, Job, JobState, NewJob, Principal, Queue, Requested, Tier};
+pub use queue::{
+    Backend, HostBudget, Job, JobState, NewJob, Principal, Queue, Requested, Tier, request_key,
+};
 pub use record::{
     ArtifactRef, Costs, DerivedImage, Environment, PinEvidence, RunRecord, RunState, Tokens,
     UpstreamDigests,

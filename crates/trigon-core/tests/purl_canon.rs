@@ -70,14 +70,28 @@ fn every_invalid_input_is_refused() {
 }
 
 #[test]
-fn the_versionless_form_is_the_versioned_one_without_its_version() {
-    // `pkg1` is "every version of this package": the two keys must differ by exactly the version,
-    // or a package lookup and a version lookup name different packages.
+fn the_versionless_form_is_the_package_and_nothing_about_one_version() {
+    // `pkg1` is "every version of this package". It kept the purl's qualifiers and subpath, so a
+    // qualifier that names one version's file — `file_name`, `checksum`, `download_url` — gave
+    // each version its own `pkg1` key, and a lookup by package found one version.
     let c = canonicalize("pkg:npm/@babel/core@7.24.0?a=1#x").unwrap();
     assert_eq!(c.as_str(), "pkg:npm/%40babel/core@7.24.0?a=1#x");
-    assert_eq!(c.package(), "pkg:npm/%40babel/core?a=1#x");
+    assert_eq!(c.package(), "pkg:npm/%40babel/core");
     assert!(c.has_version());
     assert!(!canonicalize("pkg:npm/left-pad").unwrap().has_version());
+
+    let one = canonicalize("pkg:pypi/requests@2.31.0?file_name=requests-2.31.0.tar.gz").unwrap();
+    let two = canonicalize("pkg:pypi/requests@2.32.0?file_name=requests-2.32.0.tar.gz").unwrap();
+    assert_eq!(one.package(), two.package(), "two versions, one package");
+
+    // Except the registry, which says which package this is: the same name elsewhere is another.
+    let elsewhere =
+        canonicalize("pkg:pypi/requests@2.31.0?repository_url=https://pypi.example.org").unwrap();
+    assert_eq!(
+        elsewhere.package(),
+        "pkg:pypi/requests?repository_url=https://pypi.example.org"
+    );
+    assert_ne!(elsewhere.package(), one.package());
 }
 
 #[test]

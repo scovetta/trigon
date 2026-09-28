@@ -31,8 +31,13 @@
 //! - Qualifier keys are lowercased, a pair with an empty value is dropped, a key given twice is
 //!   refused, and the pairs are sorted by key.
 //! - Subpath segments that decode to nothing, `.` or `..` are dropped, however they were encoded.
-//! - The versionless form ([`CanonicalPurl::package`], the `pkg1` key) is the same string without
-//!   `@<version>`. Qualifiers and subpath stay: the spec's words are "without its version".
+//! - The versionless form ([`CanonicalPurl::package`], the `pkg1` key) is the package and nothing
+//!   about any one version of it: `pkg:<type>/<namespace>/<name>`, with the `repository_url`
+//!   qualifier where there is one and no other. The version goes, and so do the subpath and every
+//!   other qualifier, because most qualifiers name one version's files — `file_name`, `checksum`,
+//!   `download_url` — and kept, they gave every version its own `pkg1` key, where the key is meant
+//!   to find every version. `repository_url` stays because it changes which package this is: the
+//!   same name on another registry is another package.
 //!
 //! Lenient where the intent is unambiguous: an unencoded npm scope, `pkg:npm/@babel/core@7.24.0`,
 //! is read as the purl spec's `pkg:npm/%40babel/core@7.24.0`, because an `@` that begins a path
@@ -61,8 +66,12 @@ impl CanonicalPurl {
         &self.purl
     }
 
-    /// The canonical purl without its version: what the `pkg1` key hashes, and the same string as
-    /// [`Self::as_str`] for a purl that had no version.
+    /// The package, without anything that names one version of it: what the `pkg1` key hashes.
+    ///
+    /// `pkg:<type>/<namespace>/<name>`, and the `repository_url` qualifier where the purl has one,
+    /// which says which registry's package this is. No version, no subpath, and no other
+    /// qualifier, since `file_name`, `checksum` and `download_url` each name one version's files.
+    /// The same string as [`Self::as_str`] only for a purl with none of those.
     pub fn package(&self) -> &str {
         &self.package
     }
@@ -217,6 +226,12 @@ pub fn canonicalize(purl: &str) -> Result<CanonicalPurl, PurlCanonError> {
         package.push('/');
     }
     package.push_str(&encode(&name, false));
+    // The package alone, for the `pkg1` key: its registry, where the purl names one, and nothing
+    // that names a version's files.
+    let package_key = match qualifiers.get("repository_url") {
+        Some(url) => format!("{package}?repository_url={}", encode(url, true)),
+        None => package.clone(),
+    };
     let mut tail = String::new();
     for (i, (k, v)) in qualifiers.iter().enumerate() {
         tail.push(if i == 0 { '?' } else { '&' });
@@ -236,7 +251,7 @@ pub fn canonicalize(purl: &str) -> Result<CanonicalPurl, PurlCanonError> {
     };
     Ok(CanonicalPurl {
         purl,
-        package: format!("{package}{tail}"),
+        package: package_key,
         versioned: version.is_some(),
     })
 }

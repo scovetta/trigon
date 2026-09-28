@@ -21,6 +21,7 @@ mod outcome;
 mod path;
 pub mod purl;
 mod target;
+pub mod time;
 
 pub use declared::{CheckResult, DeclaredDigest, DigestCheck};
 pub use digest::{Digest, MultiDigest, ParseDigestError, Sha1, Sha512};

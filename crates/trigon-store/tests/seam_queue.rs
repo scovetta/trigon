@@ -529,3 +529,96 @@ async fn concurrent_host_reservations_do_not_deadlock_each_other() {
         errors.len()
     );
 }
+
+/// A job that avoids a machine is never leased by a worker on it, and stays on the queue for one
+/// that is not.
+///
+/// What a confirmation needs from the queue: made on the machine that made the first attempt, the
+/// gate would not count it (`docs/19` D8, off by default), and nothing asks a third time — so the
+/// fleet's one confirmation of a target was lost whenever that machine happened to be idle first.
+#[tokio::test]
+async fn a_job_is_never_leased_on_the_machine_it_avoids() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "avoid").await;
+    let confirmation = NewJob {
+        attempt: 2,
+        avoid_host: Some("machine-id:first".into()),
+        ..NewJob::rebuild("pkg:npm/a@1", "ck1:k", Tier::Regression)
+    };
+    let id = q.enqueue(&confirmation).await.unwrap();
+    // Idempotent with its avoidance, as without: a repeat is one job avoiding one machine.
+    assert_eq!(q.enqueue(&confirmation).await.unwrap(), id);
+
+    let lease = |host: Option<&'static str>| {
+        let q = q.clone();
+        async move {
+            q.lease_on("w", host, &["rebuild"], 10, Duration::from_secs(60))
+                .await
+                .unwrap()
+        }
+    };
+    assert!(
+        lease(Some("machine-id:first")).await.is_empty(),
+        "the machine that made the first attempt leased its confirmation"
+    );
+    assert_eq!(
+        q.depth().await.unwrap(),
+        vec![("ready".to_string(), 1)],
+        "left on the queue, not taken and handed back"
+    );
+    let taken = lease(Some("machine-id:second")).await;
+    assert_eq!(taken.len(), 1, "another machine may take it");
+    assert_eq!(taken[0].id, id);
+
+    // A job that avoids nothing goes to any machine, the first included.
+    let plain = q
+        .enqueue(&NewJob::rebuild("pkg:npm/b@1", "pkg:npm/b@1", Tier::Bulk))
+        .await
+        .unwrap();
+    let taken = lease(Some("machine-id:first")).await;
+    assert_eq!(taken.iter().map(|j| j.id).collect::<Vec<_>>(), [plain]);
+}
+
+/// A request finds the first attempt a queue made before requests were canonical held under the
+/// target as it was typed, and is neither queued nor charged a second time.
+///
+/// `pkg:npm/@babel/core@7.24.0` was its own key; its canonical form encodes the scope's `@`, so a
+/// lookup by that alone answered "no job" for a package the queue held.
+#[tokio::test]
+async fn a_request_finds_the_job_a_queue_keyed_on_the_target_as_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "legacy-key").await;
+    q.migrate_identity().await.expect("identity");
+    let typed = "pkg:npm/@babel/core@7.24.0";
+    assert_ne!(
+        trigon_store::request_key(typed),
+        typed,
+        "the fixture needs a target whose canonical form is another string"
+    );
+    // As `trigon enqueue` and `request_rebuild` keyed a first attempt before.
+    let before = q
+        .enqueue(&NewJob::rebuild(typed, typed, Tier::Bulk))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        q.job_for(typed).await.unwrap(),
+        Some((before, "ready".to_string()))
+    );
+    q.add_principal("p1", "one", &["request"], 100, "tok-1")
+        .await
+        .expect("principal");
+    let who = q
+        .principal_for("tok-1")
+        .await
+        .unwrap()
+        .expect("a principal");
+    match q.request_rebuild(&who, typed, "2026-09-28").await.unwrap() {
+        trigon_store::Requested::Already { job, spent, .. } => {
+            assert_eq!(job, before);
+            assert_eq!(spent, 0, "a request for a queued job is not charged");
+        }
+        other => panic!("queued a second job for a package the queue holds: {other:?}"),
+    }
+    assert_eq!(q.depth().await.unwrap(), vec![("ready".to_string(), 1)]);
+}

@@ -66,6 +66,15 @@ fn every_field_populated() -> RunRecord {
         // attempt, which is the value that leaves a confirmed result withheld forever.
         attempt: 3,
         cache_key: Some("babel-core-7.24.0/ab54e552/nupkg-2b104124".into()),
+        // What a second attempt must share to agree, and what makes it a second opinion rather
+        // than the first replayed. A cache state with something in it and an image that was not
+        // re-pulled, so neither half can come back as its default and pass.
+        agreement: Some(Digest::from_bytes([0x0a; 32])),
+        host: Some(format!("machine-id:{}", "ab".repeat(32))),
+        cache: Some(trigon_store::CacheState {
+            warm: vec![trigon_store::CacheState::LAYERS.into()],
+            image_repulled: true,
+        }),
         // Populated here even though a record with an `outcome` never carries a `terminal` in
         // production: this fixture's job is that every field survives the round trip, and a field
         // left at its default is a field the test cannot tell from one that was dropped.
@@ -265,6 +274,16 @@ async fn every_field_of_a_run_record_survives_the_file_it_is_written_to() {
         "guard_trips: this is the field that decides whether the run is evidence at all"
     );
     assert_eq!(back.started, record.started, "started");
+    assert_eq!(back.cache_key, record.cache_key, "cache_key");
+    assert_eq!(
+        back.agreement, record.agreement,
+        "agreement: what a second attempt has to share with this one to confirm it"
+    );
+    assert_eq!(back.host, record.host, "host");
+    assert_eq!(
+        back.cache, record.cache,
+        "cache: a warm attempt that came back cold would confirm what it only replayed"
+    );
     assert_eq!(back.finished, record.finished, "finished");
     assert_eq!(
         back.environment.base_image, record.environment.base_image,
@@ -389,6 +408,9 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "finished",
         "attempt",
         "cache_key",
+        "agreement",
+        "host",
+        "cache",
         "terminal",
         "declines",
         "assumptions",

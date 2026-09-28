@@ -11,7 +11,7 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:cc5dfa46175cfee91cf705a34168941b0e363c1fbe1ea515c88fc6b94d80f8ae
+prose_version: docs/threat-model.md@sha256:a4bfb2f35e281ea87985f1b8cf5b77fe598b9bc5c86afd80209c55bee02787f6
 model_status: unratified-draft
 triage_policy: strict
 confidence:
@@ -860,7 +860,8 @@ contract_dimensions:
 - component: attestation
   dimension: failure-atomicity
   status: claimed
-  conditions: trigon attest signs a void run as void/v1 alone, never as a verdict
+  conditions: 'no path signs a void run as anything but void/v1: trigon attest and rebuild --attest share
+    the code'
   property_id: P6
   provenance:
     kind: documented
@@ -1822,16 +1823,17 @@ properties_claimed:
   violation_symptoms:
   - a signed equivalence or divergence about a run that fetched its own answer or had the whole network
   - a void/v1 that says which way the comparison went
-  statement: 'trigon attest never signs a verdict for a void run; it signs only void/v1. A void run is
+  statement: 'No path signs a verdict for a void run; it is signed as void/v1 and only that, by trigon
+    attest and by trigon rebuild --attest, which signs through the same code (sign_run). A void run is
     one the publication gate calls void (trigon_api::publication::voided, which is decide''s own answer):
     its guard tripped, whether or not it reached an outcome, or it reached an outcome at open egress or
-    with a stabilizer a person or a model wrote. void/v1 carries the reason and the facts that establish
-    it, and n'
+    with a stab'
   provenance:
     kind: documented
-    source: docs/19-distribution-and-lookup.md §4.3; docs/16-findings.md §3.96; crates/trigon/tests/seam_attest_v2.rs
+    source: docs/19-distribution-and-lookup.md §4.3; docs/16-findings.md §3.96, §3.97; crates/trigon/tests/seam_attest_v2.rs
       — `a_guard_tripped_run_yields_void_v1_and_never_a_verdict`, `an_open_egress_run_yields_void_too`,
-      `a_run_a_hand_written_stabilizer_applied_to_is_signed_as_void_and_only_void`, `a_verdict_is_not_signed_for_a_record_that_hides_a_hand_written_stabilizer`
+      `a_run_a_hand_written_stabilizer_applied_to_is_signed_as_void_and_only_void`, `a_verdict_is_not_signed_for_a_record_that_hides_a_hand_written_stabilizer`;
+      crates/trigon/src/main.rs — `rebuild_attest_at_open_egress_signs_void_and_never_a_verdict`
 - id: P7
   kind: integrity
   components:

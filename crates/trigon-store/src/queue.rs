@@ -102,7 +102,16 @@ pub struct Job {
     /// `rebuild`, `confirm`, `judge`. A worker leases only the kinds it can do.
     pub kind: String,
     pub target: String,
-    /// What makes two attempts attempts at the *same thing*. See [`RunRecord::cache_key`].
+    /// The job's identity in the queue, which enqueueing is idempotent on with `attempt`.
+    ///
+    /// **Two kinds of key share this column, and neither is copied onto a record.** A first
+    /// attempt is queued under [`request_key`], which names what was asked for — the target, all
+    /// an enqueuer knows before a strategy has been inferred. A confirmation is queued under the
+    /// first attempt's [`RunRecord::cache_key`], which the run built from the target, the strategy
+    /// it ran and the set it was judged under ([`crate::cache_key`]). The record a run writes
+    /// carries the key the run built, never this one: when the worker copied this onto the record,
+    /// every fleet run was keyed on its purl alone, and two attempts straddling a change of
+    /// strategy or set counted as one question (`docs/17-backlog.md` B31).
     pub cache_key: String,
     pub attempt: i32,
     pub tier: Tier,
@@ -127,7 +136,36 @@ pub struct NewJob {
     pub payload_ref: Option<String>,
     /// Hold it back until this many milliseconds from now. Zero is "as soon as a worker asks".
     pub delay: Duration,
+    /// A machine that may not take this job, by its host id (`crate::host_id`): the one that made
+    /// the first attempt, for a confirmation the gate would not count from it.
+    ///
+    /// Kept in a table of its own rather than as a column, so a queue made before it gains it from
+    /// `migrate` like any other table and no existing table has a second version.
+    pub avoid_host: Option<String>,
 }
+
+/// The key a first attempt is queued under: the target in canonical form, where it has one.
+///
+/// What an enqueuer knows is what it was asked for, and nothing a run has decided yet — the
+/// strategy is inferred by the worker — so this names the request and is not a cache key
+/// ([`Job::cache_key`] says why the two are kept apart). Canonical, so two spellings of one
+/// package are one request; `trigon enqueue` and [`Queue::request_rebuild`] both key through here,
+/// so a visitor's request and a sweep's entry for one package are one job.
+pub fn request_key(target: &str) -> String {
+    trigon_core::purl::canonicalize(target)
+        .map(|c| c.as_str().to_string())
+        .unwrap_or_else(|_| target.to_string())
+}
+
+/// A target's first attempt, found under its [`request_key`] or under the target as it was typed.
+///
+/// **Both, because a first attempt was keyed on the typed target before requests were canonical.**
+/// `pkg:npm/@babel/core@7.24.0` was its own key, and its canonical form, with the scope's `@`
+/// encoded, is another: looked up by the canonical key alone, a queue made before would answer
+/// "no job" for a package it holds, and a request would queue, build and charge it a second time.
+/// `$1` is the canonical key and `$2` the typed target; they are one string for most targets.
+const FIRST_ATTEMPT: &str =
+    "SELECT id, state FROM job WHERE cache_key IN ($1, $2) AND attempt = 1 ORDER BY id LIMIT 1";
 
 impl NewJob {
     pub fn rebuild(target: impl Into<String>, cache_key: impl Into<String>, tier: Tier) -> Self {
@@ -140,6 +178,7 @@ impl NewJob {
             payload: None,
             payload_ref: None,
             delay: Duration::ZERO,
+            avoid_host: None,
         }
     }
 }
@@ -233,9 +272,13 @@ impl Queue {
     /// resumed sweep and a duplicated feed entry all produce one job. Returns the existing job's id
     /// when there was one, so a caller cannot tell a first enqueue from a repeat and does not have
     /// to.
+    ///
+    /// The host a job must avoid is written in the same transaction as the job: written after it,
+    /// a job queued to run at once could be leased by that host in between.
     pub async fn enqueue(&self, j: &NewJob) -> Result<i64, StoreError> {
         let now = now_ms();
         let visible = now + j.delay.as_millis() as i64;
+        let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO job (kind, target, cache_key, attempt, tier, payload, payload_ref, \
              state, visible_at, failures, created) \
@@ -251,17 +294,29 @@ impl Queue {
         .bind(j.payload_ref.as_deref())
         .bind(visible)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| StoreError::Malformed(format!("enqueueing: {e}")))?;
 
-        let row = sqlx::query("SELECT id FROM job WHERE cache_key = $1 AND attempt = $2")
+        let id = sqlx::query("SELECT id FROM job WHERE cache_key = $1 AND attempt = $2")
             .bind(&j.cache_key)
             .bind(j.attempt)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
-            .map_err(|e| StoreError::Malformed(format!("reading back the job: {e}")))?;
-        Ok(row.get::<i64, _>("id"))
+            .map_err(|e| StoreError::Malformed(format!("reading back the job: {e}")))?
+            .get::<i64, _>("id");
+        if let Some(host) = &j.avoid_host {
+            sqlx::query("INSERT INTO job_avoid (job, host) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+                .bind(id)
+                .bind(host)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| older_queue("recording the host a job avoids", e))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| StoreError::Malformed(format!("committing a job: {e}")))?;
+        Ok(id)
     }
 
     /// Take up to `n` jobs, by tier and then by age.
@@ -278,9 +333,31 @@ impl Queue {
     /// passes and the row is visible again to the next query, with no reaper process and nothing to
     /// notice the death. That is what makes a fleet of unreliable workers workable, and it is why
     /// `visible_at` and `leased_until` are two columns rather than one.
+    ///
+    /// A worker that names no machine: it takes a job whatever host the job avoids. The engine
+    /// leases through [`Queue::lease_on`].
     pub async fn lease(
         &self,
         worker: &str,
+        kinds: &[&str],
+        n: i64,
+        lease_for: Duration,
+    ) -> Result<Vec<Job>, StoreError> {
+        self.lease_on(worker, None, kinds, n, lease_for).await
+    }
+
+    /// [`Queue::lease`], by a worker on the machine `host` names, which takes no job that avoids
+    /// that machine ([`NewJob::avoid_host`]).
+    ///
+    /// **Left on the queue, not taken and handed back.** A confirmation made on the machine that
+    /// made the first attempt is one the gate does not count, unless the operator accepts one
+    /// (`docs/19` D8); refusing it at the lease costs nothing, where leasing and declining it would
+    /// be a lease and a release every poll for as long as no other machine asks. On a fleet of one
+    /// machine such a job waits for good, which is what the gate would make of its answer.
+    pub async fn lease_on(
+        &self,
+        worker: &str,
+        host: Option<&str>,
         kinds: &[&str],
         n: i64,
         lease_for: Duration,
@@ -295,14 +372,22 @@ impl Queue {
         let sql = format!(
             "UPDATE job SET state = 'leased', leased_by = $1, leased_until = $2 \
              WHERE id IN ( \
-               SELECT id FROM job \
-               WHERE kind IN ({kind_list}) \
-                 AND visible_at <= {now} \
-                 AND (state = 'ready' OR (state = 'leased' AND leased_until < {now})) \
-               ORDER BY CASE tier WHEN 'interactive' THEN 0 WHEN 'regression' THEN 1 ELSE 2 END, \
-                        created, id \
+               SELECT j.id FROM job j \
+               WHERE j.kind IN ({kind_list}) \
+                 AND j.visible_at <= {now} \
+                 AND (j.state = 'ready' OR (j.state = 'leased' AND j.leased_until < {now})){} \
+               ORDER BY \
+                 CASE j.tier WHEN 'interactive' THEN 0 WHEN 'regression' THEN 1 ELSE 2 END, \
+                 j.created, j.id \
                LIMIT {n}{}) \
              RETURNING id, kind, target, cache_key, attempt, tier, payload, payload_ref, failures",
+            match host {
+                Some(_) => {
+                    " AND NOT EXISTS \
+                     (SELECT 1 FROM job_avoid a WHERE a.job = j.id AND a.host = $3)"
+                }
+                None => "",
+            },
             match self.backend {
                 // The one clause that differs. Postgres skips rows another worker has locked;
                 // SQLite has a single writer, so the statement itself is the exclusion.
@@ -310,12 +395,14 @@ impl Queue {
                 Backend::Sqlite => "",
             }
         );
-        let rows = sqlx::query(&sql)
-            .bind(worker)
-            .bind(until)
+        let mut query = sqlx::query(&sql).bind(worker).bind(until);
+        if let Some(h) = host {
+            query = query.bind(h);
+        }
+        let rows = query
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| StoreError::Malformed(format!("leasing: {e}")))?;
+            .map_err(|e| older_queue("leasing", e))?;
 
         // **`RETURNING` does not promise the subquery's order.** The `ORDER BY` above decides
         // *which* rows are taken; it says nothing about the order they come back in, and on SQLite
@@ -709,6 +796,23 @@ fn priority(t: Tier) -> u8 {
     }
 }
 
+/// A statement's error, saying what to run where the queue was made before a table it needs.
+///
+/// `job_avoid` came after the queue's first tables, and a queue made before it gains it only from
+/// `migrate`. A worker started without `--migrate` against one failed every lease with "no such
+/// table", which names what is missing and not what to do about it.
+fn older_queue(doing: &str, e: sqlx::Error) -> StoreError {
+    let e = e.to_string();
+    if e.contains("job_avoid") {
+        StoreError::Malformed(format!(
+            "{doing}: {e}. This queue was made before the `job_avoid` table existed; run `trigon \
+             worker --migrate` or `trigon enqueue --migrate` against it once to add the table"
+        ))
+    } else {
+        StoreError::Malformed(format!("{doing}: {e}"))
+    }
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -742,6 +846,15 @@ fn schema(serial: &str) -> Vec<String> {
         // The index every lease query runs against. `visible_at` last, because the first two
         // columns are equality and range-scanning the third is what the index is for.
         "CREATE INDEX IF NOT EXISTS job_ready ON job (state, tier, visible_at)".into(),
+        // The machines a job may not be leased on (`NewJob::avoid_host`). A table beside `job`
+        // rather than a column on it: `CREATE TABLE IF NOT EXISTS` gives a queue made before it
+        // the table, and would not have given it the column.
+        "CREATE TABLE IF NOT EXISTS job_avoid (
+           job  BIGINT NOT NULL,
+           host TEXT NOT NULL,
+           PRIMARY KEY (job, host)
+         )"
+        .into(),
         format!(
             "CREATE TABLE IF NOT EXISTS run_event (
                id     {serial},
@@ -940,13 +1053,14 @@ impl Queue {
                 .get::<i64, _>("n");
 
         // Already queued or already answered: not a new request, not charged, not a second build.
-        let existing: Option<i64> =
-            sqlx::query("SELECT id FROM job WHERE cache_key = $1 AND attempt = 1")
-                .bind(target)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| StoreError::Malformed(format!("looking for the job: {e}")))?
-                .map(|r| r.get::<i64, _>("id"));
+        let key = request_key(target);
+        let existing: Option<i64> = sqlx::query(FIRST_ATTEMPT)
+            .bind(&key)
+            .bind(target)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| StoreError::Malformed(format!("looking for the job: {e}")))?
+            .map(|r| r.get::<i64, _>("id"));
         if let Some(job) = existing {
             tx.commit()
                 .await
@@ -971,7 +1085,7 @@ impl Queue {
              failures, created) VALUES ('rebuild', $1, $2, 1, 'interactive', 'ready', $3, 0, $4)",
         )
         .bind(target)
-        .bind(target)
+        .bind(&key)
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
@@ -979,7 +1093,7 @@ impl Queue {
         .map_err(|e| StoreError::Malformed(format!("enqueueing a request: {e}")))?;
 
         let job = sqlx::query("SELECT id FROM job WHERE cache_key = $1 AND attempt = 1")
-            .bind(target)
+            .bind(&key)
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| StoreError::Malformed(format!("reading back the job: {e}")))?
@@ -1075,9 +1189,11 @@ impl Queue {
             .collect())
     }
 
-    /// The job covering a target, if any, with its state.
+    /// The job covering a target, if any, with its state: its first attempt, keyed as
+    /// [`request_key`] keys one, or as the target was typed before requests were canonical.
     pub async fn job_for(&self, target: &str) -> Result<Option<(i64, String)>, StoreError> {
-        let row = sqlx::query("SELECT id, state FROM job WHERE cache_key = $1 AND attempt = 1")
+        let row = sqlx::query(FIRST_ATTEMPT)
+            .bind(request_key(target))
             .bind(target)
             .fetch_optional(&self.pool)
             .await

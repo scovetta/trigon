@@ -130,10 +130,17 @@ enum Cmd {
         /// List every differing member rather than the first few.
         #[arg(long)]
         explain: bool,
-        /// Write a DSSE-wrapped in-toto statement of the result here.
+        /// Write a DSSE-wrapped in-toto statement of the result here: `equivalence/v1` or
+        /// `divergence/v1`, a claim about two local files.
         ///
         /// Emitted for a divergence as readily as for a match: a negative result somebody else can
         /// check is the more useful of the two, and one that only we can reproduce is an accusation.
+        ///
+        /// **Not publishable.** There is no run behind two files — no purl, no strategy, no attempt
+        /// the publication gate could count — so this signs the comparison and nothing else, and
+        /// `trigon publish` accepts only `equivalence/v2`, `divergence/v2`, `void/v1` and
+        /// `withdrawal/v1`. A claim about a published package is `trigon rebuild --store` and then
+        /// `trigon attest`, or `trigon rebuild --attest`, which signs the same.
         #[arg(long)]
         attest: Option<PathBuf>,
         /// Sign the statement with an ed25519 key held in this file (32 raw bytes).
@@ -226,8 +233,33 @@ enum Cmd {
     /// invisible is a verdict nobody can argue with.
     #[cfg(feature = "build")]
     Rebuild {
-        /// A package URL, such as `pkg:npm/left-pad@1.3.0`.
-        purl: String,
+        /// A package URL, such as `pkg:npm/left-pad@1.3.0`. Taken from the run under `--confirm`.
+        #[arg(required_unless_present = "confirm", conflicts_with = "confirm")]
+        purl: Option<String>,
+        /// Run the confirming attempt of an earlier run in `--store`: the same target, the same
+        /// strategy (from the run's strategy blob) and the same stabilizer set, with no build
+        /// cache, a fresh source checkout, no fetch cache, and the base image pulled again by
+        /// digest.
+        ///
+        /// ADR-0010 safeguard 1: nothing publishes until two attempts at the same work agree, "on
+        /// different workers at different times". The publication gate counts this attempt beside
+        /// the run it confirms only if it began at least `[publish] confirmation_interval` after
+        /// it, and ran on another machine — or on this one, where `same_host_confirmation` allows
+        /// it and this attempt was cold with its image re-pulled, which is recorded rather than
+        /// assumed. No model is asked and no repair is tried: a different recipe is a different
+        /// question. Refused, before anything is fetched, for a run that kept no strategy blob, a
+        /// void run, one that reached no verdict, and one recorded before runs were keyed on what
+        /// they ran.
+        #[arg(
+            long,
+            value_name = "RUN",
+            requires = "store",
+            conflicts_with_all = [
+                "artifact", "image", "egress", "definitions", "timewarp", "source", "model",
+                "source_cache", "cache",
+            ]
+        )]
+        confirm: Option<String>,
         /// Which file, when the version publishes more than one.
         #[arg(long)]
         artifact: Option<String>,
@@ -238,14 +270,17 @@ enum Cmd {
         /// and that is network the run's transcript would never see. `derive` builds it anyway and
         /// records that it did: the parent, what was installed, and whether these bytes were built by
         /// this run. The build itself still runs at the tier you asked for.
-        #[arg(long)]
-        image: String,
+        ///
+        /// Taken from the run under `--confirm`: the image it ran on, pinned.
+        #[arg(long, required_unless_present = "confirm")]
+        image: Option<String>,
         /// Working directory for the fetched and rebuilt artifacts.
         #[arg(long, default_value = "./trigon-work")]
         work: PathBuf,
-        /// What the build may reach.
-        #[arg(long, default_value = "open")]
-        egress: String,
+        /// What the build may reach: `open` (the default), `mirror`, `mirror-only` or `deny-all`.
+        /// Taken from the run under `--confirm`.
+        #[arg(long)]
+        egress: Option<String>,
         #[arg(long, default_value_t = 1800)]
         timeout: u64,
         /// A checked-in definitions directory, consulted before any heuristic.
@@ -269,14 +304,16 @@ enum Cmd {
         /// voiding an honest run rather than missing a forged one.
         #[arg(long)]
         source: Option<PathBuf>,
-        /// Write a DSSE-wrapped statement of the result here: `equivalence/v1` or `divergence/v1`,
-        /// signed by the process that ran the build.
+        /// Sign the recorded run exactly as `trigon attest` would, and write the statement about
+        /// its result here: `equivalence/v2` or `divergence/v2` for a verdict, `void/v1` for a run
+        /// the publication gate calls void, and never a verdict for one. Needs `--store`, where
+        /// the run is recorded and every statement is filed under it, as `trigon attest` files
+        /// them.
         ///
-        /// It asks no publication gate, so a run at `--egress open` or one a stabilizer somebody
-        /// wrote applied to is signed as a verdict here, where `trigon attest` would sign it as
-        /// `void/v1`. For a claim that matters, record the run with `--store` and sign it with
-        /// `trigon attest`.
-        #[arg(long)]
+        /// The same code as `trigon attest`, run in the process that ran the build. `--store` and
+        /// then `trigon attest` keeps signing out of that process, which is the separation
+        /// `docs/09-attestations.md` §3.1 asks of a claim that matters.
+        #[arg(long, requires = "store")]
         attest: Option<PathBuf>,
         /// Sign it with an ed25519 key held in this file (32 raw bytes, or hex).
         #[arg(long, requires = "attest")]
@@ -716,6 +753,10 @@ enum Cmd {
     /// One worker. Run several against the same queue on as many machines as you like: a job goes
     /// to exactly one of them, a worker that dies releases its job without anybody noticing, and
     /// the run and the acknowledgement land in one transaction so nothing is built twice.
+    ///
+    /// Each verdict is asked a second time, on a machine other than the one that reached it,
+    /// unless `same_host_confirmation` is set in `evidence.toml` (the publication gate counts no
+    /// other confirmation): a fleet of one machine confirms nothing without it.
     #[cfg(feature = "build")]
     Worker {
         /// `sqlite:///var/lib/trigon/queue.db` or `postgres://…`.
@@ -1313,12 +1354,16 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             model,
             source_cache,
             cache,
+            confirm,
         } => rebuild::run(rebuild::Args {
-            purl,
+            // The target, the image and the tier are the confirmed run's under `--confirm`, which
+            // the parser makes the only way the first two can be absent; `run_one` fills all three
+            // in from the run before anything reads them.
+            purl: purl.unwrap_or_default(),
             artifact,
-            image,
+            image: image.unwrap_or_default(),
             work,
-            egress,
+            egress: egress.unwrap_or_else(|| "open".into()),
             timeout,
             definitions,
             mirror_image,
@@ -1335,12 +1380,8 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             fetch_cache: cache.map(|c| (c, format!("run-{}", std::process::id()))),
             // One target on a terminal: the phases are already in front of whoever asked.
             phases: None,
-            // **No key, deliberately.** A `trigon rebuild` is one person asking one question, and
-            // inventing a key here would make two unrelated local runs look to the publication
-            // gate like a confirmed pair. Confirmation is something a queue arranges, between two
-            // attempts it knows are attempts at the same work.
-            cache_key: None,
             attempt: 1,
+            confirm,
         }),
         #[cfg(feature = "build")]
         Cmd::Sweep {
@@ -1466,41 +1507,57 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             migrate,
             once,
             no_confirm,
-        } => worker::serve(
-            &queue,
-            worker::Builder {
-                image,
-                egress,
-                work,
-                store,
-                timeout,
-                definitions,
-                mirror_image,
-                model,
-                source_cache,
-                verbose,
-            },
-            trigon_engine::Config {
-                worker: name.unwrap_or_else(|| {
-                    format!(
-                        "{}-{}",
-                        std::env::var("HOSTNAME").unwrap_or_else(|_| "host".into()),
-                        std::process::id()
-                    )
-                }),
-                class: match class.as_str() {
-                    "infer" => trigon_engine::Class::Infer,
-                    "judge" => trigon_engine::Class::Judge,
-                    // `value_parser` above admits only the three, so this is the third and not a
-                    // default standing in for an unrecognised one.
-                    _ => trigon_engine::Class::Build,
+        } => {
+            // The gate's settings, which decide when a confirmation may run and where. Read once,
+            // here, as `trigon serve` and `trigon attest` read them.
+            let publish = trigon_attest::config::EvidenceConfig::load(
+                &trigon_attest::config::Env::from_process()?,
+            )?
+            .publish()
+            .clone();
+            worker::serve(
+                &queue,
+                worker::Builder {
+                    image,
+                    egress,
+                    work,
+                    store,
+                    timeout,
+                    definitions,
+                    mirror_image,
+                    model,
+                    source_cache,
+                    verbose,
                 },
-                confirm: !no_confirm,
-                ..Default::default()
-            },
-            migrate,
-            once,
-        ),
+                trigon_engine::Config {
+                    worker: name.unwrap_or_else(|| {
+                        format!(
+                            "{}-{}",
+                            std::env::var("HOSTNAME").unwrap_or_else(|_| "host".into()),
+                            std::process::id()
+                        )
+                    }),
+                    class: match class.as_str() {
+                        "infer" => trigon_engine::Class::Infer,
+                        "judge" => trigon_engine::Class::Judge,
+                        // `value_parser` above admits only the three, so this is the third and
+                        // not a default standing in for an unrecognised one.
+                        _ => trigon_engine::Class::Build,
+                    },
+                    confirm: !no_confirm,
+                    // No sooner than the gate will count it: a confirmation that runs inside the
+                    // interval is a build spent on an answer `decide` withholds as too close.
+                    confirm_after: publish.confirmation_interval,
+                    // The machine its runs record, which a confirmation of one of them avoids
+                    // unless the operator accepts one machine confirming itself (`docs/19` D8).
+                    host: trigon_store::host_id(),
+                    same_host_confirmation: publish.same_host_confirmation,
+                    ..Default::default()
+                },
+                migrate,
+                once,
+            )
+        }
         #[cfg(feature = "build")]
         Cmd::Enqueue {
             queue,
@@ -1594,6 +1651,7 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             // derives from a distribution parent and nothing more.
             None,
             None,
+            std::env::var_os("TRIGON_NO_BUILD_CACHE").is_some(),
         )
         .map(|_| ()),
     }
@@ -2071,6 +2129,9 @@ mod build {
         // newest this tool knows of, and a guess". The publish time is a fact about the package
         // that the resolver already holds either way.
         published: Option<&str>,
+        // Build with no cached layer: a confirming attempt, or `TRIGON_NO_BUILD_CACHE`. See
+        // `RunOpts::no_cache` for what a cached layer carries from one build into the next.
+        no_cache: bool,
     ) -> Result<Built> {
         let egress = egress_tier(egress)?;
 
@@ -2313,11 +2374,10 @@ mod build {
                 guard: guard.map(Path::to_path_buf),
                 cache: fetch_cache.cloned(),
                 on_event,
-                // Read from the environment rather than given a flag, because the caller that needs
-                // it is not a person: it is the clean-re-run path of `docs/09-attestations.md` §5,
-                // which does not exist yet, and the test that proves two builds normalize. A flag
-                // nobody is meant to type is a flag that gets typed.
-                no_cache: std::env::var_os("TRIGON_NO_BUILD_CACHE").is_some(),
+                // From the caller: a confirming attempt (`rebuild --confirm`, or a worker's second
+                // attempt) always, and otherwise `TRIGON_NO_BUILD_CACHE`, which the test that
+                // proves two builds normalize sets. The caller records which, beside the run.
+                no_cache,
             };
             let handle = runner.start(&plan, &opts).await?;
             let outcome = handle.wait().await?;
@@ -2902,13 +2962,18 @@ fn getrandom(buf: &mut [u8]) -> Result<()> {
 
 /// `trigon enqueue`: put targets on a queue.
 ///
-/// The cache key is the target plus the tier's *absence* — a key made of the target alone, so a
-/// bulk sweep and an interactive request for the same package are one job rather than two. That is
-/// the behaviour somebody clicking "rebuild this" on a package a sweep already covers should get:
-/// their answer, not a second build of it.
+/// Each job is keyed on the request, `trigon_store::request_key` — the target, and not the tier,
+/// so a bulk sweep and an interactive request for the same package are one job rather than two.
+/// That is the behaviour somebody clicking "rebuild this" on a package a sweep already covers
+/// should get: their answer, not a second build of it.
+///
+/// **Not a cache key.** Nothing here knows the strategy a worker will infer, and a key built
+/// without it is the purl alone, which is what every fleet run used to carry as its cache key. The
+/// run keys its own record on what it ran (`trigon_store::cache_key`), and the confirmation is
+/// queued under that.
 #[cfg(feature = "build")]
 fn enqueue_targets(url: &str, targets: &[String], tier: &str, migrate: bool) -> Result<()> {
-    use trigon_store::queue::{NewJob, Queue, Tier};
+    use trigon_store::queue::{NewJob, Queue, Tier, request_key};
 
     let tier = match tier {
         "interactive" => Tier::Interactive,
@@ -2936,9 +3001,14 @@ fn enqueue_targets(url: &str, targets: &[String], tier: &str, migrate: bool) -> 
         }
         let mut n = 0;
         for t in &list {
-            q.enqueue(&NewJob::rebuild(t.clone(), t.clone(), tier))
-                .await
-                .map_err(anyhow::Error::from)?;
+            // Looked up first, because a queue made before requests were canonical holds a first
+            // attempt under the target as typed, which `enqueue`'s own idempotence on the
+            // canonical key does not see: it would queue the package a second time.
+            if q.job_for(t).await.map_err(anyhow::Error::from)?.is_none() {
+                q.enqueue(&NewJob::rebuild(t.clone(), request_key(t), tier))
+                    .await
+                    .map_err(anyhow::Error::from)?;
+            }
             n += 1;
         }
         // The count is of targets *offered*, not of jobs created: `enqueue` is idempotent, so
@@ -2955,6 +3025,49 @@ fn enqueue_targets(url: &str, targets: &[String], tier: &str, migrate: bool) -> 
         }
         anyhow::Ok(())
     })
+}
+
+#[cfg(all(test, feature = "build"))]
+mod enqueue_keeps_one_job_per_package {
+    use super::*;
+
+    /// A queue made before requests were canonical holds a first attempt under the target as it
+    /// was typed. `trigon enqueue` of the same target finds it rather than queuing the package a
+    /// second time under the canonical key.
+    #[test]
+    fn enqueue_finds_a_job_keyed_on_the_target_as_typed() {
+        let dir =
+            std::env::temp_dir().join(format!("trigon-enqueue-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("sqlite://{}?mode=rwc", dir.join("q.db").display());
+        let typed = "pkg:npm/@babel/core@7.24.0";
+        assert_ne!(trigon_store::request_key(typed), typed);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let q = rt.block_on(async {
+            let q = trigon_store::Queue::open(&url).await.unwrap();
+            q.migrate().await.unwrap();
+            // As `trigon enqueue` keyed it before.
+            q.enqueue(&trigon_store::NewJob::rebuild(
+                typed,
+                typed,
+                trigon_store::Tier::Bulk,
+            ))
+            .await
+            .unwrap();
+            q
+        });
+        enqueue_targets(&url, &[typed.to_string()], "bulk", false).unwrap();
+        assert_eq!(
+            rt.block_on(q.depth()).unwrap(),
+            vec![("ready".to_string(), 1)],
+            "the package was queued a second time"
+        );
+    }
 }
 
 /// `trigon serve`: the corpus, from a browser.
@@ -2976,6 +3089,14 @@ fn serve_corpus(
     queue: Option<String>,
 ) -> Result<()> {
     let store = trigon_store::Store::local(store)?;
+    // The gate's confirmation settings, from where every other command reads them (`docs/19`
+    // §2.4): `serve` answers anonymous readers from the gate, and a gate that counted two attempts
+    // differently here than `publish` does would show a run as published that is never published.
+    // A machine with no `evidence.toml` gets the defaults, as every command does; one whose file
+    // does not parse is refused, as every command refuses it.
+    let evidence = trigon_attest::config::EvidenceConfig::load(
+        &trigon_attest::config::Env::from_process()?,
+    )?;
     let cfg = trigon_api::Config {
         bind,
         unauthenticated: if public {
@@ -2983,7 +3104,10 @@ fn serve_corpus(
         } else {
             trigon_api::Principal::Operator
         },
-        switches: trigon_api::Switches { stop_divergences },
+        switches: trigon_api::Switches {
+            stop_divergences,
+            confirmation: trigon_api::Confirmation::from(evidence.publish()),
+        },
         refresh_seconds,
         queue,
         // The decompiler the member view uses for managed assemblies. The predicate for *which*
@@ -3987,16 +4111,17 @@ mod rebuild {
         /// `None` for a single `trigon rebuild`: nobody is watching one target, and the phases are
         /// on the terminal already.
         pub phases: Option<std::sync::Arc<crate::progress::Progress>>,
-        /// What makes two runs runs at the *same thing*, and which attempt this is.
+        /// Which attempt at this work this is, counting from 1. A confirmation's is the confirmed
+        /// run's plus one, whatever this says.
         ///
-        /// **Carried in rather than invented here.** The publication gate groups attempts by
-        /// `cache_key` and releases nothing until two of them agree, so a record written without
-        /// one corroborates nothing — including itself. A worker knows the key because the job
-        /// carries it; a bare `trigon rebuild` has none, and `None` is the honest answer there
-        /// rather than a key made up on the spot, which would make one run look like a
-        /// confirmation of another.
-        pub cache_key: Option<String>,
+        /// **There is no cache key here.** The run builds its own, once it knows the strategy it
+        /// ran and the set it was judged under (`trigon_store::cache_key`), for a worker and a
+        /// `trigon rebuild` alike. The key it was handed before — a worker's job key, which was the
+        /// purl alone — was a statement about the request, and it made two attempts straddling a
+        /// change of strategy or set look like one question.
         pub attempt: u32,
+        /// The run in `store` this attempt confirms, where it is one: see [`confirming`].
+        pub confirm: Option<String>,
     }
 
     /// The ladder, in the order `docs/04-strategies.md` §6 sets out.
@@ -4145,7 +4270,14 @@ mod rebuild {
     /// deliberately records only runs that reached a comparison — no statement may be written about
     /// a run that is evidence of nothing — and that is exactly why something else has to record the
     /// rest: a monitor rooted in successes reports a perfect rate on a sweep where nothing built.
-    pub fn run_one(args: Args, verbose: bool) -> Result<Ran> {
+    pub fn run_one(mut args: Args, verbose: bool) -> Result<Ran> {
+        // A confirmation is the run it confirms, repeated, so that run is read and checked before
+        // anything else: one that cannot be repeated is refused before a registry is asked
+        // anything, and before a work directory says a run happened.
+        let confirm = match args.confirm.clone() {
+            Some(run) => Some(confirming(&mut args, &run, verbose)?),
+            None => None,
+        };
         let work = args.work.clone();
         let purl = args.purl.clone();
         let mut report = crate::progress::RunReport::new(&purl);
@@ -4153,7 +4285,7 @@ mod rebuild {
         // this is the only scope that knows where one run's share of it begins. Taken before
         // anything resolves: the first thing a run does is ask a registry.
         let before = trigon_politeness::traffic();
-        let out = run_inner(args, verbose, &mut report);
+        let out = run_inner(args, verbose, &mut report, confirm.as_ref());
         // Both halves: what this process asked while resolving and fetching, and what the mirror
         // inside the island asked on the build's behalf, which `run_inner` hands to the same table
         // before returning. A record holding one of those would be a complete-looking account of a
@@ -4168,6 +4300,352 @@ mod rebuild {
         }
         report.write(&work);
         out
+    }
+
+    /// A run `--confirm` will not repeat, and why.
+    ///
+    /// **Its own type, so a worker can tell it from a failure worth trying again.** Each is a fact
+    /// about the stored record, or about this binary — no verdict, a void, no strategy blob, a
+    /// strategy these tools render another way, a set this binary does not carry as it was — and
+    /// asking again, on this worker or any running this Trigon, gets the same answer. The worker
+    /// called every error retryable, so each such confirmation was leased, refused and backed off
+    /// until it was dead, three builds' worth of leases to learn one fact.
+    #[derive(Debug)]
+    pub struct Unrepeatable(pub String);
+
+    impl std::fmt::Display for Unrepeatable {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl std::error::Error for Unrepeatable {}
+
+    /// The run a confirming attempt repeats, read from the store and checked.
+    ///
+    /// Everything else a confirmation needs — the target, the artifact, the image, the egress
+    /// tier, whether it pinned the registry — is written into [`Args`] by [`confirming`], where
+    /// every other run reads it.
+    #[derive(Debug)]
+    pub struct Confirming {
+        /// The run this attempt confirms.
+        run: String,
+        /// Its published artifact. A registry that now serves other bytes under the same name
+        /// would make this attempt a confirmation of nothing.
+        upstream: trigon_core::Digest,
+        /// Its strategy, from the blob it stored, with how it was derived and what it assumed.
+        candidate: trigon_registry::Candidate,
+        /// What it is keyed on, which this attempt has to be keyed on too.
+        cache_key: String,
+        /// The image an earlier run derived, where the run it confirms ran on one, as this attempt
+        /// reuses it: `built_here` false. See [`confirming`].
+        derived_image: Option<trigon_store::DerivedImage>,
+    }
+
+    /// Read `run` from the store, refuse it where it cannot be repeated, and set `args` up to
+    /// repeat it: the same target and artifact, the same strategy and stabilizer set, the image it
+    /// ran on and the tier it ran at, with every cache that could hand this attempt the first
+    /// one's answer emptied.
+    ///
+    /// **The caches, one by one**, because "cold" is recorded and has to be true:
+    ///
+    /// - podman's layer cache: the build runs with `--no-cache`;
+    /// - the source cache: a directory of this attempt's own, emptied first, so the checkout is
+    ///   fetched again rather than copied from one an earlier run left;
+    /// - the fetch cache (`--cache`): none, which the parser also refuses;
+    /// - the base image: taken out of the image store and pulled again by digest, before the
+    ///   build, where it has a registry to be pulled from; where it does not, the record says so.
+    ///
+    /// **An image an earlier run derived is carried over as one**, with `built_here` false, and
+    /// listed as a cache the attempt reused. The build is handed it by id, which the build reads as
+    /// an image the operator named, so the confirmation of a run on a derived image recorded that
+    /// it derived nothing and was cold — and the gate, which withholds an accusation made on a
+    /// derived image by reading the record under decision, would have published the confirmation
+    /// of a divergence it withholds.
+    ///
+    /// No model is configured and no definitions are read, because no ladder runs: the strategy is
+    /// the one the run stored, and a repair would make this attempt another question.
+    fn confirming(args: &mut Args, run: &str, verbose: bool) -> Result<Confirming> {
+        let store = args
+            .store
+            .clone()
+            .context("--confirm reads the run it confirms from a store; name one with --store")?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let (r, strategy, set) = rt.block_on(async {
+            let store = trigon_store::Store::local(&store)?;
+            let r = store
+                .get_run(run)
+                .await
+                .with_context(|| format!("reading run `{run}`, which --confirm names"))?;
+            if r.outcome.is_none() {
+                return Err(Unrepeatable(format!(
+                    "run `{run}` reached no verdict ({}), so there is nothing a second attempt \
+                     could confirm",
+                    r.terminal.as_deref().unwrap_or("it recorded no outcome")
+                ))
+                .into());
+            }
+            if let Some(because) = trigon_api::publication::voided(&r) {
+                return Err(Unrepeatable(format!(
+                    "run `{run}` is void ({}): {} A void makes no claim a second attempt could \
+                     confirm, and is publishable as it is",
+                    because.key(),
+                    because.sentence()
+                ))
+                .into());
+            }
+            let Some(blob) = r.strategy else {
+                return Err(Unrepeatable(format!(
+                    "run `{run}` kept no strategy blob — it was recorded before runs stored the \
+                     strategy that ran (docs/19 §10 phase 2) — so what it ran cannot be repeated. \
+                     Rebuild the target, and confirm that run"
+                ))
+                .into());
+            };
+            let bytes = store.blobs().get(&blob).await.with_context(|| {
+                format!("reading the strategy blob run `{run}` names, to repeat it")
+            })?;
+            let text = String::from_utf8(bytes.to_vec())
+                .with_context(|| format!("the strategy blob run `{run}` names is not text"))?;
+            let strategy = trigon_strategy::from_yaml(&text)
+                .with_context(|| format!("the strategy blob run `{run}` names is not a strategy"))?;
+            let Some(comparison) = r.comparison else {
+                return Err(Unrepeatable(format!(
+                    "run `{run}` records a verdict and no comparison, so the stabilizer set it \
+                     was judged under is not known and a confirmation could not be held to it"
+                ))
+                .into());
+            };
+            let bytes = store.blobs().get(&comparison).await?;
+            let c: trigon_compare::Comparison = serde_json::from_slice(&bytes)
+                .with_context(|| format!("reading the comparison run `{run}` names"))?;
+            anyhow::Ok((r, strategy, c.upstream.set))
+        })?;
+
+        // The same strategy, which means the same digest under this binary's tools: a tool that
+        // changed since would render another recipe from the same blob.
+        let tools = trigon_strategy::ToolRegistry::builtin()?;
+        let digest = trigon_strategy::strategy_digest(&strategy, &tools)?;
+        if r.strategy_digest.as_deref() != Some(digest.as_str()) {
+            return Err(Unrepeatable(format!(
+                "run `{run}` records strategyDigest {}, and its strategy blob gives {digest} \
+                 under this binary's tools: a tool the strategy uses has changed since Trigon {} \
+                 ran it, so this binary would run another recipe. Confirm it with that Trigon",
+                r.strategy_digest.as_deref().unwrap_or("(none)"),
+                r.trigon_version
+                    .as_deref()
+                    .unwrap_or("(version not recorded)")
+            ))
+            .into());
+        }
+        // And the same set: a confirmation judged under another is another question.
+        let (set_id, set_digest) = (set.0.as_str(), set.1);
+        let here = trigon_stabilize::profile(set_id).ok_or_else(|| {
+            Unrepeatable(format!(
+                "run `{run}` was judged under stabilizer set `{set_id}`, which this binary does \
+                 not carry, so it cannot be confirmed here"
+            ))
+        })?;
+        if here.digest() != set_digest {
+            return Err(Unrepeatable(format!(
+                "run `{run}` was judged under stabilizer set `{set_id}` {}, and this binary's \
+                 `{set_id}` is {}. A confirmation under another set answers another question",
+                crate::short(&set_digest.to_hex()),
+                crate::short(&here.digest().to_hex())
+            ))
+            .into());
+        }
+        // And keyed as runs are now keyed. One recorded before carries its job's key or none, and
+        // an attempt keyed on what it ran would never be counted beside it.
+        let key =
+            trigon_store::cache_key(&r.target, &r.upstream.name, &digest, &set_digest.to_hex());
+        let Some(cache_key) = key.filter(|k| r.cache_key.as_deref() == Some(k.as_str())) else {
+            return Err(Unrepeatable(format!(
+                "run `{run}` is keyed {}, not by the strategy it ran and the set it was judged \
+                 under, which is how runs have been keyed since docs/19 §10 phase 3. No attempt \
+                 could be counted beside it; rebuild the target, and confirm that run",
+                r.cache_key
+                    .as_deref()
+                    .map_or("on nothing".to_string(), |k| format!("`{k}`"))
+            ))
+            .into());
+        };
+
+        let source = r.source.clone().ok_or_else(|| {
+            Unrepeatable(format!(
+                "run `{run}` does not record which source it built, so it cannot be repeated"
+            ))
+        })?;
+        let derivation = match r.derivation.as_deref() {
+            Some("definition") => trigon_registry::Derivation::Definition,
+            Some("ci_derived") => trigon_registry::Derivation::CiDerived,
+            Some("heuristic") => trigon_registry::Derivation::Heuristic,
+            Some("model_assisted") => trigon_registry::Derivation::ModelAssisted,
+            other => {
+                return Err(Unrepeatable(format!(
+                    "run `{run}` records its strategy as derived by {other:?}, which is not a \
+                     derivation this binary knows, so a confirmation could not say how it was"
+                ))
+                .into());
+            }
+        };
+        let confidence = serde_json::from_value(serde_json::json!(r.confidence))
+            .unwrap_or(trigon_core::Confidence::Weak);
+
+        if verbose {
+            println!(
+                "{} {}",
+                style::heading("confirming"),
+                style::ident(&r.id)
+            );
+            field(
+                "repeating",
+                style::muted(&style::wrap(
+                    "its strategy and stabilizer set, on the image and tier it ran on, with no \
+                     cache able to supply this attempt",
+                    style::VALUE_COL,
+                )),
+            );
+        }
+
+        // A source cache of this attempt's own, emptied: the checkout is fetched again.
+        let sources = args.work.join("confirm-sources");
+        emptied(&sources)?;
+
+        args.purl = r.target.clone();
+        args.artifact = Some(r.upstream.name.clone());
+        args.image = r.environment.base_image.clone();
+        args.egress = r.environment.egress.clone();
+        args.timewarp = r.environment.registry_moment.as_ref().map(|_| "auto".into());
+        args.definitions = None;
+        args.source = None;
+        args.model = None;
+        args.fetch_cache = None;
+        args.source_cache = Some(sources);
+        args.attempt = r.attempt.saturating_add(1);
+
+        Ok(Confirming {
+            run: r.id.clone(),
+            upstream: r.upstream.sha256,
+            candidate: trigon_registry::Candidate {
+                strategy,
+                derivation,
+                confidence,
+                discovery: source.how,
+                assumptions: r.assumptions.clone(),
+            },
+            cache_key,
+            derived_image: r.environment.derived_image.clone().map(|d| {
+                trigon_store::DerivedImage {
+                    built_here: false,
+                    ..d
+                }
+            }),
+        })
+    }
+
+    /// Make `dir` an empty directory, or refuse.
+    ///
+    /// **A refusal where what was there will not go**, never a directory taken as empty. A
+    /// confirmation's record lists no source cache, and a checkout an earlier confirmation left
+    /// in a reused `--work` — one a subdirectory without write permission kept from being removed
+    /// — would be copied by the source cache rather than fetched, while the record said nothing
+    /// could have supplied it. The error from the removal was discarded, and `create_dir_all`
+    /// succeeds on a directory that still exists.
+    fn emptied(dir: &Path) -> Result<()> {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => bail!(
+                "could not empty {}, which a confirmation checks its source out into: {e}. A \
+                 checkout left there would supply this attempt while its record said nothing \
+                 could; remove it, or confirm with another --work",
+                dir.display()
+            ),
+        }
+        std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+        if std::fs::read_dir(dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .next()
+            .is_some()
+        {
+            bail!(
+                "{} is not empty after it was emptied, so a confirmation cannot say nothing \
+                 supplied its source; remove it, or confirm with another --work",
+                dir.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// The derived image a build ran on, as its record states it: the one the build derived or
+    /// found, or, for a confirmation, the one the run it confirms derived, which the build was
+    /// handed by id and reports as an image nobody derived.
+    fn ran_on(
+        built: Option<trigon_store::DerivedImage>,
+        confirm: Option<&Confirming>,
+    ) -> Option<trigon_store::DerivedImage> {
+        built.or_else(|| confirm.and_then(|c| c.derived_image.clone()))
+    }
+
+    /// What an attempt let supply it, from how the run was set up: the facts
+    /// [`trigon_store::CacheState`] records, and the one setting the build takes from them.
+    ///
+    /// Separate from the run so the claim the gate reads is a function of what the run knows and
+    /// can be tested without podman: which caches are listed, and when a confirmation calls itself
+    /// cold, decide whether a same-host pair is counted (`docs/19` D8).
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Reuse<'a> {
+        /// A confirming attempt (`--confirm`), which empties every cache it can.
+        confirm: bool,
+        /// `TRIGON_NO_BUILD_CACHE`: the operator turned podman's layer cache off for every build.
+        no_build_cache: bool,
+        /// A fetch cache (`--cache`) the mirror may answer from.
+        fetch_cache: bool,
+        /// The egress tier. At `open` the container clones its own source, so no host checkout is
+        /// copied into the build.
+        egress: &'a str,
+        /// Whether the run took a host checkout: the source cache's, or an operator's `--source`.
+        checkout: bool,
+        /// Whether the base image was taken out of the image store and pulled again by digest.
+        repulled: bool,
+        /// The image the build ran on, where a run derived it.
+        derived: Option<&'a trigon_store::DerivedImage>,
+    }
+
+    impl Reuse<'_> {
+        /// Whether the build runs with podman's layer cache off: the value `build-layers` is left
+        /// out of the record on, so the build and the record cannot disagree about it.
+        fn no_cache(&self) -> bool {
+            self.confirm || self.no_build_cache
+        }
+
+        fn state(&self) -> trigon_store::CacheState {
+            use trigon_store::CacheState;
+            let mut warm: Vec<String> = Vec::new();
+            if !self.no_cache() {
+                warm.push(CacheState::LAYERS.into());
+            }
+            if self.fetch_cache {
+                warm.push(CacheState::FETCH.into());
+            }
+            // A host checkout is copied into the build only at an enforced tier; at `open` the
+            // container clones its own. A confirmation's came from a source cache emptied for it
+            // (`emptied`).
+            if !self.egress.eq_ignore_ascii_case("open") && self.checkout && !self.confirm {
+                warm.push(CacheState::SOURCES.into());
+            }
+            // Reused rather than built by this run: bytes an earlier run fetched into being.
+            if self.derived.is_some_and(|d| !d.built_here) {
+                warm.push(CacheState::DERIVED_IMAGE.into());
+            }
+            CacheState {
+                warm,
+                image_repulled: self.repulled,
+            }
+        }
     }
 
     /// What a terminal record needs, gathered as the run learns it.
@@ -4196,10 +4674,12 @@ mod rebuild {
         args: Args,
         verbose: bool,
         report: &mut crate::progress::RunReport,
+        confirm: Option<&Confirming>,
     ) -> Result<Ran> {
         let store = args.store.clone();
+        let attest = args.attest.clone().map(|path| (path, args.key.clone()));
         let mut rec = Recording::default();
-        let mut out = run_body(args, verbose, report, &mut rec);
+        let mut out = run_body(args, verbose, report, &mut rec, confirm);
         if let Some(dir) = &store
             && rec.record_id.is_none()
         {
@@ -4211,10 +4691,61 @@ mod rebuild {
                 Err(e) => tracing::warn!("could not record this run: {e:#}"),
             }
         }
+        // **Signed from the record, by `trigon attest`'s own code**, whatever the run ended as: a
+        // void is signed as `void/v1` and never as a verdict, whether the guard ended the build or
+        // the run compared at open egress. This path used to sign the comparison it held in
+        // memory, as `equivalence/v1` or `divergence/v1`, asking no gate — so at this command's
+        // default tier every run it signed was a void signed as a verdict (`docs/16-findings.md`
+        // §3.97).
+        if let (Some((path, key)), Some(dir)) = (&attest, &store) {
+            let config = trigon_attest::config::EvidenceConfig::load(
+                &trigon_attest::config::Env::from_process()?,
+            )?;
+            let signer = crate::attestor::signer(key.as_deref())?;
+            attest_what_was_recorded(
+                dir,
+                rec.record_id.as_deref(),
+                path,
+                &config,
+                signer.as_ref(),
+            )?;
+        }
         if let Ok(ran) = &mut out {
             ran.record_id = rec.record_id.clone();
         }
         out
+    }
+
+    /// `rebuild --attest`, once the run is over: sign the record it wrote, through `trigon
+    /// attest`'s own code (`attestor::attest_recorded_with`), or say that nothing was recorded and
+    /// so nothing was signed.
+    ///
+    /// A function of its own so the route [`run_inner`] takes is the route its test takes: the
+    /// test that stood for it called `trigon attest`'s code directly, and would have passed with
+    /// this call gone.
+    fn attest_what_was_recorded(
+        store: &Path,
+        record: Option<&str>,
+        path: &Path,
+        config: &trigon_attest::config::EvidenceConfig,
+        signer: &dyn trigon_attest::Signer,
+    ) -> Result<()> {
+        match record {
+            Some(id) => crate::attestor::attest_recorded_with(store, id, config, signer, path),
+            None => {
+                println!(
+                    "\n  {}",
+                    style::warn(&style::wrap(
+                        &format!(
+                            "nothing was recorded, so nothing was signed and {} was not written",
+                            path.display()
+                        ),
+                        2
+                    ))
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Everything a run does, unchanged.
@@ -4227,6 +4758,7 @@ mod rebuild {
         verbose: bool,
         report: &mut crate::progress::RunReport,
         rec: &mut Recording,
+        confirm: Option<&Confirming>,
     ) -> Result<Ran> {
         // The phases before the sandbox. The build reports its own; these are ours, and without
         // them a page watching a target sits on "not recorded" for the minute it takes to resolve
@@ -4308,6 +4840,18 @@ mod rebuild {
         };
         drop(file);
         let upstream_digest = fetched.sha256;
+        if let Some(c) = confirm
+            && upstream_digest != c.upstream
+        {
+            let _ = std::fs::remove_file(&upstream_path);
+            bail!(
+                "the registry now serves {} for this artifact, and run `{}` was about {}: a \
+                 second attempt against other bytes confirms nothing about the first",
+                crate::short(&upstream_digest.to_hex()),
+                c.run,
+                crate::short(&c.upstream.to_hex())
+            );
+        }
         if verbose {
             // What the registry vouched for, said once, because "fetched" alone reads the same
             // whether the bytes were checked against two declarations or against none.
@@ -4487,8 +5031,13 @@ mod rebuild {
             derived_image: None,
             diff_opinion: None,
             egress: args.egress.clone(),
-            cache_key: args.cache_key.clone(),
             attempt: args.attempt,
+            // When this attempt began, which the gate holds two attempts' starts apart by. The
+            // report's, taken before anything resolved; the compared path wrote the moment it
+            // recorded, which is the end of a run and not its start.
+            started: report.started.clone(),
+            // Filled where the build is about to run, and again after it if it reused an image.
+            cache: None,
             // The instant the index was actually pinned to, not the flag that asked for one.
             // `auto` is a description of our command line; a signed statement has to describe the
             // environment, and a consumer reading `auto` learns nothing they could check.
@@ -4536,24 +5085,33 @@ mod rebuild {
                 ),
             );
         }
-        let rungs = ladder(
-            &target.ecosystem,
-            client,
-            args.definitions,
-            timewarp_host.clone(),
-            model.as_ref(),
-            args.source_cache.clone(),
-        );
-        // `climb` rather than `infer`: the same ladder, and it keeps what the rungs that said
-        // nothing said about why. Written to the report before the early return, because a
-        // `no-strategy` is exactly the run whose reasons nobody could otherwise see.
-        let climb = rt.block_on(trigon_registry::climb(&rungs, &resolved));
-        report.declines = climb
-            .declines
-            .iter()
-            .map(|(rung, why)| format!("{rung}: {why}"))
-            .collect();
-        let Some(candidate) = climb.candidate else {
+        // A confirmation climbs no ladder: its strategy is the one the confirmed run stored, and
+        // any rung that answered differently today would make this attempt another question.
+        let climbed = match confirm {
+            Some(c) => Some(c.candidate.clone()),
+            None => {
+                let rungs = ladder(
+                    &target.ecosystem,
+                    client,
+                    args.definitions,
+                    timewarp_host.clone(),
+                    model.as_ref(),
+                    args.source_cache.clone(),
+                );
+                // `climb` rather than `infer`: the same ladder, and it keeps what the rungs that
+                // said nothing said about why. Written to the report before the early return,
+                // because a `no-strategy` is exactly the run whose reasons nobody could otherwise
+                // see.
+                let climb = rt.block_on(trigon_registry::climb(&rungs, &resolved));
+                report.declines = climb
+                    .declines
+                    .iter()
+                    .map(|(rung, why)| format!("{rung}: {why}"))
+                    .collect();
+                climb.candidate
+            }
+        };
+        let Some(candidate) = climbed else {
             // **Printed, not logged.** These went to `tracing::info!`, which is off at the default
             // level, so a `no-strategy` run said everything it knew about the package and nothing
             // about why it stopped — the comment above says this is exactly the run whose reasons
@@ -4738,6 +5296,51 @@ mod rebuild {
             i.guard_bytes = guard_kept.clone();
         }
 
+        // **What this attempt could reuse, stated rather than assumed.** A confirmation empties
+        // every cache and pulls its base image again; any other run lets the caches it was given
+        // answer, and the record says which, so the gate can tell a second opinion from the first
+        // one replayed (`docs/19` §10 phase 3). One value decides both what the record says and
+        // whether the build uses podman's layer cache, so the two cannot disagree.
+        let mut reuse = Reuse {
+            confirm: confirm.is_some(),
+            no_build_cache: std::env::var_os("TRIGON_NO_BUILD_CACHE").is_some(),
+            fetch_cache: args.fetch_cache.is_some(),
+            egress: &args.egress,
+            checkout: checkout.is_some(),
+            repulled: false,
+            derived: confirm.and_then(|c| c.derived_image.as_ref()),
+        };
+        if confirm.is_some() {
+            match trigon_sandbox::repull("podman", &args.image) {
+                Ok(()) => {
+                    reuse.repulled = true;
+                    if verbose {
+                        field(
+                            "image",
+                            style::muted("taken out of the image store and pulled again by digest"),
+                        );
+                    }
+                }
+                // Not a refusal. On another machine a confirmation needs no re-pull, and on this
+                // one the gate reads what the record says and withholds; saying so here is what
+                // keeps that from being a surprise.
+                Err(why) => field_wrapped(
+                    "image",
+                    &format!(
+                        "not pulled again: {why}. The record says so, and on this machine the \
+                         gate will not count this attempt as a confirmation"
+                    ),
+                    style::warn,
+                ),
+            }
+        }
+        let no_cache = reuse.no_cache();
+        let mut cache = reuse.state();
+        if let Some(i) = rec.inputs.as_mut() {
+            i.cache = Some(cache.clone());
+            i.derived_image = reuse.derived.cloned();
+        }
+
         // Evidence the registry pin bound something, filled in once the mirror is torn down.
         let mut pin: Option<trigon_mirror::Observed> = None;
         let mirror_addr = mirror.as_ref().map(|m| m.host());
@@ -4823,7 +5426,7 @@ mod rebuild {
             if let Some(i) = rec.inputs.as_mut() {
                 i.strategy = strategy_json.clone();
             }
-            let built = crate::build::run_with(
+            let mut built = crate::build::run_with(
                 &strategy_file,
                 false,
                 &args.image,
@@ -4873,7 +5476,13 @@ mod rebuild {
                     _ => None,
                 },
                 resolved.intrinsics.publish_time.as_deref(),
+                no_cache,
             );
+            // The image the confirmed run derived, which the build was handed by id and so took
+            // for one the operator named: it reports deriving nothing, and the record would say so.
+            if let Ok(b) = &mut built {
+                b.derived_image = ran_on(b.derived_image.take(), confirm);
+            }
 
             // What the build produced, taken before the guard is consulted rather than after.
             // Whether a guarded member arriving voids the run depends on whether it came back out
@@ -4935,7 +5544,10 @@ mod rebuild {
                 // whether or not a provider is configured. It keeps this divergence before going
                 // round, exactly as an accepted model repair does, so a re-run that fails still
                 // reports what was found here.
-                if let Some(next) = dotnet_version_repair(&comparison, &upstream_path, &strategy)
+                // Never on a confirmation, whose whole claim is that it ran the confirmed recipe.
+                if confirm.is_none()
+                    && let Some(next) =
+                        dotnet_version_repair(&comparison, &upstream_path, &strategy)
                     && usable(&next, timewarp).is_ok()
                     && changes_anything(&next, &strategy_digest)
                 {
@@ -5132,7 +5744,8 @@ mod rebuild {
             // exactly this — a rule that answers a failure outright, before any provider is
             // configured and without spending a token. It refuses on `yarn install` and friends,
             // where yarn is resolving rather than running.
-            if failure.code == "npm/unsupported-package-manager"
+            if confirm.is_none()
+                && failure.code == "npm/unsupported-package-manager"
                 && failure.subject.as_deref() == Some("yarn")
                 && let Some(dir) = checkout.as_deref()
                 && let Some(next) = trigon_strategy::without_yarn(
@@ -5286,6 +5899,21 @@ mod rebuild {
         };
         if let Ok(t) = timings.lock() {
             report.timings = t.clone();
+        }
+        // An image an earlier run derived is a cache too, and only the build knows it reused one
+        // — or, for a confirmation, the run it confirms, which `reuse` was told before the build.
+        if let Ok(b) = &built
+            && b.derived_image.is_some()
+        {
+            cache = Reuse {
+                derived: b.derived_image.as_ref(),
+                ..reuse
+            }
+            .state();
+            if let Some(i) = rec.inputs.as_mut() {
+                i.cache = Some(cache.clone());
+                i.derived_image = b.derived_image.clone();
+            }
         }
         report.egress = Some(args.egress.clone());
         report.guard_notes = built
@@ -5628,26 +6256,29 @@ mod rebuild {
             report.tokens_out = Some(u.output);
             report.tokens_cached = Some(u.cached_input);
         }
-        // Reached only by a run that got this far: a tripped artifact guard returns before here, so
-        // no statement is written about a run that fetched its own answer, by the control flow
-        // rather than by a check somebody has to remember to write.
-        //
-        // **Not every void returns, though.** A run at `--egress open`, this command's default, or
-        // one a stabilizer somebody wrote applied to, gets here and is signed as a v1 verdict,
-        // where `trigon attest` signs the same run as `void/v1` alone (P6 is that command's). This
-        // path asks no publication gate. Whether it should refuse, sign the void, or go now that
-        // `attest` exists is the owner's decision (`docs/16-findings.md` §3.96, threat model Q2);
-        // `--store` then `trigon attest` is the path a claim that matters takes.
-        if let Some(path) = &args.attest {
-            // The digests the fetch computed over these bytes, sha1 included where the ecosystem
-            // publishes one; `write_bundle` refuses them if they are not the comparison's.
-            let subject = trigon_attest::Subject::with_digests(
-                crate::file_name(&upstream_path),
-                &upstream_digest,
-                &upstream_digests.sha512,
-                upstream_digests.sha1.as_ref(),
+        // A confirmation that comes out keyed otherwise than the run it confirms — the record will
+        // be keyed as `record_run` keys it, on what this attempt ran — is not counted beside it,
+        // and is told so here rather than left to find out from the gate.
+        if let Some(c) = confirm {
+            let key = cache_key_for(
+                &args.purl,
+                &upstream_path,
+                strategy_digest.as_deref(),
+                Some(comparison.upstream.set.1),
             );
-            crate::write_bundle(path, args.key.as_deref(), subject, &comparison)?;
+            if key.as_deref() != Some(c.cache_key.as_str()) {
+                field_wrapped(
+                    "confirming",
+                    &format!(
+                        "this attempt is keyed {} and run `{}` is keyed `{}`, so the publication \
+                         gate will not count the two together",
+                        key.as_deref().unwrap_or("on nothing"),
+                        c.run,
+                        c.cache_key
+                    ),
+                    style::warn,
+                );
+            }
         }
         if let Some(dir) = &args.store {
             // A failure here does not fail the run. The comparison already happened and its verdict
@@ -5720,6 +6351,7 @@ mod rebuild {
                 // What the model was asked, where one was configured. Empty for the healthy
                 // majority of a corpus, which is the point of measuring the invocation rate.
                 transcript: model.as_ref().map(|m| m.transcript(&args.purl)),
+                cache: Some(cache.clone()),
                 ..inputs.clone()
             };
             match record_run(dir, &inputs, &upstream_path, &rebuilt, &comparison, verbose) {
@@ -5835,10 +6467,16 @@ mod rebuild {
         /// `derivation: model_assisted` with no transcript is an assertion, and one with a
         /// transcript is evidence.
         transcript: Option<trigon_ai::Transcript>,
-        /// The identity of the work: see [`Args::cache_key`]. Without it the publication gate
-        /// cannot tell two attempts at one package from two runs against two packages.
-        cache_key: Option<String>,
+        /// Which attempt at this work this is. The work itself — the cache key — is not carried
+        /// here: `record_run` and `record_terminal` build it from what the record holds, through
+        /// [`cache_key_for`], so a record cannot carry a key for other work than its own.
         attempt: u32,
+        /// When this attempt began: `RunReport::started`.
+        started: String,
+        /// Which caches this attempt let supply it, and whether its image was pulled again. `None`
+        /// until a build is about to run: a run that never built reused nothing and ran cold in no
+        /// sense worth recording.
+        cache: Option<trigon_store::CacheState>,
         /// Why each rung that could have answered did not, what the chosen strategy had to assume,
         /// and how far the derivation trusts itself. Lived in the work directory and nowhere the
         /// store could see, so a corpus could report a rate and not what to build next.
@@ -5990,7 +6628,9 @@ mod rebuild {
                         rejected: o.rejected,
                     }),
                 },
-                crate::now_rfc3339(),
+                // When the attempt began. This was the moment of recording, which is when the run
+                // ended, and the gate subtracts two of these.
+                args.started.clone(),
             );
             record.state = RunState::Done;
             record.strategy = strategy;
@@ -6045,8 +6685,20 @@ mod rebuild {
             // A verdict leaves `terminal` absent by construction: the two are exclusive, and a
             // record carrying both would be saying it did and did not reach a comparison.
             record.terminal = None;
-            record.cache_key = args.cache_key.clone();
+            // What this run was an attempt at: the target, the strategy that produced this verdict
+            // and the set it was judged under, through the one function every key is built by.
+            record.cache_key = cache_key_for(
+                &args.purl,
+                upstream_path,
+                args.strategy_digest.as_deref(),
+                Some(c.upstream.set.1),
+            );
             record.attempt = args.attempt;
+            // What a second attempt at the key has to share with this one to agree with it, and
+            // what makes it a second opinion: which machine, and what it could reuse.
+            record.agreement = Some(c.agreement());
+            record.host = trigon_store::host_id();
+            record.cache = args.cache.clone();
             record.declines = args.declines.clone();
             record.assumptions = args.assumptions.clone();
             record.confidence = args.confidence.clone();
@@ -6146,6 +6798,32 @@ mod rebuild {
             }
             anyhow::Ok(id)
         })
+    }
+
+    /// This run's cache key: [`trigon_store::cache_key`] over its target, its published
+    /// artifact's name, the strategy it ran and the set it was judged under. `None` where either
+    /// digest is missing, never a key built from part of the question.
+    fn cache_key_for(
+        purl: &str,
+        upstream: &Path,
+        strategy_digest: Option<&str>,
+        set: Option<trigon_core::Digest>,
+    ) -> Option<String> {
+        trigon_store::cache_key(
+            purl,
+            &crate::file_name(upstream),
+            strategy_digest?,
+            &set?.to_hex(),
+        )
+    }
+
+    /// The stabilizer set this artifact is judged under, as [`judge`] would choose it, for a run
+    /// that never got as far as judging.
+    fn set_for(upstream: &Path) -> Option<trigon_core::Digest> {
+        let format = crate::resolve_format(upstream, None).ok()?;
+        crate::resolve_profile(upstream, None, format)
+            .ok()
+            .map(|s| s.digest())
     }
 
     /// The Trigon that ran this build, for its record: the crate version and the git revision it
@@ -6270,8 +6948,18 @@ mod rebuild {
             record.trigon_version = Some(building_version());
             record.upstream_digests = inputs.upstream_digests.clone();
             record.state = RunState::Done;
-            record.cache_key = inputs.cache_key.clone();
+            // Built as a verdict's is, from the strategy the run last tried and the set its
+            // artifact would be judged under, where it got as far as a strategy. A run that never
+            // chose one has no key rather than half of one.
+            record.cache_key = cache_key_for(
+                &inputs.purl,
+                path,
+                report.strategy_digest.as_deref(),
+                set_for(path),
+            );
             record.attempt = inputs.attempt;
+            record.host = trigon_store::host_id();
+            record.cache = inputs.cache.clone();
             // No outcome, ever, on this path. `outcome` is what a comparison produced and this ran
             // without one; the story is in `failure` and in `guard_trips`.
             record.outcome = None;
@@ -6356,7 +7044,7 @@ mod rebuild {
         //! work directory.
         use super::*;
 
-        const STRATEGY: &str = r#"
+        pub(super) const STRATEGY: &str = r#"
 schema: 1
 kind: flow
 location:
@@ -6369,7 +7057,7 @@ build:
 output_path: '*.tgz'
 "#;
 
-        fn tmpdir(tag: &str) -> PathBuf {
+        pub(super) fn tmpdir(tag: &str) -> PathBuf {
             let d =
                 std::env::temp_dir().join(format!("trigon-record-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
@@ -6377,7 +7065,7 @@ output_path: '*.tgz'
             d
         }
 
-        fn tgz() -> Vec<u8> {
+        pub(super) fn tgz() -> Vec<u8> {
             let mut b = ::tar::Builder::new(Vec::new());
             let body = b"module.exports = leftPad;\n";
             let mut h = ::tar::Header::new_ustar();
@@ -6399,7 +7087,7 @@ output_path: '*.tgz'
         }
 
         /// What a run that fetched `bytes` from npm, which declared nothing, knows about them.
-        fn fetched(bytes: &[u8]) -> trigon_store::UpstreamDigests {
+        pub(super) fn fetched(bytes: &[u8]) -> trigon_store::UpstreamDigests {
             trigon_store::UpstreamDigests {
                 sha512: trigon_attest::sha512_of(bytes),
                 sha1: Some(trigon_attest::sha1_of(bytes)),
@@ -6410,7 +7098,11 @@ output_path: '*.tgz'
 
         /// The inputs a run that got as far as arming the guard carries, with everything else at
         /// the value a run starts with.
-        fn inputs(work: &Path, strategy: &trigon_strategy::Strategy, guard: &[u8]) -> RecordInputs {
+        pub(super) fn inputs(
+            work: &Path,
+            strategy: &trigon_strategy::Strategy,
+            guard: &[u8],
+        ) -> RecordInputs {
             let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
             RecordInputs {
                 purl: "pkg:npm/left-pad@1.3.0".into(),
@@ -6436,15 +7128,16 @@ output_path: '*.tgz'
                 tokens: Vec::new(),
                 timings: Vec::new(),
                 transcript: None,
-                cache_key: None,
                 attempt: 1,
+                started: "2026-09-27T00:00:00Z".into(),
+                cache: Some(trigon_store::CacheState::default()),
                 declines: Vec::new(),
                 assumptions: Vec::new(),
                 confidence: None,
             }
         }
 
-        fn store(dir: &Path) -> (tokio::runtime::Runtime, trigon_store::Store) {
+        pub(super) fn store(dir: &Path) -> (tokio::runtime::Runtime, trigon_store::Store) {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -6604,6 +7297,557 @@ output_path: '*.tgz'
             assert!(digests.declared.is_empty());
             assert!(digests.note.unwrap().contains("declared neither"));
             assert!(!r.upstream.stored);
+        }
+    }
+
+    #[cfg(test)]
+    mod a_run_is_made_publishable {
+        //! `docs/19` §10 phase 3 on the CLI's own path. A run records what the gate needs to count
+        //! it — the key it was an attempt at, what it found, which machine ran it, what it could
+        //! reuse and when it began — `--confirm` sets up the attempt that repeats it, and `rebuild
+        //! --attest` signs what `trigon attest` signs. No podman: the records are the ones
+        //! `record_run` writes, and a second machine is a host id written as one would write it.
+        use super::record_keeps_what_the_run_threw_away::{
+            STRATEGY, fetched, inputs, store, tgz, tmpdir,
+        };
+        use super::*;
+        use trigon_api::{Publication, Switches, Withheld};
+        use trigon_attest::config::{Env, EvidenceConfig};
+
+        const PURL: &str = "pkg:npm/left-pad@1.3.0";
+        const ARTIFACT: &str = "left-pad-1.3.0.tgz";
+
+        /// A run recorded exactly as `record_run` records a match, begun at `started`.
+        fn recorded(
+            work: &Path,
+            started: &str,
+            egress: &str,
+        ) -> (PathBuf, trigon_store::RunRecord) {
+            let bytes = tgz();
+            let up = work.join(ARTIFACT);
+            std::fs::write(&up, &bytes).unwrap();
+            let rb = work.join("rebuilt-left-pad-1.3.0.tgz");
+            std::fs::write(&rb, &bytes).unwrap();
+            let c = trigon_compare::compare_bytes(
+                bytes.clone(),
+                bytes.clone(),
+                trigon_core::Format::TarGz,
+                &trigon_stabilize::profile("tar-gzip").unwrap(),
+                &trigon_archive::Limits::default(),
+            )
+            .unwrap();
+            let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
+            let mut args = inputs(work, &strategy, br#"{"artifact":"870c0fe1","members":["ab"]}"#);
+            args.upstream_digests = Some(fetched(&bytes));
+            args.started = started.into();
+            args.egress = egress.into();
+            args.source = Some(trigon_core::SourceProvenance {
+                repo_url: "https://github.com/stevemao/left-pad".into(),
+                declared_url: None,
+                commit: "ff8e7ba8b4122829cf66125ca8445cac7f073bce".into(),
+                ref_name: Some("v1.3.0".into()),
+                subdir: None,
+                how: trigon_core::SourceDiscovery::RegistryCommit,
+            });
+            let dir = work.join("store");
+            let id = record_run(&dir, &args, &up, &rb, &c, false).unwrap();
+            let (rt, store) = store(&dir);
+            (dir, rt.block_on(store.get_run(&id)).unwrap())
+        }
+
+        fn put(dir: &Path, r: &trigon_store::RunRecord) {
+            let (rt, store) = store(dir);
+            rt.block_on(store.put_run(r)).unwrap();
+        }
+
+        /// What `trigon serve` decides about `run`, with no configuration file.
+        fn gate(dir: &Path, run: &str) -> Publication {
+            let (rt, store) = store(dir);
+            let ix = trigon_api::Index::new();
+            rt.block_on(ix.refresh(&store, Switches::default())).unwrap();
+            ix.entry(run).unwrap().publication
+        }
+
+        #[test]
+        fn a_compared_run_records_its_key_what_it_found_and_where_and_when_it_ran() {
+            let work = tmpdir("publishable-fields");
+            let (dir, r) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+
+            let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
+            let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+            let digest = trigon_strategy::strategy_digest(&strategy, &tools).unwrap();
+            let set = trigon_stabilize::profile("tar-gzip")
+                .unwrap()
+                .digest()
+                .to_hex();
+            assert_eq!(
+                r.cache_key,
+                trigon_store::cache_key(PURL, ARTIFACT, &digest, &set),
+                "keyed by the one function, on the target, the strategy and the set; a CLI run \
+                 recorded no key at all"
+            );
+
+            let (rt, store) = store(&dir);
+            let bytes = rt.block_on(store.blobs().get(&r.comparison.unwrap())).unwrap();
+            let c: trigon_compare::Comparison = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(r.agreement, Some(c.agreement()));
+            assert_eq!(r.host, trigon_store::host_id());
+            assert_eq!(
+                r.started, "2026-09-27T10:00:00Z",
+                "when the attempt began, not when it was recorded"
+            );
+            assert_eq!(r.cache, Some(trigon_store::CacheState::default()));
+        }
+
+        /// The done-when, on records the CLI writes: published only beside a second attempt at
+        /// the same key, an interval later, on another machine.
+        #[test]
+        fn a_cli_run_publishes_only_beside_a_second_attempt_later_and_elsewhere() {
+            let work = tmpdir("publishable-pair");
+            let (dir, first) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+            assert_eq!(
+                gate(&dir, &first.id),
+                Publication::Withheld {
+                    because: Withheld::AwaitingConfirmation
+                }
+            );
+
+            // Run ids are to the second, and a second attempt in the same one would overwrite
+            // the first rather than stand beside it.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let (_, second) = recorded(&work, "2026-09-27T11:00:00Z", "mirror-only");
+            assert_ne!(first.id, second.id);
+            assert_eq!(first.cache_key, second.cache_key);
+            assert_eq!(first.agreement, second.agreement);
+
+            // Both on this machine, and D8 is off unless configured.
+            let one_machine = match trigon_store::host_id() {
+                Some(_) => Withheld::SameHost,
+                None => Withheld::ConfirmationUnrecorded,
+            };
+            assert_eq!(
+                gate(&dir, &second.id),
+                Publication::Withheld {
+                    because: one_machine
+                }
+            );
+
+            // Another machine, told apart by machine id. This one's id is its machine id's where
+            // it has one, and a hostname's shows no second machine (`names_a_machine`), so the
+            // first attempt is pinned to a machine id rather than to whichever this is.
+            let mut here = first.clone();
+            here.host = Some("machine-id:this-machine".into());
+            put(&dir, &here);
+            let mut elsewhere = second.clone();
+            elsewhere.host = Some("machine-id:another-machine".into());
+            put(&dir, &elsewhere);
+            assert_eq!(gate(&dir, &second.id), Publication::Published);
+            assert_eq!(
+                gate(&dir, &first.id),
+                Publication::Published,
+                "and the first attempt with it"
+            );
+
+            elsewhere.started = "2026-09-27T10:59:59Z".into();
+            put(&dir, &elsewhere);
+            assert_eq!(
+                gate(&dir, &second.id),
+                Publication::Withheld {
+                    because: Withheld::AttemptsTooClose
+                }
+            );
+        }
+
+        fn args_for(work: &Path, dir: &Path) -> Args {
+            Args {
+                purl: String::new(),
+                artifact: None,
+                image: String::new(),
+                work: work.join("confirm"),
+                egress: "open".into(),
+                timeout: 1,
+                // Everything a confirmation must not use, set, so the test sees each emptied.
+                definitions: Some(work.join("definitions")),
+                mirror_image: "localhost/trigon-mirror".into(),
+                timewarp: None,
+                source: Some(work.join("a-checkout")),
+                attest: None,
+                key: None,
+                store: Some(dir.to_path_buf()),
+                model: Some("replay:transcript.json".into()),
+                source_cache: Some(work.join("warm-sources")),
+                fetch_cache: Some((work.join("fetch-cache"), "run-1".into())),
+                phases: None,
+                attempt: 1,
+                confirm: None,
+            }
+        }
+
+        #[test]
+        fn a_confirmation_repeats_the_run_it_names_with_every_cache_emptied() {
+            let work = tmpdir("confirm-sets-up");
+            let (dir, mut r) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+            r.environment.registry_moment = Some("2016-03-01T00:00:00Z".into());
+            put(&dir, &r);
+            let stale = work.join("confirm/confirm-sources/left-over");
+            std::fs::create_dir_all(&stale).unwrap();
+
+            let mut args = args_for(&work, &dir);
+            let c = confirming(&mut args, &r.id, false).unwrap();
+            assert_eq!(args.purl, r.target);
+            assert_eq!(args.artifact.as_deref(), Some(ARTIFACT));
+            assert_eq!(args.image, r.environment.base_image);
+            assert_eq!(args.egress, "mirror-only");
+            assert_eq!(args.timewarp.as_deref(), Some("auto"), "it pinned the registry");
+            assert_eq!(args.attempt, r.attempt + 1);
+            assert!(args.model.is_none() && args.definitions.is_none() && args.source.is_none());
+            assert!(args.fetch_cache.is_none(), "no fetch cache");
+            let sources = args.source_cache.clone().unwrap();
+            assert_eq!(sources, work.join("confirm/confirm-sources"));
+            assert!(
+                std::fs::read_dir(&sources).unwrap().next().is_none(),
+                "a source cache of its own, emptied, so the checkout is fetched again"
+            );
+
+            assert_eq!(
+                c.candidate.strategy,
+                trigon_strategy::from_yaml(STRATEGY).unwrap(),
+                "the strategy the run stored, not one inferred again"
+            );
+            assert_eq!(c.candidate.derivation.to_string(), "heuristic");
+            assert_eq!(Some(c.cache_key.as_str()), r.cache_key.as_deref());
+            assert_eq!(c.upstream, r.upstream.sha256);
+        }
+
+        /// What an attempt says it could reuse, from each thing about how it was set up. The gate
+        /// counts a same-host pair on this (`docs/19` D8), so each input is asserted, and the value
+        /// the build is told about podman's layer cache with it.
+        #[test]
+        fn what_an_attempt_could_reuse_is_stated_from_how_it_was_set_up() {
+            use trigon_store::CacheState;
+            let warm = |r: Reuse| r.state().warm;
+            let plain = Reuse {
+                egress: "mirror-only",
+                checkout: true,
+                ..Reuse::default()
+            };
+            // A run as the CLI makes one: the layer cache and the source cache it copied from.
+            assert_eq!(warm(plain), [CacheState::LAYERS, CacheState::SOURCES]);
+            assert!(!plain.no_cache());
+            // The operator's switch turns the layer cache off, for the build and the record alike.
+            let off = Reuse {
+                no_build_cache: true,
+                ..plain
+            };
+            assert!(off.no_cache());
+            assert_eq!(warm(off), [CacheState::SOURCES]);
+            let fetched = Reuse {
+                fetch_cache: true,
+                ..plain
+            };
+            assert!(warm(fetched).contains(&CacheState::FETCH.to_string()));
+            // At `open` the container clones its own source: nothing was copied into the build.
+            let open = Reuse {
+                egress: "open",
+                ..plain
+            };
+            assert_eq!(warm(open), [CacheState::LAYERS]);
+
+            // A confirmation at an enforced tier, its image pulled again: nothing, and
+            // independent, which is the one state the gate accepts from one machine.
+            let confirming = Reuse {
+                confirm: true,
+                repulled: true,
+                ..plain
+            };
+            assert!(
+                confirming.no_cache(),
+                "a confirmation builds with --no-cache"
+            );
+            assert_eq!(
+                confirming.state(),
+                CacheState {
+                    warm: Vec::new(),
+                    image_repulled: true,
+                }
+            );
+            assert!(confirming.state().independent());
+            // An image that could not be pulled again is cold and not independent.
+            let kept = Reuse {
+                repulled: false,
+                ..confirming
+            };
+            assert!(kept.state().cold() && !kept.state().independent());
+
+            // A derived image an earlier run built is a cache; one this run built is not.
+            let mut image = trigon_store::DerivedImage {
+                parent: "docker.io/library/debian@sha256:aa".into(),
+                packages: vec!["build-essential".into()],
+                built_here: false,
+            };
+            assert_eq!(
+                warm(Reuse {
+                    derived: Some(&image),
+                    ..confirming
+                }),
+                [CacheState::DERIVED_IMAGE]
+            );
+            image.built_here = true;
+            assert_eq!(
+                warm(Reuse {
+                    derived: Some(&image),
+                    ..plain
+                }),
+                [CacheState::LAYERS, CacheState::SOURCES]
+            );
+        }
+
+        /// A confirmation of a run on a derived image says it ran on one, and reused it. It
+        /// recorded `derived_image: None` and a cold cache — the build is handed the image by id
+        /// and reads that as an image the operator named — so the gate, which withholds an
+        /// accusation made on a derived image by reading the record under decision, published
+        /// the confirmation of a divergence it withholds.
+        #[test]
+        fn a_confirmation_of_a_run_on_a_derived_image_says_it_ran_on_one() {
+            let work = tmpdir("confirm-derived");
+            let (dir, mut r) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+            // As `resolve_auto` records a derived image: a bare podman id, and what went into it.
+            r.environment.base_image = "7cdd".repeat(16);
+            r.environment.derived_image = Some(trigon_store::DerivedImage {
+                parent: "docker.io/library/debian@sha256:aa".into(),
+                packages: vec!["build-essential".into()],
+                built_here: true,
+            });
+            r.outcome = Some("divergent".into());
+            r.non_builtin_stabilizer = Some(false);
+            put(&dir, &r);
+
+            let mut args = args_for(&work, &dir);
+            let c = confirming(&mut args, &r.id, false).unwrap();
+            assert_eq!(args.image, r.environment.base_image);
+            let carried = trigon_store::DerivedImage {
+                built_here: false,
+                ..r.environment.derived_image.clone().unwrap()
+            };
+            assert_eq!(c.derived_image.as_ref(), Some(&carried));
+            // What the build reports — nothing derived, for an image it was handed — and what the
+            // record says.
+            let derived = ran_on(None, Some(&c));
+            assert_eq!(derived.as_ref(), Some(&carried));
+            let cache = Reuse {
+                confirm: true,
+                egress: "mirror-only",
+                checkout: true,
+                // A bare id has no registry to be pulled again from.
+                repulled: false,
+                derived: derived.as_ref(),
+                ..Reuse::default()
+            }
+            .state();
+            assert_eq!(cache.warm, [trigon_store::CacheState::DERIVED_IMAGE]);
+            assert!(!cache.cold());
+
+            // The confirmation, recorded so, on another machine an hour later, is withheld as the
+            // run it confirms is. The fact on its record is what withholds it.
+            let mut second = r.clone();
+            second.id = "1790000000-confirms".into();
+            second.attempt = r.attempt + 1;
+            second.host = Some("machine-id:another-machine".into());
+            second.started = "2026-09-27T11:00:00Z".into();
+            second.environment.derived_image = derived;
+            second.cache = Some(cache);
+            let mut first = r.clone();
+            first.host = Some("machine-id:this-machine".into());
+            put(&dir, &first);
+            put(&dir, &second);
+            assert_eq!(
+                gate(&dir, &second.id),
+                Publication::Withheld {
+                    because: Withheld::ImageDerivedOutsideBoundary
+                }
+            );
+            second.environment.derived_image = None;
+            put(&dir, &second);
+            assert_eq!(
+                gate(&dir, &second.id),
+                Publication::Published,
+                "the fixture is otherwise a confirmed divergence"
+            );
+        }
+
+        /// A source cache that will not empty is refused, never taken as empty: the record of a
+        /// confirmation lists no source cache, and a checkout left there would be copied rather
+        /// than fetched.
+        #[test]
+        fn a_source_cache_that_will_not_empty_is_refused() {
+            use std::os::unix::fs::PermissionsExt as _;
+            let work = tmpdir("confirm-sources-stuck");
+            let sources = work.join("confirm-sources");
+            let kept = sources.join("left-pad");
+            std::fs::create_dir_all(&kept).unwrap();
+            std::fs::write(kept.join("index.js"), b"an earlier checkout").unwrap();
+            // A directory whose entries cannot be unlinked, as a checkout with a read-only
+            // subdirectory leaves one.
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let out = emptied(&sources);
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if kept.exists() {
+                let e = out.unwrap_err().to_string();
+                assert!(e.contains("could not empty"), "{e}");
+            } else {
+                // Run as root, which unlinks whatever the mode says: the directory did empty.
+                out.unwrap();
+            }
+            // And one that does empty is emptied.
+            emptied(&sources).unwrap();
+            assert!(std::fs::read_dir(&sources).unwrap().next().is_none());
+        }
+
+        /// Each thing that makes a run unrepeatable is refused, and the refusal says which.
+        #[test]
+        fn a_run_that_cannot_be_repeated_is_refused_with_its_reason() {
+            let work = tmpdir("confirm-refuses");
+            let (dir, r) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+            let refused = |edit: &dyn Fn(&mut trigon_store::RunRecord)| {
+                let mut changed = r.clone();
+                edit(&mut changed);
+                put(&dir, &changed);
+                let e = confirming(&mut args_for(&work, &dir), &r.id, false).unwrap_err();
+                format!("{e:#}")
+            };
+            for (what, edit, says) in [
+                (
+                    "no strategy blob",
+                    (&|r: &mut trigon_store::RunRecord| r.strategy = None)
+                        as &dyn Fn(&mut trigon_store::RunRecord),
+                    "kept no strategy blob",
+                ),
+                (
+                    "void",
+                    &|r: &mut trigon_store::RunRecord| r.environment.egress = "open".into(),
+                    "is void (open_egress)",
+                ),
+                (
+                    "no verdict",
+                    &|r: &mut trigon_store::RunRecord| {
+                        r.outcome = None;
+                        r.terminal = Some("build-failed:build".into());
+                    },
+                    "reached no verdict (build-failed:build)",
+                ),
+                (
+                    "keyed on its purl, as a worker's run was",
+                    &|r: &mut trigon_store::RunRecord| r.cache_key = Some(r.target.clone()),
+                    "is keyed `pkg:npm/left-pad@1.3.0`, not by the strategy it ran",
+                ),
+                (
+                    "keyed on nothing, as a CLI run was",
+                    &|r: &mut trigon_store::RunRecord| r.cache_key = None,
+                    "is keyed on nothing",
+                ),
+                (
+                    "a strategy digest these tools do not give",
+                    &|r: &mut trigon_store::RunRecord| r.strategy_digest = Some("00".repeat(32)),
+                    "a tool the strategy uses has changed",
+                ),
+                (
+                    "no record of the source it built",
+                    &|r: &mut trigon_store::RunRecord| r.source = None,
+                    "does not record which source it built",
+                ),
+            ] {
+                let e = refused(edit);
+                assert!(e.contains(says), "{what}: {e}");
+            }
+            let e = confirming(&mut args_for(&work, &dir), "1700000000-nosuchrun", false)
+                .unwrap_err();
+            assert!(format!("{e:#}").contains("which --confirm names"), "{e:#}");
+        }
+
+        fn signed(dir: &Path, work: &Path, id: &str) -> (trigon_attest::Statement, Vec<String>) {
+            let path = work.join("claim.json");
+            let config = EvidenceConfig::load(&Env {
+                cwd: work.to_path_buf(),
+                ..Default::default()
+            })
+            .unwrap();
+            // The function `run_inner` calls once the run is recorded, so the route under test is
+            // the one `rebuild --attest` takes.
+            attest_what_was_recorded(dir, Some(id), &path, &config, &trigon_attest::Unsigned)
+                .unwrap();
+            let env: trigon_attest::Envelope =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let written: trigon_attest::Statement =
+                serde_json::from_slice(&env.decoded_payload().unwrap()).unwrap();
+            let (rt, store) = store(dir);
+            let r = rt.block_on(store.get_run(id)).unwrap();
+            let mut filed: Vec<String> = r
+                .attestations
+                .iter()
+                .map(|p| {
+                    let e = rt.block_on(store.get_attestation(p)).unwrap();
+                    let st: trigon_attest::Statement =
+                        serde_json::from_slice(&e.decoded_payload().unwrap()).unwrap();
+                    st.predicate_type
+                })
+                .collect();
+            filed.sort();
+            (written, filed)
+        }
+
+        /// Carry-over from phase 2: `rebuild --attest` at its default `--egress open` signed
+        /// every run as a verdict. It now signs through `trigon attest`'s own code, and a void is
+        /// `void/v1` and nothing else, in the file and in the store.
+        #[test]
+        fn rebuild_attest_at_open_egress_signs_void_and_never_a_verdict() {
+            let work = tmpdir("attest-open");
+            let (dir, r) = recorded(&work, "2026-09-27T10:00:00Z", "open");
+            assert_eq!(r.outcome.as_deref(), Some("exact"), "a match, which was signed as one");
+            let (written, filed) = signed(&dir, &work, &r.id);
+            assert_eq!(written.predicate_type, trigon_attest::VOID);
+            assert_eq!(written.predicate["because"], "open_egress");
+            assert!(written.predicate.get("outcome") == Some(&serde_json::json!("void")));
+            assert_eq!(filed, [trigon_attest::VOID], "no verdict filed beside it");
+        }
+
+        /// A run that recorded nothing — it died before it had an artifact — signs nothing and
+        /// writes no file, and says so rather than failing the run it could not describe.
+        #[test]
+        fn rebuild_attest_of_a_run_that_recorded_nothing_writes_nothing() {
+            let work = tmpdir("attest-nothing");
+            let path = work.join("claim.json");
+            let config = EvidenceConfig::load(&Env {
+                cwd: work.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+            attest_what_was_recorded(
+                &work.join("store"),
+                None,
+                &path,
+                &config,
+                &trigon_attest::Unsigned,
+            )
+            .unwrap();
+            assert!(!path.exists());
+        }
+
+        #[test]
+        fn rebuild_attest_signs_a_verdict_as_trigon_attest_does() {
+            let work = tmpdir("attest-verdict");
+            let (dir, r) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+            let (written, filed) = signed(&dir, &work, &r.id);
+            assert_eq!(written.predicate_type, trigon_attest::EQUIVALENCE_V2);
+            assert_eq!(written.predicate["outcome"], "exact");
+            assert_eq!(written.predicate["purl"], PURL);
+            assert_eq!(
+                filed,
+                [
+                    trigon_attest::BUILD_OBSERVATION,
+                    trigon_attest::EQUIVALENCE_V2,
+                    trigon_attest::REBUILD
+                ]
+            );
         }
     }
 
@@ -8900,10 +10144,11 @@ mod sweep {
                 // packument that were 18% of one sweep's egress were spread across its targets.
                 fetch_cache: args.fetch_cache.clone(),
                 phases: Some(progress.clone()),
-                // A sweep runs each target once. Its second attempt, where one is wanted, comes
-                // from the queue — which is the component that knows what a confirmation is.
-                cache_key: None,
+                // A sweep runs each target once and keys each run on what it ran, as every run is
+                // keyed. Its second attempt, where one is wanted, is `rebuild --confirm` or the
+                // queue's.
                 attempt: 1,
+                confirm: None,
             },
             false,
         )
@@ -9577,12 +10822,13 @@ fn load_key(path: &Path) -> Result<trigon_attest::LocalKey> {
 /// whether the ecosystem publishes a sha1 for it. It is refused if it is not the comparison's
 /// upstream artifact.
 ///
-/// **A v1 statement, deliberately.** `verify --attest` compares two files with no run behind them,
-/// so nothing v2 adds — the purl, the strategy, the Trigon that built it, the evidence digests — is
-/// known there. `rebuild --attest` does have a run behind it, in this process, and signs v1 as
-/// well: it signs what the comparison says and asks no publication gate, so a run the gate calls
-/// void at open egress or for a stabilizer somebody wrote is signed here as a verdict. `trigon
-/// attest` signs v2 from the store, and signs such a run as `void/v1` (`docs/09` §2.5, §2.6).
+/// **A v1 statement, deliberately, and only for `verify --attest`.** Two files compared with no
+/// run behind them: nothing v2 adds — the purl, the strategy, the Trigon that built it, the
+/// evidence digests — is known, and no publication gate has anything to decide, so the statement
+/// is a local comparison claim and `publish` accepts none. `rebuild --attest` has a run behind it
+/// and signs what `trigon attest` signs, through the same code
+/// (`attestor::attest_recorded_with`): v2 for a verdict, `void/v1` for a run the gate calls void
+/// (`docs/09` §2.5, §2.6).
 fn write_bundle(
     path: &Path,
     key: Option<&Path>,
@@ -10112,268 +11358,383 @@ mod attestor {
                     .next()
                     .context("this store holds no runs")?,
             };
-            let record = store.get_run(&id).await?;
-            println!("run       {id}");
-            println!("target    {}", record.target);
-
-            let purl = trigon_core::purl::canonicalize(&record.target).with_context(|| {
-                format!(
-                    "run `{id}` is about `{}`, which has no canonical purl, and every statement \
-                     about a published artifact signs one",
-                    record.target
-                )
-            })?;
-
-            let mut written = Vec::new();
-            let mut published_set: Option<String> = None;
-
-            let reference = record.target.parse::<trigon_core::TargetRef>()?;
-            let target = trigon_core::Target::new(
-                reference.clone(),
-                trigon_core::ArtifactId::new(record.upstream.name.clone()),
-            );
-            // The published bytes, where the store kept them, fetched by hash and checked against
-            // it. Every statement about the published artifact takes its subject from them.
-            let upstream_bytes = match record.upstream.stored {
-                true => Some(store.blobs().get(&record.upstream.sha256).await?),
-                false => None,
-            };
-            let upstream_subject = upstream_subject(
-                &record,
-                upstream_bytes.as_deref(),
-                reference.ecosystem.publishes_sha1(),
-            )?;
-            let supersedes = match &superseded {
-                Some(s) => Some(s.check(&upstream_subject, &purl)?),
-                None => None,
-            };
-
-            // Before anything else. A void run is evidence of nothing about the package — its
-            // artifact reached the build over the network, or the build had the whole network, or
-            // a stabilizer somebody wrote did the matching — and the one thing we must never do is
-            // sign a verdict about it: for a tripped guard that is the forged-attestation attack,
-            // arriving exactly as designed. The gate's own answer, so this and `trigon serve` and
-            // `publish` cannot disagree about which runs are void.
-            if let Some(because) = trigon_api::publication::voided(&record) {
-                // Folded on a terminal, one line when piped, as every other narrated line is.
-                let said = format!("{}: {}", because.key(), because.sentence());
-                println!("void      {}", crate::style::wrap(&said, 10));
-                println!(
-                    "\n{}",
-                    crate::style::wrap(
-                        "signing void/v1 and nothing else: a void run gets no verdict, and no \
-                         statement that says which way its comparison went",
-                        0
-                    )
-                );
-                let st = void_statement(
-                    &store,
-                    &record,
-                    because,
-                    &purl,
-                    upstream_subject,
-                    supersedes,
-                )
-                .await?;
-                written.push(put(&store, &target, &record, &st, signer.as_ref()).await?);
-                return finish(
-                    &store,
-                    &id,
-                    &record,
-                    &written,
-                    None,
-                    signer.as_ref(),
-                    args.prune,
-                )
-                .await;
-            }
-
-            // Only a verdict signs these, so it is said only where one may be signed.
-            let namespace = namespace(&config);
-            // The rebuilt artifact's subject, from its bytes when step 1 has them in hand.
-            let mut rebuild_subject: Option<Subject> = None;
-            // The set the comparison was made under, for `rebuild` to name as the verdict does.
-            let mut judged_under: Option<(String, String)> = None;
-            // The blobs whose content the statements below vouch for — the network transcript,
-            // counted, and the strategy, recomputed — read before anything is signed, so that a
-            // refusal over either leaves no statement behind it: step 1 files one.
-            let hex = Hex::of(&store, &record).await?;
-            let guard_manifest = kept_guard_manifest(&store, &record).await;
-
-            // 1. The equivalence (or divergence) claim, re-derived from the bytes.
-            if let Some(comparison_digest) = record.comparison {
-                let bytes = store.blobs().get(&comparison_digest).await?;
-                let comparison: trigon_compare::Comparison = serde_json::from_slice(&bytes)?;
-
-                let rebuilt = record
-                    .rebuild
-                    .as_ref()
-                    .context("a run with a comparison must name a rebuilt artifact")?;
-                if !record.upstream.stored || !rebuilt.stored {
-                    bail!(
-                        "the artifacts for this run are no longer in the store, so the claim \
-                         cannot be re-derived. It was pruned after being attested; the existing \
-                         statement is still checkable by anyone holding the two files."
-                    );
-                }
-
-                // Fetched by hash and checked against it. The attestor trusts the digest, never the
-                // process that wrote the bytes.
-                let upstream = upstream_bytes
-                    .clone()
-                    .context("the published artifact is stored, as checked above")?;
-                let rebuild = store.blobs().get(&rebuilt.sha256).await?;
-                rebuild_subject = Some(Subject::of_bytes(&rebuilt.name, &rebuild, false));
-
-                // The record and the evidence it points at must agree. Re-derivation already
-                // catches a forged *comparison*, because it recomputes from the artifact bytes —
-                // but the record is a separate document, and a worker that wrote an honest
-                // comparison beside a record claiming something better would otherwise have that
-                // claim survive into `trigon runs` and anything reading it.
-                if record.outcome.as_deref() != Some(comparison.outcome.to_string().as_str()) {
-                    bail!(
-                        "the run record says `{}` and the comparison it points at says `{}`. \
-                         Refusing to attest a run that disagrees with its own evidence.",
-                        record.outcome.as_deref().unwrap_or("nothing"),
-                        comparison.outcome
-                    );
-                }
-                // And about who wrote the stabilizers, which is what makes a run void. The gate
-                // reads the record's bit, here and in `serve` and `publish`, so a record saying no
-                // hand-written pass applied, beside a comparison in which one did, would have its
-                // void run signed here as a verdict and published by the gate as one. A record that
-                // says nothing either way (written before the bit existed) is held to the same:
-                // the comparison says the run is void, and the gate cannot see that it is.
-                let authored = AuthoredPass::of(&comparison);
-                let shows = !authored.is_empty();
-                if record.non_builtin_stabilizer.map_or(shows, |says| says != shows) {
-                    let says = match record.non_builtin_stabilizer {
-                        Some(true) => "that a stabilizer a person or a model wrote applied",
-                        Some(false) => "that every stabilizer that applied was built in",
-                        None => "nothing about who wrote the stabilizers that applied",
-                    };
-                    let evidence = match shows {
-                        true => {
-                            let passes: Vec<String> = authored
-                                .iter()
-                                .map(|a| format!("`{}` ({})", a.id, a.provenance))
-                                .collect();
-                            format!("shows {} applied", passes.join(", "))
-                        }
-                        false => "shows every applied pass was built in".to_string(),
-                    };
-                    bail!(
-                        "run `{id}` records {says}, and the comparison it points at {evidence}. \
-                         A run a hand-written stabilizer applied to is void, and the publication \
-                         gate reads the record to know it. Refusing to attest a run that disagrees \
-                         with its own evidence."
-                    );
-                }
-
-                // Publish the set this claim was made under, addressed by its own digest. A
-                // verifier whose binary carries a different set gets `SetMismatch` and, without
-                // this, nothing else — a digest that matches nothing they have. It does not let
-                // them run the old set, but it says exactly what the claim was made under.
-                //
-                // And keep the manifest as a blob of its canonical JSON, which is the file a
-                // published record carries and the digest the verdict signs as evidence: not the
-                // set digest, which is a hash over the manifest's rows and names no file (`docs/19`
-                // §4.2 item 7).
-                let set_id = comparison.upstream.set.0.as_str();
-                let set = trigon_stabilize::profile(set_id).with_context(|| {
-                    format!(
-                        "the comparison was made under stabilizer set `{set_id}`, which this build \
-                         does not carry, so the claim cannot be re-derived to be signed"
-                    )
-                })?;
-                let manifest = set.manifest();
-                match store.put_stabilizer_set(&manifest).await {
-                    Ok(p) => published_set = Some(p),
-                    Err(e) => tracing::warn!("could not publish the stabilizer set: {e}"),
-                }
-                let manifest_blob = store
-                    .blobs()
-                    .put(trigon_attest::set_manifest_file(&manifest)?)
-                    .await?
-                    .to_hex();
-                judged_under = Some((set_id.to_string(), comparison.upstream.set.1.to_hex()));
-
-                // The subject computed over the bytes above, not the one the comparison blob
-                // carries: that blob was written by the process that ran the build. The two are
-                // checked against each other here and against the bytes again by `rederive`.
-                let comparison_hex = comparison_digest.to_hex();
-                let rebuilt_hex = rebuilt.sha256.to_hex();
-                let run = run_identity(&record, &purl);
-                let facts = VerdictFacts {
-                    run,
-                    derivation: record.derivation.as_deref(),
-                    evidence: EvidenceDigests {
-                        stabilizer_set_manifest: Some(&manifest_blob),
-                        comparison: Some(&comparison_hex),
-                        strategy: hex.strategy.as_deref(),
-                        guard_manifest: guard_manifest.as_deref(),
-                        rebuilt_artifact: Some(&rebuilt_hex),
-                    },
-                    namespace,
-                    supersedes,
-                };
-                let statement =
-                    Statement::verdict(upstream_subject.clone(), &comparison, &facts)
-                        .context("the comparison is not about the run's published artifact")?;
-                let checked = trigon_attest::rederive(&statement, upstream.into(), rebuild.into())
-                    .context("re-deriving the claim before signing it")?;
-                if !checked.holds() {
-                    bail!(
-                        "refusing to sign: the run recorded `{}` and the bytes give `{}`",
-                        checked.claimed,
-                        checked.actual
-                    );
-                }
-                println!(
-                    "rederived {} under {} — signing",
-                    checked.actual, checked.stabilizer_set
-                );
-
-                written.push(put(&store, &target, &record, &statement, signer.as_ref()).await?);
-            } else if supersedes.is_some() {
-                // A supersession rides on the run's result, and a run that compared nothing has
-                // none: its build observation is not a record.
-                bail!(
-                    "run `{id}` reached no comparison, so there is no verdict to supersede the \
-                     record with. A run that is void supersedes as `void/v1`; one that failed to \
-                     build supersedes nothing"
-                );
-            }
-
-            // 2. How the rebuild came to exist, and what the build was observed to do.
-            let facts = RunFacts {
-                stabilizer_set: judged_under
-                    .as_ref()
-                    .map(|(id, digest)| (id.as_str(), digest.as_str())),
-                ..facts(&record, &hex)
-            };
-            if let Some(rebuilt) = &record.rebuild {
-                // sha256 alone only where the rebuilt bytes were not in hand, which a run with a
-                // comparison never reaches: step 1 refuses one whose bytes are gone.
-                let subject = rebuild_subject
-                    .take()
-                    .unwrap_or_else(|| Subject::new(&rebuilt.name, &rebuilt.sha256));
-                let st = Statement::rebuild(subject, &facts);
-                written.push(put(&store, &target, &record, &st, signer.as_ref()).await?);
-            }
-            let obs = Statement::build_observation(upstream_subject, &facts);
-            written.push(put(&store, &target, &record, &obs, signer.as_ref()).await?);
-
+            let signed = sign_run(&store, &id, &config, signer.as_ref(), superseded).await?;
             finish(
                 &store,
                 &id,
-                &record,
-                &written,
-                published_set.as_deref(),
+                &signed.record,
+                &signed.written,
+                signed.published_set.as_deref(),
                 signer.as_ref(),
                 args.prune,
             )
             .await
+        })
+    }
+
+    /// What signs for `rebuild --attest`: the key in `key`, or nothing, and then the statement is
+    /// written unsigned and says so.
+    pub fn signer(key: Option<&Path>) -> Result<Box<dyn trigon_attest::Signer>> {
+        Ok(match key {
+            Some(p) => Box::new(crate::load_key(p)?),
+            None => Box::new(trigon_attest::Unsigned),
+        })
+    }
+
+    /// `trigon rebuild --attest <path>`: sign the run just recorded exactly as `trigon attest`
+    /// signs it, file every statement under it as `trigon attest` files them, and write the one
+    /// about its result — the verdict, or the void — to `path`.
+    ///
+    /// **One signing path**, [`sign_run`], so the two commands cannot disagree about what a run
+    /// supports: a void run gets `void/v1` and never a verdict, from either. `rebuild --attest`
+    /// used to sign the comparison it held in memory, as `equivalence/v1` or `divergence/v1`,
+    /// asking no gate, so at its default `--egress open` every run it signed was a void signed as a
+    /// verdict.
+    pub(crate) fn attest_recorded_with(
+        store: &Path,
+        id: &str,
+        config: &EvidenceConfig,
+        signer: &dyn trigon_attest::Signer,
+        path: &Path,
+    ) -> Result<()> {
+        println!();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async {
+            let store = Store::local(store)?;
+            let signed = sign_run(&store, id, config, signer, None).await?;
+            finish(
+                &store,
+                id,
+                &signed.record,
+                &signed.written,
+                signed.published_set.as_deref(),
+                signer,
+                false,
+            )
+            .await?;
+            match &signed.result {
+                Some(env) => {
+                    let mut json = serde_json::to_string_pretty(env)?;
+                    json.push('\n');
+                    std::fs::write(path, json)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    println!("\nattestation {}", path.display());
+                }
+                // A build that failed, or one that never compared: `trigon attest` signs its build
+                // observation and nothing about a result, because there is none, and there is
+                // nothing to write here either.
+                None => println!(
+                    "\n{}",
+                    crate::style::wrap(
+                        &format!(
+                            "the run reached no verdict and is not void, so there is no statement \
+                             about a result to write to {}; its build observation is filed under \
+                             the run",
+                            path.display()
+                        ),
+                        0
+                    )
+                ),
+            }
+            Ok(())
+        })
+    }
+
+    /// What [`sign_run`] signed and filed.
+    struct Signed {
+        record: RunRecord,
+        /// Every statement filed, by path, in the order it was signed.
+        written: Vec<String>,
+        published_set: Option<String>,
+        /// The statement about the run's result: the verdict, or the void. `None` for a run that
+        /// reached neither.
+        result: Option<trigon_attest::Envelope>,
+    }
+
+    /// Sign what a stored run supports, after re-deriving it from the bytes, and file every
+    /// statement under the run: the one signing path, for `trigon attest` and `trigon rebuild
+    /// --attest` alike.
+    async fn sign_run(
+        store: &Store,
+        id: &str,
+        config: &EvidenceConfig,
+        signer: &dyn trigon_attest::Signer,
+        superseded: Option<Superseded>,
+    ) -> Result<Signed> {
+        let record = store.get_run(id).await?;
+        println!("run       {id}");
+        println!("target    {}", record.target);
+
+        let purl = trigon_core::purl::canonicalize(&record.target).with_context(|| {
+            format!(
+                "run `{id}` is about `{}`, which has no canonical purl, and every statement \
+                 about a published artifact signs one",
+                record.target
+            )
+        })?;
+
+        let mut written = Vec::new();
+        let mut published_set: Option<String> = None;
+
+        let reference = record.target.parse::<trigon_core::TargetRef>()?;
+        let target = trigon_core::Target::new(
+            reference.clone(),
+            trigon_core::ArtifactId::new(record.upstream.name.clone()),
+        );
+        // The published bytes, where the store kept them, fetched by hash and checked against
+        // it. Every statement about the published artifact takes its subject from them.
+        let upstream_bytes = match record.upstream.stored {
+            true => Some(store.blobs().get(&record.upstream.sha256).await?),
+            false => None,
+        };
+        let upstream_subject = upstream_subject(
+            &record,
+            upstream_bytes.as_deref(),
+            reference.ecosystem.publishes_sha1(),
+        )?;
+        let supersedes = match &superseded {
+            Some(s) => Some(s.check(&upstream_subject, &purl)?),
+            None => None,
+        };
+
+        // Before anything else. A void run is evidence of nothing about the package — its
+        // artifact reached the build over the network, or the build had the whole network, or
+        // a stabilizer somebody wrote did the matching — and the one thing we must never do is
+        // sign a verdict about it: for a tripped guard that is the forged-attestation attack,
+        // arriving exactly as designed. The gate's own answer, so this and `trigon serve` and
+        // `publish` cannot disagree about which runs are void.
+        if let Some(because) = trigon_api::publication::voided(&record) {
+            // Folded on a terminal, one line when piped, as every other narrated line is.
+            let said = format!("{}: {}", because.key(), because.sentence());
+            println!("void      {}", crate::style::wrap(&said, 10));
+            println!(
+                "\n{}",
+                crate::style::wrap(
+                    "signing void/v1 and nothing else: a void run gets no verdict, and no \
+                     statement that says which way its comparison went",
+                    0
+                )
+            );
+            let st = void_statement(
+                store,
+                &record,
+                because,
+                &purl,
+                upstream_subject,
+                supersedes,
+            )
+            .await?;
+            let (path, env) = put(store, &target, &record, &st, signer).await?;
+            written.push(path);
+            return Ok(Signed {
+                record,
+                written,
+                published_set: None,
+                result: Some(env),
+            });
+        }
+
+        // Only a verdict signs these, so it is said only where one may be signed.
+        let namespace = namespace(config);
+        let mut result = None;
+        // The rebuilt artifact's subject, from its bytes when step 1 has them in hand.
+        let mut rebuild_subject: Option<Subject> = None;
+        // The set the comparison was made under, for `rebuild` to name as the verdict does.
+        let mut judged_under: Option<(String, String)> = None;
+        // The blobs whose content the statements below vouch for — the network transcript,
+        // counted, and the strategy, recomputed — read before anything is signed, so that a
+        // refusal over either leaves no statement behind it: step 1 files one.
+        let hex = Hex::of(store, &record).await?;
+        let guard_manifest = kept_guard_manifest(store, &record).await;
+
+        // 1. The equivalence (or divergence) claim, re-derived from the bytes.
+        if let Some(comparison_digest) = record.comparison {
+            let bytes = store.blobs().get(&comparison_digest).await?;
+            let comparison: trigon_compare::Comparison = serde_json::from_slice(&bytes)?;
+
+            let rebuilt = record
+                .rebuild
+                .as_ref()
+                .context("a run with a comparison must name a rebuilt artifact")?;
+            if !record.upstream.stored || !rebuilt.stored {
+                bail!(
+                    "the artifacts for this run are no longer in the store, so the claim \
+                     cannot be re-derived. It was pruned after being attested; the existing \
+                     statement is still checkable by anyone holding the two files."
+                );
+            }
+
+            // Fetched by hash and checked against it. The attestor trusts the digest, never the
+            // process that wrote the bytes.
+            let upstream = upstream_bytes
+                .clone()
+                .context("the published artifact is stored, as checked above")?;
+            let rebuild = store.blobs().get(&rebuilt.sha256).await?;
+            rebuild_subject = Some(Subject::of_bytes(&rebuilt.name, &rebuild, false));
+
+            // The record and the evidence it points at must agree. Re-derivation already
+            // catches a forged *comparison*, because it recomputes from the artifact bytes —
+            // but the record is a separate document, and a worker that wrote an honest
+            // comparison beside a record claiming something better would otherwise have that
+            // claim survive into `trigon runs` and anything reading it.
+            if record.outcome.as_deref() != Some(comparison.outcome.to_string().as_str()) {
+                bail!(
+                    "the run record says `{}` and the comparison it points at says `{}`. \
+                     Refusing to attest a run that disagrees with its own evidence.",
+                    record.outcome.as_deref().unwrap_or("nothing"),
+                    comparison.outcome
+                );
+            }
+            // And about who wrote the stabilizers, which is what makes a run void. The gate
+            // reads the record's bit, here and in `serve` and `publish`, so a record saying no
+            // hand-written pass applied, beside a comparison in which one did, would have its
+            // void run signed here as a verdict and published by the gate as one. A record that
+            // says nothing either way (written before the bit existed) is held to the same:
+            // the comparison says the run is void, and the gate cannot see that it is.
+            let authored = AuthoredPass::of(&comparison);
+            let shows = !authored.is_empty();
+            if record.non_builtin_stabilizer.map_or(shows, |says| says != shows) {
+                let says = match record.non_builtin_stabilizer {
+                    Some(true) => "that a stabilizer a person or a model wrote applied",
+                    Some(false) => "that every stabilizer that applied was built in",
+                    None => "nothing about who wrote the stabilizers that applied",
+                };
+                let evidence = match shows {
+                    true => {
+                        let passes: Vec<String> = authored
+                            .iter()
+                            .map(|a| format!("`{}` ({})", a.id, a.provenance))
+                            .collect();
+                        format!("shows {} applied", passes.join(", "))
+                    }
+                    false => "shows every applied pass was built in".to_string(),
+                };
+                bail!(
+                    "run `{id}` records {says}, and the comparison it points at {evidence}. \
+                     A run a hand-written stabilizer applied to is void, and the publication \
+                     gate reads the record to know it. Refusing to attest a run that disagrees \
+                     with its own evidence."
+                );
+            }
+            // And about what it found, which the gate counts two attempts as agreeing by. A record
+            // whose agreement digest is not its comparison's would be counted as confirming — or
+            // contradicting — a run it does not agree with. One recorded before the digest
+            // existed carries none and is counted with nothing, which is not a disagreement.
+            if let Some(recorded) = record.agreement
+                && recorded != comparison.agreement()
+            {
+                bail!(
+                    "run `{id}` records the agreement digest {}, and the comparison it points at \
+                     gives {}. The publication gate counts a second attempt as agreeing by that \
+                     digest. Refusing to attest a run that disagrees with its own evidence.",
+                    recorded.to_hex(),
+                    comparison.agreement().to_hex()
+                );
+            }
+
+            // Publish the set this claim was made under, addressed by its own digest. A
+            // verifier whose binary carries a different set gets `SetMismatch` and, without
+            // this, nothing else — a digest that matches nothing they have. It does not let
+            // them run the old set, but it says exactly what the claim was made under.
+            //
+            // And keep the manifest as a blob of its canonical JSON, which is the file a
+            // published record carries and the digest the verdict signs as evidence: not the
+            // set digest, which is a hash over the manifest's rows and names no file (`docs/19`
+            // §4.2 item 7).
+            let set_id = comparison.upstream.set.0.as_str();
+            let set = trigon_stabilize::profile(set_id).with_context(|| {
+                format!(
+                    "the comparison was made under stabilizer set `{set_id}`, which this build \
+                     does not carry, so the claim cannot be re-derived to be signed"
+                )
+            })?;
+            let manifest = set.manifest();
+            match store.put_stabilizer_set(&manifest).await {
+                Ok(p) => published_set = Some(p),
+                Err(e) => tracing::warn!("could not publish the stabilizer set: {e}"),
+            }
+            let manifest_blob = store
+                .blobs()
+                .put(trigon_attest::set_manifest_file(&manifest)?)
+                .await?
+                .to_hex();
+            judged_under = Some((set_id.to_string(), comparison.upstream.set.1.to_hex()));
+
+            // The subject computed over the bytes above, not the one the comparison blob
+            // carries: that blob was written by the process that ran the build. The two are
+            // checked against each other here and against the bytes again by `rederive`.
+            let comparison_hex = comparison_digest.to_hex();
+            let rebuilt_hex = rebuilt.sha256.to_hex();
+            let run = run_identity(&record, &purl);
+            let facts = VerdictFacts {
+                run,
+                derivation: record.derivation.as_deref(),
+                evidence: EvidenceDigests {
+                    stabilizer_set_manifest: Some(&manifest_blob),
+                    comparison: Some(&comparison_hex),
+                    strategy: hex.strategy.as_deref(),
+                    guard_manifest: guard_manifest.as_deref(),
+                    rebuilt_artifact: Some(&rebuilt_hex),
+                },
+                namespace,
+                supersedes,
+            };
+            let statement =
+                Statement::verdict(upstream_subject.clone(), &comparison, &facts)
+                    .context("the comparison is not about the run's published artifact")?;
+            let checked = trigon_attest::rederive(&statement, upstream.into(), rebuild.into())
+                .context("re-deriving the claim before signing it")?;
+            if !checked.holds() {
+                bail!(
+                    "refusing to sign: the run recorded `{}` and the bytes give `{}`",
+                    checked.claimed,
+                    checked.actual
+                );
+            }
+            println!(
+                "rederived {} under {} — signing",
+                checked.actual, checked.stabilizer_set
+            );
+
+            let (path, env) = put(store, &target, &record, &statement, signer).await?;
+            written.push(path);
+            result = Some(env);
+        } else if supersedes.is_some() {
+            // A supersession rides on the run's result, and a run that compared nothing has
+            // none: its build observation is not a record.
+            bail!(
+                "run `{id}` reached no comparison, so there is no verdict to supersede the \
+                 record with. A run that is void supersedes as `void/v1`; one that failed to \
+                 build supersedes nothing"
+            );
+        }
+
+        // 2. How the rebuild came to exist, and what the build was observed to do.
+        let facts = RunFacts {
+            stabilizer_set: judged_under
+                .as_ref()
+                .map(|(id, digest)| (id.as_str(), digest.as_str())),
+            ..facts(&record, &hex)
+        };
+        if let Some(rebuilt) = &record.rebuild {
+            // sha256 alone only where the rebuilt bytes were not in hand, which a run with a
+            // comparison never reaches: step 1 refuses one whose bytes are gone.
+            let subject = rebuild_subject
+                .take()
+                .unwrap_or_else(|| Subject::new(&rebuilt.name, &rebuilt.sha256));
+            let st = Statement::rebuild(subject, &facts);
+            written.push(put(store, &target, &record, &st, signer).await?.0);
+        }
+        let obs = Statement::build_observation(upstream_subject, &facts);
+        written.push(put(store, &target, &record, &obs, signer).await?.0);
+
+        Ok(Signed {
+            record,
+            written,
+            published_set,
+            result,
         })
     }
 
@@ -10653,16 +12014,16 @@ mod attestor {
         Ok(())
     }
 
-    /// Sign a statement and file it under this run.
+    /// Sign a statement and file it under this run: where it was filed, and what was signed.
     async fn put(
         store: &Store,
         target: &trigon_core::Target,
         record: &RunRecord,
         st: &Statement,
         signer: &dyn trigon_attest::Signer,
-    ) -> Result<String> {
+    ) -> Result<(String, trigon_attest::Envelope)> {
         let env = trigon_attest::sign_statement(st, signer)?;
-        Ok(store
+        let path = store
             .put_attestation(
                 target,
                 &record.id,
@@ -10670,7 +12031,8 @@ mod attestor {
                 &st.predicate_type,
                 &env,
             )
-            .await?)
+            .await?;
+        Ok((path, env))
     }
 
     /// The subject of every statement about the published artifact.
@@ -10723,6 +12085,8 @@ mod attestor {
         network_transcript: Option<(String, u64, u64)>,
         build_log: Option<String>,
         instructions: Option<String>,
+        /// The model exchange's digest, `RunRecord.transcript`, for `derivation.transcript`.
+        transcript: Option<String>,
         /// The strategy blob's digest, which is what the `strategy.json` byproduct names.
         strategy: Option<String>,
     }
@@ -10762,6 +12126,7 @@ mod attestor {
                 network_transcript,
                 build_log: r.build_log.map(|d| d.to_hex()),
                 instructions: r.instructions.map(|d| d.to_hex()),
+                transcript: r.transcript.map(|d| d.to_hex()),
                 strategy,
             })
         }
@@ -10865,6 +12230,9 @@ mod attestor {
                 how: s.how.as_str(),
             }),
             derivation: r.derivation.as_deref(),
+            // The model exchange the run kept, where it kept one. It was signed as `null` whatever
+            // the run held.
+            transcript: hex.transcript.as_deref(),
             instructions: hex.instructions.as_deref(),
             build_log: hex.build_log.as_deref(),
             trigon_version: crate::TRIGON_VERSION,
@@ -10960,6 +12328,7 @@ mod attestor {
                 network_transcript: None,
                 build_log: None,
                 instructions: None,
+                transcript: None,
                 strategy: None,
             };
             let f = facts(&r, &hex);
@@ -10989,6 +12358,7 @@ mod attestor {
                 network_transcript: None,
                 build_log: None,
                 instructions: None,
+                transcript: None,
                 strategy: None,
             };
             let s = trigon_attest::Statement::build_observation(

@@ -70,6 +70,15 @@ pub struct RunFacts<'a> {
     /// `definition`, `heuristic`, `ci_derived`, `model_assisted`. `None` leaves the method out
     /// of the statement rather than naming one nobody recorded.
     pub derivation: Option<&'a str>,
+    /// Hex SHA-256 of the model exchange the strategy came out of (`RunRecord.transcript`), where
+    /// the run kept one.
+    ///
+    /// Signed as `derivation.transcript`, which was `null` on every statement whatever the run
+    /// held: 24 of 75 attested runs in one store had kept a transcript, and not one statement
+    /// named it. The bytes are not published (`docs/19` §4.1, they are unredacted); the digest
+    /// binds the derivation to the exchange a holder of it can check. `None` only where the run
+    /// recorded none, which is most runs, since most ask no model.
+    pub transcript: Option<&'a str>,
     /// Digest of the rendered instructions, which is what actually ran.
     pub instructions: Option<&'a str>,
     pub build_log: Option<&'a str>,
@@ -216,7 +225,7 @@ impl Statement {
             // Provenance, beside the claim rather than inside it. A consumer who wants to filter on
             // "no model touched this" can; offering that costs one field (`docs/09` §4).
             "derivation": {
-                "transcript": Value::Null,
+                "transcript": f.transcript.map_or(Value::Null, |d| json!({ "sha256": d })),
                 "reviewedBy": Value::Null,
             },
             // Not a footnote. A pass at open egress is a weaker claim than a pass under an enforced
@@ -339,6 +348,7 @@ mod tests {
                 how: "registry_commit",
             }),
             derivation: Some("heuristic"),
+            transcript: None,
             instructions: None,
             build_log: Some("aa".repeat(32).leak()),
             trigon_version: "0.0.0",
@@ -386,6 +396,37 @@ mod tests {
         );
         // The rest of the block is still there, so a reader sees the method is what is missing.
         assert!(s.predicate["derivation"]["transcript"].is_null());
+    }
+
+    /// The model exchange a run kept is named, by digest, and one it did not keep is not.
+    ///
+    /// `derivation.transcript` was `Value::Null` whatever the run held, so 24 of 75 attested runs
+    /// in one store had a transcript digest no statement signed: a `model_assisted` derivation with
+    /// nothing binding it to the exchange it came out of is an assertion, not a record.
+    #[test]
+    fn the_transcript_the_run_kept_is_signed_and_one_it_did_not_is_absent() {
+        let d = Digest::from_bytes([6; 32]);
+        let kept = "3f".repeat(32);
+        let with = Statement::rebuild(
+            Subject::new("a.tgz", &d),
+            &RunFacts {
+                derivation: Some("model_assisted"),
+                transcript: Some(&kept),
+                ..facts()
+            },
+        );
+        assert_eq!(
+            with.predicate["derivation"]["transcript"],
+            serde_json::json!({ "sha256": kept })
+        );
+
+        let without = Statement::rebuild(Subject::new("a.tgz", &d), &facts());
+        assert!(
+            without.predicate["derivation"]["transcript"].is_null(),
+            "a run that kept no transcript is signed as having none, not as having an empty one: \
+             {}",
+            without.predicate["derivation"]
+        );
     }
 
     #[test]

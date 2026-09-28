@@ -829,6 +829,11 @@ caching is worth having — the deps layer is shared across sibling versions of 
 artifacts with different raw digests and the same stabilized one. Until then, nothing in this system
 performs a clean re-run at all, so the requirement is unmet for a reason older than this entry.
 
+**The first half is done.** The re-run path exists since [`19`](19-distribution-and-lookup.md) §10
+phase 3 — `trigon rebuild --confirm`, and a worker's confirming attempt — and it builds with
+`--no-cache` whatever the environment says, and records that it did (`RunRecord::cache`). The test
+of two real re-runs needs podman and a registry, and is still to write.
+
 ## B16. System libraries are the one input a rebuild does not pin
 
 A rebuild pins the registry index to the package's publish moment, pins the toolchain by version,
@@ -961,8 +966,9 @@ correction by supersession; and consumers who clone the repository, verify the w
 a lockfile from their own copy with no request per dependency. The order is docs/19 §10, and the
 decisions each phase waits on are its §11.
 
-Phases 0 (the anonymous `POST /v1/check` no longer bypasses the gate), 0b (the decisions) and 1
-(Rekor and Sigstore removed) are done.
+Phases 0 (the anonymous `POST /v1/check` no longer bypasses the gate), 0b (the decisions), 1
+(Rekor and Sigstore removed), 2 (the statements a published record needs) and 3 (a run can reach
+`Published` through a confirming attempt, B31) are done.
 
 **Done when:** each remaining phase of docs/19 §10 meets its own done-when list: 2, the statements
 carry every field a published record needs (after D3); 3, a run can reach `Published` through a
@@ -1367,7 +1373,29 @@ narrower question inside this one, and it is worth answering carefully: making t
 what was signed is the point of that command, and a subcommand that rewrites a record mid-attestation
 is not obviously safe.
 
-## B31. "Two agreeing attempts" is agreement on a four-letter string
+## B31. ~~"Two agreeing attempts" is agreement on a four-letter string~~ — closed
+
+Closed by [`19`](19-distribution-and-lookup.md) §10 phase 3, and recorded in [`16`](16-findings.md)
+§3.97. Every cache key, worker and CLI alike, is built by one function, `trigon_store::cache_key`,
+over the target (canonical purl and artifact), the strategy digest and the stabilizer-set digest, by
+the run that knows them; a job's own key names the request and is never copied onto a record, and a
+run whose key cannot be computed gets none. Two attempts agree on `RunRecord::agreement` —
+`Comparison::agreement`, a digest over the outcome, the set, the published artifact's raw digest and
+both sides' stabilized digests, which the six Newtonsoft.Json builds below share per set — and
+`corroboration_is_counted_as_its_doc_says` holds `index::build` to `Corroboration`'s doc. A
+deliberate pair is declared by `trigon rebuild --confirm <run>`, which repeats the run's stored
+strategy under its set with every cache emptied and its image re-pulled, rather than by a
+`--cache-key` a person types: a key asserted by hand is the invented key the old comment warned
+about. Each attempt records its host, its cache state and when it began, and the gate refuses a pair
+on one machine unless `same_host_confirmation` allows it, and then only a cold, re-pulled
+confirmation, and a pair begun less than `confirmation_interval` apart; two machines are two host
+ids derived from machine ids, since a hostname names a container as readily. A worker's confirmation
+is queued to avoid the machine that made the first attempt unless `same_host_confirmation` is set,
+and a void verdict is not asked again.
+
+The runs measured below keep what they had: `cache_key: None`, and no agreement digest, so they
+confirm nothing. `rebuild --confirm` refuses them, because an attempt keyed on what it ran would
+never be counted beside them; rebuilding the target and confirming that run is the way to a pair.
 
 ADR-0010's first safeguard is that nothing publishes until two attempts at the same work agree.
 Three things have to be true for that to mean anything: the two runs must be attempts at the same

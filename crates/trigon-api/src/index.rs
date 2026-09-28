@@ -19,7 +19,7 @@
 //! the plan replaces it behind the same reader. Until then a laptop and a bucket are enough, and
 //! the site exists.
 
-use crate::publication::{Corroboration, Publication, Switches, decide};
+use crate::publication::{Attempt, Corroboration, Publication, Switches, decide, voided};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -132,8 +132,17 @@ impl Entry {
 /// hide, a field since removed with the log (ADR-0014). A list of fields to remove misses the next
 /// one, so the record is taken apart without `..`, and a field added to `RunRecord` does not
 /// compile here until somebody has decided whether an anonymous reader of a void may see it.
+///
+/// **And the host id, from an anonymous reader of any run.** It is a keyed hash under a key that
+/// is in the source, so where it was derived from a hostname anyone can check a guess at the
+/// hostname against it, and a hostname is often a person's name — the leak `host_id` exists to
+/// prevent. The gate reads the index's own records, never these, so a reader loses nothing by it.
 pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> RunRecord {
-    if !(public && matches!(publication, Publication::Void { .. })) {
+    if !public {
+        return r;
+    }
+    let r = RunRecord { host: None, ..r };
+    if !matches!(publication, Publication::Void { .. }) {
         return r;
     }
     let RunRecord {
@@ -145,6 +154,10 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         finished,
         attempt,
         cache_key,
+        // Kept: what the attempt could reuse and when it began, both settled before anything was
+        // built. The machine it ran on is removed above, for every anonymous reader.
+        host: _,
+        cache,
         // Kept: the facts that establish the void — what tripped, which egress tier, whether a
         // pass somebody wrote applied — which §4.3 says a void carries.
         guard_trips,
@@ -177,6 +190,11 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         network_transcript,
         // Gone: the verdict itself.
         outcome: _,
+        // Gone: a digest over the outcome, the published artifact's digest and both sides'
+        // stabilized digests. A reader holding the published artifact can compute its two, and
+        // for every match the rebuilt side's is the same, so four guesses at the outcome would
+        // find the one this hashes.
+        agreement: _,
         // Gone: the rebuilt artifact. See above: its digest and its retention both say the verdict.
         rebuild: _,
         // Gone: named by predicate (`divergence.intoto.json`), pointing at statements
@@ -207,6 +225,9 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         finished,
         attempt,
         cache_key,
+        agreement: None,
+        host: None,
+        cache,
         environment,
         strategy,
         strategy_digest,
@@ -595,20 +616,11 @@ impl Query {
 
 /// Turn records into rows, running the publication gate over the whole set at once.
 ///
-/// The gate needs a fact about a *set* — how many other attempts at the same `cache_key` agreed —
-/// so it cannot be computed one record at a time. That is why this is a function over the map
-/// rather than a method on `Entry`.
+/// The gate needs a fact about a *set* — which other attempts at the same `cache_key` agreed, and
+/// where and when they ran — so it cannot be computed one record at a time. That is why this is a
+/// function over the map rather than a method on `Entry`.
 fn build(records: &BTreeMap<String, RunRecord>, switches: Switches) -> Vec<Entry> {
-    // `cache_key -> (outcome -> count)`. A record with no cache key corroborates nothing, including
-    // itself: two runs that cannot be shown to be attempts at the same work are not a confirmation,
-    // and treating a missing key as a match would turn the absence of evidence into evidence.
-    let mut attempts: BTreeMap<&str, BTreeMap<&str, u32>> = BTreeMap::new();
-    for r in records.values() {
-        if let (Some(k), Some(o)) = (r.cache_key.as_deref(), r.outcome.as_deref()) {
-            *attempts.entry(k).or_default().entry(o).or_default() += 1;
-        }
-    }
-
+    let attempts = attempts_by_key(records);
     let mut out: Vec<Entry> = records
         .values()
         .map(|r| {
@@ -633,7 +645,7 @@ fn build(records: &BTreeMap<String, RunRecord>, switches: Switches) -> Vec<Entry
                 attempt: r.attempt,
                 evidence: r.is_evidence(),
                 attested: !r.attestations.is_empty(),
-                publication: decide(r, c, switches),
+                publication: decide(r, &c, switches),
                 has: Has {
                     comparison: r.comparison.is_some(),
                     build_log: r.build_log.is_some(),
@@ -650,7 +662,27 @@ fn build(records: &BTreeMap<String, RunRecord>, switches: Switches) -> Vec<Entry
     out
 }
 
-fn corroboration(r: &RunRecord, attempts: &BTreeMap<&str, BTreeMap<&str, u32>>) -> Corroboration {
+/// `cache_key -> the attempts at it that reached an outcome`, which [`corroboration`] counts.
+///
+/// A record with no cache key corroborates nothing, including itself: two runs that cannot be
+/// shown to be attempts at the same work are not a confirmation, and treating a missing key as a
+/// match would turn the absence of evidence into evidence. A void attempt is left out too, for the
+/// reason it is void: it is evidence of nothing about the package, so it can neither confirm
+/// another attempt nor contradict one. Egress is not in the key, and `trigon rebuild` defaults to
+/// `open`, so without this an open-egress rebuild would confirm a `mirror-only` one.
+fn attempts_by_key(records: &BTreeMap<String, RunRecord>) -> BTreeMap<&str, Vec<&RunRecord>> {
+    let mut attempts: BTreeMap<&str, Vec<&RunRecord>> = BTreeMap::new();
+    for r in records.values() {
+        if let (Some(k), Some(_)) = (r.cache_key.as_deref(), r.outcome.as_deref())
+            && voided(r).is_none()
+        {
+            attempts.entry(k).or_default().push(r);
+        }
+    }
+    attempts
+}
+
+fn corroboration(r: &RunRecord, attempts: &BTreeMap<&str, Vec<&RunRecord>>) -> Corroboration {
     // From the record, where the run path writes it: the fact lives in the comparison blob and the
     // index does not fetch blobs. `None` on a record written before the field existed reaches the
     // gate as `None` and is treated as an unevaluated safeguard — which is what the previous
@@ -664,20 +696,42 @@ fn corroboration(r: &RunRecord, attempts: &BTreeMap<&str, BTreeMap<&str, u32>>) 
         non_builtin_stabilizer: r.non_builtin_stabilizer,
         ..Corroboration::default()
     };
-    let (Some(k), Some(o)) = (r.cache_key.as_deref(), r.outcome.as_deref()) else {
+    let (Some(k), Some(_)) = (r.cache_key.as_deref(), r.outcome.as_deref()) else {
         return own;
     };
-    let Some(by_outcome) = attempts.get(k) else {
+    let Some(at_key) = attempts.get(k) else {
         return own;
     };
-    Corroboration {
-        agreeing_attempts: by_outcome.get(o).copied().unwrap_or(0),
-        disagreeing_attempts: by_outcome
-            .iter()
-            .filter(|(other, _)| **other != o)
-            .map(|(_, n)| *n)
-            .sum(),
-        ..own
+    let mut c = own;
+    for other in at_key {
+        match agrees(r, other) {
+            Some(true) => c.agreeing_attempts.push(Attempt::of(other)),
+            Some(false) => c.disagreeing_attempts += 1,
+            None => {}
+        }
+    }
+    c
+}
+
+/// Whether two attempts at one cache key agree, disagree, or cannot be told apart.
+///
+/// **By agreement digest, never by outcome alone.** Two runs that both landed on `divergent`
+/// agreed on nine letters, whatever each found: a divergence in the nuspec confirmed a divergence
+/// in every DLL. Different outcomes disagree whatever else the records say. The same outcome
+/// agrees only where both records carry the digest over what the comparison found and it is one
+/// digest, and disagrees where they carry two; where either record carries none — every run
+/// recorded before the digest existed — nothing can be said, and nothing is counted either way.
+/// A run always agrees with itself, which is what makes one attempt a count of one.
+fn agrees(r: &RunRecord, other: &RunRecord) -> Option<bool> {
+    if r.id == other.id {
+        return Some(true);
+    }
+    if r.outcome != other.outcome {
+        return Some(false);
+    }
+    match (r.agreement, other.agreement) {
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
     }
 }
 
@@ -724,7 +778,25 @@ mod tests {
         r.state = RunState::Done;
         r.outcome = outcome.map(str::to_string);
         r.cache_key = key.map(str::to_string);
+        // Each run on a machine of its own, and runs with one outcome finding one thing, so two
+        // attempts at a key with one outcome are a confirmation unless a test says otherwise.
+        r.host = Some(format!("machine-id:{id}"));
+        r.cache = Some(trigon_store::CacheState::default());
+        r.agreement = outcome.map(|o| trigon_store::digest_of(o.as_bytes()));
         r
+    }
+
+    /// Every fixture here begins at one instant, so the gate these build asks for no interval
+    /// between attempts; the interval is asserted in `publication.rs`, and through this index in
+    /// `the_index_holds_a_pair_to_the_confirmation_rules`.
+    fn no_interval() -> Switches {
+        Switches {
+            confirmation: crate::publication::Confirmation {
+                interval: std::time::Duration::ZERO,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     fn index_of(rs: Vec<RunRecord>) -> Index {
@@ -734,7 +806,7 @@ mod tests {
             for r in rs {
                 g.records.insert(r.id.clone(), r);
             }
-            g.entries = build(&g.records, Switches::default());
+            g.entries = build(&g.records, no_interval());
         }
         ix
     }
@@ -900,6 +972,7 @@ mod tests {
                 &g.records,
                 Switches {
                     stop_divergences: true,
+                    ..no_interval()
                 },
             );
             let reasons: Vec<_> = g
@@ -1017,6 +1090,177 @@ mod tests {
             ix.entry("1800000001-cli").unwrap().publication,
             Publication::Void {
                 because: crate::publication::Withheld::NonBuiltinStabilizer
+            }
+        );
+    }
+
+    /// `Corroboration::agreeing_attempts` says "whose outcome and agreement digest match", and
+    /// this holds `build` to it rather than leaving the two to be read side by side — which is
+    /// how the gate came to count agreement on the outcome string for as long as it did
+    /// (`docs/17-backlog.md` B31).
+    #[test]
+    fn corroboration_is_counted_as_its_doc_says() {
+        let at = |id: &str, outcome: &str, found: &str| {
+            let mut r = rec(id, "pkg:npm/a@1", Some(outcome), Some("k"));
+            r.agreement = Some(trigon_store::digest_of(found.as_bytes()));
+            r
+        };
+        let this = at("1700000001-a", "divergent", "the nuspec differs");
+        let rs = [
+            this.clone(),
+            // Same outcome, same finding: agrees.
+            at("1700000002-b", "divergent", "the nuspec differs"),
+            // Same outcome, another finding: a disagreement, not a confirmation.
+            at("1700000003-c", "divergent", "every DLL differs"),
+            // Another outcome: a disagreement.
+            at("1700000004-d", "exact", "exact"),
+            // Same outcome and no digest: recorded before it existed, and counted neither way.
+            {
+                let mut r = at("1700000005-e", "divergent", "x");
+                r.agreement = None;
+                r
+            },
+            // Same outcome, same finding, and void: evidence of nothing, counted neither way.
+            {
+                let mut r = at("1700000006-f", "divergent", "the nuspec differs");
+                r.environment.egress = "open".into();
+                r
+            },
+            // Same finding at another key: another question.
+            {
+                let mut r = at("1700000007-g", "divergent", "the nuspec differs");
+                r.cache_key = Some("other".into());
+                r
+            },
+        ];
+        let records: BTreeMap<String, RunRecord> =
+            rs.iter().map(|r| (r.id.clone(), r.clone())).collect();
+        // Grouped by the function `build` groups by, not by a copy of it here.
+        let c = corroboration(&this, &attempts_by_key(&records));
+        let agreeing: Vec<&str> = c.agreeing_attempts.iter().map(|a| a.run.as_str()).collect();
+        assert_eq!(agreeing, ["1700000001-a", "1700000002-b"]);
+        assert_eq!(c.disagreeing_attempts, 2, "c and d");
+
+        // And the index, built the same way, reaches the same verdict about the set: the
+        // disagreement withholds, whatever else agreed.
+        let ix = index_of(rs.to_vec());
+        assert_eq!(
+            ix.entry("1700000001-a").unwrap().publication,
+            Publication::Withheld {
+                because: crate::publication::Withheld::AttemptsDisagree
+            }
+        );
+    }
+
+    /// A void attempt at a key neither confirms another attempt there nor contradicts it, through
+    /// `build`, with the gate `trigon serve` builds when there is no configuration.
+    ///
+    /// Egress is not in the key and `trigon rebuild` defaults to `open`, so this one clause is what
+    /// stops a plain rebuild of a target confirming a `mirror-only` one. It had no test that went
+    /// through `build`: the one above grouped the attempts itself, with its own copy of the filter.
+    #[test]
+    fn a_void_attempt_neither_confirms_nor_contradicts_another_at_its_key() {
+        use crate::publication::Withheld;
+        let at = |id: &str, host: &str, started: &str| {
+            let mut r = rec(id, "pkg:npm/a@1", Some("exact"), Some("k"));
+            r.host = Some(host.into());
+            r.started = started.into();
+            r
+        };
+        let clean = at("1700000001-a", "machine-id:one", "2026-09-27T10:00:00Z");
+        let decided = |other: &RunRecord| {
+            let ix = Index::new();
+            {
+                let mut g = ix.inner.write().unwrap();
+                for r in [clean.clone(), other.clone()] {
+                    g.records.insert(r.id.clone(), r);
+                }
+                g.entries = build(&g.records, Switches::default());
+            }
+            ix.entry(&clean.id).unwrap().publication
+        };
+        // Another machine, an hour later, finding the same thing: a confirmation, while clean.
+        let later = at("1700000002-b", "machine-id:two", "2026-09-27T11:00:00Z");
+        assert_eq!(decided(&later), Publication::Published);
+
+        let mut open = later.clone();
+        open.environment.egress = "open".into();
+        let mut tripped = later.clone();
+        tripped
+            .guard_trips
+            .push("package/index.js arrived from registry.npmjs.org".into());
+        for (what, void) in [("at open egress", open), ("whose guard tripped", tripped)] {
+            assert_eq!(
+                decided(&void),
+                Publication::Withheld {
+                    because: Withheld::AwaitingConfirmation
+                },
+                "an attempt {what} confirmed a clean one"
+            );
+            let mut found_otherwise = void;
+            found_otherwise.outcome = Some("divergent".into());
+            found_otherwise.agreement = Some(trigon_store::digest_of(b"divergent"));
+            assert_eq!(
+                decided(&found_otherwise),
+                Publication::Withheld {
+                    because: Withheld::AwaitingConfirmation
+                },
+                "an attempt {what} contradicted a clean one"
+            );
+        }
+    }
+
+    /// An anonymous reader is shown no host id, on a published run or a void one, and an operator
+    /// is shown it.
+    #[test]
+    fn an_anonymous_reader_is_shown_no_host_id() {
+        let r = rec("1700000001-a", "pkg:npm/a@1", Some("exact"), Some("k"));
+        assert!(r.host.is_some());
+        let void = Publication::Void {
+            because: crate::publication::Withheld::OpenEgress,
+        };
+        for publication in [Publication::Published, void] {
+            assert_eq!(record_shown(r.clone(), publication, true).host, None);
+            assert_eq!(record_shown(r.clone(), publication, false).host, r.host);
+        }
+    }
+
+    /// Through the index, with the gate `trigon serve` builds when there is no configuration: a
+    /// second agreeing attempt counts only on another machine and an hour after the first.
+    #[test]
+    fn the_index_holds_a_pair_to_the_confirmation_rules() {
+        use crate::publication::Withheld;
+        let pair = |second_host: &str, second_started: &str| {
+            let mut first = rec("1700000001-a", "pkg:npm/a@1", Some("exact"), Some("k"));
+            first.host = Some("machine-id:one".into());
+            first.started = "2026-09-27T10:00:00Z".into();
+            let mut second = rec("1700000002-b", "pkg:npm/a@1", Some("exact"), Some("k"));
+            second.host = Some(second_host.into());
+            second.started = second_started.into();
+            let ix = Index::new();
+            {
+                let mut g = ix.inner.write().unwrap();
+                for r in [first, second] {
+                    g.records.insert(r.id.clone(), r);
+                }
+                g.entries = build(&g.records, Switches::default());
+            }
+            ix.entry("1700000002-b").unwrap().publication
+        };
+        assert_eq!(
+            pair("machine-id:two", "2026-09-27T11:00:00Z"),
+            Publication::Published
+        );
+        assert_eq!(
+            pair("machine-id:two", "2026-09-27T10:59:59Z"),
+            Publication::Withheld {
+                because: Withheld::AttemptsTooClose
+            }
+        );
+        assert_eq!(
+            pair("machine-id:one", "2026-09-27T12:00:00Z"),
+            Publication::Withheld {
+                because: Withheld::SameHost
             }
         );
     }

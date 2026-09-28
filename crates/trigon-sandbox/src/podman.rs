@@ -898,6 +898,96 @@ pub fn is_pinned(image: &str) -> bool {
     id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Whether `image` is a registry's image pinned by digest, which is what can be pulled again.
+///
+/// A bare id, anything under `localhost/`, and a name with no registry path name bytes that exist
+/// only in this machine's store; a tag names nothing in particular.
+pub fn repullable(image: &str) -> Result<(), String> {
+    let Some((name, digest)) = image.split_once("@sha256:") else {
+        return Err(format!(
+            "`{image}` is not pinned by a registry digest, so there is nothing to pull again by"
+        ));
+    };
+    if name.is_empty()
+        || name.starts_with("localhost/")
+        || !name.contains('/')
+        || digest.len() != 64
+        || !digest.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(format!(
+            "`{image}` exists only in this machine's image store, so it has no registry to be \
+             pulled again from"
+        ));
+    }
+    Ok(())
+}
+
+/// Take a base image out of the local store and pull it again from its registry, by digest.
+///
+/// What a confirming attempt on the machine that made the first attempt asks of its image
+/// (`docs/19` D8): that it came from the registry for this attempt, and not from whatever the store
+/// has held since the first. **Only claimed where it happened**: the image is removed, observed to
+/// be gone, and pulled, and anything short of that is an `Err` saying why, which the caller records
+/// as an image that was not re-pulled.
+///
+/// The removal takes the store's lock exclusively, as every removal does, so it cannot take a
+/// layer from under a build reading it; it waits a little for one to finish rather than giving up
+/// at once. It is never forced: an image in use by a container, or the parent of another image,
+/// stays, and the attempt says it was not re-pulled.
+pub fn repull(binary: &str, image: &str) -> Result<(), String> {
+    repullable(image)?;
+    let exists = || {
+        std::process::Command::new(binary)
+            .args(["image", "exists", image])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if exists() {
+        let mut lock = None;
+        for _ in 0..40 {
+            lock = crate::store_lock::StoreLock::try_exclusive();
+            if lock.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        if lock.is_none() {
+            return Err(
+                "another build held the image store for ten seconds, so the image could not be \
+                 taken out of it"
+                    .into(),
+            );
+        }
+        let out = std::process::Command::new(binary)
+            .args(["image", "rm", image])
+            .output()
+            .map_err(|e| format!("podman could not be run to remove it: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "podman would not remove it ({}): it is in use by a container or is the parent of \
+                 another image",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        if exists() {
+            return Err(
+                "it was still in the image store after it was removed, under another name".into(),
+            );
+        }
+    }
+    let out = std::process::Command::new(binary)
+        .args(["pull", "--quiet", image])
+        .output()
+        .map_err(|e| format!("podman could not be run to pull it: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "pulling it again failed: {}",
+            runtime_complaint(&String::from_utf8_lossy(&out.stderr))
+        ));
+    }
+    Ok(())
+}
+
 /// Which phase script the image build died in.
 ///
 /// Read from the last `RUN /bin/sh /trigon/<phase>.sh` the builder announced, because that is the

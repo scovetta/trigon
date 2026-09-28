@@ -4079,3 +4079,192 @@ For the owner:
   merge that keeping case exists to avoid; dropping only the version-bearing ones is a list that
   becomes protocol. The vectors are protocol too, so this is decided before the first record is
   published.
+
+### 3.97 A run can be published: keys from what it ran, agreement on what it found, a confirmation
+
+`docs/19` §10 phase 3 (backlog B31), and three things phase 2 left, on 2026-09-28. Nothing
+publishes yet — that is phase 5 — but a run can now reach `Published` in the gate `serve` asks and
+`publish` will ask, and before this none could.
+
+**What changed.**
+
+- **One function builds every cache key**, `trigon_store::cache_key`: the canonical purl, the
+  artifact's name, the strategy digest and the stabilizer-set digest, as canonical JSON, hashed and
+  prefixed `ck1:`. The run builds it where it writes its record, from what the record holds —
+  `record_run` from the comparison's set, `record_terminal` from the set the artifact would be
+  judged under — so a worker, `rebuild` and `sweep` key alike, and a run with no strategy has no
+  key rather than part of one. The worker no longer copies its job's key onto the record.
+- **A job's key names the request.** `trigon enqueue` and `POST /v1/runs` key a first attempt on
+  `trigon_store::request_key`, the canonical purl, because nothing that enqueues knows the strategy
+  a worker will infer. The engine queues a confirmation under the first attempt's record key, names
+  that run in the payload as `confirm`, and delays it by the configured `confirmation_interval`
+  (`trigon worker` reads it), where it used five minutes against an interval of an hour.
+- **Attempts agree on what they found.** `RunRecord::agreement` is `Comparison::agreement`, a digest
+  over the outcome, the set, the published artifact's raw digest and both sides' stabilized digests.
+  The index counts two attempts at a key as agreeing only where both carry one and it is one digest,
+  as disagreeing where the outcomes differ or the digests do, and neither where a record carries
+  none. A void attempt is left out of both counts. `corroboration_is_counted_as_its_doc_says` holds
+  `index::build` to `Corroboration`'s doc.
+- **Each attempt records where, how and when it ran**: `RunRecord::host`, an HMAC-SHA256 of
+  `/etc/machine-id` (or D-Bus's `/var/lib/dbus/machine-id`) under a key of Trigon's own, or of the
+  hostname where there is neither, prefixed with which; `RunRecord::cache`, the caches the attempt
+  let supply it (`build-layers`, `fetch`, `sources`, `derived-image`; empty is cold) and whether its
+  base image was re-pulled; and `started`, which is now when the attempt began on every path.
+- **`trigon rebuild --confirm <run>`** repeats a stored run: its target and artifact, the strategy
+  from its blob, its set, the image and tier it ran on, with no model, no ladder and no repair. It
+  builds with `--no-cache`, checks the source out into a directory of its own emptied first, uses
+  no fetch cache, and removes the base image from the store and pulls it again by digest
+  (`trigon_sandbox::repull`), recording what of that happened. It refuses, before any registry is
+  asked, a run with no verdict, a void run, one with no strategy blob, one whose strategy digest
+  these tools do not reproduce, one judged under a set this binary does not carry as it was, one
+  not keyed as runs are now keyed, and one that does not record its source; after the fetch, it
+  refuses a registry that now serves other bytes. A worker's second attempt is the same code.
+- **`decide` holds a pair to the operator's settings** (`Switches::confirmation`, from `[publish]`
+  wherever the gate runs): some pair of agreeing attempts must record a machine and a start, the
+  later must begin at least `confirmation_interval` after the earlier, and they must be on two
+  machines, or on one where `same_host_confirmation` is set and the later was cold and re-pulled.
+  Four new reasons say which fell short — `confirmation_unrecorded`, `attempts_too_close`,
+  `same_host`, `confirmation_not_cold` — the nearest pair's, and an anonymous reader still sees one
+  withheld total. `trigon serve` reads the settings, prints them, and starts with the defaults when
+  there is no `evidence.toml`; `attest` asks `voided`, which no setting can change, and a test now
+  says so.
+- **`rebuild --attest` signs through `trigon attest`'s code** (`attestor::sign_run`): it needs
+  `--store`, signs the recorded run whatever it ended as, files every statement under it, and writes
+  the verdict or the void to its path. At `--egress open`, its default, it signed every run as a
+  verdict. P6 holds without a qualification now: no path signs a verdict for a run the gate voids.
+  `verify --attest` still signs `equivalence/v1` about two local files, and its help, `docs/09` and
+  the threat model say that is not publishable.
+- **`rebuild/v1` signs `derivation.transcript`** as `{"sha256": …}` where the run kept a model
+  exchange, and `null` only where it kept none. 24 of the 75 attested runs in the local store kept
+  one that no statement named.
+- **`pkg1` is the package.** The versionless form is `pkg:<type>/<namespace>/<name>` with the
+  `repository_url` qualifier where there is one, and no version, subpath or other qualifier, so a
+  `file_name` or a `checksum` no longer gives each version its own key. The vectors changed with it;
+  this is still `purlCanon` 1, since nothing has been published under it.
+
+**Found on the way.**
+
+- **The compared path wrote the moment it recorded as `started`**, which is when the run ended. A
+  terminal run wrote when it began. The gate subtracts two of these, so the field is now the start
+  on both paths, and the gate reads it only beside a recorded host, which no older run has.
+- **Every worker confirmation would have been withheld.** The engine delayed it five minutes and the
+  default interval is an hour; the delay is the configured interval now.
+- **A void attempt could confirm a clean one**: an open-egress run at the key of a `mirror-only`
+  run was counted as agreeing with it. A void is evidence of nothing, so it is counted neither way.
+- **The agreement digest names the verdict**: it hashes the outcome and two digests a reader holding
+  the published artifact can compute, so four guesses find the outcome. `record_shown` drops it for
+  an anonymous reader of a void, beside the outcome.
+- **The attestor now refuses a record whose agreement digest is not its comparison's**, as it
+  refuses one whose outcome is not: the gate counts attempts by that digest.
+- **No stored run can be confirmed.** All 371 runs in the local store carry no cache key and no
+  strategy blob, so `--confirm` refuses each; a publishable pair starts with a new rebuild.
+
+**Decisions made here that the owner may want to revisit.**
+
+- **"Comparison digest" is read as a digest of what the comparison found, not of the report.** The
+  report names the rebuilt artifact's raw bytes, and six honest builds of `Newtonsoft.Json@11.0.1`
+  gave six raw artifacts and one stabilized digest (B31), so a report digest would never let a
+  `normalized` run be confirmed.
+- **A deliberate pair is `--confirm`, not a `--cache-key` flag** as B31's done-when put it: a key a
+  person types is the invented key the old comment warned about, and `--confirm` gets the same pair
+  with the key computed.
+- **"Target" in the key includes the artifact's name**, which is what `trigon_core::Target` means,
+  so an sdist and a wheel of one version are two questions.
+- **Re-pulled means removed, seen gone and pulled by digest**, never forced. An image that exists
+  only on this machine — anything under `localhost/`, a derived image, a bare id — cannot be pulled
+  again, so a run on one can be confirmed only from another machine.
+- **"Warm" lists the caches an attempt let answer**, not the ones that did; a consulted cache that
+  missed leaves the same bytes behind as one that was not consulted, and only the first is a fact
+  the run can state.
+- **The host id is in the run record, and no anonymous reader is shown it.** From a machine id it
+  reveals nothing; from a hostname it can be checked against a guess, since the key is in the
+  source. A key of each installation's own was considered and not taken: two installations on one
+  machine — two users, or a container beside its host — would record two ids for it, which is the
+  one mistake the gate must not be able to make.
+- **Only machine ids tell machines apart.** Two different ids where either came from a hostname are
+  held to the same-host rule, so a fleet whose workers all lack a machine id — containers, most
+  often — publishes only with `same_host_confirmation` on and cold confirmations.
+- **Any pair that confirms is enough**, and where none does the reason is the nearest pair's.
+
+**What this does not do.**
+
+- Nothing runs two real builds: `repull` is tested only where it refuses, and B15's test of two
+  clean re-runs needs podman and a registry.
+- Re-enqueueing a target after a change of set or strategy is still one job: a request is keyed on
+  the target, and a first attempt that exists answers it.
+- `publish` (phase 5) is where a confirmed run is published, and it is not built.
+
+**What review found in it.** Eight defects, each now with a test that fails without its fix;
+three things no test checked; and one question that is the owner's.
+
+- **A confirmation could run on the machine that made the first attempt**, and with
+  `same_host_confirmation` off, the default, the gate then withheld the pair as `same_host` for
+  good: `Queue::lease` chose by kind, visibility and tier, nothing in the job said which machine to
+  avoid, and nothing asks a third time. A fleet lost the one confirmation of every target whose
+  first machine happened to be idle first. The engine now queues a confirmation to avoid the host
+  the first attempt recorded (the `job_avoid` table, written in the job's own transaction; a table
+  rather than a column, so `migrate` gives an older queue it), `Queue::lease_on` leases no job to a
+  worker on a host it avoids, and `trigon worker` names its host and reads D8. With D8 on, any
+  machine may take it. A fleet of one machine confirms nothing with D8 off, which `trigon worker`
+  says when it starts and the job's events say while it waits
+  (`a_confirmation_is_made_on_another_machine`,
+  `one_machine_confirms_itself_where_the_operator_accepts_it`,
+  `a_job_is_never_leased_on_the_machine_it_avoids`).
+- **A confirmation of a run on a derived image recorded that it derived nothing and was cold.** The
+  build is handed the recorded image by id, and treats an id as an image the operator named, so
+  `derived_image` was `None` and `derived-image` was not listed. The gate withholds an accusation on
+  a derived image by reading the record under decision, so a confirmation made on another machine
+  would have published the divergence the first attempt is withheld for. `--confirm` carries the
+  image over with `built_here: false`, the build's report is corrected from it, and it is listed as
+  reused (`a_confirmation_of_a_run_on_a_derived_image_says_it_ran_on_one`).
+- **The engine queued a confirmation for every void verdict**, which `--confirm` refuses, and the
+  worker called every refusal retryable, so each was leased, refused and backed off until dead — one
+  dead job per void verdict. `Work::unconfirmable` is asked first, and the worker answers from
+  `publication::voided`; and `--confirm`'s refusals are a type of their own (`Unrepeatable`) that
+  the worker marks not retryable, since every worker running this Trigon gives them again
+  (`a_void_verdict_is_not_asked_again`, `a_run_a_confirmation_cannot_repeat_goes_dead_at_once`).
+- **Two different host ids were two machines, whatever they were derived from.** A container has a
+  hostname of its own and no machine id, so two workers in containers on one machine, or a run on
+  the machine beside one in a container on it, counted as a confirmation from elsewhere with D8 off.
+  Only two ids both derived from machine ids are two machines now; any other pair of different ids
+  is held to the same-host rule (`ids_derived_from_hostnames_do_not_show_two_machines`). The host id
+  also reads D-Bus's machine id where systemd's is absent, so fewer machines fall back to a
+  hostname.
+- **The host id was served to anonymous readers**, on every published and void run. Under a key in
+  the source, one derived from a hostname can be checked against a guess, which is the leak it
+  exists to prevent, and the gate never needed a reader to have it. `record_shown` removes it for
+  every anonymous reader (`no_anonymous_reader_is_told_which_machine_a_run_ran_on`).
+- **The agreement digest did not bind the published artifact's bytes**, so two attempts against two
+  artifacts under one name that the set makes one — a tarball republished with new timestamps —
+  confirmed each other, and `docs/01` said they could not. It hashes the upstream's raw digest now;
+  two honest attempts fetch the same bytes
+  (`the_agreement_digest_ignores_raw_bytes_and_keeps_what_was_found`).
+- **`--confirm` discarded the error from emptying its source cache**, and `create_dir_all` succeeds
+  on a directory that is still there, so a checkout that would not go was copied while the record
+  said nothing supplied the source. It refuses now
+  (`a_source_cache_that_will_not_empty_is_refused`).
+- **Requests keyed canonically missed the jobs a queue made before**, which were keyed on the target
+  as typed, so `pkg:npm/@babel/core@7.24.0` was queued, built and charged a second time.
+  `request_rebuild`, `job_for` and `trigon enqueue` look under both
+  (`a_request_finds_the_job_a_queue_keyed_on_the_target_as_typed`,
+  `enqueue_finds_a_job_keyed_on_the_target_as_typed`).
+- **Nothing tested that a void attempt neither confirms nor contradicts**: removing the filter left
+  every test passing, because the test that named it grouped the attempts with its own copy of the
+  filter. `build` and the test now share `attempts_by_key`, and
+  `a_void_attempt_neither_confirms_nor_contradicts_another_at_its_key` goes through `build`.
+- **Nothing tested what an attempt says it could reuse**, the fact the same-host rule rests on: the
+  one test read back its own fixture. The mapping is `Reuse`, one value that gives both the record
+  and the build's `--no-cache`, and each input has an assertion
+  (`what_an_attempt_could_reuse_is_stated_from_how_it_was_set_up`).
+- **The test cited for `rebuild --attest` never went through `rebuild`'s code**; it called `trigon
+  attest`'s. `run_inner` now signs through `attest_what_was_recorded`, which the test calls.
+
+For the owner:
+
+- **Re-asking for a target is deduplicated by the target alone**, whatever set or strategy it would
+  now be judged under, as `docs/01` now says: a first attempt on the queue, or done, answers the
+  request, where `docs/01` §1.1 has the scheduler admit a new attempt when the key has no terminal
+  verdict. Nothing that enqueues knows the strategy; a request key could carry the digest of every
+  set and tool this binary has, so that a change of either starts new first attempts — for every
+  target at once, on each such release, and decided by whichever binary enqueues. That trade is a
+  scheduling policy, and it is not made here.

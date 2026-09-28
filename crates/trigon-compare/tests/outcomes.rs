@@ -622,3 +622,73 @@ fn an_exact_match_has_one_step() {
     assert_eq!(p.steps[0].differences, 0);
     assert!(p.consistent);
 }
+
+/// Two honest builds agree on what the claim is about and not on their raw bytes.
+///
+/// Six builds of one package produced six raw artifacts and one stabilized digest
+/// (`docs/17-backlog.md` B31). A second attempt is compared with the first by `agreement`, so it
+/// has to be the same for two rebuilds that differ only in what the set stabilizes away, and
+/// different for two divergences that differ in what they found.
+#[test]
+fn the_agreement_digest_ignores_raw_bytes_and_keeps_what_was_found() {
+    let set = profile("tar").unwrap();
+    let judge = |rebuild: Vec<u8>| {
+        compare_bytes(
+            tar(1_700_000_000, 1000, b"same"),
+            rebuild,
+            Format::Tar,
+            &set,
+            &Limits::default(),
+        )
+        .unwrap()
+    };
+
+    let first = judge(tar(1_500_000_000, 501, b"same"));
+    let second = judge(tar(1_600_000_000, 777, b"same"));
+    assert_eq!(first.outcome, Match::Normalized);
+    assert_ne!(
+        first.rebuild.raw.sha256, second.rebuild.raw.sha256,
+        "the premise: two rebuilds with different raw bytes"
+    );
+    assert_eq!(
+        first.agreement(),
+        second.agreement(),
+        "two normalized rebuilds that stabilize alike are one answer"
+    );
+
+    let one_way = judge(tar(1, 1, b"diverges one way"));
+    let other_way = judge(tar(1, 1, b"diverges another"));
+    assert_eq!(one_way.outcome, Match::Divergent);
+    assert_eq!(other_way.outcome, Match::Divergent);
+    assert_ne!(
+        one_way.agreement(),
+        other_way.agreement(),
+        "two divergences that found different things do not confirm each other"
+    );
+    assert_ne!(first.agreement(), one_way.agreement());
+
+    // The published artifact is the question. One republished under the same name, differing
+    // only in what the set strips, stabilizes as the first did — and is other bytes, which a
+    // statement about the first does not describe.
+    let republished = compare_bytes(
+        tar(1_700_000_999, 1000, b"same"),
+        tar(1_500_000_000, 501, b"same"),
+        Format::Tar,
+        &set,
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_ne!(
+        republished.upstream.raw.sha256, first.upstream.raw.sha256,
+        "the premise: other published bytes"
+    );
+    assert_eq!(
+        republished.upstream.stabilized.sha256, first.upstream.stabilized.sha256,
+        "the premise: which the set makes one"
+    );
+    assert_ne!(
+        republished.agreement(),
+        first.agreement(),
+        "attempts against two published artifacts confirmed each other"
+    );
+}

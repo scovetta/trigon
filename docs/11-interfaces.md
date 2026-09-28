@@ -24,7 +24,8 @@ spellings differ in places.** `trigon --help` is authoritative, and today it car
 ```
 trigon verify <upstream> <rebuild> [--attest F] [--key K] [--store D]
 trigon verify-attestation <bundle> --rerun-comparison --upstream A --rebuild B [--public-key HEX]
-trigon rebuild <purl> --image <pinned> [--egress TIER] [--timewarp auto] [--store D]
+trigon rebuild <purl> --image <pinned> [--egress TIER] [--timewarp auto] [--store D] [--attest F]
+trigon rebuild --confirm <run> --store D
 trigon sweep <targets> --image <pinned> [--store D]
 trigon attest [--store D] [<run>] [--key K] [--prune]
 trigon runs [--store D]

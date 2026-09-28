@@ -20,12 +20,12 @@ provenance fact and stays out of it.
 | Predicate type | Emitted when | Subject |
 |---|---|---|
 | `https://trigon.dev/rebuild/v1` | a run that is not void is attested, and a build ran | the rebuilt artifact: sha256 and sha512 |
-| `https://trigon.dev/equivalence/v2` | `trigon attest`, for a run that compared and is not void (§2.5) | the **upstream** artifact: sha256, sha512, and sha1 for npm |
+| `https://trigon.dev/equivalence/v2` | `trigon attest`, and `trigon rebuild --attest` through the same code, for a run that compared and is not void (§2.5) | the **upstream** artifact: sha256, sha512, and sha1 for npm |
 | `https://trigon.dev/divergence/v2` | as `equivalence/v2`, when the verdict is `Divergent` | the upstream artifact, as above |
-| `https://trigon.dev/equivalence/v1` | `trigon verify --attest`, which compares two files with no run behind it; `trigon rebuild --attest`, which signs in the process that ran the build and asks no publication gate, so it signs a verdict even for a run voided by open egress or a stabilizer somebody wrote; `trigon attest` before 2026-09-27 | the upstream artifact, as above |
+| `https://trigon.dev/equivalence/v1` | `trigon verify --attest`, which compares two files with no run behind it, and whose statement is **not publishable**: `publish` accepts only v2 verdicts, `void/v1` and `withdrawal/v1`. Before 2026-09-27, `trigon attest`; before 2026-09-28, `trigon rebuild --attest`, which asked no gate and so signed a verdict even for a run voided by open egress or a stabilizer somebody wrote | the upstream artifact, as above |
 | `https://trigon.dev/divergence/v1` | as `equivalence/v1`, when the verdict is `Divergent` | the upstream artifact, as above |
 | `https://trigon.dev/buildobservation/v1` | a run that is not void is attested; its `tier` says what was observed | the **upstream** artifact, as above |
-| `https://trigon.dev/void/v1` | `trigon attest`, for a run the publication gate calls void, and nothing else is signed for it (§2.6) | the upstream artifact, as above |
+| `https://trigon.dev/void/v1` | `trigon attest` and `trigon rebuild --attest`, for a run the publication gate calls void, and nothing else is signed for it (§2.6) | the upstream artifact, as above |
 | `https://trigon.dev/withdrawal/v1` | `trigon attest --withdraw`: a published record is withdrawn (§2.7) | the withdrawn record's own subject |
 
 **A subject carries every digest a consumer might hold the artifact by**, because a lookup key that
@@ -186,7 +186,12 @@ passed no set, so no statement carried one ([`19`](19-distribution-and-lookup.md
 is additive, and the predicate stays v1: nothing that reads a statement rejects a field it does not
 know, and a test holds `Statement` and `Envelope` to that. And `derivation.method` is present only
 where the run recorded a derivation. It used to be signed as `heuristic` for a run that recorded
-none, which is absence rendered as a value; `transcript` and `reviewedBy` stay, as `null`.
+none, which is absence rendered as a value. `derivation.transcript` is `{"sha256": …}`, the digest
+of the model exchange the run kept (`RunRecord.transcript`), and `null` only where it kept none: it
+was `null` whatever the run held, and 24 of 75 attested runs in one store had a transcript no
+statement named. The exchange itself is not published, since it is unredacted
+([`19`](19-distribution-and-lookup.md) §4.1); the digest binds the derivation to it for anybody who
+holds it. There is no `models` list; `reviewedBy` stays, as `null`.
 `runDetails.builder.version.trigon` is the attestor's version, which since the same change names the
 git revision it was built from (`0.0.0+git.<rev>`); the version that ran the build is in the
 verdict.
@@ -403,20 +408,24 @@ were kept, is left out of `evidence` and the attestor says so, while `buildobser
 its digest for what the guard was armed with. The names are shared with the record file's `evidence`
 map (§2.8, `trigon_attest::evidence_key`), so the two compare key for key.
 
-**v1 is still signed, and still verifies.** `trigon verify --attest` compares two files with no run
-behind them — no purl, no strategy, no building version — and writes `equivalence/v1` and
-`divergence/v1`. `trigon rebuild --attest` writes them too, from the process that ran the build:
-it has a run behind it, and signs what the comparison says without asking the publication gate,
-so a run the gate calls void at `--egress open` (its default) or for a stabilizer somebody wrote
-is signed there as a verdict. P6 is `trigon attest`'s; whether the in-process path should refuse,
-sign the void, or go is open ([`16-findings.md`](16-findings.md) §3.96). Every v1 statement
-verifies exactly as it did, through `verify-attestation`, `--rerun-comparison` and
-`GET /v1/runs/{id}/attestation`; bundles signed before v2 existed are kept as fixtures and checked
-(`crates/trigon/tests/fixtures/v1-statements/`).
+**v1 is still signed, and still verifies, and is not published.** `trigon verify --attest`
+compares two files with no run behind them — no purl, no strategy, no building version, no attempt
+a gate could count — and writes `equivalence/v1` and `divergence/v1`: a claim about two local files,
+which `publish` refuses, since it accepts only `equivalence/v2`, `divergence/v2`, `void/v1` and
+`withdrawal/v1`. `trigon rebuild --attest` has a run behind it and, since
+[`19`](19-distribution-and-lookup.md) §10 phase 3, signs exactly what `trigon attest` signs for
+that run, through the same code: v2 for a verdict, `void/v1` for a run the gate calls void, and
+never a verdict for one. It wrote v1 until then, signing what the comparison said without asking
+the gate, so at `--egress open`, its default, every run it signed was a void signed as a verdict
+([`16-findings.md`](16-findings.md) §3.97). **No path signs a verdict for a run the gate voids.**
+Every v1 statement verifies exactly as it did, through `verify-attestation`, `--rerun-comparison`
+and `GET /v1/runs/{id}/attestation`; bundles signed before v2 existed are kept as fixtures and
+checked (`crates/trigon/tests/fixtures/v1-statements/`).
 
 ### 2.6 `void/v1`
 
-What `trigon attest` signs, **and all it signs**, for a run the publication gate calls void:
+What `trigon attest` signs, **and all it signs**, for a run the publication gate calls void — and
+`trigon rebuild --attest`, which signs through the same code:
 `trigon_api::publication::voided`, which is `decide`'s own answer. The artifact guard tripped —
 whether or not the run reached an outcome, since a tripped guard ends the build — or the run
 reached an outcome at `open` egress, or a stabilizer a person or a model wrote applied. It is "we
@@ -549,9 +558,12 @@ Version 1 is `trigon_core::purl::canonicalize`:
   is dropped as `..` is, and the canonical form canonicalises to itself;
 - whitespace, a malformed escape and bytes that are not UTF-8 are refused.
 
-The versionless form, the `pkg1` key, is the same string without `@<version>`; its qualifiers
-stay, including one that names a version, such as `file_name`, and whether those should go is open
-([`16-findings.md`](16-findings.md) §3.96). The test vectors,
+The versionless form, the `pkg1` key, is the package and nothing about one version of it:
+`pkg:<type>/<namespace>/<name>` as above, with the `repository_url` qualifier where the purl has
+one, and no version, no subpath and no other qualifier. A qualifier that names one version's files —
+`file_name`, `checksum`, `download_url` — gave every version its own `pkg1` key while it was kept;
+`repository_url` stays because the same name on another registry is another package
+([`16-findings.md`](16-findings.md) §3.97). The test vectors,
 `crates/trigon-core/testdata/purl-canon-v1.json`, are the rule's other definition: every writer and
 reader of these keys, a client in another language included, is held to them.
 

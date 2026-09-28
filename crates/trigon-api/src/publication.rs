@@ -20,6 +20,7 @@
 //! [ADR-0010]: ../../../docs/adr/0010-publish-divergences.md
 
 use serde::Serialize;
+use std::time::Duration;
 use trigon_store::RunRecord;
 
 /// Why a run is not shown to an anonymous reader.
@@ -37,6 +38,26 @@ pub enum Withheld {
     /// Safeguard 1. Two attempts, and they did not agree. This is the case the ADR cares about
     /// most: the disagreement is the finding, and the finding is that we do not know.
     AttemptsDisagree,
+    /// Safeguard 1, "on different workers at different times", **unevaluated**. The attempts
+    /// that agree do not all record which machine ran them and when they began, so whether the
+    /// second is independent of the first cannot be checked. Every run recorded before
+    /// `docs/19` §10 phase 3 is one.
+    ConfirmationUnrecorded,
+    /// Safeguard 1, "at different times". The second agreeing attempt began less than
+    /// `[publish] confirmation_interval` after the first.
+    AttemptsTooClose,
+    /// Safeguard 1, "on different workers". The attempts that agree ran on one machine, or on
+    /// machines their records cannot tell apart, and `[publish] same_host_confirmation` (`docs/19`
+    /// D8) is off.
+    ///
+    /// "Cannot tell apart" is two different host ids where either was derived from a hostname:
+    /// every container has a hostname of its own, so two of them name two containers, which may
+    /// be on one machine (`trigon_store::names_a_machine`).
+    SameHost,
+    /// Safeguard 1 under D8. The attempts ran on one machine, or on machines their records cannot
+    /// tell apart, which the operator accepts only when the confirming attempt was cold with its
+    /// base image re-pulled by digest, and it was not.
+    ConfirmationNotCold,
     /// Safeguard 2, egress clause. The build ran at a tier that adds no network isolation, so a
     /// divergence cannot be attributed to the package.
     OpenEgress,
@@ -79,6 +100,10 @@ impl Withheld {
         match self {
             Withheld::AwaitingConfirmation => "awaiting_confirmation",
             Withheld::AttemptsDisagree => "attempts_disagree",
+            Withheld::ConfirmationUnrecorded => "confirmation_unrecorded",
+            Withheld::AttemptsTooClose => "attempts_too_close",
+            Withheld::SameHost => "same_host",
+            Withheld::ConfirmationNotCold => "confirmation_not_cold",
             Withheld::OpenEgress => "open_egress",
             Withheld::GuardTripped => "guard_tripped",
             Withheld::NonBuiltinStabilizer => "non_builtin_stabilizer",
@@ -103,6 +128,28 @@ impl Withheld {
             Withheld::AttemptsDisagree => {
                 "two attempts at this disagreed, so the honest answer is that we do not know. That \
                  is a finding about our own repeatability, not about the package."
+            }
+            Withheld::ConfirmationUnrecorded => {
+                "the attempts that agree do not all record which machine ran them and when they \
+                 began, so whether the second is independent of the first cannot be checked. A \
+                 confirmation is not accepted on a safeguard nobody could evaluate."
+            }
+            Withheld::AttemptsTooClose => {
+                "the attempts that agree began closer together than the confirmation interval \
+                 allows. Two runs moments apart sample the same state of every registry, so the \
+                 second cannot catch a floating dependency or a fetch that happened to succeed."
+            }
+            Withheld::SameHost => {
+                "the attempts that agree ran on one machine, or on machines their records cannot \
+                 tell apart, and this operator does not accept a confirmation from the machine \
+                 that made the first attempt: nothing that machine holds constant could make the \
+                 two disagree."
+            }
+            Withheld::ConfirmationNotCold => {
+                "the attempts that agree ran on one machine, or on machines their records cannot \
+                 tell apart, and the second was not cold: it could reuse a build cache, or did not \
+                 pull its base image again by digest, so it may have replayed the first attempt \
+                 rather than repeated it."
             }
             Withheld::OpenEgress => {
                 "the build ran with unrestricted network access, so nothing it produced is evidence \
@@ -167,13 +214,82 @@ impl Publication {
     }
 }
 
-/// Operator switches the gate reads. Safeguard 5, and the one knob it is allowed to have.
+/// What an operator chooses about the gate: safeguard 5's kill-switch, and safeguard 1's
+/// confirmation settings. Nothing else about it is a setting.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Switches {
     /// Safeguard 5's kill-switch. Set it and divergences stop publishing until a human clears it;
     /// matches are unaffected, because a false match is an error and a false divergence is an
     /// accusation.
     pub stop_divergences: bool,
+    /// What makes a second agreeing attempt a confirmation, from `[publish]` in `evidence.toml`
+    /// wherever the gate runs (`docs/19` §2.4).
+    pub confirmation: Confirmation,
+}
+
+/// Safeguard 1's settings: when two agreeing attempts count as two.
+///
+/// ADR-0010 asks for attempts "on different workers at different times", because the risk that
+/// dominates is ambient nondeterminism, and two attempts that shared a machine and a moment share
+/// most of it. `docs/19` D8 asks whether one machine may confirm itself; these are its answer and
+/// the interval, as the operator set them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Confirmation {
+    /// `[publish] same_host_confirmation`. Whether two attempts on one machine may confirm each
+    /// other — and then only where the confirming attempt ran cold, its base image re-pulled by
+    /// digest.
+    pub same_host: bool,
+    /// `[publish] confirmation_interval`: the least time between the two attempts' starts.
+    pub interval: Duration,
+}
+
+impl Default for Confirmation {
+    /// The configuration's own defaults, read from where they are defined rather than restated: a
+    /// gate built with no configuration file — every test, and `trigon serve` on a machine with
+    /// none — decides exactly as one that read an empty file.
+    fn default() -> Self {
+        Confirmation::from(&trigon_attest::config::PublishConfig::default())
+    }
+}
+
+impl From<&trigon_attest::config::PublishConfig> for Confirmation {
+    fn from(p: &trigon_attest::config::PublishConfig) -> Self {
+        Confirmation {
+            same_host: p.same_host_confirmation,
+            interval: p.confirmation_interval,
+        }
+    }
+}
+
+/// What one attempt recorded about where, how and when it ran: the facts that make a second
+/// attempt a confirmation of the first rather than the first replayed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Attempt {
+    /// The run, which orders two attempts that began in the same second.
+    pub run: String,
+    /// `RunRecord::host`. `None` on a record from before hosts were recorded.
+    pub host: Option<String>,
+    /// When it began, in seconds since the epoch. Read from `RunRecord::started` only beside a
+    /// host: before hosts were recorded, a run that reached a comparison wrote the time it
+    /// finished there.
+    pub began: Option<i64>,
+    /// Whether it ran with no cache able to supply it and its base image re-pulled by digest
+    /// (`CacheState::independent`). `None` where the record does not say.
+    pub independent: Option<bool>,
+}
+
+impl Attempt {
+    pub fn of(r: &RunRecord) -> Attempt {
+        Attempt {
+            run: r.id.clone(),
+            host: r.host.clone(),
+            began: r
+                .host
+                .as_ref()
+                .and_then(|_| trigon_core::time::rfc3339_epoch(&r.started)),
+            independent: r.cache.as_ref().map(trigon_store::CacheState::independent),
+        }
+    }
 }
 
 /// The evidence the gate needs beyond the record itself.
@@ -182,12 +298,23 @@ pub struct Switches {
 /// non-`Builtin` stabilizer applied lives in the comparison blob, and whether a second attempt
 /// agreed is a fact about a *set* of records. Passing them in keeps [`decide`] a pure function of
 /// its arguments, which is what lets it be tested exhaustively rather than through a store.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Corroboration {
-    /// Terminal attempts at the same `cache_key` whose outcome and comparison digest match this
-    /// one's.
-    pub agreeing_attempts: u32,
-    /// Terminal attempts at the same `cache_key` that reached a *different* outcome.
+    /// Terminal attempts at the same `cache_key` whose outcome **and agreement digest**
+    /// (`RunRecord::agreement`) match this one's, this run's own included, and none of them void:
+    /// with what each recorded about where, how and when it ran, which [`decide`] reads to tell a
+    /// confirmation from a repeat.
+    ///
+    /// The agreement digest covers the outcome, the set, the published artifact's raw digest and
+    /// both sides' stabilized digests. Matching on the outcome alone let a divergence in one
+    /// member confirm a divergence in every other; matching on the stored comparison report's
+    /// digest, which names the rebuilt artifact's raw bytes, would let no two honest builds agree.
+    /// An attempt whose record carries no agreement digest agrees with nothing, itself aside. A
+    /// void attempt is evidence of nothing, so it confirms nothing either.
+    pub agreeing_attempts: Vec<Attempt>,
+    /// Terminal attempts at the same `cache_key`, none of them void, that reached a *different*
+    /// outcome, or the same outcome with a different agreement digest: a divergence that found
+    /// something else is a disagreement, not a confirmation.
     pub disagreeing_attempts: u32,
     /// Whether any applied stabilizer carried non-`Builtin` provenance.
     ///
@@ -207,7 +334,9 @@ pub struct Corroboration {
 /// `trigon attest` asks this, and signs `void/v1` and no verdict for a run it answers: the answer
 /// is `decide`'s own, because every clause that voids a run reads the record alone — the index
 /// hands `decide` the record's own provenance bit, for a run with no cache key as for any other —
-/// so the attempts at the same work and the kill-switch, which it cannot see, cannot change it.
+/// so the attempts at the same work, the kill-switch and the confirmation settings, which it cannot
+/// see, cannot change it. That is why `trigon attest` reads the settings from the configuration and
+/// passes none of them here.
 /// The index's test `the_index_voids_exactly_the_runs_the_attestor_calls_void` holds the two to
 /// each other through the index itself, not through a `Corroboration` built by hand.
 pub fn voided(r: &RunRecord) -> Option<Withheld> {
@@ -243,7 +372,7 @@ fn void_clause(r: &RunRecord, non_builtin_stabilizer: Option<bool>) -> Option<Wi
 /// an unconfirmed run is withheld entirely. Checking confirmation first would hide behind
 /// "awaiting confirmation" a run that we already know can never be a divergence, and the reader
 /// would be told to wait for something that would not change the answer.
-pub fn decide(r: &RunRecord, c: Corroboration, s: Switches) -> Publication {
+pub fn decide(r: &RunRecord, c: &Corroboration, s: Switches) -> Publication {
     // Safeguard 2. Each clause converts a divergence into a void rather than suppressing it.
     if let Some(because) = void_clause(r, c.non_builtin_stabilizer) {
         return Publication::Void { because };
@@ -262,10 +391,16 @@ pub fn decide(r: &RunRecord, c: Corroboration, s: Switches) -> Publication {
             because: Withheld::AttemptsDisagree,
         };
     }
-    if c.agreeing_attempts < 2 {
+    if c.agreeing_attempts.len() < 2 {
         return Publication::Withheld {
             because: Withheld::AwaitingConfirmation,
         };
+    }
+    // "On different workers at different times": two agreeing records are two attempts only if
+    // the second could have come out differently. Checked here, in the gate, against the
+    // operator's settings, so `serve`, `attest` and `publish` cannot each decide it their own way.
+    if let Err(because) = confirmed(&c.agreeing_attempts, s.confirmation) {
+        return Publication::Withheld { because };
     }
 
     // Safeguard 5. Late, because it is a deliberate operator intervention and the page should say
@@ -313,6 +448,74 @@ pub fn decide(r: &RunRecord, c: Corroboration, s: Switches) -> Publication {
     Publication::Published
 }
 
+/// Whether some pair of agreeing attempts is a confirmation under `rules`, and if none is, why
+/// the nearest is not.
+///
+/// A pair is the earlier attempt and a later one. It confirms when both record a machine and a
+/// start, the later began at least `rules.interval` after the earlier, and they ran on two
+/// machines — or on one, where `rules.same_host` allows it and the later attempt ran cold with its
+/// base image re-pulled. Two machines means two host ids that differ and were both derived from a
+/// machine id; a pair any other way is held to what one machine is held to. Any pair that confirms
+/// is enough; where none does, the reason given is the one for the pair that met the most of those
+/// conditions, in that order, because that is the one an operator is nearest to satisfying and the
+/// one worth telling them.
+fn confirmed(attempts: &[Attempt], rules: Confirmation) -> Result<(), Withheld> {
+    let mut ordered: Vec<&Attempt> = attempts.iter().collect();
+    ordered.sort_by(|a, b| a.began.cmp(&b.began).then_with(|| a.run.cmp(&b.run)));
+    let mut nearest: Option<Withheld> = None;
+    for (i, first) in ordered.iter().enumerate() {
+        for second in &ordered[i + 1..] {
+            match pair(first, second, rules) {
+                Ok(()) => return Ok(()),
+                Err(w) if nearest.is_none_or(|n| rank(w) > rank(n)) => nearest = Some(w),
+                Err(_) => {}
+            }
+        }
+    }
+    Err(nearest.unwrap_or(Withheld::AwaitingConfirmation))
+}
+
+/// One pair, `first` the earlier. The conditions in the order [`rank`] counts them.
+fn pair(first: &Attempt, second: &Attempt, rules: Confirmation) -> Result<(), Withheld> {
+    let (Some(h1), Some(h2), Some(t1), Some(t2)) =
+        (&first.host, &second.host, first.began, second.began)
+    else {
+        return Err(Withheld::ConfirmationUnrecorded);
+    };
+    let interval = i64::try_from(rules.interval.as_secs()).unwrap_or(i64::MAX);
+    if t2.saturating_sub(t1) < interval {
+        return Err(Withheld::AttemptsTooClose);
+    }
+    // Two machines only where both ids say so. An id derived from a hostname names a container as
+    // readily as a machine, and two containers on one machine share its kernel, its CPU and often
+    // its image store: two such ids that differ are not shown to be two machines, and counting
+    // them as two let one machine confirm itself with D8 off.
+    if h1 != h2 && trigon_store::names_a_machine(h1) && trigon_store::names_a_machine(h2) {
+        return Ok(());
+    }
+    if !rules.same_host {
+        return Err(Withheld::SameHost);
+    }
+    // The *confirming* attempt, which is the later: one that could reuse what the first left
+    // behind is the first one replayed. The first attempt's own state is not asked about, since
+    // nothing ran before it on this key that it could have replayed.
+    if second.independent != Some(true) {
+        return Err(Withheld::ConfirmationNotCold);
+    }
+    Ok(())
+}
+
+/// How far a pair got through [`pair`]'s conditions before one stopped it.
+fn rank(w: Withheld) -> u8 {
+    match w {
+        Withheld::ConfirmationUnrecorded => 0,
+        Withheld::AttemptsTooClose => 1,
+        Withheld::SameHost => 2,
+        Withheld::ConfirmationNotCold => 3,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,11 +552,35 @@ mod tests {
         r
     }
 
+    /// One agreeing attempt: on a machine of its own, cold, at `began`.
+    fn attempt(run: &str, host: &str, began: i64, independent: bool) -> Attempt {
+        Attempt {
+            run: run.into(),
+            host: Some(host.into()),
+            began: Some(began),
+            independent: Some(independent),
+        }
+    }
+
+    /// Two attempts on two machines a day apart, the second warm: a pair every setting accepts,
+    /// so a test using it isolates the clause it is about.
+    fn two_machines() -> Vec<Attempt> {
+        vec![
+            attempt("a", "machine-id:one", 0, false),
+            attempt("b", "machine-id:two", 86_400, false),
+        ]
+    }
+
     fn confirmed() -> Corroboration {
         Corroboration {
-            agreeing_attempts: 2,
+            agreeing_attempts: two_machines(),
             ..Default::default()
         }
+    }
+
+    /// One attempt, agreeing with nothing but itself.
+    fn alone() -> Vec<Attempt> {
+        two_machines()[..1].to_vec()
     }
 
     /// Confirmed, with the provenance clause answered, so these tests isolate the one clause
@@ -381,7 +608,7 @@ mod tests {
         let mut r = record(Some("divergent"), "mirror-only");
         r.environment.derived_image = Some(derived());
         assert_eq!(
-            decide(&r, confirmed_and_evaluated(), Switches::default()),
+            decide(&r, &confirmed_and_evaluated(), Switches::default()),
             Publication::Withheld {
                 because: Withheld::ImageDerivedOutsideBoundary
             }
@@ -398,7 +625,7 @@ mod tests {
         let mut r = record(Some("exact"), "mirror-only");
         r.environment.derived_image = Some(derived());
         assert_eq!(
-            decide(&r, confirmed_and_evaluated(), Switches::default()),
+            decide(&r, &confirmed_and_evaluated(), Switches::default()),
             Publication::Published
         );
     }
@@ -410,7 +637,7 @@ mod tests {
         let r = record(Some("divergent"), "mirror-only");
         assert_eq!(r.environment.derived_image, None);
         assert_eq!(
-            decide(&r, confirmed_and_evaluated(), Switches::default()),
+            decide(&r, &confirmed_and_evaluated(), Switches::default()),
             Publication::Published
         );
     }
@@ -431,7 +658,7 @@ mod tests {
             (
                 "awaiting confirmation",
                 Corroboration {
-                    agreeing_attempts: 1,
+                    agreeing_attempts: alone(),
                     ..confirmed_and_evaluated()
                 },
             ),
@@ -452,8 +679,8 @@ mod tests {
                 });
                 let without = record(Some(outcome), "mirror-only");
                 assert_eq!(
-                    decide(&with, c, Switches::default()),
-                    decide(&without, c, Switches::default()),
+                    decide(&with, &c, Switches::default()),
+                    decide(&without, &c, Switches::default()),
                     "the gate read the opinion on a {outcome}/{verdict:?} record ({baseline})"
                 );
             }
@@ -468,7 +695,7 @@ mod tests {
         // of it.
         let r = record(Some("exact"), "mirror");
         assert_eq!(
-            decide(&r, Corroboration::default(), Switches::default()),
+            decide(&r, &Corroboration::default(), Switches::default()),
             Publication::Withheld {
                 because: Withheld::AwaitingConfirmation
             }
@@ -480,14 +707,260 @@ mod tests {
         // Invariant 12, which `12-security.md` records as enforced by "nothing".
         let r = record(Some("divergent"), "mirror");
         let c = Corroboration {
-            agreeing_attempts: 1,
+            agreeing_attempts: alone(),
             disagreeing_attempts: 1,
             ..Default::default()
         };
         assert_eq!(
-            decide(&r, c, Switches::default()),
+            decide(&r, &c, Switches::default()),
             Publication::Withheld {
                 because: Withheld::AttemptsDisagree
+            }
+        );
+    }
+
+    /// `docs/19` §10 phase 3: two agreeing attempts are two only if the second could have come out
+    /// differently — on another machine, or on this one cold, and not moments later.
+    fn with(attempts: Vec<Attempt>) -> Corroboration {
+        Corroboration {
+            agreeing_attempts: attempts,
+            non_builtin_stabilizer: Some(false),
+            ..Default::default()
+        }
+    }
+
+    fn rules(same_host: bool, interval: u64) -> Switches {
+        Switches {
+            confirmation: Confirmation {
+                same_host,
+                interval: Duration::from_secs(interval),
+            },
+            ..Default::default()
+        }
+    }
+
+    const HOUR: i64 = 3600;
+
+    #[test]
+    fn a_second_attempt_on_another_machine_an_interval_later_confirms() {
+        let r = record(Some("divergent"), "mirror-only");
+        let c = with(vec![
+            attempt("a", "machine-id:one", 0, false),
+            attempt("b", "machine-id:two", HOUR, false),
+        ]);
+        // "At least the interval": a second attempt that began exactly one interval later is
+        // far enough apart.
+        assert_eq!(decide(&r, &c, rules(false, 3600)), Publication::Published);
+    }
+
+    #[test]
+    fn a_second_attempt_that_began_too_soon_is_withheld_for_that() {
+        let r = record(Some("exact"), "mirror-only");
+        let c = with(vec![
+            attempt("a", "machine-id:one", 0, true),
+            attempt("b", "machine-id:two", HOUR - 1, true),
+        ]);
+        assert_eq!(
+            decide(&r, &c, rules(true, 3600)),
+            Publication::Withheld {
+                because: Withheld::AttemptsTooClose
+            },
+            "two runs a second short of the interval sample the same moment, on any machines"
+        );
+        // And the interval is the operator's: the same pair clears a shorter one.
+        assert_eq!(decide(&r, &c, rules(true, 60)), Publication::Published);
+    }
+
+    #[test]
+    fn a_pair_on_one_machine_is_withheld_unless_the_operator_accepts_one() {
+        let r = record(Some("normalized"), "mirror-only");
+        let c = with(vec![
+            attempt("a", "machine-id:one", 0, true),
+            attempt("b", "machine-id:one", 2 * HOUR, true),
+        ]);
+        assert_eq!(
+            decide(&r, &c, rules(false, 3600)),
+            Publication::Withheld {
+                because: Withheld::SameHost
+            },
+            "D8 is off by default, and one machine cannot confirm itself however cold"
+        );
+        assert_eq!(decide(&r, &c, rules(true, 3600)), Publication::Published);
+    }
+
+    /// Two different ids show two machines only where both came from a machine id. A hostname is
+    /// given to every container, so two workers in containers on one machine — or a run on the
+    /// machine and one in a container on it — recorded two ids, and the gate counted them as a
+    /// confirmation from another machine with D8 off.
+    #[test]
+    fn ids_derived_from_hostnames_do_not_show_two_machines() {
+        let r = record(Some("divergent"), "mirror-only");
+        for (one, two) in [
+            ("hostname:one", "hostname:two"),
+            ("machine-id:one", "hostname:two"),
+            ("hostname:one", "machine-id:two"),
+        ] {
+            let pair = |second_cold| {
+                with(vec![
+                    attempt("a", one, 0, false),
+                    attempt("b", two, HOUR, second_cold),
+                ])
+            };
+            // Held to what one machine is held to: not counted with D8 off …
+            assert_eq!(
+                decide(&r, &pair(true), rules(false, 3600)),
+                Publication::Withheld {
+                    because: Withheld::SameHost
+                },
+                "{one} and {two}"
+            );
+            // … and with it on, only where the confirmation was cold and re-pulled.
+            assert_eq!(
+                decide(&r, &pair(false), rules(true, 3600)),
+                Publication::Withheld {
+                    because: Withheld::ConfirmationNotCold
+                },
+                "{one} and {two}"
+            );
+            assert_eq!(
+                decide(&r, &pair(true), rules(true, 3600)),
+                Publication::Published,
+                "{one} and {two}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_same_host_confirmation_has_to_be_cold_and_re_pulled() {
+        let r = record(Some("divergent"), "mirror-only");
+        // The *confirming* attempt is the later one, and it is the one that has to be cold: the
+        // first attempt being cold is no help if the second replayed it.
+        for (first_cold, second_cold) in [(false, false), (true, false)] {
+            let c = with(vec![
+                attempt("a", "machine-id:one", 0, first_cold),
+                attempt("b", "machine-id:one", 2 * HOUR, second_cold),
+            ]);
+            assert_eq!(
+                decide(&r, &c, rules(true, 3600)),
+                Publication::Withheld {
+                    because: Withheld::ConfirmationNotCold
+                },
+                "first cold: {first_cold}"
+            );
+        }
+        let c = with(vec![
+            attempt("a", "machine-id:one", 0, false),
+            attempt("b", "machine-id:one", 2 * HOUR, true),
+        ]);
+        assert_eq!(decide(&r, &c, rules(true, 3600)), Publication::Published);
+
+        // A cache state nobody recorded is not a cold one.
+        let mut unrecorded = c.clone();
+        unrecorded.agreeing_attempts[1].independent = None;
+        assert_eq!(
+            decide(&r, &unrecorded, rules(true, 3600)),
+            Publication::Withheld {
+                because: Withheld::ConfirmationNotCold
+            }
+        );
+    }
+
+    #[test]
+    fn attempts_that_do_not_say_where_they_ran_confirm_nothing() {
+        let r = record(Some("exact"), "mirror-only");
+        let mut c = confirmed();
+        c.non_builtin_stabilizer = Some(false);
+        c.agreeing_attempts[1].host = None;
+        assert_eq!(
+            decide(&r, &c, rules(true, 0)),
+            Publication::Withheld {
+                because: Withheld::ConfirmationUnrecorded
+            },
+            "a run recorded before hosts were, beside one recorded since, is not shown to be on \
+             another machine, and absent is not a different machine"
+        );
+        let mut c = confirmed();
+        c.agreeing_attempts[0].began = None;
+        assert_eq!(
+            decide(&r, &c, rules(true, 0)),
+            Publication::Withheld {
+                because: Withheld::ConfirmationUnrecorded
+            }
+        );
+    }
+
+    #[test]
+    fn any_pair_that_confirms_is_enough_and_otherwise_the_nearest_is_named() {
+        let r = record(Some("exact"), "mirror-only");
+        // `b` is too close to `a`, and `c` is on `a`'s machine; `b` and `c` confirm.
+        let c = with(vec![
+            attempt("a", "machine-id:one", 0, false),
+            attempt("b", "machine-id:two", 60, false),
+            attempt("c", "machine-id:one", 3 * HOUR, false),
+        ]);
+        assert_eq!(decide(&r, &c, rules(false, 3600)), Publication::Published);
+
+        // No pair confirms. One pair is unrecorded, one is too close; the nearest is the one
+        // that only lacked the interval, and that is what an operator can act on.
+        let c = with(vec![
+            Attempt {
+                run: "a".into(),
+                ..Attempt::default()
+            },
+            attempt("b", "machine-id:one", 0, true),
+            attempt("c", "machine-id:two", 60, true),
+        ]);
+        assert_eq!(
+            decide(&r, &c, rules(false, 3600)),
+            Publication::Withheld {
+                because: Withheld::AttemptsTooClose
+            }
+        );
+    }
+
+    #[test]
+    fn with_no_configuration_the_gate_holds_to_the_documented_defaults() {
+        // `docs/19` §2.4: `same_host_confirmation = false`, `confirmation_interval = "1h"`. The
+        // gate `trigon serve` builds on a machine with no `evidence.toml`.
+        assert_eq!(
+            Switches::default().confirmation,
+            Confirmation {
+                same_host: false,
+                interval: Duration::from_secs(3600),
+            }
+        );
+    }
+
+    #[test]
+    fn the_confirmation_rules_come_after_the_count_and_before_the_kill_switch() {
+        let r = record(Some("divergent"), "mirror-only");
+        let too_close = with(vec![
+            attempt("a", "machine-id:one", 0, false),
+            attempt("b", "machine-id:two", 1, false),
+        ]);
+        // Disagreement is the finding, and outranks how the agreeing pair ran.
+        let disagreeing = Corroboration {
+            disagreeing_attempts: 1,
+            ..too_close.clone()
+        };
+        assert_eq!(
+            decide(&r, &disagreeing, Switches::default()),
+            Publication::Withheld {
+                because: Withheld::AttemptsDisagree
+            }
+        );
+        // And safeguard 1 is answered before safeguard 5, as it was before these rules.
+        assert_eq!(
+            decide(
+                &r,
+                &too_close,
+                Switches {
+                    stop_divergences: true,
+                    ..Default::default()
+                }
+            ),
+            Publication::Withheld {
+                because: Withheld::AttemptsTooClose
             }
         );
     }
@@ -509,7 +982,7 @@ mod tests {
                 non_builtin_stabilizer: Some(non_builtin),
                 ..confirmed()
             };
-            let d = decide(&r, c, Switches::default());
+            let d = decide(&r, &c, Switches::default());
             assert_eq!(d, Publication::Void { because: expect });
             assert!(d.is_public(), "a void is shown, not hidden");
         }
@@ -551,7 +1024,7 @@ mod tests {
                     ..confirmed()
                 };
                 assert_eq!(
-                    decide(&r, c, Switches::default()),
+                    decide(&r, &c, Switches::default()),
                     Publication::Void { because: cause },
                     "{outcome}: the premise, that this reason is given whatever the outcome"
                 );
@@ -585,7 +1058,7 @@ mod tests {
             ..confirmed()
         };
         assert_eq!(
-            decide(&r, unknown, Switches::default()),
+            decide(&r, &unknown, Switches::default()),
             Publication::Withheld {
                 because: Withheld::ProvenanceUnknown
             },
@@ -598,7 +1071,10 @@ mod tests {
             non_builtin_stabilizer: Some(false),
             ..confirmed()
         };
-        assert_eq!(decide(&r, known, Switches::default()), Publication::Published);
+        assert_eq!(
+            decide(&r, &known, Switches::default()),
+            Publication::Published
+        );
     }
 
     /// And only an accusation. A match is not an allegation against anyone.
@@ -611,7 +1087,7 @@ mod tests {
                 ..confirmed()
             };
             assert_eq!(
-                decide(&r, unknown, Switches::default()),
+                decide(&r, &unknown, Switches::default()),
                 Publication::Published,
                 "`{outcome}` is not an accusation, and safeguard 2 exists to stop accusations"
             );
@@ -633,8 +1109,8 @@ mod tests {
         assert_eq!(
             decide(
                 &r,
-                unknown(Corroboration {
-                    agreeing_attempts: 1,
+                &unknown(Corroboration {
+                    agreeing_attempts: alone(),
                     disagreeing_attempts: 1,
                     ..Default::default()
                 }),
@@ -647,7 +1123,7 @@ mod tests {
         );
 
         assert_eq!(
-            decide(&r, unknown(Default::default()), Switches::default()),
+            decide(&r, &unknown(Default::default()), Switches::default()),
             Publication::Withheld {
                 because: Withheld::AwaitingConfirmation
             },
@@ -657,9 +1133,10 @@ mod tests {
         assert_eq!(
             decide(
                 &r,
-                unknown(confirmed()),
+                &unknown(confirmed()),
                 Switches {
-                    stop_divergences: true
+                    stop_divergences: true,
+                    ..Default::default()
                 }
             ),
             Publication::Withheld {
@@ -676,7 +1153,7 @@ mod tests {
         // cannot change the answer.
         let r = record(Some("divergent"), "open");
         assert_eq!(
-            decide(&r, Corroboration::default(), Switches::default()),
+            decide(&r, &Corroboration::default(), Switches::default()),
             Publication::Void {
                 because: Withheld::OpenEgress
             }
@@ -687,23 +1164,24 @@ mod tests {
     fn the_kill_switch_stops_accusations_and_not_matches() {
         let s = Switches {
             stop_divergences: true,
+            ..Default::default()
         };
         let div = record(Some("divergent"), "mirror");
         assert_eq!(
-            decide(&div, confirmed(), s),
+            decide(&div, &confirmed(), s),
             Publication::Withheld {
                 because: Withheld::KillSwitch
             }
         );
         let ok = record(Some("exact"), "mirror");
-        assert_eq!(decide(&ok, confirmed(), s), Publication::Published);
+        assert_eq!(decide(&ok, &confirmed(), s), Publication::Published);
     }
 
     #[test]
     fn a_run_with_no_verdict_is_not_a_verdict() {
         let r = record(None, "mirror");
         assert_eq!(
-            decide(&r, confirmed(), Switches::default()),
+            decide(&r, &confirmed(), Switches::default()),
             Publication::Withheld {
                 because: Withheld::NoOutcome
             }
@@ -711,7 +1189,7 @@ mod tests {
         // Nor is a build that failed at open egress void: it is a failed build.
         let r = record(None, "open");
         assert_eq!(
-            decide(&r, confirmed(), Switches::default()),
+            decide(&r, &confirmed(), Switches::default()),
             Publication::Withheld {
                 because: Withheld::NoOutcome
             }
@@ -729,7 +1207,7 @@ mod tests {
             .push("the artifact under test arrived from registry.npmjs.org".into());
         for c in [Corroboration::default(), confirmed()] {
             assert_eq!(
-                decide(&r, c, Switches::default()),
+                decide(&r, &c, Switches::default()),
                 Publication::Void {
                     because: Withheld::GuardTripped
                 }
@@ -746,7 +1224,7 @@ mod tests {
             Corroboration::default(),
             confirmed(),
             Corroboration {
-                agreeing_attempts: 1,
+                agreeing_attempts: alone(),
                 disagreeing_attempts: 1,
                 ..Default::default()
             },
@@ -760,17 +1238,24 @@ mod tests {
                         if guard {
                             r.guard_trips.push("tripped".into());
                         }
-                        for c in corroborations {
-                            for stop in [false, true] {
+                        for c in &corroborations {
+                            for (stop, same_host) in [(false, false), (true, false), (false, true)]
+                            {
                                 let c = Corroboration {
                                     non_builtin_stabilizer: r.non_builtin_stabilizer,
-                                    ..c
+                                    ..c.clone()
                                 };
+                                // The confirmation settings too: `attest` reads them from the
+                                // configuration and asks `voided`, which must not need them.
                                 let d = decide(
                                     &r,
-                                    c,
+                                    &c,
                                     Switches {
                                         stop_divergences: stop,
+                                        confirmation: Confirmation {
+                                            same_host,
+                                            interval: Duration::from_secs(7 * 86_400),
+                                        },
                                     },
                                 );
                                 let via_decide = match d {
@@ -797,6 +1282,10 @@ mod tests {
         for w in [
             Withheld::AwaitingConfirmation,
             Withheld::AttemptsDisagree,
+            Withheld::ConfirmationUnrecorded,
+            Withheld::AttemptsTooClose,
+            Withheld::SameHost,
+            Withheld::ConfirmationNotCold,
             Withheld::OpenEgress,
             Withheld::GuardTripped,
             Withheld::NonBuiltinStabilizer,
@@ -834,6 +1323,10 @@ mod tests {
         for w in [
             Withheld::AwaitingConfirmation,
             Withheld::AttemptsDisagree,
+            Withheld::ConfirmationUnrecorded,
+            Withheld::AttemptsTooClose,
+            Withheld::SameHost,
+            Withheld::ConfirmationNotCold,
             Withheld::OpenEgress,
             Withheld::GuardTripped,
             Withheld::NonBuiltinStabilizer,

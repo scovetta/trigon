@@ -284,6 +284,12 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused_artifact: Vec<String>,
 
+    /// When this attempt began, before anything was resolved: RFC 3339, UTC.
+    ///
+    /// The publication gate reads it to hold two attempts that began less than
+    /// `confirmation_interval` apart (`docs/19` §10 phase 3). **A run that reached a comparison
+    /// wrote the time it was recorded here** until that phase, which is the end of the run and not
+    /// its start; the gate reads the field only beside a recorded `host`, which no such run has.
     pub started: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<String>,
@@ -307,10 +313,44 @@ pub struct RunRecord {
     /// What makes two attempts attempts *at the same thing*.
     ///
     /// The target, the strategy digest and the stabilizer set: change any of them and the second
-    /// run is a different question, not a confirmation of the first. `None` on a record written
-    /// before the field existed, which the gate reads as unconfirmable rather than as confirmed.
+    /// run is a different question, not a confirmation of the first. Built by
+    /// [`crate::cache_key`] and nothing else, by the run once it knows the strategy it ran and the
+    /// set it was judged under, worker and CLI alike. `None` on a record written before the field
+    /// existed, and on a run that never had a strategy, which the gate reads as unconfirmable
+    /// rather than as confirmed.
+    ///
+    /// **Runs recorded before `docs/19` §10 phase 3 keep what they had**: a worker's run carries
+    /// its job's key, which was the purl alone, and a CLI run carries none. Neither is a key this
+    /// function builds, so neither is counted beside a run recorded since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
+    /// What two attempts at the same `cache_key` must share to agree: a digest over the outcome,
+    /// the stabilizer set, the published artifact's raw digest and both sides' stabilized digests
+    /// (`Comparison::agreement`). The raw upstream digest is in it because the key does not name
+    /// the published bytes, and two attempts against two of them are not one question.
+    ///
+    /// **Not `comparison`**, the digest of the stored comparison report, which also names the
+    /// rebuilt artifact's raw bytes: six honest builds of one package produced six raw artifacts
+    /// and one stabilized digest (`docs/17-backlog.md` B31), so two attempts that agree in every
+    /// way the claim cares about never share a report digest. And **not the outcome alone**,
+    /// which let a divergence in one member confirm a divergence in every other. `None` on a run
+    /// that reached no comparison, and on one recorded before the field existed, which agrees
+    /// with nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agreement: Option<Digest>,
+    /// The machine this attempt ran on, as an id that names no machine ([`crate::host_id`]).
+    ///
+    /// ADR-0010 safeguard 1 asks for attempts "on different workers", and two runs on one machine
+    /// share everything it holds constant. `None` on a record written before the field existed,
+    /// and on a machine with neither a machine id nor a hostname; the gate then cannot tell one
+    /// machine from two, and withholds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Which caches this attempt let supply it, and whether its base image was pulled again. See
+    /// [`crate::CacheState`]. `None` on a record written before the field existed, which is "not
+    /// recorded" and never "cold".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::CacheState>,
 
     pub environment: Environment,
     /// The blob holding the strategy that ran, as canonical JSON (`trigon_core::jcs`): the digest
@@ -566,6 +606,9 @@ impl RunRecord {
             finished: None,
             attempt: 1,
             cache_key: None,
+            agreement: None,
+            host: None,
+            cache: None,
             environment,
             strategy: None,
             strategy_digest: None,

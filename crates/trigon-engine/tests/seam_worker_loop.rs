@@ -87,6 +87,10 @@ impl Work for Fake {
         vec!["rebuild".into()]
     }
 
+    fn unconfirmable(&self, _: &RunRecord) -> Option<String> {
+        None
+    }
+
     async fn run(&self, job: &Job, progress: &Progress) -> Result<Done, Failed> {
         self.ran.fetch_add(1, Ordering::SeqCst);
         for phase in ["resolve", "fetch", "build"] {
@@ -158,6 +162,98 @@ async fn a_verdict_asks_the_question_a_second_time() {
     );
 }
 
+/// A build that answers with a record keyed as the run path keys one: on what it ran, not on
+/// what the job asked for.
+#[derive(Debug)]
+struct KeyedByTheRun {
+    key: Option<&'static str>,
+}
+
+#[async_trait]
+impl Work for KeyedByTheRun {
+    fn kinds(&self) -> Vec<String> {
+        vec!["rebuild".into()]
+    }
+
+    fn unconfirmable(&self, _: &RunRecord) -> Option<String> {
+        None
+    }
+
+    async fn run(&self, job: &Job, _progress: &Progress) -> Result<Done, Failed> {
+        let mut r = record(
+            &format!("run-{}-{}", job.id, job.attempt),
+            &job.target,
+            Some("exact"),
+            "",
+        );
+        r.cache_key = self.key.map(str::to_string);
+        Ok(Done {
+            record: r,
+            record_ref: "00".repeat(32),
+        })
+    }
+}
+
+/// The confirmation is the same question, not the same request.
+///
+/// A first attempt's job is keyed on its target, which is all `trigon enqueue` knows; the run
+/// keys its record on the target, the strategy it ran and the set it was judged under. The second
+/// attempt is asked of that key, naming the run it confirms, so the worker repeats that strategy
+/// rather than inferring one that may differ (`docs/19` §10 phase 3).
+#[tokio::test]
+async fn a_confirmation_is_keyed_on_what_the_first_attempt_ran_and_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "keyed").await;
+    let e = engine(
+        q.clone(),
+        Config {
+            worker: "w1".into(),
+            confirm_after: Duration::ZERO,
+            ..Default::default()
+        },
+    );
+    q.enqueue(&NewJob::rebuild("pkg:npm/a@1", "pkg:npm/a@1", Tier::Bulk))
+        .await
+        .unwrap();
+    e.tick(&KeyedByTheRun {
+        key: Some("ck1:the-work"),
+    })
+    .await
+    .unwrap();
+
+    let next = q
+        .lease("w2", &["rebuild"], 10, Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(next.len(), 1, "a confirmation was not enqueued");
+    assert_eq!(next[0].cache_key, "ck1:the-work");
+    assert_eq!(next[0].attempt, 2);
+    let payload: serde_json::Value =
+        serde_json::from_str(next[0].payload.as_deref().expect("a payload")).unwrap();
+    assert_eq!(payload["confirm"], format!("run-{}-1", next[0].id - 1));
+}
+
+/// A verdict whose record has no key cannot be confirmed, so it is not asked again: no second
+/// attempt could be counted beside it.
+#[tokio::test]
+async fn a_verdict_with_no_key_is_not_asked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "keyless").await;
+    let e = engine(
+        q.clone(),
+        Config {
+            worker: "w1".into(),
+            confirm_after: Duration::ZERO,
+            ..Default::default()
+        },
+    );
+    q.enqueue(&NewJob::rebuild("pkg:npm/a@1", "pkg:npm/a@1", Tier::Bulk))
+        .await
+        .unwrap();
+    e.tick(&KeyedByTheRun { key: None }).await.unwrap();
+    assert_eq!(q.depth().await.unwrap(), vec![("done".to_string(), 1)]);
+}
+
 /// A run with no verdict is not confirmed.
 ///
 /// A `no-strategy` asked twice is still a `no-strategy`, and the second build spends compute to
@@ -207,6 +303,152 @@ async fn confirmations_do_not_breed() {
         .await
         .unwrap();
     assert_eq!(q.depth().await.unwrap(), vec![("done".to_string(), 1)]);
+}
+
+/// A build on a named machine, answering as the run path does: a verdict keyed on what it ran,
+/// with the machine it ran on recorded.
+#[derive(Debug, Clone, Copy)]
+struct OnMachine {
+    host: &'static str,
+    /// What the worker says when asked whether its verdict is worth a second attempt.
+    unconfirmable: Option<&'static str>,
+}
+
+#[async_trait]
+impl Work for OnMachine {
+    fn kinds(&self) -> Vec<String> {
+        vec!["rebuild".into()]
+    }
+
+    async fn run(&self, job: &Job, _progress: &Progress) -> Result<Done, Failed> {
+        let mut r = record(
+            &format!("run-{}-{}", job.id, job.attempt),
+            &job.target,
+            Some("exact"),
+            "ck1:the-work",
+        );
+        r.host = Some(self.host.into());
+        Ok(Done {
+            record: r,
+            record_ref: "00".repeat(32),
+        })
+    }
+
+    fn unconfirmable(&self, _: &RunRecord) -> Option<String> {
+        self.unconfirmable.map(str::to_string)
+    }
+}
+
+/// A worker on `host`, whose confirmations are runnable at once.
+fn on(q: &Queue, host: &'static str, same_host_confirmation: bool) -> (Engine, OnMachine) {
+    let e = engine(
+        q.clone(),
+        Config {
+            worker: format!("worker-on-{host}"),
+            host: Some(host.into()),
+            confirm_after: Duration::ZERO,
+            same_host_confirmation,
+            ..Default::default()
+        },
+    );
+    (
+        e,
+        OnMachine {
+            host,
+            unconfirmable: None,
+        },
+    )
+}
+
+/// A confirmation goes to another machine, whichever is idle first.
+///
+/// With `same_host_confirmation` off, as it is by default, the gate does not count a confirmation
+/// made on the machine that made the first attempt, and nothing asks a third time. Nothing kept
+/// the first machine from leasing it, so a fleet lost the one confirmation of every target whose
+/// first machine happened to ask for work first, each after a full cold build.
+#[tokio::test]
+async fn a_confirmation_is_made_on_another_machine() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "elsewhere").await;
+    let (a, on_a) = on(&q, "machine-id:a", false);
+    let (b, on_b) = on(&q, "machine-id:b", false);
+    let first = q
+        .enqueue(&NewJob::rebuild("pkg:npm/a@1", "pkg:npm/a@1", Tier::Bulk))
+        .await
+        .unwrap();
+    assert_eq!(a.tick(&on_a).await.unwrap(), 1);
+
+    // The first machine is idle first, and does not take its own confirmation.
+    assert_eq!(
+        a.tick(&on_a).await.unwrap(),
+        0,
+        "the machine that made the first attempt leased its confirmation"
+    );
+    assert_eq!(
+        q.depth().await.unwrap(),
+        vec![("done".to_string(), 1), ("ready".to_string(), 1)]
+    );
+    assert_eq!(b.tick(&on_b).await.unwrap(), 1, "another machine takes it");
+    assert_eq!(q.depth().await.unwrap(), vec![("done".to_string(), 2)]);
+
+    // And the first job says where its confirmation went, which on a fleet of one machine is the
+    // only account of why it never runs.
+    let events = q.events(first).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|(_, phase, detail)| phase == "confirmation"
+                && detail
+                    .as_deref()
+                    .is_some_and(|d| d.contains("machine-id:a"))),
+        "{events:?}"
+    );
+}
+
+/// Where the operator accepts one machine confirming itself (`docs/19` D8), any machine may make
+/// the confirmation, the first included: the attempt that repeats a run is cold and re-pulls its
+/// image, which is what the gate then asks of it.
+#[tokio::test]
+async fn one_machine_confirms_itself_where_the_operator_accepts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "same-host").await;
+    let (a, on_a) = on(&q, "machine-id:a", true);
+    q.enqueue(&NewJob::rebuild("pkg:npm/a@1", "pkg:npm/a@1", Tier::Bulk))
+        .await
+        .unwrap();
+    assert_eq!(a.tick(&on_a).await.unwrap(), 1);
+    assert_eq!(a.tick(&on_a).await.unwrap(), 1, "the confirmation");
+    assert_eq!(q.depth().await.unwrap(), vec![("done".to_string(), 2)]);
+}
+
+/// A verdict the worker says is not worth confirming — a void, which the attempt that repeats a
+/// run refuses — is not asked again, and the job says why.
+///
+/// It was: the engine asked only whether there was a verdict and a key, so every void verdict
+/// queued a confirmation that was leased, refused and retried until it was dead.
+#[tokio::test]
+async fn a_void_verdict_is_not_asked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "void").await;
+    let (a, on_a) = on(&q, "machine-id:a", false);
+    let first = q
+        .enqueue(&NewJob::rebuild("pkg:npm/a@1", "pkg:npm/a@1", Tier::Bulk))
+        .await
+        .unwrap();
+    let void = OnMachine {
+        unconfirmable: Some("the run is void (open_egress)"),
+        ..on_a
+    };
+    assert_eq!(a.tick(&void).await.unwrap(), 1);
+    assert_eq!(q.depth().await.unwrap(), vec![("done".to_string(), 1)]);
+    let events = q.events(first).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|(_, phase, detail)| phase == "unconfirmed"
+                && detail.as_deref().is_some_and(|d| d.contains("open_egress"))),
+        "{events:?}"
+    );
 }
 
 /// A retryable failure comes back; an unretryable one does not.
@@ -471,6 +713,10 @@ impl Work for Sleepy {
         vec!["rebuild".into()]
     }
 
+    fn unconfirmable(&self, _: &RunRecord) -> Option<String> {
+        None
+    }
+
     async fn run(&self, job: &Job, _progress: &Progress) -> Result<Done, Failed> {
         // Deliberately silent. A `Work` that never calls `phase` is the case that broke.
         tokio::time::sleep(Duration::from_millis(self.for_ms)).await;
@@ -565,6 +811,9 @@ async fn renewing_a_lease_does_not_erase_the_phase() {
     impl Work for Named {
         fn kinds(&self) -> Vec<String> {
             vec!["rebuild".into()]
+        }
+        fn unconfirmable(&self, _: &RunRecord) -> Option<String> {
+            None
         }
         async fn run(&self, job: &Job, progress: &Progress) -> Result<Done, Failed> {
             progress.phase("rebuild").await;

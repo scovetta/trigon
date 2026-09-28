@@ -90,7 +90,10 @@ Useful flags:
   difference between "four members differ" and a list of paths you can go and look at.
 - `--output json` — `{outcome, upstream, rebuild, diff}`, for a script.
 - `--attest out.json` — write a DSSE-wrapped in-toto statement of the result. Emitted for a
-  divergence as readily as for a match.
+  divergence as readily as for a match. It is a claim about two local files, `equivalence/v1` or
+  `divergence/v1`, and not publishable: there is no run behind it for the publication gate to ask
+  about, and `trigon publish` takes only v2 verdicts, voids and withdrawals. A claim about a
+  published package comes from `trigon rebuild --store` and `trigon attest`.
 
 **Exit codes**, so this works in CI:
 
@@ -339,12 +342,57 @@ trigon attest --withdraw <record.json> --reason withdrawn              # "we wer
 record is about the same artifact, digest for digest, and the same package. A withdrawal has no run,
 and is filed in the store at `withdrawals/sha256/<record>/withdrawal.intoto.json`.
 
+`trigon rebuild … --store ./trigon-store --attest out.json` signs the same statements through the
+same code, in the process that ran the build, files them under the run, and writes the one about
+the result — the verdict, or the void — to `out.json`. `--store` and then `trigon attest` keeps the
+key out of that process, which is the separation a claim that matters wants.
+
+## Task: confirm a run, so it can be published
+
+Nothing is published on one attempt (ADR-0010 safeguard 1). A second attempt at the same work, which
+agrees, is what the publication gate asks for, and `--confirm` runs it:
+
+```
+trigon rebuild --confirm <run> --store ./trigon-store
+```
+
+It repeats the run exactly: its target and artifact, the strategy it stored, its stabilizer set, and
+the image and egress tier it ran on. No model is asked and no repair is tried. Every cache is
+emptied — the build runs with no cached layer, the source is checked out again into a directory of
+its own, no fetch cache is used — and the base image is taken out of the image store and pulled
+again by digest where it has a registry to be pulled from. The record says which of that happened,
+with the machine it ran on and when it began, and the gate reads it:
+
+- the two attempts must be keyed alike — the target, the strategy and the set — and have found the
+  same thing, not only reached the same outcome;
+- the second must begin at least `confirmation_interval` after the first (`1h` by default);
+- and on another machine — or on the same one, where `same_host_confirmation = true`, only if the
+  confirming attempt was cold and its image was pulled again.
+
+A pair that falls short is withheld with the reason: `attempts_too_close`, `same_host`,
+`confirmation_not_cold`, `confirmation_unrecorded`, or `attempts_disagree`. `--confirm` refuses a
+run it cannot repeat, before fetching anything: one that kept no strategy blob, a void run, one that
+reached no verdict, and one recorded before runs were keyed on what they ran — rebuild that target,
+and confirm the new run.
+
+"Another machine" means another machine id. A machine with no `/etc/machine-id` (nor D-Bus's
+`/var/lib/dbus/machine-id`) records an id derived from its hostname, and two of those may be two
+containers on one machine, so such a pair is held to what one machine is held to. A run on a
+derived image (`--image derive`) is confirmed on that image, and its confirmation says it reused
+one: it is never cold, so it confirms only from another machine, and a divergence on a derived image
+stays withheld however it is confirmed.
+
+A worker's second attempt is the same thing, queued by the engine for a machine other than the
+first attempt's — so a fleet of one machine confirms nothing unless `same_host_confirmation = true`
+— and never for a void verdict.
+
 ## Configuring where evidence goes: `evidence.toml`
 
 Publishing and looking up verdicts in an evidence repository
 ([`19-distribution-and-lookup.md`](19-distribution-and-lookup.md)) are configured, never compiled
-in. `trigon attest` reads the configuration today; `publish`, `evidence sync` and `lookup` are the
-later phases that use the rest of it.
+in. `trigon attest`, `trigon serve` and `trigon worker` read the configuration today — `serve` and
+`worker` for `same_host_confirmation` and `confirmation_interval`, which decide when two attempts
+count as two; `publish`, `evidence sync` and `lookup` are the later phases that use the rest of it.
 
 The file is `~/.config/trigon/evidence.toml` (`$XDG_CONFIG_HOME/trigon/evidence.toml`), or
 whatever `TRIGON_EVIDENCE_CONFIG` names instead. Every key, with its default:

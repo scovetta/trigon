@@ -139,6 +139,42 @@ pub struct Comparison {
 }
 
 impl Comparison {
+    /// What two attempts at the same work must share to agree: the outcome, the stabilizer set,
+    /// the published artifact's raw digest, and both sides' stabilized digests, hashed under a
+    /// domain tag.
+    ///
+    /// **The rebuild stabilized, never raw.** Two honest builds of one package are rarely
+    /// byte-identical — six builds of `Newtonsoft.Json@11.0.1` produced six raw artifacts and one
+    /// stabilized digest (`docs/17-backlog.md` B31) — so a digest over the stored report, which
+    /// names the rebuilt artifact's raw bytes, would never let a `normalized` run be confirmed.
+    /// And **not the outcome alone**, which let a divergence in the nuspec confirm a divergence in
+    /// every DLL: two stabilized rebuilds with one digest differ from the published artifact in
+    /// exactly the same members and the same ways, because the difference is a function of the two
+    /// stabilized archives under the set.
+    ///
+    /// **The published artifact raw as well**, because it is the question, and the cache key does
+    /// not name it. A registry that serves other bytes under one file name — a republished
+    /// artifact that differs only in what the set strips, timestamps or a gzip header — gives two
+    /// attempts one stabilized upstream digest, and they confirmed each other while each was
+    /// about different bytes, and a signed statement names only one of them. Two honest attempts
+    /// fetch the same bytes, so this costs a confirmation nothing.
+    pub fn agreement(&self) -> Digest {
+        let mut h = Sha256::new();
+        h.update(b"trigon.agreement.v1\n");
+        for part in [
+            self.outcome.to_string(),
+            self.upstream.set.0.0.clone(),
+            self.upstream.set.1.to_hex(),
+            self.upstream.raw.sha256.to_hex(),
+            self.upstream.stabilized.sha256.to_hex(),
+            self.rebuild.stabilized.sha256.to_hex(),
+        ] {
+            h.update(part.as_bytes());
+            h.update(b"\n");
+        }
+        Digest::from_bytes(h.finalize().into())
+    }
+
     /// "Same tar, different gzip framing". `None` when the format has no outer codec.
     pub fn container_bit_identical(&self) -> Option<bool> {
         Some(self.upstream.container.as_ref()?.sha256 == self.rebuild.container.as_ref()?.sha256)

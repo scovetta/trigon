@@ -348,20 +348,22 @@ fails open and reports success: it reads as assurance and is not.
 | 7 | A model-authored strategy cannot raise the egress tier | `trigon-strategy/tests/seam_rendering.rs` — a strategy cannot ask for privilege, egress, a base image or a platform | **yes** |
 | 8 | Signing never occurs in a process that executed sandbox output | `trigon attest` is a separate invocation that reads blobs by hash and re-derives before signing. There is **no deployment test**, and no attestor image to test. | **partly** |
 | 9 | Identical inputs produce identical verdicts | **nothing.** No flake test exists, and the `smoke` corpus it would run against is itself an unmet M1 exit criterion. | **no** |
-| 10 | A `Void` run is never published as a divergence | `trigon attest` signs a run the publication gate calls void — a guard trip, open egress, a stabilizer somebody wrote — as `void/v1` alone, never as a verdict (`crates/trigon/tests/seam_attest_v2.rs`), and `GET /v1/runs/{id}/attestation` serves an anonymous reader of a void run its `void/v1` and no verdict (`crates/trigon-api/tests/seam_void_statement.rs`). There is **no publication path** yet ([`19`](19-distribution-and-lookup.md) §10 phase 5), so nothing tests one. | **partly** |
+| 10 | A `Void` run is never published as a divergence | `trigon attest`, and `trigon rebuild --attest` through the same code, sign a run the publication gate calls void — a guard trip, open egress, a stabilizer somebody wrote — as `void/v1` alone, never as a verdict (`crates/trigon/tests/seam_attest_v2.rs`, and `rebuild_attest_at_open_egress_signs_void_and_never_a_verdict` in `crates/trigon/src/main.rs`, through `attest_what_was_recorded`, which is what `rebuild` signs with once the run is recorded), and `GET /v1/runs/{id}/attestation` serves an anonymous reader of a void run its `void/v1` and no verdict (`crates/trigon-api/tests/seam_void_statement.rs`). There is **no publication path** yet ([`19`](19-distribution-and-lookup.md) §10 phase 5), so nothing tests one. | **partly** |
 | 11 | The guard does not fire on stock content | **nothing.** `MIN_GUARDED_BYTES`, the stock-file rule and the also-in-source filter exist and are unit-tested individually; no corpus replay asserts zero `Void` across known-good builds. | **no** |
-| 12 | Two attempts that disagree publish nothing | **nothing.** No confirmation policy exists — nothing in this system performs a clean re-run at all ([`17-backlog.md`](17-backlog.md) B15). | **no** |
+| 12 | Two attempts that disagree publish nothing | `publication::decide` withholds every attempt at a cache key where another reached a different outcome or found something else — agreement is on a digest over what the comparison found, not on the outcome string — and releases a pair only when the second began at least `confirmation_interval` after the first, on another machine — told apart by machine id, never by hostname — or on the same one cold (`crates/trigon-api/tests/seam_confirmation.rs`, [`19`](19-distribution-and-lookup.md) §10 phase 3). A clean re-run exists, `trigon rebuild --confirm`. There is **no publication path** yet, so the gate decides what `serve` shows and nothing else. | **partly** |
 
 Invariants 2, 6 and 10 carry the security weight, and 2 and 6 are the two that hold. Invariant 11 is
 what stops the guard from being switched off in frustration six weeks in, and it is unenforced —
 the individual filters are tested, the aggregate claim is not. Invariant 9 is the one an unrelated
 change breaks without anybody noticing, and it is unenforced too.
 
-**What this costs, stated plainly.** Nothing here claims 9, 11 and 12 hold. They are design
+**What this costs, stated plainly.** Nothing here claims 9 and 11 hold. They are design
 commitments with no evidence behind them, and a reader deciding how much to trust a Trigon verdict
-should read them as such: verdicts are not checked for stability across identical runs, the guard's
-false-positive rate is unmeasured, and every attestation this system signs is signed off a single
-run.
+should read them as such: verdicts are not checked for stability across identical runs, and the
+guard's false-positive rate is unmeasured. Invariant 12 is enforced by the gate and by nothing that
+publishes, since nothing publishes yet, and a signed statement is still signed off a single run:
+`trigon attest` does not ask whether a second attempt agreed, and publishing is where that is
+asked.
 
 ## 11. Out of scope
 

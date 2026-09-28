@@ -11,6 +11,8 @@ authors.workspace = true
 [dependencies]
 trigon-core.workspace = true
 trigon-store = { workspace = true, features = ["queue"] }
+# The configuration's default confirmation interval, which the confirmation delay defaults to.
+trigon-attest.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

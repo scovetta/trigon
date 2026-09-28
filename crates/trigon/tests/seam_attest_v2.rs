@@ -417,6 +417,65 @@ fn a_run_that_recorded_no_derivation_is_not_signed_as_heuristic() {
     );
 }
 
+/// `rebuild/v1`'s `derivation.transcript` names the model exchange the run kept, and is `null`
+/// where it kept none. It was `null` whatever the run held: 24 of 75 attested runs in one store had
+/// a transcript digest no statement signed.
+#[test]
+fn the_model_exchange_a_run_kept_is_signed_and_one_it_did_not_keep_is_not() {
+    let d = dir("transcript");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (tgz(b"x\n", 1), tgz(b"x\n", 2));
+    let mut run = rt().block_on(compared_run(&store, "1789001500-b1b1b1b1", &u, &r));
+    let exchange = rt()
+        .block_on(store.blobs().put(br#"{"turns":[]}"#.to_vec()))
+        .unwrap();
+    run.transcript = Some(exchange);
+    run.derivation = Some("model_assisted".into());
+    rt().block_on(store.put_run(&run)).unwrap();
+    ok(&attest(&d, &run.id, &[], &[]));
+    let rebuild = the(&statements(&store, &run.id), trigon_attest::REBUILD);
+    assert_eq!(
+        rebuild["predicate"]["derivation"]["transcript"],
+        serde_json::json!({ "sha256": exchange.to_hex() })
+    );
+
+    let bare = rt().block_on(compared_run(&store, "1789001600-b2b2b2b2", &u, &r));
+    assert_eq!(bare.transcript, None);
+    ok(&attest(&d, &bare.id, &[], &[]));
+    let rebuild = the(&statements(&store, &bare.id), trigon_attest::REBUILD);
+    assert!(
+        rebuild["predicate"]["derivation"]["transcript"].is_null(),
+        "{}",
+        rebuild["predicate"]["derivation"]
+    );
+}
+
+/// The gate counts a second attempt as agreeing by the record's agreement digest, so a record whose
+/// digest is not its comparison's is refused, as one whose outcome is not is.
+#[test]
+fn a_record_whose_agreement_digest_is_not_its_comparisons_is_not_signed() {
+    let d = dir("agreement");
+    let store = Store::local(&d.join("store")).unwrap();
+    let (u, r) = (tgz(b"x\n", 1), tgz(b"x\n", 2));
+    let mut run = rt().block_on(compared_run(&store, "1789001700-b3b3b3b3", &u, &r));
+    run.agreement = Some(trigon_core::Digest::from_bytes([1u8; 32]));
+    rt().block_on(store.put_run(&run)).unwrap();
+    let out = attest(&d, &run.id, &[], &[]);
+    assert!(!out.status.success());
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("agreement digest"), "{e}");
+    assert!(statements(&store, &run.id).is_empty(), "nothing was signed");
+
+    // The one the comparison gives is signed.
+    let bytes = rt()
+        .block_on(store.blobs().get(&run.comparison.unwrap()))
+        .unwrap();
+    let c: trigon_compare::Comparison = serde_json::from_slice(&bytes).unwrap();
+    run.agreement = Some(c.agreement());
+    rt().block_on(store.put_run(&run)).unwrap();
+    ok(&attest(&d, &run.id, &[], &[]));
+}
+
 #[test]
 fn a_divergence_is_signed_as_divergence_v2_and_re_derives() {
     let d = dir("divergence");

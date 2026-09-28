@@ -50,6 +50,12 @@ fn run(id: &str, outcome: &str, started: &str, key: &str) -> RunRecord {
     r.outcome = Some(outcome.to_string());
     r.cache_key = Some(key.to_string());
     r.non_builtin_stabilizer = Some(false);
+    // As the run path records them: what the comparison found, which is one thing per outcome in
+    // these fixtures, and a machine of its own for every run. The pairs below begin a day apart,
+    // so a pair at one key is a confirmation under the settings a gate with no configuration uses.
+    r.agreement = Some(trigon_store::digest_of(outcome.as_bytes()));
+    r.host = Some(format!("machine-id:{id}"));
+    r.cache = Some(trigon_store::CacheState::default());
     r
 }
 

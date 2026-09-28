@@ -96,6 +96,17 @@ pub async fn run(store: trigon_store::Store, cfg: Config) -> Result<(), String> 
     if cfg.switches.stop_divergences {
         println!("  divergence publication is STOPPED (ADR-0010 safeguard 5)");
     }
+    // What a confirmation is here, said once, because it decides what the page withholds and it
+    // comes from a file the reader of this line may not know was read.
+    let c = cfg.switches.confirmation;
+    println!(
+        "  a confirmation is a second agreeing attempt begun {}s or more after the first, on {}",
+        c.interval.as_secs(),
+        match c.same_host {
+            true => "another machine, or on the same one cold with its image re-pulled",
+            false => "another machine",
+        }
+    );
 
     axum::serve(listener, crate::router(api))
         .await

@@ -1798,6 +1798,10 @@ async function detail(id) {
 const withheldTitle = (pub) => ({
   awaiting_confirmation: 'held back until a second, independent attempt agrees. One attempt cannot tell a deterministic recipe from a lucky one.',
   attempts_disagree: 'two attempts at this disagreed, so the honest answer is that we do not know. That is a finding about our repeatability, not about the package.',
+  confirmation_unrecorded: 'the attempts that agree do not all record which machine ran them and when they began, so whether the second is independent of the first cannot be checked.',
+  attempts_too_close: 'the attempts that agree began closer together than the confirmation interval allows, so the second cannot catch a floating dependency or a fetch that happened to succeed.',
+  same_host: 'the attempts that agree ran on one machine, or on machines their records cannot tell apart, and this operator does not accept a confirmation from the machine that made the first attempt.',
+  confirmation_not_cold: 'the attempts that agree ran on one machine, or on machines their records cannot tell apart, and the second was not cold, so it may have replayed the first attempt rather than repeated it.',
   open_egress: 'the build ran with unrestricted network access, so nothing it produced is evidence about the package.',
   guard_tripped: 'the build reached the published artifact over the network, so a match would prove only that it downloaded it.',
   non_builtin_stabilizer: 'a stabilizer a person or a model wrote was applied, so the normalization is itself a judgement call, and the run is evidence of nothing about the package in either direction.',

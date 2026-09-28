@@ -43,7 +43,27 @@ fn record(id: &str, target: &str, outcome: Option<&str>, key: Option<&str>) -> R
     // rebuild. `None` here would mean a record from before the field existed, and the gate treats
     // that as a safeguard it could not evaluate — correct, and not what these fixtures are about.
     r.non_builtin_stabilizer = Some(false);
+    // Runs with one outcome found one thing, so two at a key agree unless a test says otherwise.
+    r.agreement = outcome.map(|o| trigon_store::digest_of(o.as_bytes()));
+    ran(&mut r);
     r
+}
+
+/// Where and when the run with this id ran, as the run path records it: on a machine of its own,
+/// and `<id> - 1700000000` hours into 2026. Two ids one apart are then an hour apart on two
+/// machines, which is a confirmation under the settings `trigon serve` uses with no configuration,
+/// and these tests are about what a confirmed or unconfirmed run shows, not about how it was
+/// confirmed.
+fn ran(r: &mut RunRecord) {
+    let n: i64 =
+        r.id.split('-')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1_700_000_000);
+    let hours = n - 1_700_000_000;
+    r.started = format!("2026-01-{:02}T{:02}:00:00Z", 1 + hours / 24, hours % 24);
+    r.host = Some(format!("machine-id:{}", r.id));
+    r.cache = Some(trigon_store::CacheState::default());
 }
 
 async fn api_over(records: Vec<RunRecord>, who: Principal) -> Arc<Api> {
@@ -191,6 +211,57 @@ async fn two_agreeing_attempts_reach_the_public() {
     );
 }
 
+/// No anonymous reader is told which machine a run ran on, by the record route or the page.
+///
+/// A host id is a keyed hash under a key that is in the source. Where it was derived from a
+/// hostname — often a person's name — a guess at the hostname can be checked against it. The gate
+/// reads the index's own records, so the field is of no use to a reader; the operator keeps it.
+#[tokio::test]
+async fn no_anonymous_reader_is_told_which_machine_a_run_ran_on() {
+    let published = vec![
+        record(
+            "1700000001-aa",
+            "pkg:npm/p@1.0.0",
+            Some("exact"),
+            Some("k1"),
+        ),
+        record(
+            "1700000002-ab",
+            "pkg:npm/p@1.0.0",
+            Some("exact"),
+            Some("k1"),
+        ),
+    ];
+    let mut void = record(
+        "1700000005-cc",
+        "pkg:npm/v@1.0.0",
+        Some("exact"),
+        Some("k2"),
+    );
+    void.environment.egress = "open".into();
+    let mut all = published.clone();
+    all.push(void.clone());
+
+    let anon = api_over(all.clone(), Principal::Anonymous).await;
+    for id in ["1700000002-ab", "1700000005-cc"] {
+        for path in [format!("/v1/runs/{id}"), format!("/runs/{id}")] {
+            let (status, body) = get(anon.clone(), &path).await;
+            assert_eq!(status, 200, "{path}: {body}");
+            assert!(body.contains(id), "{path} does not show the run at all");
+            assert!(
+                !body.contains("machine-id:"),
+                "{path} names the machine: {body}"
+            );
+        }
+    }
+    let operator = api_over(all, Principal::Operator).await;
+    let (_, body) = get(operator, "/v1/runs/1700000002-ab").await;
+    assert!(
+        body.contains("machine-id:1700000002-ab"),
+        "the operator keeps it"
+    );
+}
+
 /// An unredacted class never leaves the process to an anonymous caller, through any route.
 #[tokio::test]
 async fn no_route_hands_the_internet_an_unredacted_byte() {
@@ -200,6 +271,7 @@ async fn no_route_hands_the_internet_an_unredacted_byte() {
     r.comparison = Some(Digest::from_bytes([3u8; 32]));
     let mut confirming = r.clone();
     confirming.id = "1700000002-ab".into();
+    ran(&mut confirming);
 
     let api = api_over(vec![r, confirming], Principal::Anonymous).await;
     for path in [
@@ -325,6 +397,7 @@ async fn a_members_bytes_never_reach_the_internet() {
     r.comparison = Some(Digest::from_bytes([4u8; 32]));
     let mut confirming = r.clone();
     confirming.id = "1700000002-ab".into();
+    ran(&mut confirming);
 
     let api = api_over(vec![r, confirming], Principal::Anonymous).await;
     for path in [

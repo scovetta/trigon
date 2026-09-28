@@ -967,31 +967,10 @@ fn rfc3339_age(s: &str) -> Option<u64> {
 /// The same instant as epoch seconds.
 ///
 /// Split out rather than copied: a single-run page needs the started→finished bracket, and a second
-/// implementation of days-from-civil is a second thing that has to agree with this one.
+/// implementation of days-from-civil is a second thing that has to agree with this one — which is
+/// why the one implementation now lives in `trigon-core`, where the publication gate reads it too.
 fn rfc3339_epoch(s: &str) -> Option<i64> {
-    let (date, rest) = s.split_once('T')?;
-    let time = rest.strip_suffix('Z')?;
-    let mut d = date.split('-');
-    let (y, m, day): (i64, i64, i64) = (
-        d.next()?.parse().ok()?,
-        d.next()?.parse().ok()?,
-        d.next()?.parse().ok()?,
-    );
-    let mut t = time.split(':');
-    let (hh, mm, ss): (i64, i64, i64) = (
-        t.next()?.parse().ok()?,
-        t.next()?.parse().ok()?,
-        t.next()?.parse().ok()?,
-    );
-    // Days from civil, the inverse of the formatter in main.rs.
-    let y2 = if m <= 2 { y - 1 } else { y };
-    let era = y2.div_euclid(400);
-    let yoe = y2 - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
+    trigon_core::time::rfc3339_epoch(s)
 }
 
 fn rates_panel(r: &Rates) -> String {
