@@ -515,7 +515,7 @@ record only for one that is, and `attest` refuses one that is not.
 ### 2.8 The record file, `trigon.record/v1`
 
 One published result, as [`19`](19-distribution-and-lookup.md) §4.1 lays it out:
-`trigon_attest::Record`, plain types that later phases verify.
+`trigon_attest::Record`, verified by `trigon_attest::evidence::check_record` (§7).
 
 ```json
 {
@@ -527,10 +527,16 @@ One published result, as [`19`](19-distribution-and-lookup.md) §4.1 lays it out
 }
 ```
 
-The record's own name is the sha256 of its bytes. `Record::statement` finds the one statement that
-is its result — a verdict, a void or a withdrawal — by predicate type, not by position. Reading a
-record refuses a file that is not one (another `schema`, not this shape) and checks nothing else;
-unknown keys are read past, as everywhere a verifier reads.
+The record's own name is the sha256 of its bytes, which are its canonical JSON
+(`Record::encode`), so a record's name is a function of what it holds. `Record::assemble` writes one
+from its envelopes, taking the unsigned `subject` and `evidence` map from the signed statement, so a
+record agrees with itself by construction; a reader still checks that it does. The map writes each
+piece of evidence as `sha256:<hex>` under the name the statement signs it by, and is empty for a
+withdrawal. `Record::statement` finds the one statement that is its result — a verdict, a void or a
+withdrawal — by predicate type, not by position. Reading a record refuses a file that is not one
+(another `schema`, not this shape) and checks nothing else; unknown keys are read past, as
+everywhere a verifier reads. `evidence::record_leaf` gives the leaf a record is logged under, from
+its signed statement, for the writer of §10 phase 5.
 
 ### 2.9 The canonical purl
 
@@ -571,7 +577,7 @@ reader of these keys, a client in another language included, is held to them.
 
 The log of [`19`](19-distribution-and-lookup.md) §2.3, which is the design, as built in
 `trigon_attest::log`: pure code, no network, reading only the directory it is given. Nothing writes
-an evidence repository yet (`publish` is §10 phase 5), and no command reads one (phases 4b and 6).
+an evidence repository yet (`publish` is §10 phase 5); `verify-attestation --record` (§7) reads one.
 Golden files for every format are in `crates/trigon-attest/testdata/log/`, and were checked against
 Go's `golang.org/x/mod/sumdb/note` and `sumdb/tlog` ([`16-findings.md`](16-findings.md) §3.98).
 
@@ -644,8 +650,12 @@ following one only when its first leaf is a `log-continuation` that holds the ol
 checkpoint, signed by both log keys, and reports every `log/<n>` that no `log-end` names as refused.
 The chain starts at the newest checkpoint the pinned key opens, in whichever directory holds it, and
 at the first such directory whose files verify: a directory is never chosen on what its checkpoint's
-text says, and any other claiming that log — unsigned, unreadable, an older state, a copy — is
-reported and set aside, so planting one neither stops the source nor moves it back. `KeyHistory`
+text says, and any other claiming that log — unsigned, unreadable, an older state the newest
+extends, a copy — is reported and set aside, so planting one neither stops the source nor moves it
+back. Two checkpoints the pinned key opens whose trees are not one tree — the same size with two
+roots, or an older one the newest does not extend — are something only the log key can sign: an
+equivocation, which refuses the source with both signed notes (`LogError::Equivocation`,
+[`16-findings.md`](16-findings.md) §3.99). `KeyHistory`
 follows `key-change` leaves from the pinned attestation key: one from the current key counts only
 when both keys signed it over this log's origin, and from that leaf on a record signed by the old
 key is refused. The writer (`VerifiedLog::plan_append`) is held to what those readers check, as far
@@ -653,6 +663,32 @@ as one log can know it — a key change signed over this log's origin, a `log-en
 with another origin, a `log-continuation` signed by this log's key and holding another log's
 checkpoint — and the free `plan_append` to a tail that is the tree's own leaves, because a leaf or a
 full bundle once written is there for good.
+
+### 2.11 The evidence repository's paths, and the index
+
+Where each file of an evidence repository is ([`19`](19-distribution-and-lookup.md) §2.3, §5), as
+`trigon_attest::evidence::paths` derives it, for the writer and every reader. The fan-out is the
+first four hex characters of the name, everywhere, and every digest is whole.
+
+| What | Path |
+|---|---|
+| a record file, by the sha256 of its bytes | `records/<aa>/<bb>/<hex>.json` |
+| an evidence file, by the sha256 of its bytes | `evidence/sha256/<aa>/<bb>/<hex>` |
+| the index, by a subject digest | `index/sha256/…/<64 hex>.json`, `index/sha512/…/<128 hex>.json`, `index/sha1/…/<40 hex>.json` |
+| the index, by purl | `index/purl<n>/<aa>/<bb>/<sha256 of the canonical purl>.json` |
+| the index, by package | `index/pkg<n>/<aa>/<bb>/<sha256 of the versionless form>.json` |
+
+`<n>` is the canonicalisation rule the record's leaf names (§2.9), so a record is filed under the
+rule it was logged under, and a reader looking a purl up tries every rule it has. The rebuilt
+artifact is never in the repository: it is a release asset, if D4 publishes it.
+
+An index file is canonical JSON, `{"key": …, "records": [{"record": "sha256:…", "leaf": 1203}]}`,
+with `"log": "log/<n>"` on an entry whose leaf is in a successor log. Its `key` is the index
+directory's name and the key's value — `sha512:<hex>`, `purl1:pkg:npm/left-pad@1.3.0`,
+`pkg1:pkg:npm/left-pad` — so a reader can check a file is at the path its key derives. It is
+derived data: `evidence::index_files` computes the whole index from a verified log, entries in the
+log's order and the superseded ones included, and a client with the log never reads it. The shared
+purl vectors (§2.9) are held to these paths in `crates/trigon-attest/tests/evidence_repo/paths.rs`.
 
 ## 3. Signing
 
@@ -917,28 +953,101 @@ on divergence, where they are the evidence. That one rule accounts for most of t
 
 ## 7. Verification
 
+Two forms, both in the network-free verifier. A bundle, on its own:
+
 ```
 trigon verify-attestation equivalence.intoto.json \
     --public-key <hex> \
     --rerun-comparison --upstream <published> --rebuild <rebuilt>
 ```
 
+and a published record, against the log of the evidence repository it is from
+([`19`](19-distribution-and-lookup.md) §6):
+
+```
+trigon verify-attestation --record <file> --evidence <dir> \
+    (--source <name> | --log-vkey <vkey> --attestation-key <key> [--checkpoint <file>]) \
+    [--rerun-comparison --upstream <published> --rebuild <rebuilt>]
+```
+
+`<dir>` is a clone, or any directory with the §2.3 layout of `19`. `--source` takes the source's
+keys from `evidence.toml` and the checkpoint last accepted for it from its state directory,
+`$TRIGON_EVIDENCE_STATE/<name>/checkpoint` or else
+`$XDG_STATE_HOME/trigon/evidence/<name>/checkpoint`, or, before any sync has accepted one, its
+configured initial checkpoint; the flags give the same for a source not configured. Where there is
+no checkpoint at all, the output says the log was checked whole and not against anything seen
+before.
+
 Steps:
 
 1. **Decode** the envelope, and its in-toto statement.
-2. **Check the signature** against a pinned public key, where one is given with `--public-key`;
-   without one the signature is reported present and unchecked. A chain to a root replaces the
-   pinned key if [B21](17-backlog.md#b21-keyed-signing-under-a-trusted-root) is built.
-3. **Check the record's inclusion in the evidence log**, for a statement that came from an evidence
-   repository. The log's own checks are built (§2.10); the command that applies them to a record,
-   `--record <file> --evidence <dir>`, is not:
-   [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §6 and the second half of §10
-   phase 4.
+2. **Check the signature** against a pinned key. For a bundle, the key given with `--public-key`;
+   without one the signature is reported present and unchecked. For a record, always: every
+   envelope must carry a signature that verifies under the attestation key its source had at the
+   record's leaf — the pinned key, or one a `key-change` leaf signed by both keys moved to — so a
+   record signed by a key the source never had, or by one retired before its leaf, fails. A chain to
+   a root replaces the pinned key if [B21](17-backlog.md#b21-keyed-signing-under-a-trusted-root) is
+   built.
+3. **Check the record against the log**, for the record form (`trigon_attest::evidence`). The log
+   first, whole, as §2.10 says, under the pinned log key and against the checkpoint last accepted:
+   a checkpoint it does not extend, or two trees under its key in one repository, refuses it. A
+   checkpoint given that is not one is a bad argument, and never the source's failure. Then the
+   record: its sha256 must be a leaf's `record` — a record no leaf names is *unlogged*, and one the
+   log holds at two leaves is *logged twice*, since a record logged again after what withdraws it
+   would otherwise read as current again; its signed statement must agree with that leaf on
+   subject digests, purl and its rule, predicate type, outcome, set digest, `supersedes` and
+   `reason`; a void or a withdrawal is one statement; a verdict's `rebuild` is of its run and under
+   its set, and about the rebuilt artifact it names, and its `buildobservation` about its subject,
+   under its egress tier and the guard manifest it names, with no guard tripped —
+   `buildobservation` names no run, so one of another attempt at the same artifact under the same
+   tier and guard is not told apart; the unsigned `subject` and `evidence` map must agree with the
+   statement; and every evidence file the statement names that the directory holds must be the
+   bytes it names. One absent is reported unchecked, never passed, and so is a rebuilt artifact,
+   which is a release asset. Each failure is *record failed verification*, with its reason. Then
+   what the source says of the record's artifact now: every record the log holds for its sha256,
+   resolved from the leaves and never from `index/`, a leaf whose file is missing *deleted*, and
+   every supersession applied as `19` §3 says — only by a verified, logged record signed by the key
+   its source had at its own later leaf, about the same subject digests and canonical purl. A
+   superseded record is shown superseded, with the reason and both leaves, and never hidden. Where
+   the log continues in a repository the directory does not hold, a record logged there may
+   withdraw or supersede this one, so what the source says now is *unknown*, never current.
 4. **Select statements** with a small typed filter (by predicate type, by build type, by subject
-   digest). Not built: the command takes one envelope.
+   digest). Not built: the command takes one envelope or one record.
 5. **`--rerun-comparison`**: take the upstream and the rebuilt artifacts, load the stabilizer set
-   named in the attestation, run both through it, and check that the stabilized digests match what
-   the statement claims.
+   named in the attestation, run both through it, and check that the stabilized digests and the
+   outcome are what the statement claims, and so is what it says the comparison found — its
+   `differences`, `applied` and `members`, each re-derived by the function that builds a verdict and
+   compared whole. A subject whose sha256 is the artifact's and whose sha512 or sha1 is not is
+   refuted too: the file in hand is the artifact, and the statement's digests were not all computed
+   over it. For a record, the published comparison report, where the directory holds it, is read
+   again, held to its signed digest again, and held to the same re-derivation field by field:
+   outcome, archive format, set, raw and stabilized digests, differences, applied passes and
+   members; every member, with its status, kind, digests and sizes; and the field edits, where it
+   carries any. Its progression and notes are explanation a later build may word differently, and
+   the members' raw paths are missing from a report written before they were kept, so those are
+   reported unchecked, and so are field edits a report does not carry. Through an archived set
+   (§7.1), which returns stabilized bytes and no report, those three fields and the report are
+   reported unchecked.
+
+A record is shown as [`19`](19-distribution-and-lookup.md) §4.2 has every client show one: with its
+outcome, its set's id and digest, its run and when it ran, the Trigon that built it and the one that
+signed it, the egress tier and whether the run was `attestable`, and, for a verdict, the derivation
+method, the command that would falsify it and where to dispute it. Each is shown as signed, and one
+the statement does not sign is shown as absent, never as a value.
+
+The record form exits as [`19`](19-distribution-and-lookup.md) §6 says, from what the source says of
+the artifact now: 0 for a verdict at or above `normalized_with_caveats`, 1 for a divergence, 2 for
+an artifact withdrawn, 3 for a void or a lower verdict, 4 for a record, a log or a re-derived claim
+that failed verification — an equivocation and a deleted record among them — or a source whose log
+continues where the directory does not reach, and 5 when it could not check at all: bad arguments,
+those `clap` refuses included, an unreadable input, a checkpoint or state file that is not a
+checkpoint, a source not configured, a set this build does not carry, or the wrong artifact given to
+`--rerun-comparison`. `--rerun-comparison`'s arguments are checked before the record, so a bad one
+exits 5 whatever the record is. Of several, the first in the order 5, 4, 1, 3, 2 wins. `--output
+json` prints the report with its exit code, and, where the check stops before a record is read, the
+exit code, what stopped it and why, with both signed notes of an equivocation or a rollback. A
+signature that does not verify, a claim that does not re-derive and a log that fails are reported as
+the evidence's fault and never as a bug in Trigon, in both forms.
 
 Step 5 is the flagship, and it explains several other decisions.
 

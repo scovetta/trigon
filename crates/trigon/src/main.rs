@@ -153,14 +153,49 @@ enum Cmd {
         #[arg(long, requires = "attest")]
         subject: Option<String>,
     },
-    /// Check an attestation against the artifacts it is about.
+    /// Check an attestation against the artifacts it is about, or a published record against the
+    /// log of the evidence repository it is from.
     ///
     /// The point of the whole design: this needs the bundle and two files, no network, and no trust
     /// in us. Under `--rerun-comparison` it recomputes the claim from the bytes rather than reading
     /// what the statement asserts.
+    ///
+    /// With `--record <file> --evidence <dir>` it checks a published record (`docs/19` §6): the
+    /// source's log, verified whole from `<dir>` against its pinned log key and the checkpoint last
+    /// accepted; the record's leaf, signature, statement and evidence; and what the source says of
+    /// its artifact now, supersessions applied. The source's keys and checkpoint come from
+    /// `--source <name>`, or from `--log-vkey`, `--attestation-key` and `--checkpoint`. No network
+    /// in either form. It exits 0 for a verdict at or above `normalized_with_caveats`, 1 for a
+    /// divergence, 2 for a withdrawn artifact, 3 for a void or a lower verdict, 4 for a record,
+    /// log or claim that failed verification or a log that continues where `<dir>` does not
+    /// reach, and 5 when it could not check at all, bad arguments included.
     VerifyAttestation {
-        /// A DSSE bundle, as written by `trigon verify --attest`.
-        bundle: PathBuf,
+        /// A DSSE bundle, as written by `trigon verify --attest`. Omitted with `--record`.
+        bundle: Option<PathBuf>,
+        /// A published record file, `trigon.record/v1`, to check against the log of `--evidence`.
+        #[arg(long)]
+        record: Option<PathBuf>,
+        /// The evidence repository `--record` is from: a clone, or any directory with the layout of
+        /// `docs/19` §2.3. An evidence file absent from it is reported unchecked, never passed.
+        #[arg(long)]
+        evidence: Option<PathBuf>,
+        /// The source `--evidence` is, by its name in `evidence.toml`: its pinned keys, and the
+        /// checkpoint last accepted for it, from its state directory
+        /// (`$TRIGON_EVIDENCE_STATE/<name>/`, or `$XDG_STATE_HOME/trigon/evidence/<name>/`).
+        #[arg(long)]
+        source: Option<String>,
+        /// The source's log key, a C2SP verifier key named by its origin, for a source not
+        /// configured.
+        #[arg(long)]
+        log_vkey: Option<String>,
+        /// The source's attestation key: 64 hex digits, or a path to its SPKI PEM.
+        #[arg(long)]
+        attestation_key: Option<String>,
+        /// The checkpoint the source's log must extend: the last one accepted, a signed note.
+        /// Without it, or a state file under `--source`, the log is checked whole and not against
+        /// anything seen before, and the output says so.
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
         /// Recompute the equivalence claim from the artifacts instead of believing it.
         #[arg(long)]
         rerun_comparison: bool,
@@ -179,16 +214,20 @@ enum Cmd {
         /// module path needs this binary built with `--features wasm`.
         #[arg(long)]
         stabilizers: Option<PathBuf>,
-        /// Check the signature against this ed25519 public key, given as hex.
+        /// Check a bundle's signature against this ed25519 public key, given as hex.
         ///
         /// Omitted, the signature is reported but not checked — and a bundle nobody pinned a key
-        /// for is worth exactly its re-derivation.
+        /// for is worth exactly its re-derivation. A record is always checked, against the key
+        /// its source had at its leaf.
         #[arg(long)]
         public_key: Option<String>,
-        /// `json` prints `subject`, `predicateType`, `outcome`, `signature` and `rederived`.
+        /// `json` prints, for a bundle, `subject`, `predicateType`, `outcome`, `signature` and
+        /// `rederived`.
         ///
         /// Those five only. The key that carried an external log's entry for the bundle was
-        /// removed with the log (ADR-0014), so a script that read it gets nothing there now.
+        /// removed with the log (ADR-0014), so a script that read it gets nothing there now. For
+        /// a record it prints the report `--record` describes, with its exit code; where the
+        /// check stops before a record is read, the exit code, what stopped it and why.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
     },
@@ -1082,8 +1121,8 @@ fn now_rfc3339() -> String {
 ///
 /// Split from [`now_rfc3339`] when the fetch cache needed to render an instant it was handed rather
 /// than the current one. The mirror stores seconds because it has no formatter and this repository
-/// already carries five copies of the one it would need; this is the caller that has one.
-#[cfg(feature = "build")]
+/// already carries five copies of the one it would need; this is the caller that has one. Not
+/// gated: the verifier renders a log's leaf times with it too (`verify-attestation --record`).
 fn rfc3339_from_unix(secs: u64) -> String {
     let secs = secs as i64;
     let days = secs.div_euclid(86_400);
@@ -1112,6 +1151,10 @@ fn rfc3339_from_unix(secs: u64) -> String {
 /// verdict too, and it should read as well as a build's does.
 mod style;
 
+/// `verify-attestation --record`: a published record checked against its source's log. In both
+/// builds, since it opens no socket.
+mod verify_record;
+
 #[cfg(feature = "build")]
 mod decompile;
 #[cfg(feature = "build")]
@@ -1132,7 +1175,18 @@ mod rederive;
 
 fn main() -> Result<()> {
     exit_quietly_on_broken_pipe();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        // `clap` exits 2 for any argument it refuses, and in the record form `docs/19` §6 gives 2
+        // to "never checked, or withdrawn": a CI job that lets that through would pass a mistyped
+        // invocation that checked nothing. There, bad arguments exit 5 like the command's own
+        // refusals; everywhere else, and for `--help` and `--version`, as `clap` exits.
+        Err(e) if e.use_stderr() && verify_record::named(std::env::args_os()) => {
+            let _ = e.print();
+            std::process::exit(verify_record::CANNOT);
+        }
+        Err(e) => e.exit(),
+    };
     // Before any output: the palette functions read this, and the first write must already know it.
     style::set_theme(cli.theme.into());
     init_logging(cli.verbose, cli.log_json);
@@ -1209,18 +1263,18 @@ fn report_fault(e: &anyhow::Error) {
 
 /// Whose fault, in words.
 ///
-/// A log that fails verification is classed `Bug`, as a signature that does not verify is, and
-/// it is not trigon's: telling the user to report a bug in trigon would point at the wrong party
-/// for a source that may be lying. `docs/19` §4.2 and §8 report it as failed verification, and so
-/// does this, until phase 6 gives it its exit code.
+/// A log that fails verification is classed `Bug`, as a signature that does not verify and a
+/// claim that does not re-derive are, and none of them is trigon's: telling the user to report a
+/// bug in trigon would point at the wrong party for evidence that may be lying. `docs/19` §4.2 and
+/// §8 report it as failed verification, and so does this; `Bug` stays for trigon's own errors.
 fn whose(fault: trigon_core::Fault, e: &anyhow::Error) -> &'static str {
+    use trigon_attest::AttestError;
     use trigon_attest::log::LogError;
     use trigon_core::Fault;
-    let log = e.downcast_ref::<LogError>().or_else(|| {
-        match e.downcast_ref::<trigon_attest::AttestError>() {
-            Some(trigon_attest::AttestError::Log(l)) => Some(l),
-            _ => None,
-        }
+    let attest = e.downcast_ref::<AttestError>();
+    let log = e.downcast_ref::<LogError>().or(match attest {
+        Some(AttestError::Log(l)) => Some(l),
+        _ => None,
     });
     match log {
         Some(l) if l.fails_verification() => {
@@ -1230,6 +1284,16 @@ fn whose(fault: trigon_core::Fault, e: &anyhow::Error) -> &'static str {
         // Not a published artifact, which is what `Upstream` says below.
         Some(LogError::Malformed(_) | LogError::Missing { .. }) => {
             return "the evidence source's: its log could not be read";
+        }
+        _ => {}
+    }
+    match attest {
+        Some(a) if a.fails_verification() => {
+            return "the evidence's: it failed verification and may be a forgery or a false \
+                    claim, so nothing it says is trusted";
+        }
+        Some(AttestError::Evidence(_)) => {
+            return "the evidence's: it is damaged, or is not what it says it is";
         }
         _ => {}
     }
@@ -1271,6 +1335,52 @@ mod fault_report {
         // Anything else that is a bug is still reported as one.
         let e = anyhow::Error::new(trigon_attest::AttestError::Canonicalize("x".into()));
         assert_eq!(whose(Fault::Bug, &e), "a bug in trigon; please report it");
+    }
+
+    /// A signature that does not verify, and a claim that does not re-derive, are `Fault::Bug` so
+    /// that they are never retried, and they are the evidence's fault and never trigon's, however
+    /// they reach `main` — bare, or under the context a command adds. Damaged evidence is the
+    /// evidence's too, and not the published artifact's.
+    #[test]
+    fn evidence_that_fails_verification_is_the_evidences_fault_and_not_trigons() {
+        use trigon_attest::AttestError;
+        let lies = [
+            AttestError::BadSignature,
+            AttestError::ClaimRefuted {
+                side: "rebuild",
+                claimed: "aa".into(),
+                actual: "bb".into(),
+            },
+            // A subject digest the artifact its sha256 names does not have: a signed claim
+            // refuted, not the wrong file handed in.
+            AttestError::SubjectRefuted {
+                algorithm: "sha512".into(),
+                claimed: "aa".into(),
+                actual: "bb".into(),
+            },
+        ];
+        for lie in lies {
+            assert_eq!(lie.fault(), Fault::Bug);
+            assert!(lie.fails_verification());
+            let text = lie.to_string();
+            for e in [
+                anyhow::Error::new(lie),
+                anyhow::Error::new(AttestError::Evidence(text)).context("x"),
+            ] {
+                let said = whose(e.downcast_ref::<AttestError>().unwrap().fault(), &e);
+                assert!(said.starts_with("the evidence's"), "{said}");
+                assert!(!said.contains("bug in trigon"), "{said}");
+            }
+        }
+        let e = anyhow::Error::new(AttestError::BadSignature)
+            .context("no signature on this bundle verifies against that key");
+        assert_eq!(e.downcast_ref::<AttestError>().unwrap().fault(), Fault::Bug);
+        assert!(whose(Fault::Bug, &e).contains("failed verification"));
+        let damaged = anyhow::Error::new(AttestError::Evidence("payload is not base64".into()));
+        assert_eq!(
+            whose(Fault::Upstream, &damaged),
+            "the evidence's: it is damaged, or is not what it says it is"
+        );
     }
 }
 
@@ -1355,23 +1465,76 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
         ),
         Cmd::VerifyAttestation {
             bundle,
+            record,
+            evidence,
+            source,
+            log_vkey,
+            attestation_key,
+            checkpoint,
             rerun_comparison,
             upstream,
             rebuild,
             stabilizers,
             public_key,
             output,
-        } => verify_attestation(
-            &bundle,
-            rerun_comparison,
-            Rerun {
+        } => {
+            let files = Rerun {
                 upstream: upstream.as_deref(),
                 rebuild: rebuild.as_deref(),
                 stabilizers: stabilizers.as_deref(),
-            },
-            public_key.as_deref(),
-            output,
-        ),
+            };
+            let record_only = [
+                ("--evidence", evidence.is_some()),
+                ("--source", source.is_some()),
+                ("--log-vkey", log_vkey.is_some()),
+                ("--attestation-key", attestation_key.is_some()),
+                ("--checkpoint", checkpoint.is_some()),
+            ];
+            match (bundle, record) {
+                (Some(bundle), None) => {
+                    if let Some((flag, _)) = record_only.iter().find(|(_, set)| *set) {
+                        verify_record::usage(&format!(
+                            "{flag} says where a published record is checked, and goes with \
+                             --record <file>; a bundle is checked on its own"
+                        ));
+                    }
+                    verify_attestation(
+                        &bundle,
+                        rerun_comparison,
+                        files,
+                        public_key.as_deref(),
+                        output,
+                    )
+                }
+                (None, Some(record)) => {
+                    if public_key.is_some() {
+                        verify_record::usage(
+                            "--public-key checks a bundle; a record is checked against the key its \
+                             source had at its leaf, from --source or --attestation-key",
+                        );
+                    }
+                    verify_record::run(verify_record::Args {
+                        record: &record,
+                        evidence: evidence.as_deref(),
+                        source: source.as_deref(),
+                        log_vkey: log_vkey.as_deref(),
+                        attestation_key: attestation_key.as_deref(),
+                        checkpoint: checkpoint.as_deref(),
+                        rerun: rerun_comparison,
+                        files,
+                        output,
+                    })
+                }
+                (Some(_), Some(_)) => verify_record::usage(
+                    "give a bundle or --record <file>, not both: each is checked on its own",
+                ),
+                (None, None) => verify_record::usage(
+                    "verify-attestation checks a bundle, `verify-attestation <bundle>`, or a \
+                     published record, `verify-attestation --record <file> --evidence <dir>` with \
+                     --source <name> or --log-vkey and --attestation-key",
+                ),
+            }
+        }
         Cmd::Stabilize {
             infile,
             outfile,
@@ -11231,60 +11394,18 @@ fn verify_attestation(
                 .filter(|s| !s.sig.is_empty())
                 .any(|s| trigon_attest::verify_signature(&pae, s, pk).is_ok());
             if !ok {
-                bail!("no signature on this bundle verifies against that key");
+                // Typed, so that the report says whose fault it is: the bundle's, which failed
+                // verification, and not a bug in trigon.
+                return Err(anyhow::Error::new(trigon_attest::AttestError::BadSignature)
+                    .context("no signature on this bundle verifies against that key"));
             }
             "verified".to_string()
         }
     };
 
-    let rederived = if rerun {
-        let (u, r) = match (files.upstream, files.rebuild) {
-            (Some(u), Some(r)) => (u, r),
-            _ => bail!("--rerun-comparison needs both --upstream and --rebuild"),
-        };
-        let stabilizers = files.stabilizers;
-        let ub = std::fs::read(u).with_context(|| format!("reading {}", u.display()))?;
-        let rb = std::fs::read(r).with_context(|| format!("reading {}", r.display()))?;
-        // A `.wasm` module is run; anything else is read as a manifest and described. Chosen by
-        // extension rather than by sniffing, because the two failure modes differ: a module we
-        // cannot run should say so, and a manifest we cannot parse should say that instead.
-        #[cfg(feature = "wasm")]
-        let mut archived = match stabilizers {
-            Some(p) if p.extension().is_some_and(|e| e == "wasm") => Some(
-                trigon_stabilize_wasm::ArchivedSet::load(p)
-                    .with_context(|| format!("loading {}", p.display()))?,
-            ),
-            _ => None,
-        };
-        #[cfg(feature = "wasm")]
-        let outcome = match archived.as_mut() {
-            Some(a) => trigon_attest::rederive_with(&st, ub, rb, Some(a)),
-            None => trigon_attest::rederive(&st, ub, rb),
-        };
-        #[cfg(not(feature = "wasm"))]
-        let outcome = {
-            if stabilizers.is_some_and(|p| p.extension().is_some_and(|e| e == "wasm")) {
-                bail!(
-                    "this build cannot run a stabilizer module. Rebuild with `--features wasm`, or \
-                     pass the set's `.json` manifest to see what it contained."
-                );
-            }
-            trigon_attest::rederive(&st, ub, rb)
-        };
-        match outcome {
-            Ok(d) => Some(d),
-            // The one error worth turning into a description rather than a refusal. A verifier who
-            // cannot reach the statement's set is not looking at a broken attestation; they are
-            // looking at one made under a set their binary does not carry, and saying which
-            // stabilizers those were is most of what they need.
-            Err(e @ trigon_attest::AttestError::SetMismatch { .. }) => {
-                describe_set(&st, stabilizers);
-                return Err(e.into());
-            }
-            Err(e) => return Err(e.into()),
-        }
-    } else {
-        None
+    let rederived = match rerun {
+        true => Some(rederive_files(&st, files)?),
+        false => None,
     };
 
     match output {
@@ -11295,12 +11416,7 @@ fn verify_attestation(
                 "predicateType": st.predicate_type,
                 "outcome": st.predicate["outcome"],
                 "signature": signature,
-                "rederived": rederived.as_ref().map(|d| serde_json::json!({
-                    "claimed": d.claimed,
-                    "actual": d.actual.to_string(),
-                    "stabilizerSet": d.stabilizer_set,
-                    "holds": d.holds(),
-                })),
+                "rederived": rederived.as_ref().map(rederived_json),
             }))?
         ),
         OutputFormat::Text => {
@@ -11328,21 +11444,7 @@ fn verify_attestation(
                 println!("supersedes {} ({})", said("supersedes"), said("reason"));
             }
             println!("signature {signature}");
-            match &rederived {
-                Some(d) if d.holds() => println!(
-                    "rederived {} under {} — the claim holds",
-                    d.actual, d.stabilizer_set
-                ),
-                Some(d) => println!(
-                    "rederived {} under {}, but the statement claims {} — the claim does NOT hold",
-                    d.actual, d.stabilizer_set, d.claimed
-                ),
-                // Worth saying outright. Reading a statement is not checking it, and the difference
-                // is the entire reason this subcommand exists.
-                None => {
-                    println!("rederived not attempted — pass --rerun-comparison to check the claim")
-                }
-            }
+            print_rederived(rederived.as_ref());
         }
     }
 
@@ -11350,6 +11452,119 @@ fn verify_attestation(
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Re-derive a statement's claim from the two artifacts `--rerun-comparison` was given, through an
+/// archived set where `--stabilizers` names a module: what `verify-attestation` does with a bundle
+/// and with a record alike.
+fn rederive_files(
+    st: &trigon_attest::Statement,
+    files: Rerun<'_>,
+) -> Result<trigon_attest::Rederived> {
+    let (u, r) = match (files.upstream, files.rebuild) {
+        (Some(u), Some(r)) => (u, r),
+        _ => bail!("--rerun-comparison needs both --upstream and --rebuild"),
+    };
+    let stabilizers = files.stabilizers;
+    let ub = std::fs::read(u).with_context(|| format!("reading {}", u.display()))?;
+    let rb = std::fs::read(r).with_context(|| format!("reading {}", r.display()))?;
+    // A `.wasm` module is run; anything else is read as a manifest and described. Chosen by
+    // extension rather than by sniffing, because the two failure modes differ: a module we
+    // cannot run should say so, and a manifest we cannot parse should say that instead.
+    #[cfg(feature = "wasm")]
+    let mut archived = match stabilizers {
+        Some(p) if p.extension().is_some_and(|e| e == "wasm") => Some(
+            trigon_stabilize_wasm::ArchivedSet::load(p)
+                .with_context(|| format!("loading {}", p.display()))?,
+        ),
+        _ => None,
+    };
+    #[cfg(feature = "wasm")]
+    let outcome = match archived.as_mut() {
+        Some(a) => trigon_attest::rederive_with(st, ub, rb, Some(a)),
+        None => trigon_attest::rederive(st, ub, rb),
+    };
+    #[cfg(not(feature = "wasm"))]
+    let outcome = {
+        if stabilizers.is_some_and(|p| p.extension().is_some_and(|e| e == "wasm")) {
+            bail!(
+                "this build cannot run a stabilizer module. Rebuild with `--features wasm`, or \
+                 pass the set's `.json` manifest to see what it contained."
+            );
+        }
+        trigon_attest::rederive(st, ub, rb)
+    };
+    match outcome {
+        Ok(d) => Ok(d),
+        // The one error worth turning into a description rather than a refusal. A verifier who
+        // cannot reach the statement's set is not looking at a broken attestation; they are
+        // looking at one made under a set their binary does not carry, and saying which
+        // stabilizers those were is most of what they need.
+        Err(e @ trigon_attest::AttestError::SetMismatch { .. }) => {
+            describe_set(st, stabilizers);
+            Err(e.into())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// What re-deriving found, as `--output json` carries it: `claimed`, `actual`, `stabilizerSet`
+/// and `holds`, and what the statement says the comparison found that re-deriving does not give,
+/// and what was left unchecked.
+fn rederived_json(d: &trigon_attest::Rederived) -> serde_json::Value {
+    serde_json::json!({
+        "claimed": d.claimed,
+        "actual": d.actual.to_string(),
+        "stabilizerSet": d.stabilizer_set,
+        "holds": d.holds(),
+        "disagreements": d.disagreements.iter().map(|x| serde_json::json!({
+            "field": x.field,
+            "said": x.said,
+            "rederived": x.rederived,
+        })).collect::<Vec<_>>(),
+        "unchecked": d.unchecked,
+    })
+}
+
+/// The `rederived` lines of `verify-attestation`'s text output.
+fn print_rederived(d: Option<&trigon_attest::Rederived>) {
+    let Some(d) = d else {
+        // Worth saying outright. Reading a statement is not checking it, and the difference is
+        // the entire reason this subcommand exists.
+        println!("rederived not attempted — pass --rerun-comparison to check the claim");
+        return;
+    };
+    if d.holds() {
+        println!(
+            "rederived {} under {} — the claim holds",
+            d.actual, d.stabilizer_set
+        );
+    } else if d.claimed != d.actual.to_string() {
+        println!(
+            "rederived {} under {}, but the statement claims {} — the claim does NOT hold",
+            d.actual, d.stabilizer_set, d.claimed
+        );
+    } else {
+        println!(
+            "rederived {} under {}, but not what the statement says the comparison found — the \
+             claim does NOT hold",
+            d.actual, d.stabilizer_set
+        );
+    }
+    for x in &d.disagreements {
+        println!("          {x}");
+    }
+    if !d.unchecked.is_empty() {
+        println!(
+            "          {} not re-derived: an archived set gives digests and no report, so they \
+             are unchecked",
+            d.unchecked
+                .iter()
+                .map(|f| format!("`{f}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -11758,11 +11973,7 @@ mod attestor {
             let checked = trigon_attest::rederive(&statement, upstream.into(), rebuild.into())
                 .context("re-deriving the claim before signing it")?;
             if !checked.holds() {
-                bail!(
-                    "refusing to sign: the run recorded `{}` and the bytes give `{}`",
-                    checked.claimed,
-                    checked.actual
-                );
+                bail!("refusing to sign: {}", refusal(&checked));
             }
             println!(
                 "rederived {} under {} — signing",
@@ -11889,6 +12100,35 @@ mod attestor {
             (None, None) => {}
         }
         p.namespace()
+    }
+
+    /// Why a claim re-derived before signing does not hold, in the words a refusal needs: the
+    /// outcome only where it is what differs, and every field of what the comparison found that
+    /// re-deriving does not give. `holds` also fails on those fields, and a refusal that named
+    /// only the outcome would read, when the outcomes agree, as `normalized` refusing `normalized`.
+    fn refusal(checked: &trigon_attest::Rederived) -> String {
+        let mut why = Vec::new();
+        if checked.claimed != checked.actual.to_string() {
+            why.push(format!(
+                "the run recorded `{}` and the bytes give `{}`",
+                checked.claimed, checked.actual
+            ));
+        }
+        if !checked.disagreements.is_empty() {
+            why.push(format!(
+                "the stored comparison says what the bytes do not give: {}",
+                checked
+                    .disagreements
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        if !checked.digests_match {
+            why.push("the stabilized digests the run recorded are not the bytes'".into());
+        }
+        why.join(", and ")
     }
 
     fn run_identity<'a>(r: &'a RunRecord, purl: &'a CanonicalPurl) -> RunIdentity<'a> {
@@ -12349,6 +12589,51 @@ mod attestor {
             }
             Ok(())
         })
+    }
+
+    #[cfg(test)]
+    mod a_refusal_to_sign_says_why {
+        use super::refusal;
+
+        fn checked(claimed: &str, actual: trigon_core::Match) -> trigon_attest::Rederived {
+            trigon_attest::Rederived {
+                claimed: claimed.into(),
+                actual,
+                digests_match: true,
+                stabilizer_set: "tar@c294a4d0c8a7".into(),
+                disagreements: Vec::new(),
+                unchecked: Vec::new(),
+                rederived: None,
+                located: None,
+            }
+        }
+
+        /// The outcome and the digests agree, and what the comparison found does not: the
+        /// refusal names the field, and never reads as an outcome refusing itself.
+        #[test]
+        fn a_refusal_over_what_the_comparison_found_names_the_field_and_not_the_outcome() {
+            let mut c = checked("normalized", trigon_core::Match::Normalized);
+            c.disagreements.push(trigon_attest::Disagreement {
+                field: "applied",
+                said: serde_json::json!([]),
+                rederived: serde_json::json!(["tar-time"]),
+            });
+            assert!(!c.holds());
+            let said = refusal(&c);
+            assert!(said.contains("`applied`"), "{said}");
+            assert!(said.contains("tar-time"), "{said}");
+            assert!(!said.contains("recorded `normalized`"), "{said}");
+        }
+
+        #[test]
+        fn a_refusal_over_the_outcome_names_both_outcomes() {
+            let c = checked("exact", trigon_core::Match::Divergent);
+            let said = refusal(&c);
+            assert_eq!(
+                said,
+                "the run recorded `exact` and the bytes give `divergent`"
+            );
+        }
     }
 
     #[cfg(test)]

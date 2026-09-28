@@ -4445,3 +4445,180 @@ without its fix; two places where the documents disagreed; and a gap in the test
   held to a full level-0 tile and a level-1 partial, and a tree of 65,836 leaves to the proofs its
   level-2 tile gives (`a_tile_that_does_not_hold_the_leaves_hashes_is_refused`,
   `hashes_read_from_tiles_are_the_trees_past_level_two`).
+
+### 3.99 Records checked against the log, lookup over its leaves, and the verifier's record form
+
+`docs/19` §10 phase 4, second half, on 2026-09-28: what reads an evidence repository, as pure code
+in `trigon_attest::evidence`, and the network-free verifier's `verify-attestation --record <file>
+--evidence <dir>`, the first command to reach `trigon_attest::log`. Nothing writes a repository yet
+(phase 5), and nothing clones, syncs or answers a lockfile from one (phase 6). `docs/09` §2.8,
+§2.11 and §7 have it as built.
+
+**What changed.**
+
+- **A record checked against its leaf** (`check_record`): its sha256 is a verified leaf's `record`,
+  or it is *unlogged*, and one leaf's only, or it is *logged twice*; its leaf's key id names the
+  attestation key the source had at that leaf, by `KeyHistory`, and every envelope carries a
+  signature by that key that verifies; the signed statement agrees with the leaf on subject
+  digests, purl and its rule, predicate type, outcome, set digest, `supersedes` and `reason`; a void
+  or a withdrawal is one statement; a verdict's `rebuild` is of its run (`invocationId` is the
+  verdict's `run.id`), under its set, and about the rebuilt artifact it names, and its
+  `buildobservation` is about its subject, under its egress tier and the guard manifest it names as
+  evidence, with no guard tripped; the unsigned `subject` and `evidence` map agree with the
+  statement; the signed subject is the key it was found under, and a purl key is the signed purl
+  canonicalised under the rule it was signed under; and every evidence file present is the bytes
+  the statement names, one absent reported unchecked, never passed. Each failure is a typed
+  `RecordFailure` with its reason.
+- **Lookup over the verified leaves** (`Key`, `Lookup`, `Answer`): a sha256, sha512 or sha1 digest,
+  an SRI string such as npm's `integrity`, a purl with or without its version, or a file hashed as
+  it is read; never `index/`. A leaf whose file is missing is `deleted`. Supersession exactly as §3
+  says, the superseded record returned marked with the reason and both leaves; two current records
+  for one subject both returned, the more severe answering. The answers are the §4.2 states, each
+  with §6's exit code: never checked, withdrawn, deleted, failed verification with its reason, each
+  outcome, and void.
+- **Where everything is** (`evidence::paths`): records, evidence, and the index under `sha256`,
+  `sha512`, `sha1`, `purl1` and `pkg1`, each with the four-hex fan-out and the digest whole, held to
+  the shared purl vectors; the index file, and the whole index derived from a verified log, for
+  phase 5's writer and `--reconcile`. `Record::assemble`, `Record::encode` and `record_leaf` are
+  the writer's other halves; `record_leaf` holds the leaf it builds to the comparison
+  `check_record` makes before it returns it.
+- **`--rerun-comparison` checks what a verdict says the comparison found**: its `differences`,
+  `applied` and `members`, re-derived by the one function that builds a verdict and compared
+  whole, where before only the outcome and the stabilized digests were. A subject whose sha256 is
+  the artifact's and whose sha512 or sha1 is not is a new `AttestError::SubjectRefuted`: a signed
+  claim refuted, not the wrong file. With a record, the published comparison report is read again,
+  held to its digest again, and held to the same re-derivation field by field, then member by
+  member — status, kind, digests and sizes — and by its field edits where it carries any; its
+  progression, its notes and the members' raw paths are reported unchecked, never passed. Through
+  an archived set, which gives digests and no report, all of that is reported unchecked.
+- **`verify-attestation --record <file> --evidence <dir>`**, in both builds: the source's keys and
+  checkpoint from `--source <name>` — `evidence.toml`, then the state directory's
+  `<name>/checkpoint`, then the source's initial checkpoint — or from `--log-vkey`,
+  `--attestation-key` and `--checkpoint`; the log verified whole and held to that checkpoint; the
+  record, shown with every §4.2 field — set, run, both versions, egress tier and `attestable`,
+  derivation, and for a verdict the falsifying command and dispute pointer, absent shown as
+  absent; what the source says of its artifact now, or *unknown*, exit 4, where the log continues
+  in a repository the directory does not hold; and `--rerun-comparison`. A bundle is checked as it
+  was. `xtask policy` passes: the verifier still links no network client.
+- **Carried over from phase 4a.** Two trees under one log key found side by side in one repository
+  — the same size with two roots, or an older checkpoint the newest does not extend — refuse the
+  source as `LogError::Equivocation`, with both signed notes, and the record form exits 4; 4a had
+  only listed them among the directories set aside. And a signature that does not verify, a claim
+  that does not re-derive and damaged evidence are labelled the evidence's fault
+  (`AttestError::fails_verification`, a new `AttestError::Evidence`), where `trigon` said "a bug in
+  trigon; please report it" for a refuted claim and, for a bundle whose signature failed, said
+  nothing about whose fault it was, since that error was untyped. `Fault::Bug` stays their class,
+  so they are never retried, and stays trigon's own for its own errors.
+- **Golden files** in `crates/trigon-attest/testdata/evidence/`: a repository of two logs — every
+  leaf kind — holding verdicts `exact`, `normalized` and `divergent`, a void, a superseding verdict,
+  a withdrawal, a deleted record, an unlogged one, and three built to fail: signed by a key the
+  source never had, by one retired before its leaf, and one whose leaf disagrees with its statement;
+  with their evidence, the index the log implies, every checkpoint the first log had, and the
+  artifacts three verdicts re-derive from. Its build observations name the guard manifest their
+  verdicts name as evidence, as the attestor signs both from one run. 40 tests in
+  `tests/evidence_repo/` and 14 in `crates/trigon/tests/verify_record.rs`, which builds the
+  repositories the golden one does not hold with `tests/evidence_repo/build.rs` itself.
+
+**Decisions made here that the owner may want to revisit.**
+
+- **The record form's exit code is what the source says of the record's artifact now**, not the
+  record's own outcome: a verified verdict that a withdrawal superseded exits 2, and a record of an
+  artifact another record of which is deleted exits 4. A record handed in is checked first, and its
+  own failure exits 4 whatever else is there.
+- **A claim `--rerun-comparison` refutes exits 4**, as failed verification: a signed statement that
+  the bytes contradict is the loudest thing a record can be. The wrong artifact, a set this build
+  does not carry, or a void handed to `--rerun-comparison` exit 5: a check not made is not a check
+  failed.
+- **Bad arguments to the record form exit 5, as §6 says**, those `clap` refuses included: `main`
+  parses with `try_parse`, and when `verify-attestation` was given `--record` a `clap` error exits
+  5, since `clap`'s 2 is the code §6 gives "never checked". Everywhere else, the bundle form
+  included, `clap`'s errors exit 2 as they did. `--rerun-comparison`'s arguments — both files,
+  readable, and none of its files without it — are checked before the record, so a bad one exits
+  5 whatever the record is; a checkpoint, given or in the state directory, that is not one exits 5
+  and is never blamed on the source.
+- **A record file is its canonical JSON**, so a record's name is a function of what it holds.
+- **An index entry names its log** — `"log": "log/1"` — where its leaf is in a successor, since a
+  leaf index alone names a leaf of one log; and an index file's `key` is `<kind>:<value>`, the
+  canonical purl in the clear, so a reader can check the file is at the path its key derives.
+- **A verdict record's other statements are held to its run**, each at most once: its `rebuild`
+  by its invocation id, its set and the rebuilt artifact it names, and its `buildobservation` by
+  its subject, egress tier and guard manifest, and refused if it says the guard tripped, since a
+  run whose guard tripped is void. `buildobservation` names no run, so an observation of another
+  attempt at the same artifact, under the same tier and guard, is not told apart; the `rebuild` is
+  what ties a verdict to its run. A statement of a kind this build does not read has its signature
+  checked and is read past, so a later writer can add one. A void or a withdrawal is refused with
+  any second statement, as §4.1 says.
+- **A record the log holds at two leaves fails verification at both**, and its subject answers
+  failed, exit 4. Judged leaf by leaf, a record logged again after the withdrawal of it had a leaf
+  later than the withdrawal's and read as current again: anyone with the log key alone could undo
+  a withdrawal in the one public history, with no fork, which §8 says only a fork or a split view
+  does. Resolving supersession by the record's first leaf would also have held; refusing is louder,
+  and costs an honest publisher nothing, since a record is logged once.
+- **A source whose log continues in a repository the directory does not hold answers *unknown***,
+  exit 4, and never shows the record as current: a withdrawal of it may be logged there. A
+  checkpoint given for a log the directory does not hold is said to be unchecked, and not refused,
+  since it may be for a log past the successor the directory names.
+- **A published comparison report is held to what the same bytes under the same set give back**:
+  every member and the field edits, besides what a verdict signs, and not its progression, notes or
+  the members' raw paths, which a later build may word differently or a report written before them
+  lacks. Those are listed as unchecked, and so are field edits a report does not carry.
+- **The state directory holds the last accepted checkpoint as `<name>/checkpoint`**, the signed
+  note as accepted. Phase 6 writes it; the verifier only reads it, and says when it is not there,
+  including when the source's initial checkpoint stands in for it.
+- **A source that trusts on first use is refused by the record form**, which reads no repository's
+  `keys/`: its keys are settled by a first sync, which phase 6 records.
+- **Record files are read up to 4 MiB, evidence files up to 100 MiB** (GitHub's own ceiling), each
+  inside the directory once links are followed and as a regular file, as the log's are. An evidence
+  file that cannot be read is unchecked, not failed; one that is there and is other bytes fails.
+
+**What this does not do.**
+
+- Judge freshness. The record form answers from the log the directory holds, against the checkpoint
+  it is given or none, and says which; `unknown`, and the stale and frozen clocks, are phase 6's,
+  and the threat model disclaims them for this form as D25.
+- Follow a successor log in another repository: one the chain continues into is reported, what
+  the source says now is *unknown*, exit 4, and a record logged there is not seen.
+- Decide whether a verified verdict that signs no falsifying command or dispute pointer should
+  fail verification. §4.2 says every record carries them, and §8 that a client never renders an
+  outcome it cannot show with them; the record form shows each as absent, loudly, and still renders
+  the outcome. Refusing them is a rule for `publish` (phase 5) and a decision for the owner.
+- Read or write the key history the state directory will keep (§8): the history is recomputed from
+  the log every time, which is the same answer while the chain is in one repository.
+- Anything over the network: `--remote`, `evidence sync`, `lookup` and `check` from sources are
+  phase 6, and publishing is phase 5.
+
+**Found on the way.**
+
+- **The threat model's census disagreed with its sidecar**: the prose said 201 documented claims
+  and `threat-model.yaml`, generated from it, counted 202. Regenerated with this phase's
+  properties, both say 209.
+
+**Found in review, and fixed.**
+
+- **The record form rendered an outcome without the fields §4.2 has every client render**: no set,
+  run, versions, egress tier, derivation, falsifying command or dispute pointer, in text or JSON.
+- **A record logged a second time after its withdrawal answered again**, exit 0: supersession was
+  applied leaf by leaf (above).
+- **A log continuing in another repository still answered "current yes"**, exit 0, even when the
+  checkpoint given was the successor's; and a checkpoint of any origin was said to hold the log.
+- **Some bad arguments still exited 2**: `--upstream` or `--rebuild` without
+  `--rerun-comparison`, and an unknown flag, all through `clap`; and this entry said otherwise.
+- **A `--checkpoint`, or a state file, that is not a checkpoint exited 4**, blamed on the source.
+- **`--rerun-comparison`'s arguments were checked only for a record that verified**, so the same
+  missing `--upstream` exited 5 or 4 by the record.
+- **A subject whose sha512 or sha1 lies, beside a sha256 that holds, exited 5** as the wrong file,
+  where it is a signed claim refuted.
+- **The comparison report was held only to what the verdict signs**, and printed as agreeing: its
+  members and field edits were never compared. And it was read a second time to be judged without
+  its digest checked again.
+- **`record_leaf` gave leaves `check_record` refuses for ever**: a `supersedes` without `sha256:`,
+  or hex in capitals, parsed leniently and logged as the log writes it.
+- **"About its run" was said of `rebuild` and `buildobservation` and checked by artifact alone**,
+  and three of `accompanies`' branches had no test.
+- **A missing state file went unsaid when an initial checkpoint stood in**, which §6.1 forbids.
+- **`--output json` wrote nothing** when the check stopped before a record: an equivocation, a log
+  that fails, a claim refuted outright. It now prints a document on every exit, and a refuted
+  claim is folded into the full report.
+- **`trigon attest` refused a claim whose outcome held and whose `applied` did not as "the run
+  recorded `normalized` and the bytes give `normalized`"**: the refusal names the fields now.
+- **No test held a refuted claim to exit 4**: setting it to never refute passed every test.

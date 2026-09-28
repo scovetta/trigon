@@ -164,7 +164,7 @@ docs/01-architecture.md §2.2)*. Verified at this commit: `cargo tree -p trigon
 | `archive-parsing` (`trigon-archive`) | `Archive::read`, the three writers | nothing outside the process | **in** |
 | `stabilization` (`trigon-stabilize`) | `profile(id)`, `StabilizerSet::apply` | nothing | **in** |
 | `comparison-and-verdict` (`trigon-compare`, `trigon-core`) | `compare()`, `Match`, PURL parsing | nothing | **in** |
-| `attestation` (`trigon-attest`) | statement building, DSSE, `Signer` | reads a key file when signing | **in** |
+| `attestation` (`trigon-attest`) | statement building, DSSE, `Signer`; the evidence log and its records verified from a directory (`log`, `evidence`), which `verify-attestation --record` reaches | reads a key file when signing; reads an evidence repository's files, `evidence.toml` and a source's state checkpoint when verifying a record | **in** |
 | `strategy-rendering` (`trigon-strategy`) | `Strategy` parse, flow DSL, minijinja render | nothing; emits a script for someone else to run | **in** |
 | `archived-stabilizer-sets` (`trigon-stabilize-wasm`) | the `wasm` feature, off by default | runs a WASM module in-process | **in**, §1.6 |
 | `registry-and-source` (`trigon-registry`) | `Registry::resolve`/`fetch`, `SourceCache` | network, filesystem, spawns `git` | **in** |
@@ -209,11 +209,12 @@ docs/README.md "Status")*. The largest: the fleet, the write-only blob credentia
 docs/16-findings.md §5)*, the evidence store and its publication pipeline — `trigon publish`,
 `trigon evidence`, `trigon lookup`, and a `trigon check` that answers from evidence repositories
 *(documented, docs/19-distribution-and-lookup.md, status and §10)* — and most of
-`docs/11-interfaces.md` §2. The evidence log's formats and its verification exist as library code,
-`trigon_attest::log`, that no command reaches: a finding against it needs A8 or A9, and routes here
-until `verify-attestation --record` reaches it, which is when this model gains the properties for
-record, inclusion and consistency verification *(documented, docs/19-distribution-and-lookup.md
-status and §10 phases 4 and 8; docs/16-findings.md §3.98)*.
+`docs/11-interfaces.md` §2. Reading an evidence repository is built: the log, the records it logs,
+lookup over its leaves and the index paths, in `trigon_attest::log` and `trigon_attest::evidence`,
+reached by the network-free verifier's `verify-attestation --record`, and held to P31–P33. What
+writes a repository, and what clones, syncs and answers a lockfile from one, is not, and a finding
+that needs those routes here *(documented, docs/19-distribution-and-lookup.md status and §10 phases
+4–6; docs/16-findings.md §3.98, §3.99)*.
 
 ---
 
@@ -257,7 +258,7 @@ path is `trigon rebuild --store` followed by `trigon attest` *(inferred, Q2)*.
 | `stabilization` | an archive already parsed, or a stabilizer set id named in an attestation |
 | `archived-stabilizer-sets` | a `.wasm` module the operator passed to `--stabilizers` |
 | `comparison-and-verdict` | two summaries produced by this process in one run |
-| `attestation` | a statement this process built, or an attestation handed to `verify-attestation` |
+| `attestation` | a statement this process built, an attestation handed to `verify-attestation`, or a record file and an evidence directory handed to `verify-attestation --record`, which whoever can push to that repository wrote (A8, A9) |
 | `strategy-rendering` | a strategy from the definitions repo, a heuristic, CI parsing, or a model |
 | `registry-and-source` | registry metadata, a package-declared repository URL, or a git host's response |
 | `build-execution` | a rendered strategy, or bytes crossing the mirror |
@@ -293,9 +294,9 @@ Negative claims, split because the verifier and the build path are different pro
 | --- | --- | --- |
 | Network of any kind | **absent** | it links no network client *(documented, docs/01-architecture.md §2.2)* |
 | Child processes | **absent** | *(documented, docs/01-architecture.md §2.2)* |
-| Environment variables | **absent** | *(documented, docs/01-architecture.md §2.2)* |
+| Environment variables | **conditional** | only `verify-attestation --record`: under `--source <name>`, the evidence configuration's — `TRIGON_EVIDENCE_CONFIG`, `TRIGON_EVIDENCE_STATE`, `TRIGON_EVIDENCE_REPO` and the keys beside it, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `HOME` — and `HOME` to expand `~/` in `--attestation-key` *(documented, crates/trigon-attest/src/config.rs — `Env::from_process`; crates/trigon/src/verify_record.rs)* |
 | Filesystem writes | **conditional** | only paths the operator named: the `stabilize` output and the `--attest` file. `SpillFile` exists as a type and is never constructed, so nothing spills *(documented, verified: no construction of `Body::Spilled` anywhere in `crates/`)* |
-| Filesystem reads | **conditional** | only paths the operator named, plus a signing key file *(documented, crates/trigon/src/main.rs — every read path is a CLI argument)* |
+| Filesystem reads | **conditional** | only paths the operator named, plus a signing key file; and under `verify-attestation --record`, the files of the evidence directory it names — checkpoints, tiles, entry bundles, records and evidence, each inside the directory once links are followed, a regular file, and no longer than its kind can be — and under `--source`, `evidence.toml`, the working directory's `.trigon/evidence.toml`, and the source's state checkpoint *(documented, crates/trigon/src/main.rs — every other read path is a CLI argument; crates/trigon-attest/src/log/files.rs; crates/trigon-attest/src/evidence/repository.rs; crates/trigon-attest/src/config.rs)* |
 | stdout / stderr | **present** | the verdict on stdout, `tracing` on stderr *(documented, docs/11-interfaces.md)* |
 | Signal handlers, global state, locale or FPU mutation | **absent** | *(assumption, Q4)* |
 | Executing WebAssembly | **conditional** | only under the non-default `wasm` feature *(documented, docs/09-attestations.md §7.1)* |
@@ -374,6 +375,8 @@ a key file, a `--model` spec, a definitions ref — are **trusted** and not tabl
 | build output directory | file entries the build wrote | **yes** | data, resource-name, object-topology | **symlinks are not followed** | *(documented, docs/16-findings.md §3.12; crates/trigon-sandbox/src/podman.rs:691)* |
 | store record paths | package name, namespace, version | **yes** | resource-name | nothing here — `object_store`'s `Path` percent-encodes `..` and `/` inside a component, so a name cannot escape the store root. **The safety is the dependency's, not ours** (§1.9) | *(documented, crates/trigon-store/src/lib.rs:204; verified against object_store 0.12: `..` → `%2E%2E`)* |
 | `verify-attestation` | the bundle | **yes** | data, serialized-state | the signature is checked only with `--public-key`, and the tool says which it did | *(documented, README.md)* |
+| `verify-attestation --record` | the record file | **yes** — anyone's bytes until it is checked | data, serialized-state | nothing — P31: its sha256 must be a verified leaf's, and one leaf's only, every envelope must verify under the key its source had at that leaf, its statement must agree with the leaf, its unsigned map with its statement, and every evidence file present with its digest; a record no leaf names is unlogged and fails, and so does one the log holds twice | *(documented, docs/19-distribution-and-lookup.md §4.1, §8; crates/trigon-attest/tests/evidence_repo/records.rs)* |
+| `verify-attestation --record` | the evidence directory: `log/`, `records/`, `evidence/`, `index/` | **yes — whoever can push to the repository, or serves a copy of it (A8, A9)** | data, size, object-topology, resource-name | nothing — P32, P33: the log is verified whole under the pinned log key, and against the checkpoint last accepted, before a record is read; every file is read inside the directory, as a regular file of at most its kind's length; `index/` is never read; a leaf whose record file is missing is deleted | *(documented, docs/19-distribution-and-lookup.md §6, §8; crates/trigon-attest/src/log/files.rs; crates/trigon-attest/tests/evidence_repo/)* |
 | `trigon watch` `GET /run/{index}` | the path segment | **yes if the port is reachable** | data, resource-name | parsed as an integer and re-formatted; never joined as a caller-supplied path | *(documented, crates/trigon/src/watch.rs)* |
 | `trigon watch` all views | package names, build logs, strategies | **yes** | data, size, x-build-log | every package-derived string is HTML-escaped on the way out | *(documented, crates/trigon/src/watch.rs — `esc`)* |
 | model prompt | README, CI config, manifests, build log | **yes** | data, x-build-log | **nothing prevents injection**; it is fenced, bounded and control-stripped, and accepted as residual risk | *(documented, docs/12-security.md §4)* |
@@ -435,6 +438,9 @@ or §1.12 disclaimer that owns it; no claimed row exists only here.
 | attestation | reference-lifecycle | N/A | a statement is built, signed and dropped within one call | — |
 | attestation | concurrency-reentrancy | disclaimed | no statement is made | D8 |
 | attestation | resource-complexity | disclaimed | a statement is as large as the difference summary it carries | D9 |
+| attestation | x-record-verification | claimed | a record is shown verified only when its leaf, the key its source had at that leaf, its statement, its unsigned map and every evidence file present all check | P31 |
+| attestation | x-log-inclusion | claimed | an answer comes only from a record the verified log holds, found from its leaves and never from `index/` | P32 |
+| attestation | x-log-consistency | claimed | the log is verified whole under the pinned key, and against the checkpoint last accepted; two trees under one key is refused | P33 |
 | strategy-rendering | numeric-domain | N/A | no arithmetic on strategy values | — |
 | strategy-rendering | failure-atomicity | claimed | an unregistered `uses:` is a hard error naming the tool, never an empty fragment | P27 |
 | strategy-rendering | recursive-cyclic-topology | claimed | tool composition is acyclic at load and depth-bounded at render | P27 |
@@ -499,6 +505,7 @@ Trigon's output is somebody else's input. A "downstream may assume X" report rou
 | the rendered Dockerfile and build script | **same as input** | a pure function of (strategy, context, tools) | **that it is safe to run outside the container.** It is the package's own shell, assembled *(documented, docs/12-security.md §5)* |
 | the rebuilt artifact in the work directory | **same as input** | it is what the build wrote | that it is safe to install or execute. A rebuild of a malicious package is a malicious package *(documented, docs/12-security.md §11)* |
 | the signed attestation | **constrained** | canonical JSON; floats and non-ASCII keys refused rather than coerced | that a signature was checked — without `--public-key` the tool re-derives and reports the signature present and unchecked *(documented, README.md)* |
+| the `verify-attestation --record` report | **constrained** | each state of docs/19 §4.2 told apart, from a log verified whole, with its §6 exit code; every §4.2 field shown as signed — set, run, versions, egress tier and `attestable`, derivation, and for a verdict the falsifying command and dispute pointer — and absent shown as absent; evidence absent from the directory, or a release asset, and whatever of a comparison report it was not held to, listed as unchecked; *unknown*, exit 4, where the log continues in a repository the directory does not hold | that an unchecked evidence file was checked; that the answer is current — it is the log as the directory holds it, checked against the checkpoint given or against none, with no freshness clock (D25); or that a record verified in one source says anything in another *(documented, docs/19-distribution-and-lookup.md §4.2, §6, §6.1)* |
 | the build log (stored, rendered, prompted) | **same as input** | bounded and control-stripped before it reaches a model | **that credentials were redacted.** They were not *(documented, docs/18-management-ui.md §2)* |
 | `trigon watch` HTML | **constrained** | every package-derived string is HTML-escaped | that the page is authenticated, or safe to serve on a routable address *(documented, crates/trigon/src/main.rs)* |
 | `/api/state` JSON | **same as input** | the view model the pages render | that it is access-controlled. It is not *(documented, crates/trigon/src/watch.rs)* |
@@ -584,9 +591,11 @@ Publishing one is a public accusation, so the false-mismatch rate is a safety pr
 *(documented, docs/09-attestations.md §5; ADR-0010)*.
 
 A8 and A9 are adversaries of the evidence store ADR-0014 decides and
-`docs/19-distribution-and-lookup.md` designs, which is not built. They are recorded now so that
-each phase that builds it adds its properties against them. Until then a finding that needs either
-concerns behaviour that exists only in `docs/`, and routes by §1.3.
+`docs/19-distribution-and-lookup.md` designs. What reads an evidence repository is built, as the
+network-free verifier's `verify-attestation --record`, and holds a record and its log to P31–P33
+against both. What writes a repository, and what syncs, looks up and checks a lockfile from one, is
+not, and a finding that needs those concerns behaviour that exists only in `docs/`, and routes by
+§1.3.
 
 **A8 — The operator of an evidence repository a client trusts.** Whoever holds a configured
 source's keys or its push credential: its operator — us, for our own repository — or a thief. What
@@ -674,6 +683,9 @@ attacker-controllable, is `VALID`.
 | **P27** | An unregistered `uses:` is a hard error naming the tool and listing the known ones; tool composition is acyclic at load and depth-bounded at render; a definitions entry is parsed with `deny_unknown_fields`. | — | an empty script fragment silently replacing a build step | **security-critical** *(documented, docs/04-strategies.md §2)* |
 | **P28** | `strategy_digest` is a canonical, domain-separated content pin over the strategy and exactly the tools it uses, taken over the migrated value rather than the YAML bytes. | — | a cache hit across different recipes | correctness-only *(documented, docs/04-strategies.md §4)* |
 | **P29** | A build is killed at a hard wall-clock limit. **Threshold:** the default is 1800 seconds and `--timeout` sets it; a build that exceeds it is killed, not waited for. | — | a build running forever | correctness-only *(documented, crates/trigon/src/main.rs:199)* |
+| **P31** | **A published record is shown as verified only when all of it checks** (`verify-attestation --record`, `trigon_attest::evidence::check_record`). Its sha256 is the `record` of a leaf of the verified log — a record no leaf names is *unlogged* and fails, and one the log holds at two leaves is *logged twice* and fails at both, since a record logged again after what withdraws it would otherwise read as current again; the leaf's key id names the attestation key its source had at that leaf, the pinned key or one a `key-change` leaf signed by both keys moved to, so a record signed by a key the source never had, or by one retired before its leaf, fails; every envelope carries a signature by that key that verifies; the signed statement agrees with its leaf on subject digests, purl, predicate type, outcome, set digest, `supersedes` and `reason`; a void or a withdrawal is one statement, a verdict's `rebuild` is of its run, under its set, and about the rebuilt artifact it names, and its `buildobservation` is about its subject, under its egress tier and guard manifest, with no guard tripped — `buildobservation` names no run, so one of another attempt at the same artifact under the same tier and guard is not told apart; the unsigned `subject` and `evidence` map agree with the statement; the signed subject is the key it was found under, a purl key its signed purl canonicalised; and every evidence file present is the bytes its statement names, one absent is reported unchecked and never passed. Each failure is reported with its reason and exits 4, never as never checked. Under `--rerun-comparison`, a claim the bytes refute exits 4 with the record's whole report: what it says the comparison found, a stabilized digest, a subject digest the artifact its sha256 names does not have, or a published comparison report that disagrees with the re-derivation, member by member — read again and held to its signed digest again before it is judged. | the source's keys are the operator's pins (§1.10) | a record shown verified that its leaf, its key, its map or its evidence contradicts; a failure reported as never checked | **security-critical** *(documented, docs/19-distribution-and-lookup.md §4.1, §4.2, §8; docs/16-findings.md §3.99; crates/trigon-attest/tests/evidence_repo/records.rs — `a_record_whose_statement_disagrees_with_its_leaf_fails_verification`, `a_record_signed_by_a_key_retired_before_its_leaf_fails_verification`, `a_record_signed_by_a_key_the_source_never_had_fails_verification`, `an_unlogged_record_fails_verification`, `an_unsigned_map_that_disagrees_with_the_signed_statement_fails_verification`, `every_evidence_file_is_checked_and_one_absent_is_unchecked_never_passed`, `what_accompanies_a_verdict_is_about_its_run`, `record_leaf_refuses_a_statement_whose_leaf_every_client_would_refuse`; lookup.rs — `a_record_logged_again_after_its_withdrawal_fails_and_never_answers_again`; rerun.rs — `a_published_report_is_held_member_by_member_and_by_its_field_edits`; crates/trigon/tests/verify_record.rs — `a_claim_rerun_comparison_refutes_exits_4`, `a_record_logged_twice_fails_verification_and_exits_4`)* |
+| **P32** | **Nothing is answered from a record the verified log does not hold, and nothing the log holds is hidden.** A key — a sha256, sha512 or sha1 digest, an integrity string, a purl with or without its version, a file — is resolved from the verified leaves, never from `index/`, so a missing, altered or planted index file changes no answer. A leaf whose record file is missing is *deleted*, whatever its outcome, and exits 4. A record is superseded only by a verified, logged record, signed by the key its source had at its own later leaf, that names it and has the same subject digests and canonical purl; a superseded record is returned marked, and two current records for one subject are both returned and the more severe answers. Where the log continues in a repository the directory does not hold, what the source says now is *unknown* and exits 4: a record is never shown as current when a withdrawal of it may be logged where the directory does not reach. | P33 holds for the log | a verdict answered that no leaf logs; a deletion answered as never checked or as its outcome; a supersession applied that §3's rules refuse, or a record hidden | **security-critical** *(documented, docs/19-distribution-and-lookup.md §3, §5, §6, §8; crates/trigon-attest/tests/evidence_repo/lookup.rs — `a_record_whose_index_entries_are_removed_or_altered_is_still_found`, `a_record_file_deleted_is_deleted_whatever_its_leaf_says`, `supersession_takes_every_clause_of_docs_19_3`, `a_record_logged_again_after_its_withdrawal_fails_and_never_answers_again`; crates/trigon/tests/verify_record.rs — `a_log_that_continues_elsewhere_answers_unknown_and_exits_4`)* |
+| **P33** | **The log is verified whole, and held to what was accepted before, before any record is read.** The checkpoint must verify under the pinned log key and name its origin; every leaf is rehashed and the root compared with the signed one; leaf times never go backwards; every tile holds the leaves' hashes; a successor is followed only through a `log-end` and a `log-continuation` signed by both keys. A checkpoint that does not extend the one given as last accepted — a rollback, a rewrite, a fork — is refused with both signed notes; two checkpoints under one log key whose trees are not one tree, found side by side in one repository, are an equivocation, refused with both notes; either exits 4, and prints both notes in its JSON document too. A checkpoint given that the log was not held to — one of a log the directory does not hold — is said to be unchecked, never one the log is held to; one that is not a checkpoint at all, given or in the state directory, exits 5 and is never blamed on the source; and a source whose state holds no checkpoint says so when its initial one stands in. | the checkpoint last accepted is given, from `--checkpoint` or the source's state or initial checkpoint — without one, D25 | a log whose files are not its signed tree accepted; a checkpoint that does not extend the accepted one, or a second tree under the key, accepted or set aside | **security-critical** *(documented, docs/19-distribution-and-lookup.md §6, §6.1, §8; docs/16-findings.md §3.98, §3.99; crates/trigon-attest/tests/evidence_log/verify.rs; crates/trigon-attest/tests/evidence_log/rotation.rs — `a_planted_directory_does_not_move_or_stop_a_client_pinned_to_a_successor`; crates/trigon/tests/verify_record.rs — `two_trees_under_one_log_key_are_an_equivocation_and_exit_4`, `a_log_that_continues_elsewhere_answers_unknown_and_exits_4`, `a_source_is_read_from_the_configuration_and_its_state_directory`)* |
 | **P30** | The repair loop is bounded by iteration, token and wall-clock budgets. **Threshold:** `wall_seconds` defaults to 1200 and is checked **between** iterations, so one long call completes and the next is refused by name. | `--model` names a provider | unbounded model spend on one target | correctness-only *(documented, crates/trigon-ai/src/repair.rs:95-110)* |
 
 ---
@@ -745,6 +757,7 @@ project has made.
 | **D20** | Confidentiality of package text from a model provider, or of a Copilot prompt from the host process table — the whole prompt is an `argv` argument. | when `--model` names a provider | correctness-only | *(documented, crates/trigon-ai/src/copilot.rs:133-134 — `.arg("-p").arg(self.prompt(req))`)* |
 | **D21** | Resource or capability bounds on an archived stabilizer set beyond wasmtime's own sandbox. The host sets no fuel limit, no epoch interruption and no memory limiter. | `wasm` feature | **security-critical** | *(documented, crates/trigon-stabilize-wasm/src/host.rs:56 — `Store::new(&engine, ())`)* |
 | **D22** | That a custom stabilizer from the definitions repository is bounded by anything but review and the provenance cap. | a merged definitions PR | **security-critical** | *(documented, docs/12-security.md §8)* |
+| **D25** | That a record verified with `verify-attestation --record` is the source's current word. It is checked against the log the directory holds and the checkpoint it is given: with none, a rewrite or a fork signed by the log key is not detected, and even with one a newer checkpoint withheld — a supersession or a withdrawal the directory does not hold — is not, since the record form judges no freshness; staleness and the frozen clock are `evidence sync`'s and `lookup`'s (docs/19 §10 phase 6), and nothing prevents a split view until witnesses cosign. What the directory itself shows is not disclaimed: a log that continues in a repository it does not hold answers *unknown* (P32). | `verify-attestation --record` | **security-critical** | *(documented, docs/19-distribution-and-lookup.md §6, §7, §8)* |
 | **D24** | Any bound on a stolen signing key. A statement carries no third-party time, so a key stolen today signs statements that verify like those it signed before the theft. The external log check once meant to bound this was never enforced, and went with the log. docs/19 D6 chooses the bound: key epochs sealed in the evidence log, or a certificate chain checked against witnessed or time-stamped time. | a key the operator holds | **security-critical** | *(documented, ADR-0014 "What this costs"; docs/19-distribution-and-lookup.md §8, §10 phase 7a)* |
 
 ### Well-known attack classes left to the caller
@@ -790,27 +803,32 @@ docs/09-attestations.md §2.1)*.
    a claim about egress being accounted for, and not a claim about anything else.
 7. **Distinguish a confirmed result from a single attempt, and a stale pass from no data.**
 8. **For npm, do not read `reproduced` as `attributed`.**
+9. **Hold a published record's log to a checkpoint you already hold.** `verify-attestation
+   --record` detects a rollback, a rewrite or a fork only back to the checkpoint it is given —
+   `--checkpoint`, or the source's state or initial checkpoint under `--source` — and says when it
+   was given none (P33, D25). Keep the checkpoint from your last check, and compare it with somebody
+   else's.
 
 **If you run Trigon:**
 
-9. **Choose the egress tier deliberately.** `--egress open` is the default and it voids the strong
-   claim. An enforced tier needs a mirror image and a base image you built first.
-10. **Only you may name a local path as a source.** `file://` chosen by the thing under test is the
+10. **Choose the egress tier deliberately.** `--egress open` is the default and it voids the strong
+    claim. An enforced tier needs a mirror image and a base image you built first.
+11. **Only you may name a local path as a source.** `file://` chosen by the thing under test is the
     dangerous one.
-11. **Read `crates/trigon-ai/src/copilot.rs`'s module docs before `--model copilot:`.** Prefer a
+12. **Read `crates/trigon-ai/src/copilot.rs`'s module docs before `--model copilot:`.** Prefer a
     provider with a real system message where the choice exists.
-12. **Keep `trigon watch` on loopback** unless you have thought about it. Build logs are not
+13. **Keep `trigon watch` on loopback** unless you have thought about it. Build logs are not
     redacted (D14).
-13. **Set `total_expanded_bytes` to something your host can absorb.** The default ceiling is 4 GiB
+14. **Set `total_expanded_bytes` to something your host can absorb.** The default ceiling is 4 GiB
     and a hostile artifact may reach it before being refused.
-14. **Treat the rebuilt artifact as untrusted.** It is the package's own build output; do not install
-    or execute it because it reproduced.
-15. **Before a real sweep, talk to the registries:** a User-Agent with a contact URL, `Retry-After`
+15. **Treat the rebuilt artifact as untrusted.** It is the package's own build output; do not
+    install or execute it because it reproduced.
+16. **Before a real sweep, talk to the registries:** a User-Agent with a contact URL, `Retry-After`
     honoured, per-host token buckets.
 
 **If you review the definitions repository:**
 
-16. **Two-party review for anything touching a stabilizer**, a non-empty prose `reason:`, and the
+17. **Two-party review for anything touching a stabilizer**, a non-empty prose `reason:`, and the
     corpus-wide impact preview before merging.
 
 ---
@@ -895,9 +913,10 @@ naming every claimed matrix row's owning property.
   selecting by sort order or mtime rather than by run. Today it is emptied before the first attempt
   and every retry *(documented, crates/trigon/src/main.rs:2218)*; that is what makes P14's guarantee
   about the *right* artifact and not merely a real one.
-- The evidence store is built (`docs/19-distribution-and-lookup.md` §10 phases 4–6, under ADR-0014).
-  It adds a consumer who never runs Trigon and never sees this document, makes A8 and A9 live, and
-  each phase adds its properties, side effects and disclaimers here (phase 8).
+- The rest of the evidence store is built (`docs/19-distribution-and-lookup.md` §10 phases 5 and 6,
+  under ADR-0014): the writer, the clones in a user's cache, and lookup and `check` over them. It
+  adds a consumer who never runs Trigon and never sees this document, and each phase adds its
+  properties, side effects and disclaimers here (phase 8), as phase 4 added P31–P33 and D25.
 - **A report that cannot be routed to exactly one §1.17 disposition.** Revise; do not improvise.
 
 ---
@@ -1021,7 +1040,7 @@ emit unless every in-scope component has a row for all eight contract dimensions
 coverage check that would otherwise be somebody remembering.
 
 **Census** — claim tags only; the legend rows and prose mentions of a tag name are excluded:
-**201 documented / 0 maintainer / 3 assumption / 5 inferred**. Every assumption and inferred tag
+**209 documented / 0 maintainer / 3 assumption / 5 inferred**. Every assumption and inferred tag
 resolves to a question in §1.18.
 
 ---
@@ -1045,7 +1064,7 @@ superset. Kept until Q18 is answered.
 | §5 free-form shell | D2; §1.12 false friends |
 | §6 sandbox hardening | §1.5; P11; §1.12 attack classes (container escape) |
 | §7 multi-tenancy | §1.3 |
-| §8 the definitions repository | §1.9; §1.10 A4; D22; §1.13 item 16 |
+| §8 the definitions repository | §1.9; §1.10 A4; D22; §1.13 item 17 |
 | §9 signing key handling | §1.13; Q2 |
 | §10 the twelve invariants | P1–P30, each with a symptom and a tier |
 | §11 out of scope | §1.3 |

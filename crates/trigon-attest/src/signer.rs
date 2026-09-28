@@ -139,10 +139,10 @@ pub fn verify(pae: &[u8], sig: &Signature, public_hex: &str) -> Result<(), Attes
 
     let raw = base64::engine::general_purpose::STANDARD
         .decode(&sig.sig)
-        .map_err(|e| AttestError::Malformed(format!("signature is not base64: {e}")))?;
+        .map_err(|e| AttestError::Evidence(format!("signature is not base64: {e}")))?;
     let raw: [u8; 64] = raw
         .try_into()
-        .map_err(|_| AttestError::Malformed("an ed25519 signature is 64 bytes".into()))?;
+        .map_err(|_| AttestError::Evidence("an ed25519 signature is 64 bytes".into()))?;
 
     // `verify_strict`, not `verify`. The permissive form implements RFC 8032's verification
     // equation and accepts a small-order public key and a non-canonical encoding, which together

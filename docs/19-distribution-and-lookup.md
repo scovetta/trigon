@@ -16,8 +16,9 @@ decisions it waits on. What exists today:
 | The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest`, `serve` and `worker` (§10 phases 2, 3); the commands that use the rest of it are phases 4 to 6 |
 | A publishable run: every cache key built from the target, the strategy and the set, worker and CLI alike; attempts that agree on what the comparison found, not on its outcome string; `trigon rebuild --confirm <run>`, cold and re-pulled; each attempt's host, cache state and start; `decide`'s rules for a pair, from `same_host_confirmation` and `confirmation_interval`; and a worker's confirmation made on another machine unless `same_host_confirmation` allows its own | built (§10 phase 3, backlog B31; [findings](16-findings.md) §3.97) |
 | `rebuild --attest` signing through `attest`'s own code, so no path signs a verdict for a run the gate voids; `rebuild/v1` naming the model exchange a run kept; a `pkg1` key that is the package alone | built (§10 phase 3; [findings](16-findings.md) §3.97) |
-| The evidence log as pure code: C2SP signed notes and checkpoints, the log key in Go's format, RFC 6962 inclusion and consistency proofs, tiles and entry bundles and what an append writes, every leaf kind of §2.3, a log verified from its files, and key-change, log-end and log-continuation leaves followed as §8 says | built (§10 phase 4, first half; [findings](16-findings.md) §3.98); nothing writes or reads an evidence repository with it yet, so the threat model's properties for inclusion and consistency verification (phase 8) are deferred to the second half, whose `verify-attestation --record` is the first command to reach this code |
-| Records verified against the log, lookup and supersession, index paths, `verify-attestation --record`, and the threat model's properties for record, inclusion and consistency verification (§10 phase 4, second half); the evidence repository, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
+| The evidence log as pure code: C2SP signed notes and checkpoints, the log key in Go's format, RFC 6962 inclusion and consistency proofs, tiles and entry bundles and what an append writes, every leaf kind of §2.3, a log verified from its files, and key-change, log-end and log-continuation leaves followed as §8 says | built (§10 phase 4, first half; [findings](16-findings.md) §3.98) |
+| Records verified against the log, lookup over its leaves with every supersession applied, the paths of records, evidence and the index, and the index derived from the log; `verify-attestation --record` in the network-free verifier, with keys and checkpoint from `--source` or from flags, showing every §4.2 field; `--rerun-comparison` re-deriving what a verdict says the comparison found and holding the published report to it; two trees under one log key refused as an equivocation; and the threat model's properties for record, inclusion and consistency verification (P31–P33) | built (§10 phase 4, second half; [findings](16-findings.md) §3.99) |
+| The evidence repository, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
 
 ---
 
@@ -529,7 +530,8 @@ And the index file a lockfile's npm integrity digest leads to — `index/sha512/
 ```
 
 If left-pad 1.3.0 were later withdrawn or re-published, the new record would be appended to that
-list. A client with a clone never reads this file (§6).
+list. An entry whose leaf is in a successor log also names that log's directory, `"log": "log/1"`,
+since a leaf's index is its place in one log. A client with a clone never reads this file (§6).
 
 Publishing the comparison report moves it from Operator-only (`Class::Comparison` in
 `crates/trigon-api/src/evidence.rs`) to public. It was Operator-only because nothing bounds its

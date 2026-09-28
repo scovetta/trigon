@@ -36,6 +36,15 @@ use crate::location::{Location, printable};
 /// The name of the source `TRIGON_EVIDENCE_REPO` adds, reserved so no file can shadow it.
 pub const ENV_SOURCE: &str = "env";
 
+/// The file in a source's state directory that holds its last accepted checkpoint: the signed note
+/// as it was accepted (`docs/19` §6.1). Outside the clone, so a clone rolled back behind it is
+/// refused as a rollback.
+pub const ACCEPTED_CHECKPOINT: &str = "checkpoint";
+
+/// The longest checkpoint file read. Ours is three lines and a signature; a hundred witness
+/// cosignatures would still be a few kilobytes.
+const CHECKPOINT_FILE_LIMIT: u64 = 64 * 1024;
+
 /// The process environment, as far as this module reads it, captured once.
 ///
 /// A value rather than calls to `std::env` scattered through the loader, so a test states the
@@ -169,6 +178,39 @@ pub enum ConfigError {
         what: &'static str,
         var: &'static str,
     },
+    #[error("no evidence source is named `{name}`; {}", configured(.known))]
+    NoSuchSource { name: String, known: Vec<String> },
+    #[error(
+        "the source `{name}` pins no {missing}: it trusts on first use, which a first `trigon \
+         evidence sync` settles by recording the keys it read. The network-free verifier checks \
+         only against keys it is given; pass --log-vkey and --attestation-key instead"
+    )]
+    Unpinned { name: String, missing: &'static str },
+}
+
+fn configured(known: &[String]) -> String {
+    match known.is_empty() {
+        true => "none is configured".into(),
+        false => format!("the sources configured are {}", known.join(", ")),
+    }
+}
+
+/// What the network-free verifier holds one source's log to (`docs/19` §6): the source's pinned
+/// keys, and the checkpoint its log must extend.
+#[derive(Clone, Debug)]
+pub struct Pins {
+    pub log_key: LogVkey,
+    pub attestation_key: AttestationKey,
+    /// The checkpoint the log must extend, as a signed note, and the file it was read from: the
+    /// one in the source's state directory, or, where no sync has accepted one yet, its configured
+    /// initial checkpoint. `None` where there is neither.
+    pub accepted: Option<(PathBuf, Vec<u8>)>,
+    /// Where the source's last accepted checkpoint is kept, whether or not one is there, so that
+    /// a missing one is reported rather than passed over (`docs/19` §6.1).
+    pub state: PathBuf,
+    /// Which file, or the environment, added the source: every answer from a source a project
+    /// added names the file that added it (`docs/19` §2.4).
+    pub added_by: AddedBy,
 }
 
 impl ConfigError {
@@ -454,6 +496,64 @@ impl EvidenceConfig {
     /// The files that were read, in order.
     pub fn files_read(&self) -> &[PathBuf] {
         &self.read
+    }
+
+    /// A source's own directory under the state directory, `<state>/<name>/`: where its last
+    /// accepted checkpoint and key history are kept, outside its clone (`docs/19` §6.1).
+    pub fn source_state_dir(&self, name: &str) -> Result<PathBuf, ConfigError> {
+        Ok(self.state_dir()?.join(name))
+    }
+
+    /// What the network-free verifier checks the source `name` against: its pinned keys, and the
+    /// checkpoint last accepted for it — the one in its state directory, or, before any sync has
+    /// accepted one, its configured initial checkpoint.
+    ///
+    /// Names are compared ignoring ASCII case, as everywhere a name is a directory. Refused, as bad
+    /// arguments, for a name no source has, and for a source that pins no key, which only trust on
+    /// first use allows and which the verifier, reading no repository's `keys/`, cannot settle. A
+    /// checkpoint file that is there and cannot be read is refused rather than passed over: it is
+    /// what a rollback is caught against.
+    pub fn pins(&self, name: &str) -> Result<Pins, ConfigError> {
+        let source = self
+            .sources
+            .iter()
+            .find(|s| same_name(&s.name, name))
+            .ok_or_else(|| ConfigError::NoSuchSource {
+                name: printable(name),
+                known: self.sources.iter().map(|s| s.name.clone()).collect(),
+            })?;
+        let (Some(log_key), Some(attestation_key)) = (&source.log_key, &source.attestation_key)
+        else {
+            return Err(ConfigError::Unpinned {
+                name: source.name.clone(),
+                missing: missing_keys(source.log_key.is_none(), source.attestation_key.is_none()),
+            });
+        };
+        let state = self.source_state_dir(&source.name)?;
+        let read = |path: &Path| -> Result<Vec<u8>, ConfigError> {
+            read_limited(path, CHECKPOINT_FILE_LIMIT)
+                .map(String::into_bytes)
+                .map_err(|why| ConfigError::File {
+                    path: path.to_path_buf(),
+                    message: format!("the checkpoint {why}"),
+                })
+        };
+        let last = state.join(ACCEPTED_CHECKPOINT);
+        let accepted = if last.exists() {
+            Some((last.clone(), read(&last)?))
+        } else {
+            match &source.checkpoint {
+                Some(initial) => Some((initial.clone(), read(initial)?)),
+                None => None,
+            }
+        };
+        Ok(Pins {
+            log_key: log_key.clone(),
+            attestation_key: attestation_key.clone(),
+            accepted,
+            state: last,
+            added_by: source.added_by.clone(),
+        })
     }
 
     fn user_file(&mut self, path: &Path, text: &str, env: &Env) -> Result<(), ConfigError> {
@@ -912,6 +1012,23 @@ fn branch(s: &str) -> Result<String, String> {
         return Err(format!("branch `{s}` is not a branch name"));
     }
     Ok(s.to_string())
+}
+
+/// An attestation key given as `evidence.toml` gives one — 64 hex digits, or a path to a PEM file,
+/// `~/` expanded and a relative path taken from `base` — read now. For a key given on the command
+/// line, such as the verifier's `--attestation-key`, `base` is the working directory.
+pub fn read_attestation_key(
+    s: &str,
+    base: &Path,
+    home: Option<&Path>,
+) -> Result<AttestationKey, String> {
+    attestation_key(s, base, home)
+}
+
+/// A checkpoint file named on the command line, as `evidence.toml`'s `checkpoint` is read: a
+/// regular file of at most 64 KiB, as text.
+pub fn read_checkpoint_file(path: &Path) -> Result<Vec<u8>, String> {
+    read_limited(path, CHECKPOINT_FILE_LIMIT).map(String::into_bytes)
 }
 
 /// 64 hex digits, or a path to a PEM file, read now.

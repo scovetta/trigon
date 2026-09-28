@@ -338,7 +338,8 @@ fn a_subject_for_an_ecosystem_that_publishes_sha1_carries_it_and_it_is_checked()
     assert!(rederive(&st, u.clone(), r.clone()).unwrap().holds());
 
     // A sha1 that is not of these bytes is a statement whose digests were not all computed over
-    // one file, and it is refused by name rather than trusted because sha256 agreed.
+    // one file, and it is refused by name rather than trusted because sha256 agreed: refuted,
+    // since sha256 says the file is the artifact, and not the wrong file handed in.
     let mut wrong = st.clone();
     wrong.subject[0]
         .digest
@@ -347,12 +348,12 @@ fn a_subject_for_an_ecosystem_that_publishes_sha1_carries_it_and_it_is_checked()
     assert!(
         matches!(
             &e,
-            trigon_attest::AttestError::WrongArtifact { side: "upstream", algorithm, .. }
-                if algorithm == "sha1"
+            trigon_attest::AttestError::SubjectRefuted { algorithm, .. } if algorithm == "sha1"
         ),
         "{e}"
     );
     assert!(e.to_string().contains("sha1"), "{e}");
+    assert!(e.fails_verification(), "{e}");
 }
 
 #[test]
@@ -366,11 +367,11 @@ fn a_tampered_sha512_in_the_subject_is_refused_even_though_sha256_agrees() {
     assert!(
         matches!(
             &e,
-            trigon_attest::AttestError::WrongArtifact { side: "upstream", algorithm, .. }
-                if algorithm == "sha512"
+            trigon_attest::AttestError::SubjectRefuted { algorithm, .. } if algorithm == "sha512"
         ),
         "{e}"
     );
+    assert!(e.fails_verification(), "{e}");
 }
 
 #[test]

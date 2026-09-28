@@ -476,9 +476,11 @@ pub struct VerifiedSource {
     pub unnamed: Vec<String>,
     /// Directories set aside in choosing where the chain starts, each with why: a checkpoint that
     /// could not be read; one that names the pinned log and does not open under its key; a copy of
-    /// the checkpoint the chain starts at, whose files did not verify or were not needed; an older
-    /// checkpoint of that log; or a second tree under its key. Whoever can push can plant all but
-    /// the last, so each is reported and none stops the source (`docs/19` §8).
+    /// the checkpoint the chain starts at, whose files did not verify or were not needed; or an
+    /// older checkpoint of that log, which the newest extends. Whoever can push can plant every
+    /// one of these, so each is reported and none stops the source (`docs/19` §8). A second tree
+    /// under the log's key is not among them: nobody without the key can plant one, and it is
+    /// refused as an equivocation ([`LogError::Equivocation`]).
     pub refused: Vec<RefusedLog>,
     /// Whether the checkpoint last accepted was checked. False only when it is for a log beyond
     /// this repository, in [`Self::continues_at`], which the caller checks it against when it
@@ -500,7 +502,9 @@ pub struct RefusedLog {
 ///
 /// The chain starts at the newest checkpoint the pinned key opens, in whichever directory holds
 /// it, and at the first such directory whose files verify whole; see [`VerifiedSource::refused`]
-/// for the others.
+/// for the others. Two checkpoints the pinned key opens whose trees are not one tree — the same
+/// size with two roots, or an older one the newest does not extend — refuse the source as an
+/// equivocation, with both signed notes (`docs/19` §6.1, §8).
 ///
 /// `accepted` is the signed note of the checkpoint last accepted for this source, for whichever
 /// log of the chain it belongs to; that log must extend it, and a chain that never reaches its
@@ -535,26 +539,31 @@ pub fn verify_source(
     accepted_checked |= acc.is_some();
     let (start_n, first) = first_log(repo, pinned, newest, acc.as_ref(), &mut refused)?;
     for (dir, cp) in older {
-        let extended = first.log.tree().root_at(cp.size()).ok() == Some(*cp.root());
-        let why = if extended {
-            format!(
+        if first.log.tree().root_at(cp.size()).ok() != Some(*cp.root()) {
+            return Err(LogError::Equivocation {
+                why: format!(
+                    "`{dir}` holds a checkpoint of `{}` of {} leaves, signed by its key, that the \
+                     tree in `{}` does not extend",
+                    pinned.origin(),
+                    cp.size(),
+                    first.dir
+                ),
+                first_dir: first.dir.clone(),
+                first: first.log.checkpoint().to_string(),
+                second_dir: dir,
+                second: cp.to_string(),
+            });
+        }
+        refused.push(RefusedLog {
+            why: format!(
                 "it holds an older checkpoint of `{}`, of {} leaves, which the one in `{}` \
                  extends; a log is read from its newest checkpoint",
                 pinned.origin(),
                 cp.size(),
                 first.dir
-            )
-        } else {
-            format!(
-                "it holds a checkpoint of `{}` of {} leaves, signed by its key, that the tree in \
-                 `{}` does not extend: two different trees under one key, which only whoever \
-                 holds the log key can sign; keep both signed notes as evidence",
-                pinned.origin(),
-                cp.size(),
-                first.dir
-            )
-        };
-        refused.push(RefusedLog { dir, why });
+            ),
+            dir,
+        });
     }
 
     let mut logs: Vec<ChainedLog> = vec![first];
@@ -731,11 +740,11 @@ fn start_of(repo: &Path, pinned: &LogVkey, numbered: &[(u64, String)]) -> Result
 /// The log a chain starts at: the first directory holding the newest checkpoint the pinned key
 /// opens whose files verify whole, with its number.
 ///
-/// Every such directory holding that checkpoint's root holds one signed tree, so whichever of them
-/// verifies is the log, and one that does not — a copy planted with the checkpoint and nothing
-/// else, or damaged files — is set aside for the next. One whose checkpoint signs another root for
-/// as many leaves is a second tree under the log's key, and is reported as that. Where none
-/// verifies, the first one's failure is the source's.
+/// Every such directory holds one signed tree, so whichever of them verifies is the log, and one
+/// that does not — a copy planted with the checkpoint and nothing else, or damaged files — is set
+/// aside for the next. Where none verifies, the first one's failure is the source's. Two of them
+/// whose checkpoints sign different roots for as many leaves are two trees under the log's key,
+/// and refuse the source as an equivocation before any is read.
 fn first_log(
     repo: &Path,
     pinned: &LogVkey,
@@ -743,30 +752,26 @@ fn first_log(
     accepted: Option<&SignedCheckpoint>,
     refused: &mut Vec<RefusedLog>,
 ) -> Result<(u64, ChainedLog), LogError> {
-    let root = *newest
-        .first()
-        .expect("a start has a newest checkpoint")
-        .2
-        .root();
+    let (_, first_dir, first) = newest.first().expect("a start has a newest checkpoint");
+    if let Some((_, dir, other)) = newest.iter().find(|(_, _, c)| c.root() != first.root()) {
+        return Err(LogError::Equivocation {
+            why: format!(
+                "`{first_dir}` and `{dir}` each hold a checkpoint of `{}` of {} leaves, signed by \
+                 its key, and they sign the roots {} and {}",
+                pinned.origin(),
+                first.size(),
+                b64(first.root()),
+                b64(other.root())
+            ),
+            first_dir: first_dir.clone(),
+            first: first.to_string(),
+            second_dir: dir.clone(),
+            second: other.to_string(),
+        });
+    }
     let mut chosen: Option<(u64, ChainedLog)> = None;
     let mut first_error = None;
-    for (n, dir, checkpoint) in newest {
-        if *checkpoint.root() != root {
-            refused.push(RefusedLog {
-                why: format!(
-                    "it holds a checkpoint of `{}` signing the root {} for {} leaves, where \
-                     another directory's signs {} for as many: two different trees under one key, \
-                     which only whoever holds the log key can sign; keep both signed notes as \
-                     evidence",
-                    pinned.origin(),
-                    b64(checkpoint.root()),
-                    checkpoint.size(),
-                    b64(&root)
-                ),
-                dir,
-            });
-            continue;
-        }
+    for (n, dir, _) in newest {
         if let Some((_, start)) = &chosen {
             refused.push(RefusedLog {
                 why: format!(

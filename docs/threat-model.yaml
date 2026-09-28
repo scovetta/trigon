@@ -11,11 +11,11 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:f2482c640929d6e5165603343f92060ab451523b2a8e9709062209b65e3fd07d
+prose_version: docs/threat-model.md@sha256:a00d32b5ed677e864d5aca2a76e1cfa4a5be44b0095eb824198167a7518f73a0
 model_status: unratified-draft
 triage_policy: strict
 confidence:
-  documented: 202
+  documented: 209
   maintainer: 0
   inferred: 5
   assumption: 3
@@ -40,7 +40,9 @@ components:
     source: docs/threat-model.md §1.2
 - name: attestation
   scope: in
-  reachability_precondition: a statement this process built, or an attestation handed to verify-attestation
+  reachability_precondition: a statement this process built, an attestation handed to verify-attestation,
+    or a record file and an evidence directory handed to verify-attestation --record, which whoever can
+    push to that repository wrote (A8, A9)
   provenance:
     kind: documented
     source: docs/threat-model.md §1.2
@@ -109,12 +111,14 @@ host_side_effects:
     kind: documented
     source: docs/01-architecture.md §2.2
 - effect: Environment variables
-  stance: absent
+  stance: conditional
   components: []
-  conditions: ''
+  conditions: 'only verify-attestation --record: under --source <name>, the evidence configuration''s
+    — TRIGON_EVIDENCE_CONFIG, TRIGON_EVIDENCE_STATE, TRIGON_EVIDENCE_REPO and the keys beside it, XDG_CONFIG_HOME,
+    XDG_STATE_HOME, HOME — and HOME to expand ~/ in --attestation-key'
   provenance:
     kind: documented
-    source: docs/01-architecture.md §2.2
+    source: crates/trigon-attest/src/config.rs — `Env::from_process`; crates/trigon/src/verify_record.rs
 - effect: Filesystem writes
   stance: conditional
   components: []
@@ -126,10 +130,15 @@ host_side_effects:
 - effect: Filesystem reads
   stance: conditional
   components: []
-  conditions: only paths the operator named, plus a signing key file
+  conditions: only paths the operator named, plus a signing key file; and under verify-attestation --record,
+    the files of the evidence directory it names — checkpoints, tiles, entry bundles, records and evidence,
+    each inside the directory once links are followed, a regular file, and no longer than its kind can
+    be — and under --source, evidence.toml, the working directory's .trigon/evidence.toml, and the source's
+    state checkpoint
   provenance:
     kind: documented
-    source: crates/trigon/src/main.rs — every read path is a CLI argument
+    source: crates/trigon/src/main.rs — every other read path is a CLI argument; crates/trigon-attest/src/log/files.rs;
+      crates/trigon-attest/src/evidence/repository.rs; crates/trigon-attest/src/config.rs
 - effect: stdout / stderr
   stance: present
   components: []
@@ -496,6 +505,35 @@ entry_points:
     provenance:
       kind: documented
       source: README.md
+- id: verify-attestation --record
+  component: multiple
+  parameters:
+  - name: the record file
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - serialized-state
+    caller_must_enforce: 'nothing — P31: its sha256 must be a verified leaf''s, and one leaf''s only,
+      every envelope must verify under the key its source had at that leaf, its statement must agree with
+      the leaf, its unsigned map with its statement, and every evidence file present with its digest;
+      a record no leaf names is unlogged and fails, and so does one the log holds twice'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §4.1, §8; crates/trigon-attest/tests/evidence_repo/records.rs
+  - name: 'the evidence directory: log/, records/, evidence/, index/'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - object-topology
+    - resource-name
+    caller_must_enforce: 'nothing — P32, P33: the log is verified whole under the pinned log key, and
+      against the checkpoint last accepted, before a record is read; every file is read inside the directory,
+      as a regular file of at most its kind''s length; index/ is never read; a leaf whose record file
+      is missing is deleted'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §6, §8; crates/trigon-attest/src/log/files.rs; crates/trigon-attest/tests/evidence_repo/
 - id: trigon watch GET /run/{index}
   component: multiple
   parameters:
@@ -910,6 +948,33 @@ contract_dimensions:
   status: disclaimed
   conditions: a statement is as large as the difference summary it carries
   property_id: D9
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: attestation
+  dimension: x-record-verification
+  status: claimed
+  conditions: a record is shown verified only when its leaf, the key its source had at that leaf, its
+    statement, its unsigned map and every evidence file present all check
+  property_id: P31
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: attestation
+  dimension: x-log-inclusion
+  status: claimed
+  conditions: an answer comes only from a record the verified log holds, found from its leaves and never
+    from index/
+  property_id: P32
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: attestation
+  dimension: x-log-consistency
+  status: claimed
+  conditions: the log is verified whole under the pinned key, and against the checkpoint last accepted;
+    two trees under one key is refused
+  property_id: P33
   provenance:
     kind: documented
     source: docs/threat-model.md §1.7
@@ -1352,49 +1417,62 @@ outputs:
       signature present and unchecked
     provenance: *id006
 - component: multiple
+  channel: the verify-attestation --record report
+  taint: constrained
+  taint_provenance: &id007
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.2, §6, §6.1
+  invariants: []
+  downstream_must_not_assume:
+  - id: mna-7
+    statement: that an unchecked evidence file was checked; that the answer is current — it is the log
+      as the directory holds it, checked against the checkpoint given or against none, with no freshness
+      clock (D25); or that a record verified in one source says anything in another
+    provenance: *id007
+- component: multiple
   channel: the build log (stored, rendered, prompted)
   taint: same-as-input
-  taint_provenance: &id007
+  taint_provenance: &id008
     kind: documented
     source: docs/18-management-ui.md §2
   invariants: []
   downstream_must_not_assume:
-  - id: mna-7
+  - id: mna-8
     statement: that credentials were redacted. They were not
-    provenance: *id007
+    provenance: *id008
 - component: multiple
   channel: trigon watch HTML
   taint: constrained
-  taint_provenance: &id008
+  taint_provenance: &id009
     kind: documented
     source: crates/trigon/src/main.rs
   invariants: []
   downstream_must_not_assume:
-  - id: mna-8
+  - id: mna-9
     statement: that the page is authenticated, or safe to serve on a routable address
-    provenance: *id008
+    provenance: *id009
 - component: multiple
   channel: /api/state JSON
   taint: same-as-input
-  taint_provenance: &id009
+  taint_provenance: &id010
     kind: documented
     source: crates/trigon/src/watch.rs
   invariants: []
   downstream_must_not_assume:
-  - id: mna-9
+  - id: mna-10
     statement: that it is access-controlled. It is not
-    provenance: *id009
+    provenance: *id010
 - component: multiple
   channel: the model transcript
   taint: same-as-input
-  taint_provenance: &id010
+  taint_provenance: &id011
     kind: documented
     source: docs/07-ai.md §8
   invariants: []
   downstream_must_not_assume:
-  - id: mna-10
+  - id: mna-11
     statement: that replaying it reproduces the result. It replays the model, not the world
-    provenance: *id010
+    provenance: *id011
 adversaries:
 - name: forged-attestation-attacker
   scope: in
@@ -2142,6 +2220,73 @@ properties_claimed:
   provenance:
     kind: documented
     source: crates/trigon/src/main.rs:199
+- id: P31
+  kind: integrity
+  components:
+  - attestation
+  tier: security-critical
+  conditions: the source's keys are the operator's pins (§1.10)
+  violation_symptoms:
+  - a record shown verified that its leaf, its key, its map or its evidence contradicts
+  - a failure reported as never checked
+  statement: A published record is shown as verified only when all of it checks (verify-attestation --record,
+    trigon_attest::evidence::check_record). Its sha256 is the record of a leaf of the verified log — a
+    record no leaf names is unlogged and fails, and one the log holds at two leaves is logged twice and
+    fails at both, since a record logged again after what withdraws it would otherwise read as current
+    again
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.1, §4.2, §8; docs/16-findings.md §3.99; crates/trigon-attest/tests/evidence_repo/records.rs
+      — `a_record_whose_statement_disagrees_with_its_leaf_fails_verification`, `a_record_signed_by_a_key_retired_before_its_leaf_fails_verification`,
+      `a_record_signed_by_a_key_the_source_never_had_fails_verification`, `an_unlogged_record_fails_verification`,
+      `an_unsigned_map_that_disagrees_with_the_signed_statement_fails_verification`, `every_evidence_file_is_checked_and_one_absent_is_unchecked_never_passed`,
+      `what_accompanies_a_verdict_is_about_its_run`, `record_leaf_refuses_a_statement_whose_leaf_every_client_would_refuse`;
+      lookup.rs — `a_record_logged_again_after_its_withdrawal_fails_and_never_answers_again`; rerun.rs
+      — `a_published_report_is_held_member_by_member_and_by_its_field_edits`; crates/trigon/tests/verify_record.rs
+      — `a_claim_rerun_comparison_refutes_exits_4`, `a_record_logged_twice_fails_verification_and_exits_4`
+- id: P32
+  kind: integrity
+  components:
+  - attestation
+  tier: security-critical
+  conditions: P33 holds for the log
+  violation_symptoms:
+  - a verdict answered that no leaf logs
+  - a deletion answered as never checked or as its outcome
+  - a supersession applied that §3's rules refuse, or a record hidden
+  statement: 'Nothing is answered from a record the verified log does not hold, and nothing the log holds
+    is hidden. A key — a sha256, sha512 or sha1 digest, an integrity string, a purl with or without its
+    version, a file — is resolved from the verified leaves, never from index/, so a missing, altered or
+    planted index file changes no answer. A leaf whose record file is missing is deleted, whatever its
+    outcome, '
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §3, §5, §6, §8; crates/trigon-attest/tests/evidence_repo/lookup.rs
+      — `a_record_whose_index_entries_are_removed_or_altered_is_still_found`, `a_record_file_deleted_is_deleted_whatever_its_leaf_says`,
+      `supersession_takes_every_clause_of_docs_19_3`, `a_record_logged_again_after_its_withdrawal_fails_and_never_answers_again`;
+      crates/trigon/tests/verify_record.rs — `a_log_that_continues_elsewhere_answers_unknown_and_exits_4`
+- id: P33
+  kind: integrity
+  components:
+  - attestation
+  tier: security-critical
+  conditions: the checkpoint last accepted is given, from --checkpoint or the source's state or initial
+    checkpoint — without one, D25
+  violation_symptoms:
+  - a log whose files are not its signed tree accepted
+  - a checkpoint that does not extend the accepted one, or a second tree under the key, accepted or set
+    aside
+  statement: The log is verified whole, and held to what was accepted before, before any record is read.
+    The checkpoint must verify under the pinned log key and name its origin; every leaf is rehashed and
+    the root compared with the signed one; leaf times never go backwards; every tile holds the leaves'
+    hashes; a successor is followed only through a log-end and a log-continuation signed by both keys.
+    A checkpoi
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6, §6.1, §8; docs/16-findings.md §3.98, §3.99; crates/trigon-attest/tests/evidence_log/verify.rs;
+      crates/trigon-attest/tests/evidence_log/rotation.rs — `a_planted_directory_does_not_move_or_stop_a_client_pinned_to_a_successor`;
+      crates/trigon/tests/verify_record.rs — `two_trees_under_one_log_key_are_an_equivocation_and_exit_4`,
+      `a_log_that_continues_elsewhere_answers_unknown_and_exits_4`, `a_source_is_read_from_the_configuration_and_its_state_directory`
 - id: P30
   kind: resource-bound
   components:
@@ -2420,6 +2565,20 @@ properties_disclaimed:
   provenance:
     kind: documented
     source: docs/12-security.md §8
+- id: D25
+  components:
+  - multiple
+  conditions: verify-attestation --record
+  tier: security-critical
+  false_friend: false
+  statement: 'That a record verified with verify-attestation --record is the source''s current word. It
+    is checked against the log the directory holds and the checkpoint it is given: with none, a rewrite
+    or a fork signed by the log key is not detected, and even with one a newer checkpoint withheld — a
+    supersession or a withdrawal the directory does not hold — is not, since the record form judges no
+    freshness; st'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6, §7, §8
 - id: D24
   components:
   - multiple
@@ -2642,13 +2801,25 @@ downstream_responsibilities:
     source: docs/threat-model.md §1.13
 - id: dr-9
   component: multiple
+  statement: Hold a published record's log to a checkpoint you already hold. verify-attestation --record
+    detects a rollback, a rewrite or a fork only back to the checkpoint it is given — --checkpoint, or
+    the source's state or initial checkpoint under --source — and says when it was given none (P33, D25).
+    Keep th
+  enforces:
+  - D25
+  - P33
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.13
+- id: dr-10
+  component: multiple
   statement: Choose the egress tier deliberately. --egress open is the default and it voids the strong
     claim. An enforced tier needs a mirror image and a base image you built first
   enforces: []
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-10
+- id: dr-11
   component: multiple
   statement: Only you may name a local path as a source. file:// chosen by the thing under test is the
     dangerous one
@@ -2656,7 +2827,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-11
+- id: dr-12
   component: multiple
   statement: Read crates/trigon-ai/src/copilot.rs's module docs before --model copilot:. Prefer a provider
     with a real system message where the choice exists
@@ -2664,7 +2835,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-12
+- id: dr-13
   component: multiple
   statement: Keep trigon watch on loopback unless you have thought about it. Build logs are not redacted
     (D14)
@@ -2673,7 +2844,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-13
+- id: dr-14
   component: multiple
   statement: Set total_expanded_bytes to something your host can absorb. The default ceiling is 4 GiB
     and a hostile artifact may reach it before being refused
@@ -2681,7 +2852,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-14
+- id: dr-15
   component: multiple
   statement: Treat the rebuilt artifact as untrusted. It is the package's own build output; do not install
     or execute it because it reproduced
@@ -2689,7 +2860,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-15
+- id: dr-16
   component: multiple
   statement: 'Before a real sweep, talk to the registries: a User-Agent with a contact URL, Retry-After
     honoured, per-host token buckets'
@@ -2697,7 +2868,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-16
+- id: dr-17
   component: multiple
   statement: Two-party review for anything touching a stabilizer , a non-empty prose reason:, and the
     corpus-wide impact preview before merging. ---

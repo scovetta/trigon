@@ -87,7 +87,7 @@ impl Envelope {
     pub fn decoded_payload(&self) -> Result<Vec<u8>, crate::AttestError> {
         base64::engine::general_purpose::STANDARD
             .decode(&self.payload)
-            .map_err(|e| crate::AttestError::Malformed(format!("payload is not base64: {e}")))
+            .map_err(|e| crate::AttestError::Evidence(format!("payload is not base64: {e}")))
     }
 
     /// What a signature over this envelope covers.

@@ -707,8 +707,9 @@ fn a_leaf_too_long_for_an_entry_bundle_is_refused() {
     assert!(e.contains("at most 65535"), "{e}");
 }
 
-/// The equality of the golden records with what `publish` would log is phase 4b's to check; here,
-/// only that the kinds a record leaf may be are the four predicates `publish` logs.
+/// That a record leaf agrees with its record's signed statement is `tests/evidence_repo/`'s to
+/// check, over records signed and logged; here, only that the kinds a record leaf may be are the
+/// four predicates `publish` logs.
 #[test]
 fn a_record_leaf_is_for_the_four_predicates_publish_logs() {
     for (predicate, outcome, set) in [

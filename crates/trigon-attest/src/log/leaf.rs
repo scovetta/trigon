@@ -783,7 +783,7 @@ fn is_token(s: &str, max: usize) -> bool {
 }
 
 /// `sha256:<64 lowercase hex>`, as a leaf writes a record's digest.
-mod sha256_ref {
+pub(crate) mod sha256_ref {
     use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
     use trigon_core::Digest;
 

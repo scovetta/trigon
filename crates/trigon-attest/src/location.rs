@@ -301,7 +301,9 @@ fn without_credentials(s: &str) -> String {
     format!("{}***{}", &s[..at], &s[at + userinfo.len()..])
 }
 
-pub(crate) fn printable(s: &str) -> String {
+/// `s` with every control character escaped, as a refusal or a report shows a string that came
+/// from somebody else's bytes: a terminal or a CI log is never handed a raw escape sequence.
+pub fn printable(s: &str) -> String {
     s.chars()
         .map(|c| match c.is_control() {
             true => c.escape_default().to_string(),

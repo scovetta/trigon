@@ -208,7 +208,10 @@ fn digests(m: &trigon_core::MultiDigest, bytes: Option<u64>) -> serde_json::Valu
     serde_json::Value::Object(o)
 }
 
-fn equivalence_predicate(c: &Comparison) -> serde_json::Value {
+/// What a verdict signs about the comparison itself: every field here is a function of the two
+/// artifacts and the stabilizer set, and so is what `--rerun-comparison` re-derives
+/// ([`crate::rederive`]) and what a published comparison report is checked against.
+pub(crate) fn equivalence_predicate(c: &Comparison) -> serde_json::Value {
     // **Both sides.** `apply` returns only the stabilizers that actually changed something, so the
     // two sides routinely differ: a wheel whose `RECORD` needed regenerating on the rebuild and not
     // upstream produces a `wheel-record` entry on one side only, and that pass is `Content` risk.

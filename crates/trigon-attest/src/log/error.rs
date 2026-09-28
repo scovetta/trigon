@@ -56,6 +56,26 @@ pub enum LogError {
         offered: String,
     },
 
+    /// Two checkpoints signed by the log's key whose trees are not one tree: the same size with
+    /// two roots, or a smaller one the larger does not extend, found side by side in one
+    /// repository. Only whoever holds the log key can sign both, so this is the log equivocating
+    /// (`docs/19` §6.1, §8), and the source is refused. Both signed notes are kept as read and
+    /// printed escaped, as [`LogError::Inconsistent`]'s are.
+    #[error(
+        "{why}. Two different trees signed by one log key is an equivocation, which only whoever \
+         holds the key can sign, and the source is refused; keep both signed notes as \
+         evidence.\n\nIn `{first_dir}`:\n{}\nIn `{second_dir}`:\n{}",
+        shown(.first),
+        shown(.second)
+    )]
+    Equivocation {
+        why: String,
+        first_dir: String,
+        first: String,
+        second_dir: String,
+        second: String,
+    },
+
     /// Leaves that break a rule of the log itself (`docs/19` §2.3): a time earlier than the leaf
     /// before it, a log-end that is not the last leaf, a log-continuation that is not the first.
     #[error("{0}")]
@@ -85,6 +105,7 @@ impl LogError {
             | LogError::BadSignature(_)
             | LogError::Mismatch(_)
             | LogError::Inconsistent { .. }
+            | LogError::Equivocation { .. }
             | LogError::Rule(_)
             | LogError::Rotation(_) => true,
             LogError::Malformed(_) | LogError::Missing { .. } | LogError::Io { .. } => false,
@@ -103,6 +124,7 @@ impl Classify for LogError {
             | LogError::BadSignature(_)
             | LogError::Mismatch(_)
             | LogError::Inconsistent { .. }
+            | LogError::Equivocation { .. }
             | LogError::Rule(_)
             | LogError::Rotation(_) => Fault::Bug,
             LogError::Malformed(_) | LogError::Missing { .. } => Fault::Upstream,

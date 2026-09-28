@@ -616,8 +616,9 @@ fn a_planted_directory_does_not_move_or_stop_a_client_pinned_to_a_successor() {
     let refused = starts_at_log_2(Some(early.to_string().as_bytes()));
     assert!(refused[0].why.contains("is missing"), "{refused:?}");
 
-    // A checkpoint of the log that the newest does not extend is signed by its key and reported
-    // as two trees under it: nobody without the log key can plant one.
+    // A checkpoint of the log that the newest does not extend is signed by its key, and nobody
+    // without the log key can plant one: two trees under one key is an equivocation, and the
+    // source is refused with both signed notes (`docs/19` §6.1, §8), not merely set aside.
     let fork = SignedCheckpoint::sign(
         &trigon_attest::log::Checkpoint {
             origin: SUCCESSOR.into(),
@@ -628,11 +629,44 @@ fn a_planted_directory_does_not_move_or_stop_a_client_pinned_to_a_successor() {
     )
     .unwrap();
     plant(&[("checkpoint", fork.to_string().as_bytes())]);
-    let refused = starts_at_log_2(None);
-    assert!(
-        refused[0].why.contains("two different trees under one key"),
-        "{refused:?}"
+    let e = verify_source(repo, &pin, None).unwrap_err();
+    let LogError::Equivocation {
+        first_dir,
+        first,
+        second_dir,
+        second,
+        ..
+    } = &e
+    else {
+        panic!("expected an equivocation, got {e}");
+    };
+    assert_eq!(
+        (first_dir.as_str(), second_dir.as_str()),
+        ("log/2", "log/1")
     );
+    assert_eq!(first, &newest.to_string());
+    assert_eq!(second, &fork.to_string());
+    assert!(e.fails_verification());
+    let said = e.to_string();
+    assert!(
+        said.contains("equivocation") && said.contains("does not extend"),
+        "{said}"
+    );
+
+    // And two checkpoints of one size with two roots, each in its own directory.
+    let twin = SignedCheckpoint::sign(
+        &trigon_attest::log::Checkpoint {
+            origin: SUCCESSOR.into(),
+            size: newest.size(),
+            root: [9; 32],
+        },
+        &successor_key(),
+    )
+    .unwrap();
+    plant(&[("checkpoint", twin.to_string().as_bytes())]);
+    let e = verify_source(repo, &pin, None).unwrap_err();
+    assert!(matches!(e, LogError::Equivocation { .. }), "{e}");
+    assert!(e.to_string().contains(&twin.to_string()), "{e}");
 
     // A client pinned to the first log still follows the chain, and the planted directory,
     // which no log-end names, is refused as a successor.

@@ -299,6 +299,39 @@ two artifacts you hold. If you obtained the rebuilt artifact from the same party
 attestation, you have checked their arithmetic and not their build. Full independence means
 producing the rebuild yourself.
 
+`--rerun-comparison` checks more than the outcome and the stabilized digests: what the statement
+says the comparison found — which members differ and how, and which passes fired on which side —
+is re-derived too, and a statement that got the outcome right and misreported either does not hold.
+
+### A published record, from an evidence repository
+
+A record published to an evidence repository ([`19`](19-distribution-and-lookup.md)) is checked
+against that repository's log, from a clone or any copy of it, with no network:
+
+```
+$ trigon verify-attestation --record records/53/0a/530a…ede.json --evidence ./trigon-evidence \
+      --source trigon
+```
+
+`--source` takes the source's pinned keys from `evidence.toml` and the checkpoint you last accepted
+for it from the state directory; `--log-vkey`, `--attestation-key` and `--checkpoint` give the same
+for a source you have not configured. The log is verified whole first, and held to that checkpoint;
+then the record, against its leaf and the key its source had there; then what the source says of
+the artifact now, with every later record that supersedes it shown. The record is shown with what
+it signs about its run: the stabilizer set, when it ran, the Trigon that built it and the one that
+signed it, the egress tier, the derivation method, and for a verdict the command that would falsify
+it and where to dispute it, each marked absent where it signs none. An evidence file the directory
+does not hold is reported unchecked, never passed. The exit code is
+[`19`](19-distribution-and-lookup.md) §6's: 0, 1 for a divergence, 2 withdrawn, 3 void, 4 for
+anything that failed verification or for a log that continues in a repository the directory does
+not hold, 5 when it could not check at all, bad arguments included. Add `--rerun-comparison
+--upstream <file> --rebuild <file>` to re-derive the verdict, and the published comparison report
+is held to the re-derivation too, member by member.
+
+Without a checkpoint, the output says so: the log is then checked for being whole, and not for
+extending anything you have seen before, so a rewrite of the whole repository would not be noticed.
+Keep the checkpoint from your last check.
+
 ---
 
 ## Task: sign what a stored run says

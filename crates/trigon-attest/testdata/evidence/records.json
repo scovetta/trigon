@@ -1,0 +1,119 @@
+{
+  "a1": {
+    "leaf": 0,
+    "log": 0,
+    "outcome": "normalized",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-a@1.0.0",
+    "record": "sha256:339ebead967f7cced3ac1f4aa5ca4b6b7a3c46bcac14a3c2e756a00b1798aa50",
+    "subject": "7cba4129b0181da4e195d4a468870c8a1c24db880453840d186041fca13f8331"
+  },
+  "a2": {
+    "leaf": 8,
+    "log": 0,
+    "outcome": "normalized",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-a@1.0.0",
+    "record": "sha256:8b6b74b2c06a0422f681a025ed9f0bde86dc946cd0e2d6bbdcfb9bda45323eca",
+    "subject": "7cba4129b0181da4e195d4a468870c8a1c24db880453840d186041fca13f8331"
+  },
+  "b": {
+    "leaf": 1,
+    "log": 0,
+    "outcome": "divergent",
+    "predicateType": "https://trigon.dev/divergence/v2",
+    "purl": "pkg:npm/demo-b@1.0.0",
+    "record": "sha256:ec36aacdb29e51c07c2a992001e8babebb41e5e2eb71313be72fe124d3f03023",
+    "subject": "e6e254df9e57aa84d95980525bdf2da331b73877992f183e6d9a2d9049ee6741"
+  },
+  "c": {
+    "leaf": 2,
+    "log": 0,
+    "outcome": "void",
+    "predicateType": "https://trigon.dev/void/v1",
+    "purl": "pkg:npm/demo-c@1.0.0",
+    "record": "sha256:7e81d5ddfd6cd8faaeac179fc862924e99d9b83ae22826d019c6abdb04040c7b",
+    "subject": "dff3f53031716b2f6afa2c43b56bb459985c49bd79613c210246d5fd940cb19b"
+  },
+  "d0": {
+    "leaf": 3,
+    "log": 0,
+    "outcome": "exact",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-d@1.0.0",
+    "record": "sha256:5ce07046466f5f43bd987dee9d5b36cd2a71bc4302c44e2f2178f1d5e5484fa0",
+    "subject": "2344967826f80ba0efd280084a418a4d2b4abe46140155d1c2d64fb893664c98"
+  },
+  "e": {
+    "leaf": 13,
+    "log": 0,
+    "outcome": "exact",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-e@1.0.0",
+    "record": "sha256:6f88ef0024b409757eff3ac5290bff67dc8e09940f155842f091d15000bcc9ac",
+    "subject": "12ed1bec483722111bd6f27ad515866481b2c4355e4ad40221b77bc73fee73f7"
+  },
+  "f": {
+    "leaf": 4,
+    "log": 0,
+    "outcome": "normalized",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-f@1.0.0",
+    "record": "sha256:6564f0f4092d48e5fe0fdb4f0e66708f344b70f7c9b04d4ee964805bfe851071",
+    "subject": "3734ccae4380724cf7a3a29fce39fc83fd1d45188139009869118b0e660ee5ff"
+  },
+  "g": {
+    "leaf": 11,
+    "log": 0,
+    "outcome": "normalized",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-g@1.0.0",
+    "record": "sha256:1df07f180e39752849adecbf1f040e141e0b29e8312fe711038e47ee245c8bf4",
+    "subject": "3ec71381c6abffe9e2ec79728ecf1dbe1451ea57a8d75d592b18de118cd26fcf"
+  },
+  "h": {
+    "leaf": 6,
+    "log": 0,
+    "outcome": "normalized",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-h@1.0.0",
+    "record": "sha256:0234af5b446381d490a1cfe04b231e7c50ccbee23181db0f417c145f3b3a12b6",
+    "subject": "76a4d3fe91421f4227fc089ac37dfd183b8a331f83aa9dfac7d90b8d2c73a8ad"
+  },
+  "i": {
+    "leaf": 5,
+    "log": 0,
+    "outcome": "normalized",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-i@1.0.0",
+    "record": "sha256:075308b943e181fd19d40a5fa4d4e0a196d9232b98aeb11fe4b0f6d3c175a9eb",
+    "subject": "206295cfb6468ea83c25c30095ccccbdb207a5c45304f59b53e93d11ef91adfc"
+  },
+  "j": {
+    "leaf": null,
+    "log": null,
+    "outcome": "normalized",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-j@1.0.0",
+    "record": "sha256:c133cb6d36b3e148e42bc8768d4aa932c1bef859ab129bd3cc1cc92356c34ba8",
+    "subject": "d7c33ab69ce79e780b66006696d7c268190aef7a5968f1a133c107e43d6319aa"
+  },
+  "k": {
+    "leaf": 1,
+    "log": 1,
+    "outcome": "normalized",
+    "predicateType": "https://trigon.dev/equivalence/v2",
+    "purl": "pkg:npm/demo-k@1.0.0",
+    "record": "sha256:25f6c8f7012468f6f8c0729cc4840345b79c956345544a672d326a40628f682e",
+    "subject": "db81c9cc2c39ad8c4e3dc04ad346325bb3f8c2524bad6d43f53885cbe283b96a"
+  },
+  "w": {
+    "leaf": 10,
+    "log": 0,
+    "outcome": null,
+    "predicateType": "https://trigon.dev/withdrawal/v1",
+    "purl": "pkg:npm/demo-d@1.0.0",
+    "record": "sha256:cbc28f3212bf3cf2f1a369f3877c87490009dc067dfab475e7b2c4e01736d93a",
+    "subject": "2344967826f80ba0efd280084a418a4d2b4abe46140155d1c2d64fb893664c98"
+  }
+}

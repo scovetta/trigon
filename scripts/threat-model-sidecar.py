@@ -44,7 +44,7 @@ KIND = {
     "P20": "integrity", "P21": "integrity", "P22": "memory-safety", "P23": "integrity",
     "P24": "correctness", "P25": "resource-bound", "P26": "integrity",
     "P27": "correctness", "P28": "correctness", "P29": "resource-bound",
-    "P30": "resource-bound",
+    "P30": "resource-bound", "P31": "integrity", "P32": "integrity", "P33": "integrity",
 }
 
 ADVERSARIES = [
@@ -62,8 +62,8 @@ ADVERSARIES = [
     ("normalization-conditioned-attacker", "in",
      ["condition-payload-on-a-normalized-observable"], [], ["match-while-differing"],
      "docs/05-archive-and-normalization.md §1"),
-    # A8 and A9 are adversaries of the evidence store docs/19 designs and nobody has built yet;
-    # §1.10 says a finding that needs either routes by §1.3 until it ships.
+    # A8 and A9 are adversaries of the evidence store docs/19 designs. Its reader is built as
+    # `verify-attestation --record` (P31-P33); §1.10 routes a finding against the rest by §1.3.
     ("evidence-repository-operator", "in",
      ["hold-the-attestation-key", "hold-the-log-key", "hold-the-push-credential",
       "rewrite-repository-history", "serve-different-clients-different-logs"],

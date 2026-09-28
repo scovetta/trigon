@@ -10,6 +10,7 @@
 pub mod config;
 mod dsse;
 mod error;
+pub mod evidence;
 mod keys;
 pub mod location;
 pub mod log;
@@ -35,5 +36,6 @@ pub use verdict::{
     WITHDRAWAL, evidence_key, is_primary, is_verdict, set_manifest_file,
 };
 pub use verify::{
-    ArchivedStabilizer, Rederived, rederive, rederive_with, sign_statement, subject_sha256,
+    ArchivedStabilizer, Disagreement, Rederived, ReportCheck, rederive, rederive_with,
+    sign_statement, subject_sha256,
 };
