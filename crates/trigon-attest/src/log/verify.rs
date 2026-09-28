@@ -946,15 +946,7 @@ pub fn follow(
             prev.origin()
         ))
     })?;
-    let named = &end.successor;
-    let vkey = named.vkey()?;
-    if vkey.origin() == prev.origin() {
-        return Err(LogError::Rotation(format!(
-            "`{}`'s log-end names a successor with its own origin; a successor is a new log, \
-             with an origin of its own",
-            prev.origin()
-        )));
-    }
+    let vkey = successor_vkey(prev.origin(), end)?;
     let log = verify_log(files, &vkey, accepted).map_err(|e| match e {
         LogError::Unverified(why) => LogError::Rotation(format!(
             "the log in `{}` is not the successor `{}`'s log-end names: {why}",
@@ -963,48 +955,73 @@ pub fn follow(
         )),
         other => other,
     })?;
-    let Some(Leaf::LogContinuation(c)) = log.leaf(0) else {
+    check_continuation(prev.vkey(), prev.checkpoint(), end, &vkey, log.leaf(0))?;
+    Ok(log)
+}
+
+/// The key a log-end names its successor by, held to what [`follow`] requires of it: a new log,
+/// with an origin of its own.
+pub fn successor_vkey(prev_origin: &str, end: &LogEndLeaf) -> Result<LogVkey, LogError> {
+    let vkey = end.successor.vkey()?;
+    if vkey.origin() == prev_origin {
         return Err(LogError::Rotation(format!(
-            "`{}` does not begin with a log-continuation leaf, so nothing in it holds the final \
-             checkpoint of `{}`, and it is not followed",
-            log.origin(),
-            prev.origin()
+            "`{prev_origin}`'s log-end names a successor with its own origin; a successor is a \
+             new log, with an origin of its own"
+        )));
+    }
+    Ok(vkey)
+}
+
+/// Hold a successor's first leaf to the log-end that named it (`docs/19` §8): a log-continuation
+/// that holds the old log's final checkpoint, signed by the old log key and the new, and logged no
+/// earlier than the log-end. `prev_vkey` and `prev_final` are the old log's key and final
+/// checkpoint, and `next_vkey` the key the log-end names.
+///
+/// What [`follow`] checks of a successor it verifies whole, and what a reader that holds only the
+/// successor's checkpoint and its first leaf, proven included, checks of it: `--remote`, which a
+/// successor not bound to its predecessor's final state would otherwise answer from.
+pub fn check_continuation(
+    prev_vkey: &LogVkey,
+    prev_final: &SignedCheckpoint,
+    end: &LogEndLeaf,
+    next_vkey: &LogVkey,
+    first: Option<&Leaf>,
+) -> Result<(), LogError> {
+    let (prev_origin, origin) = (prev_vkey.origin(), next_vkey.origin());
+    let Some(Leaf::LogContinuation(c)) = first else {
+        return Err(LogError::Rotation(format!(
+            "`{origin}` does not begin with a log-continuation leaf, so nothing in it holds the \
+             final checkpoint of `{prev_origin}`, and it is not followed"
         )));
     };
     let held = c.old_checkpoint()?;
-    if held != *prev.checkpoint().checkpoint() {
+    if held != *prev_final.checkpoint() {
         return Err(LogError::Rotation(format!(
-            "`{}`'s log-continuation holds a checkpoint of `{}` at size {} with root {}, and that \
-             log's final checkpoint is size {} with root {}",
-            log.origin(),
+            "`{origin}`'s log-continuation holds a checkpoint of `{}` at size {} with root {}, and \
+             that log's final checkpoint is size {} with root {}",
             printable(&held.origin),
             held.size,
             b64(&held.root),
-            prev.size(),
-            b64(prev.checkpoint().root())
+            prev_final.size(),
+            b64(prev_final.root())
         )));
     }
     let note = c.note()?;
-    for (key, whose) in [(prev.vkey(), "old"), (&vkey, "new")] {
+    for (key, whose) in [(prev_vkey, "old"), (next_vkey, "new")] {
         note.verify(key).map_err(|e| {
             LogError::Rotation(format!(
-                "`{}`'s log-continuation is not signed by the {whose} log key, {}: {e}",
-                log.origin(),
-                key
+                "`{origin}`'s log-continuation is not signed by the {whose} log key, {key}: {e}"
             ))
         })?;
     }
     if c.time < end.time {
         return Err(LogError::Rule(format!(
-            "`{}`'s log-continuation was logged at {}, before `{}`'s log-end at {}; a leaf's time \
-             never goes backwards, across a succession too",
-            log.origin(),
-            c.time,
-            prev.origin(),
-            end.time
+            "`{origin}`'s log-continuation was logged at {}, before `{prev_origin}`'s log-end at \
+             {}; a leaf's time never goes backwards, across a succession too",
+            c.time, end.time
         )));
     }
-    Ok(log)
+    Ok(())
 }
 
 /// One log of a source's chain, and where in the repository it is.

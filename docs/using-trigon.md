@@ -334,6 +334,11 @@ Without a checkpoint, the output says so: the log is then checked for being whol
 extending anything you have seen before, so a rewrite of the whole repository would not be noticed.
 Keep the checkpoint from your last check.
 
+With a source you sync (below), `--source <name>` without `--evidence` reads its clones as its
+last sync left them, following its log into every repository it has gone on in; and
+`verify-attestation --lookup`, the form of every verdict's falsifying command, finds the current
+record for you (see *Task: look up an artifact, or check a lockfile*).
+
 ---
 
 ## Task: sign what a stored run says
@@ -731,10 +736,8 @@ from.
 A consumer asks evidence repositories — ours, other operators', mirrors of either — through
 **sources**: one log each, pinned by its log key, whose name is the log's origin, and its
 attestation key, and served from one or more locations ([`19`](19-distribution-and-lookup.md)
-§6.1). `trigon evidence` configures them and keeps a verified clone of each. The commands that
-answer from those clones — `trigon lookup`, a `trigon check` against evidence repositories,
-`verify-attestation --lookup` — are the next phase; `verify-attestation --record --source` already
-reads a source's pins and state.
+§6.1). `trigon evidence` configures them and keeps a verified clone of each, and `trigon lookup`,
+`trigon check` and `verify-attestation --lookup` answer from those clones (the next task).
 
 ```
 $ trigon evidence add trigon https://github.com/owner/trigon-evidence.git \
@@ -837,6 +840,182 @@ other location is refused.
 
 ---
 
+## Task: look up an artifact, or check a lockfile
+
+With a source configured (above), `trigon lookup` says what every source says of one artifact or
+package, and `trigon check` of every package a lockfile names. Both answer from the verified clones:
+a source that is stale is synced first, and said to be, and then nothing is fetched per package, so
+a thousand-entry lockfile costs one fetch per source. Neither reads `index/`: a key is resolved from
+the leaves of each source's log, which it holds whole, with every supersession the log records
+applied.
+
+```
+$ trigon lookup sha512-r2cOJ3V46+rn1LIvf1Lpu…
+key       sha512:af670e277578ebeae7d4b22f7f52e9b9555e40ec62f8e8792ad65e7c82daf3131375a4f2…
+
+source    `trigon`, from /home/you/.config/trigon/evidence.toml; as of 2 leaves of `github.com/owner/trigon-evidence`
+note      synced first: it had never been synced
+answer    normalized — from 1 record(s) its log holds for it
+record    sha256:83ef8bb2…eb9737 at leaf 1 of `github.com/owner/trigon-evidence`, current
+subject   ws-1.0.0.tgz (ae1ea36b70b6ea951b818629222b1b628bf67fecef4f044e2f1f84002221ee1d)
+purl      pkg:npm/ws@1.0.0
+predicate https://trigon.dev/equivalence/v2
+claims    normalized
+set       tar-gzip, sha256:4598411b636d2d2cc62832312d37a1f2677681951a2ce19a3b8327e416b8abb3
+run       1789000000-bbbb0001, from 2026-09-27T00:00:00Z; its finish was not recorded
+trigon    built by 0.0.0+git.1111111…, signed by 0.0.0+git.5f06afd…
+egress    mirror-only, attestable
+derived   heuristic
+falsify   trigon verify-attestation --lookup sha256:ae1ea36b…21ee1d --predicate https://trigon.dev/equivalence/v2 --origin github.com/owner/trigon-evidence --rerun-comparison --upstream <file>
+dispute   https://github.com/owner/trigon-evidence/issues
+evidence  not checked here: comparison, guardManifest, rebuiltArtifact, stabilizerSetManifest, strategy. A clone keeps `evidence/` out, and `verify-attestation --lookup` fetches what it re-derives the claim from
+
+source    `theirs`, from /home/you/.config/trigon/evidence.toml; as of 1 leaves of `example.org/their-evidence`
+note      synced first: it had never been synced
+answer    never checked — its log holds no record for it
+
+exit      0: every answer at or above the threshold
+```
+
+**The key** is what you have: npm's `integrity` string (`sha512-<base64>`), `sha256:<hex>`,
+`sha512:<hex>` or `sha1:<hex>`, a purl with its version, a purl without one for every version of the
+package, or the artifact itself, whose digests are computed. A record found by sha1 alone says that
+sha1 is collision-broken.
+
+**Every source answers for itself**, beside its name, the file that added it, the keys it rests on
+where it trusts them on first use, and the checkpoint its answer came from. Every record the key
+led to is shown with the outcome as a string, the stabilizer set, when it ran and which Trigon built
+and signed it, the egress tier and whether it was `attestable`, the derivation, the command that
+would falsify it and where to dispute it. A superseded record is struck through — `~~…~~` without
+colour — with the record that superseded it, its leaf and the reason; a withdrawn artifact reads
+`withdrawn`; a leaf whose record file is gone reads `DELETED`, and its outcome is not shown; a
+record that fails verification says why. Two sources that answer differently are said to disagree,
+and neither answer is taken over the other:
+
+```
+disagree  the sources disagree about it:
+          `trigon` says normalized
+          `theirs` says divergent
+          each is its own claim, shown as its source makes it, and neither is taken over the other (docs/19 §6.1)
+
+exit      1: a divergence
+```
+
+**`trigon check <lockfile>`** reads `package-lock.json` and `npm-shrinkwrap.json`,
+`requirements.txt` and SPDX JSON, and looks each package up by the digest the file declares first —
+npm's `integrity`, every `--hash` of a requirement, an SBOM's `checksums` — and by its purl only
+where no digest finds a record about the artifact the file pins. A record is an answer about a
+package only where its digests are that artifact's: where `integrity` or `checksums` declare more
+than one digest, the strongest the record carries decides, as npm installs by the strongest, so a
+record found by sha1 whose sha512 is another's answers nothing, and a sha1 that disagrees with the
+sha512 that found a record is said; a requirement's `--hash`es are alternatives, any one of which
+pip installs, and any one matching is enough. A purl whose records are all about another artifact
+is not an answer: the package is never checked, and the note says which record was found. One whose
+record carries none of the algorithms the file declares — a PyPI record, and an SBOM's sha1 — is
+answered, and says the digests could not be compared. Two entries of one name and version with
+different digests are two packages, each answered for itself. An SBOM's packages are all kept,
+whatever their ecosystem and whether they carry a purl, and a purl with no version is the version
+its `versionInfo` gives; one nothing can answer for is never checked, never left out.
+
+```
+$ trigon check package-lock.json
+/home/you/app/package-lock.json · 3 package(s) · 2 source(s) · threshold at least normalized_with_caveats
+source    `trigon`, from /home/you/.config/trigon/evidence.toml; as of 2 leaves of `github.com/owner/trigon-evidence`
+source    `theirs`, from /home/you/.config/trigon/evidence.toml; as of 1 leaves of `example.org/their-evidence`
+
+  ✔ normalized                   1   ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░
+  ✖ divergent                    1   ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░
+  ? never checked                1   ▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+  ✖  pkg:npm/left-pad@1.3.0 — divergent
+      `trigon`: normalized, found by sha512; sha256:1ff0828f…5275fb at leaf 0 of `github.com/owner/trigon-evidence`; falsify: trigon verify-attestation --lookup sha256:0d718245…bd7a4e --predicate https://trigon.dev/equivalence/v2 --origin github.com/owner/trigon-evidence --rerun-comparison --upstream <file>; dispute: https://github.com/owner/trigon-evidence/issues
+      `theirs`: divergent, found by sha512; sha256:61350666…aafdc3 at leaf 0 of `example.org/their-evidence`; falsify: trigon verify-attestation --lookup sha256:0d718245…bd7a4e --predicate https://trigon.dev/divergence/v2 --origin example.org/their-evidence --rerun-comparison --upstream <file>; dispute: https://example.org/their-evidence/issues
+      the sources disagree: `trigon` says normalized, `theirs` says divergent; each is its own claim, and neither is taken over the other
+  ?  pkg:npm/c@1.0.0 — never checked
+      `trigon`: never checked
+      `theirs`: never checked
+
+exit      1: a divergence
+```
+
+`--format json` and `--format sarif` carry every source's answer for every package, with each
+record it found. The SARIF has a result for every package: `trigon/pass`, of kind `pass` and level
+`none`, for one that passes; one under the rule of what its sources said where that fails the
+check; and, where a source fails it whatever was answered, `trigon/source-refused` or
+`trigon/required-source-unknown`, at level `error` — a package that fails only because a required
+source could not answer is never filed as the warning its answers alone would be. **A bare `trigon
+check` answers from the evidence sources**; it used to read
+`./trigon-store`, and `--store <path>` still does exactly that — a local store of your own runs,
+newest run per package, five rows, exit 0 — with none of the flags below.
+
+**Exit codes**, the same for `lookup`, `check` and `verify-attestation`
+([`19`](19-distribution-and-lookup.md) §6): `0` every package at or above the threshold; `1` any
+divergence; `2` any package never checked, or withdrawn; `3` any void, or any result below the
+threshold; `4` any deleted record, any record or source that failed verification, a required source
+that is unknown, or no source able to answer at all; `5` the tool could not check — bad arguments,
+an unreadable lockfile, no source configured. The first of 5, 4, 1, 3, 2 wins. A package takes the
+most severe answer any source gives that is not unknown, and is never checked only where no source
+that answered holds a record for it, so a private source that holds only your own packages does not
+make every public one read as never checked.
+
+**The threshold.** `--min exact|normalized|normalized_with_caveats` (the default) is the outcome
+floor, and `--max-risk structural|metadata|content|lossy` caps the riskiest stabilizer a verdict
+may have been reached through, as its statement signs it — `--min normalized --max-risk
+structural` is `Normalized` with `risk <= Structural` ([`05`](05-archive-and-normalization.md) §1).
+An exact verdict needed no transform and meets any cap. Below either, a package is `3`.
+
+**Freshness, and a source that cannot answer.** A source that is stale and cannot be synced, or is
+frozen, answers unknown ([`19`](19-distribution-and-lookup.md) §6). An unknown source leaves only
+its own answers missing, and says so, unless it is required — `required = true`, `--require
+<name>`, or the one `TRIGON_EVIDENCE_REPO` adds — when every package fails, `4`, and the report says
+which source fails it. `--offline` touches no network: a stale source answers unknown without
+trying. `--source <name>` asks only the sources named, and `--require` of a source it leaves out is
+refused, `5`, since that source would never be asked. A source none of whose locations has a clone
+— its URL changed since its last sync — is synced first, as a stale one is.
+
+**`--remote`** asks each source over HTTPS from `raw.githubusercontent.com` instead of from a clone,
+for one question where a clone is unwelcome: the checkpoint, held to the pinned key and to the
+checkpoint your last sync accepted by a consistency proof; a successor's first leaf, held to be the
+log-continuation its predecessor's log-end requires; the index file for the key; each record; and
+the tiles that prove each record's leaf included. A record whose leaf does not prove fails
+verification; one it cannot read — the host failing or rate-limiting a request, a file not served,
+an index entry past the checkpoint it read because a publish landed meanwhile — answers unknown,
+and asking again, or syncing, answers it. A source whose last sync was refused answers nothing this
+way either, and one whose attestation key you have re-pinned since its last sync is held to the new
+pin alone until the next sync. It says, every time, what it costs: it tells GitHub which package was
+asked about; it is rate-limited; and it sees a supersession or a withdrawal only where the index
+lists it. Only for a source with an `https://github.com/<owner>/<repo>` URL; any other is refused,
+exit 5, and `--source` leaves it out.
+
+**Re-deriving a verdict: its falsifying command.** Every verdict signs the command that would
+falsify it, and it runs as written, with the upstream artifact you hold in place of `<file>`:
+
+```
+$ trigon verify-attestation --lookup sha256:0d718245…bd7a4e       --predicate https://trigon.dev/equivalence/v2 --origin github.com/owner/trigon-evidence       --rerun-comparison --upstream ./left-pad-1.3.0.tgz --rebuild ./rebuilt/left-pad-1.3.0.tgz
+```
+
+It resolves the current record in your clone of the source whose log is `--origin`, syncing only
+that source where it is stale — no such source is said, exit 4, and nothing is resolved elsewhere —
+fetches the evidence the record names from the clone's remote, which names the record to that host
+and is said, checks the record as `--record` does, and re-derives the verdict from the two
+artifacts, the published comparison report held to it member by member. A source a project's
+`.trigon/evidence.toml` added that gives the origin to a log key of its own is set aside, and said
+to be, where your own sources hold that origin; two of your own that give it to different keys are
+refused as ambiguous, `5`. Every source it asks is weighed as `lookup` weighs it, so a required
+source that cannot answer fails it though another holds the record. A void has no claim to
+re-derive, and is reported as the void it is, `3`. The rebuilt artifact is `--rebuild <file>`, the
+output of rebuilding under the record's published strategy; where the operator publishes rebuilt
+artifacts, set `rebuilt_artifacts = "github-release"` and leave it out, and the release asset the
+verdict names is downloaded from the GitHub repository that holds the record — a successor's, after
+a succession into another repository — into a directory only you can enter, and held to the digest
+the verdict signs.
+
+`verify-attestation --record <file> --source <name>` without `--evidence` reads the same clones,
+following the source's chain into every repository its log has gone on in; it is in the verifier
+build too, and fetches nothing.
+
+---
+
 ## Configuring where evidence goes: `evidence.toml`
 
 Publishing and looking up verdicts in an evidence repository
@@ -845,8 +1024,8 @@ in. `trigon attest`, `trigon publish`, `trigon log init`, `log key-change`, `log
 serve` and `trigon worker` read the configuration today — `serve` and `worker` for
 `same_host_confirmation` and `confirmation_interval`, which decide when two attempts count as two,
 and `serve` for `[publish] repo` and `branch` too, to report the repository's kill-switch — and
-`trigon evidence` reads and writes the `[[source]]` tables and reads `[freshness]`, as the
-commands that answer from the sources' clones will.
+`trigon evidence` reads and writes the `[[source]]` tables and reads `[freshness]`, as `trigon
+lookup`, `trigon check` and `verify-attestation` read them.
 
 The file is `~/.config/trigon/evidence.toml` (`$XDG_CONFIG_HOME/trigon/evidence.toml`), or
 whatever `TRIGON_EVIDENCE_CONFIG` names instead. Every key, with its default:
@@ -904,6 +1083,32 @@ instead. An SSH user, `git@github.com:…`, names the account and is kept. A pat
 `~/` is expanded, and a relative path is taken from the directory of the file that names it. `git`
 reads a colon before the first slash as SSH, so `backup:evidence` is refused; write
 `./backup:evidence`, `file://…`, or `ssh://backup/…` for a host alias.
+
+**A source by any location.** One log may be served from several places, each written as `git`
+takes it; each is a mirror, cloned and held to the others:
+
+```toml
+[[source]]
+name = "trigon"
+urls = [
+  "https://github.com/owner/trigon-evidence.git",      # HTTPS
+  "git@codeberg.org:owner/trigon-evidence.git",         # SSH, scp form; or ssh://git@host/path
+  "~/mirrors/trigon-evidence.git",                      # a local path, cloned in full
+]
+log_key = "github.com/owner/trigon-evidence+1a2b3c4d+AR…"
+attestation_key = "<64 hex>"
+```
+
+or, for one run, the same from the environment — a required source named `env`:
+
+```
+$ TRIGON_EVIDENCE_REPO='https://github.com/owner/trigon-evidence.git file:///srv/mirror.git' \
+  TRIGON_EVIDENCE_LOG_KEY='github.com/owner/trigon-evidence+1a2b3c4d+AR…' \
+  TRIGON_EVIDENCE_ATTESTATION_KEY=<64 hex> trigon check package-lock.json
+```
+
+`--remote` needs an `https://github.com/<owner>/<repo>` location among them; everything else reads
+the clones, whatever the transport.
 
 **The environment** overrides the files for one run: `TRIGON_PUBLISH_REPO` for `[publish] repo`;
 `TRIGON_EVIDENCE_REPO` (locations separated by spaces) adds a required source named `env`, pinned

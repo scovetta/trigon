@@ -19,7 +19,7 @@ use std::path::Path;
 use base64::Engine as _;
 use sha2::{Digest as _, Sha256, Sha512};
 use trigon_core::purl::{self, PURL_CANON};
-use trigon_core::{Digest, Match};
+use trigon_core::{Digest, Match, RiskTier};
 
 use super::check::{RecordFailure, RecordKind, VerifiedRecord};
 use super::paths::{IndexKey, digest_len};
@@ -351,6 +351,16 @@ pub enum Answer {
     Failed(RecordFailure),
     /// A current verdict's outcome.
     Outcome(Match),
+    /// A current verdict that reached its outcome only through a stabilizer riskier than the
+    /// `--max-risk` asked for, or that signs no risk to hold to it: a result below the threshold
+    /// (`docs/19` §6), as `docs/05-archive-and-normalization.md` §1's `Normalized` with `risk <=
+    /// Structural` has it. `risk` is the riskiest tier its statement signs as applied, `None`
+    /// where it signs none. Never a divergence, which fails a check whatever made it, and never an
+    /// exact verdict, whose raw digests matched with no transform needed, whatever passes ran.
+    AboveMaxRisk {
+        outcome: Match,
+        risk: Option<RiskTier>,
+    },
     /// A current void: "we looked, and could not tell".
     Void,
 }
@@ -364,7 +374,7 @@ impl Answer {
         match self {
             Answer::Failed(_) | Answer::Deleted => 4,
             Answer::Outcome(Match::Divergent) => 1,
-            Answer::Void => 3,
+            Answer::Void | Answer::AboveMaxRisk { .. } => 3,
             Answer::Outcome(m) if !m.is_at_least(min) => 3,
             Answer::NeverChecked | Answer::Withdrawn => 2,
             Answer::Outcome(_) => 0,
@@ -382,12 +392,16 @@ impl Answer {
     }
 
     /// Order within one exit code: failed before deleted, void before a low outcome, a lower
-    /// outcome before a higher one, withdrawn before never checked.
+    /// outcome before a higher one, withdrawn before never checked. An outcome above the risk
+    /// asked for ranks above every outcome but a divergence: it falls short under any floor,
+    /// where a caveated one falls short only under a floor above it, so of the two it is the one
+    /// the exit code has to be taken from.
     fn within(&self) -> u8 {
         match self {
             Answer::Failed(_) => 2,
             Answer::Deleted => 1,
-            Answer::Void => 5,
+            Answer::Void => 6,
+            Answer::AboveMaxRisk { .. } => 5,
             Answer::Outcome(Match::Divergent) => 4,
             Answer::Outcome(Match::NormalizedWithCaveats) => 3,
             Answer::Outcome(Match::Normalized) => 2,
@@ -406,8 +420,33 @@ impl std::fmt::Display for Answer {
             Answer::Deleted => f.write_str("deleted"),
             Answer::Failed(why) => write!(f, "record failed verification: {why}"),
             Answer::Outcome(m) => write!(f, "{m}"),
+            Answer::AboveMaxRisk {
+                outcome,
+                risk: Some(r),
+            } => write!(
+                f,
+                "{outcome}, through a stabilizer of `{}` risk, above the --max-risk asked for",
+                risk_name(*r)
+            ),
+            Answer::AboveMaxRisk {
+                outcome,
+                risk: None,
+            } => write!(
+                f,
+                "{outcome}, and its statement signs no risk to hold to the --max-risk asked for"
+            ),
             Answer::Void => f.write_str("void"),
         }
+    }
+}
+
+/// A risk tier as a statement signs it: `structural`, `metadata`, `content`, `lossy`.
+pub fn risk_name(r: RiskTier) -> &'static str {
+    match r {
+        RiskTier::Structural => "structural",
+        RiskTier::Metadata => "metadata",
+        RiskTier::Content => "content",
+        RiskTier::Lossy => "lossy",
     }
 }
 
@@ -433,8 +472,10 @@ pub struct Lookup {
 }
 
 impl Lookup {
-    /// Mark every supersession the found records make, as `docs/19` §3 says.
-    pub(crate) fn resolve(key: Key, mut found: Vec<Found>) -> Lookup {
+    /// Mark every supersession the found records make, as `docs/19` §3 says. What a lookup over
+    /// the whole log does; and what `--remote` does over the records an index file listed, which
+    /// is why it sees a supersession only where the index lists the superseding record too.
+    pub fn resolve(key: Key, mut found: Vec<Found>) -> Lookup {
         let superseding: Vec<(usize, Digest, SupersedeReason)> = found
             .iter()
             .enumerate()
@@ -472,6 +513,13 @@ impl Lookup {
     /// Each subject the key found, by its sha256, with what the source says about it, in the
     /// order the log first logged each.
     pub fn subjects(&self) -> Vec<(String, Answer)> {
+        self.subjects_under(None)
+    }
+
+    /// [`Self::subjects`], with a verdict held to `max_risk`, where one is asked for: one that
+    /// reached its outcome through a riskier stabilizer, or signs no risk, is
+    /// [`Answer::AboveMaxRisk`].
+    pub fn subjects_under(&self, max_risk: Option<RiskTier>) -> Vec<(String, Answer)> {
         let mut order: Vec<String> = Vec::new();
         let mut by: BTreeMap<String, Vec<&Found>> = BTreeMap::new();
         for f in &self.found {
@@ -484,7 +532,7 @@ impl Lookup {
         order
             .into_iter()
             .map(|s| {
-                let answer = subject_answer(&by[&s]);
+                let answer = subject_answer(&by[&s], max_risk);
                 (s, answer)
             })
             .collect()
@@ -493,14 +541,24 @@ impl Lookup {
     /// What the source says about the key: the most severe of its subjects' answers under `min`,
     /// and never checked where the log holds nothing for it.
     pub fn answer(&self, min: Match) -> Answer {
-        Answer::most_severe(self.subjects().into_iter().map(|(_, a)| a), min)
+        self.answer_under(min, None)
+    }
+
+    /// [`Self::answer`], with every verdict held to `max_risk` too, where one is asked for
+    /// (`docs/19` §6 `--max-risk`).
+    pub fn answer_under(&self, min: Match, max_risk: Option<RiskTier>) -> Answer {
+        Answer::most_severe(
+            self.subjects_under(max_risk).into_iter().map(|(_, a)| a),
+            min,
+        )
     }
 }
 
 /// What a source says about one subject: failed verification or deleted where any of its records
-/// is, since either may be an attack; otherwise its current verdicts and voids, the most severe;
-/// otherwise withdrawn, where its current records are withdrawals only.
-fn subject_answer(found: &[&Found]) -> Answer {
+/// is, since either may be an attack; otherwise its current verdicts and voids, the most severe,
+/// each verdict held to `max_risk` where one is asked for; otherwise withdrawn, where its current
+/// records are withdrawals only.
+fn subject_answer(found: &[&Found], max_risk: Option<RiskTier>) -> Answer {
     if let Some(why) = found.iter().find_map(|f| match &f.state {
         RecordState::Failed(why) => Some(why.clone()),
         _ => None,
@@ -513,13 +571,23 @@ fn subject_answer(found: &[&Found]) -> Answer {
     {
         return Answer::Deleted;
     }
-    let current: Vec<RecordKind> = found
+    let current: Vec<&VerifiedRecord> = found
         .iter()
         .filter(|f| f.is_current())
-        .filter_map(|f| f.verified().map(VerifiedRecord::kind))
+        .filter_map(|f| f.verified())
         .collect();
-    let claims = current.iter().filter_map(|k| match k {
-        RecordKind::Verdict(m) => Some(Answer::Outcome(*m)),
+    let claims = current.iter().filter_map(|r| match r.kind() {
+        RecordKind::Verdict(m @ (Match::Divergent | Match::Exact)) => Some(Answer::Outcome(m)),
+        RecordKind::Verdict(m) => Some(match (max_risk, r.max_risk_applied()) {
+            (Some(cap), Some(risk)) if risk.is_some_and(|r| r > cap) => {
+                Answer::AboveMaxRisk { outcome: m, risk }
+            }
+            (Some(_), None) => Answer::AboveMaxRisk {
+                outcome: m,
+                risk: None,
+            },
+            _ => Answer::Outcome(m),
+        }),
         RecordKind::Void => Some(Answer::Void),
         RecordKind::Withdrawal => None,
     });
@@ -529,7 +597,7 @@ fn subject_answer(found: &[&Found]) -> Answer {
     let claim = claims.max_by_key(|a| (precedence(a.exit_code(Match::Exact)), a.within()));
     match claim {
         Some(a) => a,
-        None if current.contains(&RecordKind::Withdrawal) => Answer::Withdrawn,
+        None if current.iter().any(|r| r.kind() == RecordKind::Withdrawal) => Answer::Withdrawn,
         None => Answer::NeverChecked,
     }
 }

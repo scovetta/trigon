@@ -201,7 +201,12 @@ pub(crate) fn succeeds<S: AsRef<OsStr>>(dir: Option<&Path>, args: &[S]) -> bool 
 /// Run `git` with `input` on its standard input, written from a thread of its own so that neither
 /// side waits on the other's full pipe.
 fn run_with_input<S: AsRef<OsStr>>(dir: &Path, args: &[S], input: Vec<u8>) -> Result<Output> {
-    let mut child = command(Some(dir))
+    feed(command(Some(dir)), args, input)
+}
+
+/// [`run_with_input`], for the command `c`.
+fn feed<S: AsRef<OsStr>>(mut c: Command, args: &[S], input: Vec<u8>) -> Result<Output> {
+    let mut child = c
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -785,6 +790,41 @@ pub(crate) fn attributes(dir: &Path, treeish: Option<&str>) -> Result<Option<Str
 /// The blob at each of `revs`, each `<commit>:<path>`, or `None` where there is none: asked of one
 /// `git cat-file --batch`.
 pub(crate) fn blobs(dir: &Path, revs: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    let out = run_with_input(dir, &["cat-file", "--batch"], lines_of(revs)?)?;
+    read_batch(&out.stdout, revs)
+}
+
+/// [`blobs`], in a partial clone: a blob its objects do not hold is fetched from the remote it was
+/// cloned from, which `git` does on its own when one is read, so this runs as a command that
+/// reaches a remote ([`network`]) — and names each blob fetched to the host that serves it.
+pub(crate) fn blobs_fetching(dir: &Path, revs: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    let out = feed(network(Some(dir)), &["cat-file", "--batch"], lines_of(revs)?)?;
+    read_batch(&out.stdout, revs)
+}
+
+/// Whether each of `revs` is an object the clone's objects hold already, asked with fetching
+/// turned off: what says whether reading it will name it to the host. One `git cat-file -e` each,
+/// whose exit answers; `--batch-check` stops at the first missing object of a partial clone
+/// instead of saying it is missing, when fetching is off.
+pub(crate) fn blobs_held(dir: &Path, revs: &[String]) -> Result<Vec<bool>> {
+    revs.iter()
+        .map(|r| {
+            if r.starts_with('-') || r.contains('\n') {
+                bail!("`{r}` is not a revision");
+            }
+            Ok(command(Some(dir))
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .args(["cat-file", "-e", r])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success()))
+        })
+        .collect()
+}
+
+/// `revs`, one to a line, as `git cat-file --batch` reads them.
+fn lines_of(revs: &[String]) -> Result<Vec<u8>> {
     let mut input = Vec::new();
     for r in revs {
         if r.contains('\n') {
@@ -793,8 +833,12 @@ pub(crate) fn blobs(dir: &Path, revs: &[String]) -> Result<Vec<Option<Vec<u8>>>>
         input.extend_from_slice(r.as_bytes());
         input.push(b'\n');
     }
-    let out = run_with_input(dir, &["cat-file", "--batch"], input)?;
-    let mut rest = out.stdout.as_slice();
+    Ok(input)
+}
+
+/// What `git cat-file --batch` printed for `revs`, blob by blob.
+fn read_batch(stdout: &[u8], revs: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    let mut rest = stdout;
     let mut found = Vec::with_capacity(revs.len());
     for _ in revs {
         let nl = rest

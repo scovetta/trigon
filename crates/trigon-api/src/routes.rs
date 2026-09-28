@@ -96,8 +96,33 @@ pub async fn run(State(api): S, Path(id): Path<String>) -> Response {
         return no_such_run(&api);
     };
     let public = api.principal() == Principal::Anonymous;
+    let published = published_view(&record);
     let record = crate::index::record_shown(record, entry.publication, public);
-    json(serde_json::json!({ "entry": entry.shown(public), "record": record }))
+    json(serde_json::json!({
+        "entry": entry.shown(public),
+        "record": record,
+        "published": published,
+    }))
+}
+
+/// Where a run's record was published (`docs/19` §10 phase 6), from `RunRecord.published`, or
+/// `None` where it has not been: the repository, the commit that logged it, the record's digest
+/// and the path of its file there, and its leaf. The run page shows it as a panel of its own, and
+/// the record says the same in its own field; this is it in a form a reader can go and fetch.
+///
+/// Nothing here is withheld from an anonymous reader of a run they may see: the record is
+/// already public, in the repository it names, and a run the gate withholds is refused before
+/// this is asked.
+pub(crate) fn published_view(r: &trigon_store::RunRecord) -> Option<serde_json::Value> {
+    let p = r.published.as_ref()?;
+    Some(serde_json::json!({
+        "repository": p.repository,
+        "commit": p.commit,
+        "record": format!("sha256:{}", p.record.to_hex()),
+        "path": trigon_attest::evidence::record_path(&p.record),
+        "leaf": p.leaf,
+        "log": p.log.as_deref().unwrap_or("log"),
+    }))
 }
 
 /// The run by that id and its row, if this reader may know there is one. Every per-run route asks
@@ -775,30 +800,52 @@ fn is_void(e: &trigon_attest::Envelope) -> bool {
 /// holding a tarball can ask about it without knowing what we call it, which is the query a
 /// consumer actually has.
 ///
-/// Its rows come from [`crate::index::Index::page`], which hands an anonymous reader a void row
-/// without its outcome, as it does for `/v1/runs` and `/v1/targets/{purl}`.
+/// **The algorithm is the one asked for**: `sha256:<hex>`, `sha512:<hex>` or `sha1:<hex>` — npm's
+/// lockfile holds a sha512 and nothing else — each matched against the digest of that algorithm
+/// the run computed over the published bytes, as a subject carries them (`docs/19` §5). A bare
+/// digest is read by its length. It used to discard the algorithm and compare whatever hex it was
+/// given with the sha256, so a sha512 or a sha1 matched nothing; and it searched the newest 500
+/// rows, so an older run of the artifact read as never checked. Every run is searched now.
+///
+/// Its rows are [`crate::index::Index::for_artifact`]'s, which hands an anonymous reader a void
+/// row without its outcome, as it does for `/v1/runs` and `/v1/targets/{purl}`, and no withheld
+/// row at all.
 pub async fn artifact(State(api): S, Path(digest): Path<String>) -> Response {
-    // `sha256:abcd…` or bare hex; both are what a caller has to hand.
-    let hex = digest
-        .rsplit_once(':')
-        .map(|(_, h)| h)
-        .unwrap_or(&digest)
-        .to_ascii_lowercase();
-    let page = api.index.page(
-        &Query {
-            limit: 500,
-            ..Default::default()
-        },
-        api.principal() == Principal::Anonymous,
-    );
-    let mut hits = Vec::new();
-    for e in &page.rows {
-        if let Some(r) = api.index.get(&e.id)
-            && r.upstream.sha256.to_hex() == hex
-        {
-            hits.push(e.clone());
+    let (algorithm, hex) = match digest.split_once(':') {
+        Some((a, h)) => (a.to_ascii_lowercase(), h.to_ascii_lowercase()),
+        None => {
+            let hex = digest.to_ascii_lowercase();
+            let algorithm = match hex.len() {
+                128 => "sha512",
+                40 => "sha1",
+                _ => "sha256",
+            };
+            (algorithm.to_string(), hex)
         }
+    };
+    let len = match algorithm.as_str() {
+        "sha256" => 64,
+        "sha512" => 128,
+        "sha1" => 40,
+        _ => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "unknown_algorithm",
+                "a published artifact is looked up by `sha256:<hex>`, `sha512:<hex>` or \
+                 `sha1:<hex>`: the digests a run computes over it",
+            );
+        }
+    };
+    if hex.len() != len || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "malformed_digest",
+            &format!("a {algorithm} digest is {len} hex digits"),
+        );
     }
+    let hits = api
+        .index
+        .for_artifact(&algorithm, &hex, api.principal() == Principal::Anonymous);
     if hits.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,
@@ -947,7 +994,7 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/runs/{id}",
         "get",
-        "One run: the stored record and the publication decision",
+        "One run: the stored record, the publication decision, and where its record was published",
     ),
     (
         "/v1/runs/{id}/diff",
@@ -1007,7 +1054,7 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/artifacts/{digest}",
         "get",
-        "Lookup by published artifact digest, needing no naming authority",
+        "Lookup by published artifact digest — sha256, sha512 or sha1 — needing no naming authority",
     ),
     (
         "/v1/targets/{purl}",

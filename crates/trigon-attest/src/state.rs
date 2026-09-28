@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::log::{KeyHistory, LeafPos, VerifiedLog};
+use crate::log::{KeyEpoch, KeyHistory, LeafPos, VerifiedLog};
 use crate::{AttestationKey, LogVkey};
 
 /// The last accepted checkpoint, as `config` names it too.
@@ -164,6 +164,25 @@ impl KeysFile {
     /// The log key the chain starts at.
     pub fn log_vkey(&self) -> Result<LogVkey, String> {
         LogVkey::parse(&self.log_key).map_err(|e| format!("its `logKey`: {e}"))
+    }
+
+    /// The attestation keys the chain has had, as the sync that wrote this followed them: what a
+    /// reader holding only some leaves checks a record's key against (`--remote`).
+    pub fn history(&self) -> Result<KeyHistory, String> {
+        let pos = |p: &Place| LeafPos {
+            log: p.log,
+            index: p.index,
+        };
+        let mut epochs = Vec::with_capacity(self.attestation_keys.len());
+        for e in &self.attestation_keys {
+            epochs.push(KeyEpoch {
+                key: AttestationKey::from_hex(&e.public_key)
+                    .map_err(|x| format!("its key {}: {x}", e.key_id))?,
+                from: e.from.as_ref().map(pos),
+                until: e.until.as_ref().map(pos),
+            });
+        }
+        KeyHistory::from_epochs(epochs).map_err(|e| e.to_string())
     }
 
     /// The attestation key the chain starts at.
@@ -443,4 +462,60 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     written
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::LocalKey;
+    use crate::log::{KeyChangeLeaf, KeyHistory, LeafPos};
+
+    /// The key history a sync records is the one `--remote` reads back: the same keys, each over
+    /// the leaves the key changes gave it, and a record's key asked of it answered as the log's
+    /// own history answers it. A history whose keys do not follow one another is refused.
+    #[test]
+    fn a_recorded_key_history_reads_back_as_the_one_the_log_gave() {
+        let (old, new) = (
+            LocalKey::from_bytes(&[1; 32]).unwrap(),
+            LocalKey::from_bytes(&[2; 32]).unwrap(),
+        );
+        let pinned = AttestationKey::from(old.public_key());
+        let mut history = KeyHistory::new(pinned.clone());
+        let at = LeafPos { log: 0, index: 4 };
+        let change = KeyChangeLeaf::sign("example.com/log", 10, &old, &new).unwrap();
+        history.follow(at, "example.com/log", &change).unwrap();
+        let file = KeysFile {
+            schema: KEYS_SCHEMA.into(),
+            log_key: String::new(),
+            attestation_key: pinned.to_hex(),
+            first_use: None,
+            logs: Vec::new(),
+            attestation_keys: KeysFile::of(
+                &crate::log::LogSigner::from_seed("example.com/log", [3; 32])
+                    .unwrap()
+                    .vkey(),
+                &pinned,
+                None,
+                &[],
+                &history,
+            )
+            .attestation_keys,
+        };
+        let read = file.history().unwrap();
+        assert_eq!(read, history);
+        let new_id = AttestationKey::from(new.public_key()).key_id();
+        let before = LeafPos { log: 0, index: 2 };
+        let after = LeafPos { log: 0, index: 9 };
+        assert!(read.key_for(&pinned.key_id(), before).is_ok());
+        assert!(read.key_for(&pinned.key_id(), after).is_err());
+        assert!(read.key_for(&new_id, after).is_ok());
+
+        // A second key that no change made current is not a history.
+        let mut broken = file.clone();
+        broken.attestation_keys[1].from = None;
+        assert!(broken.history().is_err());
+        let mut broken = file;
+        broken.attestation_keys[0].until = None;
+        assert!(broken.history().is_err());
+    }
 }

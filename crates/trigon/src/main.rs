@@ -170,8 +170,32 @@ enum Cmd {
     /// log or claim that failed verification or a log that continues where `<dir>` does not
     /// reach, and 5 when it could not check at all, bad arguments included.
     VerifyAttestation {
-        /// A DSSE bundle, as written by `trigon verify --attest`. Omitted with `--record`.
+        /// A DSSE bundle, as written by `trigon verify --attest`. Omitted with `--record` and
+        /// `--lookup`.
         bundle: Option<PathBuf>,
+        /// The artifact whose current record to check, `sha256:<hex>`: resolved in the synced
+        /// clone of the source whose log `--origin` names, through the log and every supersession
+        /// it records, with the evidence the record names fetched from the clone's remote. The
+        /// form of every record's falsifying command. Not in the network-free verifier, which
+        /// takes `--record <file> --evidence <dir>`.
+        #[arg(
+            long,
+            value_name = "sha256:HEX",
+            conflicts_with_all = [
+                "bundle", "record", "evidence", "source", "log_vkey", "attestation_key",
+                "checkpoint", "public_key",
+            ]
+        )]
+        lookup: Option<String>,
+        /// With `--lookup`: the predicate type of the record to check, as its falsifying command
+        /// names it.
+        #[arg(long, requires = "lookup")]
+        predicate: Option<String>,
+        /// With `--lookup`: the origin of the log the record is published in. The record is
+        /// resolved in the source that has that log and nowhere else, and a client with none says
+        /// so and exits 4.
+        #[arg(long, requires = "lookup")]
+        origin: Option<String>,
         /// A published record file, `trigon.record/v1`, to check against the log of `--evidence`.
         #[arg(long)]
         record: Option<PathBuf>,
@@ -182,6 +206,8 @@ enum Cmd {
         /// The source `--evidence` is, by its name in `evidence.toml`: its pinned keys, and the
         /// checkpoint last accepted for it, from its state directory
         /// (`$TRIGON_EVIDENCE_STATE/<name>/`, or `$XDG_STATE_HOME/trigon/evidence/<name>/`).
+        /// Without `--evidence`, the source's own synced clones are read, its chain followed into
+        /// every repository it has gone on in, as its last sync left them.
         #[arg(long)]
         source: Option<String>,
         /// The source's log key, a C2SP verifier key named by its origin, for a source not
@@ -202,7 +228,10 @@ enum Cmd {
         /// The published artifact. Required by `--rerun-comparison`.
         #[arg(long, requires = "rerun_comparison")]
         upstream: Option<PathBuf>,
-        /// The rebuilt artifact. Required by `--rerun-comparison`.
+        /// The rebuilt artifact. Required by `--rerun-comparison`, except with `--lookup` where
+        /// the operator publishes rebuilt artifacts as release assets (`rebuilt_artifacts =
+        /// "github-release"`): the one the verdict names is then downloaded and held to its
+        /// digest.
         #[arg(long, requires = "rerun_comparison")]
         rebuild: Option<PathBuf>,
         /// The stabilizer set the attestation was made under: a published `.json` manifest, or a
@@ -567,28 +596,102 @@ enum Cmd {
         #[arg(long, requires = "baseline")]
         fail_on_regression: bool,
     },
-    /// Check a lockfile or SBOM against what a store holds, with an explicit *never checked* row.
+    /// Check a lockfile or SBOM against the evidence sources you trust, with an explicit *never
+    /// checked* row; or, with `--store`, against a local store of your own runs.
     ///
     /// The one view that starts from something you already have. Everything else assumes you care
     /// about a package we happen to have scanned.
     ///
     /// Reads `package-lock.json`, `npm-shrinkwrap.json`, `requirements.txt` and SPDX JSON, chosen
     /// by file name rather than sniffed, so a file pointed at by mistake is refused instead of
-    /// reported as zero packages.
+    /// reported as zero packages. Each package is looked up by the digest the file declares —
+    /// npm's `integrity`, a requirement's `--hash`, an SBOM's `checksums` — and by its purl only
+    /// where no digest finds a record about the artifact the file pins; a record whose digests are
+    /// another artifact's never answers for it.
     ///
-    /// **Five rows, never four.** `unsupported` counts runs that reached no verdict and
-    /// `never checked` counts packages with no run; neither is a statement about the package, and
-    /// neither is summed with the three verdicts above them. No overall percentage is printed,
-    /// because a single rate needs one denominator and there are three here.
+    /// **A bare `trigon check` answers from the evidence sources** (`trigon evidence add`,
+    /// `evidence.toml`, `TRIGON_EVIDENCE_REPO`): every stale source is synced once, and every
+    /// package is then answered from the clones with no further request. It no longer reads
+    /// `./trigon-store`; `--store <path>` does what it did, and none of the evidence flags go with
+    /// it. Each source's answer is reported beside its name, and sources that disagree are said
+    /// to.
+    ///
+    /// Exits 0 when every package is at or above the threshold, 1 for any divergence, 2 for any
+    /// package never checked or withdrawn, 3 for any void or result below the threshold, 4 for any
+    /// deleted record, record or source that failed verification, required source that is
+    /// unknown, or package no source could answer, and 5 when it could not check at all. The
+    /// first of 5, 4, 1, 3, 2 wins. `--store` exits 0 whatever it reports, as it always has.
     #[cfg(feature = "build")]
     Check {
         /// The lockfile or SBOM.
         file: PathBuf,
-        /// `text` for a terminal, `json` for a script, `sarif` for a code-scanning UI.
+        /// `text` for a terminal, `json` for a script, `sarif` for a code-scanning UI. The JSON and
+        /// the SARIF carry every source's answer for every package, the SARIF a result for each,
+        /// one that passes as `trigon/pass`.
         #[arg(long, default_value = "text", value_parser = ["text", "json", "sarif"])]
         format: String,
-        #[arg(long, default_value = "./trigon-store")]
-        store: PathBuf,
+        /// Check against this local store of your own runs instead, as `trigon check` did before
+        /// it read evidence sources: newest run per package, five rows, and exit 0.
+        #[arg(
+            long,
+            conflicts_with_all = ["min", "max_risk", "sources", "require", "offline", "remote"]
+        )]
+        store: Option<PathBuf>,
+        /// The outcome floor: a verdict below it is a result below the threshold (exit 3).
+        #[arg(
+            long,
+            value_parser = ["exact", "normalized", "normalized_with_caveats"],
+            default_value = "normalized_with_caveats"
+        )]
+        min: String,
+        /// The riskiest stabilizer a verdict may have been reached through: one reached through a
+        /// riskier one, or that signs none, is below the threshold (exit 3). `structural` is
+        /// `docs/05` §1's `Normalized` with `risk <= Structural`.
+        #[arg(long, value_parser = ["structural", "metadata", "content", "lossy"])]
+        max_risk: Option<String>,
+        /// Ask only this source; may be given more than once.
+        #[arg(long = "source", value_name = "NAME")]
+        sources: Vec<String>,
+        /// Fail the check while this source cannot answer, as `required = true` does; may be given
+        /// more than once. With `--source`, it must be one of the sources asked.
+        #[arg(long, value_name = "NAME")]
+        require: Vec<String>,
+        /// Touch no network: answer from the clones as they are, a stale source as unknown.
+        #[arg(long, conflicts_with = "remote")]
+        offline: bool,
+        /// Ask each source over HTTPS from raw.githubusercontent.com instead of from a clone: every
+        /// package is named to GitHub, it is rate-limited, and it sees a supersession only where
+        /// the index lists it. For a source with a github.com HTTPS URL only.
+        #[arg(long)]
+        remote: bool,
+    },
+    /// What every evidence source says of one artifact or package: every record, verified, with
+    /// its outcome, set, versions, egress, derivation, the command that would falsify it and where
+    /// to dispute it (`docs/19` §4.2, §6).
+    ///
+    /// The key is `sha512-<base64>` (npm's `integrity`), `sha256:<hex>`, `sha512:<hex>`,
+    /// `sha1:<hex>`, a purl with its version or without it for every version, or a file, whose
+    /// digests are computed. It is resolved from the verified leaves of each source's log, never
+    /// from `index/`, with every supersession applied; a stale source is synced first, and said
+    /// to be. Each source answers for itself, and sources that disagree are said to. Exits as
+    /// `trigon check` does.
+    #[cfg(feature = "build")]
+    Lookup {
+        /// The artifact or package: a digest, an integrity string, a purl, or a file.
+        key: String,
+        /// Ask only this source; may be given more than once.
+        #[arg(long = "source", value_name = "NAME")]
+        sources: Vec<String>,
+        /// Touch no network: answer from the clones as they are, a stale source as unknown.
+        #[arg(long, conflicts_with = "remote")]
+        offline: bool,
+        /// Ask over HTTPS from raw.githubusercontent.com instead of from a clone, proving each
+        /// record's leaf from the log's tiles: it names the key to GitHub, it is rate-limited, and
+        /// it sees a supersession only where the index lists it.
+        #[arg(long)]
+        remote: bool,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+        output: OutputFormat,
     },
     /// List the runs a store holds.
     #[cfg(feature = "build")]
@@ -1457,6 +1560,10 @@ mod style;
 /// builds, since it opens no socket.
 mod verify_record;
 
+/// A source's clones, opened and verified as every command that answers from them opens them: in
+/// both builds, since reading a clone opens no socket.
+mod clones;
+
 /// `log keygen` and `log sign`: the evidence log's key, and the one step that holds it. In both
 /// builds, since neither opens a socket.
 mod evidence_log;
@@ -1496,7 +1603,7 @@ fn main() -> Result<()> {
         // to "never checked, or withdrawn": a CI job that lets that through would pass a mistyped
         // invocation that checked nothing. There, bad arguments exit 5 like the command's own
         // refusals; everywhere else, and for `--help` and `--version`, as `clap` exits.
-        Err(e) if e.use_stderr() && verify_record::named(std::env::args_os()) => {
+        Err(e) if e.use_stderr() && exits_as_section_6(std::env::args_os()) => {
             let _ = e.print();
             std::process::exit(verify_record::CANNOT);
         }
@@ -1517,6 +1624,30 @@ fn main() -> Result<()> {
         }
     }
     result
+}
+
+/// Whether a command line is one whose exit codes are `docs/19` §6's — `check`, `lookup`, and the
+/// record and lookup forms of `verify-attestation` — read from the raw arguments, so that a
+/// command `clap` refuses exits 5, the tool failing, and not `clap`'s 2, which §6 gives to "never
+/// checked": a CI job that lets 2 through would pass a mistyped invocation that checked nothing.
+fn exits_as_section_6(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    let args: Vec<std::ffi::OsString> = args.into_iter().collect();
+    // The subcommand is the first word that is neither a global flag nor `--theme`'s value.
+    let mut command = None;
+    let mut words = args.iter().skip(1);
+    while let Some(a) = words.next() {
+        match a.to_str() {
+            Some("--theme") => {
+                words.next();
+            }
+            Some(w) if w.starts_with('-') => {}
+            other => {
+                command = other;
+                break;
+            }
+        }
+    }
+    matches!(command, Some("check" | "lookup")) || verify_record::named(args)
 }
 
 /// Say whose fault a failure was, when the error knows.
@@ -1780,6 +1911,9 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
         ),
         Cmd::VerifyAttestation {
             bundle,
+            lookup,
+            predicate,
+            origin,
             record,
             evidence,
             source,
@@ -1798,6 +1932,30 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
                 rebuild: rebuild.as_deref(),
                 stabilizers: stabilizers.as_deref(),
             };
+            if let Some(subject) = lookup {
+                #[cfg(feature = "build")]
+                return evidence::rerun::run(evidence::rerun::Args {
+                    subject: &subject,
+                    predicate: predicate.as_deref(),
+                    origin: origin.as_deref(),
+                    rerun: rerun_comparison,
+                    files,
+                    output,
+                    verbose,
+                });
+                // The network-free verifier reads a directory it is given and fetches nothing, and
+                // `--lookup` fetches the evidence a record names from the clone's remote.
+                #[cfg(not(feature = "build"))]
+                {
+                    let _ = (subject, predicate, origin);
+                    verify_record::usage(
+                        "--lookup resolves a record in a source's synced clone and fetches the \
+                         evidence it names, which this build — the network-free verifier — does \
+                         not do. Run it with the default build, or check the record here with \
+                         --record <file> --evidence <dir> and the source's keys",
+                    );
+                }
+            }
             let record_only = [
                 ("--evidence", evidence.is_some()),
                 ("--source", source.is_some()),
@@ -1844,9 +2002,11 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
                     "give a bundle or --record <file>, not both: each is checked on its own",
                 ),
                 (None, None) => verify_record::usage(
-                    "verify-attestation checks a bundle, `verify-attestation <bundle>`, or a \
+                    "verify-attestation checks a bundle, `verify-attestation <bundle>`; a \
                      published record, `verify-attestation --record <file> --evidence <dir>` with \
-                     --source <name> or --log-vkey and --attestation-key",
+                     --source <name> or --log-vkey and --attestation-key, or `--record <file> \
+                     --source <name>` to read the source's synced clones; or the current record of \
+                     an artifact, `verify-attestation --lookup sha256:<hex> --origin <origin>`",
                 ),
             }
         }
@@ -2243,7 +2403,44 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             file,
             format,
             store,
-        } => check::run(&file, &store, &format),
+            min,
+            max_risk,
+            sources,
+            require,
+            offline,
+            remote,
+        } => match store {
+            Some(store) => check::run(&file, &store, &format),
+            None => evidence::check::run(evidence::check::Args {
+                lockfile: file,
+                // The parser admits only the three outcomes and the four tiers.
+                min: min.parse().map_err(|e: String| anyhow::anyhow!(e))?,
+                max_risk: max_risk
+                    .map(|r| serde_json::from_value(serde_json::Value::String(r)))
+                    .transpose()?,
+                sources,
+                require,
+                offline,
+                remote,
+                format,
+                verbose,
+            }),
+        },
+        #[cfg(feature = "build")]
+        Cmd::Lookup {
+            key,
+            sources,
+            offline,
+            remote,
+            output,
+        } => evidence::lookup::run(evidence::lookup::Args {
+            key,
+            sources,
+            offline,
+            remote,
+            output,
+            verbose,
+        }),
         #[cfg(feature = "build")]
         Cmd::Runs { store } => attestor::list(&store),
         #[cfg(feature = "build")]

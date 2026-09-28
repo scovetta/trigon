@@ -13,6 +13,10 @@
 //! classified by the two clocks of `docs/19` §6 ([`trigon_attest::evidence::Standing`]), with the
 //! file that added it and whether its keys rest on first use, so that every answer can say both.
 
+pub(crate) mod lookup;
+pub(crate) mod remote;
+pub(crate) mod rerun;
+pub(crate) mod check;
 pub(crate) mod sync;
 
 use anyhow::{Result, anyhow};
@@ -25,7 +29,7 @@ use trigon_attest::location::printable;
 use trigon_attest::state::{FirstUse, KeysFile, SyncRecord};
 
 use crate::OutputFormat;
-pub(crate) use sync::{Dirs, Failed, Opened};
+pub(crate) use crate::clones::{Dirs, Failed, Opened};
 
 /// `docs/19` §6: a source that failed verification, or one that could not answer.
 const FAILED: i32 = 4;
@@ -531,13 +535,6 @@ impl Ready {
     /// What this source says of one package, as `docs/19` §6 weighs it: `answer` asked of its
     /// chain where it can answer; unknown where it cannot, which counts only if it is required;
     /// refused where its last sync failed verification.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "phase 6b's lookup and check weigh every source's answer with it"
-        )
-    )]
     pub(crate) fn said(
         &self,
         answer: impl FnOnce(&trigon_attest::evidence::Repository) -> trigon_attest::evidence::Answer,
@@ -583,13 +580,27 @@ pub(crate) fn ready(
                         .and_then(|r| r.last_success);
                     let stale = last_success
                         .is_none_or(|t| now.saturating_sub(t) > freshness.stale_after.as_secs());
+                    // A source none of whose locations has a clone — its URL changed since its
+                    // last sync, in `evidence.toml` or `TRIGON_EVIDENCE_REPO`, or its clones were
+                    // removed — cannot be opened however recent that sync was, so it is synced
+                    // first too, as a source never synced is. One mirror of several without a
+                    // clone is not, or every command would fetch while it is down.
+                    let unopenable = !source
+                        .urls
+                        .iter()
+                        .any(|l| crate::clones::accepted_clone(&dirs.clone_of(l)));
                     let synced = match mode {
-                        Mode::Sync => stale,
+                        Mode::Sync => stale || unopenable,
                         Mode::Refresh => true,
                         Mode::Offline => false,
                     };
                     if synced {
                         let said = match (last_success, stale) {
+                            (_, false) if unopenable && mode == Mode::Sync => {
+                                "synced first: no location it names has a clone — its URLs \
+                                 changed since its last sync, or its clones were removed"
+                                    .to_string()
+                            }
                             (_, false) => "synced first: this command needs what it serves now, \
                                  and its clone may be from before that"
                                 .to_string(),

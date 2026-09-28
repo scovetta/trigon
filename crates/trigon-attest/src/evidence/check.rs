@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use trigon_core::{Digest, Match};
+use trigon_core::{Digest, Match, RiskTier};
 
 use super::lookup::Key;
 use super::paths::evidence_path;
@@ -225,6 +225,17 @@ impl VerifiedRecord {
     /// Evidence the statement names that was not checked against its digest.
     pub fn unchecked(&self) -> impl Iterator<Item = &EvidenceFile> {
         self.evidence.iter().filter(|e| !e.state.checked())
+    }
+
+    /// The riskiest stabilizer tier the verdict signs as applied, from its `provenanceCap`:
+    /// `Some(None)` where it signs that none applied, as an exact verdict does, and `None` where
+    /// it signs no tier this build reads — which a `--max-risk` then cannot be held to, and is
+    /// never read as nothing applied.
+    pub fn max_risk_applied(&self) -> Option<Option<RiskTier>> {
+        match self.statement.predicate.pointer("/provenanceCap/maxRiskApplied")? {
+            Value::Null => Some(None),
+            v => serde_json::from_value::<RiskTier>(v.clone()).ok().map(Some),
+        }
     }
 }
 
@@ -766,6 +777,16 @@ fn check_evidence(
         });
     }
     Ok(out)
+}
+
+/// One piece of evidence a verified record names, read from `files` and held to its signed digest
+/// again: [`read_evidence`], for a reader whose evidence is not the repository's own directory — a
+/// partial clone, whose `evidence/` is read from git's objects on demand.
+pub fn read_evidence_from(
+    files: &dyn LogFiles,
+    e: &EvidenceFile,
+) -> Result<(EvidenceState, Option<Vec<u8>>), RecordFailure> {
+    read_evidence(files, &e.name, &e.digest)
 }
 
 /// One piece of evidence, by the name and digest its statement signs, read from the repository

@@ -32,7 +32,7 @@ records where building it proved the design wrong.
 |---|---|---|
 | **M0** the judgement half | done | differential against the reference implementation: 34 match, 24 deviate by a declared entry, **0 unexplained** |
 | **M1** first rebuilds | done | npm and PyPI rebuild end to end, under an enforced egress tier, against a time-filtered index |
-| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`. Publishing them is [`docs/19`](docs/19-distribution-and-lookup.md): an evidence repository with a log of our own, which replaced a Rekor client that was built, measured and removed ([ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md)) — written by `trigon publish` and synced by `trigon evidence`; looking a lockfile up in it is next |
+| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`. Publishing them is [`docs/19`](docs/19-distribution-and-lookup.md): an evidence repository with a log of our own, which replaced a Rekor client that was built, measured and removed ([ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md)) — written by `trigon publish`, synced by `trigon evidence`, and asked by `trigon lookup` and `trigon check` |
 | **M3** the search half | begun | the deterministic parts first — failure signatures, log compression, the repair-loop policy, the Builder |
 
 Tier-1 observability landed early, out of milestone order: every run at an enforced egress tier now
@@ -365,10 +365,28 @@ a git repository holding the signed records, the evidence to re-derive each one,
 log we sign — one commit per publication, pushed without force, its checkpoint signed by `trigon log
 sign`, the only thing that holds the log's key ([`docs/using-trigon.md`](docs/using-trigon.md)).
 Rotating either key is a leaf of that log too, which every client follows (`trigon log
-key-change`, `trigon log succeed`). Consumers will clone that repository and answer a lockfile from their own copy; that half is not
-built yet. [`docs/19`](docs/19-distribution-and-lookup.md) is the design and its build plan, and
-[ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md) records why it replaced the Rekor
-client that used to be described here.
+key-change`, `trigon log succeed`). [`docs/19`](docs/19-distribution-and-lookup.md) is the design
+and its build plan, and [ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md) records why
+it replaced the Rekor client that used to be described here.
+
+### Checking a lockfile against it
+
+The consumer's front door. Trust a repository once, and every lockfile after that is answered from
+a clone you verified yourself — one sync, then no request per package, and nothing told which
+packages you asked about:
+
+```
+$ trigon evidence add trigon https://github.com/owner/trigon-evidence.git \
+      --log-key 'github.com/owner/trigon-evidence+1a2b3c4d+AR…' --attestation-key <64 hex>
+$ trigon check package-lock.json          # every package, by the integrity digest it pins
+$ trigon lookup ./left-pad-1.3.0.tgz      # one artifact: every record, and how to falsify it
+```
+
+Each source you trust answers for itself, sources that disagree are said to, and a package no
+source holds a record for reads *never checked*, never as a pass. The exit codes are for CI: `1`
+for a divergence, `2` never checked, `4` anything that failed verification.
+[`docs/using-trigon.md`](docs/using-trigon.md) has the rest, `--remote` and the falsifying command
+among it; `trigon check --store <path>` is the old check against a store of your own runs.
 
 A signature says *who*, never *when*. A statement carries no third-party time, so nothing bounds
 what a stolen key can sign ([threat model](docs/threat-model.md) D24), and publishing will not change

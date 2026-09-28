@@ -1639,7 +1639,7 @@ async function detail(id) {
   // `/runs/...` reached by clicking is a fetch, because the island describes the entry point.
   const booted = BOOT?.run && !DETAIL_BOOT_SPENT && BOOT.run.entry?.id === id;
   DETAIL_BOOT_SPENT = true;
-  const { entry, record } = booted
+  const { entry, record, published } = booted
     ? BOOT.run
     : await api(`/v1/runs/${encodeURIComponent(id)}`);
   document.title = `${entry.name} — Trigon`;
@@ -1735,6 +1735,8 @@ async function detail(id) {
   const panels = [
     comparison,
 
+    publishedPanel(published, record),
+
     panel('What ran', el('dl', { class: 'kv' },
       kv('base image', el('span', { class: 'mono', text: record.environment.base_image })),
       // An empty string here is a field nobody wrote, not an isolation mechanism named "". The
@@ -1824,6 +1826,32 @@ async function detail(id) {
     head, verdict, chain, ...panels,
     el('p', { class: 'empty mono', text: `run ${record.id} · attempt ${record.attempt} · started ${record.started}` }),
   );
+}
+
+// Where the run's record was published, from `RunRecord.published`: absent until `trigon publish`
+// logged it, and then the record anyone can fetch and check without this server. Nothing at all is
+// drawn for a run with none, since "not published" is already said by the tag above when it is so.
+function publishedPanel(published, record) {
+  if (!published) return null;
+  // A GitHub HTTPS repository links to the file at the commit that logged it; anything else is
+  // shown as it was configured, since a local path or an SSH location is nothing a browser opens.
+  const gh = /^https:\/\/github\.com\/([^/]+\/[^/]+?)(\.git)?\/?$/.exec(published.repository || '');
+  const file = gh
+    ? el('a', { href: `https://github.com/${gh[1]}/blob/${published.commit}/${published.path}`, rel: 'noreferrer noopener', class: 'mono', text: published.path })
+    : el('span', { class: 'mono', text: published.path });
+  const subject = record.upstream?.sha256;
+  return panel('Where its record was published', el('div', {},
+    el('dl', { class: 'kv' },
+      kv('repository', el('span', { class: 'mono', text: published.repository })),
+      kv('commit', el('span', { class: 'mono', text: published.commit })),
+      kv('record', el('span', { class: 'mono', text: published.record })),
+      kv('file', file),
+      kv('leaf', `${published.leaf} of ${published.log}/`),
+    ),
+    el('p', { class: 'note' },
+      'Logged in the evidence repository, where anyone can check it without this server: ',
+      el('code', { text: subject ? `trigon lookup sha256:${subject}` : 'trigon lookup' }),
+      ' answers from a verified clone of it.')));
 }
 
 const withheldTitle = (pub) => ({

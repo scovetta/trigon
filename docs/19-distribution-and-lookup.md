@@ -1,8 +1,10 @@
 # 19. Publishing verdicts, and looking them up
 
-**Status: partly built, mostly planned.** [ADR-0014](adr/0014-git-evidence-store-without-rekor.md)
-(accepted) records the decisions this chapter argues for. §10 is the build plan, and §11 lists the
-decisions it waits on. What exists today:
+**Status: built through §10 phase 6**, apart from phase 5's spike against a scratch GitHub
+repository, which has not been run; phases 7a, 7b and 9 wait on decisions.
+[ADR-0014](adr/0014-git-evidence-store-without-rekor.md) (accepted) records the decisions this
+chapter argues for. §10 is the build plan, and §11 lists the decisions it waits on. What exists
+today:
 
 | | Status |
 |---|---|
@@ -13,7 +15,7 @@ decisions it waits on. What exists today:
 | Rekor publication (`attest --rekor`) and verification (`verify-attestation --transparency`) | built, measured, and **removed** (ADR-0014; §10 phase 1, [findings](16-findings.md) §3.94) |
 | Subjects with sha512, and sha1 for npm, beside sha256 (§5); fetchers that verify every digest their registry declares, and runs that record what was declared (§5); the strategy, guard manifest and building version kept on the run (§4.2 items 3, 7); attestations per run, append-only | built (§10 phase 2, first half; [findings](16-findings.md) §3.95) |
 | The v2 verdicts with every §4.2 field, `void/v1` and `withdrawal/v1`, the record file's types, the versioned purl canonicalisation, and a building version that names its git revision | built (§10 phase 2, second half; [findings](16-findings.md) §3.96) |
-| The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest`, `serve`, `worker`, `publish` and `trigon evidence` (§10 phases 2, 3, 5, 6); `lookup` and `check` are the rest of phase 6 |
+| The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest`, `serve`, `worker`, `publish`, `trigon evidence`, `lookup`, `check` and `verify-attestation` (§10 phases 2, 3, 5, 6) |
 | A publishable run: every cache key built from the target, the strategy and the set, worker and CLI alike; attempts that agree on what the comparison found, not on its outcome string; `trigon rebuild --confirm <run>`, cold and re-pulled; each attempt's host, cache state and start; `decide`'s rules for a pair, from `same_host_confirmation` and `confirmation_interval`; and a worker's confirmation made on another machine unless `same_host_confirmation` allows its own | built (§10 phase 3, backlog B31; [findings](16-findings.md) §3.97) |
 | `rebuild --attest` signing through `attest`'s own code, so no path signs a verdict for a run the gate voids; `rebuild/v1` naming the model exchange a run kept; a `pkg1` key that is the package alone | built (§10 phase 3; [findings](16-findings.md) §3.97) |
 | The evidence log as pure code: C2SP signed notes and checkpoints, the log key in Go's format, RFC 6962 inclusion and consistency proofs, tiles and entry bundles and what an append writes, every leaf kind of §2.3, a log verified from its files, and key-change, log-end and log-continuation leaves followed as §8 says | built (§10 phase 4, first half; [findings](16-findings.md) §3.98) |
@@ -22,7 +24,7 @@ decisions it waits on. What exists today:
 | Rebuilt artifacts as release assets, uploaded before the commit that names them and reused on a retry; the divergence feed, regenerated from the log; `log key-change` and `log succeed`, followed by a fresh verification, with publishing going on into a successor in this repository or another; `publish --prune`, and `attest --prune` refusing a run not yet published; `serve`'s report of the repository's kill-switch beside its own | built (§10 phase 5, second half; [findings](16-findings.md) §3.101) |
 | The phase 5 spike against a scratch GitHub repository | written (`scripts/evidence-spike.sh`) and **not run**: it needs a repository of the owner's naming, which nothing here creates (§10 phase 5; [findings](16-findings.md) §3.101) |
 | `trigon evidence add`, `list`, `remove` and `sync`: sources written into `evidence.toml` keeping its comments; a verified clone of every location in the cache, and each source's checkpoint, key history and last sync in the state directory, written only once everything verifies; a checkpoint that does not extend the accepted one, and a rollback, refused with both notes; mirrors held to one another; a successor in another repository followed as part of the source; trust on first use recorded and labelled, and read by `verify-attestation --record --source`; a lost state refused until `--accept-state-loss`, which starts over only what was lost; and the two freshness clocks, as the standing every command asking a source reads. `publish` reading the whole chain, from its first log, when it publishes into a successor elsewhere; pruning that keeps bytes another run still names, and takes turns with the writers that name them | built (§10 phase 6, first half; [findings](16-findings.md) §3.102) |
-| `trigon lookup`, `trigon check` against evidence repositories, `verify-attestation --lookup`, `--remote`, and `serve`'s view of a run's published record | planned (§10 phase 6, second half) |
+| `trigon lookup` over the verified leaves of every source, per source and never merged, with every §4.2 field and state, supersessions struck through, and sources that disagree said to; `trigon check` against the sources — one sync and then no request, by digest first and purl second, every package of an SBOM kept, `--min`, `--max-risk`, `--require`, §6's exit codes, per-source detail in text, JSON and SARIF — with `--store` keeping the old check; the lockfile parser keeping npm's `integrity` and `resolved`, `--hash`, and SBOM `checksums`; `verify-attestation --lookup`, resolved in the source of its origin, its evidence fetched on demand from the partial clone and its rebuilt artifact from a release asset or `--rebuild`; `--record --source` reading the source's clones across repositories; `--remote`, proving each leaf from the tiles; a sync removing clones of locations no longer configured; and `serve` showing a run's published record, and `/v1/artifacts/{alg}:{digest}` honouring its algorithm over every run | built (§10 phase 6, second half; [findings](16-findings.md) §3.103) |
 
 ---
 
@@ -740,6 +742,8 @@ trigon verify-attestation --lookup sha256:<subject> [--predicate <type>] [--orig
     --rerun-comparison --upstream ./left-pad-1.3.0.tgz [--rebuild <file>]
 trigon verify-attestation --record <file> --evidence <dir> --source <name> \
     [--rerun-comparison --upstream <file> --rebuild <file>]
+trigon verify-attestation --record <file> --source <name> \
+    [--rerun-comparison --upstream <file> --rebuild <file>]
 ```
 
 - **`evidence sync`** fetches every URL of every source and verifies each log locally before
@@ -778,10 +782,12 @@ trigon verify-attestation --record <file> --evidence <dir> --source <name> \
 - **`check`** is the lockfile front door. It needs the lockfile parser to keep what it throws away
   today — npm `integrity` and `resolved`, `requirements.txt` `--hash=` lines (which today also
   corrupt the parsed version), SPDX `checksums` — and to look up by digest first and by purl second.
-  Given `--store <path>`, it keeps today's behaviour, checking against a local store of the
+  Given `--store <path>`, it keeps its earlier behaviour, checking against a local store of the
   operator's own runs; without it, it answers from the evidence sources. That changes what a bare
-  `trigon check` means — today it defaults to `./trigon-store` — so the release notes say so.
-  `--format text|json|sarif` carries over.
+  `trigon check` means — it defaulted to `./trigon-store` — so the release notes say so, as the
+  command's help and `docs/using-trigon.md` already do; there are no release notes yet, and the
+  first to be written carries it. `--format text|json|sarif` carries over, and the JSON and the
+  SARIF carry every source's answer for every package.
 - **`verify-attestation --lookup`**, which is also the form of a record's falsifying command (§4.2
   item 6), resolves the current record in the clone of the source whose origin `--origin` names, and
   fetches the evidence it names, so `--rerun-comparison` needs only the upstream artifact from the
@@ -790,9 +796,11 @@ trigon verify-attestation --record <file> --evidence <dir> --source <name> \
   for one source, with that source's keys and last accepted checkpoint from `--source <name>` (read
   from `evidence.toml` and the state directory) or given as `--log-vkey`, `--attestation-key` and
   `--checkpoint`. `<dir>` is a clone or any directory with the §2.3 layout. An evidence file absent
-  from `<dir>` is reported as unchecked, never as passed. `bundle` becomes optional. It opens no
-  socket, so threat-model property P21 — the verifier links no network client — stays true. Cloning
-  is the default build's job; verifying a clone needs no network at all.
+  from `<dir>` is reported as unchecked, never as passed. `bundle` becomes optional. Without
+  `--evidence`, `--source <name>` reads the source's own clones as its last sync left them, its
+  chain followed into every repository it has gone on in. It opens no socket, so threat-model
+  property P21 — the verifier links no network client — stays true. Cloning is the default build's
+  job; verifying a clone needs no network at all.
 - **`--remote`**, on `lookup` and `check`, is the one-off alternative: plain HTTPS GETs from
   `raw.githubusercontent.com`, for a single question in a place a clone is unwelcome. It fetches the
   checkpoint and verifies it against the pinned key and the last accepted checkpoint, reads the

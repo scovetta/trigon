@@ -1,4 +1,7 @@
-//! `trigon check` — a lockfile in, a verdict table out, with an explicit *never checked* row.
+//! `trigon check --store <path>` — a lockfile in, a verdict table out, with an explicit *never
+//! checked* row, from a local store of the operator's own runs. A bare `trigon check` answers from
+//! the evidence sources instead (`crate::evidence::check`, `docs/19` §6); this is what it did
+//! before there were any.
 //!
 //! [`docs/11-interfaces.md`](../../../docs/11-interfaces.md) §"The hero": this is the only view
 //! that starts from something the reader already has. Everything else assumes they care about a

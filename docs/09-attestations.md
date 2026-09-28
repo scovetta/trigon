@@ -966,6 +966,35 @@ The store is the operator's own and nothing outside it reads it. What is publish
 record per result, to an evidence repository whose layout is
 [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §2.3.
 
+**The evidence repository, as a client holds it.** `trigon publish` writes a record, its evidence,
+its leaf, the new tiles, the checkpoint and the index in one commit, and nothing else writes the
+repository. A client keeps its own copies, as built ([`19`](19-distribution-and-lookup.md) §6,
+§6.1):
+
+```
+$XDG_CACHE_HOME/trigon/evidence/<source>/<sha256 of the location>/   one clone per location: the
+                                                                     source's URLs, its mirrors,
+                                                                     and any repository its log
+                                                                     has gone on in
+$XDG_STATE_HOME/trigon/evidence/<source>/checkpoint                  the checkpoint last accepted
+$XDG_STATE_HOME/trigon/evidence/<source>/keys                        the key history: the log key
+                                                                     and attestation key the chain
+                                                                     starts at, every log of it,
+                                                                     every key change
+$XDG_STATE_HOME/trigon/evidence/<source>/sync                        when it last synced, what each
+                                                                     location served, the newest
+                                                                     leaf
+```
+
+`TRIGON_EVIDENCE_CACHE` and `TRIGON_EVIDENCE_STATE` replace the two roots. A clone of a remote is
+shallow, partial and sparse — `keys/`, `log/` and `records/` in its working tree, `evidence/` and
+`index/` in neither its tree nor, where the host takes a filter, its objects — and every file of the
+log is verified whole on every sync before the state is written. `evidence/` is read from git's
+objects when a command needs it, which fetches a blob the clone does not hold from the remote, and
+names the record to the host; only `verify-attestation --lookup` does. A sync removes, from the
+cache and never from the state, the clone of a location its source no longer names. Nothing reads
+`index/` but `--remote`, which fetches files over HTTPS instead of holding a clone (§7).
+
 **Retention:** on a match, store the rebuilt artifact's digests rather than the artifact. Keep bytes
 on divergence, where they are the evidence. That one rule accounts for most of the storage budget
 ([`10-scale.md`](10-scale.md) §2). Pruning a run drops its reference to the bytes, and deletes them
@@ -976,7 +1005,7 @@ reported missing (`Store::artifact`, `StoreError::Missing`), never as there.
 
 ## 7. Verification
 
-Two forms, both in the network-free verifier. A bundle, on its own:
+Three forms, the first two in the network-free verifier. A bundle, on its own:
 
 ```
 trigon verify-attestation equivalence.intoto.json \
@@ -993,6 +1022,14 @@ trigon verify-attestation --record <file> --evidence <dir> \
     [--rerun-comparison --upstream <published> --rebuild <rebuilt>]
 ```
 
+and the current record of an artifact, resolved in a source's synced clone — the form of every
+record's falsifying command, in the default build only, since it fetches:
+
+```
+trigon verify-attestation --lookup sha256:<subject> [--predicate <type>] [--origin <origin>] \
+    [--rerun-comparison --upstream <published> [--rebuild <rebuilt>]]
+```
+
 `<dir>` is a clone, or any directory with the §2.3 layout of `19`. `--source` takes the source's
 keys from `evidence.toml` and the checkpoint last accepted for it from its state directory,
 `$TRIGON_EVIDENCE_STATE/<name>/checkpoint` or else
@@ -1002,7 +1039,52 @@ trusts on first use is checked against the keys its first `trigon evidence sync`
 in `<state>/<name>/keys`, and the report says so. Where there is no checkpoint at all, the output
 says the log was checked whole and not against anything seen before. The clones `trigon evidence
 sync` keeps, at `$XDG_CACHE_HOME/trigon/evidence/<name>/<sha256 of the location>/`, are what `<dir>`
-usually is.
+usually is, and **without `--evidence`** `--source <name>` reads them itself, in either build: every
+location held to every other, the chain followed into every repository it has gone on in, and all
+of it held to the checkpoint last accepted, as the sync that left them did, with nothing fetched. A
+record logged in a successor elsewhere is then checked where it is logged, and a withdrawal logged
+there is seen; given the first repository alone with `--evidence`, what the source says of it now is
+unknown, since the log goes on where that directory does not reach. A source that is stale or
+frozen still has its record checked, and what it says of the artifact now is unknown.
+
+`--lookup` resolves the current record for the subject, and `--predicate`'s type where one is given,
+in the clone of the source whose chain holds a log of `--origin` — syncing that source first where
+it is stale, and no source of another origin — through the log and every supersession it records,
+and checks it exactly as the record form does. No source of that origin is said and exits 4: the
+command was signed to be answered there, and never elsewhere. An origin is only the name in a log
+key, so where sources give it to logs of different keys, a source a project's
+`.trigon/evidence.toml` added is set aside, and said to be, when the user's own sources or the
+environment's hold the origin under one key (a project's source cannot change what another answers,
+`19` §8), and otherwise the command is refused as ambiguous, exit 5. Without `--origin` every source
+is asked, and current records in more than one are refused as ambiguous, exit 5. Every source asked
+is weighed as `lookup` weighs it: its answer is printed beside the record checked, and the exit code
+is the more severe of the record's report and every source's answer, so a source that is refused, or
+required and unknown, or says withdrawn, is never dropped because another holds a current record. A
+subject whose current record is a withdrawal, or that has none, is reported with its answer and that
+answer's code; a current void asked to re-derive is reported as the void it is, exit 3, and said not
+to have been re-derived. The evidence the record names is read from the clone's objects, fetched
+from its remote where the clone is partial, and the report says so; the rebuilt artifact is
+`--rebuild <file>`, or, where the operator publishes rebuilt artifacts (`rebuilt_artifacts =
+"github-release"`) and none is given, the release asset `sha256-<hex>` of the GitHub repository that
+holds the record's leaf — a successor's, after a succession into another repository — found by name
+in its releases without a token, downloaded into a directory made for it that only the user can
+enter, and held to the digest the verdict signs as it is written: one that is other bytes fails,
+exit 4.
+
+`trigon lookup <key>` and `trigon check <lockfile>` answer from the same clones, and report every
+record with the fields below; `19` §6 has them. `--remote` on either reads one question's files
+over HTTPS instead — the checkpoint, held to the pinned key and to the checkpoint last accepted by a
+consistency proof from the tiles; the log's last leaf, proven, for how recent it is and where it
+goes on, and a successor's first leaf, proven and held to be the log-continuation its predecessor's
+log-end requires, as a sync holds it; the index file for the key; each record; and the entry bundle
+and tiles that prove each record's leaf included — and checks each record against its leaf as a
+clone's is, with its evidence unchecked. A record whose leaf does not prove fails verification.
+What cannot be read — a file not served, a request refused, failed or rate-limited, an index entry
+past the checkpoint read, which is what a publish landing between two requests looks like — leaves
+the source unknown for that question, never failed. A source whose last sync was refused answers
+nothing over HTTPS either, and a key history the last sync recorded under another pin than the
+configuration's now is not used: records are held to the pinned attestation key alone until a sync
+follows the log's key changes from it.
 
 Steps:
 

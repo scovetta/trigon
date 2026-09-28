@@ -138,7 +138,7 @@ pub(crate) struct GitHub {
 }
 
 /// The API's base: `TRIGON_GITHUB_API`, or GitHub's own.
-fn api_base() -> Result<reqwest::Url> {
+pub(crate) fn api_base() -> Result<reqwest::Url> {
     let given = std::env::var("TRIGON_GITHUB_API")
         .ok()
         .filter(|v| !v.is_empty());

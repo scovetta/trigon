@@ -29,14 +29,15 @@
 //! pins, so a successor elsewhere it names at any other location is refused, as the project's file
 //! itself would be: the thing under test never chooses where this client connects.
 //!
-//! **Verified before anything is accepted**, each clone by itself with the phase 4 code — the
-//! checkpoint under the source's log key, the root recomputed from every leaf, times that never go
-//! back, every key change and succession followed — then every location held to every other:
-//! copies of one log that are not one log are an equivocation, with both signed notes. The largest
-//! copy answers; a smaller one is lagging. The whole chain, across repositories, is then held to the
-//! checkpoint last accepted, and its key history recomputed and compared with the one kept. Only
-//! then is the state written, and a new clone kept. A sync that is refused keeps every clone as it
-//! was and the state untouched.
+//! **Verified before anything is accepted**, as every command that answers from the clones opens
+//! them ([`crate::clones`]): each clone by itself with the phase 4 code — the checkpoint under the
+//! source's log key, the root recomputed from every leaf, times that never go back, every key change
+//! and succession followed — then every location held to every other: copies of one log that are
+//! not one log are an equivocation, with both signed notes. The largest copy answers; a smaller one
+//! is lagging. The whole chain, across repositories, is then held to the checkpoint last accepted,
+//! and its key history recomputed and compared with the one kept. Only then is the state written,
+//! and a new clone kept, and the clone of a location the source no longer names removed from the
+//! cache. A sync that is refused keeps every clone as it was and the state untouched.
 //!
 //! **The state is what a rollback is caught against**, so a source that has synced before and has
 //! lost it is not silently given a new one: the sync is refused until `--accept-state-loss <name>`
@@ -47,19 +48,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
-use sha2::Digest as _;
-use trigon_attest::config::{AddedBy, EvidenceConfig, Source, read_checkpoint_file};
-use trigon_attest::evidence::Repository;
+use trigon_attest::config::Source;
 use trigon_attest::location::{Location, Transport, printable};
-use trigon_attest::log::{
-    DirFiles, LogError, LogFiles as _, VerifiedLog, VerifiedSource, compare_chains,
-    verify_continuation, verify_source,
-};
-use trigon_attest::state::{
-    self, Failure, FirstUse, KeysFile, LogSeen, StateError, SyncRecord, UNACCEPTED, UrlSeen,
-};
-use trigon_attest::{AttestationKey, LogVkey};
+use trigon_attest::state::{self, Failure, KeysFile, SyncRecord, UNACCEPTED};
 
+pub(crate) use crate::clones::{Dirs, Failed, Opened, open};
+use crate::clones::{Held, Reached, SourceLock, chain, initial, start_keys};
 use crate::publish::git;
 
 /// What a clone's working tree holds (`docs/19` §6): `index/` and `evidence/` stay out, and are
@@ -71,13 +65,6 @@ const SPARSE: [&str; 3] = ["keys", "log", "records"];
 /// can push writes.
 const NO_ATTRIBUTES: &str = "* -text -eol -filter -ident -working-tree-encoding\n";
 
-/// The longest `keys/*` file read: a PEM key or a verifier key is under 200 bytes.
-const KEY_FILE_LIMIT: u64 = 16 * 1024;
-
-/// The longest chain of repositories followed: a succession into another repository is a rare
-/// event, and a chain longer than this is a loop or an attack.
-const MOST_REPOSITORIES: usize = 64;
-
 /// How a sync runs.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Options {
@@ -86,130 +73,6 @@ pub(crate) struct Options {
     pub verbose: bool,
     /// Now, in Unix seconds: what the sync record is stamped with.
     pub now: u64,
-}
-
-/// Where a source's clones and state are.
-#[derive(Clone, Debug)]
-pub(crate) struct Dirs {
-    /// `<cache>/<name>`: one clone per location under it.
-    pub cache: PathBuf,
-    /// `<state>/<name>`: the checkpoint last accepted, the key history, the sync record.
-    pub state: PathBuf,
-}
-
-impl Dirs {
-    pub(crate) fn of(config: &EvidenceConfig, name: &str) -> anyhow::Result<Dirs> {
-        Ok(Dirs {
-            cache: config.cache_dir()?.join(name),
-            state: config.source_state_dir(name)?,
-        })
-    }
-
-    /// Where the clone of `location` is kept.
-    fn clone_of(&self, location: &Location) -> PathBuf {
-        let hash = sha2::Sha256::digest(location.as_git_arg().as_bytes());
-        self.cache.join(hex(&hash))
-    }
-
-    /// Whether any clone of the source is kept that a sync accepted: evidence that it has synced
-    /// before, whatever its state directory now says.
-    pub(crate) fn has_clone(&self) -> bool {
-        state::has_accepted_clone(&self.cache)
-    }
-}
-
-/// The keys a source's chain is verified from: its pinned ones, or those trust on first use read,
-/// with where and when.
-#[derive(Clone, Debug)]
-pub(crate) struct StartKeys {
-    pub log: LogVkey,
-    pub attestation: AttestationKey,
-    pub first_use: Option<FirstUse>,
-}
-
-/// A source's chain, verified: what its answers come from.
-pub(crate) struct Opened {
-    pub repo: Repository,
-    pub keys: StartKeys,
-    /// The checkpoint of the chain's last log, the signed note as its clone holds it.
-    pub checkpoint: Vec<u8>,
-    /// Each location, and what was found there.
-    pub urls: Vec<UrlSeen>,
-    /// What a person is told: a mirror lagging, a succession followed, a first checkpoint
-    /// accepted, a key history that disagreed with the log.
-    pub notes: Vec<String>,
-}
-
-impl Opened {
-    /// The last log of the chain, which answers are as of.
-    pub(crate) fn last(&self) -> &VerifiedLog {
-        &self
-            .repo
-            .source()
-            .logs
-            .last()
-            .expect("a chain has a log")
-            .log
-    }
-
-    /// The chain's logs, each with its size.
-    fn logs_seen(&self) -> Vec<LogSeen> {
-        self.repo
-            .logs()
-            .iter()
-            .map(|l| LogSeen {
-                origin: l.origin().to_string(),
-                size: l.size(),
-            })
-            .collect()
-    }
-}
-
-/// Why a source could not be synced or opened.
-#[derive(Debug)]
-pub(crate) struct Failed {
-    /// Whether the source failed verification — it may be lying, and `docs/19` §6 gives that exit
-    /// 4 — rather than could not be reached or read.
-    pub refused: bool,
-    pub error: anyhow::Error,
-    /// What was found before it failed, for a person.
-    pub urls: Vec<UrlSeen>,
-}
-
-impl Failed {
-    fn refused(error: impl Into<anyhow::Error>) -> Failed {
-        Failed {
-            refused: true,
-            error: error.into(),
-            urls: Vec::new(),
-        }
-    }
-
-    fn unreadable(error: impl Into<anyhow::Error>) -> Failed {
-        Failed {
-            refused: false,
-            error: error.into(),
-            urls: Vec::new(),
-        }
-    }
-
-    /// A log that failed verification refuses the source; one that could not be read leaves it
-    /// unreadable.
-    fn of_log(e: LogError, context: String) -> Failed {
-        let refused = e.fails_verification();
-        Failed {
-            refused,
-            error: anyhow::Error::new(e).context(context),
-            urls: Vec::new(),
-        }
-    }
-}
-
-/// What a sync, or an offline open, found at a location: the clone to verify, or why there is
-/// none.
-enum Reached {
-    Copy { dir: PathBuf, note: Option<String> },
-    Missing(String),
 }
 
 /// A clone a sync changed, so that a refusal can put it back.
@@ -423,166 +286,6 @@ fn remove_path(path: &Path) -> anyhow::Result<()> {
     removed.with_context(|| format!("removing {}", path.display()))
 }
 
-/// A lock on one source, held while it is synced: two syncs of it — two jobs sharing a cache, a
-/// lookup syncing a stale source while `evidence sync` runs — take turns rather than write one
-/// clone and one state at once. Waited for, not refused: a sync that waits finds the other's work
-/// done, and fetches again from there.
-struct SourceLock {
-    file: std::fs::File,
-}
-
-impl SourceLock {
-    /// Held alone, by a sync, which changes the clones and the state.
-    fn take(dirs: &Dirs) -> anyhow::Result<SourceLock> {
-        std::fs::create_dir_all(&dirs.state)
-            .with_context(|| format!("creating {}", dirs.state.display()))?;
-        Self::lock(&dirs.state.join("lock"), libc::LOCK_EX)
-    }
-
-    /// Held beside other readers, by an open, which reads them: never while a sync is changing
-    /// them. `None` for a source with no state directory, which no sync has written yet — and an
-    /// open makes none, so that looking changes nothing on disk.
-    fn shared(dirs: &Dirs) -> anyhow::Result<Option<SourceLock>> {
-        if !dirs.state.is_dir() {
-            return Ok(None);
-        }
-        Self::lock(&dirs.state.join("lock"), libc::LOCK_SH).map(Some)
-    }
-
-    fn lock(path: &Path, how: libc::c_int) -> anyhow::Result<SourceLock> {
-        use std::os::fd::AsRawFd as _;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .with_context(|| format!("opening the lock {}", path.display()))?;
-        // SAFETY: the descriptor is owned by `file` and outlives the call.
-        if unsafe { libc::flock(file.as_raw_fd(), how) } != 0 {
-            return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("locking {}", path.display()));
-        }
-        Ok(SourceLock { file })
-    }
-}
-
-impl Drop for SourceLock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd as _;
-        // SAFETY: the descriptor is owned by `self.file`, which is still open here.
-        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
-
-/// What the state directory holds of a source before a sync or an open.
-struct Held {
-    accepted: Option<Vec<u8>>,
-    keys: Option<KeysFile>,
-    sync: Option<SyncRecord>,
-}
-
-impl Held {
-    fn read(dirs: &Dirs) -> Result<Held, StateError> {
-        Ok(Held {
-            accepted: state::read_checkpoint(&dirs.state)?,
-            keys: KeysFile::read(&dirs.state)?,
-            sync: SyncRecord::read(&dirs.state)?,
-        })
-    }
-
-    /// Whether the source has synced before: a clone a sync accepted is kept, a sync worked, or
-    /// one recorded keys trusted on first use — as [`state::synced_before`] reads it for the
-    /// verifier.
-    fn synced_before(&self, dirs: &Dirs) -> bool {
-        dirs.has_clone()
-            || self.sync.as_ref().is_some_and(|s| s.last_success.is_some())
-            || self.keys.as_ref().is_some_and(|k| k.first_use.is_some())
-    }
-
-    /// What of the state a source that has synced before should have and does not: the
-    /// checkpoint, and for one trusting on first use, the keys it read.
-    fn lost(&self, source: &Source, dirs: &Dirs) -> Option<Lost> {
-        if !self.synced_before(dirs) {
-            return None;
-        }
-        let first_use = self.keys.as_ref().and_then(|k| k.first_use.as_ref());
-        let lost = Lost {
-            checkpoint: self.accepted.is_none(),
-            keys: source.trust_on_first_use && first_use.is_none(),
-        };
-        (lost.checkpoint || lost.keys).then_some(lost)
-    }
-}
-
-/// What a source that has synced before has lost of its state. Only what is lost is started over
-/// when the loss is accepted: what survives still holds the log, so that losing one file never
-/// undoes what the other pins.
-struct Lost {
-    /// The checkpoint last accepted, which a rollback is caught against.
-    checkpoint: bool,
-    /// For a source trusting on first use, the keys its first sync read: its only pin.
-    keys: bool,
-}
-
-impl Lost {
-    /// What is gone, with the files.
-    fn said(&self, dirs: &Dirs) -> String {
-        let mut out = Vec::new();
-        if self.checkpoint {
-            out.push(format!(
-                "{} is not there",
-                dirs.state.join(state::CHECKPOINT).display()
-            ));
-        }
-        if self.keys {
-            out.push(format!(
-                "{} holds no keys first read from the repository, which this source trusts on \
-                 first use",
-                dirs.state.join(state::KEYS).display()
-            ));
-        }
-        out.join(", and ")
-    }
-
-    /// What accepting the loss does: what the log is held to afterwards, and what is kept.
-    fn accepting(&self, source: &Source, held: &Held) -> String {
-        let held_to = match &source.checkpoint {
-            Some(p) => format!("its initial checkpoint, {}", p.display()),
-            None => "itself, from the first checkpoint that verifies".into(),
-        };
-        let first_use = held.keys.as_ref().and_then(|k| k.first_use.as_ref());
-        match (self.checkpoint, self.keys) {
-            (true, false) => match first_use {
-                Some(f) => format!(
-                    "the log is then held only to {held_to}, and still under the keys first read \
-                     from {} at {}, which are kept",
-                    printable(&f.read_from),
-                    crate::rfc3339_from_unix(f.at)
-                ),
-                None => format!("the log is then held only to {held_to}"),
-            },
-            (false, _) => "its keys are then read again from `keys/` of the first location \
-                 reached, as a first contact reads them, and the checkpoint last accepted, which \
-                 is kept, must open under them and be extended: a log under other keys is refused"
-                .into(),
-            (true, true) => format!(
-                "its keys are then read again from `keys/` of the first location reached, as a \
-                 first contact reads them, and the log is held only to {held_to}"
-            ),
-        }
-    }
-}
-
-/// The initial checkpoint a source is configured with, read.
-fn initial(source: &Source) -> anyhow::Result<Option<Vec<u8>>> {
-    match &source.checkpoint {
-        Some(p) => read_checkpoint_file(p)
-            .map(Some)
-            .map_err(|why| anyhow!("the initial checkpoint {} {why}", p.display())),
-        None => Ok(None),
-    }
-}
-
 /// Sync one source (see the module's documentation), under its lock.
 pub(crate) fn sync(source: &Source, dirs: &Dirs, opt: Options) -> Result<Opened, Failed> {
     let _lock = SourceLock::take(dirs).map_err(Failed::unreadable)?;
@@ -719,6 +422,16 @@ pub(crate) fn sync(source: &Source, dirs: &Dirs, opt: Options) -> Result<Opened,
     // The checkpoint is accepted, so the clones it was read from are kept whatever follows: put
     // back behind it, they would be refused as a rollback of it.
     fetcher.keep();
+    // And a clone of a location the source no longer names — a mirror taken out of its `urls`, a
+    // successor's location a log-end no longer leads to — goes from the cache, which it would
+    // otherwise hold for ever, unread. Its state is the source's, and stays.
+    let reached: Vec<PathBuf> = source
+        .urls
+        .iter()
+        .map(|l| dirs.clone_of(l))
+        .chain(opened.urls.iter().map(|u| dirs.clone_of_arg(&u.url)))
+        .collect();
+    opened.notes.extend(forget_unconfigured(dirs, &reached));
     let recorded = SyncRecord {
         last_success: Some(opt.now),
         last_attempt: Some(opt.now),
@@ -740,6 +453,42 @@ pub(crate) fn sync(source: &Source, dirs: &Dirs, opt: Options) -> Result<Opened,
     Ok(opened)
 }
 
+/// Remove from the cache every clone of `dirs` that is not one of `keep`, saying which location each
+/// was a clone of. Only the directories a clone is kept in are looked at — named by a sha256 in
+/// hex — so a clone being made, which begins with a dot, is never taken for one.
+fn forget_unconfigured(dirs: &Dirs, keep: &[PathBuf]) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(&dirs.cache) else {
+        return Vec::new();
+    };
+    let mut said = Vec::new();
+    for e in entries.flatten() {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        let clone = name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit());
+        if !clone || keep.contains(&path) {
+            continue;
+        }
+        let was = match git::is_clone_at(&path) {
+            true => git::text(Some(&path), &["config", "--get", "remote.origin.url"])
+                .map(|u| printable(&git::scrub(&u)))
+                .unwrap_or_else(|_| "a location it no longer records".into()),
+            false => "a location it no longer records".into(),
+        };
+        said.push(match remove_path(&path) {
+            Ok(()) => format!(
+                "removed the clone of {was}, a location this source no longer names, from the \
+                 cache: {}",
+                path.display()
+            ),
+            Err(e) => format!(
+                "kept the clone of {was}, a location this source no longer names, since it could \
+                 not be removed: {e:#}"
+            ),
+        });
+    }
+    said
+}
+
 /// Record a sync that did not work: the attempt and why, leaving the last success, the checkpoint
 /// and the key history as they were. Best effort: a state directory that cannot be written is said
 /// by the sync's own failure.
@@ -755,390 +504,4 @@ fn record_failure(dirs: &Dirs, before: Option<SyncRecord>, failed: &Failed, now:
         r.urls = failed.urls.clone();
     }
     let _ = r.write(&dirs.state);
-}
-
-/// Open a source from its clones as they are, touching no network: the same verification a sync
-/// makes, against the state as it is. What `--offline` answers from, and what every command
-/// answers from after a sync.
-pub(crate) fn open(source: &Source, dirs: &Dirs) -> Result<Opened, Failed> {
-    let _lock = SourceLock::shared(dirs).map_err(Failed::unreadable)?;
-    let held = Held::read(dirs).map_err(Failed::unreadable)?;
-    if let Some(l) = held.lost(source, dirs) {
-        return Err(Failed::refused(anyhow!(
-            "`{}` has synced before and its state is gone: {}. Run `trigon evidence sync \
-             --accept-state-loss {}` if it was lost",
-            source.name,
-            l.said(dirs),
-            source.name
-        )));
-    }
-    let accepted = match held.accepted.clone() {
-        Some(a) => Some(a),
-        None => initial(source).map_err(Failed::unreadable)?,
-    };
-    let find = |l: &Location| -> Reached {
-        let dir = dirs.clone_of(l);
-        match git::is_clone_at(&dir) && !dir.join(".git").join(UNACCEPTED).exists() {
-            true => Reached::Copy { dir, note: None },
-            false => Reached::Missing("no clone of it is kept: it has never been synced".into()),
-        }
-    };
-    // Offline, a key trusted on first use is only ever the one a sync recorded: the clone's own
-    // `keys/` is never read as one here.
-    let recorded = held.keys.as_ref().is_some_and(|k| k.first_use.is_some());
-    if source.trust_on_first_use && !recorded {
-        return Err(Failed::unreadable(anyhow!(
-            "`{}` trusts on first use, and no sync has recorded the keys it read",
-            source.name
-        )));
-    }
-    let first: Vec<Reached> = source.urls.iter().map(find).collect();
-    let (keys, _) = start_keys(source, held.keys.as_ref(), &first, 0)?;
-    chain(source, &keys, first, &mut |l| find(l), accepted.as_deref())
-}
-
-/// The keys the chain is verified from: those the source pins; for a key it does not, the one its
-/// first sync read and recorded; and on a first sync of a source trusting on first use, the one in
-/// `keys/` of the first location reached, with a line saying so.
-fn start_keys(
-    source: &Source,
-    held: Option<&KeysFile>,
-    first: &[Reached],
-    now: u64,
-) -> Result<(StartKeys, Vec<String>), Failed> {
-    if let (Some(log), Some(attestation)) = (&source.log_key, &source.attestation_key) {
-        return Ok((
-            StartKeys {
-                log: log.clone(),
-                attestation: attestation.clone(),
-                first_use: None,
-            },
-            Vec::new(),
-        ));
-    }
-    let bad_state = |why: String| Failed::unreadable(anyhow!("{why}"));
-    if let Some(k) = held.filter(|k| k.first_use.is_some()) {
-        let log = match &source.log_key {
-            Some(l) => l.clone(),
-            None => k.log_vkey().map_err(bad_state)?,
-        };
-        let attestation = match &source.attestation_key {
-            Some(a) => a.clone(),
-            None => k.start_key().map_err(bad_state)?,
-        };
-        return Ok((
-            StartKeys {
-                log,
-                attestation,
-                first_use: k.first_use.clone(),
-            },
-            Vec::new(),
-        ));
-    }
-    // First contact: the keys the repository publishes, from the first location that could be
-    // reached, which every later sync is then pinned by.
-    let reached = source.urls.iter().zip(first).find_map(|(l, r)| match r {
-        Reached::Copy { dir, .. } => Some((l, dir)),
-        Reached::Missing(_) => None,
-    });
-    let Some((location, dir)) = reached else {
-        return Err(Failed::unreadable(anyhow!(
-            "`{}` trusts on first use, and no location of it could be reached to read its keys \
-             from",
-            source.name
-        )));
-    };
-    let files = DirFiles::new(dir);
-    let read = |path: &str| -> Result<String, Failed> {
-        let bytes = files
-            .read(path, KEY_FILE_LIMIT)
-            .map_err(|e| Failed::unreadable(anyhow!("{location}: {e}")))?
-            .ok_or_else(|| {
-                Failed::unreadable(anyhow!(
-                    "{location} has no {path}, so there is no key to trust on first use"
-                ))
-            })?;
-        String::from_utf8(bytes)
-            .map_err(|_| Failed::unreadable(anyhow!("{location}'s {path} is not text")))
-    };
-    let log = match &source.log_key {
-        Some(l) => l.clone(),
-        None => LogVkey::parse(read("keys/log.vkey")?.trim())
-            .map_err(|e| Failed::unreadable(anyhow!("{location}'s keys/log.vkey: {e}")))?,
-    };
-    let attestation = match &source.attestation_key {
-        Some(a) => a.clone(),
-        None => AttestationKey::from_pem(&read("keys/attestation.pub")?)
-            .map_err(|e| Failed::unreadable(anyhow!("{location}'s keys/attestation.pub: {e}")))?,
-    };
-    let said = format!(
-        "trusting on first use: the log key {log} and the attestation key {} were read from {}'s \
-         keys/ and recorded, and every answer from `{}` rests on them",
-        attestation.key_id(),
-        location,
-        source.name
-    );
-    Ok((
-        StartKeys {
-            log,
-            attestation,
-            first_use: Some(FirstUse {
-                read_from: location.as_git_arg().to_string(),
-                at: now,
-            }),
-        },
-        vec![said],
-    ))
-}
-
-/// The source's chain: its first repository from the copies of its own locations, and each
-/// repository it goes on in from copies `reach` finds of the locations the log-end names; each
-/// repository's copies held to one another, the largest answering; and the whole chain held to the
-/// checkpoint last accepted.
-fn chain(
-    source: &Source,
-    keys: &StartKeys,
-    first: Vec<Reached>,
-    reach: &mut dyn FnMut(&Location) -> Reached,
-    accepted: Option<&[u8]>,
-) -> Result<Opened, Failed> {
-    let mut urls = Vec::new();
-    let mut notes = Vec::new();
-    let mut parts: Vec<(PathBuf, VerifiedSource)> = Vec::new();
-    let start = pick(
-        &source.urls,
-        first,
-        &|dir| verify_source(dir, &keys.log, None),
-        &mut urls,
-        &mut notes,
-    )
-    .map_err(|mut f| {
-        f.urls = urls.clone();
-        f
-    })?;
-    parts.push(start);
-    loop {
-        let (_, part) = parts.last().expect("the chain has its first repository");
-        let Some(next) = part.continues_at.clone() else {
-            break;
-        };
-        let prev = part
-            .logs
-            .last()
-            .expect("a repository's part of a chain has a log")
-            .log
-            .clone();
-        if parts.len() >= MOST_REPOSITORIES
-            || parts
-                .iter()
-                .any(|(_, p)| p.logs.iter().any(|c| c.log.origin() == next.origin))
-        {
-            return Err(Failed::refused(anyhow!(
-                "`{}`'s log-end names `{}`, which this chain has reached before, or the chain \
-                 runs past {MOST_REPOSITORIES} repositories: a succession never returns to an \
-                 earlier log",
-                prev.origin(),
-                printable(&next.origin)
-            )));
-        }
-        let mut locations = Vec::new();
-        for u in &next.urls {
-            // A log-end names only locations anyone can clone, which its leaf was held to.
-            let l = Location::parse(u, Path::new("/"), None).map_err(|e| {
-                Failed::refused(anyhow!(
-                    "`{}`'s log-end names its successor at {e}",
-                    prev.origin()
-                ))
-            })?;
-            // A project's source is fetched over HTTPS only (`docs/19` §2.4), and the log-end
-            // naming where it goes on is signed by the key the project pins: without this, the
-            // thing under test would choose where this client connects, over ssh with the user's
-            // own identity or in plain text.
-            if let AddedBy::ProjectFile(file) = &source.added_by
-                && l.transport() != Transport::Https
-            {
-                return Err(Failed::refused(anyhow!(
-                    "`{}`'s log-end names its successor at {l} ({}), and `{}`, which the \
-                     project's own {} added, is fetched over HTTPS only: nothing is fetched from \
-                     there, and nothing it served is accepted",
-                    prev.origin(),
-                    l.transport(),
-                    source.name,
-                    file.display()
-                )));
-            }
-            locations.push(l);
-        }
-        let reached: Vec<Reached> = locations.iter().map(&mut *reach).collect();
-        let (dir, verified) = pick(
-            &locations,
-            reached,
-            &|dir| verify_continuation(&prev, dir),
-            &mut urls,
-            &mut notes,
-        )
-        .map_err(|mut f| {
-            f.urls = urls.clone();
-            f
-        })?;
-        notes.push(format!(
-            "`{}` ended, and its successor `{}` is followed into another repository, {}",
-            prev.origin(),
-            printable(&next.origin),
-            next.urls
-                .iter()
-                .map(|u| printable(u))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        parts.push((dir, verified));
-    }
-    let repo = Repository::chain(parts, &keys.attestation, accepted).map_err(|e| {
-        let mut f = Failed::of_log(
-            e,
-            format!(
-                "`{}`'s chain does not extend the checkpoint last accepted for it",
-                source.name
-            ),
-        );
-        f.urls = urls.clone();
-        f
-    })?;
-    let last = repo.source().logs.last().expect("a chain has a log");
-    let root = repo
-        .roots()
-        .last()
-        .expect("a chain has a repository")
-        .to_path_buf();
-    let checkpoint = DirFiles::in_repository(&root, &last.dir)
-        .read("checkpoint", 64 * 1024)
-        .map_err(|e| Failed::unreadable(anyhow!(e)))?
-        .ok_or_else(|| Failed::unreadable(anyhow!("the answering clone lost its checkpoint")))?;
-    Ok(Opened {
-        repo,
-        keys: keys.clone(),
-        checkpoint,
-        urls,
-        notes,
-    })
-}
-
-/// Verify the copy at each location of one repository with `verify`, hold every copy that
-/// verifies to every other (`docs/19` §6.1), and return the largest's clone and part of the chain.
-/// A copy that fails verification refuses the source; one that could not be reached or read is
-/// said, and the others answer.
-fn pick(
-    locations: &[Location],
-    reached: Vec<Reached>,
-    verify: &dyn Fn(&Path) -> Result<VerifiedSource, LogError>,
-    urls: &mut Vec<UrlSeen>,
-    notes: &mut Vec<String>,
-) -> Result<(PathBuf, VerifiedSource), Failed> {
-    let seen = |l: &Location, size: Option<u64>, state: &str, note: Option<String>| UrlSeen {
-        url: l.as_git_arg().to_string(),
-        transport: l.transport().to_string(),
-        size,
-        state: state.into(),
-        note,
-    };
-    let mut ok: Vec<(usize, PathBuf, VerifiedSource)> = Vec::new();
-    let mut missing = Vec::new();
-    let mut said: Vec<Option<String>> = vec![None; locations.len()];
-    for (i, (l, r)) in locations.iter().zip(reached).enumerate() {
-        match r {
-            Reached::Missing(why) => {
-                missing.push(format!("{l}: {why}"));
-                urls.push(seen(l, None, "unreachable", Some(why)));
-            }
-            Reached::Copy { dir, note } => match verify(&dir) {
-                Ok(part) => {
-                    said[i] = note;
-                    ok.push((i, dir, part));
-                }
-                Err(e) if e.fails_verification() => {
-                    return Err(Failed::of_log(
-                        e,
-                        format!("the evidence repository at {l} does not verify"),
-                    ));
-                }
-                Err(e) => {
-                    let why = printable(&format!("its log could not be read: {e}"));
-                    missing.push(format!("{l}: {why}"));
-                    urls.push(seen(l, None, "unreachable", Some(why)));
-                }
-            },
-        }
-    }
-    if ok.is_empty() {
-        return Err(Failed::unreadable(anyhow!(
-            "no location could be reached and read: {}",
-            missing.join("; ")
-        )));
-    }
-    let largest = {
-        let refs: Vec<Vec<&VerifiedLog>> = ok
-            .iter()
-            .map(|(_, _, p)| p.logs.iter().map(|c| &c.log).collect())
-            .collect();
-        // Every copy against every other, since two copies that each agree with a third can still
-        // disagree with each other after where the third ends.
-        for a in 0..refs.len() {
-            for b in a + 1..refs.len() {
-                if let Err(d) = compare_chains(&refs[a], &refs[b]) {
-                    let (la, lb) = (&locations[ok[a].0], &locations[ok[b].0]);
-                    return Err(Failed::refused(LogError::Equivocation {
-                        why: format!(
-                            "{la} and {lb} serve one source and are not one log: {}",
-                            d.why
-                        ),
-                        first_dir: la.to_string(),
-                        first: refs[a][d.first].checkpoint().to_string(),
-                        second_dir: lb.to_string(),
-                        second: refs[b][d.second].checkpoint().to_string(),
-                    }));
-                }
-            }
-        }
-        // Every pair is one chain, so the order is total, and the largest is the one nothing
-        // exceeds.
-        let ahead = |a: &[&VerifiedLog], b: &[&VerifiedLog]| {
-            compare_chains(a, b).is_ok_and(|o| o == std::cmp::Ordering::Greater)
-        };
-        let mut largest = 0;
-        for k in 1..refs.len() {
-            if ahead(&refs[k], &refs[largest]) {
-                largest = k;
-            }
-        }
-        let reach = |r: &[&VerifiedLog]| {
-            r.last()
-                .map_or((String::new(), 0), |l| (l.origin().to_string(), l.size()))
-        };
-        let (top_origin, top) = reach(&refs[largest]);
-        for (k, (i, _, _)) in ok.iter().enumerate() {
-            let l = &locations[*i];
-            let behind = ahead(&refs[largest], &refs[k]);
-            let (origin, size) = reach(&refs[k]);
-            if behind {
-                notes.push(format!(
-                    "{l} is lagging: it serves `{origin}` at {size} leaves, and {} serves \
-                     `{top_origin}` at {top}",
-                    locations[ok[largest].0]
-                ));
-            }
-            let state = match (k == largest, behind) {
-                (true, _) => "answering",
-                (false, true) => "lagging",
-                (false, false) => "in agreement",
-            };
-            urls.push(seen(l, Some(size), state, said[*i].take()));
-        }
-        largest
-    };
-    let (_, dir, part) = ok.swap_remove(largest);
-    Ok((dir, part))
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }

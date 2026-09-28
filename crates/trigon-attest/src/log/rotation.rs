@@ -78,6 +78,32 @@ impl KeyHistory {
         }
     }
 
+    /// A history as a sync recorded it (`crate::state::KeysFile`): for a reader that cannot follow
+    /// the key changes itself because it does not hold every leaf — `--remote`, which reads only
+    /// the leaves it proves. Held to the shape [`Self::follow`] leaves: the first key from no
+    /// change, each later one from a change after the last, each retired by the change that made
+    /// the next and the last never.
+    pub fn from_epochs(epochs: Vec<KeyEpoch>) -> Result<KeyHistory, LogError> {
+        let bad = |why: &str| LogError::Malformed(format!("this key history is refused: {why}"));
+        let Some(first) = epochs.first() else {
+            return Err(bad("it has no key"));
+        };
+        if first.from.is_some() {
+            return Err(bad("its first key was made current by a key change"));
+        }
+        for pair in epochs.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            match (a.until, b.from) {
+                (Some(u), Some(f)) if u == f && a.from.is_none_or(|af| af < f) => {}
+                _ => return Err(bad("its keys do not follow one another, change by change")),
+            }
+        }
+        if epochs.last().is_some_and(|e| e.until.is_some()) {
+            return Err(bad("its last key is retired, and nothing took its place"));
+        }
+        Ok(KeyHistory { epochs })
+    }
+
     /// Follow every key-change leaf of a verified source, in order, from the pinned key. Returns
     /// the history and the changes that did not apply, with where each was.
     pub fn from_source(

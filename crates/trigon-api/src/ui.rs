@@ -234,11 +234,13 @@ async fn run_boot(api: &Api, id: &str, public: bool, q: &DocQuery) -> serde_json
     };
     let member = member_boot(api, &record, q).await;
     let publication = entry.publication;
+    let published = crate::routes::published_view(&record);
     serde_json::json!({
         "health": health_boot(api, public),
         "run": {
             "entry": entry.shown(public),
             "record": crate::index::record_shown(record, publication, public),
+            "published": published,
         },
         "diff": diff,
         "member": member,

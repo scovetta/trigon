@@ -5288,3 +5288,222 @@ named for. Each code defect now has a test that fails without its fix.
 held only to its configured checkpoint as §8 describes a fresh CI runner, rather than as a state
 lost. Phase 6a's brief says a source whose clone exists and whose state is missing is reported, not
 silently recreated, and that is what is built; the documents now say to keep the two together.
+
+### 3.103 `trigon lookup`, `trigon check` against evidence sources, the falsifying command, and `--remote`
+
+`docs/19` §10 phase 6, second half, on 2026-09-28: the commands that answer from the clones phase 6a
+keeps, the lockfile parser keeping what a lockfile pins, `--remote`, `serve`'s view of a published
+record, and the phase's done-when.
+
+**What changed.**
+
+- **`trigon lookup <key> [--source <name>]… [--offline | --remote] [--output text|json]`**
+  (`crates/trigon/src/evidence/lookup.rs`). The key is npm's `integrity` string, `sha256:`,
+  `sha512:` or `sha1:` with hex, a purl with or without its version, or a file, whose three digests
+  are computed. Every source is made ready once by `evidence::ready` — a stale one synced first and
+  said to be — and the key resolved over its verified leaves (`Repository::lookup`), never `index/`.
+  Each source answers for itself, labelled with its name, the file that added it, the keys it rests
+  on and the checkpoint it answered from; every record is printed with the §4.2 fields as signed; a
+  superseded one is struck through (`~~…~~` without colour) with the record that superseded it, both
+  leaves and the reason; a deleted one says so without its leaf's outcome; a failed one says why; a
+  record found by sha1 alone says sha1 is collision-broken; sources whose claims differ are said to
+  disagree, and neither is taken over the other. §6's exit code, from `evidence::exit_code`.
+- **`trigon check <lockfile>`** answers from the evidence sources (`evidence/check.rs`); `--store
+  <path>` is the old check, and none of the new flags go with it. One `askers` call makes every
+  source ready before the first package, so a lockfile costs one sync and no request per package.
+  Each package is looked up by every digest its lockfile declares that a record is filed under —
+  sha512, then sha256, then sha1 — and by its purl only where no digest found a record; a purl whose
+  records are all about another artifact than those digests is never checked, with the record found
+  said. A package's status is the most severe answer of the sources that answered, never checked
+  only where none of them holds a record, `unknown` where none answered, as `exit_code` weighs it.
+  `--min` is `Match::is_at_least`; `--max-risk` holds a normalized verdict to the riskiest tier its
+  `provenanceCap.maxRiskApplied` signs (`Answer::AboveMaxRisk`, exit 3,
+  `VerifiedRecord::max_risk_applied`, `Lookup::answer_under`). `--require <name>` makes a source's
+  unknown an error as `required = true` and `TRIGON_EVIDENCE_REPO` do. Text lists the most severe
+  packages first with every source's answer, falsifying command and dispute pointer; JSON and SARIF
+  carry each source's records per package. Any error before an answer is exit 5, `clap`'s refusals
+  included (`exits_as_section_6`).
+- **The lockfile parser** (`trigon_core::lockfile`) keeps what a lockfile pins: `Package::digests`,
+  each a `DeclaredDigest` in hex — npm's `integrity`, every hash in it, in v1 and v2/v3 lockfiles;
+  every `--hash` of a requirement; an SBOM's `checksums` — and npm's `resolved`. Requirements are
+  read as pip reads them: a line ending in `\` goes on in the next, a comment begins at a `#` after
+  whitespace, and the words up to the first beginning with `-` are the requirement, the rest its
+  options. `flask==3.0.0 --hash=sha256:…` used to parse as version `3.0.0 --hash=sha256:…`, and a
+  pin pip-compile continues onto hash lines as version `8.1.7 \`. The SPDX reader keeps every
+  package, whatever its ecosystem and whether it has a purl.
+- **`verify-attestation --lookup sha256:<subject> [--predicate] [--origin] [--rerun-comparison
+  --upstream <file> [--rebuild <file>]]`** (`evidence/rerun.rs`), the form of every verdict's
+  falsifying command. It resolves the current record only in a source whose chain holds a log of
+  `--origin` — none is exit 4 — through the log and its supersessions, reads each evidence file the
+  record names from the clone's working tree or its objects (`git cat-file` at `HEAD`, which fetches
+  a blob a partial clone does not hold from its remote, and the report says so), and takes the
+  rebuilt artifact from `--rebuild`, or, under `rebuilt_artifacts = "github-release"` with none
+  given, from the release asset `sha256-<hex>` of the source's GitHub repository, listed and
+  downloaded without a token and held to the verdict's digest. It then reports as `--record` does:
+  `verify_record::report`, which now takes a borrowed `Reading` and an evidence reader, and returns
+  the report for printing. In the verifier build `--lookup` is refused, exit 5, since it fetches.
+- **`verify-attestation --record <file> --source <name>`** without `--evidence` reads the source's
+  clones, in either build: the code that opens a source's clones moved from `evidence/sync.rs` to
+  `crates/trigon/src/clones.rs`, which both builds compile, and its check that a clone is one a sync
+  accepted no longer runs `git`. A record logged in a successor elsewhere is checked where it is
+  logged, and a source that is stale or frozen answers unknown for the artifact now.
+- **`--remote`** (`evidence/remote.rs`) reads
+  `https://raw.githubusercontent.com/<owner>/<repo>/HEAD/`, or `TRIGON_EVIDENCE_RAW_BASE` (HTTPS, or
+  loopback): the checkpoint under the pinned key, held to the one last accepted by
+  `verify_extension_from_tiles`; the last leaf, proven, for the frozen clock and a log-end; each
+  successor on github.com; the index file for each key; each record; and each leaf proven by
+  `prove_inclusion_from_tiles` and held to the record by `check_record`, with the key history the
+  last sync recorded (`KeysFile::history`, `KeyHistory::from_epochs`) and its evidence unchecked. An
+  entry it cannot prove fails verification; one proven to be another key's is not answered. It
+  prints the three caveats of §6, and refuses a source with no github.com HTTPS URL, exit 5.
+  `Lookup::resolve` is public for it.
+- **`trigon serve`**: `GET /v1/runs/{id}` and the run page's boot island carry `published` —
+  repository, commit, record digest and path, leaf and log — from `RunRecord.published`, and the run
+  page shows it as a panel. `GET /v1/artifacts/{alg}:{digest}` matches the digest of the algorithm
+  asked for, `sha256`, `sha512` or `sha1`, a bare digest by its length, over every run
+  (`Index::for_artifact`); it discarded the algorithm and compared whatever hex it was given with
+  the sha256, over the newest 500 rows, so an npm lockfile's sha512 matched nothing and an older run
+  read as never checked.
+- **`evidence sync`** removes, from the cache only, the clone of every location a source no longer
+  names — none of its URLs and no successor its chain reaches — and says which location each was.
+- **Threat model**: P43–P45, D35–D36; D32 and D34 extended to `lookup` and `check`; the side effects
+  of a sync by `lookup` and `check`, the evidence fetched on demand, `--remote`'s requests and the
+  anonymous release listing; `lookup`, `check`, `--remote` and `--lookup` in the trust table and the
+  matrix; the scope and the conditions updated; the sidecar regenerated.
+
+**Decided here, and why.**
+
+- **Digest first, and a purl for another artifact is no answer.** A lockfile's integrity names the
+  artifact it installs, and a record is about an artifact: a record found by purl about other bytes
+  says nothing about the ones pinned, and reporting its verdict would pass a swapped tarball.
+- **An exact verdict meets any `--max-risk`.** Its raw digests matched, so no transform was needed,
+  though its statement still signs the passes that ran — which is what the test found (below).
+  `docs/05` §1 names `Exact` and `Normalized` with `risk <= Structural` as separate demands.
+- **`--remote` reads the key history the last sync recorded**, since it holds no leaves to follow a
+  key change through, where that history starts at the keys pinned now; with no state, or a pin
+  changed since, only the pinned key, and a record under a key changed since fails verification, as
+  the report and D36 say. The chain is followed through log-ends by proving each log's last leaf,
+  and each successor's first leaf is held to be its log-continuation, so a succession is not
+  missed, nor followed into a log not bound to it; one into a repository not on github.com answers
+  unknown rather than past it.
+- **Two sources of one origin and one log key are one log configured twice**: `--lookup` checks a
+  record found in both once, and looks for its release asset in the GitHub repository that holds
+  its leaf. Two of one origin and different keys are not one log (below).
+- **A consumer's `[publish] rebuilt_artifacts` says whether assets are fetched.** It is D4's
+  setting, and the only one there is; a per-source setting would be the finer answer (below).
+- **`check` reads nothing a lockfile names**: `resolved` is kept and shown, never followed.
+
+**What this does not do.**
+
+- **The phase 5 spike** is still not run: it needs a scratch repository of the owner's naming.
+- **`--remote` over GitHub itself** is not tested, per the rule that no test touches the network;
+  every `--remote` test reads a published repository's working tree from a server on `127.0.0.1:0`,
+  and the release-asset test lists and downloads from one too.
+- **The standalone client** (phase 9) waits on D3.
+
+**Found on the way.**
+
+- **Phase 6a's partial clones were not partial in its tests.** A `file://` remote refuses `--filter`
+  unless `uploadpack.allowFilter` is set, and says so only as a warning, so every test clone held
+  `evidence/` in its objects and the on-demand fetch had never run. The falsifying-command test now
+  serves filters as GitHub does, and asserts the fetch happens and is said.
+- **`git cat-file --batch-check` with lazy fetching off dies** at the first missing blob of a
+  partial clone — `fatal: could not fetch … from promisor remote` — instead of printing `missing`,
+  so asking whether a blob is held reported every evidence file unreadable. It is asked per blob
+  with `git cat-file -e`, whose exit answers (`git::blobs_held`).
+- **A package's status let one source's never checked outweigh another's verdict**: `most_severe`
+  over every answer ranks never checked (2) above a pass (0). It is weighed as `exit_code` weighs it
+  now (`lookup::weighed`); the two-source test caught it.
+- **An exact verdict signs `maxRiskApplied`** of the passes that ran, `metadata` in the fixtures, so
+  a first `--max-risk structural` read every exact verdict as above the cap.
+- **A wrong rebuilt file is not a refutation**: re-deriving from bytes that are not the artifact the
+  verdict names is a check not made, exit 5, as the record form already said; the test holds the
+  lookup form to it, and refutes the published comparison report instead, altered in a later commit,
+  which the fetched evidence fails at its digest, exit 4.
+- **`lookup` and `check` exited 1 for an error before an answer**, `anyhow`'s default; §6 gives the
+  tool failing 5, and a CI job that treats 1 as a divergence would read a mistyped source as one.
+
+**Left for the owner.**
+
+- **Whether `rebuilt_artifacts` should also be a per-source setting.** A consumer reads the one
+  `[publish]` setting to decide whether `--lookup` fetches a release asset, which fits a consumer
+  who also publishes and asks one repository; one asking another operator's repository would want
+  the setting of that source.
+- **Whether `--remote` should refuse a source it cannot hold to a key history**, rather than answer
+  under the pinned key alone and say so. Built: it answers, fails any record under a changed key,
+  and says why.
+- **The release notes.** §6 has the change of what a bare `trigon check` means said in the release
+  notes; there are none yet, so it is said in the command's help and `docs/using-trigon.md`, and
+  the first release notes written carry it. The review restored §6's wording, which this phase had
+  changed to say only the help and the guide.
+
+**Review, and what it changed.** A review of this phase found these, each fixed with a test that
+fails without the fix (`crates/trigon/tests/lookup.rs` unless named):
+
+- **`--remote` called a request it could not complete an attack.** A record, entry bundle or tile
+  that could not be fetched — a timeout, a 5xx, GitHub's rate limit — failed verification, exit 4,
+  where §4.2 has a failed `--remote` lookup answer unknown; only the index file's own failure did.
+  `Remote::record` now tells what cannot be read (`LogError::fails_verification` false, as `open`
+  already did) from a proof that does not prove, and the first leaves the source unknown for that
+  question (`remote_answers_unknown_for_what_it_cannot_read_and_holds_to_the_state`).
+- **`--remote` read every file at whatever commit GitHub served then**, so an index read after a
+  publish listed a record at a leaf past the checkpoint read before it, and an honest record failed
+  verification. An entry past the checkpoint of the log still being written is now unknown for that
+  question — a race, or an altered index, which could hide the key by deleting its index file
+  anyway — and past an ended log's final checkpoint still fails. Reading every file at one commit
+  would need a request to GitHub's API, a host §6 does not name for `--remote`.
+- **`--remote` followed a log-end into its successor without its log-continuation leaf**, which
+  §6.1 and §8 require and a sync checks. The successor's first leaf is proven and held to the checks
+  `follow` makes, now shared as `log::check_continuation` and `log::successor_vkey`
+  (`remote_follows_a_succession_only_through_its_continuation`).
+- **`--remote` ignored a refused sync, and a re-pinned attestation key.** A source whose last sync
+  failed verification answered over HTTPS, and a key history recorded under a pin the user had
+  changed kept accepting records under the key pinned away from. Both are held now as a clone is.
+- **`check` merged digests that name different artifacts.** Two entries of one name and version
+  with different `integrity` — a nested copy from another registry, a substitute — were one package
+  answered by either's record (`dedupe`); they are two packages now, merged only where one's digests
+  are part of the other's. And each declared digest was looked up alone: a record found by sha1
+  whose sha512 contradicted the declared one answered for the package. A record answers now only
+  where the strongest digest the lockfile declares that the record carries is its own, as npm
+  installs by the strongest in `integrity`; a requirement's `--hash`es stay alternatives, any one of
+  which pip installs (`Package::alternatives`, `lookup::pinned_by`). A purl's record whose subject
+  carries none of the declared algorithms — a PyPI record and an SBOM's sha1 — was called another
+  artifact's; it answers now, and says it could not be compared
+  (`check_answers_for_the_artifact_the_lockfile_pins`).
+- **An SBOM's purl without a version** was looked up as every version of the package, and two
+  versions of it were one package: the version `versionInfo` gives is built into the purl
+  (`trigon_core::lockfile`), and a purl with no version at all is looked up by its digests alone.
+- **A requirements comment ending in `\`** took the next requirement into the comment, out of the
+  check; pip never continues a comment line (`trigon_core::lockfile`).
+- **SARIF filed only failing packages, and filed a package failing for a source under what the
+  other sources said** — `trigon/below-threshold`, a warning, for a package a required source's
+  silence failed with exit 4. Every package is filed now, `trigon/pass` for one that passes, and a
+  source that fails a package adds `trigon/source-refused` or `trigon/required-source-unknown`, an
+  error; `unknown` is an error too. The text and JSON name the failing source beside the answer.
+- **`--require` of a source `--source` leaves out** was checked to exist and never asked, so the
+  check passed without it; it is refused, exit 5.
+- **`verify-attestation --lookup` took any source that named the origin**, so a project's
+  `.trigon/evidence.toml` could give its own log key the origin's name and answer the falsifying
+  command beside, or instead of, the source that logged it. A project's source that gives the
+  origin to another key than the user's own sources is set aside and said to be; two of the user's
+  own that disagree are refused as ambiguous
+  (`the_falsifying_command_is_answered_in_its_origins_log_alone`). It synced every stale source,
+  not only the origin's, and it dropped every other source's answer once one held a current record
+  — a required source's silence, a withdrawal in a fresher mirror; both are weighed now, as `lookup`
+  weighs them (`the_falsifying_command_weighs_every_source_it_asks`).
+- **The rebuilt artifact was looked for in the source's own repository**, never in the successor
+  elsewhere whose publisher uploaded it; it is looked for in the repository that holds the record's
+  leaf. It was downloaded to a predictable path in the shared temporary directory and hashed after
+  it was written; it is downloaded into a `0700` directory made for it and hashed as it is written
+  (`rerun::tests`). A void asked to re-derive exited 5; it is reported as the void it is, exit 3
+  (`the_falsifying_command_across_a_succession_and_for_a_void`).
+- **`lookup` struck a superseded record through without its §4.2 fields**; they are shown, struck
+  through too, since §8 never shows an outcome without its dispute pointer and falsifying command.
+- **Of two current verdicts one above `--max-risk` and one caveated**, the order of the log decided
+  which answered, and a caveated one logged later passed the check. An answer above the cap ranks
+  above every outcome but a divergence (`crates/trigon-attest`,
+  `of_two_current_verdicts_one_above_the_risk_cap_answers_whatever_their_order`).
+- **The configuration test** covers every way a source is configured with every location form now,
+  and a check the environment's required source fails. It found that a source whose URL changed
+  since its last sync, fresh, answered unknown — no location it named had a clone — until synced by
+  hand; a command syncs such a source first now, as it does one never synced.

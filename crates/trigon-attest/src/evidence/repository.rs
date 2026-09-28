@@ -328,6 +328,18 @@ impl Repository {
     /// the one the log holds for its digest; a record the log holds no leaf for is unlogged, and
     /// one it holds at two is logged twice, which fails.
     pub fn verify_record(&self, bytes: &[u8]) -> Result<VerifiedRecord, RecordFailure> {
+        self.verify_record_reading(bytes, None)
+    }
+
+    /// [`Self::verify_record`], with the evidence the record names read from `evidence` where one
+    /// is given, rather than from the directory of the repository that holds its log: what
+    /// `verify-attestation --lookup` reads a partial clone's `evidence/` through, which is in
+    /// git's objects and not in its working tree.
+    pub fn verify_record_reading(
+        &self,
+        bytes: &[u8],
+        evidence: Option<&dyn LogFiles>,
+    ) -> Result<VerifiedRecord, RecordFailure> {
         let digest = Record::digest_of(bytes);
         if let Some(leaves) = self.twice.get(&digest) {
             return Err(RecordFailure::LoggedTwice {
@@ -337,8 +349,8 @@ impl Repository {
         }
         let leaf = self.record_leaves().find(|(_, l)| l.record == digest);
         let origin = leaf.map_or("", |(pos, _)| self.origin(pos));
-        let files = leaf.map_or(&self.parts[0].files, |(pos, _)| self.files_of(pos));
-        check_record(bytes, leaf, origin, &self.keys, files, None)
+        let own: &dyn LogFiles = leaf.map_or(&self.parts[0].files, |(pos, _)| self.files_of(pos));
+        check_record(bytes, leaf, origin, &self.keys, evidence.unwrap_or(own), None)
     }
 
     /// Every record the log holds for `key`, each read from `records/` and verified, a missing one

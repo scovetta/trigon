@@ -423,3 +423,120 @@ fn a_record_whose_index_entries_are_removed_or_altered_is_still_found() {
         Answer::Outcome(Match::Exact)
     );
 }
+
+/// `--max-risk` holds a verdict to the riskiest stabilizer it was reached through, as its
+/// statement signs it (`docs/19` §6, `docs/05` §1): above the cap it is a result below the
+/// threshold, exit 3; an exact verdict needed no transform and meets any cap; a divergence fails a
+/// check whatever the cap.
+#[test]
+fn a_verdict_is_held_to_the_risk_it_was_reached_through() {
+    use trigon_core::RiskTier;
+    let r = open_golden();
+    let a = r.lookup(&Key::parse("pkg:npm/demo-a@1.0.0").unwrap());
+    let v = a.current().next().unwrap().verified().unwrap();
+    let risk = v.max_risk_applied().expect("a v2 verdict signs its riskiest pass");
+    let risk = risk.expect("a normalized verdict applied a pass");
+    assert!(risk > RiskTier::Structural, "{risk:?}");
+    let capped = a.answer_under(FLOOR, Some(RiskTier::Structural));
+    assert_eq!(
+        capped,
+        Answer::AboveMaxRisk {
+            outcome: Match::Normalized,
+            risk: Some(risk)
+        }
+    );
+    assert_eq!(capped.exit_code(FLOOR), 3);
+    assert!(capped.to_string().contains("above the --max-risk asked for"), "{capped}");
+    assert_eq!(a.answer_under(FLOOR, Some(risk)), Answer::Outcome(Match::Normalized));
+    assert_eq!(a.answer_under(FLOOR, None), Answer::Outcome(Match::Normalized));
+    // Exact: the raw digests matched and no transform was needed, whatever passes ran, so it
+    // meets any cap — though its statement signs the passes that ran.
+    let e = r.lookup(&Key::parse("pkg:npm/demo-e@1.0.0").unwrap());
+    assert!(
+        e.current()
+            .next()
+            .unwrap()
+            .verified()
+            .unwrap()
+            .max_risk_applied()
+            .is_some()
+    );
+    assert_eq!(
+        e.answer_under(FLOOR, Some(RiskTier::Structural)),
+        Answer::Outcome(Match::Exact)
+    );
+    // A divergence stays a divergence.
+    let b = r.lookup(&Key::parse("pkg:npm/demo-b@1.0.0").unwrap());
+    assert_eq!(
+        b.answer_under(FLOOR, Some(RiskTier::Structural)),
+        Answer::Outcome(Match::Divergent)
+    );
+}
+
+/// Two current verdicts for one subject, one above `--max-risk` and one caveated within it: the
+/// more severe answers (`docs/19` §3), which is the one above the cap under any floor, whichever
+/// the log holds first. Both exit 3 under the highest floor, and `most_severe` took the last of
+/// equals, so a caveated verdict logged after one above the cap answered, and passed the check.
+#[test]
+fn of_two_current_verdicts_one_above_the_risk_cap_answers_whatever_their_order() {
+    use trigon_attest::log::LeafOutcome;
+    use trigon_core::RiskTier;
+    let r = open_golden();
+    let a = r.lookup(&Key::parse("pkg:npm/demo-a@1.0.0").unwrap());
+    let above = a.current().next().unwrap().clone();
+    assert!(
+        above
+            .verified()
+            .unwrap()
+            .max_risk_applied()
+            .flatten()
+            .is_some_and(|risk| risk > RiskTier::Structural)
+    );
+    // The same subject, caveated, through a structural pass alone, at a later leaf.
+    let mut caveated = above.clone();
+    caveated.pos.index += 100;
+    caveated.leaf.outcome = Some(LeafOutcome::NormalizedWithCaveats);
+    let RecordState::Verified(v) = &mut caveated.state else {
+        panic!("a current record is verified")
+    };
+    v.pos = caveated.pos;
+    v.leaf.outcome = Some(LeafOutcome::NormalizedWithCaveats);
+    v.statement.predicate["provenanceCap"]["maxRiskApplied"] =
+        serde_json::to_value(RiskTier::Structural).unwrap();
+    for found in [
+        vec![above.clone(), caveated.clone()],
+        vec![caveated.clone(), above.clone()],
+    ] {
+        let both = trigon_attest::evidence::Lookup {
+            key: a.key.clone(),
+            found,
+        };
+        assert_eq!(both.current().count(), 2);
+        let got = both.answer_under(FLOOR, Some(RiskTier::Structural));
+        assert!(
+            matches!(
+                got,
+                Answer::AboveMaxRisk {
+                    outcome: Match::Normalized,
+                    ..
+                }
+            ),
+            "{got}"
+        );
+        assert_eq!(got.exit_code(FLOOR), 3);
+    }
+    assert_eq!(
+        Answer::most_severe(
+            [
+                Answer::AboveMaxRisk {
+                    outcome: Match::Normalized,
+                    risk: None
+                },
+                Answer::Outcome(Match::NormalizedWithCaveats),
+            ],
+            Match::Exact
+        )
+        .exit_code(FLOOR),
+        3
+    );
+}

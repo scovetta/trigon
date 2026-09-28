@@ -5,7 +5,11 @@
 //! For one source, with its keys and the checkpoint its log must extend taken from `--source
 //! <name>` — `evidence.toml` and the state directory — or given as `--log-vkey`,
 //! `--attestation-key` and `--checkpoint`. The directory is a clone or any copy of one; nothing
-//! here opens a socket, and cloning is the default build's job.
+//! here opens a socket, and cloning is the default build's job. **Without `--evidence`**, `--source
+//! <name>` reads the source's own clones, as a sync left them, and follows its chain across every
+//! repository it has gone on in, as the sync did ([`crate::clones::open`]), so a record logged in a
+//! successor elsewhere is checked where it is logged and a withdrawal logged there is seen.
+//! `verify-attestation --lookup` finds its record and then reports on it here too.
 //!
 //! What it checks, in order: the source's log, whole, from `<dir>` (`trigon_attest::evidence::
 //! Repository::open`); the record against its leaf, the key its source had at that leaf, and the
@@ -31,10 +35,12 @@ use trigon_attest::config::{
     AddedBy, Env, EvidenceConfig, read_attestation_key, read_checkpoint_file,
 };
 use trigon_attest::evidence::{
-    Answer, EvidenceState, Key, Lookup, RecordFailure, RecordKind, Repository, VerifiedRecord,
+    Answer, EvidenceState, Key, Lookup, RecordFailure, RecordKind, Repository, Standing,
+    VerifiedRecord, read_evidence_from,
 };
 use trigon_attest::location::printable;
-use trigon_attest::log::{Checkpoint, LogError, SignedNote};
+use trigon_attest::log::{Checkpoint, LogError, LogFiles, SignedNote};
+use trigon_attest::state::SyncRecord;
 use trigon_attest::{
     AttestationKey, DisputePointer, FalsifyingCommand, LogVkey, Record, Rederived, ReportCheck,
 };
@@ -68,29 +74,39 @@ pub(crate) fn usage(message: &str) -> ! {
     std::process::exit(CANNOT)
 }
 
-/// Whether a command line is this form — `verify-attestation` given `--record` — read from the
-/// raw arguments, so that `main` knows, when `clap` refuses them, that they exit 5 and not 2.
+/// Whether a command line is one of `docs/19` §6's forms — `verify-attestation` given `--record`
+/// or `--lookup` — read from the raw arguments, so that `main` knows, when `clap` refuses them,
+/// that they exit 5 and not 2.
 pub(crate) fn named(args: impl IntoIterator<Item = OsString>) -> bool {
     let mut after = args
         .into_iter()
         .skip(1)
         .skip_while(|a| a != "verify-attestation");
+    let flag = |a: &OsString, f: &str| {
+        a == f || a.to_str().is_some_and(|s| s.starts_with(&format!("{f}=")))
+    };
     after.next().is_some()
         && after
             .take_while(|a| a != "--")
-            .any(|a| a == "--record" || a.to_str().is_some_and(|s| s.starts_with("--record=")))
+            .any(|a| flag(&a, "--record") || flag(&a, "--lookup"))
 }
 
 /// Check the record, print the report, and exit with its code.
 pub(crate) fn run(args: Args<'_>) -> anyhow::Result<()> {
-    let code = match check(&args) {
+    finish(check(&args), args.output)
+}
+
+/// Exit with a report's code, or say why the command stopped before it had a record to report on
+/// and exit with that: the end of the record form and of `--lookup` alike.
+pub(crate) fn finish(result: Result<i32, Stop>, output: OutputFormat) -> anyhow::Result<()> {
+    let code = match result {
         Ok(code) => code,
         Err(Stop { code, error }) => {
             crate::report_fault(&error);
             eprintln!("Error: {error:?}");
             // A JSON reader gets a document on every exit, and most of all on the ones §6 cares
             // about: an equivocation or a log that does not verify stops before any record is read.
-            if args.output == OutputFormat::Json {
+            if output == OutputFormat::Json {
                 println!("{}", pretty(&stopped(code, &error)));
             }
             code
@@ -103,14 +119,23 @@ pub(crate) fn run(args: Args<'_>) -> anyhow::Result<()> {
 }
 
 /// Why the command stopped before it had a record to report on, and the exit code that says so.
-struct Stop {
-    code: i32,
-    error: anyhow::Error,
+pub(crate) struct Stop {
+    pub code: i32,
+    pub error: anyhow::Error,
 }
 
-fn cannot(error: impl Into<anyhow::Error>) -> Stop {
+/// The tool could not check at all: exit 5.
+pub(crate) fn cannot(error: impl Into<anyhow::Error>) -> Stop {
     Stop {
         code: CANNOT,
+        error: error.into(),
+    }
+}
+
+/// The source failed verification, or cannot say what it says now: exit 4.
+pub(crate) fn failed(error: impl Into<anyhow::Error>) -> Stop {
+    Stop {
+        code: FAILED,
         error: error.into(),
     }
 }
@@ -257,13 +282,18 @@ fn pins(a: &Args<'_>) -> Result<Pinned, Stop> {
 /// 5 whatever the record turns out to be (§6: 5 before 4): both artifacts named and readable, and
 /// none of its files given without it.
 fn rerun_arguments(a: &Args<'_>) -> Result<(), Stop> {
-    let f = a.files;
+    rerun_files(a.rerun, a.files, true)
+}
+
+/// [`rerun_arguments`], for any form: `rebuild_needed` is false where the rebuilt artifact can be
+/// had another way — `--lookup`, from the release asset a record names.
+pub(crate) fn rerun_files(rerun: bool, f: crate::Rerun<'_>, rebuild_needed: bool) -> Result<(), Stop> {
     let given = [
         ("--upstream", f.upstream),
         ("--rebuild", f.rebuild),
         ("--stabilizers", f.stabilizers),
     ];
-    if !a.rerun {
+    if !rerun {
         return match given.iter().find(|(_, p)| p.is_some()) {
             Some((flag, _)) => Err(cannot(anyhow!(
                 "{flag} is read by --rerun-comparison, and goes with it: without it the claim is \
@@ -272,7 +302,7 @@ fn rerun_arguments(a: &Args<'_>) -> Result<(), Stop> {
             None => Ok(()),
         };
     }
-    if f.upstream.is_none() || f.rebuild.is_none() {
+    if f.upstream.is_none() || (rebuild_needed && f.rebuild.is_none()) {
         return Err(cannot(anyhow!(
             "--rerun-comparison needs both --upstream <file>, the published artifact, and \
              --rebuild <file>, the rebuilt one"
@@ -306,36 +336,87 @@ struct Report {
 }
 
 fn check(a: &Args<'_>) -> Result<i32, Stop> {
-    let evidence = a.evidence.ok_or_else(|| {
-        cannot(anyhow!(
-            "--record needs --evidence <dir>: the evidence repository the record is from, a \
-             clone or any directory with the layout of docs/19 §2.3"
-        ))
-    })?;
-    if !evidence.is_dir() {
-        return Err(cannot(anyhow!(
-            "--evidence {} is not a directory",
-            evidence.display()
-        )));
-    }
-    rerun_arguments(a)?;
-    let pinned = pins(a)?;
+    let reading = match (a.evidence, a.source) {
+        (Some(dir), _) => {
+            if !dir.is_dir() {
+                return Err(cannot(anyhow!("--evidence {} is not a directory", dir.display())));
+            }
+            rerun_arguments(a)?;
+            from_directory(a, dir)?
+        }
+        (None, Some(name)) => {
+            if a.log_vkey.is_some() || a.attestation_key.is_some() || a.checkpoint.is_some() {
+                return Err(cannot(anyhow!(
+                    "--source takes the source's keys and checkpoint from its configuration and \
+                     state; --log-vkey, --attestation-key and --checkpoint are for a source not \
+                     configured, and go without it"
+                )));
+            }
+            rerun_arguments(a)?;
+            from_clones(name)?
+        }
+        (None, None) => {
+            return Err(cannot(anyhow!(
+                "--record needs --evidence <dir>, the evidence repository the record is from — a \
+                 clone or any directory with the layout of docs/19 §2.3 — or --source <name>, \
+                 whose synced clones are read"
+            )));
+        }
+    };
     let bytes = std::fs::read(a.record)
         .with_context(|| format!("reading {}", a.record.display()))
         .map_err(cannot)?;
+    let rerun = a.rerun.then_some(a.files);
+    let done = report(&reading.reading(), &bytes, None, rerun)?;
+    print(&done, a.output);
+    Ok(done.code)
+}
 
+/// A source's log, opened and verified whole, and what a report says of where it came from: what a
+/// record is checked against.
+pub(crate) struct Reading<'a> {
+    /// How the source is named: its name and the file that added it, or the flags.
+    pub pinned: String,
+    pub repo: &'a Repository,
+    pub notes: Vec<String>,
+    /// Why what the source says of the artifact now is not known, where it is not: the log
+    /// continues where this does not reach, or the source is stale or frozen.
+    pub unknown: Option<String>,
+}
+
+/// A [`Reading`] that holds the repository it reads.
+struct Opened {
+    pinned: String,
+    repo: Repository,
+    notes: Vec<String>,
+    unknown: Option<String>,
+}
+
+impl Opened {
+    fn reading(&self) -> Reading<'_> {
+        Reading {
+            pinned: self.pinned.clone(),
+            repo: &self.repo,
+            notes: self.notes.clone(),
+            unknown: self.unknown.clone(),
+        }
+    }
+}
+
+/// The repository in `--evidence <dir>`, verified under the keys `--source` or the flags give.
+fn from_directory(a: &Args<'_>, evidence: &Path) -> Result<Opened, Stop> {
+    let pinned = pins(a)?;
     // The source's log, whole, before anything is read from the repository. A log that does not
     // verify — a signature, a tree, a rollback, two trees under one key — is the source failing
     // verification, and one that cannot be read is a source that cannot answer: both 4.
     let held_to = pinned.accepted.as_ref().map(|c| c.note.as_slice());
     let repo = Repository::open(evidence, &pinned.log_key, &pinned.attestation_key, held_to)
-        .map_err(|e| Stop {
-            code: FAILED,
-            error: anyhow::Error::new(e).context(format!(
+        .map_err(|e| {
+            failed(anyhow::Error::new(e).context(format!(
                 "the evidence repository in {} does not verify under {}",
                 evidence.display(),
                 pinned.said
-            )),
+            )))
         })?;
     let source = repo.source();
     let mut notes = Vec::new();
@@ -350,14 +431,6 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
         )),
         Some(c) => notes.push(unchecked_checkpoint(c, source.continues_at.as_ref())),
         None => notes.push(pinned.unaccepted.clone()),
-    }
-    for r in &source.refused {
-        notes.push(format!("`{}` set aside: {}", r.dir, printable(&r.why)));
-    }
-    for d in &source.unnamed {
-        notes.push(format!(
-            "`{d}` is named by no log-end, and was not read as a successor"
-        ));
     }
     // A log that continues in a repository this directory does not hold may hold, past what is
     // here, a withdrawal or a supersession of this very record: what the source says now is not
@@ -375,6 +448,158 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
                 .join(", ")
         )
     });
+    Ok(Opened {
+        pinned: pinned.said,
+        repo,
+        notes,
+        unknown,
+    })
+}
+
+/// The source `name`'s own clones, as its last sync left them, opened as every command that
+/// answers from them opens them: every location held to every other, the chain followed into
+/// every repository it has gone on in, and all of it held to the checkpoint last accepted. Nothing
+/// is fetched; a source that is stale or frozen still has its record checked, and what it says of
+/// the artifact now is unknown.
+fn from_clones(name: &str) -> Result<Opened, Stop> {
+    let config = Env::from_process()
+        .and_then(|env| EvidenceConfig::load(&env))
+        .map_err(cannot)?;
+    let source = config
+        .source(name)
+        .ok_or_else(|| {
+            cannot(trigon_attest::config::ConfigError::NoSuchSource {
+                name: printable(name),
+                known: config.sources().iter().map(|s| s.name.clone()).collect(),
+            })
+        })?
+        .clone();
+    let dirs = crate::clones::Dirs::of(&config, &source.name).map_err(cannot)?;
+    let opened = crate::clones::open(&source, &dirs).map_err(|f| {
+        failed(f.error.context(format!(
+            "`{}`'s clones in {} {}",
+            source.name,
+            dirs.cache.display(),
+            match f.refused {
+                true => "do not verify",
+                false => {
+                    "cannot be read; run `trigon evidence sync --source <name>` in the default \
+                     build, or give the repository with --evidence <dir>"
+                }
+            }
+        )))
+    })?;
+    let mut pinned = match &source.added_by {
+        AddedBy::ProjectFile(f) => format!(
+            "`{}`, added by the project's own {}",
+            source.name,
+            f.display()
+        ),
+        other => format!("`{}`, from {other}", source.name),
+    };
+    if let Some(f) = &opened.keys.first_use {
+        pinned.push_str(&format!(
+            ", resting on keys trusted on first use: read from {}'s keys/ at {} by its first \
+             sync, and pinned since",
+            printable(&f.read_from),
+            crate::rfc3339_from_unix(f.at)
+        ));
+    }
+    let last = opened.last();
+    let mut notes = vec![format!(
+        "read from its clones in {}, as its last sync left them, as of {} leaves of `{}`",
+        dirs.cache.display(),
+        last.size(),
+        last.origin()
+    )];
+    notes.extend(opened.notes.iter().cloned());
+    let state = dirs.state.join(trigon_attest::state::CHECKPOINT);
+    notes.push(match (state.exists(), &source.checkpoint) {
+        (true, _) => format!(
+            "the chain is held to the checkpoint last accepted, in {}",
+            state.display()
+        ),
+        (false, Some(initial)) => format!(
+            "no checkpoint has been accepted for this source — {} is not there — so its log is \
+             held only to the initial checkpoint it is configured with, {}",
+            state.display(),
+            initial.display()
+        ),
+        (false, None) => format!(
+            "no checkpoint has been accepted for this source — {} is not there — and it \
+             configures no initial one, so its log is checked whole and not against anything \
+             this client has seen before",
+            state.display()
+        ),
+    });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let record = SyncRecord::read(&dirs.state).ok().flatten();
+    let standing = Standing::of(config.freshness(), record.as_ref(), opened.repo.newest_time(), now);
+    let unknown = (!standing.answers()).then(|| {
+        format!(
+            "`{}` is {}: {}, so what it says of the artifact now is not known",
+            source.name,
+            standing.key(),
+            match &standing {
+                Standing::Frozen { newest: Some(t) } => format!(
+                    "its newest leaf was logged {}, longer ago than `frozen_after`",
+                    crate::rfc3339_from_unix(*t)
+                ),
+                Standing::Frozen { newest: None } => "its log has no leaf".into(),
+                Standing::Unknown { why } | Standing::Refused { why } => printable(why),
+                Standing::Fresh | Standing::Usable { .. } => String::new(),
+            }
+        )
+    });
+    Ok(Opened {
+        pinned,
+        repo: opened.repo,
+        notes,
+        unknown,
+    })
+}
+
+/// A record checked, and its exit code: what [`print`] shows.
+pub(crate) struct Done {
+    pub code: i32,
+    report: Report,
+}
+
+impl Done {
+    /// Say one thing more of it, beside the notes it was checked with: what was done while it was
+    /// checked.
+    #[cfg(feature = "build")]
+    pub(crate) fn note(&mut self, note: String) {
+        self.report.notes.push(note);
+    }
+}
+
+/// Check one record against a source's log: everything `docs/19` §4.2 has every client show of it,
+/// with what the source says of its artifact now, gathered for [`print`] — the record form's
+/// report, and `--lookup`'s.
+///
+/// `evidence` is where the evidence the record names is read, where that is not the directory of
+/// the repository that holds its log: a partial clone's objects. `rerun` holds the two artifacts
+/// `--rerun-comparison` re-derives the claim from.
+pub(crate) fn report(
+    reading: &Reading<'_>,
+    bytes: &[u8],
+    evidence: Option<&dyn LogFiles>,
+    rerun: Option<crate::Rerun<'_>>,
+) -> Result<Done, Stop> {
+    let repo = reading.repo;
+    let mut notes = reading.notes.clone();
+    let source = repo.source();
+    for r in &source.refused {
+        notes.push(format!("`{}` set aside: {}", r.dir, printable(&r.why)));
+    }
+    for d in &source.unnamed {
+        notes.push(format!(
+            "`{d}` is named by no log-end, and was not read as a successor"
+        ));
+    }
     for (pos, why) in repo.skipped_key_changes() {
         notes.push(format!(
             "key change at {pos} changed nothing: {}",
@@ -382,9 +607,9 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
         ));
     }
 
-    let verified = repo.verify_record(&bytes);
+    let verified = repo.verify_record_reading(bytes, evidence);
     let mut report = Report {
-        pinned: pinned.said.clone(),
+        pinned: reading.pinned.clone(),
         notes,
         logs: source
             .logs
@@ -392,13 +617,13 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
             .map(|c| (c.log.origin().to_string(), c.log.size()))
             .collect(),
         newest: repo.newest_time(),
-        record: Record::digest_of(&bytes),
+        record: Record::digest_of(bytes),
         origin: verified
             .as_ref()
             .ok()
             .map(|v| repo.origin(v.pos).to_string()),
         lookup: None,
-        unknown,
+        unknown: reading.unknown.clone(),
         rerun: None,
         verified,
     };
@@ -409,21 +634,30 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
             algorithm: "sha256",
             hex: subject,
         }));
-        if a.rerun {
-            report.rerun = Some(rerun(a, &repo, v)?);
+        if let Some(files) = rerun {
+            report.rerun = Some(rederive(files, repo, evidence, v)?);
         }
-    } else if a.rerun {
+    } else if rerun.is_some() {
         report.notes.push(
             "not re-derived: the record failed verification, so its claim is not read".into(),
         );
     }
 
     let code = exit_code(&report);
-    match a.output {
-        OutputFormat::Text => print_text(&report),
-        OutputFormat::Json => println!("{}", pretty(&json_of(&report, code))),
+    Ok(Done { code, report })
+}
+
+/// Print a record's report, in text or as its JSON document.
+pub(crate) fn print(done: &Done, output: OutputFormat) {
+    match output {
+        OutputFormat::Text => print_text(&done.report),
+        OutputFormat::Json => println!("{}", pretty(&json(done))),
     }
-    Ok(code)
+}
+
+/// A record's report as `--output json` carries it.
+pub(crate) fn json(done: &Done) -> Value {
+    json_of(&done.report, done.code)
 }
 
 /// A checkpoint given as last accepted that the log in this directory was not held to, which is
@@ -484,8 +718,14 @@ impl Rederivation {
 }
 
 /// `--rerun-comparison` on a verified verdict: the claim re-derived from the two artifacts, and the
-/// published comparison report, where the directory holds it, held to the re-derivation.
-fn rerun(a: &Args<'_>, repo: &Repository, v: &VerifiedRecord) -> Result<Rederivation, Stop> {
+/// published comparison report, where it can be read — from the repository's directory, or from
+/// `evidence` where one is given — held to the re-derivation.
+fn rederive(
+    files: crate::Rerun<'_>,
+    repo: &Repository,
+    evidence: Option<&dyn LogFiles>,
+    v: &VerifiedRecord,
+) -> Result<Rederivation, Stop> {
     if !trigon_attest::is_verdict(&v.statement.predicate_type) {
         return Err(cannot(anyhow!(
             "--rerun-comparison re-derives a verdict, and this record is a `{}`, which makes no \
@@ -493,7 +733,7 @@ fn rerun(a: &Args<'_>, repo: &Repository, v: &VerifiedRecord) -> Result<Rederiva
             v.statement.predicate_type
         )));
     }
-    let claim = match crate::rederive_files(&v.statement, a.files) {
+    let claim = match crate::rederive_files(&v.statement, files) {
         Ok(d) => Ok(d),
         // A claim the bytes refute fails verification, and is reported in full with the rest of
         // the record; anything else — the wrong file, a set this build does not carry, an
@@ -519,7 +759,11 @@ fn rerun(a: &Args<'_>, repo: &Repository, v: &VerifiedRecord) -> Result<Rederiva
         (Some(e), Ok(d)) if e.state == EvidenceState::Matches => {
             // Read again to be judged, and held to its digest again: the file checked when the
             // record was verified may be other bytes by now.
-            match repo.read_evidence_checked(v.pos, e) {
+            let read = match evidence {
+                Some(files) => read_evidence_from(files, e),
+                None => repo.read_evidence_checked(v.pos, e),
+            };
+            match read {
                 Err(failure) => Published::Failed(failure.to_string()),
                 Ok((state, None)) => Published::Unchecked(format!(
                     "unchecked: sha256:{} was there when the record was verified, and is {} now",
@@ -561,7 +805,7 @@ fn exit_code(r: &Report) -> i32 {
     i32::from(answer.exit_code(FLOOR))
 }
 
-fn state_said(s: &EvidenceState) -> String {
+pub(crate) fn state_said(s: &EvidenceState) -> String {
     match s {
         EvidenceState::Matches => "there, and matches its digest".into(),
         EvidenceState::Absent => "not in this directory: unchecked".into(),
@@ -570,7 +814,7 @@ fn state_said(s: &EvidenceState) -> String {
     }
 }
 
-fn state_name(s: &EvidenceState) -> &'static str {
+pub(crate) fn state_name(s: &EvidenceState) -> &'static str {
     match s {
         EvidenceState::Matches => "matches",
         EvidenceState::Absent => "absent",
@@ -579,7 +823,7 @@ fn state_name(s: &EvidenceState) -> &'static str {
     }
 }
 
-fn kind_said(k: RecordKind) -> String {
+pub(crate) fn kind_said(k: RecordKind) -> String {
     match k {
         RecordKind::Verdict(m) => m.to_string(),
         RecordKind::Void => "void".into(),
@@ -609,7 +853,7 @@ fn superseded(r: &Report, v: &VerifiedRecord) -> Vec<(String, String)> {
 /// them: the set, when and which Trigon, the egress tier and `attestable`, and for a verdict the
 /// derivation method, the command that would falsify it and where to dispute it. Each is escaped,
 /// since a statement is its signer's bytes, and absent is shown as absent, never as a value.
-fn signed_fields(v: &VerifiedRecord) -> Vec<(&'static str, String)> {
+pub(crate) fn signed_fields(v: &VerifiedRecord) -> Vec<(&'static str, String)> {
     let p = &v.statement.predicate;
     let text = |pointer: &str| p.pointer(pointer).and_then(Value::as_str).map(printable);
     let kind = v.kind();
@@ -962,7 +1206,7 @@ fn stopped(code: i32, error: &anyhow::Error) -> Value {
     })
 }
 
-fn pretty(doc: &Value) -> String {
+pub(crate) fn pretty(doc: &Value) -> String {
     // A `Value` is always serializable; nothing here can fail but the allocator.
     serde_json::to_string_pretty(doc).unwrap_or_else(|_| doc.to_string())
 }

@@ -58,7 +58,7 @@ mod feed;
 pub(crate) mod git;
 mod init;
 mod lock;
-mod release;
+pub(crate) mod release;
 mod switch;
 
 use std::collections::{BTreeMap, BTreeSet};

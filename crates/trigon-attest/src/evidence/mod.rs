@@ -35,9 +35,9 @@ mod standing;
 
 pub use check::{
     EvidenceFile, EvidenceState, RecordFailure, RecordKind, VerifiedRecord, check_record,
-    record_leaf,
+    read_evidence_from, record_leaf,
 };
-pub use lookup::{Answer, Found, Key, Lookup, RecordState, SupersededBy};
+pub use lookup::{Answer, Found, Key, Lookup, RecordState, SupersededBy, risk_name};
 pub use paths::{
     IndexEntry, IndexFile, IndexKey, evidence_path, index_files, index_files_after, record_path,
 };

@@ -477,6 +477,35 @@ impl Index {
             .and_then(|e| g.records.get(&e.id).map(|r| (r.clone(), e.publication)))
     }
 
+    /// Every run of the published artifact whose `algorithm` digest is `hex`, newest first, as a
+    /// reader who is `public` or not is shown each: `sha256` against the artifact's recorded
+    /// digest, and `sha512` and `sha1` against the digests the run computed over the same bytes
+    /// (`RunRecord::upstream_digests`), which are what a subject carries beside it (`docs/19` §5).
+    /// Every run the index holds is asked, not a page of them; a withheld run is not among them for
+    /// a public reader, and a void one is shown without its outcome.
+    pub fn for_artifact(&self, algorithm: &str, hex: &str, public: bool) -> Vec<Entry> {
+        let g = self.read_or_recover();
+        let matches = |r: &RunRecord| match algorithm {
+            "sha256" => r.upstream.sha256.to_hex() == hex,
+            "sha512" => r
+                .upstream_digests
+                .as_ref()
+                .is_some_and(|d| d.sha512.to_hex() == hex),
+            "sha1" => r
+                .upstream_digests
+                .as_ref()
+                .and_then(|d| d.sha1)
+                .is_some_and(|d| d.to_hex() == hex),
+            _ => false,
+        };
+        g.entries
+            .iter()
+            .filter(|e| !public || e.publication.is_public())
+            .filter(|e| g.records.get(&e.id).is_some_and(matches))
+            .map(|e| e.clone().shown(public))
+            .collect()
+    }
+
     /// The other attempts at `id`'s work that agree with it — the same cache key, outcome and
     /// agreement digest, none of them void — as the gate counts them.
     ///
