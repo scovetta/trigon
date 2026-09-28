@@ -185,7 +185,7 @@ flowchart TB
     subgraph done["Done — a separate process, and the only one holding the signing key"]
         direction TB
         attest["Attest<br/>in-toto statement, DSSE"]
-        publish["Publish<br/>store; an evidence repository, planned"]
+        publish["Publish<br/>store; an evidence repository"]
         attest --> publish
     end
 
@@ -359,11 +359,13 @@ all** — which is the property that makes an attestation from a rebuilder worth
 
 ### Publishing it
 
-Not yet. Signing is local: `trigon attest` writes into the store and opens no socket. Publishing is
-its own step, `trigon publish`, which will ask the publication gate about each run and write what it
-allows to a public git repository holding the signed records, the evidence to re-derive each one,
-and an append-only log we sign. Consumers clone that repository and answer a lockfile from their own
-copy. [`docs/19`](docs/19-distribution-and-lookup.md) is the design and its build plan, and
+Signing is local: `trigon attest` writes into the store and opens no socket. Publishing is its own
+step, `trigon publish`, which asks the publication gate about each run and writes what it allows to
+a git repository holding the signed records, the evidence to re-derive each one, and an append-only
+log we sign — one commit per publication, pushed without force, its checkpoint signed by `trigon log
+sign`, the only thing that holds the log's key ([`docs/using-trigon.md`](docs/using-trigon.md)).
+Consumers will clone that repository and answer a lockfile from their own copy; that half is not
+built yet. [`docs/19`](docs/19-distribution-and-lookup.md) is the design and its build plan, and
 [ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md) records why it replaced the Rekor
 client that used to be described here.
 

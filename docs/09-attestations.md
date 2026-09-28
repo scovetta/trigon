@@ -398,7 +398,7 @@ holds; where rebuilt artifacts are not published (D4), the client asks for `--re
 **Both or neither.** `attest` signs the falsifying command and the dispute pointer only when
 `[publish] origin` and `disputes` are both set in `evidence.toml`, and leaves both out — absent,
 never empty — when either is missing, and says so. A statement made for local use names no
-repository, and `publish` will refuse it.
+repository, and `publish` refuses it.
 
 **Every evidence digest names a blob the attestor read.** The set manifest is written to the store
 as a blob of its canonical JSON (`trigon_attest::set_manifest_file`) when the verdict is signed, so
@@ -576,8 +576,9 @@ reader of these keys, a client in another language included, is held to them.
 ### 2.10 The evidence log's formats
 
 The log of [`19`](19-distribution-and-lookup.md) §2.3, which is the design, as built in
-`trigon_attest::log`: pure code, no network, reading only the directory it is given. Nothing writes
-an evidence repository yet (`publish` is §10 phase 5); `verify-attestation --record` (§7) reads one.
+`trigon_attest::log`: pure code, no network, reading only the directory it is given. `trigon
+publish` writes an evidence repository (§6), and `trigon log sign` signs each of its checkpoints;
+`verify-attestation --record` (§7) reads one.
 Golden files for every format are in `crates/trigon-attest/testdata/log/`, and were checked against
 Go's `golang.org/x/mod/sumdb/note` and `sumdb/tlog` ([`16-findings.md`](16-findings.md) §3.98).
 
@@ -809,8 +810,14 @@ all (B21 steps 4-5), or key epochs sealed in our own log take its place, is
 Nothing in this section publishes. `trigon attest` signs into the store and opens no socket;
 publishing is a separate `trigon publish`, behind the publication gate, to an evidence repository —
 a public git repository holding the signed records, the evidence to re-derive each, and an
-append-only log we sign. It is designed in
-[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) and not built.
+append-only log we sign — designed in
+[`19-distribution-and-lookup.md`](19-distribution-and-lookup.md). It is built for runs, withdrawals
+and heartbeats (§10 phase 5): `publish` verifies the repository's log before building on it, asks
+the gate about every run, checks every record it would write as a client will, has `trigon log
+sign` — a child process, and the only thing that opens the log key — check the new tree again and
+sign its checkpoint, and pushes one commit, never forced ([`using-trigon.md`](using-trigon.md)).
+Rebuilt artifacts as release assets, the divergence feed and key rotation are the phase's second
+half.
 
 Until 2026-09-27 this section described a Rekor client in `trigon attest`, which logged each
 equivalence statement at attest time, before any gate had been asked, and a check of the log's
@@ -1000,17 +1007,21 @@ Steps:
    its set, and about the rebuilt artifact it names, and its `buildobservation` about its subject,
    under its egress tier and the guard manifest it names, with no guard tripped —
    `buildobservation` names no run, so one of another attempt at the same artifact under the same
-   tier and guard is not told apart; the unsigned `subject` and `evidence` map must agree with the
-   statement; and every evidence file the statement names that the directory holds must be the
-   bytes it names. One absent is reported unchecked, never passed, and so is a rebuilt artifact,
-   which is a release asset. Each failure is *record failed verification*, with its reason. Then
-   what the source says of the record's artifact now: every record the log holds for its sha256,
-   resolved from the leaves and never from `index/`, a leaf whose file is missing *deleted*, and
-   every supersession applied as `19` §3 says — only by a verified, logged record signed by the key
-   its source had at its own later leaf, about the same subject digests and canonical purl. A
-   superseded record is shown superseded, with the reason and both leaves, and never hidden. Where
-   the log continues in a repository the directory does not hold, a record logged there may
-   withdraw or supersede this one, so what the source says now is *unknown*, never current.
+   tier and guard is not told apart; a verdict must carry the command that would falsify it —
+   `trigon verify-attestation` naming its own subject and predicate type and the origin of the log
+   it is logged in — and a divergence the `https://` pointer to where it is disputed, since a
+   client never renders an outcome it cannot show with them (`19` §8); the unsigned `subject` and
+   `evidence` map must agree with the statement; and every evidence file the statement names that
+   the directory holds must be the bytes it names. One absent is reported unchecked, never passed,
+   and so is a rebuilt artifact, which is a release asset. Each failure is *record failed
+   verification*, with its reason. Then what the source says of the record's artifact now: every
+   record the log holds for its sha256, resolved from the leaves and never from `index/`, a leaf
+   whose file is missing *deleted*, and every supersession applied as `19` §3 says — only by a
+   verified, logged record signed by the key its source had at its own later leaf, about the same
+   subject digests and canonical purl. A superseded record is shown superseded, with the reason and
+   both leaves, and never hidden. Where the log continues in a repository the directory does not
+   hold, a record logged there may withdraw or supersede this one, so what the source says now is
+   *unknown*, never current.
 4. **Select statements** with a small typed filter (by predicate type, by build type, by subject
    digest). Not built: the command takes one envelope or one record.
 5. **`--rerun-comparison`**: take the upstream and the rebuilt artifacts, load the stabilizer set
@@ -1033,7 +1044,9 @@ A record is shown as [`19`](19-distribution-and-lookup.md) §4.2 has every clien
 outcome, its set's id and digest, its run and when it ran, the Trigon that built it and the one that
 signed it, the egress tier and whether the run was `attestable`, and, for a verdict, the derivation
 method, the command that would falsify it and where to dispute it. Each is shown as signed, and one
-the statement does not sign is shown as absent, never as a value.
+the statement does not sign is shown as absent, never as a value; a verdict with no falsifying
+command, or a divergence with no dispute pointer, is never shown at all, since it fails
+verification above.
 
 The record form exits as [`19`](19-distribution-and-lookup.md) §6 says, from what the source says of
 the artifact now: 0 for a verdict at or above `normalized_with_caveats`, 1 for a divergence, 2 for

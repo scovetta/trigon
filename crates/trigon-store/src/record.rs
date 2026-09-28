@@ -148,6 +148,25 @@ impl PinEvidence {
     }
 }
 
+/// Where a run's record was published (`docs/19` §10 phase 5 step 7): written by `trigon publish`
+/// once the commit that logs it is pushed, or found there by the next `publish` when a crash came
+/// between the push and this.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Published {
+    /// The evidence repository, as `git` was given it: a URL as configured, or a local path made
+    /// absolute. Never a credential, which a location may not carry.
+    pub repository: String,
+    /// The commit that logged the record.
+    pub commit: String,
+    /// The sha256 of the record file.
+    pub record: Digest,
+    /// The record's leaf, by its index in its log.
+    pub leaf: u64,
+    /// The log the leaf is in, where it is not the repository's first: its directory, `log/<n>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
+}
+
 /// Every digest of the published bytes beyond `upstream.sha256`: what the run computed over them,
 /// and what the registry declared and whether the bytes agreed.
 ///
@@ -531,6 +550,12 @@ pub struct RunRecord {
     /// `None` means no model, nothing to show, or the ask failed — never "the diff is fine".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_opinion: Option<trigon_core::DiffOpinion>,
+
+    /// Where this run's record was published. `None` until `trigon publish` has logged it, which
+    /// is also every run the publication gate withholds; a run whose record is logged and has none
+    /// here is one a crash stopped after the push, and the next `publish` completes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published: Option<Published>,
 }
 
 impl RunRecord {
@@ -634,6 +659,7 @@ impl RunRecord {
             per_target_attestations: Vec::new(),
             non_builtin_stabilizer: None,
             diff_opinion: None,
+            published: None,
         }
     }
 

@@ -18,7 +18,9 @@ decisions it waits on. What exists today:
 | `rebuild --attest` signing through `attest`'s own code, so no path signs a verdict for a run the gate voids; `rebuild/v1` naming the model exchange a run kept; a `pkg1` key that is the package alone | built (§10 phase 3; [findings](16-findings.md) §3.97) |
 | The evidence log as pure code: C2SP signed notes and checkpoints, the log key in Go's format, RFC 6962 inclusion and consistency proofs, tiles and entry bundles and what an append writes, every leaf kind of §2.3, a log verified from its files, and key-change, log-end and log-continuation leaves followed as §8 says | built (§10 phase 4, first half; [findings](16-findings.md) §3.98) |
 | Records verified against the log, lookup over its leaves with every supersession applied, the paths of records, evidence and the index, and the index derived from the log; `verify-attestation --record` in the network-free verifier, with keys and checkpoint from `--source` or from flags, showing every §4.2 field; `--rerun-comparison` re-deriving what a verdict says the comparison found and holding the published report to it; two trees under one log key refused as an equivocation; and the threat model's properties for record, inclusion and consistency verification (P31–P33) | built (§10 phase 4, second half; [findings](16-findings.md) §3.99) |
-| The evidence repository, `trigon publish`, `trigon evidence sync` and `trigon lookup` | planned (§10) |
+| The evidence repository and its writer: `trigon log keygen`, `log init` and `log sign`, and `trigon publish` for runs, withdrawals and heartbeats, with `--dry-run` and `--reconcile` — the remote's log verified before anything is built on it, the gate asked through the index `serve` uses, one commit pushed without force, a lost race discarded and built again, `RunRecord.published`; and a logged verdict without its falsifying command, or a divergence without its dispute pointer, failing verification | built (§10 phase 5, first half; [findings](16-findings.md) §3.100) |
+| Rebuilt artifacts as release assets, the divergence feed, `log key-change` and `log succeed`, `--prune`, `serve`'s report of the repository's kill-switch, and the spike | planned (§10 phase 5, second half) |
+| `trigon evidence sync` and `trigon lookup` | planned (§10 phase 6) |
 
 ---
 
@@ -385,9 +387,16 @@ required, with its keys and the checkpoint current at the client's release. Unti
 configures at least one, and a command that needs a source and has none says so and exits 5.
 
 **The publisher's working clone.** `publish` keeps its own clone of the repository it writes to
-under the store, at `<store>/publish/<sha256 of the location>/`, beside the lock that keeps it to
-one `publish` at a time and the newest checkpoint it has verified on that remote. A local non-bare
-working tree is used in place, with the same lock and state kept in the store.
+under the store, at `<store>/publish/<sha256 of the location>/`, beside the store's lock. The newest
+checkpoint of a log that the host has published, or verified on its repository, is kept apart from
+any store, at `$XDG_STATE_HOME/trigon/publish/<sha256 of the origin>.checkpoint`, beside a lock that
+keeps the host to one `publish` at a time. Kept by the log rather than by the store or by how the
+location is spelled, it holds every `publish` on the host, and `trigon log sign` too, which refuses
+a tree that does not extend it: a repository rolled back holds an older checkpoint the log key opens
+as well as the newest, and a tree built on that would be a second root for a size already published
+(§8). A host with none — a fresh CI runner — is held only to what the repository holds, so the state
+directory is kept from one run to the next. A local non-bare working tree is used in place, with the
+same locks and state.
 
 ---
 
@@ -431,8 +440,9 @@ content-addressed and its digest is in the log. So the superseding record names 
 signed: `supersedes: <record digest>` and a reason from a closed list — `withdrawn`, `set_changed`,
 `attempts_disagree_later`, `pipeline_bug`. A superseding verdict is signed by `trigon attest <run>
 --supersedes <record> --reason <code>`, which reads the superseded record from a local clone.
-`publish` refuses a verdict for a subject that already has a current record in the repository unless
-it supersedes that record.
+`publish` refuses a verdict or a void for a subject that already has a current record in the
+repository unless it supersedes that record: a second current record is a second answer, which a
+client can only show beside the first.
 
 A client collects every record for a subject and verifies each. It drops a record only when a
 verified, logged record, signed by a key it trusts for that record (the pinned key, or its successor
@@ -944,9 +954,13 @@ timestamp, and freshness can rest on that instead.
   checkpoint, cosigned by the new key. A client follows that pair only when both verify, and a
   successor that is not named by the old log's `log-end` is refused.
 - **The push credential is a third secret.** Alone it cannot make a client accept a record. It can
-  delete and withhold files, add or remove the kill-switch, write unsigned feed entries, and plant
-  files beyond the checkpoint. So `publish` verifies the remote log before building on it, never
-  signs a leaf it did not write, and regenerates the index and the feed from the log (§10 phase 5).
+  delete and withhold files, add or remove the kill-switch, write unsigned feed entries, plant
+  files beyond the checkpoint, and commit a `.gitignore` or a `.gitattributes`. So `publish`
+  verifies the remote log before building on it, never signs a leaf it did not write, commits
+  exactly the bytes it wrote whatever git is told to ignore, refuses a branch that names git
+  attributes, and regenerates the index and the feed from the log (§10 phase 5). Where the ruleset
+  is missing it can roll the branch back too; `publish` and `log sign` then refuse to build behind
+  the newest checkpoint the host has published (§2.4).
   A fine-grained token or a GitHub App installation token with contents-write on this one
   repository, and an expiry, is the narrowest form; a write deploy key is scoped to the repository
   too, but never expires (D5).
@@ -1150,13 +1164,14 @@ In the build half, shelling out to `git` as Trigon already does for sources, to 
 with contents-write on the repository, or a workflow's `GITHUB_TOKEN`, from the environment, never
 logged and never on argv. `trigon publish [RUN…] [--repo <location>] [--withdrawal <envelope>]
 [--heartbeat] [--dry-run] [--reconcile] [--prune]` runs one at a time per host, enforced by a lock
-file in the store, against its working clone (§2.4):
+in the host's state directory and one in the store, against its working clone (§2.4):
 
 1. Fetch, and reset the working clone hard to the remote, discarding any unpushed commit and any
    checkpoint signed for it. Verify the remote checkpoint's signature, recompute the root from
    exactly its first N leaves, and refuse if they differ, or if the checkpoint does not extend the
-   newest one this publisher has verified on the remote. Anything in `log/` beyond N is ignored and
-   overwritten.
+   newest one this host has published or verified for the log (§2.4). Anything in `log/` beyond N
+   is ignored and overwritten, and a branch that names git attributes is refused before it is
+   checked out.
 2. For each run, read its publication from a `trigon_api::Index` loaded from the store, with
    `Switches { stop_divergences }` set from the repository's kill-switch. Refuse anything not
    `Published` or `Void`; every divergence while `divergences = "refuse"`; a run already logged; the
@@ -1171,12 +1186,15 @@ file in the store, against its working clone (§2.4):
    every record, and the feed if D7 chose one, from the log.
 5. Sign the checkpoint in a separate, socketless step, `trigon log sign`, which reads the new tree
    from disk and holds the log key; `publish` never holds it. `log sign` signs only a tree whose
-   first N leaves recompute to a checkpoint it has itself verified, and whose every new leaf names a
-   record file on disk whose envelopes verify under the attestation key and whose signed statement
-   matches the leaf.
-6. Commit everything as one commit, and `git push` without force. If the push is rejected, another
-   writer won: discard the commit and the signed checkpoint, which must never leave this host, and
-   return to step 1. With one publishing host (D5) and the lock, that cannot happen; it is handled
+   first N leaves recompute to a checkpoint it has itself verified, which extends the newest
+   checkpoint of the log this host has published, and whose every new leaf names a record file on
+   disk whose envelopes verify under the attestation key and whose signed statement matches the
+   leaf.
+6. Commit exactly what steps 4 and 5 wrote as one commit — never by `git add`, which a
+   `.gitignore` or an attribute can make skip or rewrite a file — check that it holds those bytes
+   and nothing else, and `git push` without force. If the push is rejected, another writer won:
+   discard the commit and the signed checkpoint, which must never leave this host, and return to
+   step 1. With one publishing host (D5) and the lock, that cannot happen; it is handled
    because a second host is a configuration mistake away.
 7. Record `RunRecord.published`: repository, commit, record digest and leaf index. A run whose
    record is already logged but has no `published` — a crash after the push — is completed here.

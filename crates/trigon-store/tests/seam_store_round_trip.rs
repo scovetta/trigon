@@ -249,6 +249,15 @@ fn every_field_populated() -> RunRecord {
             "attestations/npm/@babel/core/7.24.0/core-7.24.0.tgz/buildobservation.intoto.json"
                 .into(),
         ],
+        // In a successor log, so `log` is written too: a record published before a succession
+        // and read after it names its leaf in the right log only if this survives.
+        published: Some(trigon_store::Published {
+            repository: "https://github.com/owner/trigon-evidence.git".into(),
+            commit: "c0ffee".repeat(6) + "c0ff",
+            record: Digest::from_bytes([0x0b; 32]),
+            leaf: 1203,
+            log: Some("log/1".into()),
+        }),
     }
 }
 
@@ -437,6 +446,7 @@ async fn the_round_trip_above_is_told_when_a_field_is_added_to_the_record() {
         "per_target_attestations",
         "non_builtin_stabilizer",
         "diff_opinion",
+        "published",
     ]
     .into_iter()
     .collect();

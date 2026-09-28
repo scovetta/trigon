@@ -280,10 +280,31 @@ impl IndexFile {
 /// Every index file a verified log implies, by path: an entry under every key of every record
 /// leaf, in the order the chain of logs holds them.
 pub fn index_files(source: &VerifiedSource) -> Result<BTreeMap<String, IndexFile>, LogError> {
+    index_files_after(source, &[])
+}
+
+/// Every index file the chain of logs implies once `appended` is logged after the last log's
+/// leaves, by path. What `publish` writes each index file of a record it appends from (`docs/19`
+/// §10 phase 5 step 4): derived from the log whole, never read and edited, so an index file a
+/// push credential altered or removed is written again as the log implies it.
+pub fn index_files_after(
+    source: &VerifiedSource,
+    appended: &[Leaf],
+) -> Result<BTreeMap<String, IndexFile>, LogError> {
     let mut files: BTreeMap<String, IndexFile> = BTreeMap::new();
-    for chained in &source.logs {
+    let last = source.logs.len().saturating_sub(1);
+    for (n, chained) in source.logs.iter().enumerate() {
         let log = (chained.dir != "log").then(|| chained.dir.clone());
-        for (index, leaf) in chained.log.leaves() {
+        let size = chained.log.size();
+        let more = match n == last {
+            true => appended,
+            false => &[],
+        };
+        let leaves = chained
+            .log
+            .leaves()
+            .chain(more.iter().enumerate().map(|(i, l)| (size + i as u64, l)));
+        for (index, leaf) in leaves {
             let Leaf::Record(r) = leaf else {
                 continue;
             };

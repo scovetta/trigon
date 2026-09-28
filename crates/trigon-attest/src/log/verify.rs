@@ -25,7 +25,7 @@ use super::merkle::{
     Hash, Tree, consistency_proof, inclusion_proof, leaf_hash, root_of, verify_consistency,
     verify_inclusion,
 };
-use super::note::SignedNote;
+use super::note::{LogSigner, SignedNote};
 use super::tiles::{
     Append, Bundle, TILE_WIDTH, Tile, TileHashes, bundle_limit, decode_bundle, decode_tile,
     plan_append, tile_limit,
@@ -149,37 +149,46 @@ impl VerifiedLog {
     ///
     /// [`KeyHistory`]: super::KeyHistory
     fn check_for_readers(&self, leaf: &Leaf, index: u64) -> Result<(), LogError> {
-        let refuse = |why: String| {
-            LogError::Rotation(format!(
-                "leaf {index} of `{}` would be refused by every reader, and a leaf once logged is \
-                 there for good: {why}",
-                self.origin()
-            ))
-        };
-        match leaf {
-            Leaf::KeyChange(c) => c.verify(self.origin()).map_err(|e| refuse(e.to_string())),
-            Leaf::LogEnd(end) if end.successor.origin == self.origin() => Err(refuse(
-                "it is a log-end naming a successor with this log's own origin, and a successor \
-                 is a new log, with an origin of its own"
-                    .into(),
-            )),
-            Leaf::LogContinuation(c) => {
-                if c.old_checkpoint()?.origin == self.origin() {
-                    return Err(refuse(
-                        "it is a log-continuation holding a checkpoint of this log, and one holds \
-                         the final checkpoint of the log this one succeeds"
-                            .into(),
-                    ));
-                }
-                c.note()?.verify(self.vkey()).map_err(|e| {
-                    refuse(format!(
-                        "it is a log-continuation not signed by this log's key, {}: {e}",
-                        self.vkey()
-                    ))
-                })
+        check_for_readers(leaf, index, self.origin(), self.vkey())
+    }
+}
+
+/// [`VerifiedLog::check_for_readers`], for a leaf at `index` of the log `origin` whose key is
+/// `vkey`.
+fn check_for_readers(
+    leaf: &Leaf,
+    index: u64,
+    origin: &str,
+    vkey: &LogVkey,
+) -> Result<(), LogError> {
+    let refuse = |why: String| {
+        LogError::Rotation(format!(
+            "leaf {index} of `{origin}` would be refused by every reader, and a leaf once logged \
+             is there for good: {why}"
+        ))
+    };
+    match leaf {
+        Leaf::KeyChange(c) => c.verify(origin).map_err(|e| refuse(e.to_string())),
+        Leaf::LogEnd(end) if end.successor.origin == origin => Err(refuse(
+            "it is a log-end naming a successor with this log's own origin, and a successor is a \
+             new log, with an origin of its own"
+                .into(),
+        )),
+        Leaf::LogContinuation(c) => {
+            if c.old_checkpoint()?.origin == origin {
+                return Err(refuse(
+                    "it is a log-continuation holding a checkpoint of this log, and one holds the \
+                     final checkpoint of the log this one succeeds"
+                        .into(),
+                ));
             }
-            _ => Ok(()),
+            c.note()?.verify(vkey).map_err(|e| {
+                refuse(format!(
+                    "it is a log-continuation not signed by this log's key, {vkey}: {e}"
+                ))
+            })
         }
+        _ => Ok(()),
     }
 }
 
@@ -209,12 +218,71 @@ pub fn verify_log(
     }
     let size = checkpoint.size();
 
+    let Read {
+        tree,
+        leaves,
+        refused,
+    } = read_leaves(files, size)?;
+    let root = tree.root();
+    if root != *checkpoint.root() {
+        return Err(LogError::Mismatch(format!(
+            "the {size} leaves of `{}` hash to the root {}, and its checkpoint signs {}: the entry \
+             bundles are not the leaves the checkpoint was signed over",
+            checkpoint.origin(),
+            b64(&root),
+            b64(checkpoint.root())
+        )));
+    }
+    // Signed: the log key vouched for this leaf, and the log is refused for it.
+    if let Some(e) = refused {
+        return Err(e);
+    }
+    check_tiles(files, &tree, checkpoint.origin())?;
+
+    if let Some(a) = accepted {
+        let prefix = tree.root_at(a.size())?;
+        if prefix != *a.root() {
+            return Err(inconsistent(
+                format!(
+                    "the first {} leaves of `{}` hash to {}, and the checkpoint last accepted \
+                     signs {} for them",
+                    a.size(),
+                    checkpoint.origin(),
+                    b64(&prefix),
+                    b64(a.root())
+                ),
+                a,
+                &checkpoint,
+            ));
+        }
+    }
+
+    Ok(VerifiedLog {
+        checkpoint,
+        vkey: vkey.clone(),
+        tree,
+        leaves,
+    })
+}
+
+/// The leaves of a tree of `size` leaves, as its entry bundles hold them, and the tree over them.
+struct Read {
+    tree: Tree,
+    /// Every leaf up to the first refused one.
+    leaves: Vec<Leaf>,
+    /// The first leaf refused, held until the root is checked. A leaf that does not decode, or
+    /// that breaks a rule of the log, is the log key's doing only if a checkpoint signs it; until
+    /// a root says so it is as likely a bundle altered after signing, by whoever can push
+    /// (`docs/19` §8), and reporting that as the log breaking its own rules would accuse the
+    /// wrong party.
+    refused: Option<LogError>,
+}
+
+/// Read every entry bundle a tree of `size` leaves has, and nothing beyond it: hash each leaf,
+/// decode it strictly, and hold it to its place and its time.
+fn read_leaves(files: &dyn LogFiles, size: u64) -> Result<Read, LogError> {
     let mut tree = Tree::new();
     let mut leaves: Vec<Leaf> = Vec::new();
-    // The first leaf refused, held until the root is checked. A leaf that does not decode, or that
-    // breaks a rule of the log, is the log key's doing only if the checkpoint signs it; until the
-    // root says so it is as likely a bundle altered after signing, by whoever can push (`docs/19`
-    // §8), and reporting that as the log breaking its own rules would accuse the wrong party.
     let mut refused: Option<LogError> = None;
     for bundle in Bundle::for_size(size) {
         let path = bundle.path();
@@ -244,22 +312,17 @@ pub fn verify_log(
             }
         }
     }
-    let root = tree.root();
-    if root != *checkpoint.root() {
-        return Err(LogError::Mismatch(format!(
-            "the {size} leaves of `{}` hash to the root {}, and its checkpoint signs {}: the entry \
-             bundles are not the leaves the checkpoint was signed over",
-            checkpoint.origin(),
-            b64(&root),
-            b64(checkpoint.root())
-        )));
-    }
-    // Signed: the log key vouched for this leaf, and the log is refused for it.
-    if let Some(e) = refused {
-        return Err(e);
-    }
+    Ok(Read {
+        tree,
+        leaves,
+        refused,
+    })
+}
 
-    for tile in Tile::for_size(size) {
+/// Hold every tile a tree has to the hashes of its leaves: a reader proving inclusion from the
+/// tiles relies on them.
+fn check_tiles(files: &dyn LogFiles, tree: &Tree, origin: &str) -> Result<(), LogError> {
+    for tile in Tile::for_size(tree.size()) {
         let path = tile.path();
         let bytes = files
             .read(&path, tile_limit(&tile))?
@@ -271,33 +334,176 @@ pub fn verify_log(
             .expect("a tree held whole has every tile of its size");
         if decode_tile(&bytes, &tile)? != want {
             return Err(LogError::Mismatch(format!(
-                "`{path}` does not hold the hashes of the leaves of `{}`, so a reader proving \
-                 inclusion from the tiles would be misled; the tile was altered or written wrong",
-                checkpoint.origin()
+                "`{path}` does not hold the hashes of the leaves of `{origin}`, so a reader \
+                 proving inclusion from the tiles would be misled; the tile was altered or written \
+                 wrong"
             )));
         }
     }
+    Ok(())
+}
 
-    if let Some(a) = accepted {
-        let prefix = tree.root_at(a.size())?;
-        if prefix != *a.root() {
-            return Err(inconsistent(
-                format!(
-                    "the first {} leaves of `{}` hash to {}, and the checkpoint last accepted \
-                     signs {} for them",
-                    a.size(),
-                    checkpoint.origin(),
-                    b64(&prefix),
-                    b64(a.root())
-                ),
-                a,
-                &checkpoint,
-            ));
+/// A log's files at a size beyond its signed checkpoint, verified as far as they can be before a
+/// checkpoint for them is signed: what `trigon log sign` holds a tree to (`docs/19` §8, §10 phase
+/// 5 step 5).
+///
+/// The checkpoint in the files is the one the new tree extends, and it was opened under the log's
+/// own key — a checkpoint the signer has itself verified. The first [`Self::base`]'s size of the
+/// new tree's leaves hash to its root, so the extension rewrites nothing that was signed; every
+/// leaf decodes, sits where a leaf of its kind may and is no earlier than the one before it; and
+/// every tile of the new tree holds its leaves' hashes. What a new leaf names — a record file and
+/// its evidence — is the caller's to check, with the records beside the log.
+#[derive(Clone, Debug)]
+pub struct Extension {
+    base: SignedCheckpoint,
+    vkey: LogVkey,
+    tree: Tree,
+    leaves: Vec<Leaf>,
+}
+
+impl Extension {
+    /// The signed checkpoint the tree extends.
+    pub fn base(&self) -> &SignedCheckpoint {
+        &self.base
+    }
+
+    pub fn origin(&self) -> &str {
+        self.base.origin()
+    }
+
+    pub fn size(&self) -> u64 {
+        self.tree.size()
+    }
+
+    /// Every leaf of the new tree with its index, the base's among them.
+    pub fn leaves(&self) -> impl Iterator<Item = (u64, &Leaf)> {
+        self.leaves.iter().enumerate().map(|(i, l)| (i as u64, l))
+    }
+
+    /// The leaves the base's checkpoint does not sign, with their indices.
+    pub fn new_leaves(&self) -> impl Iterator<Item = (u64, &Leaf)> {
+        self.leaves().skip(self.base.size() as usize)
+    }
+
+    /// The checkpoint of the new tree, unsigned: what `trigon log sign` signs, and what `publish
+    /// --dry-run` prints.
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            origin: self.base.origin().to_string(),
+            size: self.tree.size(),
+            root: self.tree.root(),
         }
     }
 
-    Ok(VerifiedLog {
-        checkpoint,
+    /// Check that the new tree extends `published`, a checkpoint of this log published before: it
+    /// has at least as many leaves, and its first ones hash to that checkpoint's root.
+    ///
+    /// The base alone is not enough to sign over. It is whatever checkpoint the tree holds, and a
+    /// repository rolled back holds an older one the key opens just as well; a tree extending that
+    /// would be a second root, under the same key, for a size already published.
+    pub fn check_extends(&self, published: &SignedCheckpoint) -> Result<(), LogError> {
+        if published.origin() != self.origin() {
+            return Err(LogError::Malformed(format!(
+                "the checkpoint given as published is for `{}`, and this log is `{}`",
+                printable(published.origin()),
+                self.origin()
+            )));
+        }
+        published.note().verify(&self.vkey)?;
+        let offered = || self.checkpoint().body();
+        if published.size() > self.tree.size() {
+            return Err(inconsistent_notes(
+                format!(
+                    "the tree offered has {} leaves, fewer than the {} of `{}`'s checkpoint \
+                     published before",
+                    self.tree.size(),
+                    published.size(),
+                    self.origin()
+                ),
+                published.to_string(),
+                offered(),
+            ));
+        }
+        let prefix = self.tree.root_at(published.size())?;
+        if prefix != *published.root() {
+            return Err(inconsistent_notes(
+                format!(
+                    "the first {} leaves of the tree offered hash to {}, and `{}`'s checkpoint \
+                     published before signs {} for them",
+                    published.size(),
+                    b64(&prefix),
+                    self.origin(),
+                    b64(published.root())
+                ),
+                published.to_string(),
+                offered(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Sign the new tree's checkpoint with the log key the base was opened under, and no other.
+    pub fn sign(&self, signer: &LogSigner) -> Result<SignedCheckpoint, LogError> {
+        if signer.vkey() != self.vkey {
+            return Err(LogError::Unverified(format!(
+                "the tree extends a checkpoint of {}, and the key given to sign it is {}: a log's \
+                 checkpoints are signed by its own key",
+                self.vkey,
+                signer.vkey()
+            )));
+        }
+        SignedCheckpoint::sign(&self.checkpoint(), signer)
+    }
+}
+
+/// Verify the files of the log `vkey` names as a tree of `size` leaves extending the checkpoint
+/// they hold (see [`Extension`]). Nothing beyond `size` is read, so a bundle or a tile planted
+/// past it is never part of what is signed.
+///
+/// A size smaller than the checkpoint's is refused, as is one that adds a leaf after a log-end.
+/// Every new leaf is held to what a reader holds a leaf of this log to ([`check_for_readers`]),
+/// since a leaf once signed is there for good.
+pub fn verify_extension(
+    files: &dyn LogFiles,
+    vkey: &LogVkey,
+    size: u64,
+) -> Result<Extension, LogError> {
+    let base = open_checkpoint(files, vkey)?;
+    if size < base.size() {
+        return Err(LogError::Rule(format!(
+            "a tree of {size} leaves was offered as extending `{}`'s checkpoint of {}; a log only \
+             grows",
+            base.origin(),
+            base.size()
+        )));
+    }
+    let Read {
+        tree,
+        leaves,
+        refused,
+    } = read_leaves(files, size)?;
+    // Before anything else is said about the leaves: if the first ones are not the signed tree,
+    // the files were changed under the checkpoint, and nothing new is signed over them.
+    let prefix = tree.root_at(base.size())?;
+    if prefix != *base.root() {
+        return Err(LogError::Mismatch(format!(
+            "the first {} leaves of the tree offered hash to {}, and `{}`'s checkpoint signs {} \
+             for them: the tree rewrites what was signed, and is not an extension of it",
+            base.size(),
+            b64(&prefix),
+            base.origin(),
+            b64(base.root())
+        )));
+    }
+    if let Some(e) = refused {
+        return Err(e);
+    }
+    check_tiles(files, &tree, base.origin())?;
+    for (index, leaf) in leaves.iter().enumerate().skip(base.size() as usize) {
+        check_for_readers(leaf, index as u64, base.origin(), vkey)?;
+    }
+    Ok(Extension {
+        base,
         vkey: vkey.clone(),
         tree,
         leaves,

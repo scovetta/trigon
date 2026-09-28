@@ -81,29 +81,34 @@ impl LocalKey {
     /// The public key as SPKI PEM, which is what `openssl` and most other tools read, and the form
     /// an evidence repository publishes its attestation key in (`keys/attestation.pub`, docs/19
     /// §2.3).
-    ///
-    /// Hand-built rather than pulled from a PEM crate, because for ed25519 the SPKI DER is a fixed
-    /// twelve-byte prefix and the thirty-two key bytes — `SEQUENCE { SEQUENCE { OID 1.3.101.112 },
-    /// BIT STRING }`, where every length is known at compile time. RFC 8410 §4. A crate would be
-    /// more code in the judgement half to emit forty-four constant-shaped bytes.
     pub fn public_pem(&self) -> String {
-        const SPKI_ED25519: [u8; 12] = [
-            0x30, 0x2a, // SEQUENCE, 42 bytes
-            0x30, 0x05, // SEQUENCE, 5 bytes — the algorithm identifier
-            0x06, 0x03, 0x2b, 0x65, 0x70, // OID 1.3.101.112, id-Ed25519
-            0x03, 0x21, 0x00, // BIT STRING, 33 bytes, 0 unused bits
-        ];
-        let mut der = SPKI_ED25519.to_vec();
-        der.extend_from_slice(self.key.verifying_key().as_bytes());
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
-        let mut out = String::from("-----BEGIN PUBLIC KEY-----\n");
-        for line in b64.as_bytes().chunks(64) {
-            out.push_str(std::str::from_utf8(line).unwrap_or_default());
-            out.push('\n');
-        }
-        out.push_str("-----END PUBLIC KEY-----\n");
-        out
+        spki_pem(&self.key.verifying_key())
     }
+}
+
+/// An ed25519 public key as SPKI PEM.
+///
+/// Hand-built rather than pulled from a PEM crate, because for ed25519 the SPKI DER is a fixed
+/// twelve-byte prefix and the thirty-two key bytes — `SEQUENCE { SEQUENCE { OID 1.3.101.112 },
+/// BIT STRING }`, where every length is known at compile time. RFC 8410 §4. A crate would be more
+/// code in the judgement half to emit forty-four constant-shaped bytes.
+pub(crate) fn spki_pem(key: &VerifyingKey) -> String {
+    const SPKI_ED25519: [u8; 12] = [
+        0x30, 0x2a, // SEQUENCE, 42 bytes
+        0x30, 0x05, // SEQUENCE, 5 bytes — the algorithm identifier
+        0x06, 0x03, 0x2b, 0x65, 0x70, // OID 1.3.101.112, id-Ed25519
+        0x03, 0x21, 0x00, // BIT STRING, 33 bytes, 0 unused bits
+    ];
+    let mut der = SPKI_ED25519.to_vec();
+    der.extend_from_slice(key.as_bytes());
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+    let mut out = String::from("-----BEGIN PUBLIC KEY-----\n");
+    for line in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(line).unwrap_or_default());
+        out.push('\n');
+    }
+    out.push_str("-----END PUBLIC KEY-----\n");
+    out
 }
 
 impl Signer for LocalKey {

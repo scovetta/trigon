@@ -4,6 +4,7 @@
 //! on disk is the one implementation here; `--remote` (`docs/19` §6) will be another, reading the
 //! same paths over HTTPS, and everything that verifies a log reads through this.
 
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
@@ -131,5 +132,41 @@ impl LogFiles for DirFiles {
 
     fn shown(&self, path: &str) -> String {
         self.root.join(path).display().to_string()
+    }
+}
+
+/// Files about to be written, over the files already there: what a writer checks a publication
+/// against with the reader's own code before any of it is on disk (`docs/19` §10 phase 5), so a
+/// record it would write and every client would refuse is refused first.
+///
+/// A path staged is read from memory, held to the same `limit`; any other is read from `under`.
+pub struct Staged<'a> {
+    staged: &'a BTreeMap<String, Vec<u8>>,
+    under: &'a dyn LogFiles,
+}
+
+impl<'a> Staged<'a> {
+    pub fn new(staged: &'a BTreeMap<String, Vec<u8>>, under: &'a dyn LogFiles) -> Self {
+        Staged { staged, under }
+    }
+}
+
+impl LogFiles for Staged<'_> {
+    fn read(&self, path: &str, limit: u64) -> Result<Option<Vec<u8>>, LogError> {
+        match self.staged.get(path) {
+            Some(bytes) if bytes.len() as u64 > limit => Err(LogError::Malformed(format!(
+                "`{path}` would be {} bytes, and no file at that path can be more than {limit}",
+                bytes.len()
+            ))),
+            Some(bytes) => Ok(Some(bytes.clone())),
+            None => self.under.read(path, limit),
+        }
+    }
+
+    fn shown(&self, path: &str) -> String {
+        match self.staged.contains_key(path) {
+            true => format!("{path} (to be written)"),
+            false => self.under.shown(path),
+        }
     }
 }

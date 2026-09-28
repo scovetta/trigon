@@ -14,7 +14,7 @@ use crate::build::{
     Clock, Made, Pair, copy, digest, leaf_for, open, open_golden, pairs, repo, resigned, sha256,
     small, verdict, void, withdrawal,
 };
-use crate::common::{T0, attestation_key};
+use crate::common::{ORIGIN, T0, attestation_key};
 
 fn failure(r: &trigon_attest::evidence::Repository, name: &str) -> RecordFailure {
     let bytes = r.read_record(&digest(name)).unwrap().unwrap();
@@ -514,6 +514,7 @@ fn a_record_is_accepted_only_under_a_key_its_signed_subject_is() {
         check_record(
             &bytes,
             Some((pos, leaf)),
+            ORIGIN,
             r.keys(),
             &DirFiles::new(repo()),
             Some(&Key::parse(key).unwrap()),
@@ -550,6 +551,7 @@ fn a_record_is_accepted_only_under_a_key_its_signed_subject_is() {
     check_record(
         &bytes,
         Some((pos, leaf)),
+        ORIGIN,
         r.keys(),
         &DirFiles::new(repo()),
         Some(&Key::File(d.clone())),
@@ -559,6 +561,7 @@ fn a_record_is_accepted_only_under_a_key_its_signed_subject_is() {
     let e = check_record(
         &bytes,
         Some((pos, leaf)),
+        ORIGIN,
         r.keys(),
         &DirFiles::new(repo()),
         Some(&Key::File(d)),
@@ -600,4 +603,137 @@ fn a_file_that_is_not_a_record_fails_verification_as_unreadable() {
         let e = open(tmp.path()).verify_record(&bytes).unwrap_err();
         assert!(matches!(e, RecordFailure::Unreadable(_)), "{e}");
     }
+}
+
+/// `docs/19` §4.2 item 6 and §8: a client never renders an outcome it cannot show with the command
+/// that would falsify it and, for a divergence, where to dispute it. So a logged verdict without
+/// its falsifying command fails verification, and so does one whose command would resolve
+/// elsewhere — another log's origin, another subject, another predicate type, another program —
+/// and a divergence without its dispute pointer. An equivalence need not say where to dispute it,
+/// and a void and a withdrawal carry neither (`a_verdict_a_void_a_withdrawal_and_a_superseding_
+/// verdict_each_verify`).
+#[test]
+fn a_verdict_without_what_answers_it_fails_verification() {
+    let p = pairs();
+    let k3 = attestation_key(3);
+    let eq = verdict(&p["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let div = verdict(&p["b"], &k3, "1789000000-bbbbbbbb", None, T0);
+    let drop = |field: &'static str| {
+        move |st: &mut Statement| {
+            st.predicate.as_object_mut().unwrap().remove(field);
+        }
+    };
+    // The falsifying command's argv, edited by `f`.
+    fn argv(f: impl Fn(&mut Vec<String>)) -> impl Fn(&mut Statement) {
+        move |st: &mut Statement| {
+            let mut argv: Vec<String> =
+                serde_json::from_value(st.predicate["falsifyingCommand"]["argv"].clone()).unwrap();
+            f(&mut argv);
+            st.predicate["falsifyingCommand"]["argv"] = serde_json::json!(argv);
+        }
+    }
+    fn set(flag: &'static str, to: &'static str) -> impl Fn(&mut Vec<String>) {
+        move |argv: &mut Vec<String>| {
+            let at = argv.iter().position(|a| a == flag).unwrap();
+            argv[at + 1] = to.into();
+        }
+    }
+    type Edit = Box<dyn Fn(&mut Statement)>;
+    let cases: Vec<(&Made, &str, Edit)> = vec![
+        (
+            &eq,
+            "signs no falsifying command",
+            Box::new(drop("falsifyingCommand")),
+        ),
+        (
+            &div,
+            "signs no falsifying command",
+            Box::new(drop("falsifyingCommand")),
+        ),
+        (
+            &div,
+            "signs no dispute pointer",
+            Box::new(drop("disputePointer")),
+        ),
+        (
+            &eq,
+            "naming the log `example.com/elsewhere`, and it is logged in \
+             `example.com/trigon-evidence`",
+            Box::new(argv(set("--origin", "example.com/elsewhere"))),
+        ),
+        (
+            &div,
+            "naming the log `example.com/elsewhere`",
+            Box::new(argv(set("--origin", "example.com/elsewhere"))),
+        ),
+        (
+            &eq,
+            "whose `--lookup` is `sha256:0000",
+            Box::new(argv(set(
+                "--lookup",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ))),
+        ),
+        (
+            &eq,
+            "whose `--predicate` is `https://trigon.dev/divergence/v2`",
+            Box::new(argv(set("--predicate", "https://trigon.dev/divergence/v2"))),
+        ),
+        (
+            &eq,
+            "without `--origin`",
+            Box::new(argv(|a| {
+                let at = a.iter().position(|x| x == "--origin").unwrap();
+                a.drain(at..at + 2);
+            })),
+        ),
+        (
+            &eq,
+            "gives `--origin` 2 times",
+            Box::new(argv(|a| {
+                a.extend(["--origin".to_string(), "example.com/trigon-evidence".into()])
+            })),
+        ),
+        (
+            &eq,
+            "is not `trigon verify-attestation`",
+            Box::new(argv(|a| a[0] = "sh".into())),
+        ),
+        (
+            &div,
+            "not an `https://` URL",
+            Box::new(|st: &mut Statement| {
+                st.predicate["disputePointer"]["url"] = "http://example.com/issues".into();
+            }),
+        ),
+        (
+            &eq,
+            "not an `https://` URL",
+            Box::new(|st: &mut Statement| {
+                st.predicate["disputePointer"] =
+                    serde_json::json!({"kind": "email", "address": "x@example.com"});
+            }),
+        ),
+    ];
+    for (m, says, edit) in &cases {
+        let edited = resigned(m, &k3, T0, None, |i, st| {
+            if i == 0 {
+                edit(st)
+            }
+        });
+        let e = verify_alone(&edited).unwrap_err();
+        assert!(matches!(e, RecordFailure::Recourse(_)), "{says}: {e}");
+        assert_eq!(e.kind(), "no-recourse");
+        assert!(e.to_string().contains(says), "{says}: {e}");
+    }
+
+    // An equivalence is no accusation, and need not say where to dispute it.
+    let without = resigned(&eq, &k3, T0, None, |i, st| {
+        if i == 0 {
+            drop("disputePointer")(st)
+        }
+    });
+    verify_alone(&without).unwrap();
+    verify_alone(&eq).unwrap();
+    verify_alone(&div).unwrap();
 }

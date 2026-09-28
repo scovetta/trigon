@@ -213,6 +213,10 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         // `upstream.bytes` is the rebuild's size), the comparison's, and the tokens spent on the
         // two questions above — three measurements of the difference.
         costs: _,
+        // Kept: where the void's record was published. It is the `void/v1` record, which says
+        // why the run is void and nothing of which way its comparison went, and it is already
+        // public, in the evidence repository it names.
+        published,
     } = r;
     RunRecord {
         id,
@@ -253,6 +257,7 @@ pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> Run
         per_target_attestations: Vec::new(),
         non_builtin_stabilizer,
         diff_opinion: None,
+        published,
     }
 }
 
@@ -452,6 +457,32 @@ impl Index {
             .filter(|e| e.target == target && e.publication.is_public())
             .max_by(|a, b| a.started.cmp(&b.started).then_with(|| a.id.cmp(&b.id)))
             .and_then(|e| g.records.get(&e.id).map(|r| (r.clone(), e.publication)))
+    }
+
+    /// The other attempts at `id`'s work that agree with it — the same cache key, outcome and
+    /// agreement digest, none of them void — as the gate counts them.
+    ///
+    /// For `trigon publish`, which publishes one of two agreeing attempts (`docs/19` §3): a run
+    /// whose agreeing attempt is already published is the same finding again, and a second record
+    /// for it would be a second current record for one subject. Empty for a run the index does not
+    /// hold, a void one, or one with no cache key or no outcome, which agrees with nothing but
+    /// itself.
+    pub fn agreeing(&self, id: &str) -> Vec<RunRecord> {
+        let g = self.read_or_recover();
+        // A void run is evidence of nothing, so it confirms nothing and nothing confirms it, as
+        // `attempts_by_key` leaves it out of every count.
+        let Some(r) = g.records.get(id).filter(|r| voided(r).is_none()) else {
+            return Vec::new();
+        };
+        let attempts = attempts_by_key(&g.records);
+        let Some(at_key) = r.cache_key.as_deref().and_then(|k| attempts.get(k)) else {
+            return Vec::new();
+        };
+        at_key
+            .iter()
+            .filter(|other| other.id != r.id && agrees(r, other) == Some(true))
+            .map(|other| (*other).clone())
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -1150,6 +1181,20 @@ mod tests {
                 because: crate::publication::Withheld::AttemptsDisagree
             }
         );
+
+        // What `publish` asks, so that of two agreeing attempts one is published: the same set,
+        // the run itself left out.
+        let others: Vec<String> = ix
+            .agreeing("1700000001-a")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(others, ["1700000002-b"]);
+        assert!(
+            ix.agreeing("1700000006-f").is_empty(),
+            "a void agrees with nothing"
+        );
+        assert!(ix.agreeing("no-such-run").is_empty());
     }
 
     /// A void attempt at a key neither confirms another attempt there nor contradicts it, through

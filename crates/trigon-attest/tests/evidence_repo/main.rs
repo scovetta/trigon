@@ -17,3 +17,4 @@ mod lookup;
 mod paths;
 mod records;
 mod rerun;
+mod sign;

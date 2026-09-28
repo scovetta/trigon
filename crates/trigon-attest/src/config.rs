@@ -128,6 +128,12 @@ impl Env {
         }
     }
 
+    /// `$XDG_STATE_HOME`, or `~/.local/state`: where a host keeps what must outlive any one store,
+    /// such as the newest checkpoint it has published of a log.
+    pub fn state_home(&self) -> Option<PathBuf> {
+        self.xdg(&self.xdg_state_home, ".local/state")
+    }
+
     /// Where the user's own `evidence.toml` is, whether or not it exists.
     pub fn user_config_path(&self) -> Option<PathBuf> {
         match &self.evidence_config {
@@ -964,6 +970,13 @@ fn source_name(name: &str) -> Result<(), String> {
 /// ASCII, so ASCII case is all there is to fold.
 fn same_name(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
+}
+
+/// Whether `s` is a log's origin as `[publish] origin` takes one: schema-less, and a name a log key
+/// can carry. For a command given one, such as `trigon log keygen --origin`, so that a key is never
+/// made for an origin the configuration would refuse.
+pub fn check_origin(s: &str) -> Result<(), String> {
+    origin(s).map(|_| ())
 }
 
 /// The origin line of a log: schema-less and permanent (`docs/19` §2.3).

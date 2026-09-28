@@ -731,24 +731,27 @@ fn a_record_is_shown_with_every_field_docs_19_4_2_has_a_client_render() {
     assert_eq!(doc["stabilizerSet"], serde_json::Value::Null);
     assert_eq!(doc["falsifyingCommand"], serde_json::Value::Null);
 
-    // A verdict signed with no derivation, no command and no dispute pointer: each said to be
-    // absent, never shown as a value.
+    // An equivalence signed with no derivation and no dispute pointer, which only a divergence
+    // must carry: each said to be absent, never shown as a value.
     let p = build::pairs();
     let k3 = common::attestation_key(3);
-    let bare = build::resigned(
-        &build::verdict(&p["a"], &k3, "1789000000-aaaaaaa1", None, common::T0),
-        &k3,
-        common::T0,
-        None,
-        |i, st| {
-            if i == 0 {
-                let o = st.predicate.as_object_mut().unwrap();
-                for field in ["derivation", "falsifyingCommand", "disputePointer"] {
-                    o.remove(field);
+    let without = |fields: &'static [&'static str]| {
+        build::resigned(
+            &build::verdict(&p["a"], &k3, "1789000000-aaaaaaa1", None, common::T0),
+            &k3,
+            common::T0,
+            None,
+            move |i, st| {
+                if i == 0 {
+                    let o = st.predicate.as_object_mut().unwrap();
+                    for field in fields {
+                        o.remove(*field);
+                    }
                 }
-            }
-        },
-    );
+            },
+        )
+    };
+    let bare = without(&["derivation", "disputePointer"]);
     let root = scratch("bare");
     build::small(&root, &[&bare]);
     let out = check_made(&root, &bare, &[]);
@@ -756,11 +759,20 @@ fn a_record_is_shown_with_every_field_docs_19_4_2_has_a_client_render() {
     assert_eq!(out.status.code(), Some(0), "{said}");
     for line in [
         "derived   not recorded: the statement names no derivation method",
-        "falsify   none signed",
         "dispute   none signed",
     ] {
         assert!(said.contains(line), "{line}\n{said}");
     }
+
+    // A verdict with no command that would falsify it is never rendered: it fails verification,
+    // exit 4, since a client never renders an outcome it cannot show with one (docs/19 §8).
+    let bare = without(&["falsifyingCommand"]);
+    let root = scratch("no-command");
+    build::small(&root, &[&bare]);
+    let out = check_made(&root, &bare, &[]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(4), "{said}");
+    assert!(said.contains("signs no falsifying command"), "{said}");
 }
 
 /// `verify-attestation --record <m's file> --evidence <root>`, with the keys `build.rs` signs

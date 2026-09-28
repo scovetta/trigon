@@ -47,10 +47,12 @@ cargo build --release -p trigon --no-default-features
 ```
 
 This is the build to use when you are checking somebody else's claim and would rather not run their
-code path. It carries seven commands — `verify`, `verify-attestation`, `stabilize`, `stabilizers`, `strategy`,
-`keygen` and `public-key` — and links no async runtime, no network client and no model code. The
-two key commands are here deliberately: making a signing key on a machine that has never had a
-socket open is a reasonable thing to want, and nothing about making one needs the build half.
+code path. It carries eight commands — `verify`, `verify-attestation`, `stabilize`, `stabilizers`,
+`strategy`, `keygen`, `public-key`, and `log` with its `keygen` and `sign` — and links no async
+runtime, no network client and no model code. The key commands are here deliberately: making a
+signing key on a machine that has never had a socket open is a reasonable thing to want, and nothing
+about making one needs the build half; nor does `log sign`, which holds an evidence log's key and
+opens no socket, so that key can live on such a machine too.
 Everything `verify-attestation` does is arithmetic over bytes already on disk, so it needs no
 network and gets none. You can check that yourself rather than take it on trust:
 
@@ -419,13 +421,157 @@ A worker's second attempt is the same thing, queued by the engine for a machine 
 first attempt's — so a fleet of one machine confirms nothing unless `same_host_confirmation = true`
 — and never for a void verdict.
 
+## Task: publish to an evidence repository
+
+`trigon publish` is the only thing that writes an evidence repository
+([`19`](19-distribution-and-lookup.md)): a git repository holding signed records, the log that holds
+them, and an index for finding them. Set one up once. First the log's own key:
+
+```
+$ trigon log keygen --origin example.com/trigon-evidence --out ~/.config/trigon/log.key
+  wrote        /home/you/.config/trigon/log.key (0600)
+
+  log key      example.com/trigon-evidence+0a714227+AUQS5nZWL9BI4ddCHeT5QyKj/Qjs6BPs6KWF5qTkZHGl
+```
+
+It signs the log's checkpoints and nothing else, and is a separate key from the one `trigon attest`
+signs records with: Ed25519 in Go's private-key format, written `0600` and never over a file already
+there. Point `[publish] log_key` at it. Only `trigon log sign` ever reads it — `publish` runs `log
+sign` as a child process and never opens the key — and `log keygen` and `log sign` are in the
+verifier build too, so the key can be kept on a machine that has never had a socket open. The line
+it prints is what a client pins as the source's `log_key`.
+
+Then, with `[publish] origin` and `disputes` set in `evidence.toml`, begin the log:
+
+```
+$ trigon log init --origin example.com/trigon-evidence --repo /srv/trigon-evidence.git \
+      --attestation-key feaf1c610a3938f709780cc762f30e1add00513b5691edf2c13a7194750aed49
+  repository   /srv/trigon-evidence.git (main)
+  commit       e88208bf388f8d42ae2ba260f6fa474d94442924
+  origin       example.com/trigon-evidence
+  log key      example.com/trigon-evidence+0a714227+AUQS5nZWL9BI4ddCHeT5QyKj/Qjs6BPs6KWF5qTkZHGl
+  attestation  feaf1c610a3938f709780cc762f30e1add00513b5691edf2c13a7194750aed49 (key id 59d9d354f06b4e8b)
+```
+
+That is the repository's first commit: `keys/log.vkey` and `keys/attestation.pub`, copies of the two
+keys a client pins; a README stating the origin, the keys, how often a checkpoint appears — once per
+publication, and at least every `[publish] heartbeat` — and where a dispute goes; and a checkpoint
+of size 0, signed by `log sign --init`. A repository that already has a log is refused, and so is a
+log this host has already published: another repository needs a log of its own, with its own origin
+and key. On GitHub the branch also wants a ruleset that forbids force-pushes and deletion with no
+one exempt; `log init` prints the `gh api` call that sets one on `[publish] branch`, and never runs
+it.
+
+Then publish runs the gate releases, one commit each time:
+
+```
+$ trigon publish 1789000000-aaaa0001 --store ./trigon-store --repo /srv/trigon-evidence.git
+repository /srv/trigon-evidence.git (main)
+logged    leaf 0: run 1789000000-aaaa0001: equivalence/v2 normalized, pkg:npm/demo-a@1.0.0
+commit    bcdd74de13f1838cce145824577918f097a9908c (publish: 1 record, tree 0 → 1)
+checkpoint example.com/trigon-evidence 1 2DY/vIdbRFHytloyGdm9M4zsk21mswwqlxN2n8Vo/8A=
+```
+
+The commit holds each record, the evidence it names, its leaf, the new tiles and checkpoint, and the
+index file of every key the record is found by, and it is pushed without force. Before any of it is
+written, `publish`:
+
+- **verifies the repository's log**, whole, under `keys/log.vkey` — whose origin must be `[publish]
+  origin` — and against the newest checkpoint of the log this host has published or verified, which
+  it keeps in the host's state directory. A remote rolled back or rewritten behind that is refused,
+  from any store and however the repository is named, and so is one whose log does not verify, or
+  whose branch names git attributes; files beyond the checkpoint are never read;
+- **asks the publication gate** about every run, as `trigon serve` does, with the repository's
+  `kill-switch` file as safeguard 5. A withheld run is refused with its reason; a void one is
+  published only as its `void/v1`; a divergence is refused while `divergences = "refuse"`, the
+  default until [`19`](19-distribution-and-lookup.md) D7 decides how a maintainer is told;
+- **refuses** a run already published, the second of two agreeing attempts whose first is, a record
+  for an artifact that already has a current one unless it supersedes it (`trigon attest <run>
+  --supersedes <record> --reason <code>`), and a verdict without the falsifying command naming
+  `[publish] origin` and the dispute pointer `[publish] disputes` names — attest it again with both
+  set. Every refusal is listed at once:
+
+  ```
+  Error: refusing to publish, and nothing was written:
+    - run `1789007200-aaaa0002`: it agrees with run `1789000000-aaaa0001`, which is published: of
+      two agreeing attempts one is published, and the second would be the same finding again
+      (docs/19 §3)
+  ```
+
+- **checks every record it would write as every client will**, and `trigon log sign` checks the
+  tree again from disk before it signs: it extends a checkpoint the log key itself verifies, and the
+  newest checkpoint of the log this host has published, and every new leaf is a heartbeat or names
+  a record file whose envelopes verify under `keys/attestation.pub` and agree with the leaf.
+
+A push that loses to another writer is never forced: the commit and the checkpoint signed for it
+are discarded, and the publication is built again on what the other writer pushed. A publisher
+killed part way leaves the repository as it was or with the whole publication; a run whose record
+was pushed and not yet noted on the run is completed by the next `publish` of it, and never logged
+twice. The run records where it went, as `published`: the repository, the commit, the record's
+digest and its leaf.
+
+The commit holds exactly the bytes `publish` wrote and `log sign` checked, and is read back before
+it is pushed; it is never made by `git add`, so no `.gitignore`, excludes file or attribute keeps a
+file out or rewrites one.
+
+The repository is `--repo`, else `TRIGON_PUBLISH_REPO`, else `[publish] repo`: anything `git`
+accepts, with `git`'s own credentials, and never a prompt — `GIT_TERMINAL_PROMPT=0`, and ssh with
+`BatchMode=yes`, added to a configured `ssh` command too, so a missing credential or an unknown host
+key fails rather than waits. A credential helper, an askpass, or an ssh wrapper that is not `ssh`,
+runs as you configured it. Nothing else in your git configuration changes what is published:
+`core.autocrlf` and your attributes file are switched off, and neither commit nor push is signed
+with your key. `publish` keeps a clone of the repository in the store under `publish/`. One
+`publish` runs at a time on a host, whatever store it runs from — a second is refused with the
+first's pid, start time and store rather than left waiting — and the newest checkpoint of each log
+the host has published is kept in `$XDG_STATE_HOME/trigon/publish/`. Keep that directory from one
+run to the next: a host without it, such as a fresh CI runner, is held only to the checkpoint the
+repository holds. A local path to a working tree, rather than a bare repository, is published into
+in place: the commit is made there, nothing is pushed, and it is refused unless it is clean, holds
+nothing git ignores under `keys/`, `log/`, `records/`, `evidence/` or `index/`, and is on
+`[publish] branch`.
+
+The other forms:
+
+```
+trigon publish --withdrawal <store>/withdrawals/sha256/<record>/withdrawal.intoto.json
+trigon publish --heartbeat         # a heartbeat leaf, if the newest leaf is older than `heartbeat`
+trigon publish --reconcile         # rebuild index/ from the log, in one commit
+trigon publish <run>… --dry-run    # every file and leaf, and the checkpoint, unsigned
+```
+
+A withdrawal, signed by `trigon attest --withdraw`, is published only of a record the log holds and
+nothing supersedes yet, and gets an entry in every index file of that artifact's keys.
+`--heartbeat` logs a leaf only when one is due, and says so otherwise, so a scheduler can run it
+daily; without one, every client's copy of an honest but quiet log turns *unknown* after
+`frozen_after`. `--dry-run` prints what it would write, runs no `log sign`, and leaves the
+repository, the working clone and the store's runs exactly as they were:
+
+```
+dry run   nothing is written, and `trigon log sign` is not run; the working clone and the repository are left as they are
+write     evidence/sha256/0c/3d/0c3d0652f1e9abf9c749507dc33b2fd5df380ae15995014cb360aac1b5681cb6 (3014 bytes)
+…
+write     records/84/06/84061f04c7ef35caa4ae4f147909670f136bfe016869ad71e88b003326fc1cfd.json (8740 bytes)
+leaf 0    {"keyId":"b62e867fa2f33afe","kind":"record","outcome":"normalized",…,"time":1790592152}
+checkpoint, unsigned:
+  example.com/trigon-evidence
+  1
+  2DY/vIdbRFHytloyGdm9M4zsk21mswwqlxN2n8Vo/8A=
+commit    publish: 1 record, tree 0 → 1
+```
+
+Not built yet ([`19`](19-distribution-and-lookup.md) §10 phase 5): rebuilt artifacts as release
+assets — `rebuilt_artifacts = "github-release"` is refused rather than publishing records that name
+assets nobody uploaded — the divergence feed, so `divergences = "feed"` still refuses divergences,
+key rotation and log succession (`log key-change`, `log succeed`), and `--prune`.
+
 ## Configuring where evidence goes: `evidence.toml`
 
 Publishing and looking up verdicts in an evidence repository
 ([`19-distribution-and-lookup.md`](19-distribution-and-lookup.md)) are configured, never compiled
-in. `trigon attest`, `trigon serve` and `trigon worker` read the configuration today — `serve` and
-`worker` for `same_host_confirmation` and `confirmation_interval`, which decide when two attempts
-count as two; `publish`, `evidence sync` and `lookup` are the later phases that use the rest of it.
+in. `trigon attest`, `trigon publish`, `trigon log init`, `trigon serve` and `trigon worker` read
+the configuration today — `serve` and `worker` for `same_host_confirmation` and
+`confirmation_interval`, which decide when two attempts count as two; `evidence sync` and `lookup`
+are the later phases that use the `[freshness]` and `[[source]]` tables.
 
 The file is `~/.config/trigon/evidence.toml` (`$XDG_CONFIG_HOME/trigon/evidence.toml`), or
 whatever `TRIGON_EVIDENCE_CONFIG` names instead. Every key, with its default:
@@ -459,7 +605,7 @@ trust_on_first_use = false     # true only to read an unpinned key from the repo
 
 `attest` signs `origin` and `disputes` into every verdict's falsifying command and dispute pointer
 when **both** are set, and leaves both out when either is not — which is right for local use, and
-what `publish` will refuse.
+what `publish` refuses.
 
 **An unknown key is an error**, and so is a value of the wrong kind, a pin that does not parse, or a
 source without both keys that does not ask for trust on first use: a typo in a security setting that

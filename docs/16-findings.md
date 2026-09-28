@@ -4622,3 +4622,227 @@ in `trigon_attest::evidence`, and the network-free verifier's `verify-attestatio
 - **`trigon attest` refused a claim whose outcome held and whose `applied` did not as "the run
   recorded `normalized` and the bytes give `normalized`"**: the refusal names the fields now.
 - **No test held a refuted claim to exit 4**: setting it to never refute passed every test.
+
+### 3.100 `trigon publish`: one verified commit, and a log key only `trigon log sign` holds
+
+`docs/19` §10 phase 5, first half, on 2026-09-28: the evidence repository's writer. `trigon log
+keygen`, `log init` and `log sign`, and `trigon publish` for runs, withdrawals and heartbeats, with
+`--dry-run` and `--reconcile`. The second half — rebuilt artifacts as release assets, the
+divergence feed, `log key-change` and `log succeed`, `--prune`, `serve`'s report of the repository's
+kill-switch, and the spike against a scratch GitHub repository — is phase 5b, and each of its
+settings is refused here rather than half-honoured.
+
+**What changed.**
+
+- **`trigon log keygen --origin <o> --out <file>`**: an Ed25519 log key in Go's private-key
+  format, named by the origin, written `0600` and never over a file already there, with the
+  verifier key a client pins printed whole. The origin is held to `[publish] origin`'s rule
+  (`config::check_origin`).
+- **`trigon log sign --tree <dir> --size <n> --key <file>`**: the one step that holds the log key.
+  It reads the tree from disk and signs its checkpoint only where the checkpoint the tree extends
+  opens under the key itself, the new tree's first leaves hash to its root, every leaf decodes and
+  keeps its place and time, every tile holds its leaves' hashes, and every new leaf is a heartbeat,
+  a key change signed by both keys, or names a record file in the tree, logged at no other leaf,
+  that passes `check_record` under the attestation key the tree names, with every evidence file it
+  names beside it (`trigon_attest::evidence::check_to_sign`, over the new
+  `log::verify_extension`). A release, log-end or log-continuation leaf is refused: no command of
+  this build writes one. Nothing past `--size` is read. `--init` writes `keys/log.vkey` and the
+  empty checkpoint, and only in a tree with neither.
+- **`trigon log init --origin <o> --repo <location> --attestation-key <key>`**: the first commit —
+  `keys/`, the README (origin, both keys, "once per publication, and at least every `[publish]
+  heartbeat`", and `[publish] disputes`), and the checkpoint of size 0 that `log sign --init`
+  signs. A repository with `log/` or `keys/` is refused. It prints the `gh api` call that sets a
+  ruleset forbidding force-pushes and deletion with an empty bypass list, naming the repository
+  where the origin or the location is on GitHub, and never runs it.
+- **`trigon publish [RUN…] [--repo] [--withdrawal <envelope>] [--heartbeat] [--dry-run]
+  [--reconcile]`**, steps 1 to 7 as §10 phase 5 lists them (step 3 is D4's). The repository is
+  `--repo`, `TRIGON_PUBLISH_REPO` or `[publish] repo`; a working clone is kept at
+  `<store>/publish/<sha256 of the location as git is given it>/clone`, beside the newest checkpoint
+  verified there, and `<store>/publish/lock` keeps one `publish` at a time, refusing a second with
+  the first's pid, start and repository. A local working tree is published into in place, with a
+  lock in its git directory, and refused unless clean and on `[publish] branch`. Step 1 resets the
+  clone to the remote and verifies its log whole under `keys/log.vkey`, whose origin must be
+  `[publish] origin`, and against the stored checkpoint. Step 2 asks `decide` through
+  `trigon_api::Index` with the repository's `kill-switch`, and refuses every run it must at once:
+  withheld; a divergence under `divergences = "refuse"`; already published; the second of an
+  agreeing pair whose first is (the new `Index::agreeing`); a verdict or void for an artifact with
+  a current record it does not supersede; a verdict without its falsifying command naming
+  `[publish] origin` or the dispute pointer `[publish] disputes` names; and a record every client
+  would refuse, checked with `check_record` at the leaf it will have, against the evidence it
+  stages (`log::Staged`). Step 4 writes records and evidence deduplicated, one leaf each at a time
+  never earlier than the newest, the tiles and bundles `plan_append` gives and the partials it
+  makes obsolete removed, and each index file of every new record's keys derived from the log whole
+  (`evidence::index_files_after`). Step 5 runs `trigon log sign` as a child process and holds its
+  checkpoint to the one planned. Step 6 commits once and pushes without force. Step 7 records
+  `RunRecord.published` — repository, commit, record, leaf, and the log where it is not the first —
+  through `Store::record_published`, merged into the record as it is now, as attestations are.
+- **The forms without runs.** `--withdrawal` publishes a `withdrawal/v1` of a record the log holds
+  and nothing supersedes yet, of the same subject and purl, with an entry in every index file of its
+  keys. `--heartbeat` logs a heartbeat leaf when the newest is older than `[publish] heartbeat`, or
+  none, on a log with no leaves, and otherwise says why and writes nothing. `--reconcile` writes
+  every index file the log implies and removes every other under `index/`, in one commit, or says
+  there is nothing to reconcile. `--dry-run` reads a clone of its own, prints every file and leaf
+  and the checkpoint body, unsigned, and runs no `log sign`; the repository, the working clone and
+  the store's runs are left byte-identical.
+- **Carried over from phase 4b, decided by the lead.** `check_record` takes the origin of the log a
+  leaf is in, and fails a logged v2 verdict without its falsifying command, one whose command is not
+  `trigon verify-attestation` naming its own subject, its own predicate type and that origin, and a
+  divergence without an `https://` dispute pointer, as a new `RecordFailure::Recourse` (kind
+  `no-recourse`); a verdict that carries a dispute pointer it need not is held to the same. The
+  golden repository is regenerated: `k`, in the successor log, now names the successor's origin.
+  `verify-attestation --record`'s test of a verdict with no command, which pinned it rendering with
+  "falsify none signed", now expects exit 4.
+
+**Decided here, and why.**
+
+- **`log keygen` and `log sign` are in the verifier build too**, as `keygen` is: neither opens a
+  socket, and D5's option of a log key held apart wants a binary that can sign where nothing else
+  runs. `log init` and `publish` are the build half's.
+- **`log sign` takes `--size` and `--log`** beside the `--tree` and `--key` §10 names, so that what
+  it signs is exactly a size it was told, and a wider bundle planted beside the new one is never
+  read. It takes the attestation key from the tree's `keys/attestation.pub`, or `--attestation-key`;
+  a push credential that swaps the file stops publishing, since every honest record then fails, and
+  gets no record of its own signed, since only `publish` writes new leaves.
+- **A lost race is decided by asking the remote**, not by reading `git`'s wording: a rejected push
+  whose remote branch has moved from the commit the publication was built on is a lost race, and
+  any other failure is an error. `git` says `[rejected] (fetch first)` for one refused before the
+  pack is sent and `[remote rejected] (failed to update ref)` for one refused after it.
+- **A publication is committed as `trigon publish <publish@trigon.invalid>`**, not as the
+  operator: who committed a file is never who signed it (§8), and the operator's address would
+  otherwise enter a public history with every publication. `--no-verify`, so no pre-commit hook of
+  a tree published into changes what `log sign` checked. `git` keeps the operator's own
+  configuration, where the credential helper is, with `GIT_TERMINAL_PROMPT=0`, and `GIT_DIR` and
+  its kin removed, which a `publish` run from a git hook needs.
+- **A void, like a verdict, must supersede a current record for its artifact.** §3 said "a
+  verdict"; a void published beside a current verdict is a second current record, which a client
+  can only show beside the first, and §3 now says so.
+- **At publish, a verdict needs both the falsifying command and the dispute pointer, equal to
+  `[publish] origin` and `disputes`**, as §2.4 says; a client requires the pointer only on a
+  divergence, as §4.2 item 6 does.
+- **A withdrawal of a record already superseded is refused**, naming the record that supersedes it:
+  it would be a second current record, and it is that one that should be withdrawn.
+- **`TRIGON_PUBLISH_DIE_AT=written|signed|committed|pushed`** stops `publish` there as a kill would,
+  with nothing cleaned up, for the tests of a killed publisher. It is in every build: a kill can
+  stop `publish` at any of those points anyway.
+
+**What this does not do.**
+
+- Phase 5b, above. `rebuilt_artifacts = "github-release"` is refused rather than publishing records
+  that name assets nobody uploaded, and `divergences = "feed"` still refuses divergences.
+- Push to HTTPS or SSH in a test: nothing here reaches GitHub. That a location reaches `git` exactly
+  as configured is a unit test; the spike of §10 phase 5 is where a real push is measured.
+- Make the race of D26 impossible. A push that loses between the server advertising its refs and
+  updating them has sent its objects, the signed checkpoint among them: measured against a local
+  bare repository, whose object store kept the losing commit, unreachable, after `[remote
+  rejected] (failed to update ref)`. One publishing host under the lock is what makes the race
+  impossible, as ADR-0014 says. The test of two racing publishers has the second publish from a
+  `post-commit` hook in the first's clone, with a state directory of its own as a second host has,
+  so the first is refused before its pack is sent, and checks every object the remote holds.
+- `attest --prune`'s refusal of an unpublished run, which waits on D4.
+
+**Found on the way.**
+
+- **`index_files` could derive the index only from a verified log**, and the writer needs the index
+  of a tree whose checkpoint is not signed yet; `index_files_after` is the same derivation with the
+  new leaves appended.
+- **Nothing could write `keys/attestation.pub`** from a public key: only a private `LocalKey`
+  wrote SPKI PEM. `AttestationKey::to_pem` shares its writer.
+- **A test built on the golden repository pinned a record rendering an outcome without its
+  falsifying command**, the behaviour §8 forbids and this phase removes.
+
+**What review found in it.** Eighteen findings, of twelve defects — several found more than once —
+and a test that could not see what it was named for. Each defect now has a test that fails without
+its fix.
+
+- **A `.gitignore` could make `publish` push a signed checkpoint without its leaves.**
+  `git add --all` staged the publication, and follows the tree's `.gitignore`, the operator's
+  excludes and every filter or line-end conversion an attribute names; nothing checked that the
+  commit held what `log sign` checked. A `.gitignore` naming `tile/`, which whoever can push may
+  commit, left the remote with a signed checkpoint and no bundle, and the next run's `clean -x`
+  deleted the only copy: the log could never verify again. `log init` could push `keys/` without
+  `log/checkpoint`. The commit is now made from exactly the bytes written —
+  `hash-object --no-filters` and `update-index`, never `git add` — and read back before the push:
+  its parent, every path it changes and every blob must be the publication's, each blob's id
+  computed here from the bytes rather than taken from `git`. A branch that names git attributes is
+  refused before it is checked out, so no filter the operator's configuration defines ever runs on
+  it; `core.autocrlf` and the operator's attributes file are switched off for every run; and a
+  working tree published into must hold nothing git ignores where a publication reads and writes,
+  and is discarded there, ignored files included, when a publication fails
+  (`what_a_publication_writes_is_committed_whatever_git_is_told_to_ignore`,
+  `a_branch_that_names_git_attributes_is_refused_before_it_is_checked_out`,
+  `a_commit_holds_exactly_what_was_written_whatever_the_tree_ignores`).
+- **The operator's `commit.gpgSign` signed, or stopped, every publication**: a public commit signed
+  with the operator's own key, which the fixed committer is there to keep out of the history, or a
+  passphrase prompt, or `gpg failed to sign the data`. `push.gpgSign` would fail every push to a
+  server without signed pushes. Commits are made `--no-gpg-sign` and pushes `--no-signed`
+  (`the_operators_git_configuration_changes_nothing_that_is_committed`).
+- **ssh could wait on a terminal nobody watches.** `GIT_TERMINAL_PROMPT=0` stops `git`'s own prompt,
+  not ssh's passphrase or host-key question, and a scheduled `publish --heartbeat` from a session
+  with a terminal held its lock while ssh waited. ssh runs with `BatchMode=yes` now, added to a
+  configured `ssh` command too; a command that is not `ssh` runs as configured, and the documents
+  say so (`ssh_is_told_never_to_ask`).
+- **A working clone whose `.git` was gone was taken for the repository around the store.**
+  `git -C <clone> rev-parse` looked up through the parents, found the checkout the store sat in —
+  the owner's own sits in this repository — and `publish` rewrote its `origin`, reset its branch to
+  the evidence commit and discarded its uncommitted work. A clone is used only where its git
+  directory is its own, and every `git` run in a directory looks for a repository there and no
+  further up
+  (`a_working_clone_without_its_git_directory_is_made_again_and_never_the_checkout_around_it`,
+  `a_directory_without_a_repository_of_its_own_is_never_taken_for_the_one_around_it`).
+- **A remote rolled back could make the log key sign a second root for a size it had published.**
+  The newest checkpoint verified was kept per store and per spelling of the location, and `log sign`
+  accepted any checkpoint in the tree its key opened, so a fresh store, or `file://` for a path,
+  built on the rolled-back log and signed. It is kept by the log's origin in the host's state
+  directory now, and `log sign` holds every tree to it as well as to the tree's own base (below)
+  (`a_remote_rolled_back_behind_what_this_host_published_is_refused`,
+  `a_tree_that_does_not_extend_what_was_published_is_not_signed`).
+- **`log sign` wrote its checkpoint through a link.** The file it renamed from was opened with a
+  plain write at a predictable name, which follows a link planted there, and `log init` wrote the
+  README the same way. Both are made new now, never opened, and renamed over the old
+  (`a_file_is_replaced_and_never_written_through_a_link`).
+- **One `publish` per host was one per store.** Two stores on one host raced into D26's window. A
+  lock in the host's state directory keeps one `publish` at a time on it, whatever store it runs
+  from, beside the store's (`one_publish_runs_at_a_time_on_a_host_whatever_store_it_runs_from`).
+- **Any branch ending in the publish branch's name was read as it.** `ls-remote` matches a pattern
+  against a ref's end, so `refs/heads/a/refs/heads/main`, which anyone who can push can make, turned
+  every push failure into a lost race, five times over, with the real error unsaid. Only the exact
+  ref is read (`the_remote_head_is_the_branch_named_and_no_other_ending_in_its_name`).
+- **A push the remote took was taken for a lost one** when the connection went before the remote
+  answered: `publish` said it discarded what was published, and a withdrawal then refused itself as
+  already logged. A remote at the commit just pushed is a publication
+  (`a_push_the_remote_took_is_published_even_when_the_connection_goes_before_it_answers`).
+- **`--reconcile` walked a directory of the host's** through an `index` planted as a link, and a dry
+  run listed its files. The start of the walk is held to be a directory of the tree's own
+  (`reconcile_never_reads_through_a_link_planted_as_index`).
+- **A run completed after its record file was removed named the branch's tip** as the commit that
+  logged it. The commit is now the first whose checkpoint, opened under the log's key, covers the
+  leaf, and the missing file is said
+  (`a_run_completed_after_its_record_file_was_removed_names_the_commit_that_logged_it`).
+- **The ruleset `log init` prints protected the default branch**, whatever `[publish] branch` is. It
+  names the branch the log is on (`the_ruleset_protects_the_branch_the_log_is_on`).
+- **The test of files planted in `log/` could not see the leaf it planted**: its heartbeat's time
+  broke the order rule, and it counted record leaves only. The heartbeat is a valid one now, and the
+  test asserts the log's size and that no heartbeat was signed.
+
+**Decided in review, and why.**
+
+- **What `log sign` holds a tree to is the newest checkpoint *published*, never the newest
+  *signed*.** A checkpoint signed for a push that loses, or one a kill stops, never leaves the host;
+  holding the key to it would refuse every tree after a crash between signing and pushing, and stop
+  the log for good. So the host keeps what it has verified on the repository and what it has pushed,
+  `publish` moves it forward at step 1 and after the push, and `log sign` moves it forward to the
+  base of every tree it signs. It is kept by origin, not by vkey, so that a second key under one
+  origin is refused rather than given a memory of its own. And `log sign --init` refuses a log the
+  host has published: the same key beginning a second repository's log signs a second root for every
+  size. `the_repository_named_each_way_publishes` now begins each repository as a log of its own,
+  since four logs under one key and one origin were four roots for size 1.
+- **The host's state directory is `$XDG_STATE_HOME/trigon/publish/`**, the store's `publish/`
+  keeping only the working clone and its lock; `docs/19` §2.4 said the checkpoint was kept in the
+  store, and says where it is now, and why.
+- **A branch with attributes is refused, not neutralised.** Recent `git` can read attributes from
+  another tree, `--attr-source`, which an empty tree would neutralise, and older `git` cannot;
+  `info/attributes` applies either way. A refusal is the same on every version, and the branch is
+  checked before it is checked out.
+- **D27, new**: a host with no memory of the log — a fresh CI runner — is held only to what the
+  repository holds, and on one rolled back its log key signs a second root. The ruleset is what
+  forbids the rollback, and keeping the state directory between runs is what catches one.

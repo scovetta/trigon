@@ -179,6 +179,12 @@ impl AttestationKey {
         Ok(AttestationKey { key })
     }
 
+    /// The key as SPKI PEM, as [`crate::LocalKey::public_pem`] writes it: what an evidence
+    /// repository publishes as `keys/attestation.pub`, and what `trigon log init` writes there.
+    pub fn to_pem(&self) -> String {
+        crate::signer::spki_pem(&self.key)
+    }
+
     /// The key as hex, which is what [`crate::verify_signature`] takes.
     pub fn to_hex(&self) -> String {
         hex(self.key.as_bytes())

@@ -12,7 +12,9 @@
 //! - [`Key`], [`Lookup`]: resolving a digest, a purl, a package or a file to the records the log
 //!   holds for it, never through `index/`, with every supersession the log records applied;
 //! - [`Repository`]: a directory with the `docs/19` §2.3 layout, its log verified under a source's
-//!   pinned keys, which the rest is asked through.
+//!   pinned keys, which the rest is asked through;
+//! - [`check_to_sign`]: what `trigon log sign` holds a new tree to before the log key signs it —
+//!   the writer's side, checked with the reader's code.
 //!
 //! **The log wins, and the disagreement is shown** (`docs/19` §8). A record file no leaf names is
 //! unlogged and fails verification, and one the log holds at two leaves fails at both; a leaf
@@ -24,11 +26,15 @@ mod check;
 mod lookup;
 pub mod paths;
 mod repository;
+mod sign;
 
 pub use check::{
     EvidenceFile, EvidenceState, RecordFailure, RecordKind, VerifiedRecord, check_record,
     record_leaf,
 };
 pub use lookup::{Answer, Found, Key, Lookup, RecordState, SupersededBy};
-pub use paths::{IndexEntry, IndexFile, IndexKey, evidence_path, index_files, record_path};
+pub use paths::{
+    IndexEntry, IndexFile, IndexKey, evidence_path, index_files, index_files_after, record_path,
+};
 pub use repository::{EVIDENCE_LIMIT, RECORD_LIMIT, Repository};
+pub use sign::{Unsignable, check_to_sign};

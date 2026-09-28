@@ -418,6 +418,13 @@ enum Cmd {
         #[arg(long)]
         pem: bool,
     },
+    /// The evidence log's key, and the repository it signs (`docs/19` §2.3, §8).
+    ///
+    /// `keygen` and `sign` are in the verifier build too, as `keygen` is: the log key is held by
+    /// the socketless `log sign` and nothing else, and holding it on a machine that has never had a
+    /// socket open is a reasonable thing to want.
+    #[command(subcommand)]
+    Log(LogCmd),
     /// Sign what a stored run says, after re-deriving it from the bytes.
     ///
     /// A separate process from the one that ran the build, and that is the point: it reads blobs by
@@ -473,6 +480,45 @@ enum Cmd {
             )
         )]
         reason: Option<String>,
+    },
+    /// Publish to the evidence repository: runs the publication gate releases, a withdrawal, or a
+    /// heartbeat, each as one commit (`docs/19` §3, §10 phase 5).
+    ///
+    /// The only thing that writes an evidence repository. It verifies the repository's log before
+    /// building on it; asks the gate about every run, through the index `trigon serve` uses, with
+    /// the kill-switch read from the repository; publishes a run the gate calls void only as
+    /// `void/v1`, and a withheld run not at all; refuses divergences while `[publish] divergences`
+    /// is "refuse"; has `trigon log sign`, a child process that holds the log key, sign the new
+    /// checkpoint; and pushes one commit, never forced. The repository is `--repo`, else
+    /// `TRIGON_PUBLISH_REPO`, else `[publish] repo`.
+    #[cfg(feature = "build")]
+    Publish {
+        /// Runs to publish, by id; their leaves are logged in the order given.
+        runs: Vec<String>,
+        /// The store the runs are in. Its `publish/` holds the working clone, the lock that keeps
+        /// publishing to one `trigon publish` at a time, and the newest checkpoint verified on the
+        /// repository.
+        #[arg(long, default_value = "./trigon-store")]
+        store: PathBuf,
+        /// The evidence repository: any location git accepts. A local working tree is published
+        /// into in place; anything else, a bare repository's path included, is pushed to.
+        #[arg(long, value_name = "LOCATION")]
+        repo: Option<String>,
+        /// Publish a withdrawal `trigon attest --withdraw <record> --reason <code>` signed: the
+        /// envelope file, as the store files it under `withdrawals/`.
+        #[arg(long, value_name = "ENVELOPE")]
+        withdrawal: Option<PathBuf>,
+        /// Log a heartbeat leaf if the newest leaf is older than `[publish] heartbeat`, and say so
+        /// and do nothing otherwise, so a scheduler can run it daily.
+        #[arg(long)]
+        heartbeat: bool,
+        /// Print every file and leaf it would write, and the checkpoint it would sign, unsigned;
+        /// run no `trigon log sign`, and leave the repository and the working clone as they are.
+        #[arg(long)]
+        dry_run: bool,
+        /// Rebuild `index/` from the log, in one commit.
+        #[arg(long)]
+        reconcile: bool,
     },
     /// Score a sweep against a labelled corpus.
     ///
@@ -948,6 +994,73 @@ enum Cmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum LogCmd {
+    /// Make a log key: Ed25519, in Go's private-key format, named by the log's origin.
+    ///
+    /// Written `0600` and never over a file already there; the verifier key clients pin is
+    /// printed. Point `[publish] log_key` at the file: only `trigon log sign` reads it.
+    Keygen {
+        /// The log's origin, schema-less, as `github.com/<owner>/trigon-evidence`: the key's name,
+        /// and the first line of every checkpoint it signs.
+        #[arg(long)]
+        origin: String,
+        /// Where to write the private key.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Begin an evidence repository's log: `keys/`, the README and a checkpoint of size 0, in its
+    /// first commit.
+    ///
+    /// Refuses a repository that already has a log. Prints, and never runs, the `gh api` call that
+    /// forbids force-pushes and deletion of the branch with no one exempt.
+    #[cfg(feature = "build")]
+    Init {
+        /// The log's origin, as its key names it.
+        #[arg(long)]
+        origin: String,
+        /// The repository: any location git accepts. Else `TRIGON_PUBLISH_REPO`, else
+        /// `[publish] repo`.
+        #[arg(long, value_name = "LOCATION")]
+        repo: Option<String>,
+        /// The attestation key the repository's records are signed with: 64 hex digits, as
+        /// `trigon public-key` prints it, or a PEM public key file.
+        #[arg(long, value_name = "KEY")]
+        attestation_key: String,
+        /// The log key, read only by the `trigon log sign` this runs. Else `[publish] log_key`.
+        #[arg(long, value_name = "FILE")]
+        log_key: Option<PathBuf>,
+    },
+    /// Sign the checkpoint of a tree `trigon publish` wrote, after checking it: the one step that
+    /// holds the log key.
+    ///
+    /// Signs only a tree whose first leaves hash to the checkpoint it holds, which must verify
+    /// under this key, and whose every new leaf is a heartbeat or names a record file in the tree
+    /// that every client would accept, with its evidence beside it. Reads nothing past `--size`.
+    Sign {
+        /// The repository's working tree.
+        #[arg(long)]
+        tree: PathBuf,
+        /// The log key.
+        #[arg(long)]
+        key: PathBuf,
+        /// How many leaves the tree to sign has.
+        #[arg(long, required_unless_present = "init")]
+        size: Option<u64>,
+        /// The log's directory in the tree: `log`, or `log/<n>` for a successor.
+        #[arg(long, default_value = "log")]
+        log: String,
+        /// The attestation key current at the checkpoint the tree extends: 64 hex digits or a PEM
+        /// file. Else the tree's `keys/attestation.pub`.
+        #[arg(long, value_name = "KEY")]
+        attestation_key: Option<String>,
+        /// Begin a log instead: write `keys/log.vkey` and a checkpoint of size 0, in a tree that
+        /// has neither.
+        #[arg(long, conflicts_with_all = ["size", "attestation_key"])]
+        init: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum StrategyCmd {
     /// Render a strategy to the scripts an executor would run.
     ///
@@ -1154,6 +1267,14 @@ mod style;
 /// `verify-attestation --record`: a published record checked against its source's log. In both
 /// builds, since it opens no socket.
 mod verify_record;
+
+/// `log keygen` and `log sign`: the evidence log's key, and the one step that holds it. In both
+/// builds, since neither opens a socket.
+mod evidence_log;
+
+/// `trigon publish` and `trigon log init`: the only writers of an evidence repository.
+#[cfg(feature = "build")]
+mod publish;
 
 #[cfg(feature = "build")]
 mod decompile;
@@ -1654,6 +1775,52 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             wall,
         }),
         Cmd::Keygen { out, public_out } => keygen(&out, public_out.as_deref()),
+        Cmd::Log(LogCmd::Keygen { origin, out }) => evidence_log::keygen(&origin, &out),
+        #[cfg(feature = "build")]
+        Cmd::Log(LogCmd::Init {
+            origin,
+            repo,
+            attestation_key,
+            log_key,
+        }) => publish::init(publish::InitArgs {
+            origin,
+            repo,
+            attestation_key,
+            log_key,
+        }),
+        Cmd::Log(LogCmd::Sign {
+            tree,
+            key,
+            size,
+            log,
+            attestation_key,
+            init,
+        }) => evidence_log::sign(evidence_log::SignArgs {
+            tree,
+            key,
+            size,
+            log,
+            attestation_key,
+            init,
+        }),
+        #[cfg(feature = "build")]
+        Cmd::Publish {
+            runs,
+            store,
+            repo,
+            withdrawal,
+            heartbeat,
+            dry_run,
+            reconcile,
+        } => publish::run(publish::Args {
+            runs,
+            store,
+            repo,
+            withdrawal,
+            heartbeat,
+            dry_run,
+            reconcile,
+        }),
         Cmd::PublicKey { key, pem } => {
             let k = load_key(&key)?;
             print!(
@@ -10936,8 +11103,6 @@ fn file_name(p: &Path) -> String {
 
 /// Write a new ed25519 signing key, and say what was written.
 fn keygen(out: &Path, public_out: Option<&Path>) -> Result<()> {
-    use std::io::Write as _;
-
     // Refused rather than overwritten, with no `--force`. A signing key is not a file you can
     // regenerate: every statement ever signed with the old one becomes unattributable the moment
     // it is gone, and nothing about `trigon keygen` should be able to do that by being run twice.
@@ -10956,43 +11121,7 @@ fn keygen(out: &Path, public_out: Option<&Path>) -> Result<()> {
 
     let key = trigon_attest::LocalKey::generate();
     let hex: String = key.seed().iter().map(|b| format!("{b:02x}")).collect();
-
-    // Created `0600` rather than chmod'd to it afterwards. A chmod leaves a window in which the
-    // key is on disk and world-readable, and that window is the whole vulnerability.
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let mut f = opts
-        .open(out)
-        .with_context(|| format!("creating {}", out.display()))?;
-    writeln!(f, "{hex}").with_context(|| format!("writing {}", out.display()))?;
-    drop(f);
-
-    // And then checked, because a mode that was asked for is not a mode that was applied — a
-    // filesystem that ignores permissions accepts the request and grants everyone the key. Fail
-    // closed: take the file back rather than report success over a key anyone can read.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(out)
-            .with_context(|| format!("checking the mode on {}", out.display()))?
-            .permissions()
-            .mode()
-            & 0o777;
-        if mode != 0o600 {
-            let _ = std::fs::remove_file(out);
-            bail!(
-                "{} came out mode {mode:04o} rather than 0600, so the key would be readable by \
-                 others. Removed it rather than leave it there; this filesystem cannot hold a \
-                 signing key safely.",
-                out.display()
-            );
-        }
-    }
+    create_private(out, &format!("{hex}\n"))?;
 
     if let Some(pub_path) = public_out {
         std::fs::write(pub_path, key.public_pem())
@@ -11033,6 +11162,51 @@ fn keygen(out: &Path, public_out: Option<&Path>) -> Result<()> {
             0,
         ))
     );
+    Ok(())
+}
+
+/// Write a secret key to `out`, created `0600` and never over a file already there.
+///
+/// Created `0600` rather than chmod'd to it afterwards. A chmod leaves a window in which the key is
+/// on disk and world-readable, and that window is the whole vulnerability.
+fn create_private(out: &Path, contents: &str) -> Result<()> {
+    use std::io::Write as _;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(out)
+        .with_context(|| format!("creating {}", out.display()))?;
+    f.write_all(contents.as_bytes())
+        .with_context(|| format!("writing {}", out.display()))?;
+    drop(f);
+
+    // And then checked, because a mode that was asked for is not a mode that was applied — a
+    // filesystem that ignores permissions accepts the request and grants everyone the key. Fail
+    // closed: take the file back rather than report success over a key anyone can read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(out)
+            .with_context(|| format!("checking the mode on {}", out.display()))?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode != 0o600 {
+            let _ = std::fs::remove_file(out);
+            bail!(
+                "{} came out mode {mode:04o} rather than 0600, so the key would be readable by \
+                 others. Removed it rather than leave it there; this filesystem cannot hold a \
+                 signing key safely.",
+                out.display()
+            );
+        }
+    }
     Ok(())
 }
 

@@ -16,10 +16,14 @@
 //!    and is about the rebuilt artifact the verdict names; its `buildobservation` is about the
 //!    verdict's subject, under the same egress tier and guard manifest, with no guard tripped —
 //!    and a void or a withdrawal is one statement alone;
-//! 5. the unsigned `subject` and `evidence` map agree with the signed statement;
-//! 6. the signed subject is the key the record was found under, and a purl key is the signed purl
+//! 5. a verdict carries the command that would falsify it, naming its own subject and predicate
+//!    type and the origin of the log it is logged in, and a divergence the pointer to where it is
+//!    disputed: a client never renders an outcome it cannot show with them (`docs/19` §4.2 item 6,
+//!    §8);
+//! 6. the unsigned `subject` and `evidence` map agree with the signed statement;
+//! 7. the signed subject is the key the record was found under, and a purl key is the signed purl
 //!    canonicalised;
-//! 7. every evidence file present is the bytes the signed statement names, and one absent is
+//! 8. every evidence file present is the bytes the signed statement names, and one absent is
 //!    reported unchecked, never passed.
 //!
 //! Each failure is a [`RecordFailure`] with the reason, and each is reported as failed
@@ -40,8 +44,9 @@ use crate::record::{Record, signed_evidence};
 use crate::statement::Statement;
 use crate::verdict::is_primary;
 use crate::{
-    AttestError, AttestationKey, BUILD_OBSERVATION, Envelope, PAYLOAD_TYPE, REBUILD,
-    SupersedeReason, VOID, WITHDRAWAL, evidence_key,
+    AttestError, AttestationKey, BUILD_OBSERVATION, DIVERGENCE_V2, DisputePointer, EQUIVALENCE_V2,
+    Envelope, FalsifyingCommand, PAYLOAD_TYPE, REBUILD, SupersedeReason, VOID, WITHDRAWAL,
+    evidence_key,
 };
 
 /// Why a record failed verification. Every kind is reported loudly, as failed verification and
@@ -61,6 +66,11 @@ pub enum RecordFailure {
     Leaf(String),
     /// The record's statements are not what a record of its kind carries.
     Statements(String),
+    /// A verdict without the command that would falsify it, or whose command resolves elsewhere —
+    /// another log's origin, another subject or predicate type — or a divergence without the
+    /// pointer to where it is disputed. `docs/19` §8: a client never renders an outcome it cannot
+    /// show with them, so the record fails rather than being shown without them.
+    Recourse(String),
     /// The unsigned `subject` or `evidence` map disagrees with the signed statement.
     Map(String),
     /// An evidence file present is not the bytes the signed statement names.
@@ -88,6 +98,7 @@ impl RecordFailure {
             RecordFailure::Signature(_) => "signature",
             RecordFailure::Leaf(_) => "disagrees-with-leaf",
             RecordFailure::Statements(_) => "statements",
+            RecordFailure::Recourse(_) => "no-recourse",
             RecordFailure::Map(_) => "unsigned-map",
             RecordFailure::Evidence(_) => "evidence",
             RecordFailure::WrongKey(_) => "wrong-key",
@@ -128,6 +139,7 @@ impl std::fmt::Display for RecordFailure {
             | RecordFailure::Signature(why)
             | RecordFailure::Leaf(why)
             | RecordFailure::Statements(why)
+            | RecordFailure::Recourse(why)
             | RecordFailure::Map(why)
             | RecordFailure::Evidence(why)
             | RecordFailure::WrongKey(why) => f.write_str(why),
@@ -219,13 +231,15 @@ impl VerifiedRecord {
 /// Check one record file (`bytes`) against the leaf that names it, the source's key history, and
 /// the evidence files beside it — every check of the module's documentation, in that order.
 ///
-/// `leaf` is the leaf found for the record's digest, `None` where the log has none. `evidence`
-/// reads the repository's files by their paths in it (`evidence/sha256/…`). `found_under` is the
-/// key a lookup found the record by, which its signed subject must be; `None` for a record handed
-/// in directly.
+/// `leaf` is the leaf found for the record's digest, `None` where the log has none, and `origin`
+/// the origin of the log that leaf is in, which a verdict's falsifying command must name.
+/// `evidence` reads the repository's files by their paths in it (`evidence/sha256/…`).
+/// `found_under` is the key a lookup found the record by, which its signed subject must be; `None`
+/// for a record handed in directly.
 pub fn check_record(
     bytes: &[u8],
     leaf: Option<(LeafPos, &RecordLeaf)>,
+    origin: &str,
     keys: &KeyHistory,
     evidence: &dyn LogFiles,
     found_under: Option<&Key>,
@@ -258,6 +272,7 @@ pub fn check_record(
 
     agrees_with_leaf(&statement, leaf)?;
     accompanies(&statement, &statements)?;
+    recourse(&statement, origin)?;
     unsigned_agrees(&record, &statement)?;
     if let Some(k) = found_under {
         k.check_signed(&statement)
@@ -596,6 +611,105 @@ fn accompanies(primary: &Statement, all: &[Statement]) -> Result<(), RecordFailu
         }
     }
     Ok(())
+}
+
+/// `docs/19` §4.2 item 6 and §8: what a reader needs to answer a verdict. A verdict carries the
+/// command that would falsify it, and the command resolves to this record: `trigon
+/// verify-attestation` looking up the statement's own subject and predicate type in the log it is
+/// logged in, by that log's origin, since one naming another origin sends a reader to another
+/// source, or to none. A divergence also carries the pointer to where it is disputed, an
+/// `https://` URL, and a verdict that carries one without having to is held to the same. A void and
+/// a withdrawal are no claim about the package, and carry neither.
+///
+/// Read as a later writer may extend it: flags beyond these three are read past.
+fn recourse(st: &Statement, origin: &str) -> Result<(), RecordFailure> {
+    let kind = st.predicate_type.as_str();
+    if kind != EQUIVALENCE_V2 && kind != DIVERGENCE_V2 {
+        return Ok(());
+    }
+    let refuse = |why: String| {
+        Err(RecordFailure::Recourse(format!(
+            "its `{kind}` verdict {why}; a client never renders an outcome it cannot show with the \
+             command that would falsify it and, for a divergence, where to dispute it (docs/19 \
+             §4.2 item 6, §8)"
+        )))
+    };
+    let p = &st.predicate;
+    let Some(signed) = p.get("falsifyingCommand") else {
+        return refuse("signs no falsifying command".into());
+    };
+    let shown = |v: &Value| printable(&v.to_string());
+    let Ok(command) = serde_json::from_value::<FalsifyingCommand>(signed.clone()) else {
+        return refuse(format!(
+            "signs a falsifying command that is not an argv: `{}`",
+            shown(signed)
+        ));
+    };
+    let argv = &command.argv;
+    if argv.len() < 2 || argv[0] != "trigon" || argv[1] != "verify-attestation" {
+        return refuse(format!(
+            "signs a falsifying command that is not `trigon verify-attestation`: `{}`",
+            printable(&command.render())
+        ));
+    }
+    let lookup = st
+        .subject
+        .first()
+        .and_then(|s| s.digest.get("sha256"))
+        .map(|h| format!("sha256:{h}"))
+        .unwrap_or_default();
+    for (flag, want) in [
+        ("--lookup", lookup.as_str()),
+        ("--predicate", kind),
+        ("--origin", origin),
+    ] {
+        let given: Vec<&str> = argv
+            .windows(2)
+            .filter(|w| w[0] == flag)
+            .map(|w| w[1].as_str())
+            .collect();
+        match given.as_slice() {
+            [v] if *v == want => {}
+            [] => return refuse(format!("signs a falsifying command without `{flag}`")),
+            [v] if flag == "--origin" => {
+                return refuse(format!(
+                    "signs a falsifying command naming the log `{}`, and it is logged in `{}`: \
+                     the command would look for it in another source, or in none",
+                    printable(v),
+                    printable(origin)
+                ));
+            }
+            [v] => {
+                return refuse(format!(
+                    "signs a falsifying command whose `{flag}` is `{}`, and its own is `{}`: the \
+                     command would resolve another record",
+                    printable(v),
+                    printable(want)
+                ));
+            }
+            _ => {
+                return refuse(format!(
+                    "signs a falsifying command that gives `{flag}` {} times",
+                    given.len()
+                ));
+            }
+        }
+    }
+    match p.get("disputePointer") {
+        None if kind == DIVERGENCE_V2 => refuse("signs no dispute pointer".into()),
+        None => Ok(()),
+        Some(v) => match serde_json::from_value::<DisputePointer>(v.clone()) {
+            Ok(DisputePointer::Url { url })
+                if url.len() > "https://".len() && url.starts_with("https://") =>
+            {
+                Ok(())
+            }
+            _ => refuse(format!(
+                "signs a dispute pointer that is not an `https://` URL a reader can open: `{}`",
+                shown(v)
+            )),
+        },
+    }
 }
 
 /// `docs/19` §4.1: the top-level `subject` and `evidence` map are unsigned conveniences, and a

@@ -47,8 +47,8 @@ pub use queue::{
     Backend, HostBudget, Job, JobState, NewJob, Principal, Queue, Requested, Tier, request_key,
 };
 pub use record::{
-    ArtifactRef, Costs, DerivedImage, Environment, PinEvidence, RunRecord, RunState, Tokens,
-    UpstreamDigests,
+    ArtifactRef, Costs, DerivedImage, Environment, PinEvidence, Published, RunRecord, RunState,
+    Tokens, UpstreamDigests,
 };
 
 use std::path::Path;
@@ -458,9 +458,34 @@ impl Store {
         run_id: &str,
         written: &[String],
     ) -> Result<RunRecord, StoreError> {
+        self.update_run(run_id, |record| name_statements(record, written))
+            .await
+    }
+
+    /// Record where a run's record was published (`docs/19` §10 phase 5 step 7), merged into the
+    /// record as it is now, as [`Self::record_attestations`] merges: an attestor or a confirming
+    /// run writing the record meanwhile keeps what it wrote.
+    ///
+    /// Returns the record as written.
+    pub async fn record_published(
+        &self,
+        run_id: &str,
+        published: &Published,
+    ) -> Result<RunRecord, StoreError> {
+        self.update_run(run_id, |record| record.published = Some(published.clone()))
+            .await
+    }
+
+    /// Change a run's record by `change`, read as it is now and written only over that version
+    /// where the backend can say so: see [`Self::record_attestations`] for how far that holds.
+    async fn update_run(
+        &self,
+        run_id: &str,
+        change: impl Fn(&mut RunRecord),
+    ) -> Result<RunRecord, StoreError> {
         /// How often a conditional write may lose to another writer before this gives up. Each
-        /// loss means another attestor wrote this run's record in between, which is rare; this
-        /// many in a row means something is writing it in a loop.
+        /// loss means another writer wrote this run's record in between, which is rare; this many
+        /// in a row means something is writing it in a loop.
         const ATTEMPTS: usize = 16;
         let location = Self::run_path(run_id);
         let mut attempt = 1;
@@ -477,7 +502,7 @@ impl Store {
                 version: got.meta.version.clone(),
             };
             let mut record: RunRecord = serde_json::from_slice(&got.bytes().await?)?;
-            name_statements(&mut record, written);
+            change(&mut record);
             let body = serde_json::to_vec_pretty(&record)?;
             let put = self
                 .inner

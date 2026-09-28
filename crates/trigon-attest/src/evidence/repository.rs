@@ -162,7 +162,8 @@ impl Repository {
             });
         }
         let leaf = self.record_leaves().find(|(_, l)| l.record == digest);
-        check_record(bytes, leaf, &self.keys, &self.files, None)
+        let origin = leaf.map_or("", |(pos, _)| self.origin(pos));
+        check_record(bytes, leaf, origin, &self.keys, &self.files, None)
     }
 
     /// Every record the log holds for `key`, each read from `records/` and verified, a missing one
@@ -184,6 +185,7 @@ impl Repository {
                     match check_record(
                         &bytes,
                         Some((pos, leaf)),
+                        self.origin(pos),
                         &self.keys,
                         &self.files,
                         Some(key),

@@ -24,7 +24,9 @@ use trigon_core::purl::canonicalize;
 use trigon_core::{Digest, Format};
 use trigon_stabilize::profile;
 
-use crate::common::{ORIGIN, T0, Writer, attestation_key, heartbeat, log_key, successor_key};
+use crate::common::{
+    ORIGIN, SUCCESSOR, T0, Writer, attestation_key, heartbeat, log_key, successor_key,
+};
 
 /// Where a dispute about the golden repository's verdicts goes.
 pub const DISPUTES: &str = "https://example.com/trigon-evidence/issues";
@@ -167,8 +169,22 @@ fn made(statements: Vec<Envelope>, evidence: Vec<Vec<u8>>, key: &LocalKey, time:
 }
 
 /// A v2 verdict about `pair`, with its `rebuild` and `buildobservation`, signed with `key`, and
-/// every piece of evidence it names but the rebuilt artifact, which is a release asset.
+/// every piece of evidence it names but the rebuilt artifact, which is a release asset. Its
+/// falsifying command names [`ORIGIN`], the log it is logged in.
 pub fn verdict(
+    pair: &Pair,
+    key: &LocalKey,
+    run: &str,
+    supersedes: Option<Supersession>,
+    time: u64,
+) -> Made {
+    verdict_in(ORIGIN, pair, key, run, supersedes, time)
+}
+
+/// [`verdict`], for the log `origin`: a verdict's falsifying command names the log it is logged
+/// in, and a client refuses one that names another (`docs/19` §4.2 item 6).
+pub fn verdict_in(
+    origin: &str,
     pair: &Pair,
     key: &LocalKey,
     run: &str,
@@ -200,7 +216,7 @@ pub fn verdict(
             guard_manifest: Some(&g),
             rebuilt_artifact: Some(&a),
         },
-        namespace: Some((ORIGIN, DISPUTES)),
+        namespace: Some((origin, DISPUTES)),
         supersedes,
     };
     let st = Statement::verdict(pair.subject(), &c, &facts).unwrap();
@@ -464,7 +480,15 @@ pub fn golden(root: &Path) -> Golden {
         time: clock.tick(),
         checkpoint: last.note().cosign(&successor_key()).unwrap().to_string(),
     });
-    let k = verdict(&p["k"], &k4, "1789000300-kkkkkkkk", None, clock.tick());
+    // Its falsifying command names the successor, the log it is logged in.
+    let k = verdict_in(
+        SUCCESSOR,
+        &p["k"],
+        &k4,
+        "1789000300-kkkkkkkk",
+        None,
+        clock.tick(),
+    );
     next.append(&[continuation, Leaf::Record(k.leaf.clone())]);
     next.append(&[heartbeat(clock.tick())]);
 
