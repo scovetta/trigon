@@ -4126,9 +4126,8 @@ fn serve_corpus(
     // differently here than `publish` does would show a run as published that is never published.
     // A machine with no `evidence.toml` gets the defaults, as every command does; one whose file
     // does not parse is refused, as every command refuses it.
-    let evidence = trigon_attest::config::EvidenceConfig::load(
-        &trigon_attest::config::Env::from_process()?,
-    )?;
+    let evidence =
+        trigon_attest::config::EvidenceConfig::load(&trigon_attest::config::Env::from_process()?)?;
     say_config_notes(&evidence);
     let cfg = trigon_api::Config {
         bind,
@@ -5641,8 +5640,9 @@ mod rebuild {
             })?;
             let text = String::from_utf8(bytes.to_vec())
                 .with_context(|| format!("the strategy blob run `{run}` names is not text"))?;
-            let strategy = trigon_strategy::from_yaml(&text)
-                .with_context(|| format!("the strategy blob run `{run}` names is not a strategy"))?;
+            let strategy = trigon_strategy::from_yaml(&text).with_context(|| {
+                format!("the strategy blob run `{run}` names is not a strategy")
+            })?;
             let Some(comparison) = r.comparison else {
                 return Err(Unrepeatable(format!(
                     "run `{run}` records a verdict and no comparison, so the stabilizer set it \
@@ -5727,11 +5727,7 @@ mod rebuild {
             .unwrap_or(trigon_core::Confidence::Weak);
 
         if verbose {
-            println!(
-                "{} {}",
-                style::heading("confirming"),
-                style::ident(&r.id)
-            );
+            println!("{} {}", style::heading("confirming"), style::ident(&r.id));
             field(
                 "repeating",
                 style::muted(&style::wrap(
@@ -5750,7 +5746,11 @@ mod rebuild {
         args.artifact = Some(r.upstream.name.clone());
         args.image = r.environment.base_image.clone();
         args.egress = r.environment.egress.clone();
-        args.timewarp = r.environment.registry_moment.as_ref().map(|_| "auto".into());
+        args.timewarp = r
+            .environment
+            .registry_moment
+            .as_ref()
+            .map(|_| "auto".into());
         args.definitions = None;
         args.source = None;
         args.model = None;
@@ -5989,7 +5989,10 @@ mod rebuild {
             crate::short_ref(image)
         );
         if let Some(r) = reused {
-            return (format!("{local}, and {refused}, whatever is set: {r}"), true);
+            return (
+                format!("{local}, and {refused}, whatever is set: {r}"),
+                true,
+            );
         }
         match (gate.same_host, gate.local_images) {
             (true, true) => (
@@ -8743,7 +8746,11 @@ output_path: '*.tgz'
             )
             .unwrap();
             let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
-            let mut args = inputs(work, &strategy, br#"{"artifact":"870c0fe1","members":["ab"]}"#);
+            let mut args = inputs(
+                work,
+                &strategy,
+                br#"{"artifact":"870c0fe1","members":["ab"]}"#,
+            );
             args.upstream_digests = Some(fetched(&bytes));
             args.started = started.into();
             args.egress = egress.into();
@@ -8770,7 +8777,8 @@ output_path: '*.tgz'
         fn gate(dir: &Path, run: &str) -> Publication {
             let (rt, store) = store(dir);
             let ix = trigon_api::Index::new();
-            rt.block_on(ix.refresh(&store, Switches::default())).unwrap();
+            rt.block_on(ix.refresh(&store, Switches::default()))
+                .unwrap();
             ix.entry(run).unwrap().publication
         }
 
@@ -8794,7 +8802,9 @@ output_path: '*.tgz'
             );
 
             let (rt, store) = store(&dir);
-            let bytes = rt.block_on(store.blobs().get(&r.comparison.unwrap())).unwrap();
+            let bytes = rt
+                .block_on(store.blobs().get(&r.comparison.unwrap()))
+                .unwrap();
             let c: trigon_compare::Comparison = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(r.agreement, Some(c.agreement()));
             assert_eq!(r.host, trigon_store::host_id());
@@ -8904,7 +8914,11 @@ output_path: '*.tgz'
             assert_eq!(args.artifact.as_deref(), Some(ARTIFACT));
             assert_eq!(args.image, r.environment.base_image);
             assert_eq!(args.egress, "mirror-only");
-            assert_eq!(args.timewarp.as_deref(), Some("auto"), "it pinned the registry");
+            assert_eq!(
+                args.timewarp.as_deref(),
+                Some("auto"),
+                "it pinned the registry"
+            );
             assert_eq!(args.attempt, r.attempt + 1);
             assert!(args.model.is_none() && args.definitions.is_none() && args.source.is_none());
             assert!(args.fetch_cache.is_none(), "no fetch cache");
@@ -9057,7 +9071,10 @@ output_path: '*.tgz'
                     ImagePin::RegistryDigest,
                 ),
                 // A registry tag names no bytes in particular, and gives nothing to pull by.
-                ("docker.io/library/debian:bookworm-slim".into(), ImagePin::Other),
+                (
+                    "docker.io/library/debian:bookworm-slim".into(),
+                    ImagePin::Other,
+                ),
                 ("docker.io/library/node".into(), ImagePin::Other),
                 // A short id prefixes whichever image the store holds; a `localhost/` name, digest
                 // or tag, is no registry's.
@@ -9082,7 +9099,11 @@ output_path: '*.tgz'
                     "{image}"
                 );
             }
-            assert!(asked.borrow().is_empty(), "podman asked of {:?}", asked.borrow());
+            assert!(
+                asked.borrow().is_empty(),
+                "podman asked of {:?}",
+                asked.borrow()
+            );
 
             for id in [hex.to_string(), format!("sha256:{hex}")] {
                 // As `--image auto` and `trigon base-image` record the images they build: podman
@@ -9110,7 +9131,12 @@ output_path: '*.tgz'
                 assert!(why.contains("podman could not say") && why.contains("image not known"));
                 assert!(why.contains("not taken for a local image"), "{why}");
             }
-            assert_eq!(asked.borrow().len(), 8, "each id is asked about: {:?}", asked.borrow());
+            assert_eq!(
+                asked.borrow().len(),
+                8,
+                "each id is asked about: {:?}",
+                asked.borrow()
+            );
         }
 
         /// What `--confirm` says of an image it did not pull again follows the configuration the
@@ -9139,19 +9165,27 @@ output_path: '*.tgz'
             let (said, warning) = not_repulled(id, local, &why, gate(true, false), &[]);
             assert!(warning, "{said}");
             assert!(said.contains("will not count this attempt"), "{said}");
-            assert!(said.contains("unless `[publish] same_host_local_images` is set"), "{said}");
+            assert!(
+                said.contains("unless `[publish] same_host_local_images` is set"),
+                "{said}"
+            );
 
             for local_images in [false, true] {
-                let (said, warning) =
-                    not_repulled(id, local, &why, gate(false, local_images), &[]);
+                let (said, warning) = not_repulled(id, local, &why, gate(false, local_images), &[]);
                 assert!(warning, "{said}");
-                assert!(said.contains("`[publish] same_host_confirmation` is off"), "{said}");
+                assert!(
+                    said.contains("`[publish] same_host_confirmation` is off"),
+                    "{said}"
+                );
             }
             // Each names the image, shortened as every id is shown, as a local image, and says
             // there was nothing to pull it by.
             let (said, _) = not_repulled(id, local, &why, gate(true, true), &[]);
             assert!(said.contains(&crate::short_ref(id)), "{said}");
-            assert!(said.contains("is a local image, pinned by its content id"), "{said}");
+            assert!(
+                said.contains("is a local image, pinned by its content id"),
+                "{said}"
+            );
             assert!(!said.contains("built on this machine"), "{said}");
 
             // A registry's image the pull failed for — named by digest, or by its id — or a tag,
@@ -9167,7 +9201,10 @@ output_path: '*.tgz'
                 (
                     id.to_string(),
                     ImagePin::RegistryDigest,
-                    format!("`{}` is the registry's `…`, and {failed}", crate::short_ref(id)),
+                    format!(
+                        "`{}` is the registry's `…`, and {failed}",
+                        crate::short_ref(id)
+                    ),
                 ),
                 (
                     "docker.io/library/debian:bookworm".to_string(),
@@ -9232,7 +9269,10 @@ output_path: '*.tgz'
                 &[trigon_store::CacheState::LAYERS.into()],
             );
             assert!(warning, "{said}");
-            assert!(said.contains("whatever is set: it reuses a cache (`build-layers`)"), "{said}");
+            assert!(
+                said.contains("whatever is set: it reuses a cache (`build-layers`)"),
+                "{said}"
+            );
         }
 
         /// `--confirm` builds its gate from the configuration, as `serve`, `attest` and `publish`
@@ -9450,8 +9490,8 @@ output_path: '*.tgz'
                 let e = refused(edit);
                 assert!(e.contains(says), "{what}: {e}");
             }
-            let e = confirming(&mut args_for(&work, &dir), "1700000000-nosuchrun", false)
-                .unwrap_err();
+            let e =
+                confirming(&mut args_for(&work, &dir), "1700000000-nosuchrun", false).unwrap_err();
             assert!(format!("{e:#}").contains("which --confirm names"), "{e:#}");
         }
 
@@ -9620,7 +9660,11 @@ output_path: '*.tgz'
         fn rebuild_attest_at_open_egress_signs_void_and_never_a_verdict() {
             let work = tmpdir("attest-open");
             let (dir, r) = recorded(&work, "2026-09-27T10:00:00Z", "open");
-            assert_eq!(r.outcome.as_deref(), Some("exact"), "a match, which was signed as one");
+            assert_eq!(
+                r.outcome.as_deref(),
+                Some("exact"),
+                "a match, which was signed as one"
+            );
             let (written, filed) = signed(&dir, &work, &r.id);
             assert_eq!(written.predicate_type, trigon_attest::VOID);
             assert_eq!(written.predicate["because"], "open_egress");
@@ -14177,15 +14221,8 @@ mod attestor {
                     0
                 )
             );
-            let st = void_statement(
-                store,
-                &record,
-                because,
-                &purl,
-                upstream_subject,
-                supersedes,
-            )
-            .await?;
+            let st = void_statement(store, &record, because, &purl, upstream_subject, supersedes)
+                .await?;
             let (path, env) = put(store, &target, &record, &st, signer).await?;
             written.push(path);
             return Ok(Signed {
@@ -14258,7 +14295,10 @@ mod attestor {
             // the comparison says the run is void, and the gate cannot see that it is.
             let authored = AuthoredPass::of(&comparison);
             let shows = !authored.is_empty();
-            if record.non_builtin_stabilizer.map_or(shows, |says| says != shows) {
+            if record
+                .non_builtin_stabilizer
+                .map_or(shows, |says| says != shows)
+            {
                 let says = match record.non_builtin_stabilizer {
                     Some(true) => "that a stabilizer a person or a model wrote applied",
                     Some(false) => "that every stabilizer that applied was built in",
@@ -14344,9 +14384,8 @@ mod attestor {
                 namespace,
                 supersedes,
             };
-            let statement =
-                Statement::verdict(upstream_subject.clone(), &comparison, &facts)
-                    .context("the comparison is not about the run's published artifact")?;
+            let statement = Statement::verdict(upstream_subject.clone(), &comparison, &facts)
+                .context("the comparison is not about the run's published artifact")?;
             let checked = trigon_attest::rederive(&statement, upstream.into(), rebuild.into())
                 .context("re-deriving the claim before signing it")?;
             if !checked.holds() {
@@ -16211,7 +16250,11 @@ mod mirror_source_tests {
     fn the_digest_is_of_the_mirrors_manifest_and_sources_whatever_order_they_are_listed_in() {
         let base = digest(&workspace("base", MIRROR));
         assert_eq!(base.len(), 16, "{base}");
-        assert!(base.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "{base}");
+        assert!(
+            base.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "{base}"
+        );
         // Over the files in sorted order, whatever order the directory listed them in. Comparing
         // two trees with each other is not enough: a filesystem that lists by name hash lists
         // both alike, so a digest that followed the listing would still agree with itself.
@@ -16243,23 +16286,48 @@ mod mirror_source_tests {
             }
             digest(&workspace(what, &files))
         };
-        assert_ne!(changed("route", "src/routes/npm.rs", "pub fn packument() { 1 }\n"), base);
-        assert_ne!(changed("new", "src/routes/pypi.rs", "pub fn simple() {}\n"), base);
-        assert_ne!(changed("manifest", "Cargo.toml", "[package]\nname = \"x\"\n"), base);
+        assert_ne!(
+            changed("route", "src/routes/npm.rs", "pub fn packument() { 1 }\n"),
+            base
+        );
+        assert_ne!(
+            changed("new", "src/routes/pypi.rs", "pub fn simple() {}\n"),
+            base
+        );
+        assert_ne!(
+            changed("manifest", "Cargo.toml", "[package]\nname = \"x\"\n"),
+            base
+        );
         // A file moved is a change, even with its bytes the same.
         let moved: Vec<(&str, &str)> = MIRROR
             .iter()
-            .map(|(p, b)| (if *p == "src/routes/npm.rs" { "src/routes/yarn.rs" } else { *p }, *b))
+            .map(|(p, b)| {
+                (
+                    if *p == "src/routes/npm.rs" {
+                        "src/routes/yarn.rs"
+                    } else {
+                        *p
+                    },
+                    *b,
+                )
+            })
             .collect();
         assert_ne!(digest(&workspace("moved", &moved)), base);
 
         // What does not decide it leaves it alone: the mirror's tests and readme, and every other
         // crate, whose changes would make a warning that fires on every commit.
-        assert_eq!(changed("tests", "tests/routes.rs", "#[test] fn t() {}\n"), base);
+        assert_eq!(
+            changed("tests", "tests/routes.rs", "#[test] fn t() {}\n"),
+            base
+        );
         assert_eq!(changed("readme", "README.md", "# the mirror\n"), base);
         let root = workspace("neighbour", MIRROR);
         std::fs::create_dir_all(root.join("crates/trigon-core/src")).unwrap();
-        std::fs::write(root.join("crates/trigon-core/src/lib.rs"), "pub fn f() {}\n").unwrap();
+        std::fs::write(
+            root.join("crates/trigon-core/src/lib.rs"),
+            "pub fn f() {}\n",
+        )
+        .unwrap();
         assert_eq!(digest(&root), base);
     }
 
@@ -16302,7 +16370,8 @@ mod mirror_source_tests {
                 }
             }
         }
-        seen.into_iter().find(|p| modified(p).is_some_and(|t| t > baked))
+        seen.into_iter()
+            .find(|p| modified(p).is_some_and(|t| t > baked))
     }
 
     /// What `build.rs` baked in is what the same function says of the checkout this binary was

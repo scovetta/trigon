@@ -55,8 +55,7 @@ pub enum Principal {
 /// deployment without it (or without podman) simply serves the hex view, exactly as before. The
 /// same rule the opinion path is under: a decompilation is a reading aid, never a verdict, and the
 /// member route treats a `None` here as "no C# available", never as "the sources match".
-pub type Decompiler =
-    Arc<dyn Fn(&str, &[u8], &[u8]) -> Option<(String, String)> + Send + Sync>;
+pub type Decompiler = Arc<dyn Fn(&str, &[u8], &[u8]) -> Option<(String, String)> + Send + Sync>;
 
 /// The evidence repository's kill-switch, as `trigon serve` reads it (`docs/19` §3).
 ///
@@ -270,7 +269,10 @@ pub fn router(api: Arc<Api>) -> axum::Router {
         .route("/v1/runs/{id}/attestation", get(routes::attestation))
         .route("/v1/runs/{id}/log", get(routes::build_log))
         .route("/v1/runs/{id}/network", get(routes::network))
-        .route("/v1/runs/{id}/network/summary", get(routes::network_summary))
+        .route(
+            "/v1/runs/{id}/network/summary",
+            get(routes::network_summary),
+        )
         .route("/v1/artifacts/{digest}", get(routes::artifact))
         .route("/v1/targets/{purl}", get(routes::target))
         .route("/v1/evidence/{digest}", get(routes::evidence_blob))

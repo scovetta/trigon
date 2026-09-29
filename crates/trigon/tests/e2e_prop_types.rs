@@ -164,7 +164,10 @@ fn every_recorded_answer_is_either_a_recipe_or_a_clean_refusal() {
     }
     eprintln!("recipes: {recipes} of {}", ANSWERS.len());
     for (n, why) in &refusals {
-        eprintln!("  {n} refused: {}", why.chars().take(120).collect::<String>());
+        eprintln!(
+            "  {n} refused: {}",
+            why.chars().take(120).collect::<String>()
+        );
     }
     assert!(
         recipes > 0,
@@ -266,10 +269,7 @@ fn the_yarn_rewrite_needs_no_model() {
         );
     }
     // And yarn doing something only yarn does is still refused.
-    assert_eq!(
-        rewritten("yarn install --frozen-lockfile", &s),
-        None
-    );
+    assert_eq!(rewritten("yarn install --frozen-lockfile", &s), None);
 }
 
 /// The repair has to be about the actual divergence.

@@ -526,8 +526,12 @@ pub async fn member(
         // The C# diff replaces the (absent) text view; the hex view stays, so a reader can still
         // see the bytes. `decompiled` marks it so the page says the diff is a reading of the
         // assembly and not the assembly.
-        let cs =
-            crate::member::view(&q.path, Some(up_cs.into_bytes()), Some(rb_cs.into_bytes()), None);
+        let cs = crate::member::view(
+            &q.path,
+            Some(up_cs.into_bytes()),
+            Some(rb_cs.into_bytes()),
+            None,
+        );
         view.text = cs.text;
         view.decompiled = true;
     }
@@ -1190,7 +1194,8 @@ mod tests {
         // stores nothing, and returns verdicts that were already in the index. A `POST` that is a
         // read is a shape this rule has to allow for, or the next one gets argued into being a
         // `GET` with a 40,000-package query string.
-        let posts: std::collections::BTreeSet<&str> = ["/v1/runs", "/v1/check"].into_iter().collect();
+        let posts: std::collections::BTreeSet<&str> =
+            ["/v1/runs", "/v1/check"].into_iter().collect();
         assert_eq!(
             src.matches("post(").count(),
             posts.len(),

@@ -680,9 +680,19 @@ async fn an_unconfirmed_divergence_has_no_public_statement() {
 #[tokio::test]
 async fn a_confirmed_run_still_publishes_its_statement() {
     // Two attempts at one cache key, agreeing, which is what safeguard 1 asks for.
-    let mut a = record("1700000020-ee", "pkg:npm/y@1.0.0", Some("divergent"), Some("k"));
+    let mut a = record(
+        "1700000020-ee",
+        "pkg:npm/y@1.0.0",
+        Some("divergent"),
+        Some("k"),
+    );
     a.attestations = vec!["attestations/y/statement.json".into()];
-    let mut b = record("1700000021-ee", "pkg:npm/y@1.0.0", Some("divergent"), Some("k"));
+    let mut b = record(
+        "1700000021-ee",
+        "pkg:npm/y@1.0.0",
+        Some("divergent"),
+        Some("k"),
+    );
     b.attestations = vec!["attestations/y/statement.json".into()];
 
     let anon = api_over(vec![a, b], Principal::Anonymous).await;

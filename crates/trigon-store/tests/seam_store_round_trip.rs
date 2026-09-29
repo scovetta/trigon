@@ -132,7 +132,9 @@ fn every_field_populated() -> RunRecord {
             // That is this test's own stated failure mode ("every existing test still passes
             // because none of them set it") sitting inside the test, on the two fields it was
             // written for.
-            guard_manifest: Some("631678f4fbb61e055f3f8db33ca1c38d8b69ed64fe3fbd3f12bc4abe758f0ece".into()),
+            guard_manifest: Some(
+                "631678f4fbb61e055f3f8db33ca1c38d8b69ed64fe3fbd3f12bc4abe758f0ece".into(),
+            ),
             // Zero is a real answer and not `None`: every member was too small, too common, or
             // also in the source, so the guard watched the artifact alone.
             guarded_members: Some(0),

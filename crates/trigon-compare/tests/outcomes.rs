@@ -618,7 +618,8 @@ fn a_renamed_member_keeps_the_name_each_artifact_holds_it_under() {
         let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         w.start_file("Demo.nuspec", opts).unwrap();
         w.write_all(b"<package/>\n").unwrap();
-        w.start_file(format!("lib/{folder}/Demo.dll"), opts).unwrap();
+        w.start_file(format!("lib/{folder}/Demo.dll"), opts)
+            .unwrap();
         w.write_all(b"the same assembly").unwrap();
         w.finish().unwrap().into_inner()
     };
@@ -648,7 +649,10 @@ fn a_renamed_member_keeps_the_name_each_artifact_holds_it_under() {
         )
     );
     let nuspec = file("Demo.nuspec");
-    assert_eq!((&nuspec.upstream_raw_path, &nuspec.rebuild_raw_path), (&None, &None));
+    assert_eq!(
+        (&nuspec.upstream_raw_path, &nuspec.rebuild_raw_path),
+        (&None, &None)
+    );
 }
 
 #[test]
@@ -720,8 +724,14 @@ fn field_edits_attribute_each_change_to_its_pass() {
     };
 
     // b.txt's mtime was zeroed by tar-time, its owner ids by tar-owners — proven, not guessed.
-    assert_eq!(edits_for("pkg/b.txt", "mtime"), vec!["tar-time".to_string()]);
-    assert_eq!(edits_for("pkg/b.txt", "tar.uid"), vec!["tar-owners".to_string()]);
+    assert_eq!(
+        edits_for("pkg/b.txt", "mtime"),
+        vec!["tar-time".to_string()]
+    );
+    assert_eq!(
+        edits_for("pkg/b.txt", "tar.uid"),
+        vec!["tar-owners".to_string()]
+    );
     // …and those reconciliations left no residual code behind.
     assert!(
         !d.codes.iter().any(|c| c.ends_with("@pkg/b.txt")),
@@ -750,7 +760,11 @@ fn a_body_rewrite_is_attributed_to_the_pass_that_made_it() {
         let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let eol = if crlf { "\r\n" } else { "\n" };
         w.start_file("demo-1.0.dist-info/METADATA", opts).unwrap();
-        write!(w, "Metadata-Version: 2.1{eol}Name: demo{eol}Version: 1.0{eol}").unwrap();
+        write!(
+            w,
+            "Metadata-Version: 2.1{eol}Name: demo{eol}Version: 1.0{eol}"
+        )
+        .unwrap();
         w.finish().unwrap().into_inner()
     }
     let c = compare_bytes(
@@ -790,11 +804,24 @@ fn progression_shows_which_pass_closed_which_member() {
     )
     .unwrap();
     assert_eq!(c.outcome, Match::Divergent);
-    let p = c.diff.as_ref().unwrap().progression.as_ref().expect("progression recorded");
+    let p = c
+        .diff
+        .as_ref()
+        .unwrap()
+        .progression
+        .as_ref()
+        .expect("progression recorded");
 
     assert!(p.omitted.is_none(), "{:?}", p.omitted);
-    assert!(p.consistent, "the last step must reproduce the verdict's signature");
-    assert_eq!(p.steps.len(), set.members.len() + 1, "one step per pass, plus as-published");
+    assert!(
+        p.consistent,
+        "the last step must reproduce the verdict's signature"
+    );
+    assert_eq!(
+        p.steps.len(),
+        set.members.len() + 1,
+        "one step per pass, plus as-published"
+    );
 
     let first = &p.steps[0];
     assert!(first.pass.is_none());
@@ -823,8 +850,14 @@ fn progression_shows_which_pass_closed_which_member() {
 #[test]
 fn an_exact_match_has_one_step() {
     let a = tar(1, 1, b"same");
-    let c = compare_bytes(a.clone(), a, Format::Tar, &profile("tar").unwrap(), &Limits::default())
-        .unwrap();
+    let c = compare_bytes(
+        a.clone(),
+        a,
+        Format::Tar,
+        &profile("tar").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
     let p = c.diff.unwrap().progression.unwrap();
     assert_eq!(p.steps.len(), 1);
     assert_eq!(p.steps[0].differences, 0);

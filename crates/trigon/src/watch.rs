@@ -4953,17 +4953,41 @@ mod tests {
             ("source", source_of(sweep_at(w.clone()), 0).await),
             ("cluster", text(cluster_page(sweep_at(w), &key).await).await),
             ("errored run", run_page(sweep_at(errored), 0).await),
-            ("declined board", board_page(sweep_at(declined.clone())).await),
-            ("declined run", run_page(sweep_at(declined.clone()), 0).await),
-            ("declined compare", compare_page(sweep_at(declined), 0).await),
+            (
+                "declined board",
+                board_page(sweep_at(declined.clone())).await,
+            ),
+            (
+                "declined run",
+                run_page(sweep_at(declined.clone()), 0).await,
+            ),
+            (
+                "declined compare",
+                compare_page(sweep_at(declined), 0).await,
+            ),
             ("shelf board", board_page(sweep_at(shelf.clone())).await),
             ("shelf run", run_page(sweep_at(shelf.clone()), 0).await),
-            ("shelf network", network_page(sweep_at(shelf.clone()), 0).await),
-            ("shelf compare", compare_page(sweep_at(shelf.clone()), 0).await),
+            (
+                "shelf network",
+                network_page(sweep_at(shelf.clone()), 0).await,
+            ),
+            (
+                "shelf compare",
+                compare_page(sweep_at(shelf.clone()), 0).await,
+            ),
             ("shelf source", source_of(sweep_at(shelf.clone()), 0).await),
-            ("shelf's other run", run_page(sweep_at(shelf.clone()), 1).await),
-            ("shelf's other source", source_of(sweep_at(shelf.clone()), 1).await),
-            ("shelf cluster", text(cluster_page(sweep_at(shelf), &key).await).await),
+            (
+                "shelf's other run",
+                run_page(sweep_at(shelf.clone()), 1).await,
+            ),
+            (
+                "shelf's other source",
+                source_of(sweep_at(shelf.clone()), 1).await,
+            ),
+            (
+                "shelf cluster",
+                text(cluster_page(sweep_at(shelf), &key).await).await,
+            ),
         ];
         let shown = "&lt;img src=x onerror=alert(1)&gt;";
         for (name, page) in &pages {
@@ -4980,15 +5004,33 @@ mod tests {
         // renderer that dropped one would pass the loop above on the strength of its neighbours.
         let on = |which: &str, what: String| {
             let page = &pages.iter().find(|(n, _)| *n == which).unwrap().1;
-            assert!(page.contains(&what), "the {which} page is missing `{what}`:\n{page}");
+            assert!(
+                page.contains(&what),
+                "the {which} page is missing `{what}`:\n{page}"
+            );
         };
-        on("errored run", format!("an error of ours.</strong> {shown}<br>"));
+        on(
+            "errored run",
+            format!("an error of ours.</strong> {shown}<br>"),
+        );
         on("declined run", format!("<li>{shown}</li>"));
         on("declined board", format!(">{shown}</span>"));
-        on("declined compare", format!("It read <strong>{shown}</strong>"));
-        on("shelf board", format!("<a href=\"/run/0\"><code>{shown}</code></a>"));
-        on("shelf board", format!("<a href=\"/run/1\">npm/{shown}@1</a>"));
-        on("shelf board", format!("<code>{shown}</code>@<code title=\"{shown}\">"));
+        on(
+            "declined compare",
+            format!("It read <strong>{shown}</strong>"),
+        );
+        on(
+            "shelf board",
+            format!("<a href=\"/run/0\"><code>{shown}</code></a>"),
+        );
+        on(
+            "shelf board",
+            format!("<a href=\"/run/1\">npm/{shown}@1</a>"),
+        );
+        on(
+            "shelf board",
+            format!("<code>{shown}</code>@<code title=\"{shown}\">"),
+        );
         on("shelf board", format!("<span class=\"dim\">{shown}</span>"));
         on("shelf source", format!("<h1>{shown}</h1>"));
         on("shelf's other source", format!("<h1>npm/{shown}@1</h1>"));

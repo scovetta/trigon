@@ -101,7 +101,10 @@ fn fixture(profile: &str) -> Option<(Format, Vec<u8>)> {
         "gem" => (
             Format::Tar,
             tar(&[
-                ("metadata.gz", &gzip(b"--- !ruby/object:Gem::Specification\ndate: 2021-01-01\n")),
+                (
+                    "metadata.gz",
+                    &gzip(b"--- !ruby/object:Gem::Specification\ndate: 2021-01-01\n"),
+                ),
                 ("checksums.yaml.gz", &gzip(b"---\n")),
                 ("data.tar.gz", &gzip(&tar(&[("lib/x.rb", b"X = 1\n")]))),
             ]),
@@ -110,7 +113,10 @@ fn fixture(profile: &str) -> Option<(Format, Vec<u8>)> {
             Format::Zip,
             zip(&[
                 ("x/__init__.py", b"X = 1\n"),
-                ("x-1.0.dist-info/direct_url.json", br#"{"url":"file:///tmp"}"#),
+                (
+                    "x-1.0.dist-info/direct_url.json",
+                    br#"{"url":"file:///tmp"}"#,
+                ),
                 ("x-1.0.dist-info/METADATA", b"Name: x\r\nVersion: 1.0\r\n"),
                 ("x-1.0.dist-info/RECORD", b"x/__init__.py,,\n"),
             ]),
@@ -121,9 +127,15 @@ fn fixture(profile: &str) -> Option<(Format, Vec<u8>)> {
         "nupkg" => (
             Format::Zip,
             zip(&[
-                ("lib/portable45-net45+win8+wp8+wpa81/z.dll", b"MZ\x90\x00late"),
+                (
+                    "lib/portable45-net45+win8+wp8+wpa81/z.dll",
+                    b"MZ\x90\x00late",
+                ),
                 ("lib/net45/a.dll", b"MZ\x90\x00early"),
-                ("x.nuspec", b"<package><metadata><id>x</id></metadata></package>\r\n"),
+                (
+                    "x.nuspec",
+                    b"<package><metadata><id>x</id></metadata></package>\r\n",
+                ),
                 (".signature.p7s", b"\x30\x82signature"),
                 ("[Content_Types].xml", b"<Types/>"),
             ]),
@@ -203,7 +215,11 @@ fn no_profile_is_left_without_a_fixture() {
 
     for p in EMPTY_BY_DESIGN {
         assert!(
-            profile(p).expect("listed profile").manifest().members.is_empty(),
+            profile(p)
+                .expect("listed profile")
+                .manifest()
+                .members
+                .is_empty(),
             "`{p}` is excused from a fixture on the grounds that it has no passes, and it now has \
              some"
         );
@@ -221,9 +237,13 @@ fn no_profile_is_left_without_a_fixture() {
 /// workspace member (it needs a nightly toolchain and `cargo-fuzz`), so nothing links it.
 #[test]
 fn the_fuzz_target_covers_every_profile_too() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/fuzz_targets/stabilize.rs");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/fuzz_targets/stabilize.rs");
     let Ok(text) = std::fs::read_to_string(&src) else {
-        panic!("the stabilize fuzz target is missing from {}", src.display());
+        panic!(
+            "the stabilize fuzz target is missing from {}",
+            src.display()
+        );
     };
 
     let missing: Vec<&str> = all_profiles()

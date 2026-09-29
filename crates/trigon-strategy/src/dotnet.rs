@@ -158,7 +158,10 @@ mod tests {
         let next = with_assembly_version(&castle(), &info()).expect("changed");
         let (_, literal) = pack(&next);
         assert_eq!(literal.get("assembly_version").unwrap(), "5.0.0.0");
-        assert_eq!(literal.get("copyright").unwrap(), "Copyright (c) 2004-2022 Castle Project");
+        assert_eq!(
+            literal.get("copyright").unwrap(),
+            "Copyright (c) 2004-2022 Castle Project"
+        );
         assert_eq!(literal.get("file_version").unwrap(), "5.1.1");
     }
 

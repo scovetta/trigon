@@ -340,7 +340,11 @@ pub struct NoteGroup {
 /// one ecosystem and never otherwise.
 pub fn raw_name(bytes: &[u8], path: &str, side: &str) -> Option<String> {
     let c: Stored = serde_json::from_slice(bytes).ok()?;
-    let f = c.diff.files.into_iter().find(|f| path_of(&f.path) == path)?;
+    let f = c
+        .diff
+        .files
+        .into_iter()
+        .find(|f| path_of(&f.path) == path)?;
     let raw = match side {
         "upstream" => f.upstream_raw_path,
         _ => f.rebuild_raw_path,

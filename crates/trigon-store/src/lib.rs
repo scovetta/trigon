@@ -723,7 +723,9 @@ impl Store {
     /// decompile where it can and to the hex view where it cannot.
     pub async fn get_decompiled(&self, assembly: &Digest) -> Result<Option<String>, StoreError> {
         match self.inner.get(&Self::decompiled_path(assembly)).await {
-            Ok(r) => Ok(Some(String::from_utf8_lossy(&r.bytes().await?).into_owned())),
+            Ok(r) => Ok(Some(
+                String::from_utf8_lossy(&r.bytes().await?).into_owned(),
+            )),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -731,7 +733,10 @@ impl Store {
 
     fn derived_comparison_path(original: &Digest) -> ObjPath {
         let hex = original.to_hex();
-        ObjPath::from(format!("derived/comparison/sha256/{}/{hex}.json", &hex[..2]))
+        ObjPath::from(format!(
+            "derived/comparison/sha256/{}/{hex}.json",
+            &hex[..2]
+        ))
     }
 
     /// Store a comparison **re-derived** from a run's stored artifacts, keyed by the digest of the

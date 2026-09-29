@@ -173,7 +173,11 @@ const ALL: [Status; 5] = [
 /// sometimes package names. The count is not the sensitive part; the subject is.
 pub async fn clusters(State(api): State<Arc<Api>>) -> Response {
     if !admits(api.principal(), Class::BuildLog) {
-        return refuse(StatusCode::FORBIDDEN, "class_gated", Class::BuildLog.refusal());
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "class_gated",
+            Class::BuildLog.refusal(),
+        );
     }
 
     struct Cluster {
@@ -186,7 +190,9 @@ pub async fn clusters(State(api): State<Arc<Api>>) -> Response {
     let mut by_key: BTreeMap<String, Cluster> = BTreeMap::new();
 
     for r in api.index.records() {
-        let Some(f) = r.failure.as_ref() else { continue };
+        let Some(f) = r.failure.as_ref() else {
+            continue;
+        };
         let key = f.key();
         let eco = r
             .target

@@ -23,7 +23,9 @@ mod set;
 pub use cx::{Cx, Level};
 pub use passes::all_builtin;
 pub use profiles::{all_profiles, default_for, profile};
-pub use set::{Applied, FieldEdit, SetManifest, SetMember, StabilizerSet, Touched, apply, apply_traced};
+pub use set::{
+    Applied, FieldEdit, SetManifest, SetMember, StabilizerSet, Touched, apply, apply_traced,
+};
 
 use std::fmt::Debug;
 

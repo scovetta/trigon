@@ -1174,7 +1174,8 @@ fn a_void_or_a_withdrawal_with_any_second_statement_is_refused() {
         let e = verify_alone(&logged_as(record.encode().unwrap(), m)).unwrap_err();
         assert!(matches!(e, RecordFailure::Statements(_)), "{e}");
         assert!(
-            e.to_string().contains("holds one statement, and this one holds 2"),
+            e.to_string()
+                .contains("holds one statement, and this one holds 2"),
             "{e}"
         );
     }
@@ -1197,7 +1198,10 @@ fn a_dispute_pointer_that_is_the_scheme_alone_is_no_recourse() {
             Err(e) => {
                 assert!(!verifies, "{url}: {e}");
                 assert!(matches!(e, RecordFailure::Recourse(_)), "{url}: {e}");
-                assert!(e.to_string().contains("not an `https://` URL"), "{url}: {e}");
+                assert!(
+                    e.to_string().contains("not an `https://` URL"),
+                    "{url}: {e}"
+                );
             }
         }
     }

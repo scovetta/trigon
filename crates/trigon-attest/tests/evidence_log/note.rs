@@ -445,7 +445,10 @@ fn a_signature_line_holds_a_key_hash_and_at_least_one_byte() {
     assert_eq!(note.signatures()[1].key_hash(), [1, 2, 3, 4]);
     note.verify(&peter()).unwrap();
 
-    let peters = format!("\u{2014} PeterNeumann {}\n", b64.encode([0xc7, 0x4f, 0x20, 0xa3, 5]));
+    let peters = format!(
+        "\u{2014} PeterNeumann {}\n",
+        b64.encode([0xc7, 0x4f, 0x20, 0xa3, 5])
+    );
     let note = SignedNote::parse(format!("{text}\n{peters}").as_bytes()).unwrap();
     let e = note.verify(&peter()).unwrap_err();
     assert!(matches!(e, LogError::BadSignature(_)), "{e}");

@@ -102,9 +102,9 @@ pub fn compute(
 ) -> Progression {
     match walk(upstream, rebuild, format, set, limits, full) {
         Ok(p) => p,
-        Err(e) => Progression::omitted(format!(
-            "the set could not be re-applied pass by pass: {e}"
-        )),
+        Err(e) => {
+            Progression::omitted(format!("the set could not be re-applied pass by pass: {e}"))
+        }
     }
 }
 

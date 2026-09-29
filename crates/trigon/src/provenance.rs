@@ -702,7 +702,10 @@ mod tests {
         // A fetch a second later: the directory's time moves on, whatever the clock's resolution.
         let later = std::fs::metadata(&dir).unwrap().modified().unwrap()
             + std::time::Duration::from_secs(5);
-        std::fs::File::open(&dir).unwrap().set_modified(later).unwrap();
+        std::fs::File::open(&dir)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
         let (out, scope) = join(&members, Some(&dir), None, "d50b912e");
         assert_eq!(out[0].origin, Origin::Verbatim);
         assert_eq!(scope.files, 2);
@@ -738,7 +741,11 @@ mod tests {
         set(&dir.join("sealed"), 0o755);
         set(&dir.join("locked.txt"), 0o644);
         assert!(scope.searched);
-        assert_eq!(out[0].origin, Origin::Verbatim, "the readable part was not searched");
+        assert_eq!(
+            out[0].origin,
+            Origin::Verbatim,
+            "the readable part was not searched"
+        );
         if stopped {
             assert_eq!(out[1].origin, Origin::Built);
             assert_eq!(out[2].origin, Origin::Built);
@@ -767,7 +774,11 @@ mod tests {
         let (_, walk) = index_checkout_upto(&dir, 2);
         assert_eq!((walk.hashed, walk.finished), (2, false));
         let (_, walk) = index_checkout_upto(&dir, 3);
-        assert_eq!((walk.hashed, walk.finished), (3, true), "exactly the bound is the whole");
+        assert_eq!(
+            (walk.hashed, walk.finished),
+            (3, true),
+            "exactly the bound is the whole"
+        );
 
         let stopped = Scope {
             commit: "abc".into(),

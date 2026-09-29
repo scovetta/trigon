@@ -437,10 +437,7 @@ mod tests {
     }
 
     fn workdir(what: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "trigon-progress-{}-{what}",
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("trigon-progress-{}-{what}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -549,7 +546,10 @@ mod tests {
         p.phase("deps");
         let c = on_disk(&work).current.unwrap();
         assert_eq!(c.phase.as_deref(), Some("deps"));
-        assert_eq!(c.phase_elapsed_seconds, 0, "a new phase starts its own clock");
+        assert_eq!(
+            c.phase_elapsed_seconds, 0,
+            "a new phase starts its own clock"
+        );
         assert_eq!(c.elapsed_seconds, 40, "the target's clock runs on");
 
         // The same phase again is not a new one: its clock keeps running.
@@ -575,7 +575,10 @@ mod tests {
         let c = back.current.unwrap();
         assert_eq!(c.elapsed_seconds, 30 + HEARTBEAT.as_secs());
         assert_eq!(c.phase_elapsed_seconds, 5 + HEARTBEAT.as_secs());
-        assert_ne!(back.heartbeat, "2026-01-01T00:00:00Z", "the beat is stamped");
+        assert_ne!(
+            back.heartbeat, "2026-01-01T00:00:00Z",
+            "the beat is stamped"
+        );
 
         // Between targets there is only the stamp.
         let mut idle = status("starting", None);
@@ -598,12 +601,18 @@ mod tests {
 
         let s = on_disk(&work);
         assert_eq!((s.state.as_str(), s.done), ("finished", 20));
-        assert!(s.current.is_none(), "nothing is in flight after the last one");
+        assert!(
+            s.current.is_none(),
+            "nothing is in flight after the last one"
+        );
         assert_eq!(Liveness::of(&s, 86_400, false, 600), Liveness::Finished);
         let back: Sweep =
             serde_json::from_str(&std::fs::read_to_string(work.join("sweep.json")).unwrap())
                 .unwrap();
-        assert!(back.finished.is_some(), "the sweep itself is stamped finished");
+        assert!(
+            back.finished.is_some(),
+            "the sweep itself is stamped finished"
+        );
         assert_eq!(back.targets_count, 20, "and is otherwise what it was");
     }
 
@@ -658,8 +667,7 @@ mod tests {
         assert!(r.finished.is_none());
         r.write(&work);
         let back: RunReport =
-            serde_json::from_str(&std::fs::read_to_string(work.join("run.json")).unwrap())
-                .unwrap();
+            serde_json::from_str(&std::fs::read_to_string(work.join("run.json")).unwrap()).unwrap();
         assert_eq!(back.purl, "pkg:npm/a@1");
         assert!(back.finished.is_some());
         assert!(!work.join("run.tmp").exists());

@@ -442,8 +442,7 @@ impl Anthropic {
         // The request's depth where it names one, this client's default otherwise. It was a bare
         // constant, which made the one setting that fixes a truncated answer unreachable from the
         // caller and from any retry.
-        body["output_config"] =
-            json!({"effort": req.effort.unwrap_or(ANTHROPIC_EFFORT).as_str()});
+        body["output_config"] = json!({"effort": req.effort.unwrap_or(ANTHROPIC_EFFORT).as_str()});
         // Sampling parameters are **removed** on the current models and answer 400, so temperature
         // is sent only where something asked for one. Zero, which is every request this system
         // makes, is what those models do anyway.
@@ -714,7 +713,8 @@ mod tests {
         // And below the API's default, because adaptive thinking scales to the room it is given:
         // at `high` a repair spent 16,379 of 16,384 output tokens reasoning and never answered.
         assert_ne!(
-            ANTHROPIC_EFFORT.as_str(), "high",
+            ANTHROPIC_EFFORT.as_str(),
+            "high",
             "raising the ceiling is not the lever"
         );
     }

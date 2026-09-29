@@ -482,7 +482,11 @@ fn a_lockfile_that_cannot_be_read_exits_5_with_a_store_too() {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(out.stdout.is_empty(), "{}", String::from_utf8_lossy(&out.stdout));
+        assert!(
+            out.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
         assert!(
             String::from_utf8_lossy(&out.stderr).contains("Error: "),
             "{}",

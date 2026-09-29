@@ -398,8 +398,7 @@ fn a_chain_followed_elsewhere_names_the_directories_there_it_does_not_reach() {
     let (here, there) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let old = ended(here.path(), &heartbeats(T0, 3), end_elsewhere(T0 + 180));
     let third = || {
-        trigon_attest::log::LogSigner::from_seed("example.com/trigon-evidence/2", [12; 32])
-            .unwrap()
+        trigon_attest::log::LogSigner::from_seed("example.com/trigon-evidence/2", [12; 32]).unwrap()
     };
     let next = successor_at(
         there.path(),

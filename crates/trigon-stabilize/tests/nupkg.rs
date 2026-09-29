@@ -248,7 +248,10 @@ fn only_a_psmdcp_in_the_core_properties_folder_takes_the_canonical_name() {
     let other = format!("{PSMDCP_DIR}notes.txt");
     let bytes = zip(&[
         ("_rels/.rels", b"<Relationships/>"),
-        (&format!("{PSMDCP_DIR}55d4e0b4.psmdcp"), b"<coreProperties/>"),
+        (
+            &format!("{PSMDCP_DIR}55d4e0b4.psmdcp"),
+            b"<coreProperties/>",
+        ),
         (&other, b"notes"),
         ("content/sample.psmdcp", b"<coreProperties/>"),
     ]);
@@ -469,7 +472,10 @@ fn a_tarball_the_package_ships_is_not_a_package_member() {
     };
     let (crlf, applied) = stabilize(&nupkg(), package(b"one\r\ntwo\r\n"));
     let (lf, _) = stabilize(&nupkg(), package(b"one\ntwo\n"));
-    assert_ne!(crlf, lf, "a difference inside a shipped tarball is a difference");
+    assert_ne!(
+        crlf, lf,
+        "a difference inside a shipped tarball is a difference"
+    );
     assert!(!ids(&applied).contains(&"nupkg-text-eol"), "{applied:?}");
 }
 

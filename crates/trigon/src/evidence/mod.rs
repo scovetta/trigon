@@ -13,10 +13,10 @@
 //! classified by the two clocks of `docs/19` §6 ([`trigon_attest::evidence::Standing`]), with the
 //! file that added it and whether its keys rest on first use, so that every answer can say both.
 
+pub(crate) mod check;
 pub(crate) mod lookup;
 pub(crate) mod remote;
 pub(crate) mod rerun;
-pub(crate) mod check;
 pub(crate) mod sync;
 
 use anyhow::{Result, anyhow};

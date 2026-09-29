@@ -836,7 +836,13 @@ mod one_sniff {
         let family = Family::of("docker.io/library/debian:bookworm");
         let once = family.packages(&["cc".to_string()]);
         let twice = family.packages(&["cc".to_string(), "cc".to_string()]);
-        assert_eq!(once, twice, "a repeated dependency added a repeated package");
-        assert!(!once.is_empty(), "`cc` should expand to something on Debian");
+        assert_eq!(
+            once, twice,
+            "a repeated dependency added a repeated package"
+        );
+        assert!(
+            !once.is_empty(),
+            "`cc` should expand to something on Debian"
+        );
     }
 }

@@ -798,7 +798,11 @@ pub(crate) fn blobs(dir: &Path, revs: &[String]) -> Result<Vec<Option<Vec<u8>>>>
 /// cloned from, which `git` does on its own when one is read, so this runs as a command that
 /// reaches a remote ([`network`]) — and names each blob fetched to the host that serves it.
 pub(crate) fn blobs_fetching(dir: &Path, revs: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
-    let out = feed(network(Some(dir)), &["cat-file", "--batch"], lines_of(revs)?)?;
+    let out = feed(
+        network(Some(dir)),
+        &["cat-file", "--batch"],
+        lines_of(revs)?,
+    )?;
     read_batch(&out.stdout, revs)
 }
 
@@ -1233,7 +1237,15 @@ mod tests {
         let d = Dir::new("outside");
         d.git(".", &["init", "--quiet", "-b", "main", "w"]);
         let w = d.0.join("w");
-        for path in ["", "../escape", "/etc/passwd", "./a", "a/../../b", "a\nb", "a\0b"] {
+        for path in [
+            "",
+            "../escape",
+            "/etc/passwd",
+            "./a",
+            "a/../../b",
+            "a\nb",
+            "a\0b",
+        ] {
             for change in [
                 Change {
                     writes: vec![(path, b"x")],
@@ -1246,12 +1258,16 @@ mod tests {
             ] {
                 let e = commit(&w, None, &change, "publish: test").unwrap_err();
                 assert!(
-                    e.to_string().contains("is not a path inside the repository"),
+                    e.to_string()
+                        .contains("is not a path inside the repository"),
                     "{path:?}: {e:#}"
                 );
             }
         }
-        assert!(!succeeds(Some(&w), &["rev-parse", "--verify", "--quiet", "HEAD"]));
+        assert!(!succeeds(
+            Some(&w),
+            &["rev-parse", "--verify", "--quiet", "HEAD"]
+        ));
         assert!(!d.0.join("escape").exists());
     }
 
@@ -1302,7 +1318,10 @@ mod tests {
             "publish: test",
         )
         .unwrap_err();
-        assert!(e.to_string().contains("is not what was written there"), "{e:#}");
+        assert!(
+            e.to_string().contains("is not what was written there"),
+            "{e:#}"
+        );
         assert_eq!(d.git("w", &["rev-parse", "HEAD"]), head);
     }
 

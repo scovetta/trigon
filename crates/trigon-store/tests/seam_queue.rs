@@ -569,7 +569,10 @@ async fn concurrent_requests_do_not_deadlock_each_other() {
         .filter(|(state, _)| state == "ready")
         .map(|(_, n)| *n)
         .sum();
-    assert_eq!(ready as usize, N, "not every request produced a job: {depth:?}");
+    assert_eq!(
+        ready as usize, N,
+        "not every request produced a job: {depth:?}"
+    );
 }
 
 /// The same, for the host reservation, which reads a floor and then writes it back.

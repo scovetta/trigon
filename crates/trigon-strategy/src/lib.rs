@@ -9,23 +9,22 @@
 //!
 //! This crate is pure: no network, no clock, no filesystem beyond what a caller hands it.
 
-mod dotnet;
-mod yarn;
 mod compat;
 mod context;
 mod digest;
+mod dotnet;
 mod error;
 mod instructions;
 mod model;
 mod parse;
 mod render;
 mod tool;
+mod yarn;
 
-pub use dotnet::{AssemblyVersionInfo, with_assembly_version};
-pub use yarn::{scripts_from_checkout, without_yarn};
 pub use compat::{CustomStabilizer, Imported, import};
 pub use context::{Context, EnvCtx, IntrinsicsCtx, LocationCtx, TargetCtx};
 pub use digest::{canonical, strategy_digest};
+pub use dotnet::{AssemblyVersionInfo, with_assembly_version};
 pub use error::StrategyError;
 pub use instructions::{Instructions, Requirements, Script, SourceProvenance};
 pub use model::{
@@ -35,3 +34,4 @@ pub use model::{
 pub use parse::{from_yaml, from_yaml_longest_prefix, to_yaml};
 pub use render::render;
 pub use tool::{Tool, ToolParam, ToolRegistry, VENV};
+pub use yarn::{scripts_from_checkout, without_yarn};

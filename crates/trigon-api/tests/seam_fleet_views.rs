@@ -47,7 +47,13 @@ fn record(id: &str, target: &str, outcome: Option<&str>) -> RunRecord {
 }
 
 /// A failed run carrying a signature, which is what a cluster is made of.
-fn failed(id: &str, target: &str, code: &'static str, subject: Option<&str>, when: &str) -> RunRecord {
+fn failed(
+    id: &str,
+    target: &str,
+    code: &'static str,
+    subject: Option<&str>,
+    when: &str,
+) -> RunRecord {
     let mut r = record(id, target, None);
     r.finished = Some(when.to_string());
     r.failure = Some(FailureSignature {
@@ -67,7 +73,10 @@ async fn api_over(records: Vec<RunRecord>, who: Principal) -> Arc<Api> {
         store.put_run(r).await.expect("put_run");
     }
     let index = Index::new();
-    index.refresh(&store, Switches::default()).await.expect("refresh");
+    index
+        .refresh(&store, Switches::default())
+        .await
+        .expect("refresh");
     Arc::new(Api {
         store,
         queue: None,
@@ -99,7 +108,9 @@ async fn send(api: Arc<Api>, method: &str, path: &str, body: &str) -> (u16, serd
     let status = res.status().as_u16();
     // Generous, because `/v1/check` answers with one row per package and the cap it enforces is
     // on the request. A 3 MiB requirements file is ~160,000 rows.
-    let bytes = axum::body::to_bytes(res.into_body(), 256 << 20).await.expect("body");
+    let bytes = axum::body::to_bytes(res.into_body(), 256 << 20)
+        .await
+        .expect("body");
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
     (status, json)
@@ -145,7 +156,11 @@ async fn each_lockfile_shape_is_read_as_itself() {
     // packages, which reads as a clean bill of health.
     let api = api_over(Vec::new(), Principal::Anonymous).await;
 
-    for (what, body) in [("npm lock", NPM_LOCK), ("requirements", REQUIREMENTS), ("spdx", SPDX)] {
+    for (what, body) in [
+        ("npm lock", NPM_LOCK),
+        ("requirements", REQUIREMENTS),
+        ("spdx", SPDX),
+    ] {
         let (status, doc) = check(Arc::clone(&api), body).await;
         assert_eq!(status, 200, "{what}: {doc}");
         assert!(
@@ -186,7 +201,10 @@ async fn a_lockfile_larger_than_the_cap_is_refused_with_both_numbers() {
     let detail = doc["detail"].as_str().unwrap_or_default();
     // Both figures round to the same string one byte over the cap, which is the honest thing for
     // a reader to see: the file is not meaningfully bigger than what we read.
-    assert!(detail.contains("8.0 MB"), "the cap is not in the message: {detail}");
+    assert!(
+        detail.contains("8.0 MB"),
+        "the cap is not in the message: {detail}"
+    );
 }
 
 #[tokio::test]
@@ -205,12 +223,26 @@ async fn a_lockfile_the_handler_says_it_reads_is_not_refused_by_the_transport() 
         body.push_str(&format!("package-{n}==1.0.{n}\n"));
         n += 1;
     }
-    assert!(body.len() > (2 << 20), "the fixture has to exceed axum's default limit");
-    assert!(body.len() < MAX_LOCKFILE, "and stay inside the documented cap");
+    assert!(
+        body.len() > (2 << 20),
+        "the fixture has to exceed axum's default limit"
+    );
+    assert!(
+        body.len() < MAX_LOCKFILE,
+        "and stay inside the documented cap"
+    );
 
     let (status, doc) = check(api, &body).await;
-    assert_eq!(status, 200, "a lockfile inside the documented cap was refused: {doc}");
-    assert_eq!(doc["packages"].as_u64(), Some(n as u64), "{}", doc["packages"]);
+    assert_eq!(
+        status, 200,
+        "a lockfile inside the documented cap was refused: {doc}"
+    );
+    assert_eq!(
+        doc["packages"].as_u64(),
+        Some(n as u64),
+        "{}",
+        doc["packages"]
+    );
 }
 
 #[tokio::test]
@@ -221,8 +253,17 @@ async fn the_tally_names_all_five_verdicts_even_at_zero() {
     let api = api_over(Vec::new(), Principal::Anonymous).await;
     let (status, doc) = check(api, REQUIREMENTS).await;
     assert_eq!(status, 200);
-    for label in ["reproduced", "caveats", "divergent", "unsupported", "never checked"] {
-        assert!(doc["tally"].get(label).is_some(), "`{label}` is missing from the tally: {doc}");
+    for label in [
+        "reproduced",
+        "caveats",
+        "divergent",
+        "unsupported",
+        "never checked",
+    ] {
+        assert!(
+            doc["tally"].get(label).is_some(),
+            "`{label}` is missing from the tally: {doc}"
+        );
     }
 }
 
@@ -234,8 +275,16 @@ async fn the_check_reports_counts_and_never_a_rate() {
     let api = api_over(Vec::new(), Principal::Anonymous).await;
     let (_, doc) = check(api, REQUIREMENTS).await;
     let text = doc.to_string();
-    for forbidden in ["\"rate\"", "\"percent\"", "\"percentage\"", "\"success_rate\""] {
-        assert!(!text.contains(forbidden), "the check grew a {forbidden} field: {text}");
+    for forbidden in [
+        "\"rate\"",
+        "\"percent\"",
+        "\"percentage\"",
+        "\"success_rate\"",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "the check grew a {forbidden} field: {text}"
+        );
     }
 }
 
@@ -249,24 +298,37 @@ async fn a_package_nobody_ran_is_never_checked_not_a_failure() {
     assert!(!rows.is_empty());
     for row in rows {
         assert_eq!(row["status"], "never checked", "{row}");
-        assert!(row["run"].is_null(), "a never-checked row named a run: {row}");
+        assert!(
+            row["run"].is_null(),
+            "a never-checked row named a run: {row}"
+        );
     }
 }
 
 #[tokio::test]
 async fn a_package_with_a_run_carries_the_run_id_back() {
     let api = api_over(
-        vec![record("1700000001-aa", "pkg:pypi/requests@2.31.0", Some("exact"))],
+        vec![record(
+            "1700000001-aa",
+            "pkg:pypi/requests@2.31.0",
+            Some("exact"),
+        )],
         Principal::Operator,
     )
     .await;
     let (_, doc) = check(api, REQUIREMENTS).await;
     let rows = doc["results"].as_array().expect("results");
-    let hit = rows.iter().find(|r| r["name"] == "requests").expect("requests row");
+    let hit = rows
+        .iter()
+        .find(|r| r["name"] == "requests")
+        .expect("requests row");
     assert_eq!(hit["status"], "reproduced", "{hit}");
     assert_eq!(hit["run"], "1700000001-aa", "{hit}");
     // The row that had no run keeps saying so.
-    let miss = rows.iter().find(|r| r["name"] == "urllib3").expect("urllib3 row");
+    let miss = rows
+        .iter()
+        .find(|r| r["name"] == "urllib3")
+        .expect("urllib3 row");
     assert_eq!(miss["status"], "never checked", "{miss}");
 }
 
@@ -279,13 +341,22 @@ async fn an_anonymous_reader_cannot_see_failure_subjects() {
     // The count is not the sensitive part; the subject is. `FailureSignature::subject` carries
     // paths and, despite the rule its own doc states, sometimes package names.
     let api = api_over(
-        vec![failed("1700000001-aa", "pkg:pypi/x@1", "pypi/missing-header", Some("Python.h"), "2026-01-01T00:00:01Z")],
+        vec![failed(
+            "1700000001-aa",
+            "pkg:pypi/x@1",
+            "pypi/missing-header",
+            Some("Python.h"),
+            "2026-01-01T00:00:01Z",
+        )],
         Principal::Anonymous,
     )
     .await;
     let (status, doc) = get(api, "/v1/clusters").await;
     assert_eq!(status, 403, "{doc}");
-    assert!(!doc.to_string().contains("Python.h"), "the gate leaked the subject: {doc}");
+    assert!(
+        !doc.to_string().contains("Python.h"),
+        "the gate leaked the subject: {doc}"
+    );
 }
 
 #[tokio::test]
@@ -295,9 +366,27 @@ async fn runs_that_failed_the_same_way_are_one_cluster() {
     // fix would move.
     let api = api_over(
         vec![
-            failed("1700000001-aa", "pkg:pypi/x@1", "pypi/missing-header", Some("Python.h"), "2026-01-01T00:00:03Z"),
-            failed("1700000002-bb", "pkg:pypi/y@1", "pypi/missing-header", Some("Python.h"), "2026-01-01T00:00:01Z"),
-            failed("1700000003-cc", "pkg:npm/z@1", "npm/no-lockfile", None, "2026-01-01T00:00:02Z"),
+            failed(
+                "1700000001-aa",
+                "pkg:pypi/x@1",
+                "pypi/missing-header",
+                Some("Python.h"),
+                "2026-01-01T00:00:03Z",
+            ),
+            failed(
+                "1700000002-bb",
+                "pkg:pypi/y@1",
+                "pypi/missing-header",
+                Some("Python.h"),
+                "2026-01-01T00:00:01Z",
+            ),
+            failed(
+                "1700000003-cc",
+                "pkg:npm/z@1",
+                "npm/no-lockfile",
+                None,
+                "2026-01-01T00:00:02Z",
+            ),
         ],
         Principal::Operator,
     )
@@ -321,17 +410,40 @@ async fn runs_that_failed_the_same_way_are_one_cluster() {
 async fn a_cluster_spanning_ecosystems_names_each_one_once() {
     let api = api_over(
         vec![
-            failed("1700000001-aa", "pkg:pypi/x@1", "generic/oom", None, "2026-01-01T00:00:01Z"),
-            failed("1700000002-bb", "pkg:npm/y@1", "generic/oom", None, "2026-01-01T00:00:02Z"),
-            failed("1700000003-cc", "pkg:npm/z@1", "generic/oom", None, "2026-01-01T00:00:03Z"),
+            failed(
+                "1700000001-aa",
+                "pkg:pypi/x@1",
+                "generic/oom",
+                None,
+                "2026-01-01T00:00:01Z",
+            ),
+            failed(
+                "1700000002-bb",
+                "pkg:npm/y@1",
+                "generic/oom",
+                None,
+                "2026-01-01T00:00:02Z",
+            ),
+            failed(
+                "1700000003-cc",
+                "pkg:npm/z@1",
+                "generic/oom",
+                None,
+                "2026-01-01T00:00:03Z",
+            ),
         ],
         Principal::Operator,
     )
     .await;
     let (_, doc) = get(api, "/v1/clusters").await;
-    let ecos = doc["clusters"][0]["ecosystems"].as_array().expect("ecosystems");
+    let ecos = doc["clusters"][0]["ecosystems"]
+        .as_array()
+        .expect("ecosystems");
     assert_eq!(ecos.len(), 2, "{doc}");
-    assert!(ecos.contains(&serde_json::json!("npm")) && ecos.contains(&serde_json::json!("pypi")), "{doc}");
+    assert!(
+        ecos.contains(&serde_json::json!("npm")) && ecos.contains(&serde_json::json!("pypi")),
+        "{doc}"
+    );
 }
 
 #[tokio::test]
@@ -343,7 +455,10 @@ async fn a_run_that_did_not_fail_is_in_no_cluster() {
     .await;
     let (status, doc) = get(api, "/v1/clusters").await;
     assert_eq!(status, 200);
-    assert!(doc["clusters"].as_array().expect("clusters").is_empty(), "{doc}");
+    assert!(
+        doc["clusters"].as_array().expect("clusters").is_empty(),
+        "{doc}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -355,8 +470,15 @@ async fn the_fleet_view_says_which_principal_it_answered_for() {
     // An operator's fleet page counts the whole corpus and an anonymous one counts what the gate
     // released. Two different true answers to one question, and a reader comparing two numbers
     // needs to know which they are holding.
-    for (who, want) in [(Principal::Anonymous, "anonymous"), (Principal::Operator, "operator")] {
-        let api = api_over(vec![record("1700000001-aa", "pkg:pypi/x@1", Some("exact"))], who).await;
+    for (who, want) in [
+        (Principal::Anonymous, "anonymous"),
+        (Principal::Operator, "operator"),
+    ] {
+        let api = api_over(
+            vec![record("1700000001-aa", "pkg:pypi/x@1", Some("exact"))],
+            who,
+        )
+        .await;
         let (status, doc) = get(api, "/v1/fleet").await;
         assert_eq!(status, 200, "{doc}");
         assert_eq!(doc["principal"], want, "{doc}");
@@ -370,7 +492,13 @@ async fn the_fleet_view_keeps_the_two_denominators_apart() {
     let api = api_over(
         vec![
             record("1700000001-aa", "pkg:pypi/x@1", Some("exact")),
-            failed("1700000002-bb", "pkg:npm/y@1", "generic/oom", None, "2026-01-01T00:00:02Z"),
+            failed(
+                "1700000002-bb",
+                "pkg:npm/y@1",
+                "generic/oom",
+                None,
+                "2026-01-01T00:00:02Z",
+            ),
         ],
         Principal::Operator,
     )
@@ -380,7 +508,10 @@ async fn the_fleet_view_keeps_the_two_denominators_apart() {
     assert!(doc["corpus"]["by_fault"].is_object(), "{doc}");
     let text = doc["corpus"].to_string();
     for forbidden in ["\"rate\"", "\"percent\"", "\"success_rate\""] {
-        assert!(!text.contains(forbidden), "the corpus summary grew a {forbidden}: {text}");
+        assert!(
+            !text.contains(forbidden),
+            "the corpus summary grew a {forbidden}: {text}"
+        );
     }
 }
 

@@ -10,11 +10,11 @@
 // The writer the golden repository is built by, from the crate whose tests own it: one writer, so
 // that a repository built here is laid out, signed and logged exactly as the golden one is.
 #[allow(dead_code)]
-#[path = "../../trigon-attest/tests/evidence_log/common.rs"]
-mod common;
-#[allow(dead_code)]
 #[path = "../../trigon-attest/tests/evidence_repo/build.rs"]
 mod build;
+#[allow(dead_code)]
+#[path = "../../trigon-attest/tests/evidence_log/common.rs"]
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -262,8 +262,8 @@ fn two_trees_under_one_log_key_are_an_equivocation_and_exit_4() {
     // And a JSON reader gets a document, with both notes, though no record was read.
     let out = check(&root, "e", &["--output", "json"]);
     assert_eq!(out.status.code(), Some(4), "{}", text(&out));
-    let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
     assert_eq!(doc["exit"], 4);
     assert_eq!(doc["stopped"], "equivocation");
     let notes: Vec<&str> = doc["signedNotes"]
@@ -451,11 +451,19 @@ fn arguments_that_cannot_be_checked_exit_5() {
             "--rerun-comparison",
         ),
         (
-            [vec!["--record", rec, "--evidence", r, "--bogus"], keys.clone()].concat(),
+            [
+                vec!["--record", rec, "--evidence", r, "--bogus"],
+                keys.clone(),
+            ]
+            .concat(),
             "--bogus",
         ),
         (
-            [vec![joined.as_str(), "--evidence", r, "--bogus"], keys.clone()].concat(),
+            [
+                vec![joined.as_str(), "--evidence", r, "--bogus"],
+                keys.clone(),
+            ]
+            .concat(),
             "--bogus",
         ),
         (
@@ -703,7 +711,10 @@ fn a_record_is_shown_with_every_field_docs_19_4_2_has_a_client_render() {
     assert_eq!(doc["egressTier"], "mirror-only");
     assert_eq!(doc["attestable"], true);
     assert_eq!(doc["derivation"], "heuristic");
-    assert_eq!(doc["falsifyingCommand"]["argv"][3], format!("sha256:{subject}"));
+    assert_eq!(
+        doc["falsifyingCommand"]["argv"][3],
+        format!("sha256:{subject}")
+    );
     assert_eq!(
         doc["disputePointer"],
         json!({"kind": "url", "url": "https://example.com/trigon-evidence/issues"})
@@ -901,8 +912,7 @@ fn a_claim_rerun_comparison_refutes_exits_4() {
             .unwrap_or_else(|e| panic!("{what}: {e}: {}", text(&out)));
         assert_eq!(doc["exit"], 4, "{what}");
         assert_eq!(doc["verified"], true, "{what}");
-        let refuted =
-            doc["rederived"]["holds"] == false || doc["report"]["agrees"] == false;
+        let refuted = doc["rederived"]["holds"] == false || doc["report"]["agrees"] == false;
         assert!(refuted, "{what}: {doc}");
     }
 }
@@ -927,7 +937,10 @@ fn a_record_logged_twice_fails_verification_and_exits_4() {
     let out = check_made(&root, &d0, &[]);
     let said = text(&out);
     assert_eq!(out.status.code(), Some(4), "{said}");
-    assert!(said.contains("at 2 leaves — leaf 0 of log 0, leaf 2 of log 0"), "{said}");
+    assert!(
+        said.contains("at 2 leaves — leaf 0 of log 0, leaf 2 of log 0"),
+        "{said}"
+    );
     assert!(!said.contains("answer    exact"), "{said}");
     // The withdrawal verifies, and what the source says of the artifact is still a failure.
     let out = check_made(&root, &w, &["--output", "json"]);
@@ -935,7 +948,10 @@ fn a_record_logged_twice_fails_verification_and_exits_4() {
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["verified"], true);
     assert!(
-        doc["answer"].as_str().unwrap().contains("failed verification"),
+        doc["answer"]
+            .as_str()
+            .unwrap()
+            .contains("failed verification"),
         "{doc}"
     );
 }
@@ -1027,8 +1043,8 @@ fn a_log_that_continues_elsewhere_answers_unknown_and_exits_4() {
 fn a_json_reader_is_told_what_stopped_the_check() {
     let stopped = |out: &Output, code: i32| -> serde_json::Value {
         assert_eq!(out.status.code(), Some(code), "{}", text(out));
-        let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .unwrap_or_else(|e| panic!("{e}: {}", text(out)));
+        let doc: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(out)));
         assert_eq!(doc["exit"], code, "{doc}");
         assert!(doc["error"].is_string(), "{doc}");
         doc
@@ -1079,12 +1095,8 @@ fn a_json_reader_is_told_what_stopped_the_check() {
     let root = scratch("json-other-key");
     copy_dir(&repo(), &root);
     let note = std::fs::read(root.join("log/checkpoint")).unwrap();
-    let cp = Checkpoint::parse(
-        trigon_attest::log::SignedNote::parse(&note)
-            .unwrap()
-            .text(),
-    )
-    .unwrap();
+    let cp =
+        Checkpoint::parse(trigon_attest::log::SignedNote::parse(&note).unwrap().text()).unwrap();
     let other = LogSigner::from_seed("example.com/trigon-evidence", [9; 32]).unwrap();
     std::fs::write(
         root.join("log/checkpoint"),
@@ -1263,7 +1275,10 @@ fn a_field_a_verdict_does_not_sign_is_shown_as_absent() {
                     o.remove("run");
                     o.remove("egressTier");
                     o.insert("attestable".into(), json!(false));
-                    o["trigonVersion"].as_object_mut().unwrap().remove("builder");
+                    o["trigonVersion"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("builder");
                 }
             }),
             &[
@@ -1278,7 +1293,10 @@ fn a_field_a_verdict_does_not_sign_is_shown_as_absent() {
                 if i == 0 {
                     let o = st.predicate.as_object_mut().unwrap();
                     o.remove("attestable");
-                    o["trigonVersion"].as_object_mut().unwrap().remove("attestor");
+                    o["trigonVersion"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("attestor");
                 }
             }),
             &[
@@ -1355,7 +1373,10 @@ fn a_signed_report_that_is_no_comparison_fails_the_record() {
     let said = text(&out);
     assert_eq!(out.status.code(), Some(0), "{said}");
     assert!(said.contains("the claim holds"), "{said}");
-    assert!(said.contains("report    unchecked: the verdict names none"), "{said}");
+    assert!(
+        said.contains("report    unchecked: the verdict names none"),
+        "{said}"
+    );
 }
 
 /// A checkpoint given as last accepted that is of no log the directory's chain reaches, where the

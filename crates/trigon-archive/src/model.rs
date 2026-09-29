@@ -297,7 +297,10 @@ impl Body {
                     format: "archive",
                     // Saturating: a range whose end overflows is exactly the one being refused,
                     // and `+` panicked on it under the workspace's overflow checks.
-                    detail: format!("body range {off}..{} out of bounds", off.saturating_add(*len)),
+                    detail: format!(
+                        "body range {off}..{} out of bounds",
+                        off.saturating_add(*len)
+                    ),
                 }),
             Body::Spilled { file, off, len } => {
                 let mut f = file.file.try_clone()?;

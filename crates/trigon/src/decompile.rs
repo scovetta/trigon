@@ -122,7 +122,15 @@ pub fn source(dll: &[u8]) -> Option<String> {
         std::fs::write(dir.join("a.dll"), dll).ok()?;
         let out = podman(180)
             .args([
-                "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "256", "-v",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--memory",
+                "2g",
+                "--pids-limit",
+                "256",
+                "-v",
             ])
             .arg(format!("{}:/w:Z", dir.display()))
             .args([
@@ -331,7 +339,13 @@ mod tests {
         for yes in ["Castle.Core.dll", "lib/net6.0/A.DLL", "tool.exe"] {
             assert!(looks_like_assembly(yes), "{yes}");
         }
-        for no in ["Castle.Core.nuspec", "a.xml", "readme.txt", "A.dll.config", "x.pdb"] {
+        for no in [
+            "Castle.Core.nuspec",
+            "a.xml",
+            "readme.txt",
+            "A.dll.config",
+            "x.pdb",
+        ] {
             assert!(!looks_like_assembly(no), "{no}");
         }
     }
@@ -350,7 +364,10 @@ mod tests {
 
     #[test]
     fn the_version_stamps_are_read_from_the_attributes_ilspy_emits() {
-        assert!(CASTLE.contains("\n    [assembly: AssemblyInformationalVersion"), "the fixture");
+        assert!(
+            CASTLE.contains("\n    [assembly: AssemblyInformationalVersion"),
+            "the fixture"
+        );
         let info = version_info_in(CASTLE).unwrap();
         assert_eq!(info.assembly_version.as_deref(), Some("5.0.0.0"));
         assert_eq!(info.file_version.as_deref(), Some("5.1.1"));
@@ -412,7 +429,10 @@ mod tests {
             Some("\u{7}\u{8}\u{c}\n\r\u{b}'")
         );
         // A character outside the basic plane is a surrogate pair in C#, and one character here.
-        assert_eq!(copyright(r"\uD83D\uDE00 \U0001F600").as_deref(), Some("😀 😀"));
+        assert_eq!(
+            copyright(r"\uD83D\uDE00 \U0001F600").as_deref(),
+            Some("😀 😀")
+        );
         // `\x` takes one to four hex digits, as many as there are.
         assert_eq!(copyright(r"\x41\x4Z").as_deref(), Some("A\u{4}Z"));
         // A literal whose value ends in what looks like the attribute's close is still one literal.
@@ -497,18 +517,20 @@ mod tests {
         let Some((a_cs, b_cs)) = sources(&a, &b) else {
             return skip("the decompiler image could not be built or run");
         };
-        assert!(a_cs.contains("return 1") || a_cs.contains("return 1;"), "a: {a_cs}");
-        assert!(b_cs.contains("return 2") || b_cs.contains("return 2;"), "b: {b_cs}");
+        assert!(
+            a_cs.contains("return 1") || a_cs.contains("return 1;"),
+            "a: {a_cs}"
+        );
+        assert!(
+            b_cs.contains("return 2") || b_cs.contains("return 2;"),
+            "b: {b_cs}"
+        );
         // And the difference is *localised*: the two decompilations are identical but for the
         // lines carrying the constant. This is the property the feature sells — the compiler noise
         // is gone and only the source difference is left.
         let a_lines: Vec<&str> = a_cs.lines().filter(|l| l.trim() != "").collect();
         let b_lines: Vec<&str> = b_cs.lines().filter(|l| l.trim() != "").collect();
-        let differing = a_lines
-            .iter()
-            .zip(&b_lines)
-            .filter(|(x, y)| x != y)
-            .count();
+        let differing = a_lines.iter().zip(&b_lines).filter(|(x, y)| x != y).count();
         assert!(
             a_lines.len() == b_lines.len() && differing <= 2,
             "the decompilations should differ only in the changed return: {differing} lines differ"
@@ -529,8 +551,16 @@ mod tests {
     /// the image, so nothing is restored.
     fn compile_pair() -> Option<(Vec<u8>, Vec<u8>)> {
         let dir = scratch_dir()?;
-        std::fs::write(dir.join("a.cs"), "public class C { public static int F() { return 1; } }").ok()?;
-        std::fs::write(dir.join("b.cs"), "public class C { public static int F() { return 2; } }").ok()?;
+        std::fs::write(
+            dir.join("a.cs"),
+            "public class C { public static int F() { return 1; } }",
+        )
+        .ok()?;
+        std::fs::write(
+            dir.join("b.cs"),
+            "public class C { public static int F() { return 2; } }",
+        )
+        .ok()?;
         let script = "set -eu\n\
              CSC=$(find /usr/share/dotnet/sdk -name csc.dll -path '*Roslyn*' | head -1)\n\
              RD=$(dirname \"$(find /usr/share/dotnet/shared/Microsoft.NETCore.App -name System.Runtime.dll | head -1)\")\n\

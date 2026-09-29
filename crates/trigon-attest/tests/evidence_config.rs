@@ -245,7 +245,11 @@ attestation_key = "attestation.pub"
     assert_eq!(p.rebuilt_artifacts, RebuiltArtifacts::GithubRelease);
     assert!(p.same_host_confirmation);
     assert!(p.same_host_local_images);
-    assert!(c.notes().is_empty(), "both set is what the second asks for: {:?}", c.notes());
+    assert!(
+        c.notes().is_empty(),
+        "both set is what the second asks for: {:?}",
+        c.notes()
+    );
     assert_eq!(p.confirmation_interval, Duration::from_secs(30 * 60));
     assert_eq!(p.heartbeat, Duration::from_secs(3 * 86_400));
     assert_eq!(
@@ -1753,8 +1757,10 @@ fn the_process_environment_is_read_with_empty_as_unset_and_not_unicode_refused()
             }
             Some("cwd-gone") => {
                 // This child's own working directory, removed from under it.
-                let gone = std::env::temp_dir()
-                    .join(format!("trigon-evidence-config-{}-cwd-gone", std::process::id()));
+                let gone = std::env::temp_dir().join(format!(
+                    "trigon-evidence-config-{}-cwd-gone",
+                    std::process::id()
+                ));
                 std::fs::create_dir_all(&gone).unwrap();
                 std::env::set_current_dir(&gone).unwrap();
                 std::fs::remove_dir(&gone).unwrap();

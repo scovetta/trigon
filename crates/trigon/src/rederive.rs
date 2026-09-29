@@ -37,7 +37,10 @@ pub struct Args {
 
 /// What happened to one run.
 enum Done {
-    Written { steps: usize, edits: usize },
+    Written {
+        steps: usize,
+        edits: usize,
+    },
     Skipped(String),
     /// Re-derived, to something other than the recorded comparison: the first thing a verdict
     /// rests on that the two disagree about. Not written.
@@ -65,7 +68,11 @@ pub fn run(args: Args) -> Result<()> {
                     written += 1;
                     println!(
                         "{id}  {}  {steps} step(s), {edits} field edit(s)",
-                        if args.dry_run { "would write" } else { "written" }
+                        if args.dry_run {
+                            "would write"
+                        } else {
+                            "written"
+                        }
                     );
                 }
                 Ok(Done::Skipped(why)) => {
@@ -86,7 +93,11 @@ pub fn run(args: Args) -> Result<()> {
         }
         println!(
             "\n{written} {}, {skipped} skipped, {} failed, of {} run(s)",
-            if args.dry_run { "would be written" } else { "written" },
+            if args.dry_run {
+                "would be written"
+            } else {
+                "written"
+            },
             unread.len() + disagreed.len(),
             ids.len()
         );
@@ -245,7 +256,13 @@ fn disagreement(a: &Comparison, b: &Comparison) -> Option<String> {
     match (&a.diff, &b.diff) {
         (Some(x), Some(y)) => {
             let counts = |d: &trigon_compare::DiffReport| {
-                (d.identical, d.differs, d.only_upstream, d.only_rebuild, d.executable_differs)
+                (
+                    d.identical,
+                    d.differs,
+                    d.only_upstream,
+                    d.only_rebuild,
+                    d.executable_differs,
+                )
             };
             if counts(x) != counts(y) {
                 return Some("member counts".into());
@@ -300,15 +317,24 @@ mod tests {
     fn divergent() -> Comparison {
         let set = trigon_stabilize::profile("tar-gzip").unwrap();
         let c = compare_bytes(
-            tgz(&[("package/a.js", b"a\n"), ("package/b.js", b"one\n")], 1_700_000_000),
-            tgz(&[("package/a.js", b"a\n"), ("package/b.js", b"two\n")], 1_600_000_000),
+            tgz(
+                &[("package/a.js", b"a\n"), ("package/b.js", b"one\n")],
+                1_700_000_000,
+            ),
+            tgz(
+                &[("package/a.js", b"a\n"), ("package/b.js", b"two\n")],
+                1_600_000_000,
+            ),
             trigon_core::Format::TarGz,
             &set,
             &Limits::default(),
         )
         .unwrap();
         assert_eq!(c.outcome, trigon_core::Match::Divergent, "the fixture");
-        assert!(c.diff.as_ref().is_some_and(|d| d.files.len() == 2), "the fixture");
+        assert!(
+            c.diff.as_ref().is_some_and(|d| d.files.len() == 2),
+            "the fixture"
+        );
         c
     }
 
@@ -353,13 +379,22 @@ mod tests {
                 "outcome divergent vs normalized",
                 Box::new(|b| b.outcome = trigon_core::Match::Normalized),
             ),
-            ("upstream raw digest", Box::new(|b| b.upstream.raw.sha256 = other())),
+            (
+                "upstream raw digest",
+                Box::new(|b| b.upstream.raw.sha256 = other()),
+            ),
             (
                 "upstream stabilized digest",
                 Box::new(|b| b.upstream.stabilized.sha256 = other()),
             ),
-            ("upstream stabilizer set", Box::new(|b| b.upstream.set.1 = other())),
-            ("rebuild raw digest", Box::new(|b| b.rebuild.raw.sha256 = other())),
+            (
+                "upstream stabilizer set",
+                Box::new(|b| b.upstream.set.1 = other()),
+            ),
+            (
+                "rebuild raw digest",
+                Box::new(|b| b.rebuild.raw.sha256 = other()),
+            ),
             (
                 "rebuild stabilized digest",
                 Box::new(|b| b.rebuild.stabilized.sha256 = other()),

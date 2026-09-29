@@ -198,7 +198,10 @@ fn params(strategy: &Strategy, phase: &str) -> BTreeMap<String, String> {
     // none a template the repository could steer.
     match &steps[0].body {
         StepBody::Uses { with, .. } => {
-            assert!(with.is_empty(), "a lowered parameter is a template: {with:?}");
+            assert!(
+                with.is_empty(),
+                "a lowered parameter is a template: {with:?}"
+            );
             steps[0].literal.clone()
         }
         other => panic!("expected a tool step, got {other:?}"),

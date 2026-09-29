@@ -2021,7 +2021,11 @@ fn a_guid_heap_listed_last_in_the_stream_directory_is_still_found() {
     let (mut bytes, lay) = Asm::default().build();
     let header = |name: &str| lay.stream_names.iter().find(|(n, _)| n == name).unwrap().1 - 8;
     let (guid, blob) = (header("#GUID"), header("#Blob"));
-    assert_eq!(blob, guid + 16, "the fixture lists `#Blob` right after `#GUID`");
+    assert_eq!(
+        blob,
+        guid + 16,
+        "the fixture lists `#Blob` right after `#GUID`"
+    );
     let listed = bytes[guid..guid + 16].to_vec();
     bytes.copy_within(blob..blob + 16, guid);
     bytes[blob..blob + 16].copy_from_slice(&listed);

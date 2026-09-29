@@ -937,7 +937,8 @@ mod wrapping {
     #[test]
     fn a_fence_after_prose_is_still_a_fence() {
         // `strip_prefix("```")` missed this, which is the whole finding.
-        let answer = format!("Here is what I think went wrong.\n\nAnd the recipe:\n\n```yaml\n{DOC}\n```\n");
+        let answer =
+            format!("Here is what I think went wrong.\n\nAnd the recipe:\n\n```yaml\n{DOC}\n```\n");
         assert_eq!(strip_fence(&answer), DOC);
     }
 
@@ -949,7 +950,8 @@ mod wrapping {
 
     #[test]
     fn prose_with_no_fence_is_cut_at_the_document() {
-        let answer = format!("The previous recipe built successfully but is missing two files.\n\n{DOC}");
+        let answer =
+            format!("The previous recipe built successfully but is missing two files.\n\n{DOC}");
         assert_eq!(strip_fence(&answer), DOC);
     }
 
@@ -976,7 +978,10 @@ mod wrapping {
         })
         .to_string();
         let c = parse_candidate(&json).expect("parses");
-        assert_eq!(c.strategy, DOC, "the fence survived into the strategy field");
+        assert_eq!(
+            c.strategy, DOC,
+            "the fence survived into the strategy field"
+        );
         assert!(c.diagnosis.starts_with("The previous recipe"));
     }
 

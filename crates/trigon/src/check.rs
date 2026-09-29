@@ -437,7 +437,9 @@ mod tests {
             r#"{"packages": {"": {}, "node_modules/a": {"version": "1.0.0"}}}"#,
         )
         .unwrap();
-        let e = run(&lock, &d.join("store"), "yaml").unwrap_err().to_string();
+        let e = run(&lock, &d.join("store"), "yaml")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("`yaml` is not a format this writes"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }

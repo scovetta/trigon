@@ -196,7 +196,11 @@ async fn a_rederivation_that_says_anything_different_about_the_verdict_is_ignore
             serde_json::json!(["another", "sha256:00"]),
         ),
         ("the signature", "/diff/codes", serde_json::json!([])),
-        ("the identical count", "/diff/identical", serde_json::json!(99)),
+        (
+            "the identical count",
+            "/diff/identical",
+            serde_json::json!(99),
+        ),
         ("the differing count", "/diff/differs", serde_json::json!(0)),
         (
             "the upstream-only count",

@@ -1205,7 +1205,11 @@ mod tests {
         let rebuilt = "ab".repeat(32);
         let subject = "cd".repeat(32);
         let signing = serde_json::json!({"artifacts": {"rebuild": {"sha256": rebuilt}}});
-        for kind in [Match::Normalized, Match::NormalizedWithCaveats, Match::Divergent] {
+        for kind in [
+            Match::Normalized,
+            Match::NormalizedWithCaveats,
+            Match::Divergent,
+        ] {
             let w = wanted(RecordKind::Verdict(kind), &signing, Some(&subject))
                 .unwrap_or_else(|s| panic!("{kind:?}: {:#}", s.error));
             assert_eq!(
@@ -1236,7 +1240,9 @@ mod tests {
         // Without the subject's digest to compare, a signed digest is the asset's name.
         assert_eq!(
             wanted(RecordKind::Verdict(Match::Normalized), &signing, None).ok(),
-            Some(Wanted::Asset(trigon_core::Digest::from_hex(&rebuilt).unwrap()))
+            Some(Wanted::Asset(
+                trigon_core::Digest::from_hex(&rebuilt).unwrap()
+            ))
         );
         let refused = [
             serde_json::json!({"artifacts": {"upstream": {"sha256": subject}}}),

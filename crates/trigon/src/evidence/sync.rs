@@ -194,9 +194,8 @@ impl Fetcher<'_> {
             git::run_network(None, &args)?;
             std::fs::write(making.join(".git").join(UNACCEPTED), b"")
                 .with_context(|| format!("marking {}", making.display()))?;
-            std::fs::rename(&making, dir).with_context(|| {
-                format!("moving {} to {}", making.display(), dir.display())
-            })?;
+            std::fs::rename(&making, dir)
+                .with_context(|| format!("moving {} to {}", making.display(), dir.display()))?;
             branch_of(dir)?;
             write_attributes(dir)?;
             let mut set = vec!["sparse-checkout", "set"];

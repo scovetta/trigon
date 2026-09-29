@@ -50,7 +50,13 @@ pub fn on_diff(
     // The same depth walk `propose` uses, starting from the floor: this is a classification, not
     // a search, and `Low` leaves the whole budget to the answer. One step down remains — reasoning
     // off entirely — and it is taken on truncation rather than surfaced as a failure.
-    let answer = match attempt(provider, model, diff, Some(Effort::Low), provider.reasoning()) {
+    let answer = match attempt(
+        provider,
+        model,
+        diff,
+        Some(Effort::Low),
+        provider.reasoning(),
+    ) {
         Err(LlmError::Truncated { limit, thinking }) => {
             tracing::warn!(
                 limit,
@@ -205,8 +211,9 @@ mod tests {
 
     #[test]
     fn a_fenced_answer_is_read() {
-        let o = read("```json\n{\"verdict\": \"substantive\", \"reason\": \"different logic\"}\n```")
-            .unwrap();
+        let o =
+            read("```json\n{\"verdict\": \"substantive\", \"reason\": \"different logic\"}\n```")
+                .unwrap();
         assert_eq!(o.verdict, DiffVerdict::Substantive);
     }
 
@@ -242,8 +249,16 @@ mod tests {
         // it, `parse` refuses it, and the run just records no opinion.
         let s = schema().to_string();
         for v in DiffVerdict::ALL {
-            assert!(RUBRIC.contains(v.as_str()), "the rubric never says {:?}", v.as_str());
-            assert!(s.contains(v.as_str()), "the schema never says {:?}", v.as_str());
+            assert!(
+                RUBRIC.contains(v.as_str()),
+                "the rubric never says {:?}",
+                v.as_str()
+            );
+            assert!(
+                s.contains(v.as_str()),
+                "the schema never says {:?}",
+                v.as_str()
+            );
         }
     }
 
@@ -264,7 +279,10 @@ mod tests {
     #[test]
     fn a_reason_that_keeps_talking_is_bounded() {
         let long = "x".repeat(2_000);
-        let o = read(&format!(r#"{{"verdict": "equivalent", "reason": "{long}"}}"#)).unwrap();
+        let o = read(&format!(
+            r#"{{"verdict": "equivalent", "reason": "{long}"}}"#
+        ))
+        .unwrap();
         assert!(o.reason.chars().count() <= 401, "{}", o.reason.len());
         assert!(o.reason.ends_with('…'));
     }
@@ -279,7 +297,10 @@ mod tests {
         on_diff(&p, "replay", diff, 1, 1).unwrap();
         let asked = p.asked();
         let flat = asked[0].prompt.flatten();
-        assert!(!flat.contains('\u{1b}'), "an escape sequence reached the prompt");
+        assert!(
+            !flat.contains('\u{1b}'),
+            "an escape sequence reached the prompt"
+        );
         assert!(!flat.contains('\u{0}'), "a NUL reached the prompt");
         assert!(flat.contains("line one red"), "{flat}");
     }

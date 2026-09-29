@@ -350,7 +350,14 @@ impl Repository {
         let leaf = self.record_leaves().find(|(_, l)| l.record == digest);
         let origin = leaf.map_or("", |(pos, _)| self.origin(pos));
         let own: &dyn LogFiles = leaf.map_or(&self.parts[0].files, |(pos, _)| self.files_of(pos));
-        check_record(bytes, leaf, origin, &self.keys, evidence.unwrap_or(own), None)
+        check_record(
+            bytes,
+            leaf,
+            origin,
+            &self.keys,
+            evidence.unwrap_or(own),
+            None,
+        )
     }
 
     /// Every record the log holds for `key`, each read from `records/` and verified, a missing one

@@ -104,7 +104,6 @@ fn is_progress(line: &str) -> bool {
     line.contains("..........")
 }
 
-
 /// What [`compress`] will actually emit, in bytes, for a given chosen set.
 ///
 /// **Including the elision markers**, which is the whole point: their number depends on which
@@ -267,10 +266,7 @@ pub fn compress(log: &str, budget: usize) -> Compressed {
     // `truncated` feeds back in: the first eviction makes it true, which adds the notice's cost,
     // which may require another. The loop settles because every pass removes a line.
     while rendered_len(&cleaned, &chosen, truncated) > budget {
-        let Some(&victim) = chosen
-            .iter()
-            .min_by_key(|i| (priority(**i), **i))
-        else {
+        let Some(&victim) = chosen.iter().min_by_key(|i| (priority(**i), **i)) else {
             break;
         };
         chosen.remove(&victim);

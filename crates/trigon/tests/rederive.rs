@@ -186,13 +186,18 @@ fn refused(out: &Output) -> (String, String) {
         String::from_utf8_lossy(&out.stderr).into_owned(),
     );
     assert_eq!(out.status.code(), Some(1), "{text}{err}");
-    assert!(text.contains(" failed, of "), "the tally was not printed: {text}");
+    assert!(
+        text.contains(" failed, of "),
+        "the tally was not printed: {text}"
+    );
     (text, err)
 }
 
 /// The runs stderr names after `what`, in id order.
 fn named<'a>(err: &'a str, what: &str) -> Vec<&'a str> {
-    let at = err.find(what).unwrap_or_else(|| panic!("no `{what}`: {err}"));
+    let at = err
+        .find(what)
+        .unwrap_or_else(|| panic!("no `{what}`: {err}"));
     let rest = err[at + what.len()..].lines().next().unwrap_or_default();
     let mut ids: Vec<&str> = rest.split(';').next().unwrap().split(", ").collect();
     ids.sort_unstable();
@@ -561,7 +566,10 @@ fn a_rederivation_that_disagrees_with_the_record_is_refused_and_not_written() {
     }
     // And the exit says which, as a disagreement: not a run that could not be read.
     assert_eq!(
-        named(&err, "2 run(s) re-derived to a comparison other than the one recorded: "),
+        named(
+            &err,
+            "2 run(s) re-derived to a comparison other than the one recorded: "
+        ),
         [a, b],
         "{err}"
     );

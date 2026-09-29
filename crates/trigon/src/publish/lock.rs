@@ -99,8 +99,8 @@ mod tests {
         // A child forked from another thread has the lock's open file description until it execs,
         // which made the test above fail now and then; a duplicate descriptor is that child, held
         // for as long as the test likes rather than for a moment it cannot choose.
-        let dir = std::env::temp_dir()
-            .join(format!("trigon-publish-lock-shared-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("trigon-publish-lock-shared-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("lock");
         let first = Lock::take(&path, "pid 1").unwrap();

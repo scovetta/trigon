@@ -1432,7 +1432,10 @@ fn the_registry_digests_of_an_image_are_podmans_and_a_failure_to_say_is_not_none
 
     fake.set("repo-digests.out", "")
         .set("repo-digests.code", "125")
-        .set("repo-digests.err", &format!("Error: {id}: image not known\n"));
+        .set(
+            "repo-digests.err",
+            &format!("Error: {id}: image not known\n"),
+        );
     let e = trigon_sandbox::repo_digests(&fake.path(), &id).expect_err("podman could not say");
     assert!(e.contains("image not known"), "{e}");
     fake.set("repo-digests.code", "0")
@@ -1471,7 +1474,8 @@ fn an_image_named_by_its_id_is_pulled_again_by_its_digest_and_must_come_back_as_
     let e = trigon_sandbox::repull_by(&fake.path(), &id, &by).expect_err("another image");
     assert!(e.contains("the registry served another image"), "{e}");
     assert!(e.contains(&"d0".repeat(32)), "{e}");
-    fake.set("image-inspect.out", "").set("image-inspect.code", "125");
+    fake.set("image-inspect.out", "")
+        .set("image-inspect.code", "125");
     let e = trigon_sandbox::repull_by(&fake.path(), &id, &by).expect_err("nothing to say");
     assert!(e.contains("podman could not say which"), "{e}");
 
@@ -1485,8 +1489,16 @@ fn an_image_named_by_its_id_is_pulled_again_by_its_digest_and_must_come_back_as_
     let untouched = Fake::new("repull-by-refused");
     for (image, digest, says) in [
         (&id[..12], &*by, "not an image's full content id"),
-        (&*id, &*format!("localhost/trigon-base@sha256:{}", "ab".repeat(32)), "only in this"),
-        (&*id, "docker.io/library/node:22", "not pinned by a registry digest"),
+        (
+            &*id,
+            &*format!("localhost/trigon-base@sha256:{}", "ab".repeat(32)),
+            "only in this",
+        ),
+        (
+            &*id,
+            "docker.io/library/node:22",
+            "not pinned by a registry digest",
+        ),
     ] {
         let e = trigon_sandbox::repull_by(&untouched.path(), image, digest).unwrap_err();
         assert!(e.contains(says), "{image} by {digest}: {e}");

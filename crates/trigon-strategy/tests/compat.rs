@@ -12,7 +12,10 @@
 use trigon_strategy::{Location, StepBody, Strategy, import};
 
 /// The `with` map of the nth step of a section, or a panic naming what was there instead.
-fn with_of(steps: &[trigon_strategy::Step], n: usize) -> &std::collections::BTreeMap<String, String> {
+fn with_of(
+    steps: &[trigon_strategy::Step],
+    n: usize,
+) -> &std::collections::BTreeMap<String, String> {
     match &steps[n].body {
         StepBody::Uses { with, .. } => with,
         other => panic!("expected a tool step, got {other:?}"),
@@ -44,7 +47,10 @@ fn a_document_with_two_strategy_keys_is_refused() {
     let e = import("npm_pack_build:\n  location:\n    repo: x\nflow:\n  build: []\n").unwrap_err();
     let m = e.to_string();
     assert!(m.contains("two strategy keys"), "{m}");
-    assert!(m.contains("npm_pack_build") && m.contains("flow"), "both keys must be named: {m}");
+    assert!(
+        m.contains("npm_pack_build") && m.contains("flow"),
+        "both keys must be named: {m}"
+    );
 }
 
 #[test]
@@ -52,7 +58,10 @@ fn a_document_with_no_strategy_key_says_what_it_expected() {
     let e = import("custom_stabilizers: []\n").unwrap_err();
     let m = e.to_string();
     assert!(m.contains("no strategy key"), "{m}");
-    assert!(m.contains("flow"), "the message must list what it takes: {m}");
+    assert!(
+        m.contains("flow"),
+        "the message must list what it takes: {m}"
+    );
 }
 
 #[test]
@@ -75,7 +84,10 @@ fn a_shape_we_have_not_ported_names_the_tools_it_would_need() {
         let e = import(&format!("{kind}:\n  location:\n    repo: x\n")).unwrap_err();
         let m = e.to_string();
         assert!(m.contains(kind), "{m}");
-        assert!(m.contains(ecosystem), "`{kind}` should name `{ecosystem}`: {m}");
+        assert!(
+            m.contains(ecosystem),
+            "`{kind}` should name `{ecosystem}`: {m}"
+        );
     }
 }
 
@@ -97,7 +109,11 @@ fn the_repository_root_is_no_subdir_rather_than_an_empty_one() {
         let f = flow(&format!(
             "flow:\n  location:\n    repo: https://github.com/a/b\n    ref: c\n    dir: {dir}\n  build: []\n"
         ));
-        assert_eq!(f.location.subdir, None, "dir: {dir} became {:?}", f.location.subdir);
+        assert_eq!(
+            f.location.subdir, None,
+            "dir: {dir} became {:?}",
+            f.location.subdir
+        );
     }
 
     let f = flow(
@@ -135,9 +151,14 @@ fn a_tool_parameter_arrives_in_our_spelling() {
          pythonVersion: \"3.9\"\n        someParameterNobodyHasSeen: yes-really\n        plain: v\n",
     );
     let with = with_of(&f.deps, 0);
-    assert_eq!(with.get("python_version").map(String::as_str), Some("3.9"), "{with:?}");
     assert_eq!(
-        with.get("some_parameter_nobody_has_seen").map(String::as_str),
+        with.get("python_version").map(String::as_str),
+        Some("3.9"),
+        "{with:?}"
+    );
+    assert_eq!(
+        with.get("some_parameter_nobody_has_seen")
+            .map(String::as_str),
         Some("yes-really"),
         "an unknown parameter must still arrive: {with:?}"
     );
@@ -164,7 +185,11 @@ fn a_pure_wheel_build_writes_its_dist_beside_the_project() {
     assert_eq!(root.output_dir.as_deref(), Some("dist"));
 
     let sub = flow("pypi_pure_wheel_build:\n  location:\n    repo: r\n    dir: src/lib/\n");
-    assert_eq!(sub.output_dir.as_deref(), Some("src/lib/dist"), "a trailing slash must not double");
+    assert_eq!(
+        sub.output_dir.as_deref(),
+        Some("src/lib/dist"),
+        "a trailing slash must not double"
+    );
 }
 
 #[test]
@@ -181,7 +206,12 @@ fn a_pure_wheel_builds_requirements_list_reaches_the_tool_as_json() {
 
     // Absent is an empty list, not a missing key: the tool takes a list either way.
     let none = flow("pypi_pure_wheel_build:\n  location:\n    repo: r\n");
-    assert_eq!(with_of(&none.deps, 0).get("requirements").map(String::as_str), Some("[]"));
+    assert_eq!(
+        with_of(&none.deps, 0)
+            .get("requirements")
+            .map(String::as_str),
+        Some("[]")
+    );
 }
 
 #[test]
@@ -242,8 +272,16 @@ fn an_absent_boolean_is_not_carried_through_as_the_string_false() {
          keep_root: true\n  prepack_remove_deps: true\n",
     );
     let with = with_of(&set.build, 0);
-    assert_eq!(with.get("keep_root").map(String::as_str), Some("true"), "{with:?}");
-    assert_eq!(with.get("remove_deps").map(String::as_str), Some("true"), "their `prepack_remove_deps` is our `remove_deps`: {with:?}");
+    assert_eq!(
+        with.get("keep_root").map(String::as_str),
+        Some("true"),
+        "{with:?}"
+    );
+    assert_eq!(
+        with.get("remove_deps").map(String::as_str),
+        Some("true"),
+        "their `prepack_remove_deps` is our `remove_deps`: {with:?}"
+    );
 
     // And an explicit `false` is still absent, because it is still the same build.
     let off = flow(
@@ -284,7 +322,10 @@ fn a_location_hint_lowers_to_a_hint_and_says_where_it_came_from() {
                     subdir: None
                 }
             );
-            assert!(h.note.unwrap_or_default().contains("oss-rebuild"), "the provenance is the point");
+            assert!(
+                h.note.unwrap_or_default().contains("oss-rebuild"),
+                "the provenance is the point"
+            );
         }
         other => panic!("expected a location hint, got {other:?}"),
     }

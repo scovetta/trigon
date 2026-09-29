@@ -49,8 +49,11 @@ pub enum DiffVerdict {
 impl DiffVerdict {
     /// The whole vocabulary, in one place, so the prompt's schema and rubric can be built from it
     /// rather than restating it. Five spellings of three words is how one of them drifts.
-    pub const ALL: [DiffVerdict; 3] =
-        [DiffVerdict::Substantive, DiffVerdict::Equivalent, DiffVerdict::Unclear];
+    pub const ALL: [DiffVerdict; 3] = [
+        DiffVerdict::Substantive,
+        DiffVerdict::Equivalent,
+        DiffVerdict::Unclear,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -88,15 +91,18 @@ mod tests {
                 format!("\"{}\"", v.as_str()),
                 "the record and the terminal spell {v:?} differently"
             );
-            let back: DiffVerdict =
-                serde_json::from_str(&format!("\"{}\"", v.as_str())).unwrap();
+            let back: DiffVerdict = serde_json::from_str(&format!("\"{}\"", v.as_str())).unwrap();
             assert_eq!(back, v);
         }
     }
 
     #[test]
     fn parse_is_the_inverse_of_as_str_and_forgives_casing() {
-        for v in [DiffVerdict::Substantive, DiffVerdict::Equivalent, DiffVerdict::Unclear] {
+        for v in [
+            DiffVerdict::Substantive,
+            DiffVerdict::Equivalent,
+            DiffVerdict::Unclear,
+        ] {
             assert_eq!(DiffVerdict::parse(v.as_str()), Some(v));
             assert_eq!(DiffVerdict::parse(&v.as_str().to_uppercase()), Some(v));
         }

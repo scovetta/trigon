@@ -359,13 +359,7 @@ impl World {
         git(&c, &["commit", "--quiet", "-m", "replaced"]);
         git(
             &c,
-            &[
-                "push",
-                "--quiet",
-                "--force",
-                repo.to_str().unwrap(),
-                "main",
-            ],
+            &["push", "--quiet", "--force", repo.to_str().unwrap(), "main"],
         );
     }
 }
@@ -1415,7 +1409,10 @@ fn accepting_a_lost_state_keeps_what_survives_of_it() {
     // The checkpoint lost: the keys first read still pin the source.
     std::fs::remove_file(w.state("tofu").join("checkpoint")).unwrap();
     let said = exits(&w.sync(&[]), 4);
-    assert!(said.contains("still under the keys first read from"), "{said}");
+    assert!(
+        said.contains("still under the keys first read from"),
+        "{said}"
+    );
     let said = exits(
         &w.trigon(&[
             "verify-attestation",
@@ -1457,7 +1454,10 @@ fn accepting_a_lost_state_keeps_what_survives_of_it() {
     git(&w.remote, &["update-ref", "refs/heads/main", &good]);
     let said = ok(&w.sync(&["--accept-state-loss", "tofu"]));
     assert!(said.contains("state loss accepted"), "{said}");
-    assert!(said.contains("trusting on first use: the log key"), "{said}");
+    assert!(
+        said.contains("trusting on first use: the log key"),
+        "{said}"
+    );
     let again: serde_json::Value =
         serde_json::from_slice(&std::fs::read(w.state("tofu").join("keys")).unwrap()).unwrap();
     assert_eq!(again["logKey"], w.vkey().to_string());
@@ -1528,8 +1528,14 @@ fn a_source_whose_state_cannot_be_read_is_unknown_and_the_others_answer() {
     assert!(said.contains("source    `b`"), "{said}");
     // A sync says the same of `a`, and syncs `b`.
     let said = exits(&w.sync(&[]), 4);
-    assert!(said.contains("synced    `example.com/trigon-evidence`"), "{said}");
-    assert!(said.contains("it is not a sync record this build reads"), "{said}");
+    assert!(
+        said.contains("synced    `example.com/trigon-evidence`"),
+        "{said}"
+    );
+    assert!(
+        said.contains("it is not a sync record this build reads"),
+        "{said}"
+    );
 }
 
 /// Every clone reads exactly the blobs, whatever the repository's own attributes say: a tree whose
@@ -1810,14 +1816,20 @@ fn a_projects_source_follows_its_successor_over_https_only() {
     .unwrap();
     let said = exits(&w.sync(&["--source", "theirs"]), 4);
     assert!(said.contains("REFUSED"), "{said}");
-    assert!(said.contains(&format!("names its successor at {ssh} (ssh)")), "{said}");
+    assert!(
+        said.contains(&format!("names its successor at {ssh} (ssh)")),
+        "{said}"
+    );
     assert!(said.contains("is fetched over HTTPS only"), "{said}");
     assert!(w.clones("theirs").is_empty(), "nothing is kept");
     assert_eq!(w.list()["theirs"]["standing"], "refused");
 
     ok(&w.add("mine", &[w.remote.to_str().unwrap()], &[]));
     let said = ok(&w.sync(&["--source", "mine"]));
-    assert!(said.contains("is followed into another repository"), "{said}");
+    assert!(
+        said.contains("is followed into another repository"),
+        "{said}"
+    );
 }
 
 /// Two agreeing attempts rebuild byte-identical artifacts, which the store keeps as one blob:
@@ -1881,7 +1893,10 @@ fn the_evidence_commands_say_what_there_is_when_there_is_little() {
     let remote = w.remote.to_str().unwrap();
     ok(&w.add("main", &[remote], &[]));
     ok(&w.add("other", &[remote], &[]));
-    let said = exits(&w.sync(&["--source", "main", "--accept-state-loss", "other"]), 5);
+    let said = exits(
+        &w.sync(&["--source", "main", "--accept-state-loss", "other"]),
+        5,
+    );
     assert!(
         said.contains(
             "--accept-state-loss other: no source being synced is named that; name it with \
@@ -1911,7 +1926,10 @@ fn the_evidence_commands_say_what_there_is_when_there_is_little() {
         &["--checkpoint", initial.to_str().unwrap()],
     ));
     assert!(
-        said.contains(&format!("pinned    the initial checkpoint {}", initial.display())),
+        said.contains(&format!(
+            "pinned    the initial checkpoint {}",
+            initial.display()
+        )),
         "{said}"
     );
 
@@ -2085,7 +2103,12 @@ fn trust_on_first_use_reads_only_what_is_not_pinned_from_the_first_location_reac
     let c = w.dir.join("keyless");
     git(
         &w.dir,
-        &["clone", "--quiet", bare.to_str().unwrap(), c.to_str().unwrap()],
+        &[
+            "clone",
+            "--quiet",
+            bare.to_str().unwrap(),
+            c.to_str().unwrap(),
+        ],
     );
     git(&c, &["rm", "--quiet", "keys/log.vkey"]);
     git(&c, &["commit", "--quiet", "-m", "no key"]);
@@ -2138,7 +2161,12 @@ fn the_location_furthest_ahead_answers_whatever_order_they_are_listed_in() {
     let c = w.dir.join("damaging");
     git(
         &w.dir,
-        &["clone", "--quiet", damaged.to_str().unwrap(), c.to_str().unwrap()],
+        &[
+            "clone",
+            "--quiet",
+            damaged.to_str().unwrap(),
+            c.to_str().unwrap(),
+        ],
     );
     git(&c, &["rm", "--quiet", "log/tile/entries/000.p/2"]);
     git(&c, &["commit", "--quiet", "-m", "leaves gone"]);

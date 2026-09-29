@@ -225,7 +225,10 @@ mod tests {
     #[test]
     fn a_switch_nobody_has_read_is_unknown_and_never_clear() {
         let d = Dir::new("unread");
-        d.git(".", &["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
+        d.git(
+            ".",
+            &["init", "--quiet", "--bare", "-b", "main", "remote.git"],
+        );
         d.git(".", &["init", "--quiet", "-b", "main", "writer"]);
         d.commit("writer", "README.md", b"evidence\n");
         d.git("writer", &["push", "--quiet", "../remote.git", "main"]);
@@ -295,7 +298,10 @@ mod tests {
     fn the_reader_reads_the_clone_publish_keeps_for_the_repository_configured() {
         use sha2::Digest as _;
         let d = Dir::new("reader");
-        d.git(".", &["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
+        d.git(
+            ".",
+            &["init", "--quiet", "--bare", "-b", "main", "remote.git"],
+        );
         d.git(".", &["init", "--quiet", "-b", "main", "writer"]);
         d.commit("writer", "README.md", b"evidence\n");
         d.git("writer", &["push", "--quiet", "../remote.git", "main"]);
@@ -327,7 +333,9 @@ mod tests {
         // The clone `publish` makes for the location, fetched and recorded as it records one.
         let clone = store
             .join("publish")
-            .join(super::super::hex(&sha2::Sha256::digest(location.as_git_arg())))
+            .join(super::super::hex(&sha2::Sha256::digest(
+                location.as_git_arg(),
+            )))
             .join("clone");
         std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
         d.git(
@@ -337,7 +345,11 @@ mod tests {
         record_fetch(&clone, 1_700_000_000, "origin/main").unwrap();
         let s = read();
         assert_eq!(s.state, SwitchState::Clear, "{}", s.detail);
-        assert!(s.detail.contains(&clone.display().to_string()), "{}", s.detail);
+        assert!(
+            s.detail.contains(&clone.display().to_string()),
+            "{}",
+            s.detail
+        );
     }
 
     /// A working tree published into in place is the repository itself: its branch is read as it
@@ -354,7 +366,8 @@ mod tests {
         assert_eq!(s.state, SwitchState::Clear, "{}", s.detail);
         assert!(s.as_of.is_some());
         assert!(
-            s.detail.contains("read from the working tree published into"),
+            s.detail
+                .contains("read from the working tree published into"),
             "{}",
             s.detail
         );

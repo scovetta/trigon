@@ -1038,7 +1038,12 @@ mod tests {
             held(Withheld::ConfirmationNotCold(NotCold::Warm))
         );
         // And the interval, and a record of where each ran.
-        let soon = pair(cold_on("b", "machine-id:one", 60, Some(ImagePin::LocalContentId)));
+        let soon = pair(cold_on(
+            "b",
+            "machine-id:one",
+            60,
+            Some(ImagePin::LocalContentId),
+        ));
         assert_eq!(
             decide(&r, &soon, rules_local(true, true, 3600)),
             held(Withheld::AttemptsTooClose)
@@ -1106,12 +1111,28 @@ mod tests {
         let kept =
             |run, began| cold_on(run, "machine-id:one", began, Some(ImagePin::RegistryDigest));
         for c in [
-            with(vec![warm("a", 0), local("b", 2 * HOUR), warm("c", 4 * HOUR)]),
-            with(vec![warm("a", 0), warm("b", 2 * HOUR), local("c", 4 * HOUR)]),
+            with(vec![
+                warm("a", 0),
+                local("b", 2 * HOUR),
+                warm("c", 4 * HOUR),
+            ]),
+            with(vec![
+                warm("a", 0),
+                warm("b", 2 * HOUR),
+                local("c", 4 * HOUR),
+            ]),
             // Of one rank, these were named by whichever pair began first: the operator was told
             // the image was not pulled again where turning on the setting would have published.
-            with(vec![warm("a", 0), kept("b", 2 * HOUR), local("c", 4 * HOUR)]),
-            with(vec![warm("a", 0), local("b", 2 * HOUR), kept("c", 4 * HOUR)]),
+            with(vec![
+                warm("a", 0),
+                kept("b", 2 * HOUR),
+                local("c", 4 * HOUR),
+            ]),
+            with(vec![
+                warm("a", 0),
+                local("b", 2 * HOUR),
+                kept("c", 4 * HOUR),
+            ]),
         ] {
             assert_eq!(
                 decide(&r, &c, rules(true, 3600)),
@@ -1123,8 +1144,16 @@ mod tests {
         // With the setting on, the local image's pair publishes, in either order.
         let on = rules_local(true, true, 3600);
         for c in [
-            with(vec![warm("a", 0), kept("b", 2 * HOUR), local("c", 4 * HOUR)]),
-            with(vec![warm("a", 0), local("b", 2 * HOUR), kept("c", 4 * HOUR)]),
+            with(vec![
+                warm("a", 0),
+                kept("b", 2 * HOUR),
+                local("c", 4 * HOUR),
+            ]),
+            with(vec![
+                warm("a", 0),
+                local("b", 2 * HOUR),
+                kept("c", 4 * HOUR),
+            ]),
         ] {
             assert_eq!(decide(&r, &c, on), Publication::Published);
         }
@@ -1662,7 +1691,9 @@ mod tests {
             .split_once("const withheldTitle")
             .expect("the page still renders a reason for a withheld row")
             .1;
-        let table = &table[..table.find("}[pub.because]").expect("the table is an object literal")];
+        let table = &table[..table
+            .find("}[pub.because]")
+            .expect("the table is an object literal")];
         for w in [
             Withheld::AwaitingConfirmation,
             Withheld::AttemptsDisagree,

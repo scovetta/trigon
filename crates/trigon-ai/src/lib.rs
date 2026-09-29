@@ -12,10 +12,10 @@
 #![warn(missing_debug_implementations)]
 
 mod builder;
-mod opinion;
 mod copilot;
 mod eval;
 mod http;
+mod opinion;
 mod provider;
 mod repair;
 mod transcript;

@@ -225,7 +225,11 @@ fn an_exact_version_nobody_can_order_is_skipped_rather_than_contradicting() {
         );
     }
     let r = resolve_toolchain("cargo", &[exact("stable", "a")]);
-    assert_eq!(r, ToolchainResolution::Unconstrained, "a claim we cannot read is not a pin");
+    assert_eq!(
+        r,
+        ToolchainResolution::Unconstrained,
+        "a claim we cannot read is not a pin"
+    );
     assert!(r.needs_help());
 }
 
@@ -236,7 +240,12 @@ fn a_rung_that_names_a_commit_is_exact_and_one_that_names_a_tag_or_a_repository_
         assert!(s.is_exact(), "{s:?} identifies a commit on its own");
     }
     // A tag still has to be resolved to a commit, and a declared repository names none.
-    for s in [S::RegistryMetadata, S::ExactTag, S::PrefixedTag, S::FuzzyTag] {
+    for s in [
+        S::RegistryMetadata,
+        S::ExactTag,
+        S::PrefixedTag,
+        S::FuzzyTag,
+    ] {
         assert!(!s.is_exact(), "{s:?} needs a commit resolved");
     }
 }

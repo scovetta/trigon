@@ -3030,7 +3030,10 @@ fn publishing_into_a_successor_elsewhere_reads_the_chain_from_its_first_log() {
         )),
         "{said}"
     );
-    assert!(said.contains("pinned to the chain's first log key"), "{said}");
+    assert!(
+        said.contains("pinned to the chain's first log key"),
+        "{said}"
+    );
     assert_eq!(
         git(&elsewhere, &["rev-parse", "main"]),
         begun,
@@ -4518,8 +4521,10 @@ fn a_verdict_is_published_only_with_the_repositorys_dispute_pointer() {
     config("");
     let said = refused(&w.publish(&[&a]));
     assert!(
-        said.contains("`[publish] disputes` is not set, and a verdict is published with where to \
-                       dispute it"),
+        said.contains(
+            "`[publish] disputes` is not set, and a verdict is published with where to \
+                       dispute it"
+        ),
         "{said}"
     );
     assert_eq!(w.commits(), 1);
@@ -4644,7 +4649,10 @@ fn a_log_begun_in_place_that_fails_leaves_the_tree_as_it_was() {
     git(&tree, &["commit", "--quiet", "-m", "readme"]);
     let head = git(&tree, &["rev-parse", "HEAD"]);
     let said = refused(&init(&tree, &other));
-    assert!(said.contains("is for the log `example.com/other`"), "{said}");
+    assert!(
+        said.contains("is for the log `example.com/other`"),
+        "{said}"
+    );
     assert!(!tree.join("keys").exists() && !tree.join("log").exists());
     assert_eq!(
         std::fs::read_to_string(tree.join("README.md")).unwrap(),
@@ -4656,7 +4664,10 @@ fn a_log_begun_in_place_that_fails_leaves_the_tree_as_it_was() {
     let empty = w.dir.join("empty");
     git(&w.dir, &["init", "--quiet", "-b", "main", "empty"]);
     let said = refused(&init(&empty, &other));
-    assert!(said.contains("is for the log `example.com/other`"), "{said}");
+    assert!(
+        said.contains("is for the log `example.com/other`"),
+        "{said}"
+    );
     for gone in ["keys", "log", "README.md"] {
         assert!(!empty.join(gone).exists(), "{gone}");
     }
@@ -4797,7 +4808,9 @@ fn log_sign_refuses_what_it_cannot_check_and_writes_nothing() {
         all.extend_from_slice(extra);
         w.trigon(&all)
     };
-    for dir in ["logs", "log/0", "log/01", "log/x", "log/", "../log", "log/1/2"] {
+    for dir in [
+        "logs", "log/0", "log/01", "log/x", "log/", "../log", "log/1/2",
+    ] {
         let said = refused(&sign(&["--log", dir, "--size", "0"]));
         assert!(said.contains("is not a log's directory"), "{dir}: {said}");
     }
@@ -4809,7 +4822,10 @@ fn log_sign_refuses_what_it_cannot_check_and_writes_nothing() {
         said.contains("so the tree names no attestation key to check its records under"),
         "{said}"
     );
-    assert_eq!(std::fs::read(tree.join("log/checkpoint")).unwrap(), checkpoint);
+    assert_eq!(
+        std::fs::read(tree.join("log/checkpoint")).unwrap(),
+        checkpoint
+    );
 
     // A new log's tree whose `keys` leads out of it.
     let fresh = w.dir.join("fresh");
@@ -4908,9 +4924,7 @@ fn a_withdrawal_or_a_supersession_is_published_only_of_the_current_record() {
     });
     let said = refused(&publish(&verdict[0]));
     assert!(
-        said.contains(
-            "statement, and --withdrawal publishes a `https://trigon.dev/withdrawal/v1`"
-        ),
+        said.contains("statement, and --withdrawal publishes a `https://trigon.dev/withdrawal/v1`"),
         "{said}"
     );
     let said = refused(&publish(&withdraw(&file, false)));
@@ -4925,8 +4939,10 @@ fn a_withdrawal_or_a_supersession_is_published_only_of_the_current_record() {
     std::fs::write(&other, bytes).unwrap();
     let said = refused(&publish(&withdraw(&other, true)));
     assert!(
-        said.contains("which this repository's chain of logs does not hold; a withdrawal is \
-                       published only of a logged record"),
+        said.contains(
+            "which this repository's chain of logs does not hold; a withdrawal is \
+                       published only of a logged record"
+        ),
         "{said}"
     );
     assert_eq!(w.commits(), 2);
@@ -4936,7 +4952,12 @@ fn a_withdrawal_or_a_supersession_is_published_only_of_the_current_record() {
     let supersede = |id: &str, of: &Path| {
         w.attest(
             id,
-            &["--supersedes", of.to_str().unwrap(), "--reason", "set_changed"],
+            &[
+                "--supersedes",
+                of.to_str().unwrap(),
+                "--reason",
+                "set_changed",
+            ],
         );
     };
     supersede(&second, &file);
@@ -4951,7 +4972,10 @@ fn a_withdrawal_or_a_supersession_is_published_only_of_the_current_record() {
         )),
         "{said}"
     );
-    assert!(said.contains("withdraw the record that is current"), "{said}");
+    assert!(
+        said.contains("withdraw the record that is current"),
+        "{said}"
+    );
 
     // A third run, superseding the record its artifact no longer has current, and then one no
     // leaf logs.
@@ -4970,8 +4994,10 @@ fn a_withdrawal_or_a_supersession_is_published_only_of_the_current_record() {
     supersede(&third, &other);
     let said = refused(&w.publish(&[&third]));
     assert!(
-        said.contains("which this repository's chain of logs does not hold, so no client would \
-                       ever apply it"),
+        said.contains(
+            "which this repository's chain of logs does not hold, so no client would \
+                       ever apply it"
+        ),
         "{said}"
     );
     assert_eq!(w.commits(), 3);
@@ -5130,7 +5156,11 @@ fn log_sign_refuses_a_chain_it_cannot_read() {
         all.extend_from_slice(extra);
         w.command(&all)
     };
-    let said = refused(&sign(&w.log_key, &["--log", "log/1", "--size", "0"]).output().unwrap());
+    let said = refused(
+        &sign(&w.log_key, &["--log", "log/1", "--size", "0"])
+            .output()
+            .unwrap(),
+    );
     assert!(
         said.contains(
             "`log/1` is not the last log of the chain keys/log.vkey begins, and only the last log \
@@ -5171,12 +5201,19 @@ fn log_sign_refuses_a_chain_it_cannot_read() {
         "{said}"
     );
     std::fs::remove_file(tree.join("keys/log.vkey")).unwrap();
-    let said = refused(&sign(&w.log_key, &["--log", "log/1", "--size", "0"]).output().unwrap());
+    let said = refused(
+        &sign(&w.log_key, &["--log", "log/1", "--size", "0"])
+            .output()
+            .unwrap(),
+    );
     assert!(
         said.contains("is not there, so the chain `log/1` is in cannot be read"),
         "{said}"
     );
-    assert_eq!(std::fs::read(tree.join("log/checkpoint")).unwrap(), checkpoint);
+    assert_eq!(
+        std::fs::read(tree.join("log/checkpoint")).unwrap(),
+        checkpoint
+    );
     assert!(!tree.join("log/1").exists());
 }
 
@@ -5188,7 +5225,12 @@ fn log_sign_refuses_a_chain_it_cannot_read() {
 fn publish_refuses_a_repository_it_cannot_publish_to() {
     let w = World::new("where");
     let publish = |repo: Option<&Path>| {
-        let mut args = vec!["publish", "--store", w.store.to_str().unwrap(), "--heartbeat"];
+        let mut args = vec![
+            "publish",
+            "--store",
+            w.store.to_str().unwrap(),
+            "--heartbeat",
+        ];
         if let Some(r) = repo {
             args.extend(["--repo", r.to_str().unwrap()]);
         }
@@ -5281,7 +5323,10 @@ fn a_log_is_begun_in_place_only_in_a_clean_tree_with_no_attributes() {
     );
     let attributed = tree(
         "attributed",
-        &[("README.md", "committed\n"), (".gitattributes", "* text=auto\n")],
+        &[
+            ("README.md", "committed\n"),
+            (".gitattributes", "* text=auto\n"),
+        ],
     );
     let head = git(&attributed, &["rev-parse", "HEAD"]);
     let said = refused(&init(&attributed));
@@ -5312,8 +5357,26 @@ fn publish_prunes_by_the_stores_rule_and_says_which_way_it_went() {
     assert_ne!(first.rebuilt, second.rebuilt);
     let (a, b) = ("1789000000-dddd0001", "1789007200-dddd0002");
     rt().block_on(async {
-        attempt(&store, a, &first, "ck1:dddd", 'a', "2026-09-27T00:00:00Z", "mirror-only").await;
-        attempt(&store, b, &second, "ck1:dddd", 'b', "2026-09-27T02:00:00Z", "mirror-only").await;
+        attempt(
+            &store,
+            a,
+            &first,
+            "ck1:dddd",
+            'a',
+            "2026-09-27T00:00:00Z",
+            "mirror-only",
+        )
+        .await;
+        attempt(
+            &store,
+            b,
+            &second,
+            "ck1:dddd",
+            'b',
+            "2026-09-27T02:00:00Z",
+            "mirror-only",
+        )
+        .await;
     });
     w.attest(a, &[]);
     let said = ok(&w.publish(&[a, "--prune"]));
@@ -5328,7 +5391,11 @@ fn publish_prunes_by_the_stores_rule_and_says_which_way_it_went() {
     let rebuilt = run.rebuild.unwrap();
     assert!(!rebuilt.stored);
     let hex = rebuilt.sha256.to_hex();
-    assert!(!w.store.join(format!("blobs/sha256/{}/{hex}", &hex[..2])).exists());
+    assert!(
+        !w.store
+            .join(format!("blobs/sha256/{}/{hex}", &hex[..2]))
+            .exists()
+    );
     assert!(w.run(b).rebuild.unwrap().stored);
 
     let (d, _) = pair(&w, &Package::new("x", true), "xxxx");
@@ -5385,7 +5452,13 @@ fn a_dry_run_says_what_it_would_do_and_does_nothing() {
     let g = World::new("dry-no-token");
     g.on_github("");
     let (b, _) = pair(&g, &Package::new("b", false), "bbbb");
-    let said = ok(&g.trigon(&["publish", "--store", g.store.to_str().unwrap(), &b, "--dry-run"]));
+    let said = ok(&g.trigon(&[
+        "publish",
+        "--store",
+        g.store.to_str().unwrap(),
+        &b,
+        "--dry-run",
+    ]));
     assert!(
         said.contains(
             "neither GITHUB_TOKEN nor GH_TOKEN is set, and `trigon publish` itself would refuse \

@@ -232,7 +232,11 @@ impl VerifiedRecord {
     /// it signs no tier this build reads — which a `--max-risk` then cannot be held to, and is
     /// never read as nothing applied.
     pub fn max_risk_applied(&self) -> Option<Option<RiskTier>> {
-        match self.statement.predicate.pointer("/provenanceCap/maxRiskApplied")? {
+        match self
+            .statement
+            .predicate
+            .pointer("/provenanceCap/maxRiskApplied")?
+        {
             Value::Null => Some(None),
             v => serde_json::from_value::<RiskTier>(v.clone()).ok().map(Some),
         }

@@ -1058,8 +1058,18 @@ mod tests {
             let mut g = ix.inner.write().unwrap();
             for r in [
                 rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), Some("k1")),
-                rec("1700000002-ba", "pkg:npm/b@1", Some("divergent"), Some("k2")),
-                rec("1700000003-bb", "pkg:npm/b@1", Some("divergent"), Some("k2")),
+                rec(
+                    "1700000002-ba",
+                    "pkg:npm/b@1",
+                    Some("divergent"),
+                    Some("k2"),
+                ),
+                rec(
+                    "1700000003-bb",
+                    "pkg:npm/b@1",
+                    Some("divergent"),
+                    Some("k2"),
+                ),
             ] {
                 g.records.insert(r.id.clone(), r);
             }
@@ -1083,7 +1093,10 @@ mod tests {
             BTreeMap::from([("withheld".to_string(), 3)]),
             "the public count is a total, never a reason"
         );
-        assert!(ix.stats(false).by_withheld.is_empty(), "an operator is shown every row");
+        assert!(
+            ix.stats(false).by_withheld.is_empty(),
+            "an operator is shown every row"
+        );
     }
 
     #[test]

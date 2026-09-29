@@ -136,7 +136,12 @@ async fn commit_for(
 /// than what the registry recorded at publish time.
 async fn found_commit(
     target: &ResolvedTarget,
-) -> Option<(&trigon_core::SourceProvenance, String, SourceDiscovery, Vec<String>)> {
+) -> Option<(
+    &trigon_core::SourceProvenance,
+    String,
+    SourceDiscovery,
+    Vec<String>,
+)> {
     let source = target.source.as_ref()?;
     let (commit, how, tag) = commit_for(target, false).await.ok()?;
     let assumptions = tag.map(|t| vec![from_a_tag(&t)]).unwrap_or_default();
@@ -1692,9 +1697,7 @@ mod node_substitution_tests {
     fn the_substitute_is_the_highest_linux_release_out_by_the_publish_day() {
         // Entries shaped as `nodejs.org/dist/index.json` writes them. On 2017-03-21 Node released
         // both 4.8.1 and 7.7.4, and `isexe@2.0.0` reproduces only under the second.
-        let entry = |version: &str, date: &str, files: &[&str]| {
-            serde_json::json!({ "version": version, "date": date, "files": files })
-        };
+        let entry = |version: &str, date: &str, files: &[&str]| serde_json::json!({ "version": version, "date": date, "files": files });
         let index = [
             entry("v7.8.0", "2017-03-29", &["linux-x64", "osx-x64-tar"]),
             entry("v7.7.4", "2017-03-21", &["linux-x64", "win-x64-exe"]),

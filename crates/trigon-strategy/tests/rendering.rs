@@ -1,4 +1,3 @@
-
 /// `uses: runs` is read as a `runs` step.
 ///
 /// **Four of eight recorded answers for one package wrote it this way.** `runs` is a step kind and
@@ -140,7 +139,6 @@ fn dotnet_pack_forces_the_properties_a_bare_csproj_pack_lacks() {
     );
 }
 
-
 /// The version-reconstruction rung's parameters render as the standard global MSBuild properties.
 #[test]
 fn dotnet_pack_renders_the_reconstructed_version_stamps() {
@@ -175,7 +173,11 @@ fn dotnet_pack_renders_the_reconstructed_version_stamps() {
         "-p:PackageVersion=5.1.1",
         "-p:Copyright=Copyright (c) 2004-2022 X",
     ] {
-        assert!(i.build.contains(needle), "missing {needle} in:\n{}", i.build);
+        assert!(
+            i.build.contains(needle),
+            "missing {needle} in:\n{}",
+            i.build
+        );
     }
 }
 

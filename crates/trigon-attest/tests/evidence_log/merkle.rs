@@ -312,5 +312,12 @@ fn the_longest_proof_a_tree_can_have_verifies() {
     let proof = inclusion_proof(&t, 0, n).unwrap();
     assert_eq!(proof.len(), 64);
     verify_inclusion(0, n, &t.0[0], &proof, &b).unwrap();
-    verify_inclusion(n - 1, n, &t.0[0], &inclusion_proof(&t, n - 1, n).unwrap(), &b).unwrap();
+    verify_inclusion(
+        n - 1,
+        n,
+        &t.0[0],
+        &inclusion_proof(&t, n - 1, n).unwrap(),
+        &b,
+    )
+    .unwrap();
 }

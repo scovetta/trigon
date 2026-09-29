@@ -304,15 +304,22 @@ fn a_manifest_that_is_a_symlink_out_of_the_checkout_is_not_read() {
     // Sanity: git really did check the symlink out as a symlink, or this test proves nothing.
     let link = c.path.join("package.json");
     assert!(
-        std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "the fixture is not exercising a symlink; git checked out a regular file"
     );
 
-    let got = c.read(&["package.json", "sub/up/host-secret.txt", "pyproject.toml"], 1 << 20);
+    let got = c.read(
+        &["package.json", "sub/up/host-secret.txt", "pyproject.toml"],
+        1 << 20,
+    );
     let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
 
     assert!(
-        !got.iter().any(|(_, body)| body.contains("PRIVATE KEY MATERIAL")),
+        !got.iter()
+            .any(|(_, body)| body.contains("PRIVATE KEY MATERIAL")),
         "a file outside the checkout was read into what becomes a model prompt: {names:?}"
     );
     assert!(

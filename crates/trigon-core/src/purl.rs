@@ -513,7 +513,11 @@ mod tests {
         for b in 0..0x80u8 {
             let want = char::from(b).to_string();
             for escape in [format!("%{b:02x}"), format!("%{b:02X}")] {
-                assert_eq!(decode("pkg:", &escape, "name"), Ok(want.clone()), "{escape}");
+                assert_eq!(
+                    decode("pkg:", &escape, "name"),
+                    Ok(want.clone()),
+                    "{escape}"
+                );
             }
         }
         assert_eq!(

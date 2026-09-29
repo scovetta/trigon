@@ -423,7 +423,10 @@ fn the_commit_a_crate_was_packaged_from_is_masked_and_nothing_around_it_moves() 
             .iter()
             .find(|x| x.id.as_str() == "cargo-vcs-hash")
             .unwrap();
-        assert_eq!((x.risk, x.entries_touched, x.bytes_changed), (RiskTier::Content, 1, 40));
+        assert_eq!(
+            (x.risk, x.entries_touched, x.bytes_changed),
+            (RiskTier::Content, 1, 40)
+        );
     }
 }
 
@@ -470,7 +473,10 @@ fn a_record_inside_a_tarball_the_wheel_ships_is_left_as_the_tarball_has_it() {
     );
     let mut a = parsed(wheel, Format::Zip);
     let applied = apply(&profile("wheel").unwrap(), &mut a);
-    assert!(fired(&applied, "wheel-record-v2"), "the wheel's own RECORD: {applied:?}");
+    assert!(
+        fired(&applied, "wheel-record-v2"),
+        "the wheel's own RECORD: {applied:?}"
+    );
     let shipped = a
         .entries
         .iter()
@@ -565,7 +571,10 @@ fn the_gzip_headers_of_a_gems_own_members_are_normalized() {
     let set = profile("gem").unwrap();
     let (a, applied) = stabilized(&set, parsed(gem(1_600_000_000), Format::Tar));
     let (b, _) = stabilized(&set, parsed(gem(1_700_000_000), Format::Tar));
-    assert_eq!(a, b, "two gems differing only in their members' gzip headers");
+    assert_eq!(
+        a, b,
+        "two gems differing only in their members' gzip headers"
+    );
     assert!(fired(&applied, "gzip-meta"), "{applied:?}");
 }
 
@@ -604,7 +613,10 @@ fn a_gzip_file_a_package_ships_keeps_its_header() {
 
     let (x, _) = stabilized(&set, parsed(package(1_600_000_000), Format::TarGz));
     let (y, _) = stabilized(&set, parsed(package(1_700_000_000), Format::TarGz));
-    assert_ne!(x, y, "a difference in a file the package ships is still a difference");
+    assert_ne!(
+        x, y,
+        "a difference in a file the package ships is still a difference"
+    );
 }
 
 // --- metadata of the other format ----------------------------------------------------------------

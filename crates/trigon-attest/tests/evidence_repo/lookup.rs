@@ -434,7 +434,9 @@ fn a_verdict_is_held_to_the_risk_it_was_reached_through() {
     let r = open_golden();
     let a = r.lookup(&Key::parse("pkg:npm/demo-a@1.0.0").unwrap());
     let v = a.current().next().unwrap().verified().unwrap();
-    let risk = v.max_risk_applied().expect("a v2 verdict signs its riskiest pass");
+    let risk = v
+        .max_risk_applied()
+        .expect("a v2 verdict signs its riskiest pass");
     let risk = risk.expect("a normalized verdict applied a pass");
     assert!(risk > RiskTier::Structural, "{risk:?}");
     let capped = a.answer_under(FLOOR, Some(RiskTier::Structural));
@@ -446,9 +448,20 @@ fn a_verdict_is_held_to_the_risk_it_was_reached_through() {
         }
     );
     assert_eq!(capped.exit_code(FLOOR), 3);
-    assert!(capped.to_string().contains("above the --max-risk asked for"), "{capped}");
-    assert_eq!(a.answer_under(FLOOR, Some(risk)), Answer::Outcome(Match::Normalized));
-    assert_eq!(a.answer_under(FLOOR, None), Answer::Outcome(Match::Normalized));
+    assert!(
+        capped
+            .to_string()
+            .contains("above the --max-risk asked for"),
+        "{capped}"
+    );
+    assert_eq!(
+        a.answer_under(FLOOR, Some(risk)),
+        Answer::Outcome(Match::Normalized)
+    );
+    assert_eq!(
+        a.answer_under(FLOOR, None),
+        Answer::Outcome(Match::Normalized)
+    );
     // Exact: the raw digests matched and no transform was needed, whatever passes ran, so it
     // meets any cap — though its statement signs the passes that ran.
     let e = r.lookup(&Key::parse("pkg:npm/demo-e@1.0.0").unwrap());

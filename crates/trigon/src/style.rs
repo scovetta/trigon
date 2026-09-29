@@ -432,7 +432,10 @@ mod tests {
     fn neon_and_bbs_share_the_bright_palette_and_the_base_stays_base() {
         // The neon step: bright-cyan keys, bright-white data, high-intensity status.
         let n = palette_for(Theme::Neon);
-        assert_eq!((n.label, n.ident, n.ok, n.bad), ("1;96", "1;97", "1;92", "1;91"));
+        assert_eq!(
+            (n.label, n.ident, n.ok, n.bad),
+            ("1;96", "1;97", "1;92", "1;91")
+        );
         // BBS rides the same palette; its difference is flourish, not colour.
         let b = palette_for(Theme::Bbs);
         assert_eq!((b.label, b.ident, b.heading), (n.label, n.ident, n.heading));

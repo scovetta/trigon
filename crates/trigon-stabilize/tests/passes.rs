@@ -142,7 +142,10 @@ fn a_filter_keeps_the_passes_it_names_and_none_is_a_keyword_only_on_its_own() {
     assert_eq!(kept(&["all"], &[]), every);
     assert!(kept(&["none"], &[]).is_empty());
     assert_eq!(kept(&["none", "tar-time"], &[]), ["tar-time"]);
-    assert_eq!(kept(&["tar-time", "tar-mode"], &[]), ["tar-mode", "tar-time"]);
+    assert_eq!(
+        kept(&["tar-time", "tar-mode"], &[]),
+        ["tar-mode", "tar-time"]
+    );
     // `disable` then removes from whatever survived.
     assert_eq!(kept(&["tar-time", "tar-mode"], &["tar-mode"]), ["tar-time"]);
     assert_eq!(kept(&["all"], &["tar-time"]).len(), every.len() - 1);
@@ -609,7 +612,10 @@ fn a_symlink_does_not_stabilize_into_a_regular_file() {
         let mut w = zip_crate::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let opts: zip_crate::write::FileOptions<'_, ()> = zip_crate::write::FileOptions::default()
             .compression_method(zip_crate::CompressionMethod::Stored);
-        for (name, body) in [("pkg/x.py", &b"/etc/passwd"[..]), ("pkg/ok.py", b"print(1)\n")] {
+        for (name, body) in [
+            ("pkg/x.py", &b"/etc/passwd"[..]),
+            ("pkg/ok.py", b"print(1)\n"),
+        ] {
             w.start_file(name, opts).unwrap();
             w.write_all(body).unwrap();
         }

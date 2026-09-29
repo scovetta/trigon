@@ -79,7 +79,10 @@ fn tool_params(strategy: &Strategy, phase: &str) -> BTreeMap<String, String> {
     // literal and none of it a template the package's text could steer.
     match &steps[0].body {
         StepBody::Uses { with, .. } => {
-            assert!(with.is_empty(), "an inferred parameter is a template: {with:?}");
+            assert!(
+                with.is_empty(),
+                "an inferred parameter is a template: {with:?}"
+            );
             steps[0].literal.clone()
         }
         other => panic!("expected a tool step, got {other:?}"),

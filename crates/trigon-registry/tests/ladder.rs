@@ -184,8 +184,15 @@ async fn a_rung_that_answers_is_never_asked_why_not() {
     let out = climb(&rungs, &target(&["widget-1.2.3.tar.gz"])).await;
 
     assert!(out.candidate.is_some());
-    assert_eq!(counts[0].why_nots(), 0, "why_not was asked of a rung that answered");
-    assert!(out.declines.is_empty(), "a climb that ended in an answer recorded declines");
+    assert_eq!(
+        counts[0].why_nots(),
+        0,
+        "why_not was asked of a rung that answered"
+    );
+    assert!(
+        out.declines.is_empty(),
+        "a climb that ended in an answer recorded declines"
+    );
 }
 
 #[tokio::test]
@@ -194,9 +201,18 @@ async fn every_rung_that_declined_for_a_reason_is_in_the_record_in_order() {
     // `tracing::debug!` that is off by default, so a `no-strategy` verdict recorded no reason at
     // all and someone had to re-derive it from the registry by hand, days later.
     let (rungs, _) = ladder(vec![
-        Rung::new("definitions", Answer::Silent(Some("nobody has written one down"))),
-        Rung::new("ci", Answer::Silent(Some("the release job runs on a self-hosted runner"))),
-        Rung::new("heuristic", Answer::Silent(Some("no repository is declared"))),
+        Rung::new(
+            "definitions",
+            Answer::Silent(Some("nobody has written one down")),
+        ),
+        Rung::new(
+            "ci",
+            Answer::Silent(Some("the release job runs on a self-hosted runner")),
+        ),
+        Rung::new(
+            "heuristic",
+            Answer::Silent(Some("no repository is declared")),
+        ),
     ]);
     let out = climb(&rungs, &target(&["widget-1.2.3.tar.gz"])).await;
 
@@ -207,7 +223,11 @@ async fn every_rung_that_declined_for_a_reason_is_in_the_record_in_order() {
         ["definitions", "ci", "heuristic"],
         "the declines are the order the rungs were asked in"
     );
-    assert!(out.declines[1].1.contains("self-hosted"), "{:?}", out.declines[1]);
+    assert!(
+        out.declines[1].1.contains("self-hosted"),
+        "{:?}",
+        out.declines[1]
+    );
 }
 
 #[tokio::test]
@@ -217,7 +237,10 @@ async fn a_rung_with_nothing_to_add_leaves_no_line() {
     // that explains the verdict.
     let (rungs, _) = ladder(vec![
         Rung::new("npm", Answer::Silent(None)),
-        Rung::new("pypi", Answer::Silent(Some("the sdist has no pyproject.toml"))),
+        Rung::new(
+            "pypi",
+            Answer::Silent(Some("the sdist has no pyproject.toml")),
+        ),
     ]);
     let out = climb(&rungs, &target(&["widget-1.2.3.tar.gz"])).await;
 
@@ -235,7 +258,10 @@ async fn a_rung_that_breaks_is_written_down_and_the_next_one_still_runs() {
     ]);
     let out = climb(&rungs, &target(&["widget-1.2.3.tar.gz"])).await;
 
-    assert!(out.candidate.is_some(), "the rung after the broken one was not asked");
+    assert!(
+        out.candidate.is_some(),
+        "the rung after the broken one was not asked"
+    );
     assert_eq!(counts[1].infers(), 1);
     assert_eq!(out.declines.len(), 1);
     assert_eq!(out.declines[0].0, "ci");
@@ -244,7 +270,11 @@ async fn a_rung_that_breaks_is_written_down_and_the_next_one_still_runs() {
         "a broken rung must be distinguishable from one that declined on purpose: {:?}",
         out.declines[0]
     );
-    assert!(out.declines[0].1.contains("packument"), "{:?}", out.declines[0]);
+    assert!(
+        out.declines[0].1.contains("packument"),
+        "{:?}",
+        out.declines[0]
+    );
 }
 
 /// A rung that keeps the trait's default `why_not`, as a rung for another ecosystem does.
@@ -294,7 +324,10 @@ async fn a_rung_that_never_explains_itself_adds_no_line_and_infer_takes_the_firs
 #[test]
 fn a_release_with_one_file_needs_no_choosing() {
     let t = target(&["widget-1.2.3.tar.gz"]);
-    assert_eq!(t.sole_artifact().unwrap().id.as_str(), "widget-1.2.3.tar.gz");
+    assert_eq!(
+        t.sole_artifact().unwrap().id.as_str(),
+        "widget-1.2.3.tar.gz"
+    );
     assert_eq!(t.preferred().unwrap().id.as_str(), "widget-1.2.3.tar.gz");
     assert_eq!(t.pick(None).unwrap().id.as_str(), "widget-1.2.3.tar.gz");
 }
@@ -308,8 +341,14 @@ fn the_pure_wheel_is_what_a_release_is_about() {
         "widget-1.2.3-py3-none-any.whl",
         "widget-1.2.3-cp39-cp39-manylinux_2_17_x86_64.whl",
     ]);
-    assert!(t.sole_artifact().is_none(), "three files is not a sole artifact");
-    assert_eq!(t.preferred().unwrap().id.as_str(), "widget-1.2.3-py3-none-any.whl");
+    assert!(
+        t.sole_artifact().is_none(),
+        "three files is not a sole artifact"
+    );
+    assert_eq!(
+        t.preferred().unwrap().id.as_str(),
+        "widget-1.2.3-py3-none-any.whl"
+    );
 }
 
 #[test]
@@ -328,7 +367,10 @@ fn a_lone_sdist_is_chosen_when_no_wheel_is_pure() {
 fn a_genuinely_ambiguous_release_stays_an_error() {
     // Two pure wheels and no sdist. Picking one would attach a verdict to whichever the registry
     // happened to list first, which is worse than refusing.
-    let t = target(&["widget-1.2.3-py2-none-any.whl", "widget-1.2.3-py3-none-any.whl"]);
+    let t = target(&[
+        "widget-1.2.3-py2-none-any.whl",
+        "widget-1.2.3-py3-none-any.whl",
+    ]);
     assert!(t.preferred().is_none());
     let e = t.pick(None).unwrap_err();
     assert!(matches!(e, RegistryError::NoSuchArtifact { .. }));
@@ -343,14 +385,23 @@ fn the_error_for_an_unknown_file_lists_the_ones_that_exist() {
         "widget-1.2.3-py3-none-any.whl",
         "widget-1.2.3-cp39-cp39-manylinux_2_17_x86_64.whl",
     ]);
-    let msg = t.pick(Some("widget-1.2.3-cp38-cp38-win_amd64.whl")).unwrap_err().to_string();
-    assert!(msg.contains("widget-1.2.3-cp38-cp38-win_amd64.whl"), "{msg}");
+    let msg = t
+        .pick(Some("widget-1.2.3-cp38-cp38-win_amd64.whl"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        msg.contains("widget-1.2.3-cp38-cp38-win_amd64.whl"),
+        "{msg}"
+    );
     for present in [
         "widget-1.2.3.tar.gz",
         "widget-1.2.3-py3-none-any.whl",
         "widget-1.2.3-cp39-cp39-manylinux_2_17_x86_64.whl",
     ] {
-        assert!(msg.contains(present), "the message omits `{present}`: {msg}");
+        assert!(
+            msg.contains(present),
+            "the message omits `{present}`: {msg}"
+        );
     }
 }
 
@@ -358,8 +409,14 @@ fn the_error_for_an_unknown_file_lists_the_ones_that_exist() {
 fn a_named_file_is_taken_over_the_obvious_one() {
     // `preferred()` would pick the pure wheel. A caller that named the sdist gets the sdist.
     let t = target(&["widget-1.2.3.tar.gz", "widget-1.2.3-py3-none-any.whl"]);
-    assert_eq!(t.preferred().unwrap().id.as_str(), "widget-1.2.3-py3-none-any.whl");
-    assert_eq!(t.pick(Some("widget-1.2.3.tar.gz")).unwrap().id.as_str(), "widget-1.2.3.tar.gz");
+    assert_eq!(
+        t.preferred().unwrap().id.as_str(),
+        "widget-1.2.3-py3-none-any.whl"
+    );
+    assert_eq!(
+        t.pick(Some("widget-1.2.3.tar.gz")).unwrap().id.as_str(),
+        "widget-1.2.3.tar.gz"
+    );
     assert!(t.artifact("widget-9.9.9.tar.gz").is_none());
 }
 
@@ -481,7 +538,10 @@ fn only_a_failure_that_could_go_differently_is_retried() {
         },
     ];
     for e in facts {
-        assert!(!e.is_retryable(), "`{e}` cannot go differently and was retried anyway");
+        assert!(
+            !e.is_retryable(),
+            "`{e}` cannot go differently and was retried anyway"
+        );
     }
 }
 
@@ -507,7 +567,10 @@ fn a_missing_version_suggests_the_recent_ones_not_all_of_them() {
 
     assert!(msg.contains("0.0.800"), "the newest is missing: {msg}");
     assert!(msg.contains("0.0.796"), "five were promised: {msg}");
-    assert!(!msg.contains("0.0.795"), "more than five were printed: {msg}");
+    assert!(
+        !msg.contains("0.0.795"),
+        "more than five were printed: {msg}"
+    );
     assert!(!msg.contains("0.0.1,"), "the whole list was printed: {msg}");
 }
 
@@ -520,7 +583,10 @@ fn a_package_whose_versions_are_unknown_gets_no_empty_suggestion() {
         available: Vec::new(),
     }
     .to_string();
-    assert!(!msg.contains("Recent"), "an empty list produced a dangling `Recent:`: {msg}");
+    assert!(
+        !msg.contains("Recent"),
+        "an empty list produced a dangling `Recent:`: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -529,7 +595,11 @@ fn a_package_whose_versions_are_unknown_gets_no_empty_suggestion() {
 
 /// Write a `build.yaml` where the definitions rung looks for one.
 fn definition(root: &std::path::Path, artifact: &str, body: &str) {
-    let dir = root.join("pypi").join("widget").join("1.2.3").join(artifact);
+    let dir = root
+        .join("pypi")
+        .join("widget")
+        .join("1.2.3")
+        .join(artifact);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("build.yaml"), body).unwrap();
 }
@@ -556,7 +626,10 @@ async fn a_target_nobody_wrote_a_definition_for_is_silent() {
     let tmp = tempfile::tempdir().unwrap();
     let rung = DefinitionsInferrer::new(tmp.path());
     assert!(
-        rung.infer(&target(&["widget-1.2.3.tar.gz"])).await.unwrap().is_empty(),
+        rung.infer(&target(&["widget-1.2.3.tar.gz"]))
+            .await
+            .unwrap()
+            .is_empty(),
         "an absent definition is not an error: most targets have none"
     );
 }
@@ -567,14 +640,24 @@ async fn a_definition_that_does_not_parse_is_an_error_not_a_fallthrough() {
     // somebody had already established needs something else, and report the resulting divergence
     // as a fact about the package.
     let tmp = tempfile::tempdir().unwrap();
-    definition(tmp.path(), "widget-1.2.3.tar.gz", "kind: flow\nlocation: [not, a, mapping]\n");
+    definition(
+        tmp.path(),
+        "widget-1.2.3.tar.gz",
+        "kind: flow\nlocation: [not, a, mapping]\n",
+    );
 
     let rung = DefinitionsInferrer::new(tmp.path());
-    let e = rung.infer(&target(&["widget-1.2.3.tar.gz"])).await.unwrap_err();
+    let e = rung
+        .infer(&target(&["widget-1.2.3.tar.gz"]))
+        .await
+        .unwrap_err();
 
     assert!(matches!(e, RegistryError::Malformed { .. }), "{e:?}");
     let msg = e.to_string();
-    assert!(msg.contains("build.yaml"), "the message must name the file: {msg}");
+    assert!(
+        msg.contains("build.yaml"),
+        "the message must name the file: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -599,8 +682,14 @@ async fn a_custom_stabilizer_the_run_cannot_execute_is_surfaced_not_dropped() {
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].assumptions.len(), 1, "{:?}", out[0].assumptions);
     let a = &out[0].assumptions[0];
-    assert!(a.contains("exclude_path"), "the assumption must name the operation: {a}");
-    assert!(a.contains("timezone"), "the assumption must carry the author's reason: {a}");
+    assert!(
+        a.contains("exclude_path"),
+        "the assumption must name the operation: {a}"
+    );
+    assert!(
+        a.contains("timezone"),
+        "the assumption must carry the author's reason: {a}"
+    );
     assert!(a.contains("not executed yet"), "{a}");
 }
 
@@ -613,11 +702,18 @@ async fn a_release_gets_one_candidate_per_artifact_that_has_a_definition() {
 
     let rung = DefinitionsInferrer::new(tmp.path());
     let out = rung
-        .infer(&target(&["widget-1.2.3.tar.gz", "widget-1.2.3-py3-none-any.whl"]))
+        .infer(&target(&[
+            "widget-1.2.3.tar.gz",
+            "widget-1.2.3-py3-none-any.whl",
+        ]))
         .await
         .unwrap();
 
-    assert_eq!(out.len(), 1, "the wheel has no definition and must not borrow the sdist's");
+    assert_eq!(
+        out.len(),
+        1,
+        "the wheel has no definition and must not borrow the sdist's"
+    );
 }
 
 #[test]

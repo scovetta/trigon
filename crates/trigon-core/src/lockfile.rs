@@ -146,7 +146,6 @@ impl Status {
     }
 }
 
-
 /// Every package a lockfile names, in purl order.
 pub fn parse(text: &str, kind: Kind) -> Result<Vec<Package>, LockfileError> {
     match kind {
@@ -189,8 +188,7 @@ fn line_of_id(text: &str, id: &str) -> usize {
 }
 
 fn npm_lock(text: &str) -> Result<Vec<Package>, LockfileError> {
-    let v: serde_json::Value =
-        serde_json::from_str(text)
+    let v: serde_json::Value = serde_json::from_str(text)
         .map_err(|e| LockfileError::Malformed(format!("package-lock.json is not JSON: {e}")))?;
     let mut out = Vec::new();
 
@@ -202,7 +200,11 @@ fn npm_lock(text: &str) -> Result<Vec<Package>, LockfileError> {
                 continue;
             }
             // `node_modules/a/node_modules/b` names `b`. The last segment is the package.
-            let Some(name) = path.rsplit("node_modules/").next().filter(|s| !s.is_empty()) else {
+            let Some(name) = path
+                .rsplit("node_modules/")
+                .next()
+                .filter(|s| !s.is_empty())
+            else {
                 continue;
             };
             // A link entry points at a workspace and has no published version to check.
@@ -286,12 +288,13 @@ fn resolved(entry: &serde_json::Value) -> Option<String> {
 /// A digest written `<algorithm>:<hex>`, as a `--hash` is, or `None` where it is not one.
 fn hex_digest(algorithm: &str, hex: &str, source: &str) -> Option<DeclaredDigest> {
     let hex = hex.trim().to_ascii_lowercase();
-    (!algorithm.is_empty() && !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| DeclaredDigest {
+    (!algorithm.is_empty() && !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(
+        || DeclaredDigest {
             algorithm: algorithm.trim().to_ascii_lowercase(),
             value: hex,
             source: source.into(),
-        })
+        },
+    )
 }
 
 /// A requirements file's logical lines, as pip reads them: a line ending in `\` goes on in the
@@ -616,7 +619,10 @@ mod tests {
             .into_iter()
             .map(|p| p.purl)
             .collect();
-        assert!(purls.contains(&"pkg:npm/inner@3.0.0".to_string()), "{purls:?}");
+        assert!(
+            purls.contains(&"pkg:npm/inner@3.0.0".to_string()),
+            "{purls:?}"
+        );
         assert_eq!(purls.len(), 3, "{purls:?}");
     }
 
@@ -673,9 +679,19 @@ mod tests {
         // Every package, whatever its ecosystem and whether it carries a purl: one this cannot
         // answer for is reported as never checked, which is the truth, and one left out reads as a
         // package nobody needs to worry about. The parser used to keep npm and PyPI alone.
-        assert_eq!(purls, ["", "pkg:deb/debian/openssl@3.0.11", "pkg:npm/left-pad@1.3.0"]);
+        assert_eq!(
+            purls,
+            [
+                "",
+                "pkg:deb/debian/openssl@3.0.11",
+                "pkg:npm/left-pad@1.3.0"
+            ]
+        );
         let vendored = &got[0];
-        assert_eq!((vendored.name.as_str(), vendored.version.as_str()), ("vendored", "2.1"));
+        assert_eq!(
+            (vendored.name.as_str(), vendored.version.as_str()),
+            ("vendored", "2.1")
+        );
         assert!(vendored.line > 0, "{vendored:?}");
         assert_eq!(vendored.digests[0].algorithm, "sha256");
         assert_eq!(vendored.digests[0].value, "0a1b");
@@ -699,15 +715,31 @@ mod tests {
              plain==1.0  # a comment\n"
         );
         let got = parse(&text, Kind::Requirements).expect("parse");
-        let by = |n: &str| got.iter().find(|p| p.name == n).unwrap_or_else(|| panic!("{got:?}"));
+        let by = |n: &str| {
+            got.iter()
+                .find(|p| p.name == n)
+                .unwrap_or_else(|| panic!("{got:?}"))
+        };
         assert_eq!(by("flask").version, "3.0.0");
         assert_eq!(by("flask").purl, "pkg:pypi/flask@3.0.0");
         assert_eq!(by("click").version, "8.1.7");
         assert_eq!(by("click").line, 2, "the line the requirement began on");
-        let hashes: Vec<&str> = by("click").digests.iter().map(|d| d.value.as_str()).collect();
-        assert_eq!(hashes, [a.clone(), b.to_ascii_lowercase()], "every hash, lowercase");
-        assert!(by("click").digests.iter().all(|d| d.algorithm == "sha256"
-            && d.source == "requirements:--hash"));
+        let hashes: Vec<&str> = by("click")
+            .digests
+            .iter()
+            .map(|d| d.value.as_str())
+            .collect();
+        assert_eq!(
+            hashes,
+            [a.clone(), b.to_ascii_lowercase()],
+            "every hash, lowercase"
+        );
+        assert!(
+            by("click")
+                .digests
+                .iter()
+                .all(|d| d.algorithm == "sha256" && d.source == "requirements:--hash")
+        );
         assert_eq!(by("colorama").version, "0.4.6");
         assert_eq!(by("colorama").digests.len(), 1);
         assert_eq!(by("plain").version, "1.0");
@@ -897,8 +929,7 @@ mod tests {
             (sbom, Kind::Spdx, vec![("", 2), ("pkg:npm/b@1.0.0", 4)]),
         ] {
             let got = parse(text, kind).expect("parse");
-            let lines: Vec<(&str, usize)> =
-                got.iter().map(|p| (p.purl.as_str(), p.line)).collect();
+            let lines: Vec<(&str, usize)> = got.iter().map(|p| (p.purl.as_str(), p.line)).collect();
             assert_eq!(lines, want, "{text}");
         }
     }
@@ -1005,9 +1036,7 @@ mod tests {
     fn a_declared_digest_that_is_not_hex_under_a_named_algorithm_is_left_out() {
         let a = "a".repeat(64);
         let got = parse(
-            &format!(
-                "x==1.0 --hash=sha256:not-hex --hash=:{a} --hash=sha256: --hash=sha256:{a}\n"
-            ),
+            &format!("x==1.0 --hash=sha256:not-hex --hash=:{a} --hash=sha256: --hash=sha256:{a}\n"),
             Kind::Requirements,
         )
         .expect("parse");
@@ -1047,7 +1076,11 @@ mod tests {
         .expect("parse");
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].purl, "pkg:pypi/x@1.0");
-        assert_eq!(got[0].digests.len(), 1, "the hash after the `#` was cut: {got:?}");
+        assert_eq!(
+            got[0].digests.len(),
+            1,
+            "the hash after the `#` was cut: {got:?}"
+        );
     }
 
     /// Two packages an SBOM names without a purl are two packages unless nothing tells them apart:

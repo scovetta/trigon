@@ -366,7 +366,11 @@ fn rerun_arguments(a: &Args<'_>) -> Result<(), Stop> {
 
 /// [`rerun_arguments`], for any form: `rebuild_needed` is false where the rebuilt artifact can be
 /// had another way — `--lookup`, from the release asset a record names.
-pub(crate) fn rerun_files(rerun: bool, f: crate::Rerun<'_>, rebuild_needed: bool) -> Result<(), Stop> {
+pub(crate) fn rerun_files(
+    rerun: bool,
+    f: crate::Rerun<'_>,
+    rebuild_needed: bool,
+) -> Result<(), Stop> {
     let given = [
         ("--upstream", f.upstream),
         ("--rebuild", f.rebuild),
@@ -418,7 +422,10 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
     let reading = match (a.evidence, a.source) {
         (Some(dir), _) => {
             if !dir.is_dir() {
-                return Err(cannot(anyhow!("--evidence {} is not a directory", dir.display())));
+                return Err(cannot(anyhow!(
+                    "--evidence {} is not a directory",
+                    dir.display()
+                )));
             }
             rerun_arguments(a)?;
             from_directory(a, dir)?
@@ -621,7 +628,12 @@ fn from_clones(name: &str) -> Result<Opened, Stop> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let record = SyncRecord::read(&dirs.state).ok().flatten();
-    let standing = Standing::of(config.freshness(), record.as_ref(), opened.repo.newest_time(), now);
+    let standing = Standing::of(
+        config.freshness(),
+        record.as_ref(),
+        opened.repo.newest_time(),
+        now,
+    );
     let unknown = (!standing.answers()).then(|| {
         format!(
             "`{}` is {}: {}, so what it says of the artifact now is not known",

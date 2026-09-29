@@ -458,7 +458,10 @@ impl Provider for Replay {
     }
 
     fn complete(&self, req: &Request) -> Result<Response, LlmError> {
-        self.asked.lock().expect("no panics hold this").push(req.clone());
+        self.asked
+            .lock()
+            .expect("no panics hold this")
+            .push(req.clone());
         let i = self.at.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.answers.get(i).cloned().ok_or_else(|| {
             // Running off the end means the recording and the code have diverged, which is the one

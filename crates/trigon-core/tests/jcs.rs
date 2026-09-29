@@ -123,9 +123,8 @@ fn every_control_character_with_a_short_form_uses_it_and_only_those_do() {
     // character below 0x20 is `\u00xx`, lower-case hex. DEL is above the range and passes through.
     let v = json!({"s": "\u{8}\u{9}\u{a}\u{c}\u{d}|\u{0}\u{b}\u{1f}|\u{7f}"});
     let bs = '\\';
-    let expected = format!(
-        "{{\"s\":\"{bs}b{bs}t{bs}n{bs}f{bs}r|{bs}u0000{bs}u000b{bs}u001f|\u{7f}\"}}"
-    );
+    let expected =
+        format!("{{\"s\":\"{bs}b{bs}t{bs}n{bs}f{bs}r|{bs}u0000{bs}u000b{bs}u001f|\u{7f}\"}}");
     assert_eq!(canonicalize(&v).unwrap(), expected);
 }
 

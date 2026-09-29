@@ -544,12 +544,19 @@ async fn a_dll_member_is_served_as_decompiled_csharp_from_the_hook_or_the_precom
         tar_of(&[("lib/net6.0/A.dll", &[0u8, 1, 2, byte][..])])
     }
 
-    async fn view(store: Arc<Store>, id: &str, decompiler: Option<trigon_api::Decompiler>) -> serde_json::Value {
+    async fn view(
+        store: Arc<Store>,
+        id: &str,
+        decompiler: Option<trigon_api::Decompiler>,
+    ) -> serde_json::Value {
         use axum::body::Body;
         use axum::http::Request;
         use tower_service::Service as _;
         let index = trigon_api::Index::new();
-        index.refresh(&store, trigon_api::Switches::default()).await.unwrap();
+        index
+            .refresh(&store, trigon_api::Switches::default())
+            .await
+            .unwrap();
         let api = Arc::new(trigon_api::Api {
             store,
             queue: None,
@@ -570,7 +577,9 @@ async fn a_dll_member_is_served_as_decompiled_csharp_from_the_hook_or_the_precom
             )
             .await
             .unwrap();
-        let b = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let b = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
         serde_json::from_slice(&b).unwrap()
     }
 
@@ -593,11 +602,21 @@ async fn a_dll_member_is_served_as_decompiled_csharp_from_the_hook_or_the_precom
     let mut r = RunRecord::new(
         "1700000009-dd",
         "pkg:nuget/a@1.0.0",
-        ArtifactRef { name: "a.tar".into(), sha256: up_d, bytes: 4, stored: true },
+        ArtifactRef {
+            name: "a.tar".into(),
+            sha256: up_d,
+            bytes: 4,
+            stored: true,
+        },
         env,
         "2026-01-01T00:00:00Z",
     );
-    r.rebuild = Some(ArtifactRef { name: "a.tar".into(), sha256: rb_d, bytes: 4, stored: true });
+    r.rebuild = Some(ArtifactRef {
+        name: "a.tar".into(),
+        sha256: rb_d,
+        bytes: 4,
+        stored: true,
+    });
     r.state = RunState::Done;
     r.outcome = Some("divergent".into());
     store.put_run(&r).await.unwrap();
@@ -617,9 +636,16 @@ async fn a_dll_member_is_served_as_decompiled_csharp_from_the_hook_or_the_precom
     // With the hook: the text view is the C# diff, and it is marked decompiled.
     let with = view(store.clone(), "1700000009-dd", Some(dec)).await;
     assert_eq!(with["decompiled"], serde_json::json!(true), "{with}");
-    assert_eq!(with["binary"], serde_json::json!(true), "the bytes are still binary: {with}");
+    assert_eq!(
+        with["binary"],
+        serde_json::json!(true),
+        "the bytes are still binary: {with}"
+    );
     let text = with["text"].to_string();
-    assert!(text.contains("int v = 10") && text.contains("int v = 20"), "the C# diff: {text}");
+    assert!(
+        text.contains("int v = 10") && text.contains("int v = 20"),
+        "the C# diff: {text}"
+    );
 
     // The pre-computed path: with the C# already in the store keyed by each side's assembly
     // digest, the view is decompiled **without any hook at all** — the read-replica case, no
@@ -630,17 +656,28 @@ async fn a_dll_member_is_served_as_decompiled_csharp_from_the_hook_or_the_precom
     let up2_d = store2.blobs().put(up2).await.unwrap();
     let rb2_d = store2.blobs().put(rb2).await.unwrap();
     store2
-        .put_decompiled(&trigon_store::digest_of(&[0, 1, 2, 10]), "class A { int v = 10; }\n")
+        .put_decompiled(
+            &trigon_store::digest_of(&[0, 1, 2, 10]),
+            "class A { int v = 10; }\n",
+        )
         .await
         .unwrap();
     store2
-        .put_decompiled(&trigon_store::digest_of(&[0, 1, 2, 20]), "class A { int v = 20; }\n")
+        .put_decompiled(
+            &trigon_store::digest_of(&[0, 1, 2, 20]),
+            "class A { int v = 20; }\n",
+        )
         .await
         .unwrap();
     let mut r2 = RunRecord::new(
         "1700000010-ee",
         "pkg:nuget/a@1.0.0",
-        ArtifactRef { name: "a.tar".into(), sha256: up2_d, bytes: 4, stored: true },
+        ArtifactRef {
+            name: "a.tar".into(),
+            sha256: up2_d,
+            bytes: 4,
+            stored: true,
+        },
         Environment {
             base_image: "x@sha256:0".into(),
             derived_image: None,
@@ -654,19 +691,35 @@ async fn a_dll_member_is_served_as_decompiled_csharp_from_the_hook_or_the_precom
         },
         "2026-01-01T00:00:00Z",
     );
-    r2.rebuild = Some(ArtifactRef { name: "a.tar".into(), sha256: rb2_d, bytes: 4, stored: true });
+    r2.rebuild = Some(ArtifactRef {
+        name: "a.tar".into(),
+        sha256: rb2_d,
+        bytes: 4,
+        stored: true,
+    });
     r2.state = RunState::Done;
     r2.outcome = Some("divergent".into());
     store2.put_run(&r2).await.unwrap();
     let precomputed = view(store2, "1700000010-ee", None).await;
-    assert_eq!(precomputed["decompiled"], serde_json::json!(true), "{precomputed}");
+    assert_eq!(
+        precomputed["decompiled"],
+        serde_json::json!(true),
+        "{precomputed}"
+    );
     let text = precomputed["text"].to_string();
-    assert!(text.contains("int v = 10") && text.contains("int v = 20"), "cached C#: {text}");
+    assert!(
+        text.contains("int v = 10") && text.contains("int v = 20"),
+        "cached C#: {text}"
+    );
 
     // Without the hook and without a cache: the same member is a binary/hex view, no phantom text.
     let without = view(store, "1700000009-dd", None).await;
     assert_eq!(without["decompiled"], serde_json::json!(false), "{without}");
-    assert_eq!(without["text"], serde_json::Value::Null, "no text view without a decompiler: {without}");
+    assert_eq!(
+        without["text"],
+        serde_json::Value::Null,
+        "no text view without a decompiler: {without}"
+    );
 }
 
 /// Bytes a run's record says are kept and the store no longer has — deleted from outside, or

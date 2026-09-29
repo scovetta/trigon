@@ -502,10 +502,7 @@ fn a_checkpoint_cosigned_by_as_many_witnesses_as_a_note_holds_is_read() {
     w.write("checkpoint", bytes.as_bytes());
     let log = verify_log(&w.files(), &log_key().vkey(), None).unwrap();
     assert_eq!(log.size(), 3);
-    assert_eq!(
-        log.checkpoint().note().signatures().len(),
-        MAX_SIGNATURES
-    );
+    assert_eq!(log.checkpoint().note().signatures().len(), MAX_SIGNATURES);
 }
 
 /// A refusal that compares two roots names each as a checkpoint writes it, in base64, so a reader

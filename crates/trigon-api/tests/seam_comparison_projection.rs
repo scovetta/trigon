@@ -99,9 +99,15 @@ fn the_projection_reads_a_real_comparison() {
 
     // The pass-by-pass progression, recorded by `compare_bytes` and read back here. One step for
     // the artifacts as published and one per pass in the set, each pass named.
-    let p = v.progression.as_ref().expect("the progression did not survive");
+    let p = v
+        .progression
+        .as_ref()
+        .expect("the progression did not survive");
     assert!(p.omitted.is_none(), "{:?}", p.omitted);
-    assert!(p.consistent, "the last step must reproduce the verdict's signature");
+    assert!(
+        p.consistent,
+        "the last step must reproduce the verdict's signature"
+    );
     let set = trigon_stabilize::default_for(Format::Zip);
     assert_eq!(p.steps.len(), set.members.len() + 1);
     assert!(p.steps[0].pass.is_none());
@@ -245,8 +251,8 @@ fn a_renamed_member_resolves_in_the_artifact_it_came_from() {
         let mut out = Vec::new();
         {
             let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
-            let opts: zip::write::FileOptions<'_, ()> =
-                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
             for (name, body) in [
                 (format!("lib/{portable}/x.dll"), &b"MZ\x90\x00payload"[..]),
                 ("x.nuspec".into(), b"<package/>"),
@@ -265,8 +271,14 @@ fn a_renamed_member_resolves_in_the_artifact_it_came_from() {
     let rb = nupkg("portable45-net45+win8+wp8+wpa81");
 
     let set = trigon_stabilize::profile("nupkg").expect("the nupkg profile");
-    let c = compare_bytes(up.clone(), rb.clone(), Format::Zip, &set, &Limits::default())
-        .expect("compare");
+    let c = compare_bytes(
+        up.clone(),
+        rb.clone(),
+        Format::Zip,
+        &set,
+        &Limits::default(),
+    )
+    .expect("compare");
 
     let diff = c.diff.as_ref().expect("a diff report");
     let member = diff

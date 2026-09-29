@@ -385,7 +385,10 @@ mod tests {
         assert_eq!(b.kinds(), vec!["rebuild".to_string()]);
         // What a log line shows of it: the image it builds in and the tier it builds at.
         let shown = format!("{b:?}");
-        assert!(shown.contains("mirror-only") && shown.contains("node@sha256:00"), "{shown}");
+        assert!(
+            shown.contains("mirror-only") && shown.contains("node@sha256:00"),
+            "{shown}"
+        );
     }
 
     /// The record the job hands the outbox is the one the run wrote, and the reference it hands
@@ -413,7 +416,10 @@ mod tests {
 
         // A run the store does not hold is an error, said as the reading of it.
         let e = read_back(&store, "1790000009-ffffffff").await.unwrap_err();
-        assert!(format!("{e:#}").starts_with("reading the run back"), "{e:#}");
+        assert!(
+            format!("{e:#}").starts_with("reading the run back"),
+            "{e:#}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

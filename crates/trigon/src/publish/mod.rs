@@ -1068,9 +1068,7 @@ fn whole_chain(base: &Base, s: &Settings, dry_run: bool) -> Result<Option<Reposi
         if !behind.is_empty() {
             passed_over.retain(|(n, _)| !behind.contains(n));
             let again = ready(config, &behind, Mode::Refresh, now, false)?;
-            if let Some(whole) =
-                chain_through(base, s, &held, &again, &mut passed_over, dry_run)?
-            {
+            if let Some(whole) = chain_through(base, s, &held, &again, &mut passed_over, dry_run)? {
                 return Ok(Some(whole));
             }
         }
@@ -1091,7 +1089,8 @@ fn whole_chain(base: &Base, s: &Settings, dry_run: bool) -> Result<Option<Reposi
             false => format!(" that can be read ({})", why.join("; ")),
         },
         match dry_run {
-            true => ". A dry run syncs nothing, so each source was read from its clone as it \
+            true =>
+                ". A dry run syncs nothing, so each source was read from its clone as it \
                  is: `trigon evidence sync` brings them up to date",
             false => "",
         }

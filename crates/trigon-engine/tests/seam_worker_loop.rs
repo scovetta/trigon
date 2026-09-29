@@ -844,7 +844,10 @@ async fn a_second_worker_cannot_take_a_job_that_is_still_being_worked_on() {
         .expect("job_for")
         .expect("the job that ran");
     assert_eq!(got_id, id);
-    assert_eq!(state, "done", "the worker that did the work could not record it");
+    assert_eq!(
+        state, "done",
+        "the worker that did the work could not record it"
+    );
 }
 
 /// And the renewal does not overwrite the phase the worker last reported.
@@ -960,7 +963,10 @@ async fn a_worker_cannot_lease_across_its_class() {
         .await
         .expect_err("a judge worker must not lease a build");
     let text = format!("{e}");
-    assert!(text.contains("judge"), "the error must name the class: {text}");
+    assert!(
+        text.contains("judge"),
+        "the error must name the class: {text}"
+    );
     assert!(text.contains("rebuild"), "and the kind it refused: {text}");
 
     // And nothing was taken: the job is still there for a worker that may do it.

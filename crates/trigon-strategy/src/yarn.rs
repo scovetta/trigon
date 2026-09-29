@@ -305,10 +305,7 @@ mod tests {
             Some("npm run umd && npm run umd-min")
         );
         // `yarn run x` is the same call spelled longer.
-        assert_eq!(
-            inline("yarn run umd", &s).as_deref(),
-            Some("npm run umd")
-        );
+        assert_eq!(inline("yarn run umd", &s).as_deref(), Some("npm run umd"));
     }
 
     /// The case that actually fires: the strategy never mentions yarn.
@@ -472,10 +469,7 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-        let (next, built) = rendered(
-            "npm run umd-min && yarn umd_min && yarn umd-min",
-            &scripts,
-        );
+        let (next, built) = rendered("npm run umd-min && yarn umd_min && yarn umd-min", &scripts);
         let Strategy::Flow(f) = &next else {
             panic!("shape changed")
         };
@@ -488,10 +482,7 @@ mod tests {
             )
         );
         assert_eq!(f.build[0].literal.len(), 2, "{:?}", f.build[0].literal);
-        assert_eq!(
-            built,
-            "( npm run x ) && ( npm run y ) && ( npm run x )"
-        );
+        assert_eq!(built, "( npm run x ) && ( npm run y ) && ( npm run x )");
     }
 
     /// Whether `sh` reads a script without a syntax error. `-n` parses and runs nothing.

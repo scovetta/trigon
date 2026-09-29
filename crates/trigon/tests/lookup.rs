@@ -79,7 +79,11 @@ fn month_of(secs: u64) -> String {
 fn series(month: &str, by: i64) -> String {
     let (y, m) = month.split_once('-').unwrap();
     let n = y.parse::<i64>().unwrap() * 12 + m.parse::<i64>().unwrap() - 1 + by;
-    format!("rebuilt-{:04}-{:02}", n.div_euclid(12), n.rem_euclid(12) + 1)
+    format!(
+        "rebuilt-{:04}-{:02}",
+        n.div_euclid(12),
+        n.rem_euclid(12) + 1
+    )
 }
 
 /// A publisher and a consumer on one machine: a store, a home with `evidence.toml` in it, a
@@ -2015,7 +2019,10 @@ fn the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone() {
             said.contains("no repository that holds the record, in `local`, is on github.com"),
             "{s:?}: {said}"
         );
-        assert!(said.contains("nothing was asked of GitHub"), "{s:?}: {said}");
+        assert!(
+            said.contains("nothing was asked of GitHub"),
+            "{s:?}: {said}"
+        );
         assert!(said.contains(GIVE_REBUILD), "{s:?}: {said}");
         assert_eq!(t.server.asked(), Vec::<String>::new(), "{s:?}");
     }
@@ -2219,10 +2226,7 @@ fn the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it() {
     let (now, before) = (series(&t.month, 0), series(&t.month, -1));
     let mut unfinished = Held::new(repo, &now, name, b"half an upl");
     unfinished.state = "starter";
-    t.server.state().assets = vec![
-        unfinished,
-        Held::new(repo, &before, name, &t.p.rebuilt),
-    ];
+    t.server.state().assets = vec![unfinished, Held::new(repo, &before, name, &t.p.rebuilt)];
     t.server.asked();
     let said = exits(&t.run(None), 0);
     assert!(said.contains(&format!("in release {before}")), "{said}");
@@ -2312,10 +2316,8 @@ fn the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked() {
     t.server.state().redirect.clear();
 
     // A download URL of plain HTTP off this machine is not asked at all.
-    t.server.state().assets[0].url = Some(format!(
-        "http://0.0.0.0:{}{download}",
-        t.server.addr.port()
-    ));
+    t.server.state().assets[0].url =
+        Some(format!("http://0.0.0.0:{}{download}", t.server.addr.port()));
     t.server.asked();
     let said = exits(&t.run(None), 5);
     assert!(said.contains("is not https://"), "{said}");
@@ -2429,7 +2431,10 @@ fn the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record() {
             said.contains("no repository that holds the record, in `local`, is on github.com"),
             "{s:?}: {said}"
         );
-        assert!(said.contains("nothing was asked of GitHub"), "{s:?}: {said}");
+        assert!(
+            said.contains("nothing was asked of GitHub"),
+            "{s:?}: {said}"
+        );
         assert!(
             said.contains(&format!(
                 "`copy`, added by the project's own {}, holds the record too, and attacker/copy \
@@ -2478,14 +2483,20 @@ fn an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_githu
             said.contains("the rebuilt artifact is the upstream file given: this verdict is exact"),
             "{s:?}: {said}"
         );
-        assert!(said.contains("nothing was asked of GitHub"), "{s:?}: {said}");
+        assert!(
+            said.contains("nothing was asked of GitHub"),
+            "{s:?}: {said}"
+        );
         assert!(said.contains("rederived exact under"), "{s:?}: {said}");
         assert!(said.contains("the claim holds"), "{s:?}: {said}");
         assert!(!said.contains("--rebuild <file>"), "{s:?}: {said}");
         assert_eq!(t.server.asked(), Vec::<String>::new(), "{s:?}");
         let said = exits(&t.run(Some(&t.upstream)), 0);
         assert!(said.contains("the claim holds"), "{s:?}: {said}");
-        assert!(!said.contains("is the upstream file given"), "{s:?}: {said}");
+        assert!(
+            !said.contains("is the upstream file given"),
+            "{s:?}: {said}"
+        );
         assert_eq!(t.server.asked(), Vec::<String>::new(), "{s:?}");
     }
     // Another file as the upstream one is not the artifact the verdict is about: the check is not
@@ -3761,9 +3772,8 @@ fn the_record_form_reads_a_sources_clones_as_they_stand() {
     let ra = w.record_of(&w.publish_package(&a, "aaaa"));
     let file = w.checkout("files").join(record_path(&ra));
     let file = file.to_str().unwrap();
-    let record = |source: &str| {
-        w.trigon(&["verify-attestation", "--record", file, "--source", source])
-    };
+    let record =
+        |source: &str| w.trigon(&["verify-attestation", "--record", file, "--source", source]);
     // What a JSON reader is told stopped it, where it stops before a record is read.
     let stopped = |source: &str| {
         let out = w.trigon(&[
@@ -3838,7 +3848,10 @@ fn the_record_form_reads_a_sources_clones_as_they_stand() {
         said.contains("resting on keys trusted on first use: read from"),
         "{said}"
     );
-    assert!(said.contains("by its first sync, and pinned since"), "{said}");
+    assert!(
+        said.contains("by its first sync, and pinned since"),
+        "{said}"
+    );
 
     // A project's own source is named as the project's, from its clones and from a directory.
     let url = github_url_to(&w, &w.remote);
@@ -4164,7 +4177,10 @@ fn the_falsifying_command_says_what_the_source_says_where_there_is_nothing_to_re
         said.contains("`main` and `other` each hold a current record for"),
         "{said}"
     );
-    assert!(said.contains("name the log it was published in with --origin"), "{said}");
+    assert!(
+        said.contains("name the log it was published in with --origin"),
+        "{said}"
+    );
     exits(&lookup(&[&subject, "--origin", ORIGIN]), 0);
     exits(&lookup(&[&subject, "--origin", "example.com/other"]), 0);
 
@@ -4199,8 +4215,10 @@ fn the_falsifying_command_says_what_the_source_says_where_there_is_nothing_to_re
         "`main` says withdrawn",
     );
     assert!(
-        said.contains("its only current record is a withdrawal, so there is no verdict to \
-                       re-derive"),
+        said.contains(
+            "its only current record is a withdrawal, so there is no verdict to \
+                       re-derive"
+        ),
         "{said}"
     );
     let doc = json_of(
@@ -4246,8 +4264,7 @@ fn log_by_hand(w: &World, id: &str, time: u64) -> String {
     let mut files = vec![(record_path(&digest), bytes.clone())];
     for (name, value) in &record.evidence {
         let hex = value.trim_start_matches("sha256:");
-        if let Ok(blob) = std::fs::read(w.store.join(format!("blobs/sha256/{}/{hex}", &hex[..2])))
-        {
+        if let Ok(blob) = std::fs::read(w.store.join(format!("blobs/sha256/{}/{hex}", &hex[..2]))) {
             files.push((
                 format!("evidence/sha256/{}/{}/{hex}", &hex[..2], &hex[2..4]),
                 blob,
@@ -4278,7 +4295,13 @@ fn the_falsifying_command_shows_every_current_record_and_the_more_severe_decides
     ok(&w.sync(&[]));
 
     let subject = format!("sha256:{}", a.sha256());
-    let args = ["verify-attestation", "--lookup", &subject, "--origin", ORIGIN];
+    let args = [
+        "verify-attestation",
+        "--lookup",
+        &subject,
+        "--origin",
+        ORIGIN,
+    ];
     let said = exits(&w.trigon(&args), 1);
     for line in [
         "current   record 1 of 2: the source holds more than one current record for this \
@@ -4308,8 +4331,10 @@ fn the_falsifying_command_shows_every_current_record_and_the_more_severe_decides
     assert!(said.contains("claims    normalized"), "{said}");
     assert!(!said.contains("claims    divergent"), "{said}");
     assert!(
-        said.contains("answer    divergent — what this source says of the artifact now, from 2 \
-                       record(s)"),
+        said.contains(
+            "answer    divergent — what this source says of the artifact now, from 2 \
+                       record(s)"
+        ),
         "{said}"
     );
 
@@ -4319,14 +4344,21 @@ fn the_falsifying_command_shows_every_current_record_and_the_more_severe_decides
     let file = w.checkout("files").join(record_path(&digest));
     w.attest(
         &third,
-        &["--supersedes", file.to_str().unwrap(), "--reason", "set_changed"],
+        &[
+            "--supersedes",
+            file.to_str().unwrap(),
+            "--reason",
+            "set_changed",
+        ],
     );
     let out = w.publish(&[&third]);
     let said = text(&out);
     assert!(!out.status.success(), "{said}");
     assert!(
-        said.contains("its artifact has 2 records nothing supersedes, and one supersession can \
-                       replace only one of them"),
+        said.contains(
+            "its artifact has 2 records nothing supersedes, and one supersession can \
+                       replace only one of them"
+        ),
         "{said}"
     );
 }
@@ -4558,7 +4590,10 @@ fn the_record_form_answers_unknown_for_a_frozen_or_refused_source() {
     git(&w.remote, &["update-ref", "refs/heads/main", &before]);
     exits(&w.sync(&[]), 4);
     let said = exits(&record(), 4);
-    assert!(said.contains(&format!("record    sha256:{digest}")), "{said}");
+    assert!(
+        said.contains(&format!("record    sha256:{digest}")),
+        "{said}"
+    );
     assert!(said.contains("`main` is refused: "), "{said}");
     assert!(said.contains("answer    unknown"), "{said}");
 }
@@ -4599,7 +4634,13 @@ fn the_falsifying_command_weighs_a_refused_source_of_its_origin() {
     exits(&w.sync(&[]), 4);
     let subject = format!("sha256:{}", a.sha256());
     let said = exits(
-        &w.trigon(&["verify-attestation", "--lookup", &subject, "--origin", ORIGIN]),
+        &w.trigon(&[
+            "verify-attestation",
+            "--lookup",
+            &subject,
+            "--origin",
+            ORIGIN,
+        ]),
         4,
     );
     assert!(

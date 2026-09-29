@@ -212,7 +212,10 @@ fn clicolor_force_colours_a_pipe_unless_something_said_plain() {
         ),
         "NO_COLOR lost to CLICOLOR_FORCE with a dumb TERM"
     );
-    assert!(!coloured(&[("CLICOLOR_FORCE", "0"), ("TERM", "dumb")], "auto"));
+    assert!(!coloured(
+        &[("CLICOLOR_FORCE", "0"), ("TERM", "dumb")],
+        "auto"
+    ));
     // `NO_COLOR=0` is still `NO_COLOR` set; only an empty value is not.
     assert!(!coloured(&[("NO_COLOR", "0")], "textcolor"));
     assert!(coloured(&[("NO_COLOR", "")], "textcolor"));

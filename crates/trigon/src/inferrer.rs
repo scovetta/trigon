@@ -686,11 +686,11 @@ impl Configured {
         trigon_strategy::from_yaml_longest_prefix(&second.strategy)
             .map(|(s, _)| s)
             .with_context(|| {
-            format!(
-                "the proposal did not parse as a strategy, twice. The model said: {}",
-                first_line(&second.diagnosis)
-            )
-        })
+                format!(
+                    "the proposal did not parse as a strategy, twice. The model said: {}",
+                    first_line(&second.diagnosis)
+                )
+            })
     }
 
     /// Ask for a repair: the recipe that was tried, how it failed, and the log.
@@ -1084,10 +1084,7 @@ mod tests {
     /// asked.
     fn configured(answers: Vec<trigon_ai::Response>) -> (Configured, Arc<Replay>) {
         let replay = Arc::new(Replay::new(answers));
-        let cfg = Configured::live(
-            Box::new(replay.clone()),
-            "claude-haiku-4-5-20251001".into(),
-        );
+        let cfg = Configured::live(Box::new(replay.clone()), "claude-haiku-4-5-20251001".into());
         (cfg, replay)
     }
 
@@ -1125,10 +1122,19 @@ mod tests {
     fn a_repair_that_parses_is_taken_from_the_first_answer() {
         let (cfg, replay) = configured(vec![free(&proposal("add the pack step", RECIPE))]);
         let got = cfg
-            .repair(&inputs(), UNPARSEABLE, &failure(), "npm ERR! missing script: build")
+            .repair(
+                &inputs(),
+                UNPARSEABLE,
+                &failure(),
+                "npm ERR! missing script: build",
+            )
             .unwrap();
         assert_eq!(got, recipe());
-        assert_eq!(replay.asked().len(), 1, "a parsed answer is not asked again");
+        assert_eq!(
+            replay.asked().len(),
+            1,
+            "a parsed answer is not asked again"
+        );
         // The question carried the failure and the log it was given.
         let q = asked(&replay, 0);
         assert!(q.contains("npm/script-missing"), "{q}");
@@ -1143,7 +1149,11 @@ mod tests {
         assert!(trigon_strategy::from_yaml(&chatty).is_err(), "the fixture");
         let (cfg, replay) = configured(vec![free(&proposal("pack it", &chatty))]);
         let got = cfg
-            .repair_divergence(&inputs(), UNPARSEABLE, "member-only-in-reference@dist/index.js")
+            .repair_divergence(
+                &inputs(),
+                UNPARSEABLE,
+                "member-only-in-reference@dist/index.js",
+            )
             .unwrap();
         assert_eq!(got, recipe());
         assert_eq!(replay.asked().len(), 1);
@@ -1172,7 +1182,10 @@ mod tests {
         assert!(!asked(&replay, 0).contains("rejected by the parser"));
         let again = asked(&replay, 1);
         assert!(again.contains("rejected by the parser"), "{again}");
-        assert!(again.contains(&why), "the parser's words are not in it: {again}");
+        assert!(
+            again.contains(&why),
+            "the parser's words are not in it: {again}"
+        );
     }
 
     /// Twice unparseable ends the attempt — a model that cannot fix a named field with the error in
@@ -1213,9 +1226,15 @@ mod tests {
         let e = cfg
             .repair_divergence(&inputs(), UNPARSEABLE, "differs")
             .unwrap_err();
-        assert!(format!("{e:#}").starts_with("asking about a divergence"), "{e:#}");
+        assert!(
+            format!("{e:#}").starts_with("asking about a divergence"),
+            "{e:#}"
+        );
         let e = cfg.opinion_on_diff("-a\n+b\n", 1, 1).unwrap_err();
-        assert!(format!("{e:#}").starts_with("asking for a reading of the diff"), "{e:#}");
+        assert!(
+            format!("{e:#}").starts_with("asking for a reading of the diff"),
+            "{e:#}"
+        );
     }
 
     /// Every call is counted and timed whether or not it answered — a call that failed still
@@ -1223,7 +1242,10 @@ mod tests {
     #[test]
     fn a_call_is_counted_and_timed_whether_or_not_it_answered_and_billed_by_its_answer() {
         let opinion = r#"{"verdict": "equivalent", "reason": "only timestamps differ"}"#;
-        let (cfg, _) = configured(vec![billed(opinion, 100, 40, 20), billed(opinion, 50, 0, 5)]);
+        let (cfg, _) = configured(vec![
+            billed(opinion, 100, 40, 20),
+            billed(opinion, 50, 0, 5),
+        ]);
         // Never asked is not asked for no time.
         assert_eq!(cfg.calls(), 0);
         assert_eq!(cfg.inference_seconds(), None);
@@ -1319,7 +1341,10 @@ mod tests {
         assert_eq!(got.files, ["index.js", "package.json"]);
         assert_eq!(
             got.manifests,
-            [("package.json".to_string(), "{\"name\":\"left-pad\"}\n".to_string())]
+            [(
+                "package.json".to_string(),
+                "{\"name\":\"left-pad\"}\n".to_string()
+            )]
         );
         assert_eq!(got.evidence.len(), 1, "{:?}", got.evidence);
         assert!(
@@ -1359,7 +1384,10 @@ mod tests {
         let untagged = target(&repo, "");
 
         assert!(r.infer(&untagged).await.unwrap().is_empty());
-        assert!(replay.asked().is_empty(), "a model was asked to guess a tree");
+        assert!(
+            replay.asked().is_empty(),
+            "a model was asked to guess a tree"
+        );
         let why = r.why_not(&untagged).await.expect("a described decline");
         assert!(why.contains("recorded no commit for this version"), "{why}");
         assert!(why.contains(&repo.to_string_lossy().into_owned()), "{why}");
@@ -1491,7 +1519,10 @@ mod tests {
     fn an_ollama_spec_needs_a_tag() {
         for spec in ["ollama:", "ollama:+no-reasoning"] {
             let e = Configured::parse(spec).unwrap_err().to_string();
-            assert!(e.contains("`--model ollama:<model>` needs a model"), "{spec}: {e}");
+            assert!(
+                e.contains("`--model ollama:<model>` needs a model"),
+                "{spec}: {e}"
+            );
         }
     }
 
@@ -1499,7 +1530,10 @@ mod tests {
     #[test]
     fn copilot_chooses_its_own_model_unless_one_is_named() {
         assert_eq!(Configured::parse("copilot:").unwrap().model_id(), "auto");
-        assert_eq!(Configured::parse("copilot:gpt-5").unwrap().model_id(), "gpt-5");
+        assert_eq!(
+            Configured::parse("copilot:gpt-5").unwrap().model_id(),
+            "gpt-5"
+        );
     }
 
     /// `compatible:` has nothing to guess its URL or its model from, so it needs both, and says so.

@@ -199,7 +199,11 @@ pub fn summarize(transcript: &[u8]) -> Summary {
     hosts.truncate(HOSTS);
     s.hosts = hosts;
 
-    let toolchain: Vec<Exchange> = all.iter().filter(|e| e.route == "toolchain").cloned().collect();
+    let toolchain: Vec<Exchange> = all
+        .iter()
+        .filter(|e| e.route == "toolchain")
+        .cloned()
+        .collect();
     s.toolchain_total = toolchain.len();
     s.toolchain = toolchain.into_iter().take(TOOLCHAIN).collect();
 
@@ -231,11 +235,21 @@ mod tests {
         let s = summarize(T.as_bytes());
         assert_eq!(s.exchanges, 4);
         assert_eq!(s.bytes, 1370);
-        assert_eq!(s.unreadable, 1, "a bad line is counted, and a blank one is not a line");
+        assert_eq!(
+            s.unreadable, 1,
+            "a bad line is counted, and a blank one is not a line"
+        );
         let names: Vec<_> = s.routes.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(names, ["toolchain", "index", "artifact"], "in the order a build meets them");
+        assert_eq!(
+            names,
+            ["toolchain", "index", "artifact"],
+            "in the order a build meets them"
+        );
         assert_eq!(s.withheld, 7);
-        assert_eq!(s.indexes_withholding, 1, "an index that withheld nothing is not counted");
+        assert_eq!(
+            s.indexes_withholding, 1,
+            "an index that withheld nothing is not counted"
+        );
         assert_eq!(s.toolchain_total, 1);
         assert_eq!(s.largest[0].bytes, 1000, "largest first");
     }
@@ -246,7 +260,11 @@ mod tests {
         let hosts: Vec<_> = s.hosts.iter().map(|h| h.host.as_str()).collect();
         assert!(hosts.contains(&"registry.npmjs.org"), "{hosts:?}");
         assert!(hosts.iter().all(|h| !h.contains("tok")), "{hosts:?}");
-        let npm = s.hosts.iter().find(|h| h.host == "registry.npmjs.org").unwrap();
+        let npm = s
+            .hosts
+            .iter()
+            .find(|h| h.host == "registry.npmjs.org")
+            .unwrap();
         assert_eq!(npm.count, 3);
         assert_eq!(npm.routes, ["artifact", "index"]);
     }

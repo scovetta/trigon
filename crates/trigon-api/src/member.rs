@@ -536,13 +536,7 @@ fn align(a: &[String], b: &[String]) -> Vec<Op> {
 /// Stops at [`MAX_DIFF_LINES`] and returns how many lines it did not reach. The budget is spent on
 /// the first changes rather than sampled across the file, because a reader who opens a diff starts
 /// at the top — and because the alternative is a rendering whose gaps nobody can locate.
-fn hunks(
-    a: &[String],
-    b: &[String],
-    head: usize,
-    tail: usize,
-    ops: &[Op],
-) -> (Vec<Hunk>, usize) {
+fn hunks(a: &[String], b: &[String], head: usize, tail: usize, ops: &[Op]) -> (Vec<Hunk>, usize) {
     // Replay the whole file as ops, so line numbers below are the real ones.
     let mut all: Vec<Op> = vec![Op::Same; head];
     all.extend_from_slice(ops);

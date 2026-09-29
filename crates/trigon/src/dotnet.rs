@@ -299,7 +299,10 @@ mod tests {
             None,
             Some("2022-12-30T00:00:00Z"),
         );
-        assert_eq!(major, 7, "the newest SDK at publish built it, not the target's");
+        assert_eq!(
+            major, 7,
+            "the newest SDK at publish built it, not the target's"
+        );
         assert!(why.contains("newest SDK that existed"), "{why}");
         assert!(why.contains("floor that SDK clears"), "{why}");
     }
@@ -329,7 +332,10 @@ mod tests {
             Some(r#"{ "sdk": { "version": "8.0.100", "rollForward": "latestMinor" } }"#),
             Some("2022-12-30T00:00:00Z"),
         );
-        assert_eq!(major, 8, "global.json is the publisher naming the SDK outright");
+        assert_eq!(
+            major, 8,
+            "global.json is the publisher naming the SDK outright"
+        );
         assert!(why.contains("global.json pins the .NET 8"), "{why}");
     }
 

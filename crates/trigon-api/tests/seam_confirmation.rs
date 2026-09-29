@@ -436,7 +436,12 @@ fn local_image_id() -> String {
 /// the confirmation's cache state is `confirming`.
 fn on_a_local_image(confirming: CacheState) -> [RunRecord; 2] {
     let mut first = attempt("1790500000-aa", "2026-09-27T10:00:00Z", &machine(1), warm());
-    let mut second = attempt("1790507200-ab", "2026-09-27T12:00:00Z", &machine(1), confirming);
+    let mut second = attempt(
+        "1790507200-ab",
+        "2026-09-27T12:00:00Z",
+        &machine(1),
+        confirming,
+    );
     for r in [&mut first, &mut second] {
         r.environment.base_image = local_image_id();
     }
@@ -468,7 +473,11 @@ fn settings(same_host: bool, local_images: bool) -> Switches {
 #[tokio::test]
 async fn with_both_settings_a_cold_confirmation_on_a_local_image_publishes() {
     assert_eq!(
-        decided(&on_a_local_image(cold_on_a_local_image()), settings(true, true)).await,
+        decided(
+            &on_a_local_image(cold_on_a_local_image()),
+            settings(true, true)
+        )
+        .await,
         [Publication::Published, Publication::Published]
     );
 }
@@ -498,7 +507,11 @@ async fn without_the_opt_in_a_local_image_is_withheld_as_not_cold_naming_the_set
 #[tokio::test]
 async fn the_opt_in_without_same_host_confirmation_is_withheld_as_same_host() {
     assert_eq!(
-        decided(&on_a_local_image(cold_on_a_local_image()), settings(false, true)).await,
+        decided(
+            &on_a_local_image(cold_on_a_local_image()),
+            settings(false, true)
+        )
+        .await,
         [withheld(Withheld::SameHost), withheld(Withheld::SameHost)],
         "set alone it changes nothing: one machine does not confirm itself"
     );
@@ -627,7 +640,10 @@ async fn a_run_file_from_before_the_pin_was_recorded_is_decided_as_before() {
         }
         write(&first);
         write(confirming);
-        let read = store.get_run(&confirming.id).await.expect("an old run file reads");
+        let read = store
+            .get_run(&confirming.id)
+            .await
+            .expect("an old run file reads");
         assert_eq!(read.cache.as_ref().map(|c| c.image_pin), Some(None));
         for local_images in [false, true] {
             let ix = Index::new();
