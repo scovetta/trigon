@@ -11907,8 +11907,17 @@ mod mirror {
         // Without this the build context is the whole workspace including `target`, which is
         // gigabytes and is being written to by any concurrent cargo run: the copy then fails on a
         // file that vanished underneath it.
+        //
+        // Patterns are anchored at the context root, so `target/` alone missed every nested one:
+        // a git worktree under `.claude/worktrees/` carries its own `target`, and with it, `work/`
+        // and the store the context came to 9 GB, and `COPY . .` sat for a quarter of an hour.
+        // Nothing the build compiles reads outside `crates/`, and the workspace excludes `fuzz`.
         let ignore = root.join("target").join("mirror.containerignore");
-        std::fs::write(&ignore, "target/\n.git/\nfuzz/target/\ncorpora/cache/\n")?;
+        std::fs::write(
+            &ignore,
+            "target/\n**/target/\n.git/\n**/.git/\n.claude/\nwork/\ntrigon-store/\nfuzz/\n\
+             corpora/cache/\n",
+        )?;
 
         println!(
             "{} {} {}",
