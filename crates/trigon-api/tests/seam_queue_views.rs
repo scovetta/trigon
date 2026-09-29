@@ -433,6 +433,52 @@ async fn the_fleet_view_names_who_holds_work_and_how_long_until_it_lapses() {
     assert!((0..=120).contains(&left), "{left}");
 }
 
+/// The public is told how many hold work and how soon each lease lapses, and never who holds it.
+///
+/// A worker is named `$HOSTNAME-<pid>` unless it is given a name, and a hostname is often a
+/// person's name: the reason an anonymous reader is shown no run's host id, which is only a keyed
+/// hash of it. This page printed the name itself, to anybody.
+#[tokio::test]
+async fn the_fleet_view_names_no_worker_to_an_anonymous_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, &["jobs"]).await;
+    q.enqueue(&NewJob::rebuild("pkg:npm/p@1", "k1", Tier::Bulk))
+        .await
+        .unwrap();
+    q.lease(
+        "alice-laptop-4242",
+        &["rebuild"],
+        1,
+        std::time::Duration::from_secs(120),
+    )
+    .await
+    .unwrap();
+    let api = api_with(Some(q), Principal::Anonymous).await;
+
+    let (status, _, body) = send(api, "GET", "/v1/fleet", None, "").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body.contains("alice-laptop"),
+        "an anonymous reader was shown a worker's name: {body}"
+    );
+    let fleet: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+    let workers = fleet["queue"]["workers"].as_array().expect("a worker list");
+    assert_eq!(workers.len(), 1, "{fleet}");
+    assert!(workers[0].get("worker").is_none(), "{fleet}");
+    assert_eq!(workers[0]["jobs_held"], 1);
+    let left = workers[0]["lease_expires_in_seconds"]
+        .as_i64()
+        .expect("seconds until the lease lapses");
+    assert!((0..=120).contains(&left), "{left}");
+    // Said, so a missing name is not read as a worker that has none.
+    assert!(
+        fleet["queue"]["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("not shown to an anonymous reader")),
+        "{fleet}"
+    );
+}
+
 #[tokio::test]
 async fn the_site_serves_its_own_files_under_its_own_policy() {
     // The same bytes a CDN would serve, with the policy that keeps the page from loading anything

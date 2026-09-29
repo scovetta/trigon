@@ -304,6 +304,9 @@ fn each_gzip_header_field_that_differs_is_named_by_its_own_code() {
         ("container:gzip.extra", |h| h.extra = Some(vec![1, 2, 3, 4])),
         ("container:gzip.os", |h| h.os = 3),
         ("container:gzip.xfl", |h| h.xfl = 2),
+        ("container:gzip.trailing", |h| {
+            h.trailing = b"after the last member".to_vec()
+        }),
     ];
     for (code, edit) in cases {
         let mut reference = read(&bytes, Format::Tar);
@@ -334,6 +337,22 @@ fn a_zip_archive_comment_is_named_and_an_equal_one_is_not() {
         signature(&reference, &ours),
         set(&["container:zip.comment"])
     );
+}
+
+#[test]
+fn bytes_after_the_tar_end_of_archive_marker_are_named_and_equal_ones_are_not() {
+    let bytes = tar_of(&[("a", b"x")]);
+    let reference = read(&bytes, Format::Tar);
+    let mut ours = read(&bytes, Format::Tar);
+    ours.tar_trailing = b"after the end".to_vec();
+    assert_eq!(
+        signature(&reference, &ours),
+        set(&["container:tar.trailing"])
+    );
+
+    let mut theirs = read(&bytes, Format::Tar);
+    theirs.tar_trailing = b"after the end".to_vec();
+    assert!(signature(&theirs, &ours).is_empty());
 }
 
 #[test]
@@ -393,6 +412,17 @@ fn a_difference_inside_a_nested_archive_is_named_through_its_container() {
     assert_eq!(
         signature(&reference, &framing),
         set(&["container:gzip.os@data.tar.gz"])
+    );
+
+    // The inner tar's own end sits beside the gzip header that is its trailer, and is named too.
+    let mut after = gem(&[("lib/x.rb", b"one"), ("lib/y.rb", b"two")], &h);
+    let Body::Nested { inner, .. } = &mut after.entries[0].body else {
+        unreachable!("descended into, as above")
+    };
+    inner.tar_trailing = b"after the end".to_vec();
+    assert_eq!(
+        signature(&reference, &after),
+        set(&["container:tar.trailing@data.tar.gz"])
     );
 }
 

@@ -55,9 +55,11 @@ pub enum MirrorError {
     HostNotAllowed { host: String, route: &'static str },
 
     #[error(
-        "upstream redirected to `{found}`, which is not a URL this mirror can resolve or check. A \
+        "upstream redirected to `{found}`, which this mirror did not follow: it is not a URL the \
+         mirror can resolve and check, or it comes after the last hop the mirror takes. A \
          destination we cannot name is a destination we cannot put on an allowlist, so it is \
-         refused rather than followed."
+         refused rather than followed, and never handed on: a build behind an enforced egress \
+         boundary cannot follow a redirect itself."
     )]
     BadRedirect { found: String },
 

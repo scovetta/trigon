@@ -100,6 +100,9 @@ impl MirrorLog {
 
 impl Island {
     /// Create the network and start the mirror on it.
+    ///
+    /// All or nothing: an island whose mirror does not come up is taken down again before the
+    /// error is returned, so a caller holding the error has nothing left to clean up.
     pub async fn create(
         binary: &str,
         run_id: &str,
@@ -107,6 +110,28 @@ impl Island {
         mirror_port: u16,
         guard: Option<&std::path::Path>,
         cache: Option<&(std::path::PathBuf, String)>,
+    ) -> Result<Self, SandboxError> {
+        Self::create_within(
+            binary,
+            run_id,
+            mirror_image,
+            mirror_port,
+            guard,
+            cache,
+            container_start_timeout(),
+        )
+        .await
+    }
+
+    /// [`Island::create`], giving the mirror `timeout` to start listening.
+    async fn create_within(
+        binary: &str,
+        run_id: &str,
+        mirror_image: &str,
+        mirror_port: u16,
+        guard: Option<&std::path::Path>,
+        cache: Option<&(std::path::PathBuf, String)>,
+        timeout: std::time::Duration,
     ) -> Result<Self, SandboxError> {
         let name = format!("trigon-{run_id}");
         let mut island = Island {
@@ -125,10 +150,35 @@ impl Island {
         run_ok(binary, &["network", "create", "--internal", &name]).await?;
         tracing::debug!(network = %name, "created an internal network");
 
+        // **From here on a failure has something to take down.** Returning with the network and
+        // the mirror still standing left them to nobody: the orphan sweep leaves alone every island
+        // whose owner is alive, and a run id ends in this process's pid, so under `serve` or a
+        // sweep every failed start — a wedged mirror still running among them — stayed until the
+        // process exited, and a second run of the same strategy found its network name taken. What
+        // the mirror said is already in the error, so nothing a post-mortem needs goes with them.
+        if let Err(e) = island
+            .start_mirror(mirror_image, mirror_port, guard, cache, timeout)
+            .await
+        {
+            island.teardown().await;
+            return Err(e);
+        }
+        Ok(island)
+    }
+
+    /// Start the mirror on the island's network and wait for it to listen.
+    async fn start_mirror(
+        &mut self,
+        mirror_image: &str,
+        mirror_port: u16,
+        guard: Option<&std::path::Path>,
+        cache: Option<&(std::path::PathBuf, String)>,
+        timeout: std::time::Duration,
+    ) -> Result<(), SandboxError> {
         // Two networks: the internal one so the build can reach it, and the default one so it can
         // reach the registries it proxies. A container with only the internal network has no
         // uplink at all, which is the point of the internal network.
-        let container = format!("{name}-mirror");
+        let container = format!("{}-mirror", self.name);
         let port = mirror_port.to_string();
         let mut args: Vec<String> = [
             "run",
@@ -136,13 +186,14 @@ impl Island {
             "--name",
             &container,
             "--network",
-            &name,
+            &self.name,
             "--network",
             "podman",
             // Deliberately no `--rm`. A mirror that crashes on startup takes its logs with it, and
             // then a crash and a slow start are the same observation: the readiness probe polls a
             // container that no longer exists and reports a timeout, which sent an afternoon
-            // looking at the wrong thing. `destroy` and `prune_orphans` already remove these.
+            // looking at the wrong thing. `create` removes it when it fails to start, once its
+            // logs are in the error, and `destroy` and `prune_orphans` remove it otherwise.
         ]
         .iter()
         .map(|s| s.to_string())
@@ -181,32 +232,35 @@ impl Island {
             ]);
         }
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_ok(binary, &argv)
-        .await
-        .map_err(|e| SandboxError::Failed {
-            phase: "setup".into(),
-            detail: format!(
-                "could not start the mirror container from `{mirror_image}`: {e}. Build one with \
-                 `trigon mirror-image`, or name a different one."
-            ),
-        })?;
-        island.mirror = Some(container.clone());
+        // Named as the island's before it is asked for, not once it is up: a `run` that fails after
+        // creating its container — an OCI runtime that will not start it — leaves it behind, and
+        // the name is this island's whichever way `run` went.
+        self.mirror = Some(container.clone());
+        run_ok(&self.binary, &argv)
+            .await
+            .map_err(|e| SandboxError::Failed {
+                phase: "setup".into(),
+                detail: format!(
+                    "could not start the mirror container from `{mirror_image}`: {e}. Build one \
+                     with `trigon mirror-image`, or name a different one."
+                ),
+            })?;
 
         // Wait for it to bind. `podman run --detach` returns when the container starts, not when
         // the process inside is listening, and the image build begins immediately afterwards: the
         // race shows up as `ECONNREFUSED` from a package manager, which reads like a broken mirror
         // rather than a mirror that was not up yet.
-        island.wait_ready(container_start_timeout()).await?;
+        self.wait_ready(timeout).await?;
 
         // The address the build will use. A name rather than an IP so the strategy stays free of
         // this machine, and podman resolves container names on a shared network.
-        island.mirror_host = Some(format!("{container}:{mirror_port}"));
+        self.mirror_host = Some(format!("{container}:{mirror_port}"));
         tracing::info!(
-            network = %name,
+            network = %self.name,
             mirror = %container,
             "egress island: the build can reach the mirror and nothing else"
         );
-        Ok(island)
+        Ok(())
     }
 
     /// Block until the mirror reports that it is listening, or give up.
@@ -381,6 +435,14 @@ impl Island {
 
     /// Stop the mirror and remove the network.
     pub async fn destroy(self) {
+        self.teardown().await;
+    }
+
+    /// Stop and remove the mirror, if one was asked for, and remove the network.
+    ///
+    /// By reference, because `create` takes down an island that failed to start before it has
+    /// anything to hand back.
+    async fn teardown(&self) {
         if let Some(c) = &self.mirror {
             let _ = run_ok(&self.binary, &["stop", "--time", "2", c]).await;
             // Explicit, now that the container does not remove itself.
@@ -510,8 +572,8 @@ async fn prune_orphans(binary: &str) {
         // found`, on an island nobody had abandoned.
         //
         // A container whose owner is alive is not an orphan whatever state it is in, and its owner
-        // removes it in `destroy`. The `running` check answered a question this sweep was not
-        // asking.
+        // removes it: in `destroy`, or in `create` when it never came up. The `running` check
+        // answered a question this sweep was not asking.
         if !owner_is_gone(name) {
             continue;
         }
@@ -540,6 +602,8 @@ mod tests {
     use super::*;
 
     /// A runtime whose mirror container is up and says nothing, for ever.
+    ///
+    /// It writes each invocation to `calls` beside it, one per line.
     fn silent_runtime(name: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("trigon-island-{name}-{}", std::process::id()));
@@ -548,7 +612,8 @@ mod tests {
         let bin = dir.join("podman");
         std::fs::write(
             &bin,
-            "#!/bin/sh\ncase \"$1\" in inspect) cat \"$(dirname \"$0\")/state\" ;; esac\nexit 0\n",
+            "#!/bin/sh\nD=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$D/calls\"\n\
+             case \"$1\" in inspect) cat \"$D/state\" ;; esac\nexit 0\n",
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -594,6 +659,50 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(bin.parent().unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn a_mirror_that_never_listens_is_taken_down_with_its_network() {
+        let _spawning = crate::store_lock::tests::SPAWNING.read().await;
+        // The one failed start that leaves a container *running*. The sweep never takes an island
+        // whose owner is alive, so a wedged mirror `create` did not take down stayed up, holding
+        // its network, until the process exited.
+        let bin = silent_runtime("wedged");
+        std::fs::write(bin.with_file_name("state"), "running").unwrap();
+        let run_id = format!("wedged-{}", std::process::id());
+        let started = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            Island::create_within(
+                &bin.display().to_string(),
+                &run_id,
+                "localhost/trigon-mirror:latest",
+                8129,
+                None,
+                None,
+                std::time::Duration::ZERO,
+            ),
+        )
+        .await
+        .expect("waited past the deadline");
+        let Err(e) = started else {
+            panic!("a mirror that never listened came up");
+        };
+        assert!(
+            e.to_string().contains("did not start listening within"),
+            "{e}"
+        );
+        let calls = std::fs::read_to_string(bin.with_file_name("calls")).unwrap();
+        let at = |call: String| calls.lines().position(|c| c == call);
+        let (stop, rm, network) = (
+            at(format!("stop --time 2 trigon-{run_id}-mirror")),
+            at(format!("rm --force trigon-{run_id}-mirror")),
+            at(format!("network rm --force trigon-{run_id}")),
+        );
+        assert!(
+            stop.is_some() && stop < rm && rm < network,
+            "a wedged mirror was left standing on its network: {calls}"
+        );
+        let _ = std::fs::remove_dir_all(bin.parent().unwrap());
     }
 
     #[tokio::test]

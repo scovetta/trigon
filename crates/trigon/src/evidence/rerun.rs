@@ -63,7 +63,7 @@ use super::{Dirs, Mode, Ready, ready};
 use crate::OutputFormat;
 use crate::publish::git;
 use crate::publish::release::on_github;
-use crate::verify_record::{self, Done, Reading, Stop, cannot, failed};
+use crate::verify_record::{self, Cause, Done, Reading, Stop, cannot, failed};
 
 /// The outcome floor `verify-attestation` holds an answer to: it takes no `--min`.
 const FLOOR: trigon_core::Match = trigon_core::Match::NormalizedWithCaveats;
@@ -143,7 +143,8 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
                 true => String::new(),
                 false => format!(" ({})", aside.join("; ")),
             }
-        )));
+        ))
+        .because(Cause::NoSource));
     }
     let mut found: Vec<(&Ready, trigon_attest::evidence::Found)> = Vec::new();
     let mut said = Vec::new();
@@ -197,8 +198,13 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
         .map(|(r, s)| format!("`{}` says {}", r.source.name, super::lookup::said_word(s)))
         .collect();
     if found.is_empty() {
-        // Nothing current to check: what the source says instead, and its code.
+        // Nothing current to check: what the source says instead, and its code. A 4 is a record
+        // that was deleted or failed verification, where a source answers so, and otherwise a
+        // source that was refused or cannot answer, which is never called a record that failed.
         let withdrawn = said.contains(&Said::Answered(Answer::Withdrawn));
+        let record_failed = said
+            .iter()
+            .any(|s| matches!(s, Said::Answered(answer) if answer.exit_code(FLOOR) == 4));
         let why = match (a.predicate, withdrawn) {
             (_, true) => {
                 "its only current record is a withdrawal, so there is no verdict to re-derive"
@@ -218,6 +224,13 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
                     .collect::<Vec<_>>()
                     .join("; ")
             ),
+            cause: match (weighed, record_failed, said.contains(&Said::Refused)) {
+                // `failed-verification`, which is a record's.
+                (4, true, _) => None,
+                (4, false, true) => Some(Cause::SourceRefused),
+                (4, false, false) => Some(Cause::SourceUnknown),
+                _ => Some(Cause::NoCurrentRecord),
+            },
         });
     }
 

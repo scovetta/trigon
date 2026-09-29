@@ -5,7 +5,7 @@
 //! else. These are the cases where an implementation drifts.
 
 use serde_json::json;
-use trigon_core::jcs::{CanonError, canonicalize};
+use trigon_core::jcs::{CanonError, MAX_SAFE_INTEGER, canonicalize};
 
 #[test]
 fn object_keys_are_sorted_however_they_arrived() {
@@ -78,6 +78,33 @@ fn integers_keep_their_exact_form() {
     assert_eq!(
         canonicalize(&v).unwrap(),
         r#"{"a":0,"b":-1,"c":9007199254740991}"#
+    );
+}
+
+#[test]
+fn an_integer_a_double_cannot_hold_is_refused_rather_than_written_exactly() {
+    // RFC 8785 writes a number as ECMAScript does, through the nearest double, so another
+    // implementation writes `u64::MAX` as `18446744073709552000` and this one would have written
+    // its own digits: two digests of one document. 2^53 is the first integer a double cannot tell
+    // from its neighbour, on either side of zero.
+    for n in [
+        json!(9007199254740992u64),
+        json!(-9007199254740992i64),
+        json!(u64::MAX),
+        json!(i64::MIN),
+    ] {
+        let e = canonicalize(&json!({ "n": n })).unwrap_err();
+        assert!(matches!(e, CanonError::UnsafeInteger(_)), "{n}: {e:?}");
+        assert!(e.to_string().contains("signed"), "{e}");
+    }
+    // And the last ones it can are still written, exactly.
+    assert_eq!(
+        canonicalize(&json!(MAX_SAFE_INTEGER)).unwrap(),
+        "9007199254740991"
+    );
+    assert_eq!(
+        canonicalize(&json!(-9007199254740991i64)).unwrap(),
+        "-9007199254740991"
     );
 }
 

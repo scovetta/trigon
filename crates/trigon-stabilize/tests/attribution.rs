@@ -248,8 +248,8 @@ fn a_member_inside_a_nested_archive_is_named_outer_bang_inner() {
 
 #[test]
 fn a_body_change_is_attributed_from_what_the_pass_reports() {
-    // Bodies are not fingerprinted — reading them would defeat copy-on-write — so a pass that
-    // rewrote one says so through `Touched::bytes`, and that is what names it.
+    // An entry pass's bodies are not fingerprinted — reading them would defeat copy-on-write — so
+    // a pass that rewrote one says so through `Touched::bytes`, and that is what names it.
     let mut pass = custom(|e| e.body_mut().unwrap().copy_from_slice(b"DATA"));
     pass.touched = Touched::entry_bytes(4);
     let mut a = parsed(tar(&[("a.txt", b"data")]), Format::Tar);
@@ -291,6 +291,189 @@ fn a_pass_that_changes_nothing_is_neither_applied_nor_attributed() {
     let (applied, edits) = apply_traced(&set_of(vec![pass]), &mut a);
     assert!(applied.is_empty(), "{applied:?}");
     assert!(edits.is_empty(), "{edits:?}");
+}
+
+// --- a body a pass rewrote, however it reported the work ----------------------------------------
+
+/// A pass that acts on the archive as a whole: `f` over it, reporting `touched`.
+struct WholeArchive {
+    touched: Touched,
+    f: Box<dyn Fn(&mut Archive) + Send + Sync>,
+}
+
+impl std::fmt::Debug for WholeArchive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WholeArchive")
+    }
+}
+
+impl Stabilizer for WholeArchive {
+    fn id(&self) -> StabilizerId {
+        StabilizerId::new("custom-edit")
+    }
+    fn risk(&self) -> RiskTier {
+        RiskTier::Content
+    }
+    fn applies(&self, cx: &Cx) -> bool {
+        cx.at_depth(0)
+    }
+    fn on_archive(&self, a: &mut Archive, _cx: &Cx) -> Touched {
+        (self.f)(a);
+        self.touched
+    }
+}
+
+fn whole_archive(f: impl Fn(&mut Archive) + Send + Sync + 'static) -> StabilizerSet {
+    StabilizerSet::new(
+        "custom",
+        vec![Arc::new(WholeArchive {
+            touched: Touched::entry(),
+            f: Box::new(f),
+        }) as Arc<dyn Stabilizer>],
+    )
+}
+
+/// One builtin profile, narrowed to one of its passes.
+fn only(profile_id: &str, pass: &str) -> StabilizerSet {
+    let set = profile(profile_id)
+        .unwrap()
+        .filtered(&[pass.to_string()], &[]);
+    assert_eq!(set.members.len(), 1, "no `{pass}` in `{profile_id}`");
+    set
+}
+
+fn by(path: &str, field: &str, pass: &str) -> FieldEdit {
+    FieldEdit {
+        path: path.into(),
+        field: field.into(),
+        pass: StabilizerId::new(pass),
+    }
+}
+
+#[test]
+fn a_body_an_archive_pass_rewrites_is_attributed_to_it() {
+    // An archive pass reports what it did as a whole, and no count of its says which member's body
+    // it rewrote. `wheel-record-v2` regenerates RECORD there and `nupkg-packaging-names` rewrites
+    // `_rels/.rels`: without the body compared across the pass, a member either one reconciled read
+    // as a difference nothing addressed.
+    let record = b"pkg/__init__.py,sha256=stale,1\npkg-1.0.dist-info/RECORD,,\n";
+    let mut a = parsed(
+        zip(&[
+            ("pkg/__init__.py", b"x = 1\n"),
+            ("pkg-1.0.dist-info/RECORD", record),
+        ]),
+        Format::Zip,
+    );
+    let (_, edits) = apply_traced(&only("wheel", "wheel-record-v2"), &mut a);
+    assert!(
+        edits.contains(&by("pkg-1.0.dist-info/RECORD", "body", "wheel-record-v2")),
+        "{edits:?}"
+    );
+
+    let psmdcp = "package/services/metadata/core-properties/55d4e0b4.psmdcp";
+    let rels = |target: &str, id: &str| {
+        format!("<Relationships><Relationship Target=\"/{target}\" Id=\"{id}\" /></Relationships>")
+    };
+    let mut a = parsed(
+        zip(&[
+            ("_rels/.rels", rels(psmdcp, "Rabc").as_bytes()),
+            (psmdcp, b"<coreProperties/>"),
+        ]),
+        Format::Zip,
+    );
+    let (_, edits) = apply_traced(&only("nupkg", "nupkg-packaging-names"), &mut a);
+    assert!(
+        edits.contains(&by("_rels/.rels", "body", "nupkg-packaging-names")),
+        "{edits:?}"
+    );
+
+    // The same pass renaming the part a relationships file already names canonically reads that
+    // file and leaves it as it was: no body edit, though the pass did work.
+    let canonical = "package/services/metadata/core-properties/core.psmdcp";
+    let mut a = parsed(
+        zip(&[
+            ("_rels/.rels", rels(canonical, "R0").as_bytes()),
+            (psmdcp, b"<coreProperties/>"),
+        ]),
+        Format::Zip,
+    );
+    let (applied, edits) = apply_traced(&only("nupkg", "nupkg-packaging-names"), &mut a);
+    assert_eq!(applied.len(), 1, "the rename is work: {applied:?}");
+    assert!(!edits.iter().any(|e| e.path == "_rels/.rels"), "{edits:?}");
+}
+
+#[test]
+fn a_profile_whose_edits_changed_no_longer_has_the_digest_its_reports_were_published_under() {
+    // A published comparison report carries its field edits, and a verifier re-deriving a record
+    // under the set digest it names holds the report to the edits re-deriving gives. Each profile
+    // below now names a body an archive pass rewrote, which its reports did not, so under its old
+    // digest an honest report would read as disagreeing. A new digest sends such a record to its
+    // archived set instead, where the report is unchecked rather than refuted. These are the
+    // digests the two profiles had before.
+    for (id, published) in [
+        (
+            "wheel",
+            "58632c3c627d30f9ddd01c3b2f8ae292e89af5e2b6f0893fc4cfba4e5a7d425d",
+        ),
+        (
+            "nupkg",
+            "266ab529cd6473d864c98e6c7816a37d789e7b900e8abadfb8f0eeb65b82e717",
+        ),
+    ] {
+        assert_ne!(
+            profile(id).unwrap().digest().to_hex(),
+            published,
+            "`{id}` would re-derive old reports to edits they do not carry"
+        );
+    }
+}
+
+#[test]
+fn a_body_is_attributed_by_what_changed_not_by_how_the_pass_reached_it() {
+    // A tar member's body is a window onto the source until a pass asks for it mutably. Asked for
+    // and left alone, it is the same bytes; changed in place, or promoted and changed, it is not.
+    let body = |a: &mut Archive| a.entries[0].body_mut().unwrap().len();
+    let mut a = parsed(tar(&[("a.txt", b"data")]), Format::Tar);
+    let (applied, edits) = apply_traced(&whole_archive(move |a| _ = body(a)), &mut a);
+    assert_eq!(applied.len(), 1);
+    assert!(
+        edits.is_empty(),
+        "promotion alone is not a change: {edits:?}"
+    );
+
+    let mut a = parsed(tar(&[("a.txt", b"data")]), Format::Tar);
+    let upper = |a: &mut Archive| a.entries[0].body_mut().unwrap().make_ascii_uppercase();
+    let (_, edits) = apply_traced(&whole_archive(upper), &mut a);
+    assert_eq!(edits, [edit("a.txt", "body")]);
+
+    // A zip member is already in memory, so no promotion shows it: the change itself has to, and
+    // an in-place rewrite of the same length moves no pointer and no size.
+    let mut a = parsed(zip(&[("a.txt", b"data"), ("b.txt", b"same")]), Format::Zip);
+    let (_, edits) = apply_traced(&whole_archive(upper), &mut a);
+    assert_eq!(edits, [edit("a.txt", "body")]);
+}
+
+#[test]
+fn a_documentation_file_sorted_into_order_is_a_body_the_pass_changed() {
+    // The pass rewrote the file and reported no bytes, so `applied` said it had changed no body,
+    // and no edit named the member it reconciled.
+    let unsorted =
+        "<doc><members>\n<member name=\"T:B\"/>\n<member name=\"T:A\"/>\n</members></doc>\n";
+    let mut a = parsed(
+        zip(&[("lib/net8.0/Demo.xml", unsorted.as_bytes())]),
+        Format::Zip,
+    );
+    let pass = "nupkg-doc-member-order-v2";
+    let (applied, edits) = apply_traced(&only("nupkg", pass), &mut a);
+    assert_eq!(edits, [by("lib/net8.0/Demo.xml", "body", pass)]);
+    let [x] = applied.as_slice() else {
+        panic!("{applied:?}")
+    };
+    assert_eq!(
+        (x.entries_touched, x.bytes_changed),
+        (1, unsorted.len() as u64),
+        "the bytes it wrote"
+    );
 }
 
 // --- who wrote a pass ----------------------------------------------------------------------------
@@ -353,7 +536,7 @@ fn a_sets_ids_run_default_then_patch_then_finalize() {
     // is regenerated, so the manifest describes the wheel the patch left.
     assert_eq!(
         ids[ids.len() - 2..],
-        ["a-custom-patch", "wheel-record"],
+        ["a-custom-patch", "wheel-record-v2"],
         "{ids:?}"
     );
     let defaults = &ids[..ids.len() - 2];

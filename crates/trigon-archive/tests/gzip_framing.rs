@@ -3,10 +3,14 @@
 //! The container is framed by hand (`src/gzip.rs`) because stabilization has to control the
 //! header's MTIME, OS and XFL bytes. That makes every optional field — FEXTRA, FNAME, FCOMMENT,
 //! FHCRC — ours to read and to write, and a header is bytes the publisher chose.
+//!
+//! So is the file around it. RFC 1952 makes a gzip file a series of members, and what the publisher
+//! put after the first one — another member, or bytes that are none — is read, checked and kept, as
+//! gunzip reads it, rather than skipped.
 
 use trigon_archive::gzip::{self, OS_UNKNOWN, xfl_for};
-use trigon_archive::{ArchiveError, GzipHeader, Limits, Trailer, parse, serialize};
-use trigon_core::Format;
+use trigon_archive::{ArchiveError, Body, GzipHeader, Limits, Trailer, parse, serialize};
+use trigon_core::{Format, NoteCode};
 
 const FHCRC: u8 = 1 << 1;
 const FEXTRA: u8 = 1 << 2;
@@ -17,6 +21,12 @@ fn framed(h: &GzipHeader, payload: &[u8]) -> Vec<u8> {
     let mut v = Vec::new();
     gzip::write(h, payload, flate2::Compression::none(), &mut v).unwrap();
     v
+}
+
+/// [`gzip::read`] with nothing to limit it, for the tests about something other than limits.
+fn gunzip(bytes: &[u8]) -> Result<(GzipHeader, Vec<u8>), ArchiveError> {
+    let mut members = u32::MAX;
+    gzip::read(bytes, u64::MAX, &mut members)
 }
 
 fn malformed(err: ArchiveError) -> String {
@@ -38,6 +48,7 @@ fn every_optional_header_field_round_trips_in_the_order_the_format_fixes() {
         extra: Some(vec![b'A', b'P', 2, 0, 0xde, 0xad]),
         os: 3,
         xfl: 2,
+        trailing: Vec::new(),
     };
     let bytes = framed(&h, b"payload");
 
@@ -48,7 +59,7 @@ fn every_optional_header_field_round_trips_in_the_order_the_format_fixes() {
     expected.extend_from_slice(b"pkg-1.0.tar\0built by hand\0");
     assert_eq!(&bytes[10..10 + expected.len()], &expected[..]);
 
-    let (back, payload) = gzip::read(&bytes, u64::MAX).unwrap();
+    let (back, payload) = gunzip(&bytes).unwrap();
     assert_eq!(back, h);
     assert_eq!(payload, b"payload");
 }
@@ -65,7 +76,7 @@ fn a_header_crc_is_stepped_over_to_reach_the_payload() {
     with_crc.extend_from_slice(&crc16.to_le_bytes());
     with_crc.extend_from_slice(&plain[10..]);
 
-    let (h, payload) = gzip::read(&with_crc, u64::MAX).unwrap();
+    let (h, payload) = gunzip(&with_crc).unwrap();
     assert_eq!(payload, b"after the crc16");
     assert_eq!(h, GzipHeader::default());
 
@@ -83,13 +94,13 @@ fn a_header_crc_is_stepped_over_to_reach_the_payload() {
 fn a_name_with_no_terminator_is_malformed_rather_than_read_to_the_end() {
     let mut bytes = vec![0x1f, 0x8b, 8, FNAME, 0, 0, 0, 0, 0, OS_UNKNOWN];
     bytes.extend_from_slice(b"no-nul-anywhere-in-here");
-    let detail = malformed(gzip::read(&bytes, u64::MAX).unwrap_err());
+    let detail = malformed(gunzip(&bytes).unwrap_err());
     assert_eq!(detail, "unterminated string");
 
     // The comment is read by the same rule.
     let mut bytes = vec![0x1f, 0x8b, 8, FCOMMENT, 0, 0, 0, 0, 0, OS_UNKNOWN];
     bytes.extend_from_slice(b"a comment that never ends");
-    let detail = malformed(gzip::read(&bytes, u64::MAX).unwrap_err());
+    let detail = malformed(gunzip(&bytes).unwrap_err());
     assert_eq!(detail, "unterminated string");
 }
 
@@ -98,7 +109,7 @@ fn an_extra_field_longer_than_the_member_is_malformed() {
     let mut bytes = vec![0x1f, 0x8b, 8, FEXTRA, 0, 0, 0, 0, 0, OS_UNKNOWN];
     bytes.extend_from_slice(&0xffffu16.to_le_bytes());
     bytes.extend_from_slice(&[0u8; 16]);
-    let detail = malformed(gzip::read(&bytes, u64::MAX).unwrap_err());
+    let detail = malformed(gunzip(&bytes).unwrap_err());
     assert_eq!(detail, "truncated FEXTRA body");
 }
 
@@ -107,7 +118,7 @@ fn fields_that_run_into_the_trailer_leave_no_payload_and_say_so() {
     // A name that ends inside the eight trailer bytes: nothing is left to inflate.
     let mut bytes = vec![0x1f, 0x8b, 8, FNAME, 0, 0, 0, 0, 0, OS_UNKNOWN];
     bytes.extend_from_slice(b"abcdefghi\0");
-    let detail = malformed(gzip::read(&bytes, u64::MAX).unwrap_err());
+    let detail = malformed(gunzip(&bytes).unwrap_err());
     assert_eq!(detail, "truncated payload");
 }
 
@@ -155,11 +166,11 @@ fn a_stabilized_reserialization_reports_the_xfl_of_stored_output() {
     assert!(matches!(&parsed.archive.trailer, Trailer::Gzip(h) if h.xfl == 2));
 
     let stabilized = serialize(&parsed.archive, true).unwrap();
-    assert_eq!(gzip::read(&stabilized, u64::MAX).unwrap().0.xfl, 0);
+    assert_eq!(gunzip(&stabilized).unwrap().0.xfl, 0);
 
     // Not stabilizing: the header is written back as it was found.
     let kept = serialize(&parsed.archive, false).unwrap();
-    let (h, payload) = gzip::read(&kept, u64::MAX).unwrap();
+    let (h, payload) = gunzip(&kept).unwrap();
     assert_eq!(h.xfl, 2);
     let back = parse(payload, Format::Tar, &Limits::default(), &mut Vec::new()).unwrap();
     let e = &back.archive.entries[0];
@@ -188,7 +199,7 @@ fn a_bare_gzip_member_reserializes_to_the_same_payload_and_name_either_way() {
 
     for store_only in [true, false] {
         let out = serialize(&parsed.archive, store_only).unwrap();
-        let (back, payload) = gzip::read(&out, u64::MAX).unwrap();
+        let (back, payload) = gunzip(&out).unwrap();
         assert_eq!(payload, text, "store_only {store_only}");
         assert_eq!(back.name, h.name, "store_only {store_only}");
     }
@@ -215,9 +226,237 @@ fn a_tar_reserialized_as_tar_gz_without_a_gzip_header_leaks_no_name_or_time() {
     assert_eq!(a.trailer, Trailer::Tar);
     a.format = Format::TarGz;
 
-    let (h, _) = gzip::read(&serialize(&a, true).unwrap(), u64::MAX).unwrap();
+    let (h, _) = gunzip(&serialize(&a, true).unwrap()).unwrap();
     assert_eq!(h.mtime, None);
     assert_eq!(h.name, None);
     assert_eq!(h.comment, None);
     assert_eq!(h.extra, None);
+}
+
+// --- members, and what comes after them -----------------------------------------------------------
+
+/// `member` with the CRC-32 its trailer stores replaced by `crc`.
+fn with_crc(mut member: Vec<u8>, crc: u32) -> Vec<u8> {
+    let n = member.len();
+    member[n - 8..n - 4].copy_from_slice(&crc.to_le_bytes());
+    member
+}
+
+#[test]
+fn a_file_of_several_members_reads_as_their_contents_in_order() {
+    // RFC 1952 §2.2: a gzip file is a series of members, and gunzip, Node's zlib and Python's gzip
+    // all decompress every one of them. Reading the first and stopping digested a file that none of
+    // them sees, and the next member was the crc32 mismatch this reported against a legal file.
+    let first = GzipHeader {
+        name: Some(b"first".to_vec()),
+        ..GzipHeader::default()
+    };
+    let second = GzipHeader {
+        name: Some(b"second".to_vec()),
+        os: 3,
+        ..GzipHeader::default()
+    };
+    let bytes = [framed(&first, b"hello P"), framed(&second, b"hidden Q")].concat();
+
+    let (h, payload) = gunzip(&bytes).unwrap();
+    assert_eq!(payload, b"hello Phidden Q");
+    assert_eq!(
+        h, first,
+        "the header is the first member's, which every reader reports"
+    );
+
+    // The fixture is honest: a multi-member reader from elsewhere reads the same bytes.
+    let mut theirs = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::MultiGzDecoder::new(&bytes[..]),
+        &mut theirs,
+    )
+    .unwrap();
+    assert_eq!(theirs, payload);
+}
+
+#[test]
+fn a_second_member_whose_crc_was_forged_to_the_firsts_is_refused_rather_than_skipped() {
+    // The trailer was taken to be the file's last eight bytes, so a second member whose stored CRC
+    // was set to the first member's content made the whole file read as its first member alone.
+    // An npm tarball or sdist framed that way installs both, and stabilized to the same digest as
+    // an honest rebuild of the first: a false match.
+    let p = framed(&GzipHeader::default(), b"hello P");
+    let q = with_crc(
+        framed(&GzipHeader::default(), b"hidden Q"),
+        crc32fast::hash(b"hello P"),
+    );
+    let detail = malformed(gunzip(&[p, q].concat()).unwrap_err());
+    assert_eq!(detail, "crc32 mismatch: stored ed5a68a9, computed 408c554b");
+}
+
+#[test]
+fn bytes_between_the_deflate_stream_and_its_trailer_are_not_stepped_over() {
+    // A member's trailer is the eight bytes after its deflate stream ends, wherever that is.
+    let member = framed(&GzipHeader::default(), b"hello P");
+    let n = member.len();
+    let spliced = [&member[..n - 8], b"8 junk!!", &member[n - 8..]].concat();
+    let detail = malformed(gunzip(&spliced).unwrap_err());
+    assert!(
+        detail.starts_with("crc32 mismatch: stored 756a2038"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn an_isize_that_disagrees_with_what_inflated_is_refused() {
+    // ISIZE is the member's length modulo 2^32, and a member is its content only if both halves of
+    // its trailer say so.
+    let mut member = framed(&GzipHeader::default(), b"hello P");
+    let n = member.len();
+    member[n - 1] ^= 0x80;
+    let detail = malformed(gunzip(&member).unwrap_err());
+    assert_eq!(detail, "isize mismatch: stored 2147483655, inflated 7");
+}
+
+#[test]
+fn every_member_draws_on_the_one_budget() {
+    // The budget bounds the file, not each member: two members of 600 bytes are 1200.
+    let member = framed(&GzipHeader::default(), &[0u8; 600]);
+    let bytes = [member.clone(), member].concat();
+    assert_eq!(gzip::read(&bytes, 1200, &mut 2).unwrap().1.len(), 1200);
+    match gzip::read(&bytes, 1199, &mut 2) {
+        Err(ArchiveError::LimitExceeded {
+            limit,
+            actual,
+            allowed,
+        }) => assert_eq!(
+            (limit, actual, allowed),
+            ("total_expanded_bytes", 1200, 1199)
+        ),
+        other => panic!("expected the ceiling, got {other:?}"),
+    }
+}
+
+#[test]
+fn members_are_counted_and_the_one_past_the_count_is_refused() {
+    // An empty member adds nothing to the output and still costs an inflate, so the byte budget
+    // never runs out and five million of them in a nested `.gz` took 12.9 s to parse. The count is
+    // what bounds them: taken down one per member read, and the member past it refused.
+    let empty = framed(&GzipHeader::default(), b"");
+    let bytes = empty.repeat(4);
+
+    let mut left = 4;
+    assert_eq!(
+        gzip::read(&bytes, u64::MAX, &mut left).unwrap().1,
+        b"",
+        "four members, four allowed"
+    );
+    assert_eq!(left, 0, "every one of them taken from the count");
+
+    let mut left = 3;
+    match gzip::read(&bytes, u64::MAX, &mut left) {
+        Err(ArchiveError::LimitExceeded {
+            limit,
+            actual,
+            allowed,
+        }) => assert_eq!((limit, actual, allowed), ("gzip_members", 4, 3)),
+        other => panic!("expected the member count, got {other:?}"),
+    }
+}
+
+#[test]
+fn one_artifact_shares_one_member_count_across_every_gz_it_holds() {
+    // A count per read would let the same members be spread over many `.gz` files, each under it.
+    // Two nested files of three members each read under six; under five, the second is the one
+    // that runs out, and it stays in the archive as the bytes it arrived as, with a note.
+    let three = [&b"x"[..], b"y", b"z"]
+        .map(|c| framed(&GzipHeader::default(), c))
+        .concat();
+    let mut b = ::tar::Builder::new(Vec::new());
+    for name in ["a.gz", "b.gz"] {
+        let mut h = ::tar::Header::new_ustar();
+        h.set_size(three.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, name, &three[..]).unwrap();
+    }
+    let outer = b.into_inner().unwrap();
+
+    for (max_entries, nested, refused) in [
+        (6, [true, true], None),
+        (5, [true, false], Some("gzip_members limit (3 > 2)")),
+    ] {
+        let limits = Limits {
+            max_entries,
+            ..Limits::default()
+        };
+        let mut notes = Vec::new();
+        let a = parse(outer.clone(), Format::Tar, &limits, &mut notes)
+            .unwrap()
+            .archive;
+        let got = a
+            .entries
+            .iter()
+            .map(|e| matches!(e.body, Body::Nested { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(got, nested, "max_entries {max_entries}");
+        let failed = notes
+            .iter()
+            .filter(|n| n.code == NoteCode::NestedParseFailed)
+            .map(|n| n.detail.as_str())
+            .collect::<Vec<_>>();
+        match refused {
+            None => assert!(failed.is_empty(), "{failed:?}"),
+            Some(why) => assert!(matches!(failed[..], [d] if d.contains(why)), "{failed:?}"),
+        }
+    }
+}
+
+#[test]
+fn bytes_after_the_last_member_that_begin_no_other_are_kept_and_written_back() {
+    // gunzip warns about trailing garbage and carries on; a reader that dropped it would make two
+    // files that differ only there one digest. So it is kept: the writer puts it back where it was,
+    // and the comparison names it as `container:gzip.trailing`.
+    let h = GzipHeader {
+        name: Some(b"a".to_vec()),
+        ..GzipHeader::default()
+    };
+    for tail in [&b"trailing garbage"[..], &[0u8; 512][..], &[0x1f][..]] {
+        let bytes = [framed(&h, b"payload"), tail.to_vec()].concat();
+        let (back, payload) = gunzip(&bytes).unwrap();
+        assert_eq!(payload, b"payload");
+        assert_eq!(back.trailing, tail, "kept, not part of the content");
+        assert_eq!(back.name, h.name, "and the header is the member's");
+        assert_eq!(framed(&back, &payload), bytes, "parse(write(a)) == a");
+    }
+}
+
+#[test]
+fn trailing_bytes_that_would_read_back_as_a_member_are_refused_by_the_writer() {
+    // The reader never produces them, but a model can hold them; written out, they would come back
+    // as a member or as a malformed file, and never as what they were.
+    let h = GzipHeader {
+        trailing: vec![0x1f, 0x8b, 8, 0],
+        ..GzipHeader::default()
+    };
+    let mut out = Vec::new();
+    match gzip::write(&h, b"x", flate2::Compression::none(), &mut out) {
+        Err(ArchiveError::Unsupported(what)) => assert!(what.contains("magic"), "{what}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(out.is_empty(), "nothing written before the refusal");
+}
+
+#[test]
+fn a_remainder_that_begins_with_the_magic_is_a_member_and_has_to_be_a_whole_one() {
+    // gunzip's rule, and the one that decides what counts as trailing: after a member, the magic
+    // starts another and anything else is not a member. A cut-off second member is a malformed
+    // file, not a first member with some bytes after it.
+    let one = framed(&GzipHeader::default(), b"hello P");
+    let two = framed(&GzipHeader::default(), b"hidden Q");
+    for (cut, why) in [
+        (2, "not a gzip member"),
+        (20, "inflate: incomplete deflate stream"),
+        (two.len() - 1, "truncated trailer"),
+    ] {
+        let bytes = [&one[..], &two[..cut]].concat();
+        let detail = malformed(gunzip(&bytes).unwrap_err());
+        assert_eq!(detail, why, "cut at {cut}");
+    }
 }

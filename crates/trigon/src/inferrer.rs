@@ -361,6 +361,12 @@ impl Provider for Counting {
         self.inner.reasoning()
     }
 
+    /// The wrapped provider's, not the trait's: `propose` starts its depth walk here, and every
+    /// provider a run builds sits inside one of these.
+    fn default_effort(&self) -> trigon_ai::Effort {
+        self.inner.default_effort()
+    }
+
     fn complete(
         &self,
         req: &trigon_ai::Request,
@@ -927,6 +933,36 @@ mod tests {
             1,
             "Counting stopped counting once Recorder sat inside it"
         );
+    }
+
+    /// A provider that states its own depth, where the trait's default would say `medium`.
+    struct Deep;
+
+    impl Provider for Deep {
+        fn id(&self) -> &str {
+            "deep"
+        }
+        fn caps(&self) -> trigon_ai::ModelCaps {
+            Replay::once("").caps()
+        }
+        fn complete(
+            &self,
+            _: &trigon_ai::Request,
+        ) -> Result<trigon_ai::Response, trigon_ai::LlmError> {
+            Err(trigon_ai::LlmError::NoModel("deep".into()))
+        }
+        fn default_effort(&self) -> trigon_ai::Effort {
+            trigon_ai::Effort::High
+        }
+    }
+
+    #[test]
+    fn the_provider_a_run_uses_starts_at_the_depth_its_provider_states() {
+        // `propose` starts its depth walk at `default_effort`, read through everything
+        // `Configured` wraps a provider in. `Counting` forwarded `reasoning` and not this, so the
+        // walk would start at the trait's `medium` whatever the provider had said.
+        let cfg = Configured::live(Box::new(Deep), "m".into());
+        assert_eq!(cfg.provider.default_effort(), trigon_ai::Effort::High);
     }
 
     #[tokio::test]

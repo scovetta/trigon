@@ -254,6 +254,25 @@ async fn a_missing_npm_version_names_the_versions_the_packument_has() {
 }
 
 #[tokio::test]
+async fn the_npm_versions_called_recent_are_the_highest_numbers_not_the_last_strings() {
+    // A packument's keys sort as strings, which puts `1.10.0` before `1.9.0`, and the message once
+    // called `1.9.0` the newest and left the real one out.
+    let packument = serde_json::json!({
+        "versions": { "1.9.0": {}, "1.10.0": {}, "1.2.0": {} },
+    });
+    let e = npm(
+        vec![("/widget".into(), vec![json(packument)])],
+        "pkg:npm/widget@1.0.0",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        e.to_string().contains("Recent: 1.10.0, 1.9.0, 1.2.0"),
+        "{e}"
+    );
+}
+
+#[tokio::test]
 async fn a_package_npm_has_never_heard_of_is_no_such_package() {
     // Both the version and the package 404. That is a different fact from a missing version, and
     // the message has to say which one it is.
@@ -477,6 +496,24 @@ async fn a_missing_pypi_release_names_the_releases_the_project_has() {
     .await
     .unwrap_err();
     assert!(matches!(e, RegistryError::NoSuchPackage { .. }), "{e}");
+}
+
+#[tokio::test]
+async fn the_pypi_releases_called_recent_are_the_highest_numbers_not_the_last_strings() {
+    // The same string-order trap as npm's, with a release candidate that belongs below its release.
+    let project = serde_json::json!({
+        "releases": { "1.9.0": [], "1.10.0rc1": [], "1.10.0": [] },
+    });
+    let e = pypi(
+        vec![("/pypi/widget/json".into(), vec![json(project)])],
+        "pkg:pypi/widget@9.9.9",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        e.to_string().contains("Recent: 1.10.0, 1.10.0rc1, 1.9.0"),
+        "{e}"
+    );
 }
 
 #[tokio::test]
@@ -741,8 +778,7 @@ async fn a_missing_crate_version_names_what_crates_io_lists() {
     .await
     .unwrap_err();
     // Every version the listing names, and nothing for an entry that names none. (Which of them
-    // the message calls recent depends on the order crates.io lists them in, which is not
-    // asserted here.)
+    // the message calls recent is the next test's question.)
     let RegistryError::NoSuchVersion { available, .. } = &e else {
         panic!("not a missing version: {e}");
     };
@@ -760,6 +796,30 @@ async fn a_missing_crate_version_names_what_crates_io_lists() {
         "{e}"
     );
     assert!(!e.to_string().contains("Recent"), "{e}");
+}
+
+#[tokio::test]
+async fn the_crate_versions_called_recent_are_the_newest_although_crates_io_lists_them_first() {
+    // crates.io lists newest first. Read as oldest first, the message called the oldest recent.
+    let listing = serde_json::json!({
+        "versions": [
+            { "num": "1.1.0" },
+            { "num": "1.1.0-rc.1" },
+            { "num": "1.0.1" },
+            { "num": "0.9.0" },
+        ],
+    });
+    let e = cargo(
+        vec![("/api/v1/crates/widget".into(), vec![json(listing)])],
+        "pkg:cargo/widget@1.0.0",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("Recent: 1.1.0, 1.1.0-rc.1, 1.0.1, 0.9.0"),
+        "{e}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 use trigon_core::Digest;
 use trigon_engine::{Config, Done, Engine, Failed, Progress, Work};
@@ -688,7 +688,7 @@ async fn a_worker_leases_only_its_own_kinds() {
     assert_eq!(work.ran.load(Ordering::SeqCst), 0);
 }
 
-/// A worker that sleeps in `Work::run` keeps its lease, because the loop renews it.
+/// A worker that is silent in `Work::run` keeps its lease, because the loop renews it.
 ///
 /// **The defect this asserts against.** `Progress::phase` renews the lease, so the lease lives
 /// exactly as long as a worker keeps calling it. The real builder calls it once, at the top, and
@@ -700,15 +700,15 @@ async fn a_worker_leases_only_its_own_kinds() {
 /// The loop already knew: it logged `"lease expired before this finished; the work was done
 /// twice"` and carried on. The condition was detected, named, and left in place.
 ///
-/// Here the work sleeps for well over a lease without saying anything, which is exactly what a
-/// build does. It must still be able to record.
-struct Sleepy {
-    for_ms: u64,
+/// Here the work runs for well over a lease without saying anything, which is exactly what a
+/// build does, and finishes only when the test says so. It must still be able to record.
+struct Silent {
+    finish: tokio::sync::Notify,
     heartbeats_seen: AtomicUsize,
 }
 
 #[async_trait]
-impl Work for Sleepy {
+impl Work for Silent {
     fn kinds(&self) -> Vec<String> {
         vec!["rebuild".into()]
     }
@@ -719,7 +719,7 @@ impl Work for Sleepy {
 
     async fn run(&self, job: &Job, _progress: &Progress) -> Result<Done, Failed> {
         // Deliberately silent. A `Work` that never calls `phase` is the case that broke.
-        tokio::time::sleep(Duration::from_millis(self.for_ms)).await;
+        self.finish.notified().await;
         self.heartbeats_seen.fetch_add(1, Ordering::SeqCst);
         Ok(Done {
             record: record(
@@ -733,15 +733,62 @@ impl Work for Sleepy {
     }
 }
 
+/// Wait until `worker` holds a lease on the queue that runs to `until`: taken, or renewed, at the
+/// moment the test last set the clock to.
+///
+/// Polled, because the renewal is the loop's own and nothing outside it is told. The bound is
+/// there only so a loop that never renews fails the test rather than hanging it; on the way to a
+/// pass it is never reached, however slowly the machine runs.
+async fn renewed_to(q: &Queue, worker: &str, until: i64) {
+    let wait = async {
+        loop {
+            let held = q.workers().await.expect("workers");
+            if held
+                .iter()
+                .any(|(w, _, soonest)| w == worker && *soonest == until)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), wait)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the loop never renewed `{worker}`'s lease to {until}: a job longer than one \
+                 lease goes back on the queue while it is still being built"
+            )
+        });
+}
+
+/// **On the queue's clock, which only the test moves.** This ran on the wall clock — a 300 ms
+/// lease renewed every 100 ms, a 900 ms job, a thief at 500 ms — and failed on a loaded machine:
+/// a renewal the scheduler delayed past the lease let the thief lease the job, and the queue was
+/// right to let it. Here the clock moves by less than a lease at a time and the test waits for the
+/// loop to renew at each moment, so by the time the thief asks, three leases after the job was
+/// taken, the lease has lapsed only if the loop did not renew it.
+///
+/// **What this cannot see is how often.** It waits for each renewal however long that takes, so a
+/// loop renewing once a minute passes it; that a renewal comes round well inside the lease is the
+/// unit test `a_lease_is_renewed_well_inside_itself` beside `renew_every`, and the two together
+/// assert what the wall-clock version did.
 #[tokio::test]
 async fn a_second_worker_cannot_take_a_job_that_is_still_being_worked_on() {
+    const LEASE_MS: i64 = 300;
     let dir = tempfile::tempdir().unwrap();
-    let q = queue(&dir, "longjob").await;
+    let now = Arc::new(AtomicI64::new(1_800_000_000_000));
+    let q = {
+        let now = now.clone();
+        queue(&dir, "longjob")
+            .await
+            .with_clock(move || now.load(Ordering::SeqCst))
+    };
     let cfg = Config {
         worker: "slow".into(),
-        // The renewal interval is a third of this, so a 900 ms job spans three leases and about
-        // nine renewals. The same ratio as the shipped 300 s lease against an 1800 s build.
-        lease: Duration::from_millis(300),
+        // The loop renews every third of this on its own timer, which the queue's clock does not
+        // govern: a renewal takes a tenth of a second to come round whatever the clock says.
+        lease: Duration::from_millis(LEASE_MS as u64),
         ..Default::default()
     };
     let e = engine(q.clone(), cfg);
@@ -750,17 +797,32 @@ async fn a_second_worker_cannot_take_a_job_that_is_still_being_worked_on() {
         .await
         .unwrap();
 
-    let work = Arc::new(Sleepy {
-        for_ms: 900,
+    let work = Arc::new(Silent {
+        finish: tokio::sync::Notify::new(),
         heartbeats_seen: AtomicUsize::new(0),
     });
     let w = work.clone();
     let running = tokio::spawn(async move { e.tick(w.as_ref()).await });
 
-    // Well past one lease, and still inside the job.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Taken, and marked `leased` at the moment the job was taken.
+    let taken = now.load(Ordering::SeqCst);
+    renewed_to(&q, "slow", taken + LEASE_MS).await;
+
+    // Two thirds of a lease at a time, five times: well past three leases, and still inside the
+    // job. Without a renewal at each moment, the lease would lapse by the second.
+    for _ in 0..5 {
+        let at = now.fetch_add(LEASE_MS * 2 / 3, Ordering::SeqCst) + LEASE_MS * 2 / 3;
+        renewed_to(&q, "slow", at + LEASE_MS).await;
+    }
+    assert!(now.load(Ordering::SeqCst) - taken > 3 * LEASE_MS);
+
     let stolen = q
-        .lease("thief", &["rebuild"], 5, Duration::from_millis(300))
+        .lease(
+            "thief",
+            &["rebuild"],
+            5,
+            Duration::from_millis(LEASE_MS as u64),
+        )
         .await
         .expect("lease");
     assert!(
@@ -770,6 +832,7 @@ async fn a_second_worker_cannot_take_a_job_that_is_still_being_worked_on() {
         stolen.iter().map(|j| j.id).collect::<Vec<_>>()
     );
 
+    work.finish.notify_one();
     running.await.expect("join").expect("tick");
     assert_eq!(work.heartbeats_seen.load(Ordering::SeqCst), 1);
 
@@ -1075,6 +1138,106 @@ async fn a_worker_whose_job_was_taken_while_it_ran_records_nothing_and_asks_noth
         !phases.contains(&"recorded".to_string()),
         "a worker said it recorded an answer the queue refused: {phases:?}"
     );
+}
+
+/// And one whose job was taken while it ran, and whose build then failed, says nothing either.
+///
+/// `fail` gives nothing back for a worker that no longer holds the lease, and the loop wrote its
+/// "retrying" or "dead" regardless — so a reader following the job saw it end while another worker
+/// was still on it. `/v1/jobs/{id}/events` shows phase names to anybody.
+#[tokio::test]
+async fn a_worker_whose_job_was_taken_while_it_ran_says_nothing_when_it_fails() {
+    /// `Displaced` above, with a build that fails.
+    struct DisplacedThenFails {
+        q: Queue,
+        retryable: bool,
+    }
+
+    #[async_trait]
+    impl Work for DisplacedThenFails {
+        fn kinds(&self) -> Vec<String> {
+            vec!["rebuild".into()]
+        }
+
+        fn unconfirmable(&self, _: &RunRecord) -> Option<String> {
+            None
+        }
+
+        async fn run(&self, job: &Job, _: &Progress) -> Result<Done, Failed> {
+            self.q
+                .fail(job.id, "slow", "the lease lapsed", Some(Duration::ZERO))
+                .await
+                .unwrap();
+            let taken = self
+                .q
+                .lease("fast", &["rebuild"], 1, Duration::from_secs(60))
+                .await
+                .unwrap();
+            assert_eq!(
+                taken.len(),
+                1,
+                "the fixture did not hand the job to another worker"
+            );
+            Err(Failed {
+                why: "the build failed".into(),
+                retryable: self.retryable,
+            })
+        }
+    }
+
+    // Both ways out of a failure: another attempt, and none.
+    for retryable in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let q = queue(&dir, "displaced-fails").await;
+        let e = engine(
+            q.clone(),
+            Config {
+                worker: "slow".into(),
+                ..Default::default()
+            },
+        );
+        let id = q
+            .enqueue(&NewJob::rebuild("pkg:npm/a@1", "pkg:npm/a@1", Tier::Bulk))
+            .await
+            .unwrap();
+
+        let work = DisplacedThenFails {
+            q: q.clone(),
+            retryable,
+        };
+        assert_eq!(
+            e.tick(&work).await.unwrap(),
+            1,
+            "losing the race is not an error"
+        );
+
+        // The other worker still holds it.
+        assert_eq!(
+            e.queue().depth().await.unwrap(),
+            vec![("leased".to_string(), 1)]
+        );
+        let holders: Vec<String> = q
+            .workers()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(w, ..)| w)
+            .collect();
+        assert_eq!(holders, ["fast"]);
+        let phases: Vec<String> = q
+            .events(id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, phase, _)| phase)
+            .collect();
+        assert!(phases.contains(&"leased".to_string()), "{phases:?}");
+        assert!(
+            !phases.iter().any(|p| p == "retrying" || p == "dead"),
+            "a displaced worker said a job another worker holds had ended (retryable: \
+             {retryable}): {phases:?}"
+        );
+    }
 }
 
 /// A worker told not to confirm records its verdict and asks nothing a second time.

@@ -166,7 +166,7 @@ fn rederive(store: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
-/// What a run that finished printed, whatever it said about each run.
+/// What a run in which no line failed printed: every run written or skipped, and it exits 0.
 fn said(out: &Output) -> String {
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
@@ -177,10 +177,26 @@ fn said(out: &Output) -> String {
     text
 }
 
-/// What a run printed, with no word on how it exited. For the runs where a line failed: whether a
-/// failed line makes the command exit non-zero is not settled, and these tests do not settle it.
-fn printed(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
+/// What a run in which a line failed printed, and what it said on stderr. It exits 1, and only
+/// after every line and the tally: one run that failed stops no other, and a backfill run from a
+/// script does not pass over a comparison the same bytes no longer give.
+fn refused(out: &Output) -> (String, String) {
+    let (text, err) = (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    );
+    assert_eq!(out.status.code(), Some(1), "{text}{err}");
+    assert!(text.contains(" failed, of "), "the tally was not printed: {text}");
+    (text, err)
+}
+
+/// The runs stderr names after `what`, in id order.
+fn named<'a>(err: &'a str, what: &str) -> Vec<&'a str> {
+    let at = err.find(what).unwrap_or_else(|| panic!("no `{what}`: {err}"));
+    let rest = err[at + what.len()..].lines().next().unwrap_or_default();
+    let mut ids: Vec<&str> = rest.split(';').next().unwrap().split(", ").collect();
+    ids.sort_unstable();
+    ids
 }
 
 /// The line about run `id`.
@@ -349,8 +365,8 @@ fn a_comparison_that_recorded_its_own_progression_is_left_alone() {
 }
 
 /// A run with nothing to re-derive from is skipped, and the line says what it lacked: no
-/// comparison, no rebuilt artifact, one never kept, one the record says is kept and the store has
-/// lost, and one whose bytes are not the bytes the record names.
+/// comparison, no rebuilt artifact, or one never kept. None is a failure: a second backfill meets
+/// them all again, and nothing in the store is damaged.
 #[test]
 fn a_run_with_nothing_to_rederive_from_is_skipped_and_says_what_it_lacked() {
     let (up, rb) = pair();
@@ -359,8 +375,6 @@ fn a_run_with_nothing_to_rederive_from_is_skipped_and_says_what_it_lacked() {
         "1789000000-nocompare",
         "1789000001-norebuild",
         "1789000002-notkept",
-        "1789000003-missing",
-        "1789000004-corrupt",
     ];
     let runs: Vec<(&str, serde_json::Value)> = ids.iter().map(|id| (*id, old.clone())).collect();
     let root = dir("lacking").join("store");
@@ -372,26 +386,10 @@ fn a_run_with_nothing_to_rederive_from_is_skipped_and_says_what_it_lacked() {
                 "1789000000-nocompare" => r.comparison = None,
                 "1789000001-norebuild" => r.rebuild = None,
                 "1789000002-notkept" => r.rebuild.as_mut().unwrap().stored = false,
-                // Its own bytes, so losing them loses no other run's.
-                "1789000003-missing" => {
-                    let lost = b"a rebuilt artifact the store lost".to_vec();
-                    r.rebuild = Some(artifact("lost.tgz", &lost));
-                }
                 _ => {}
             }
             store.put_run(&r).await.unwrap();
         }
-    });
-    // Bytes at the rebuilt artifact's address that are not the bytes it names. Every run here
-    // shares that blob, so this one names its own.
-    let impostor = b"the rebuilt artifact, as it was".to_vec();
-    rt().block_on(async {
-        let mut r = store.get_run(ids[4]).await.unwrap();
-        let named = artifact("impostor.tgz", &impostor);
-        std::fs::create_dir_all(blob_path(&root, &named.sha256).parent().unwrap()).unwrap();
-        std::fs::write(blob_path(&root, &named.sha256), b"other bytes entirely").unwrap();
-        r.rebuild = Some(named);
-        store.put_run(&r).await.unwrap();
     });
 
     let text = said(&rederive(&root, &[]));
@@ -407,20 +405,8 @@ fn a_run_with_nothing_to_rederive_from_is_skipped_and_says_what_it_lacked() {
         line(&text, ids[2]).contains("skipped  one of the two artifacts was not kept in the store"),
         "{text}"
     );
-    // Kept by the record's word and gone from the store: missing, and said so, never taken for a
-    // run whose bytes were pruned on purpose.
-    let missing = line(&text, ids[3]);
-    assert!(missing.contains("skipped  "), "{text}");
-    assert!(missing.contains("rebuilt artifact"), "{missing}");
-    assert!(missing.contains("the bytes are missing"), "{missing}");
-    // Bytes that are not the ones the record names are not re-derived from.
     assert!(
-        line(&text, ids[4])
-            .contains("skipped  one of the two artifacts could not be read from the store"),
-        "{text}"
-    );
-    assert!(
-        text.contains("0 written, 5 skipped, 0 failed, of 5 run(s)"),
+        text.contains("0 written, 3 skipped, 0 failed, of 3 run(s)"),
         "{text}"
     );
     // Every run here names one comparison, so one lookup covers them all.
@@ -429,6 +415,74 @@ fn a_run_with_nothing_to_rederive_from_is_skipped_and_says_what_it_lacked() {
         derived(&store, &any).is_none(),
         "a skipped run wrote a derivation"
     );
+}
+
+/// An artifact the record says is kept and the store has lost, and one whose bytes are not the
+/// bytes the record names, are damage rather than a run with nothing to fill in: each line says
+/// which, the command fails naming both, and the run after them is still re-derived.
+#[test]
+fn bytes_the_store_lost_or_cannot_give_back_fail_the_command_and_say_which() {
+    let (up, rb) = pair();
+    let old = predating(&compared(&up, &rb));
+    // The store lists its newest run first, so the fine run is the oldest: it comes after the
+    // damage, and writing its derivation first would make the others read as already done.
+    let ids = [
+        "1789000003-missing",
+        "1789000004-corrupt",
+        "1789000002-fine",
+    ];
+    let runs: Vec<(&str, serde_json::Value)> = ids.iter().map(|id| (*id, old.clone())).collect();
+    let root = dir("damaged").join("store");
+    let store = Store::local(&root).unwrap();
+    rt().block_on(async {
+        for (id, cmp) in &runs {
+            let mut r = recorded(&store, id, cmp).await;
+            // Its own bytes, so losing them loses no other run's.
+            if *id == "1789000003-missing" {
+                let lost = b"a rebuilt artifact the store lost".to_vec();
+                r.rebuild = Some(artifact("lost.tgz", &lost));
+            }
+            store.put_run(&r).await.unwrap();
+        }
+    });
+    // Bytes at the rebuilt artifact's address that are not the bytes it names. Every run here
+    // shares that blob, so this one names its own.
+    let impostor = b"the rebuilt artifact, as it was".to_vec();
+    rt().block_on(async {
+        let mut r = store.get_run(ids[1]).await.unwrap();
+        let named = artifact("impostor.tgz", &impostor);
+        std::fs::create_dir_all(blob_path(&root, &named.sha256).parent().unwrap()).unwrap();
+        std::fs::write(blob_path(&root, &named.sha256), b"other bytes entirely").unwrap();
+        r.rebuild = Some(named);
+        store.put_run(&r).await.unwrap();
+    });
+
+    let (text, err) = refused(&rederive(&root, &[]));
+    // Kept by the record's word and gone from the store: missing, and said so, never taken for a
+    // run whose bytes were pruned on purpose.
+    let missing = line(&text, ids[0]);
+    assert!(missing.contains("failed   "), "{text}");
+    assert!(missing.contains("rebuilt artifact"), "{missing}");
+    assert!(missing.contains("the bytes are missing"), "{missing}");
+    // Bytes that are not the ones the record names are not re-derived from.
+    assert!(
+        line(&text, ids[1])
+            .contains("failed   one of the two artifacts could not be read from the store"),
+        "{text}"
+    );
+    assert!(line(&text, ids[2]).contains("  written  "), "{text}");
+    assert!(
+        text.contains("1 written, 0 skipped, 2 failed, of 3 run(s)"),
+        "{text}"
+    );
+    // The exit names both, as runs that could not be re-derived, and not the one written.
+    assert_eq!(
+        named(&err, "2 run(s) could not be re-derived: "),
+        [ids[0], ids[1]],
+        "{err}"
+    );
+    assert!(!err.contains(ids[2]), "{err}");
+    assert!(!err.contains("other than the one recorded"), "{err}");
 }
 
 /// A run judged under a set this binary does not have, or under another version of a set it
@@ -483,7 +537,7 @@ fn a_rederivation_that_disagrees_with_the_record_is_refused_and_not_written() {
     let (a, b) = ("1789000000-outcome", "1789000001-digest");
     let (root, store, runs) = store_with("disagrees", &[(a, outcome), (b, digest)]);
 
-    let text = printed(&rederive(&root, &[]));
+    let (text, err) = refused(&rederive(&root, &[]));
     assert!(
         line(&text, a).ends_with(
             "failed   re-derivation disagrees with the recorded comparison: outcome divergent vs \
@@ -505,6 +559,13 @@ fn a_rederivation_that_disagrees_with_the_record_is_refused_and_not_written() {
     for r in &runs {
         assert!(derived(&store, r).is_none(), "{} was written anyway", r.id);
     }
+    // And the exit says which, as a disagreement: not a run that could not be read.
+    assert_eq!(
+        named(&err, "2 run(s) re-derived to a comparison other than the one recorded: "),
+        [a, b],
+        "{err}"
+    );
+    assert!(!err.contains("could not be re-derived"), "{err}");
 }
 
 /// A run the store does not hold, a comparison blob it has lost, and one that is not a comparison
@@ -533,7 +594,7 @@ fn what_cannot_be_read_is_a_failure_and_the_rest_still_run() {
     });
 
     let absent = "1789999999-ffffffff";
-    let text = printed(&rederive(&root, &[ids[0], ids[1], absent, ids[2]]));
+    let (text, err) = refused(&rederive(&root, &[ids[0], ids[1], absent, ids[2]]));
     assert!(
         line(&text, ids[0]).contains("failed   reading the recorded comparison"),
         "{text}"
@@ -552,9 +613,18 @@ fn what_cannot_be_read_is_a_failure_and_the_rest_still_run() {
         text.contains("1 written, 0 skipped, 3 failed, of 4 run(s)"),
         "{text}"
     );
+    // The exit names each run that failed, and none that was written.
+    assert_eq!(
+        named(&err, "3 run(s) could not be re-derived: "),
+        [ids[0], ids[1], absent],
+        "{err}"
+    );
+    assert!(!err.contains(ids[2]), "{err}");
+    assert!(!err.contains("other than the one recorded"), "{err}");
 }
 
-/// A store path that names nothing is refused rather than created and read as an empty store.
+/// A store path that names nothing is refused rather than created and read as an empty store, and
+/// the refusal is the command line's mistake, never a bug in trigon to be reported.
 #[test]
 fn rederive_refuses_a_store_that_is_not_there() {
     let d = dir("nostore");
@@ -567,5 +637,7 @@ fn rederive_refuses_a_store_that_is_not_there() {
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("is not a directory"), "{err}");
+    assert!(err.contains("the command line's: no such store"), "{err}");
+    assert!(!err.contains("bug in trigon"), "{err}");
     assert!(!typo.exists(), "reading a store created one");
 }

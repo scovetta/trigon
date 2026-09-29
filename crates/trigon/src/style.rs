@@ -7,7 +7,8 @@
 //!   subscriber already applies to stderr. `--output json` never reaches here.
 //! - **`NO_COLOR` wins.** Set to anything non-empty, it turns colour off regardless of the
 //!   terminal, per <https://no-color.org>. `CLICOLOR_FORCE` forces it back on for the reader who is
-//!   piping into a pager that understands escapes.
+//!   piping into a pager that understands escapes — over anything but `NO_COLOR` and a named
+//!   theme, `TERM=dumb` included, as the `CLICOLOR` convention has it.
 //! - **Colour is an accent, never the message.** Every distinction the colour draws — a match from
 //!   a divergence, a label from its value — is also there in the words and the symbols, so the
 //!   plain output says exactly what the coloured one does. A reader who turned colour off, or whose
@@ -117,14 +118,16 @@ pub fn enabled() -> bool {
             Theme::Mono => false,
             Theme::Colour | Theme::Neon | Theme::Bbs => true,
             Theme::Auto => {
-                // A terminal that says it cannot do this is taken at its word.
-                if std::env::var_os("TERM").is_some_and(|v| v == "dumb") {
-                    return false;
-                }
                 // The one override that turns colour back on for a pipe: a pager the reader chose,
-                // told to interpret the escapes rather than print them.
+                // told to interpret the escapes rather than print them. Before `TERM`, because it
+                // is set for this command where `TERM` is set for every one a shell runs — an
+                // Emacs shell or a CI runner says `dumb` whatever reads the output.
                 if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| !v.is_empty() && v != "0") {
                     return true;
+                }
+                // Otherwise a terminal that says it cannot do this is taken at its word.
+                if std::env::var_os("TERM").is_some_and(|v| v == "dumb") {
+                    return false;
                 }
                 is_tty()
             }

@@ -38,8 +38,9 @@ impl AssemblyVersionInfo {
             && self.copyright.is_none()
     }
 
-    /// The (tool-parameter, value) pairs this carries.
-    fn params(&self) -> Vec<(&'static str, &str)> {
+    /// The (tool-parameter, value) pairs this carries, each spelled as the template that renders
+    /// to it: a stamp that cannot be spelled so is left out, as one not found.
+    fn params(&self) -> Vec<(&'static str, String)> {
         [
             ("version", &self.version),
             ("assembly_version", &self.assembly_version),
@@ -48,9 +49,26 @@ impl AssemblyVersionInfo {
             ("copyright", &self.copyright),
         ]
         .into_iter()
-        .filter_map(|(k, v)| v.as_deref().map(|v| (k, v)))
+        .filter_map(|(k, v)| v.as_deref().and_then(literal).map(|v| (k, v)))
         .collect()
     }
+}
+
+/// `v` as a `with` value that renders to exactly `v`, or `None` where there is no such spelling.
+///
+/// A step's `with` values are templates themselves, so a stamp is the publisher's text in a place
+/// that evaluates it: a copyright carrying `{{`, `{%` or `{#` would be rendered as the template it
+/// looks like, or fail the render on a name that is not defined. One that does is wrapped in a raw
+/// block, which renders its contents as they are, and one that would end that block early is left
+/// out rather than set to something the assembly never said.
+fn literal(v: &str) -> Option<String> {
+    if !["{{", "{%", "{#"].iter().any(|m| v.contains(m)) {
+        return Some(v.to_string());
+    }
+    if v.contains("endraw") {
+        return None;
+    }
+    Some(format!("{{% raw %}}{v}{{% endraw %}}"))
 }
 
 /// Set the version stamps on the strategy's `nuget/build/pack` step, or `None` if there is nothing
@@ -76,8 +94,8 @@ pub fn with_assembly_version(strategy: &Strategy, info: &AssemblyVersionInfo) ->
             && tool == "nuget/build/pack"
         {
             for (k, v) in info.params() {
-                if with.get(k).map(String::as_str) != Some(v) {
-                    with.insert(k.to_string(), v.to_string());
+                if with.get(k) != Some(&v) {
+                    with.insert(k.to_string(), v);
                     changed = true;
                 }
             }
@@ -133,6 +151,41 @@ mod tests {
             with_assembly_version(&once, &info()).is_none(),
             "the props are already set; the second pass must be a no-op"
         );
+    }
+
+    #[test]
+    fn a_stamp_that_reads_as_a_template_is_set_as_a_raw_block_and_does_not_loop() {
+        let braced = AssemblyVersionInfo {
+            copyright: Some("Copyright {{ year }} {% x %} {# y #}".into()),
+            ..info()
+        };
+        let once = with_assembly_version(&castle(), &braced).expect("changed");
+        let Strategy::Flow(f) = &once else { panic!("flow") };
+        let StepBody::Uses { with, .. } = &f.build[0].body else {
+            panic!("uses")
+        };
+        assert_eq!(
+            with.get("copyright").unwrap(),
+            "{% raw %}Copyright {{ year }} {% x %} {# y #}{% endraw %}"
+        );
+        // A stamp with nothing a template would read is set as it is.
+        assert_eq!(with.get("file_version").unwrap(), "5.1.1");
+        assert!(with_assembly_version(&once, &braced).is_none());
+    }
+
+    #[test]
+    fn a_stamp_that_would_end_its_raw_block_is_left_out_and_the_rest_are_set() {
+        let closing = AssemblyVersionInfo {
+            copyright: Some("{{ a }}{% endraw %}{{ b }}".into()),
+            ..info()
+        };
+        let next = with_assembly_version(&castle(), &closing).expect("changed");
+        let Strategy::Flow(f) = &next else { panic!("flow") };
+        let StepBody::Uses { with, .. } = &f.build[0].body else {
+            panic!("uses")
+        };
+        assert!(with.get("copyright").is_none(), "{with:?}");
+        assert_eq!(with.get("assembly_version").unwrap(), "5.0.0.0");
     }
 
     #[test]

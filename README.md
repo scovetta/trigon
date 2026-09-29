@@ -283,7 +283,7 @@ $ trigon rebuild pkg:pypi/chardet@7.6.0 \
 ✔ exact
 
   format         zip
-  stabilizer set wheel (58632c3c627d…)
+  stabilizer set wheel (738725964c4a…)
 
                upstream           rebuild
   raw          4076d795897c…      4076d795897c…      =
@@ -310,7 +310,7 @@ $ trigon runs --store ./store
 
 $ trigon attest --store ./store --key key.bin
 target    pkg:pypi/chardet@7.6.0
-rederived exact under wheel@58632c3c627d — signing
+rederived exact under wheel@738725964c4a — signing
 
   attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/equivalence.intoto.json
   attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/rebuild.intoto.json
@@ -349,7 +349,7 @@ subject   chardet-7.6.0-py3-none-any.whl (4076d795897ce45239825956a1334e134322ec
 predicate https://trigon.dev/equivalence/v1
 claims    exact
 signature verified
-rederived exact under wheel@58632c3c627d — the claim holds
+rederived exact under wheel@738725964c4a — the claim holds
 ```
 
 Drop `--public-key` and it still re-derives; it says only that the signature was present and unchecked,

@@ -354,6 +354,11 @@ pub trait Provider: Send + Sync {
 /// and the thing being wrapped is a `Box<dyn Provider>`, which was not one. That is the whole
 /// reason production never recorded a transcript: the wrapper existed, the store had a field for
 /// its digest, and there was no way to compose the two.
+///
+/// **Every method, including the ones with a default.** A defaulted method left out of a wrapper
+/// still compiles, and answers with the trait's value in place of the wrapped provider's.
+/// `default_effort` was missing here, so a provider that set its own depth would have been asked
+/// for `medium` through a `Box` — latent only because none sets one yet.
 impl<P: Provider + ?Sized> Provider for Box<P> {
     fn id(&self) -> &str {
         (**self).id()
@@ -366,6 +371,9 @@ impl<P: Provider + ?Sized> Provider for Box<P> {
     }
     fn reasoning(&self) -> Reasoning {
         (**self).reasoning()
+    }
+    fn default_effort(&self) -> Effort {
+        (**self).default_effort()
     }
 }
 
@@ -381,6 +389,9 @@ impl<P: Provider + ?Sized> Provider for std::sync::Arc<P> {
     }
     fn reasoning(&self) -> Reasoning {
         (**self).reasoning()
+    }
+    fn default_effort(&self) -> Effort {
+        (**self).default_effort()
     }
 }
 
@@ -607,7 +618,9 @@ mod tests {
         }
     }
 
-    /// A provider configured to answer without reasoning.
+    /// A provider configured away from each default the trait supplies, so a wrapper that answers
+    /// with the trait's own in place of the provider's is caught: no reasoning, and when it is
+    /// asked to think, deeply.
     struct Quiet;
 
     impl Provider for Quiet {
@@ -628,6 +641,9 @@ mod tests {
         fn reasoning(&self) -> Reasoning {
             Reasoning::Off
         }
+        fn default_effort(&self) -> Effort {
+            Effort::High
+        }
     }
 
     #[test]
@@ -639,6 +655,9 @@ mod tests {
             assert_eq!(p.id(), "quiet");
             assert_eq!(p.caps(), Quiet.caps());
             assert_eq!(p.reasoning(), Reasoning::Off);
+            // The depth `propose` starts its walk from. Answering the trait's default here would
+            // ask every wrapped provider for `medium`, whatever it had said.
+            assert_eq!(p.default_effort(), Effort::High);
             assert!(matches!(
                 p.complete(&Request {
                     prompt: Prompt::new("s"),

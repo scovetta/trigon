@@ -473,7 +473,7 @@ fn a_tarball_the_package_ships_is_not_a_package_member() {
     assert!(!ids(&applied).contains(&"nupkg-text-eol"), "{applied:?}");
 }
 
-// --- nupkg-doc-member-order ----------------------------------------------------------------------
+// --- nupkg-doc-member-order-v2 -------------------------------------------------------------------
 
 fn doc(members: &[&str]) -> Vec<u8> {
     let mut d =
@@ -496,8 +496,8 @@ fn two_collations_of_one_doc_file_agree() {
     let t = "<member name=\"T:Demo.X\">\n<summary>a type</summary>\n</member>";
     let a = zip(&[("lib/net8.0/Demo.xml", &doc(&[x, y, t]))]);
     let b = zip(&[("lib/net8.0/Demo.xml", &doc(&[y, x, t]))]);
-    let (sa, already) = stabilize(&only("nupkg-doc-member-order"), a);
-    let (sb, applied) = stabilize(&only("nupkg-doc-member-order"), b);
+    let (sa, already) = stabilize(&only("nupkg-doc-member-order-v2"), a);
+    let (sb, applied) = stabilize(&only("nupkg-doc-member-order-v2"), b);
     assert_eq!(
         member(sa, "lib/net8.0/Demo.xml"),
         member(sb, "lib/net8.0/Demo.xml")
@@ -506,7 +506,7 @@ fn two_collations_of_one_doc_file_agree() {
         already.is_empty(),
         "the order already sorted was claimed: {already:?}"
     );
-    assert_eq!(ids(&applied), ["nupkg-doc-member-order"]);
+    assert_eq!(ids(&applied), ["nupkg-doc-member-order-v2"]);
     assert_eq!(applied[0].risk, RiskTier::Structural);
 }
 
@@ -520,7 +520,7 @@ fn sorting_loses_no_member_and_changes_no_text() {
         "<member name=\"T:A\">\n<summary>ay</summary>\n</member>",
     ];
     let (out, _) = stabilize(
-        &only("nupkg-doc-member-order"),
+        &only("nupkg-doc-member-order-v2"),
         zip(&[("lib/net8.0/Demo.xml", &doc(&blocks))]),
     );
     let text = member(out, "lib/net8.0/Demo.xml");
@@ -553,7 +553,10 @@ fn only_generated_documentation_beside_an_assembly_is_reordered() {
         "[Content_Types].xml",
         "lib/net8.0/Demo.txt",
     ] {
-        let (out, applied) = stabilize(&only("nupkg-doc-member-order"), zip(&[(name, &unsorted)]));
+        let (out, applied) = stabilize(
+            &only("nupkg-doc-member-order-v2"),
+            zip(&[(name, &unsorted)]),
+        );
         assert!(applied.is_empty(), "`{name}`: {applied:?}");
         assert_eq!(
             member(out, name).into_bytes(),
@@ -566,7 +569,10 @@ fn only_generated_documentation_beside_an_assembly_is_reordered() {
 #[test]
 fn a_members_element_closed_before_it_opens_is_not_rewritten() {
     let d = b"<doc></members><members><member name=\"T:B\"/><member name=\"T:A\"/>".as_slice();
-    let (out, applied) = stabilize(&only("nupkg-doc-member-order"), zip(&[("lib/Demo.xml", d)]));
+    let (out, applied) = stabilize(
+        &only("nupkg-doc-member-order-v2"),
+        zip(&[("lib/Demo.xml", d)]),
+    );
     assert!(applied.is_empty(), "{applied:?}");
     assert_eq!(member(out, "lib/Demo.xml").as_bytes(), d);
 }

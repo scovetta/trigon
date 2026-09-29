@@ -4,7 +4,7 @@
 //! bytes, which leaves no half-stabilized state. A body can fail to read — a spilled member whose
 //! file went away, a range past the end of its source — and every content pass reaches it through
 //! `body_bytes` or `body_mut`. Each must decline rather than panic, drop the member, or claim a
-//! change it did not make; and `wheel-record`, which digests every member, must leave RECORD as
+//! change it did not make; and `wheel-record-v2`, which digests every member, must leave RECORD as
 //! it arrived rather than write a manifest of a wheel that does not exist.
 
 use std::sync::Arc;
@@ -123,10 +123,10 @@ fn nupkg_passes_leave_an_unreadable_member_alone() {
             "nupkg-repository-branch",
             "nupkg-readme-markers",
             "nupkg-text-eol",
-            "nupkg-doc-member-order",
+            "nupkg-doc-member-order-v2",
             "nupkg-packager-version",
             "dotnet-assembly-identity",
-            "dotnet-il-canonical",
+            "dotnet-il-canonical-v2",
         ],
     );
 }
@@ -152,7 +152,7 @@ fn wheel_passes_leave_an_unreadable_member_alone_and_record_as_it_arrived() {
             "pkg/__pycache__/m.cpython-312.pyc",
             "pkg-1.0.dist-info/METADATA",
         ],
-        &["pyc-header", "wheel-metadata-eol", "wheel-record"],
+        &["pyc-header", "wheel-metadata-eol", "wheel-record-v2"],
     );
 
     let mut a = parsed(

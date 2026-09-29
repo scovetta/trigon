@@ -14,6 +14,8 @@ pub enum RegistryError {
         ecosystem: String,
         name: String,
         version: String,
+        /// What the registry lists, oldest first (`sort_versions`), because the message calls the
+        /// last few recent.
         available: Vec<String>,
     },
 
@@ -129,6 +131,56 @@ fn suggestion(available: &[String]) -> String {
     // The nearest few, not all of them. A package with 800 versions produces an error nobody reads.
     let shown: Vec<&str> = available.iter().rev().take(5).map(String::as_str).collect();
     format!(". Recent: {}", shown.join(", "))
+}
+
+/// Put versions oldest first, which is what [`RegistryError::NoSuchVersion`] expects of its list.
+///
+/// Sorted here rather than taken in the order a registry sends them, because no two agree:
+/// crates.io lists newest first, and npm and PyPI send an object whose keys a string sort would
+/// put `1.10.0` before `1.9.0`. Runs of digits compare as numbers and everything else as text,
+/// except that a version followed by a tag (`-rc.1`, `b2`, `.dev0`) comes before the same version
+/// without one, as a pre-release does. That orders a hint, not a resolution, so it is no one
+/// ecosystem's whole rule: a PEP 440 post-release (`.post1`) sorts before its release rather than
+/// after it.
+pub(crate) fn sort_versions(versions: &mut [String]) {
+    versions.sort_by(|a, b| version_parts(a).cmp(&version_parts(b)));
+}
+
+/// One run of a version string, in the order [`sort_versions`] puts them.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Part<'a> {
+    /// Text other than the dot before a further number: `-rc.`, `b`, `.dev`, a leading `v`.
+    Tag(&'a str),
+    /// Where the version stops. Above a tag, so `1.0.0` follows `1.0.0-rc.1`.
+    End,
+    /// The dot before a further number, so `1.0.0.1` follows `1.0.0`.
+    Dot,
+    /// Digits: by length without leading zeros, then by those digits, which is by value however
+    /// long the run; then as written, so that `01` and `1` are still two versions.
+    Number(usize, &'a str, &'a str),
+}
+
+fn version_parts(v: &str) -> Vec<Part<'_>> {
+    let mut parts = Vec::new();
+    let mut rest = v;
+    while let Some(first) = rest.chars().next() {
+        let digits = first.is_ascii_digit();
+        let len = rest
+            .find(|c: char| c.is_ascii_digit() != digits)
+            .unwrap_or(rest.len());
+        let (run, tail) = rest.split_at(len);
+        parts.push(if digits {
+            let value = run.trim_start_matches('0');
+            Part::Number(value.len(), value, run)
+        } else if run == "." {
+            Part::Dot
+        } else {
+            Part::Tag(run)
+        });
+        rest = tail;
+    }
+    parts.push(Part::End);
+    parts
 }
 
 fn retry_hint(after: &Option<u64>) -> String {

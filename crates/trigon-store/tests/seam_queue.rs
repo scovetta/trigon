@@ -11,6 +11,8 @@
 
 #![cfg(feature = "queue")]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use trigon_core::Digest;
 use trigon_store::queue::{Backend, NewJob, Queue, Tier};
@@ -23,6 +25,16 @@ async fn queue(dir: &tempfile::TempDir, name: &str) -> Queue {
         .expect("open");
     q.migrate().await.expect("migrate");
     q
+}
+
+/// A moment to start a test's clock at, in milliseconds since the Unix epoch.
+const T0: i64 = 1_800_000_000_000;
+
+/// `q`, reading the time from `now` and from nothing else: it moves only when the test moves it,
+/// so a stall between two calls is not time passing.
+fn clocked(q: Queue, now: &Arc<AtomicI64>) -> Queue {
+    let now = now.clone();
+    q.with_clock(move || now.load(Ordering::SeqCst))
 }
 
 fn record(id: &str, target: &str, outcome: Option<&str>) -> RunRecord {
@@ -377,7 +389,12 @@ async fn the_fleet_reserves_slots_rather_than_racing_for_them() {
 #[tokio::test]
 async fn being_throttled_slows_the_whole_fleet() {
     let dir = tempfile::tempdir().unwrap();
-    let q = queue(&dir, "throttle").await;
+    // On the queue's own clock, which stands still. On the wall clock this asserted a wait of at
+    // least 300 ms after a 400 ms throttle, and failed on a loaded machine that took longer than
+    // the difference between the two calls — with the queue answering correctly for the moment it
+    // was asked. Stopped, the wait is exactly what the throttle left, however long the calls take.
+    let now = Arc::new(AtomicI64::new(T0));
+    let q = clocked(queue(&dir, "throttle").await, &now);
     q.note_throttled("registry.npmjs.org", Duration::from_millis(400))
         .await
         .unwrap();
@@ -386,8 +403,9 @@ async fn being_throttled_slows_the_whole_fleet() {
         .reserve_host("registry.npmjs.org", Duration::from_millis(10))
         .await
         .unwrap();
-    assert!(
-        wait >= Duration::from_millis(300),
+    assert_eq!(
+        wait,
+        Duration::from_millis(400),
         "a 429 did not reach the next worker: {wait:?}"
     );
 
@@ -426,6 +444,59 @@ async fn heartbeats_stay_off_the_hot_path() {
         !q.heartbeat(id, "someone-else", Duration::from_secs(60), None)
             .await
             .unwrap()
+    );
+}
+
+/// A worker that has lost its lease says nothing more about the job.
+///
+/// A phase is a claim about where the job has got to, and once the lease has lapsed and another
+/// worker has taken it, the job is the other worker's. The displaced one keeps building — its
+/// container often cannot be cancelled — and its heartbeat still wrote the phase it reached into
+/// the one stream a reader follows, between the holder's, so the page could say `build` while the
+/// holder was resolving. Its `false` is the signal it needs; what it did stays out of the stream.
+#[tokio::test]
+async fn a_displaced_worker_records_no_phase() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicI64::new(T0));
+    let q = clocked(queue(&dir, "displaced").await, &now);
+    let id = q
+        .enqueue(&NewJob::rebuild("pkg:npm/a@1", "k1", Tier::Bulk))
+        .await
+        .unwrap();
+    q.lease("w1", &["rebuild"], 1, Duration::from_secs(60))
+        .await
+        .unwrap();
+
+    // `w1` goes quiet past its lease, and `w2` takes the job and starts on it.
+    now.fetch_add(61_000, Ordering::SeqCst);
+    let taken = q
+        .lease("w2", &["rebuild"], 1, Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(taken.len(), 1, "the lapsed lease did not come back");
+    assert!(
+        q.heartbeat(id, "w2", Duration::from_secs(60), Some("resolve"))
+            .await
+            .unwrap()
+    );
+
+    assert!(
+        !q.heartbeat(id, "w1", Duration::from_secs(60), Some("build"))
+            .await
+            .unwrap(),
+        "the displaced worker was told it still held the lease"
+    );
+    let phases: Vec<String> = q
+        .events(id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, p, _)| p)
+        .collect();
+    assert_eq!(
+        phases,
+        ["resolve"],
+        "a worker that no longer holds the job wrote into its stream"
     );
 }
 

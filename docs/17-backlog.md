@@ -1122,7 +1122,8 @@ deleted without a reason comes back as a rediscovery.
   `trigon/src/main.rs:5271`
 - **medium** — `sweep::one` labels every orchestration error `Fault::Policy`, including the sweep's own infrastructure failures  
   `trigon/src/main.rs:6711`
-- **medium** — member_diffs joins the two member lists with a linear scan per member (O(n²))  
+- ~~**medium** — member_diffs joins the two member lists with a linear scan per member (O(n²))~~
+  Fixed with the item below: each side's raw rows are a map keyed by ordinal, taken out as found  
   `trigon/src/watch.rs:2390`
 - **medium** — chain_ribbon byte-slices source.commit at index 8, panicking in the request handler  
   `trigon/src/watch.rs:3620`
@@ -1136,13 +1137,19 @@ deleted without a reason comes back as a rediscovery.
   `trigon/src/main.rs:2683`
 - **low** — checkout_dir hashes the raw repo/commit while SourceCache keys on the normalized form  
   `trigon/src/provenance.rs:112`
-- **low** — index_checkout gives up at MAX_FILES but reports the truncated walk as a completed search  
+- ~~**low** — index_checkout gives up at MAX_FILES but reports the truncated walk as a completed search~~
+  Fixed: a walk that stops at its bound says so, and counts only what it hashed
+  (`a_walk_that_stops_at_its_bound_says_it_did_not_finish`)  
   `trigon/src/provenance.rs:171`
 - **low** — The checkout index memo is an unbounded, never-evicted static cache in a long-lived server  
   `trigon/src/provenance.rs:296`
 - **low** — join() attributes every line-ending match to nupkg-text-eol regardless of format or stabilizer set  
   `trigon/src/provenance.rs:275`
-- **low** — The stabilizer ledger drops every member a pass removed, contradicting the comment above the join  
+- ~~**low** — The stabilizer ledger drops every member a pass removed, contradicting the comment above the join~~
+  Fixed: a removed member keeps its raw row and is counted as stabilized out, raw and stabilized
+  are joined by ordinal so a renamed one stays one member, one `Band` classifier serves every
+  reader, and the source page looks each verdict up under the name upstream published
+  (`a_member_a_pass_removed_is_counted_as_stabilized_out_rather_than_dropped`)  
   `trigon/src/watch.rs:2381`
 
 Written off, with the code they were about: three low items on the external log client — the
@@ -1308,14 +1315,19 @@ removed the client, `check_log_entry` and the stored entry (docs/19 §10 phase 1
   `trigon-core/src/failure.rs:1434`
 - **low** — `normalize_subject` strips only `==`, so `env/needs-the-package-under-test` keys one cluster per version specifier  
   `trigon-core/src/failure.rs:1435`
-- **low** — The JCS canonicalizer emits integers outside ±2^53 verbatim instead of in RFC 8785 ES6 `Number::toString` form  
+- ~~**low** — The JCS canonicalizer emits integers outside ±2^53 verbatim instead of in RFC 8785 ES6 `Number::toString` form~~
+  Fixed by refusing them, as floats are: an integer beyond ±(2^53 − 1) is `UnsafeInteger`
+  (`an_integer_a_double_cannot_hold_is_refused_rather_than_written_exactly`)  
   `trigon-core/src/jcs.rs:57`
 
 ### `trigon-archive`
 
 - **high** — Tar long names, link targets and PAX values are written through String::from_utf8_lossy, so two archives with different non-UTF-8 long member names serialize to byte-identical stabilized output  
   `trigon-archive/src/tar.rs:252`
-- **medium** — A legal multi-member gzip stream is rejected as "malformed gzip: crc32 mismatch", accusing a well-formed artifact of corruption  
+- ~~**medium** — A legal multi-member gzip stream is rejected as "malformed gzip: crc32 mismatch", accusing a well-formed artifact of corruption~~
+  Fixed: every member is read as gunzip reads it, each held to its own CRC-32 and ISIZE, and
+  bytes after the last are kept and compared
+  (`a_file_of_several_members_reads_as_their_contents_in_order`)  
   `trigon-archive/src/gzip.rs:110`
 - **medium** — flatten copies every member body into a fresh heap Vec, so serialize peaks at roughly 4x the payload and 2x the stated expansion ceiling  
   `trigon-archive/src/parse.rs:336`
@@ -1848,11 +1860,22 @@ Two follow-ons past the major-level fix, both smaller than it was:
 
 ## B46. A .NET assembly's debug layout is structural, and closes only with a matching build environment
 
-**Resolved for the code-identical case by [3.89](16-findings.md): `dotnet-il-canonical` compares a
-managed assembly by its method IL rather than its layout, so the structural residual below no longer
-holds a divergence when the code is the same — it lands `normalized_with_caveats`. What remains open
-is only the reverse: distinguishing a layout-only difference from a real one without the lossy step,
-which is what a matching build environment would give for free.**
+**Resolved for the code-identical case by [3.89](16-findings.md): `dotnet-il-canonical-v2`
+compares a managed assembly by its code — its methods, every row and literal their tokens and
+signatures name, and the declarations that decide how they run — rather than its layout, so the
+structural residual below no longer holds a divergence when the code is the same — it lands
+`normalized_with_caveats`. What remains open is only the reverse: distinguishing a layout-only
+difference from a real one without the lossy step, which is what a matching build environment
+would give for free.**
+
+**A known limit of that form.** It keeps the declarations that decide how the code runs —
+parameters, defaults and marshalling, implemented interfaces, explicit overrides, P/Invoke entry
+points, layout, nesting, generic constraints, properties and events — and drops resources, custom
+attributes and security declarations, and the data a field is initialized from (FieldRVA: a static
+array's initial bytes, say). A difference only there reads as a caveated match, which is what the
+Lossy tier says. Keeping custom attributes would need a corpus to show code-identical builds agree
+on them, and SourceLink and build metadata ride in attributes; FieldRVA data would need each
+field's size read from its type, since the RVA itself moves with the layout.
 
 [3.81](16-findings.md)'s `dotnet-assembly-identity` normalizes the fixed-location build/signing
 identity of a managed assembly (strong-name signature, MVID, PE timestamp/checksum, debug

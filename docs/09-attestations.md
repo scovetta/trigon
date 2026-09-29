@@ -770,7 +770,7 @@ subject   chardet-7.4.3-py3-none-any.whl (1173b74051570cf0…)
 predicate https://trigon.dev/equivalence/v2
 claims    exact
 signature verified
-rederived exact under wheel@58632c3c627d — the claim holds
+rederived exact under wheel@738725964c4a — the claim holds
 ```
 
 The rebuild's record stays in the store, so a later `trigon attest` signs it again without building.
@@ -1176,7 +1176,8 @@ checkpoint, a source not configured, a set this build does not carry, or the wro
 `--rerun-comparison`. `--rerun-comparison`'s arguments are checked before the record, so a bad one
 exits 5 whatever the record is. Of several, the first in the order 5, 4, 1, 3, 2 wins. `--output
 json` prints the report with its exit code, and, where the check stops before a record is read, the
-exit code, what stopped it and why, with both signed notes of an equivocation or a rollback. A
+exit code, what stopped it and why, with both signed notes of an equivocation or a rollback; only an
+argument `clap` refuses, which stops it before `--output` is read, prints `clap`'s message alone. A
 signature that does not verify, a claim that does not re-derive and a log that fails are reported as
 the evidence's fault and never as a bug in Trigon, in both forms.
 

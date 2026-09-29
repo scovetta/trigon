@@ -1261,15 +1261,18 @@ const STABILIZER_DOCS = {
   'nupkg-packaging-names': { sum: 'Normalizes the random GUID names OPC packaging invents.', why: 'The `.psmdcp` file and its relationship entry are named after a fresh GUID on every pack; nothing depends on the name.' },
   'nupkg-packager-version': { sum: 'Zeroes the packaging-tool version in the .nuspec’s psmdcp.', why: 'Which NuGet version wrote the package is provenance, not content.' },
   'nupkg-text-eol': { sum: 'Normalizes line endings in the package’s text files.', why: 'CRLF vs LF is a checkout and platform artifact; the text is the same either way. Content risk: it rewrites shipped bytes.' },
-  'nupkg-doc-member-order': { sum: 'Sorts the members of an XML documentation file.', why: 'The compiler may emit `<member>` entries in any order; sorting them makes two docs of the same API match. Structural.' },
+  'nupkg-doc-member-order': { sum: 'Sorted the members of an XML documentation file. Superseded by nupkg-doc-member-order-v2.', why: 'The compiler may emit `<member>` entries in any order; sorting them makes two docs of the same API match. It reported no bytes changed for the file it rewrote. Structural.' },
+  'nupkg-doc-member-order-v2': { sum: 'Sorts the members of an XML documentation file.', why: 'The compiler may emit `<member>` entries in any order; sorting them makes two docs of the same API match. Structural.' },
   'dotnet-assembly-identity': { sum: 'Zeroes a .NET assembly’s build and signing identity.', why: 'The strong-name signature (a key we do not have), the module MVID (a per-compilation GUID), the PE timestamp and checksum, and the debug-directory data — none is code, all are stamps a build writes around it.' },
-  'dotnet-il-canonical': { sum: 'Compares a managed assembly by its code, not its byte layout.', why: 'It reads the assembly’s own tables and keeps every method’s name, signature and IL, resolved through the heaps to values — so two assemblies built from the same source match even when SourceLink, a source-generator’s document order or a shifted heap laid their metadata and embedded PDB out differently. Lossy: it drops resources, attributes and field data, so a match it makes is caveated, and a real code change still shows.' },
+  'dotnet-il-canonical': { sum: 'Compared a managed assembly by its methods’ IL, not its byte layout. Superseded by dotnet-il-canonical-v2.', why: 'It kept every method’s name, signature and IL, resolved through the heaps to values, and nothing the IL’s tokens named — so a changed string literal, a call retargeted under the same token, a method’s flags, a catch clause’s type or a P/Invoke’s entry point compared equal. Records made under it are re-derived under the set they were signed with. Lossy: a match it made is caveated.' },
+  'dotnet-il-canonical-v2': { sum: 'Compares a managed assembly by its code, not its byte layout.', why: 'It reads the assembly’s own tables and keeps every method’s name, signature, flags and whole body, every row and string literal the code’s tokens can name, and the declarations that decide how it runs — P/Invoke entry points, overrides, implemented interfaces, parameters, layout — resolved through the heaps to values, so two assemblies built from the same source match even when SourceLink, a source-generator’s document order or a shifted heap laid their metadata and embedded PDB out differently. Lossy, so a match it makes is caveated: a change to a method, to anything its tokens name or to how it is declared still shows; a change only to resources, custom attributes or the data a field is initialized from does not.' },
   'nupkg-repository-branch': { sum: 'Drops the <repository branch=…> git ref from the .nuspec.', why: 'That names the tag or branch the publisher built from, which a detached-commit checkout cannot reproduce. The commit — the identity — is kept.' },
   'nupkg-readme-markers': { sum: 'Strips NuGetizer’s <!-- include … --> readme markers.', why: 'These are assembly directives NuGetizer leaves in the readme, spelled a hair differently once a remote include is neutralized for an offline build; the text a reader sees is unchanged. Content risk.' },
   'pyc-header': { sum: 'Zeroes the source mtime in a .pyc header.', why: 'A compiled Python file stamps when its .py was last modified, for cache invalidation — not part of the bytecode.' },
   'wheel-direct-url': { sum: 'Drops direct_url.json from a wheel.', why: 'It records the URL or path pip installed from, which is about the install, not the package.' },
   'wheel-metadata-eol': { sum: 'Normalizes line endings in a wheel’s METADATA and RECORD.', why: 'CRLF vs LF in the metadata is a platform artifact. Content risk.' },
-  'wheel-record': { sum: 'Rebuilds the wheel’s RECORD manifest after the other passes.', why: 'RECORD lists every file and its hash; the passes above change some, so it is regenerated last so it still describes the package.' },
+  'wheel-record': { sum: 'Rebuilt the wheel’s RECORD manifest after the other passes. Superseded by wheel-record-v2.', why: 'RECORD lists every file and its hash; the passes above change some, so it is regenerated last so it still describes the package. The manifest it wrote is the same as v2’s; what changed is that v2’s rewrite of RECORD is recorded as an edit to that member, so records made under it are re-derived under the set they were signed with.' },
+  'wheel-record-v2': { sum: 'Rebuilds the wheel’s RECORD manifest after the other passes.', why: 'RECORD lists every file and its hash; the passes above change some, so it is regenerated last so it still describes the package.' },
   'wheel-direct-url-drop': { sum: 'Drops direct_url.json from a wheel.', why: 'Records where pip installed from, not what is in the package.' },
   'gem-exclude-checksums': { sum: 'Drops a gem’s checksums.yaml.gz.', why: 'It is a hash of the gem’s other members and is re-derivable from them, so it carries nothing new.' },
   'gem-exclude-signatures': { sum: 'Drops a gem’s signature files.', why: 'Made with a private key the rebuild does not have.' },
@@ -2108,8 +2111,11 @@ async function fleetView() {
                 el('th', { text: 'worker' }),
                 el('th', { class: 'n', text: 'holding' }),
                 el('th', { text: 'lease' }))),
+              // An anonymous reader is sent no names, and the server says why in `q.detail`.
               el('tbody', {}, workers.map((w) => el('tr', {},
-                el('td', { class: 'pkg', text: w.worker }),
+                w.worker === undefined
+                  ? el('td', { class: 'empty', text: 'not shown' })
+                  : el('td', { class: 'pkg', text: w.worker }),
                 el('td', { class: 'n', text: String(w.jobs_held) }),
                 el('td', {}, el('span', {
                   class: `tag ${w.lease_expires_in_seconds < 0 ? 'divergent' : 'normalized'}`,
@@ -2117,7 +2123,10 @@ async function fleetView() {
                     ? `lapsed ${-w.lease_expires_in_seconds}s ago`
                     : `${w.lease_expires_in_seconds}s left`,
                 }))))))
-          : el('p', { class: 'empty', text: 'No worker is holding a lease.' }));
+          : el('p', { class: 'empty', text: 'No worker is holding a lease.' }),
+        workers.length && q.detail
+          ? el('p', { class: 'note', text: q.detail[0].toUpperCase() + q.detail.slice(1) })
+          : null);
 
   view.replaceChildren(
     el('p', {}, el('a', { href: '/', text: '← the corpus' })),

@@ -149,7 +149,7 @@ fn the_bytes_a_nested_member_contributes_are_what_arrived_until_something_inside
         "a changed inner archive is re-serialized, not written back"
     );
     // Store-only, like every stabilized stream, and still the same archive inside.
-    let (h, payload) = gzip::read(&rewritten, u64::MAX).unwrap();
+    let (h, payload) = gzip::read(&rewritten, u64::MAX, &mut 1).unwrap();
     assert_eq!(h.xfl, gzip::xfl_for(0));
     let back = read(payload, Format::Tar);
     assert_eq!(

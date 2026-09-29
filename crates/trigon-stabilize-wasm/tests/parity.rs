@@ -237,6 +237,12 @@ fn a_profile_the_module_does_not_have_blames_the_module_not_the_artifact() {
         e.contains("does not implement the profile `no-such-profile`"),
         "asking for a missing profile must name the profile: {e}"
     );
+    // One sentence after another, as a reader sees them: a literal joined across source lines
+    // without a continuation kept each line's indentation in the middle of the message.
+    assert!(
+        !e.contains("  "),
+        "a run of spaces inside the message: {e:?}"
+    );
     assert!(
         !e.contains("parse"),
         "and must not blame the artifact, which was never passed: {e}"
@@ -476,7 +482,7 @@ fn the_archived_set_reads_an_assembly_whose_offsets_overflow_32_bits_as_the_nati
         ("with its metadata off a 4-byte boundary", &skewed),
     ] {
         let applied = native_applied("nupkg", nupkg(dll));
-        for id in ["dotnet-assembly-identity", "dotnet-il-canonical"] {
+        for id in ["dotnet-assembly-identity", "dotnet-il-canonical-v2"] {
             assert!(
                 applied.iter().any(|a| a == id),
                 "{what}: `{id}` did not read the fixture: {applied:?}"
@@ -553,7 +559,7 @@ fn the_archived_set_reads_an_assembly_whose_offsets_overflow_32_bits_as_the_nati
             patched(&base, &[(blob, 0xffff_ff00)]),
         ),
         (
-            // `dotnet-il-canonical` would replace whatever the identity pass zeroed, so it is
+            // `dotnet-il-canonical-v2` would replace whatever the identity pass zeroed, so it is
             // made to decline, and the identity pass's own reading is what reaches the bytes.
             "a #GUID stream 0xffff_ff00 past the metadata, in an assembly read only for identity",
             patched(

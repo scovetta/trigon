@@ -25,6 +25,11 @@ const MAX_OCTAL_8: u64 = 0o7_777_777;
 // Reading
 // ---------------------------------------------------------------------------------------------
 
+/// Read a tar, ending it where every reader agrees it ends.
+///
+/// A lone zero block with more of the archive after it is refused, because node-tar reads on past
+/// one and the `tar` crate does not. Bytes after two zero blocks that are not padding are kept, in
+/// [`Archive::tar_trailing`].
 pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Result<Archive> {
     let bytes = src.as_slice();
     let mut archive = tar::Archive::new(Cursor::new(bytes));
@@ -36,6 +41,7 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
         detail: format!("reading entries: {e}"),
     })?;
 
+    let mut cut = false;
     for (ordinal, item) in entries.enumerate() {
         let ordinal = ordinal as u32;
         let mut e = item.map_err(|err| ArchiveError::Malformed {
@@ -48,6 +54,7 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
                 NoteCode::EntryLimitReached,
                 format!("stopped at {ordinal}"),
             ));
+            cut = true;
             break;
         }
 
@@ -169,6 +176,13 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
         });
     }
 
+    // Where the `tar` crate stopped: past the zero block it took for the end, or at the end of
+    // the bytes. An entry limit stops the walk short of either, and its note already says so.
+    if !cut {
+        let stop = archive.into_inner().position();
+        out.tar_trailing = after_the_end(bytes, usize::try_from(stop).unwrap_or(usize::MAX))?;
+    }
+
     for (p, n) in out.duplicate_paths() {
         notes.push(Note::at(
             NoteCode::DuplicateEntryPath,
@@ -178,6 +192,36 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
     }
 
     Ok(out)
+}
+
+/// What follows the entries, from `stop`, the offset the `tar` crate stopped reading at.
+///
+/// The `tar` crate ends an archive at its first zero block, as GNU tar, bsdtar and Python do.
+/// node-tar, which npm installs with, ends it only at two in a row and reads on past one. So
+/// entries after a lone zero block installed from npm and were never seen here, and a `.tgz`
+/// carrying them matched an honest rebuild without them. Where readers disagree on what an archive
+/// holds there is no one answer to compare, and the archive is refused.
+///
+/// After two zero blocks every reader has stopped. Zero padding after them is dropped, as the
+/// writer drops a blocking factor. Anything else is returned, to be kept rather than lost.
+fn after_the_end(bytes: &[u8], stop: usize) -> Result<Vec<u8>> {
+    let rest = bytes.get(stop..).unwrap_or_default();
+    if rest.iter().all(|&b| b == 0) {
+        return Ok(Vec::new());
+    }
+    // Something follows, so the crate stopped at a zero block and not at the end of the bytes.
+    // The block after it, whole or cut short, decides which kind of end that was.
+    let (second, after) = rest.split_at(rest.len().min(BLOCK));
+    if second.iter().any(|&b| b != 0) {
+        return Err(ArchiveError::Malformed {
+            format: "tar",
+            detail: format!(
+                "a lone zero block ends the entries, and more of the archive follows at offset \
+                 {stop}: node-tar reads on past it and other readers do not"
+            ),
+        });
+    }
+    Ok(after.to_vec())
 }
 
 fn classify(typeflag: u8, linkname: &[u8], major: u32, minor: u32) -> EntryKind {
@@ -209,13 +253,24 @@ fn parse_pax_time(s: Option<&str>) -> Option<i64> {
 // Writing
 // ---------------------------------------------------------------------------------------------
 
+/// Write `archive`'s entries, its end-of-archive marker, and then its [`Archive::tar_trailing`].
+///
+/// Trailing bytes that are all zero are refused: [`read`] takes them for padding, so they could
+/// not come back as what they were.
 pub fn write<W: Write>(archive: &Archive, w: &mut W) -> Result<()> {
+    let trailing = &archive.tar_trailing;
+    if !trailing.is_empty() && trailing.iter().all(|&b| b == 0) {
+        return Err(ArchiveError::Unsupported(
+            "tar trailing bytes that are all zero would read back as padding".into(),
+        ));
+    }
     for entry in &archive.entries {
         write_entry(entry, w)?;
     }
-    // Two zero blocks and nothing more: no blocking-factor padding, so the output is a pure
-    // function of the entries.
+    // Two zero blocks and no blocking-factor padding, so the output is a pure function of the
+    // entries and of whatever followed the end of the archive they were read from.
     w.write_all(&[0u8; BLOCK * 2])?;
+    w.write_all(trailing)?;
     Ok(())
 }
 
@@ -228,6 +283,19 @@ fn write_entry<W: Write>(e: &Entry, w: &mut W) -> Result<()> {
             ));
         }
     };
+
+    // A device number past seven octal digits has no spelling here that reads back as itself.
+    // `put_octal` would keep the low digits, which is another device; GNU base-256 is a field the
+    // `tar` crate reads as 0; and a `SCHILY.devmajor` record is one our reader does not lift back
+    // into the field. Each breaks `parse(write(a)) == a`, so the entry is refused instead, before
+    // anything is written. `tar-device` zeroes both before a stabilized write.
+    for (field, v) in [("devmajor", raw.devmajor), ("devminor", raw.devminor)] {
+        if u64::from(v) > MAX_OCTAL_8 {
+            return Err(ArchiveError::Unsupported(format!(
+                "{field} {v:#o} does not fit the seven octal digits of its ustar field"
+            )));
+        }
+    }
 
     let body = e.body_bytes()?;
     // The format requires an empty body for these kinds, whatever the parser found.
@@ -419,6 +487,10 @@ fn put_bytes(field: &mut [u8], value: &[u8]) {
 }
 
 /// Zero-padded octal filling `field.len() - 1` bytes, then a NUL. What GNU tar and Go both emit.
+///
+/// A value too wide keeps its low digits, which is a different number. So a caller whose value can
+/// be too wide either clamps it and carries it whole in a PAX record, or refuses it, first; neither
+/// GNU tar nor Go truncates.
 fn put_octal(field: &mut [u8], value: u64) {
     let s = format!("{value:o}");
     let width = field.len() - 1;

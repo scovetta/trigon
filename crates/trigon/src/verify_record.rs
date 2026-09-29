@@ -74,6 +74,17 @@ pub(crate) fn usage(message: &str) -> ! {
     std::process::exit(CANNOT)
 }
 
+/// Refuse the arguments of the record or the `--lookup` form as [`usage`] does, and under `--output
+/// json` print the document every other stop prints, `cannot-check`: a JSON reader gets one
+/// wherever `--output` was read, and only `clap`'s own refusals, before it is, print none.
+pub(crate) fn refuse(message: &str, output: OutputFormat) -> ! {
+    eprintln!("Error: {message}");
+    if output == OutputFormat::Json {
+        println!("{}", pretty(&stopped(CANNOT, &anyhow!("{message}"), None)));
+    }
+    std::process::exit(CANNOT)
+}
+
 /// Whether a command line is one of `docs/19` §6's forms — `verify-attestation` given `--record`
 /// or `--lookup` — read from the raw arguments, so that `main` knows, when `clap` refuses them,
 /// that they exit 5 and not 2.
@@ -101,13 +112,20 @@ pub(crate) fn run(args: Args<'_>) -> anyhow::Result<()> {
 pub(crate) fn finish(result: Result<i32, Stop>, output: OutputFormat) -> anyhow::Result<()> {
     let code = match result {
         Ok(code) => code,
-        Err(Stop { code, error }) => {
-            crate::report_fault(&error);
-            eprintln!("Error: {error:?}");
+        Err(Stop { code, error, cause }) => {
+            // `--lookup` finding no current record, and answering with what the sources say of the
+            // artifact instead, is no failure, and is said as the answer it is, not as an error.
+            match code {
+                FAILED | CANNOT => {
+                    crate::report_fault(&error);
+                    eprintln!("Error: {error:?}");
+                }
+                _ => eprintln!("{error:#}"),
+            }
             // A JSON reader gets a document on every exit, and most of all on the ones §6 cares
             // about: an equivocation or a log that does not verify stops before any record is read.
             if output == OutputFormat::Json {
-                println!("{}", pretty(&stopped(code, &error)));
+                println!("{}", pretty(&stopped(code, &error, cause)));
             }
             code
         }
@@ -122,6 +140,53 @@ pub(crate) fn finish(result: Result<i32, Stop>, output: OutputFormat) -> anyhow:
 pub(crate) struct Stop {
     pub code: i32,
     pub error: anyhow::Error,
+    /// What stopped it, where that was a source or no current record: `None` where it was the
+    /// tool, a log or a record, which the code and the error say.
+    pub cause: Option<Cause>,
+}
+
+/// What stopped a check where it was neither the tool, a log nor a record, as `--output json` names
+/// it, so that `failed-verification` is said of a record and of nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cause {
+    /// No source configured here has the log of the origin `--lookup` names: exit 4.
+    #[cfg_attr(
+        not(feature = "build"),
+        expect(
+            dead_code,
+            reason = "only `--lookup` resolves an origin, and it is the default build's"
+        )
+    )]
+    NoSource,
+    /// A source failed verification as a whole — its last sync was refused, or its clones do not
+    /// verify — and no record was checked: exit 4.
+    SourceRefused,
+    /// A source cannot say what it says now — required and unknown, every one asked unknown, or its
+    /// clones not there to be read — and no record was checked: exit 4.
+    SourceUnknown,
+    /// `--lookup` found no current verdict or void, and exits with what the sources say of the
+    /// artifact instead — never checked, withdrawn, or a record of another predicate — which is no
+    /// failure.
+    #[cfg_attr(
+        not(feature = "build"),
+        expect(
+            dead_code,
+            reason = "only `--lookup` resolves a record, and it is the default build's"
+        )
+    )]
+    NoCurrentRecord,
+}
+
+impl Cause {
+    /// The name `--output json` gives it, as `stopped`.
+    fn key(self) -> &'static str {
+        match self {
+            Cause::NoSource => "no-source",
+            Cause::SourceRefused => "source-refused",
+            Cause::SourceUnknown => "source-unknown",
+            Cause::NoCurrentRecord => "no-current-record",
+        }
+    }
 }
 
 /// The tool could not check at all: exit 5.
@@ -129,14 +194,28 @@ pub(crate) fn cannot(error: impl Into<anyhow::Error>) -> Stop {
     Stop {
         code: CANNOT,
         error: error.into(),
+        cause: None,
     }
 }
 
-/// The source failed verification, or cannot say what it says now: exit 4.
+/// A log, a record or a file a record names failed verification, or a log cannot be read: exit 4.
+/// A source that stops the command is said to with [`Stop::because`].
 pub(crate) fn failed(error: impl Into<anyhow::Error>) -> Stop {
     Stop {
         code: FAILED,
         error: error.into(),
+        cause: None,
+    }
+}
+
+impl Stop {
+    /// Say that a source, or no current record, stopped it: called what `cause` names, and never a
+    /// record that failed verification.
+    pub(crate) fn because(self, cause: Cause) -> Stop {
+        Stop {
+            cause: Some(cause),
+            ..self
+        }
     }
 }
 
@@ -475,6 +554,8 @@ fn from_clones(name: &str) -> Result<Opened, Stop> {
         })?
         .clone();
     let dirs = crate::clones::Dirs::of(&config, &source.name).map_err(cannot)?;
+    // No record has been read: what stops it here is the source, refused or not there to be read,
+    // and a log that failed is named as the log it is.
     let opened = crate::clones::open(&source, &dirs).map_err(|f| {
         failed(f.error.context(format!(
             "`{}`'s clones in {} {}",
@@ -488,6 +569,10 @@ fn from_clones(name: &str) -> Result<Opened, Stop> {
                 }
             }
         )))
+        .because(match f.refused {
+            true => Cause::SourceRefused,
+            false => Cause::SourceUnknown,
+        })
     })?;
     let mut pinned = match &source.added_by {
         AddedBy::ProjectFile(f) => format!(
@@ -1168,19 +1253,20 @@ fn json_of(r: &Report, code: i32) -> Value {
 
 /// The JSON document for a check that stopped before it had a record to report on: the exit code,
 /// what stopped it, why, and, for a log that equivocates or does not extend the checkpoint it is
-/// held to, both signed notes, which §8 has the client print. A stop with any other code than 4 or
-/// 5 is `--lookup` finding no current record to check, with what the sources say of the artifact
-/// instead — never checked, withdrawn, or a record of another predicate — which is no failure.
-fn stopped(code: i32, error: &anyhow::Error) -> Value {
+/// held to, both signed notes, which §8 has the client print. What stopped it is named for what it
+/// was — the tool, a log, a source, or `--lookup` finding no current record to check, with what the
+/// sources say of the artifact instead, which is no failure — and is `failed-verification` only
+/// where a record, or a file it names, failed. `docs/using-trigon.md` lists every name.
+fn stopped(code: i32, error: &anyhow::Error, cause: Option<Cause>) -> Value {
     let log = error.downcast_ref::<LogError>();
-    let stopped = match (code, log) {
-        (CANNOT, _) => "cannot-check",
-        (_, Some(LogError::Equivocation { .. })) => "equivocation",
-        (_, Some(LogError::Inconsistent { .. })) => "inconsistent",
-        (_, Some(l)) if l.fails_verification() => "log-failed-verification",
-        (_, Some(_)) => "log-unreadable",
-        (FAILED, None) => "failed-verification",
-        _ => "no-current-record",
+    let stopped = match (code, log, cause) {
+        (CANNOT, ..) => "cannot-check",
+        (_, Some(LogError::Equivocation { .. }), _) => "equivocation",
+        (_, Some(LogError::Inconsistent { .. }), _) => "inconsistent",
+        (_, Some(l), _) if l.fails_verification() => "log-failed-verification",
+        (_, Some(_), _) => "log-unreadable",
+        (_, None, Some(c)) => c.key(),
+        (_, None, None) => "failed-verification",
     };
     let notes = match log {
         Some(LogError::Equivocation {

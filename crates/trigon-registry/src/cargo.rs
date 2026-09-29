@@ -24,7 +24,7 @@ use trigon_core::{
 
 use crate::client::Client;
 use crate::declared::fetch_verified;
-use crate::error::RegistryError;
+use crate::error::{RegistryError, sort_versions};
 use crate::model::{ArtifactMeta, BlobSink, Fetched, ResolvedTarget};
 use crate::registry::Registry;
 
@@ -48,11 +48,12 @@ impl CratesIoRegistry {
         self
     }
 
-    /// The versions this crate has, for an error that names them.
+    /// The versions this crate has, oldest first, for an error that names them.
     ///
     /// Best effort: a listing we could not read gives an error with an empty list rather than a
     /// different error about the listing, because the caller asked about a version and that is
-    /// still the answer.
+    /// still the answer. Sorted, because crates.io lists newest first and the error calls the end
+    /// of its list the recent ones.
     async fn available(&self, name: &str) -> Vec<String> {
         let url = format!("{}/api/v1/crates/{name}", self.base);
         let Ok(resp) = self.client.get(&url, ECO).await else {
@@ -61,7 +62,8 @@ impl CratesIoRegistry {
         let Ok(doc) = resp.json::<Value>().await else {
             return Vec::new();
         };
-        doc.get("versions")
+        let mut available: Vec<String> = doc
+            .get("versions")
             .and_then(Value::as_array)
             .map(|vs| {
                 vs.iter()
@@ -69,7 +71,9 @@ impl CratesIoRegistry {
                     .map(str::to_owned)
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        sort_versions(&mut available);
+        available
     }
 }
 

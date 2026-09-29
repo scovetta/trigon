@@ -179,7 +179,9 @@ fn the_bbs_theme_marks_a_heading_with_a_block() {
 }
 
 /// `CLICOLOR_FORCE` turns colour on for a pipe, and only where nothing said otherwise: not when it
-/// is `0` or empty, not over an explicit plain theme, and never over `NO_COLOR`.
+/// is `0` or empty, not over an explicit plain theme, and never over `NO_COLOR`. A terminal that
+/// calls itself dumb is not something saying otherwise: `TERM` is set for every command a shell
+/// runs, and the force is set for this one, so the force wins, as the `CLICOLOR` convention has it.
 #[test]
 fn clicolor_force_colours_a_pipe_unless_something_said_plain() {
     let d = dir("force");
@@ -198,6 +200,19 @@ fn clicolor_force_colours_a_pipe_unless_something_said_plain() {
         !coloured(&[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")], "auto"),
         "NO_COLOR lost to CLICOLOR_FORCE"
     );
+    assert!(!coloured(&[("TERM", "dumb")], "auto"));
+    assert!(
+        coloured(&[("CLICOLOR_FORCE", "1"), ("TERM", "dumb")], "auto"),
+        "a dumb TERM beat CLICOLOR_FORCE"
+    );
+    assert!(
+        !coloured(
+            &[("CLICOLOR_FORCE", "1"), ("TERM", "dumb"), ("NO_COLOR", "1")],
+            "auto"
+        ),
+        "NO_COLOR lost to CLICOLOR_FORCE with a dumb TERM"
+    );
+    assert!(!coloured(&[("CLICOLOR_FORCE", "0"), ("TERM", "dumb")], "auto"));
     // `NO_COLOR=0` is still `NO_COLOR` set; only an empty value is not.
     assert!(!coloured(&[("NO_COLOR", "0")], "textcolor"));
     assert!(coloured(&[("NO_COLOR", "")], "textcolor"));

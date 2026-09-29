@@ -292,6 +292,22 @@ fn environment(cx: &Context) -> Environment<'static> {
     // Shell quoting is the one thing these templates actually need a regex for, and getting it
     // wrong is a command injection rather than a typo.
     env.add_filter("shell_single_quote", |s: String| s.replace('\'', r"'\''"));
+    // A value for an MSBuild `-p:Name=value`, escaped so MSBuild sets the property to exactly it.
+    // Its command line splits properties on `;` and `,` and strips `"`, and it decodes `%XX` and
+    // item-expands `@(…)` in the value where it is used, so each of those is spelled `%XX`, which
+    // it decodes back. Measured against `dotnet pack` from SDK 10.0.112: unescaped, a comma fails
+    // with MSB1006 and a quote is dropped; escaped, the assembly attribute is the value as given.
+    // ASCII only, because MSBuild decodes `%XX` a byte to a character.
+    env.add_filter("msbuild_escape", |s: String| {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '%' | ';' | ',' | '"' | '@' => out.push_str(&format!("%{:02X}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out
+    });
     env.add_filter("indent", |s: String, n: usize| {
         let pad = " ".repeat(n);
         s.lines()

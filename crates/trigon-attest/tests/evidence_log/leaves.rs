@@ -166,8 +166,19 @@ fn record_refused(r: RecordLeaf) -> String {
     // A reader refuses what the writer refuses: the same leaf, written past the writer's checks.
     let mut v = serde_json::to_value(&r).unwrap();
     v["kind"] = json!("record");
-    assert_eq!(refused(&canonical(&v)), e);
+    assert_eq!(refused(&written_anyway(&v)), e);
     e
+}
+
+/// `v` as canonical JSON, or, for a time past [`MAX_TIME`], which the canonicalizer refuses too, as
+/// a writer without that refusal would have written it: `serde_json` writes compact JSON with its
+/// keys in order, so every other byte is the same.
+fn written_anyway(v: &Value) -> Vec<u8> {
+    match trigon_core::jcs::canonicalize(v) {
+        Ok(c) => c.into_bytes(),
+        Err(trigon_core::jcs::CanonError::UnsafeInteger(_)) => serde_json::to_vec(v).unwrap(),
+        Err(e) => panic!("{e}"),
+    }
 }
 
 #[test]

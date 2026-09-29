@@ -224,9 +224,8 @@ pub struct FieldEdit {
 }
 
 /// Exactly the fields [`trigon_compare`]'s `signature::entry` compares, snapshotted so a change to
-/// any one can be attributed to the pass that made it. Body is deliberately absent: reading it
-/// would defeat the copy-on-write model a 2 GB wheel relies on, and a body change is already
-/// reported losslessly by the pass's own `Touched::bytes`, so it is attributed from that instead.
+/// any one can be attributed to the pass that made it. Body is kept apart, in [`BodyWas`]: reading
+/// a body the archive still borrows would defeat the copy-on-write model a 2 GB wheel relies on.
 ///
 /// Kept in lockstep with that comparator: a field it compares and this omits is a difference no
 /// pass could ever be shown to have caused, and the join would silently attribute it to nothing.
@@ -248,6 +247,115 @@ impl Fp {
             mode: e.meta.mode,
             raw: e.raw.clone(),
         }
+    }
+}
+
+/// A body as it stood before an `on_archive` pass, as much of it as telling whether the pass
+/// rewrote it takes.
+///
+/// An entry pass reports each body it rewrote through its own `Touched::bytes`, one entry at a
+/// time. An archive pass reports its work for the archive as a whole — `wheel-record-v2`
+/// regenerating RECORD, `nupkg-packaging-names` rewriting `_rels/.rels` — and no count of its names
+/// the member.
+/// So its bodies are compared across it instead, and promotion to `Inline` is not taken for a
+/// change: `nupkg-packaging-names` asks for `_rels/.rels` mutably whether or not it finds anything
+/// to rewrite.
+enum BodyWas {
+    /// Still the source's bytes, held by another handle onto the same window rather than a copy. A
+    /// body still borrowed afterwards is the one it was; one a pass promoted is compared with the
+    /// bytes it borrowed, which are still there.
+    Borrowed(Body),
+    /// Already in memory, so already read: its digest.
+    Inline([u8; 32]),
+    /// A nested archive, whose members are attributed at their own level.
+    Nested,
+}
+
+impl BodyWas {
+    fn of(e: &Entry, digests: &mut BodyDigests) -> BodyWas {
+        match &e.body {
+            Body::Original { src, off, len } => BodyWas::Borrowed(Body::Original {
+                src: Arc::clone(src),
+                off: *off,
+                len: *len,
+            }),
+            Body::Spilled { file, off, len } => BodyWas::Borrowed(Body::Spilled {
+                file: Arc::clone(file),
+                off: *off,
+                len: *len,
+            }),
+            Body::Inline(v) => BodyWas::Inline(digests.of(e.ordinal, v)),
+            Body::Nested { .. } => BodyWas::Nested,
+        }
+    }
+
+    /// Whether `e`'s body is other bytes than it was. One that cannot be read on either side is
+    /// taken as changed only if it is no longer the same window: a pass cannot have read it either.
+    fn changed(&self, e: &Entry, digests: &mut BodyDigests) -> bool {
+        match (self, &e.body) {
+            (BodyWas::Nested, Body::Nested { .. }) => false,
+            (BodyWas::Nested, _) | (_, Body::Nested { .. }) => true,
+            (BodyWas::Inline(d), Body::Inline(v)) => digests.fresh(e.ordinal, v) != *d,
+            (BodyWas::Inline(d), now) => now
+                .bytes()
+                .map_or(true, |b| <[u8; 32]>::from(Sha256::digest(&b)) != *d),
+            (BodyWas::Borrowed(was), now) if same_window(was, now) => false,
+            (BodyWas::Borrowed(was), now) => match (was.bytes(), now.bytes()) {
+                (Ok(a), Ok(b)) => a != b,
+                _ => true,
+            },
+        }
+    }
+}
+
+/// Two handles onto one window of one source: the same bytes, without reading them.
+fn same_window(a: &Body, b: &Body) -> bool {
+    match (a, b) {
+        (
+            Body::Original { src, off, len },
+            Body::Original {
+                src: s,
+                off: o,
+                len: l,
+            },
+        ) => Arc::ptr_eq(src, s) && (off, len) == (o, l),
+        (
+            Body::Spilled { file, off, len },
+            Body::Spilled {
+                file: f,
+                off: o,
+                len: l,
+            },
+        ) => Arc::ptr_eq(file, f) && (off, len) == (o, l),
+        _ => false,
+    }
+}
+
+/// Each `Inline` body's digest, kept from pass to pass so a body in memory is read again only once
+/// something may have changed it: an entry pass reporting bytes on it, an archive pass reporting
+/// any work, or its buffer moving or changing length.
+#[derive(Default)]
+struct BodyDigests(std::collections::HashMap<u32, (usize, usize, [u8; 32])>);
+
+impl BodyDigests {
+    /// The digest of `v`, from the last time it was read if its buffer is where and as long as it
+    /// was then.
+    fn of(&mut self, ordinal: u32, v: &[u8]) -> [u8; 32] {
+        match self.0.get(&ordinal) {
+            Some(&(at, len, d)) if (at, len) == (v.as_ptr() as usize, v.len()) => d,
+            _ => self.fresh(ordinal, v),
+        }
+    }
+
+    /// The digest of `v`, read now: a pass may have rewritten it in place.
+    fn fresh(&mut self, ordinal: u32, v: &[u8]) -> [u8; 32] {
+        let d: [u8; 32] = Sha256::digest(v).into();
+        self.0.insert(ordinal, (v.as_ptr() as usize, v.len(), d));
+        d
+    }
+
+    fn forget(&mut self, ordinal: u32) {
+        self.0.remove(&ordinal);
     }
 }
 
@@ -360,22 +468,32 @@ fn record_field_changes(
 /// and the attestation, so a pass that was configured but did no work has no business in either.
 #[tracing::instrument(level = "debug", skip(set, archive), fields(profile = %set.id))]
 pub fn apply(set: &StabilizerSet, archive: &mut Archive) -> Vec<Applied> {
-    apply_traced(set, archive).0
+    stabilize(set, archive, None)
 }
 
 /// [`apply`], and additionally the per-field, per-member edits each pass made — the ground truth a
 /// comparison joins to its difference codes to say which pass touched which field of which member.
 ///
-/// The edits are the only extra work: the stabilization itself is identical, and the fingerprints
-/// it diffs are metadata only, so a body is never read to produce them.
+/// The edits are the only extra work: the stabilization itself is identical. The fingerprints it
+/// diffs are metadata, and a body is read only where it is in memory already — to tell whether an
+/// archive pass that reported work rewrote it — never where the archive still borrows it. [`apply`]
+/// takes none of them, so the archived set, which runs it, pays for none.
 pub fn apply_traced(set: &StabilizerSet, archive: &mut Archive) -> (Vec<Applied>, Vec<FieldEdit>) {
+    let mut edits: Vec<FieldEdit> = Vec::new();
+    let applied = stabilize(set, archive, Some(&mut edits));
+    (applied, edits)
+}
+
+fn stabilize(
+    set: &StabilizerSet,
+    archive: &mut Archive,
+    edits: Option<&mut Vec<FieldEdit>>,
+) -> Vec<Applied> {
     let cx = Cx::root(archive.format);
     let mut totals: Vec<Touched> = vec![Touched::NONE; set.members.len()];
-    let mut edits: Vec<FieldEdit> = Vec::new();
-    run(set, archive, &cx, &[], &mut totals, &mut edits);
+    run(set, archive, &cx, &[], &mut totals, edits);
 
-    let applied = set
-        .members
+    set.members
         .iter()
         .zip(totals)
         .filter(|(_, t)| t.entries > 0 || t.bytes > 0)
@@ -395,8 +513,7 @@ pub fn apply_traced(set: &StabilizerSet, archive: &mut Archive) -> (Vec<Applied>
                 "applied"
             );
         })
-        .collect();
-    (applied, edits)
+        .collect()
 }
 
 /// The stabilized-name prefix a nested archive's members carry, matching the comparator's
@@ -415,7 +532,7 @@ fn run(
     cx: &Cx,
     prefix: &[u8],
     totals: &mut [Touched],
-    edits: &mut Vec<FieldEdit>,
+    mut edits: Option<&mut Vec<FieldEdit>>,
 ) {
     // Depth first: a nested archive is stabilized before the parent re-serializes it, so a parent
     // pass sees the bytes its children will actually produce.
@@ -434,47 +551,74 @@ fn run(
             child_prefix.extend_from_slice(name.as_bytes());
             child_prefix.push(b'!');
             if let Body::Nested { inner, .. } = &mut archive.entries[i].body {
-                run(set, inner, &child, &child_prefix, totals, edits);
+                run(
+                    set,
+                    inner,
+                    &child,
+                    &child_prefix,
+                    totals,
+                    edits.as_deref_mut(),
+                );
             }
         }
     }
 
+    let mut digests = BodyDigests::default();
     for (idx, s) in set.members.iter().enumerate() {
         if !s.applies(cx) {
             continue;
         }
         // Fingerprint every entry before the pass, keyed by `ordinal` — stable across the reorder
-        // an `on_archive` pass may perform, where position is not. Metadata only: no body is read.
-        let before: std::collections::HashMap<u32, Fp> = archive
-            .entries
-            .iter()
-            .map(|e| (e.ordinal, Fp::of(e)))
-            .collect();
+        // an `on_archive` pass may perform, where position is not. Only when the edits are wanted.
+        let before: Option<std::collections::HashMap<u32, (Fp, BodyWas)>> =
+            edits.is_some().then(|| {
+                archive
+                    .entries
+                    .iter()
+                    .map(|e| (e.ordinal, (Fp::of(e), BodyWas::of(e, &mut digests))))
+                    .collect()
+            });
 
         let mut t = s.on_archive(archive, cx);
-        // Which entries the pass rewrote the body of, by ordinal — from its own `Touched::bytes`,
-        // the lossless signal, rather than from re-hashing the bytes it just changed.
-        let mut body_changed: Vec<u32> = Vec::new();
+        // Which entries the pass rewrote the body of, by ordinal. An archive pass's are found by
+        // comparing each body across it, and only when it reported work, as its other edits are.
+        let mut body_changed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        if let Some(before) = &before {
+            if t.entries > 0 || t.bytes > 0 {
+                for e in &archive.entries {
+                    if let Some((_, was)) = before.get(&e.ordinal) {
+                        if was.changed(e, &mut digests) {
+                            body_changed.insert(e.ordinal);
+                        }
+                    }
+                }
+            }
+        }
+        // An entry pass's, from its own `Touched::bytes`, the lossless signal, rather than from
+        // re-hashing the bytes it just changed.
         for e in &mut archive.entries {
             let te = s.on_entry(e, cx);
             if te.bytes > 0 {
-                body_changed.push(e.ordinal);
+                body_changed.insert(e.ordinal);
+                digests.forget(e.ordinal);
             }
             t.merge(te);
         }
         totals[idx].merge(t);
 
+        let (Some(edits), Some(before)) = (edits.as_deref_mut(), before) else {
+            continue;
+        };
         if t.entries == 0 && t.bytes == 0 {
             continue;
         }
         let id = s.id();
-        let bodies: std::collections::HashSet<u32> = body_changed.into_iter().collect();
         for e in &archive.entries {
             let path = joined(prefix, e.path.as_bytes());
-            if let Some(b) = before.get(&e.ordinal) {
+            if let Some((b, _)) = before.get(&e.ordinal) {
                 record_field_changes(b, &Fp::of(e), &path, &id, edits);
             }
-            if bodies.contains(&e.ordinal) {
+            if body_changed.contains(&e.ordinal) {
                 edits.push(FieldEdit {
                     path,
                     field: "body".to_string(),

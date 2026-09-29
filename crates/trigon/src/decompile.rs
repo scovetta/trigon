@@ -143,10 +143,74 @@ pub fn source(dll: &[u8]) -> Option<String> {
     result
 }
 
-/// The value inside `[assembly: <attr>("...")]`, or `None` if this line is not that attribute.
-fn assembly_attr<'a>(line: &'a str, attr: &str) -> Option<&'a str> {
+/// The value inside `[assembly: <attr>("...")]`, or `None` if this line is not that attribute or
+/// its literal does not spell a value exactly.
+///
+/// **The value, not its spelling.** ILSpy writes C#, so the literal is escaped as C# needs: `\"`
+/// and `\\`, the control characters, and `\uXXXX` for a non-breaking space or a format character.
+/// Taken verbatim, those reached the build as the escapes themselves, and a rung that exists to
+/// reproduce the published stamps set ones the assembly never carried.
+fn assembly_attr(line: &str, attr: &str) -> Option<String> {
     let head = format!("[assembly: {attr}(\"");
-    line.trim().strip_prefix(&head)?.strip_suffix("\")]")
+    csharp_literal(line.trim().strip_prefix(&head)?.strip_suffix("\")]")?)
+}
+
+/// The value a C# regular string literal's body spells, or `None` where it spells none exactly.
+///
+/// Every escape C# has is decoded, and a UTF-16 surrogate pair becomes the one character it
+/// encodes. `None` for an escape C# does not have or that is cut short, a surrogate with no
+/// partner, a bare `"` — which is not one literal — and a NUL, which no command line carries:
+/// `None` is "not found, do not set it", and a stamp half-read is a wrong one.
+fn csharp_literal(body: &str) -> Option<String> {
+    let mut units: Vec<u16> = Vec::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    // Up to `max` hex digits, at least `min`, as one number.
+    let hex = |chars: &mut std::iter::Peekable<std::str::Chars<'_>>, min: usize, max: usize| {
+        let mut n = 0u32;
+        let mut taken = 0;
+        while taken < max
+            && let Some(d) = chars.peek().and_then(|c| c.to_digit(16))
+        {
+            n = n * 16 + d;
+            chars.next();
+            taken += 1;
+        }
+        (taken >= min).then_some(n)
+    };
+    while let Some(c) = chars.next() {
+        let unit = match c {
+            '"' => return None,
+            '\\' => match chars.next()? {
+                '\'' => u32::from('\''),
+                '"' => u32::from('"'),
+                '\\' => u32::from('\\'),
+                '0' => 0,
+                'a' => 0x07,
+                'b' => 0x08,
+                'f' => 0x0c,
+                'n' => u32::from('\n'),
+                'r' => u32::from('\r'),
+                't' => u32::from('\t'),
+                'v' => 0x0b,
+                'u' => hex(&mut chars, 4, 4)?,
+                'x' => hex(&mut chars, 1, 4)?,
+                'U' => {
+                    let c = char::from_u32(hex(&mut chars, 8, 8)?)?;
+                    units.extend_from_slice(c.encode_utf16(&mut [0; 2]));
+                    continue;
+                }
+                _ => return None,
+            },
+            c => {
+                units.extend_from_slice(c.encode_utf16(&mut [0; 2]));
+                continue;
+            }
+        };
+        // Every escape but `\U` names one UTF-16 unit, `\u` and `\x` a surrogate among them.
+        units.push(u16::try_from(unit).ok()?);
+    }
+    let value = String::from_utf16(&units).ok()?;
+    (!value.contains('\0')).then_some(value)
 }
 
 /// Read a published assembly's version stamps by decompiling it and parsing the assembly-level
@@ -167,13 +231,13 @@ fn version_info_in(cs: &str) -> Option<trigon_strategy::AssemblyVersionInfo> {
     // from being scanned in full.
     for line in cs.lines().take(400) {
         if let Some(v) = assembly_attr(line, "AssemblyVersion") {
-            info.assembly_version = Some(v.to_string());
+            info.assembly_version = Some(v);
         } else if let Some(v) = assembly_attr(line, "AssemblyFileVersion") {
-            info.file_version = Some(v.to_string());
+            info.file_version = Some(v);
         } else if let Some(v) = assembly_attr(line, "AssemblyInformationalVersion") {
-            info.informational_version = Some(v.to_string());
+            info.informational_version = Some(v);
         } else if let Some(v) = assembly_attr(line, "AssemblyCopyright") {
-            info.copyright = Some(v.to_string());
+            info.copyright = Some(v);
         }
     }
     // The package version prop: the informational version is what a `.csproj` `Version` becomes,
@@ -327,6 +391,69 @@ mod tests {
             None
         );
         assert_eq!(version_info_in("[AssemblyVersion(\"1.0.0.0\")]\n"), None);
+    }
+
+    /// ILSpy writes each value as a C# string literal, escaped as C# needs it, and the stamp is the
+    /// value the literal spells, not its spelling: `\"` and `\\`, the control characters, and the
+    /// `\uXXXX` it uses for a non-breaking space or a format character are decoded.
+    #[test]
+    fn a_stamp_is_the_value_the_literal_spells_not_its_spelling() {
+        let copyright = |literal: &str| {
+            version_info_in(&format!("[assembly: AssemblyCopyright(\"{literal}\")]\n"))
+                .and_then(|i| i.copyright)
+        };
+        assert_eq!(copyright(r"A\u00a0B\tC").as_deref(), Some("A\u{a0}B\tC"));
+        assert_eq!(
+            copyright(r#"say \"hi\" from C:\\x"#).as_deref(),
+            Some(r#"say "hi" from C:\x"#)
+        );
+        assert_eq!(
+            copyright(r"\a\b\f\n\r\v\'").as_deref(),
+            Some("\u{7}\u{8}\u{c}\n\r\u{b}'")
+        );
+        // A character outside the basic plane is a surrogate pair in C#, and one character here.
+        assert_eq!(copyright(r"\uD83D\uDE00 \U0001F600").as_deref(), Some("😀 😀"));
+        // `\x` takes one to four hex digits, as many as there are.
+        assert_eq!(copyright(r"\x41\x4Z").as_deref(), Some("A\u{4}Z"));
+        // A literal whose value ends in what looks like the attribute's close is still one literal.
+        assert_eq!(copyright(r#"a\")]"#).as_deref(), Some(r#"a")]"#));
+        // Characters ILSpy leaves alone are left alone, `$` and the backtick among them.
+        assert_eq!(
+            copyright("© 2004–2022 $HOME `id`").as_deref(),
+            Some("© 2004–2022 $HOME `id`")
+        );
+    }
+
+    /// A literal that does not spell a value a build can be given exactly is not read at all:
+    /// `None` is "not found, do not set it", and a stamp set to its escapes, or to half of it, is a
+    /// stamp the published assembly never carried.
+    #[test]
+    fn a_literal_that_spells_no_exact_value_is_not_read() {
+        for literal in [
+            // Not an escape C# has, or one cut short.
+            r"a\qb",
+            r"a\",
+            r"a\u00",
+            r"a\xZ",
+            r"a\U0011FFFF",
+            // A surrogate with no partner is no character at all.
+            r"a\uD83D",
+            r"a\uDE00b",
+            // No command line carries a NUL.
+            r"a\0b",
+            // Two literals, or a quote C# would not have left bare.
+            r#"a", "b"#,
+        ] {
+            let cs = format!("[assembly: AssemblyCopyright(\"{literal}\")]\n");
+            assert_eq!(version_info_in(&cs), None, "{literal}");
+        }
+        // One stamp that cannot be read leaves the others as they were.
+        let info = version_info_in(
+            "[assembly: AssemblyCopyright(\"a\\qb\")]\n[assembly: AssemblyVersion(\"1.0.0.0\")]\n",
+        )
+        .unwrap();
+        assert_eq!(info.copyright, None);
+        assert_eq!(info.assembly_version.as_deref(), Some("1.0.0.0"));
     }
 
     /// The attributes sit at the top; a pathological decompilation is not scanned in full.

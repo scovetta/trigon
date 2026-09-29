@@ -20,7 +20,7 @@ use trigon_core::{
 
 use crate::client::Client;
 use crate::declared::fetch_verified;
-use crate::error::RegistryError;
+use crate::error::{RegistryError, sort_versions};
 use crate::model::{ArtifactMeta, BlobSink, Fetched, ResolvedTarget};
 use crate::registry::Registry;
 
@@ -241,7 +241,7 @@ impl NpmRegistry {
             .and_then(Value::as_object)
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
-        available.sort();
+        sort_versions(&mut available);
         RegistryError::NoSuchVersion {
             ecosystem: ECO.into(),
             name,

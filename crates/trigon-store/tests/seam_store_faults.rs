@@ -510,11 +510,18 @@ async fn a_store_is_not_opened_where_there_is_no_directory_and_none_is_made() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("no-such-store");
     let e = Store::existing(&missing).unwrap_err();
-    assert!(matches!(e, StoreError::Malformed(_)), "{e}");
+    // Its own variant and not `Malformed`, which is about a record: a path that names no store is
+    // the command line's mistake, and `trigon` says so rather than asking for a bug report.
+    assert!(
+        matches!(&e, StoreError::NotAStore(p) if *p == missing),
+        "{e}"
+    );
     assert!(
         e.to_string().contains("no-such-store"),
         "the refusal names the path it was given: {e}"
     );
+    assert_eq!(e.fault(), Fault::Bug);
+    assert!(!e.is_retryable(), "a directory is not made by asking again");
     assert!(
         !missing.exists(),
         "a reader created the directory it was pointed at"
@@ -524,7 +531,7 @@ async fn a_store_is_not_opened_where_there_is_no_directory_and_none_is_made() {
     std::fs::write(&file, b"not a store").unwrap();
     assert!(matches!(
         Store::existing(&file).unwrap_err(),
-        StoreError::Malformed(_)
+        StoreError::NotAStore(_)
     ));
 
     // A directory that is there opens, and reads as the empty store it is.

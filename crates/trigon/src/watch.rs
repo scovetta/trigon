@@ -618,6 +618,11 @@ impl Sweep {
     /// three identical tabs and the history was a guess. The target where one is known, the work
     /// directory where it is not, and the tool's name on the end, because a tab reading
     /// `once@1.4.0` does not say what is looking at it.
+    ///
+    /// Every page's title comes through here. A page under a run passes its view in with the name —
+    /// `once@1.4.0 · network` — so a run and the three pages under it are four tabs, not one tab
+    /// four times; the two that skipped this carried no tool name, and the source page carried
+    /// nothing but the run's.
     fn tab_title(&self, name: Option<&str>) -> String {
         let what = name.map(str::to_string).unwrap_or_else(|| {
             self.work
@@ -1115,6 +1120,34 @@ fn baseline_panel(sweep: &Sweep, v: &View) -> String {
     let b = other.read();
 
     let mut out = format!("<h2>Against {}</h2>", esc(&path.display().to_string()));
+    // Before a single flip is counted. A path that is not a work directory reads as a sweep that
+    // attempted nothing, and every target here would then be "in this sweep and not the
+    // baseline", under a "Not a gain" — a mistyped `--baseline`, rendered as a finding about the
+    // change.
+    if b.layout == Layout::Unknown {
+        // Why, asked so that "could not look" never reads as "not there": `exists` is false on a
+        // permission error, and a directory this user may not list or enter reads, to `read`, as
+        // one that holds nothing. The probe of `results.tsv` is the entering half.
+        let why = match path.try_exists() {
+            Err(e) => format!("whether anything is there could not be told: {e}"),
+            Ok(false) => "there is nothing at that path".to_string(),
+            Ok(true) => {
+                match std::fs::read_dir(path).and_then(|_| path.join("results.tsv").try_exists()) {
+                    Err(e) => format!("it could not be read as a directory: {e}"),
+                    Ok(_) => "it holds no sweep, no run and no directory of runs".to_string(),
+                }
+            }
+        };
+        return out
+            + &format!(
+                "<p class=\"void\"><code>{}</code> is not a work directory this page can read — \
+                 {} — so nothing was compared against it</p><p class=\"note\">This is a problem \
+                 with <code>--baseline</code>, not with either sweep. A relative path is resolved \
+                 against the directory <code>trigon watch</code> was started in.</p>",
+                esc(&path.display().to_string()),
+                esc(&why),
+            );
+    }
     match (
         v.sweep.as_ref().and_then(|s| s.targets_sha256.clone()),
         b.sweep.as_ref().and_then(|s| s.targets_sha256.clone()),
@@ -1636,7 +1669,13 @@ async fn cluster(
     ));
     body.push_str("<p><a href=\"/\">← all targets</a></p>");
 
-    page(&q.key, v.live.is_live(), &body, &sweep.bind).into_response()
+    page(
+        &sweep.tab_title(Some(&q.key)),
+        v.live.is_live(),
+        &body,
+        &sweep.bind,
+    )
+    .into_response()
 }
 
 /// What the mirror served into this build, read from the run's own `network.jsonl`.
@@ -1840,7 +1879,8 @@ async fn network(
             }
         }
     }
-    page(&format!("{title} · network"), false, &body, &sweep.bind).into_response()
+    let tab = sweep.tab_title(Some(&format!("{title} · network")));
+    page(&tab, false, &body, &sweep.bind).into_response()
 }
 
 /// How far the guard got, in words rather than in an enum name.
@@ -1869,12 +1909,10 @@ fn compare_panel(dir: &Path, index: usize) -> String {
             esc(&detail)
         ),
         Ok((m, _)) => {
-            let differs = m
-                .iter()
-                .filter(|d| !d.only_one_side() && d.content_differs())
-                .count();
-            let meta_only = m.iter().filter(|d| d.metadata_only()).count();
-            let removed = m.iter().filter(|d| d.removed_by_stabilization()).count();
+            let count = |b: Band| m.iter().filter(|d| d.band() == b).count();
+            let differs = count(Band::Differs);
+            let meta_only = count(Band::Packed);
+            let removed = count(Band::Stabilized);
             format!(
                 "<h2>What differs</h2><p>{} member(s): <strong>{differs}</strong> differ in \
                  content, <strong>{meta_only}</strong> are byte-identical and packed differently, \
@@ -1927,7 +1965,8 @@ async fn compare(
              directory that has been cleaned, leaves this page with no inputs. The verdict in the \
              run record still stands — it was computed when both were there.</p>",
         );
-        return page(&format!("{title} · compare"), false, &body, &sweep.bind).into_response();
+        let tab = sweep.tab_title(Some(&format!("{title} · compare")));
+        return page(&tab, false, &body, &sweep.bind).into_response();
     };
 
     body.push_str(&format!(
@@ -1953,7 +1992,8 @@ async fn compare(
             body.push_str(&member_table(&members));
         }
     }
-    page(&format!("{title} · stabilizers"), false, &body, &sweep.bind).into_response()
+    let tab = sweep.tab_title(Some(&format!("{title} · stabilizers")));
+    page(&tab, false, &body, &sweep.bind).into_response()
 }
 
 /// The best verdict this set of passes could reach, and what holds it there.
@@ -2154,14 +2194,13 @@ fn silent_panel(artifact: &Path, applied: &[trigon_stabilize::Applied]) -> Strin
 /// then the ones that were identical all along, then the ones present on one side only.
 fn ladder_svg(m: &[MemberDiff]) -> String {
     let total = m.len().max(1) as f64;
-    let one_side = m.iter().filter(|d| d.only_one_side()).count();
-    let differs = m
-        .iter()
-        .filter(|d| !d.only_one_side() && d.content_differs())
-        .count();
-    let meta_only = m.iter().filter(|d| d.metadata_only()).count();
-    let removed = m.iter().filter(|d| d.removed_by_stabilization()).count();
-    let identical = m.len() - one_side - differs - meta_only - removed;
+    // Each band counted, none of them derived: a remainder hides a member counted twice.
+    let count = |b: Band| m.iter().filter(|d| d.band() == b).count();
+    let one_side = count(Band::OneSide);
+    let differs = count(Band::Differs);
+    let meta_only = count(Band::Packed);
+    let removed = count(Band::Stabilized);
+    let identical = count(Band::Identical);
 
     // `(count, label, fill)`. The colours are the verdict palette the rest of the page uses, so a
     // red band here and a red tag above it mean the same thing.
@@ -2202,7 +2241,8 @@ fn ladder_svg(m: &[MemberDiff]) -> String {
          <p class=\"legend\">{legend}</p>\
          <p class=\"note\">{} member(s) in total. <strong>Stabilized out</strong> is the band the \
          verdict turns on: those members' published and rebuilt bytes are not the same, and every \
-         way in which they differ was removed by one of the passes in the ledger above. \
+         way in which they differ was removed by one of the passes in the ledger above — a member \
+         only one side carried, when a pass took it out whole, among them. \
          <strong>Same bytes, packed differently</strong> is the one worth reading twice — the file \
          is byte-for-byte what was published and its archive entry is not, so the divergence is \
          about how it was packed and not about what anybody wrote.</p>",
@@ -2215,50 +2255,54 @@ fn ladder_svg(m: &[MemberDiff]) -> String {
 fn member_table(m: &[MemberDiff]) -> String {
     // Most interesting first: a hundred identical members must not bury the four that differ.
     let mut rows: Vec<&MemberDiff> = m.iter().collect();
-    rows.sort_by_key(|d| {
-        (
-            !d.content_differs(),
-            !d.only_one_side(),
-            !d.metadata_only(),
-            !d.removed_by_stabilization(),
-            d.path.clone(),
-        )
-    });
+    rows.sort_by_key(|d| (d.band(), d.path.clone()));
     let mut out = String::from(
         "<h2>Every member</h2><table><tr><th>member</th><th>as published</th>\
          <th>stabilized</th><th class=\"n\">upstream</th><th class=\"n\">rebuild</th></tr>",
     );
     for d in rows {
-        let (raw_cell, stab_cell) = if d.only_one_side() {
-            let which = if d.raw.0.is_some() {
-                "upstream"
-            } else {
-                "rebuild"
-            };
-            (
+        let which = if d.raw.0.is_some() {
+            "upstream"
+        } else {
+            "rebuild"
+        };
+        let (raw_cell, stab_cell) = match d.band() {
+            Band::OneSide => (
                 format!("<span class=\"ours\">only in {which}</span>"),
                 "<span class=\"ours\">—</span>".to_string(),
-            )
-        } else if d.content_differs() {
-            (
+            ),
+            Band::Differs => (
                 "<span class=\"fail\">differs</span>".to_string(),
                 "<span class=\"fail\">content still differs</span>".to_string(),
-            )
-        } else if d.metadata_only() {
-            (
+            ),
+            Band::Packed => (
                 "<span class=\"diff\">differs</span>".to_string(),
                 "<span class=\"diff\">same bytes, packed differently</span>".to_string(),
-            )
-        } else if d.removed_by_stabilization() {
-            (
-                "<span class=\"diff\">differs</span>".to_string(),
-                "<span class=\"ok\">equal — stabilized out</span>".to_string(),
-            )
-        } else {
-            (
+            ),
+            // Where a pass took the member out rather than rewriting it, the row says so: "equal"
+            // over two archives that no longer hold it would be a comparison nobody made.
+            Band::Stabilized => (
+                if d.only_one_side() {
+                    format!("<span class=\"diff\">only in {which}</span>")
+                } else {
+                    "<span class=\"diff\">differs</span>".to_string()
+                },
+                if d.stabilized == (None, None) {
+                    "<span class=\"ok\">removed — stabilized out</span>".to_string()
+                } else {
+                    "<span class=\"ok\">equal — stabilized out</span>".to_string()
+                },
+            ),
+            // And the same where the published bytes agreed: identical as published is a fact about
+            // two archives that held it, and neither stabilized one does.
+            Band::Identical => (
                 "<span class=\"ok\">identical</span>".to_string(),
-                "<span class=\"ok\">identical</span>".to_string(),
-            )
+                if d.stabilized == (None, None) {
+                    "<span class=\"ok\">removed by a pass</span>".to_string()
+                } else {
+                    "<span class=\"ok\">identical</span>".to_string()
+                },
+            ),
         };
         let b = |v: Option<u64>| match v {
             Some(n) => human_bytes(n),
@@ -2322,18 +2366,61 @@ fn artifact_pair(dir: &Path) -> Option<(PathBuf, PathBuf)> {
 }
 
 /// One side's members, keyed by `(path, occurrence)`, each as `(raw fingerprint, stabilized
-/// fingerprint, size)`. The occurrence is in the key because a duplicate member path is legal and
-/// would otherwise be unmatchable — the rule `diff.rs` keys on.
+/// fingerprint, size, published name)`. The path is the stabilized name, or the published one for
+/// a member a pass removed. The occurrence is in the key because a duplicate member path is legal
+/// and would otherwise be unmatchable — the rule `diff.rs` keys on.
 type MemberKey = (Vec<u8>, usize);
-/// `(raw content, raw metadata, stabilized content, stabilized metadata, size)`.
-type Fingerprints = (String, String, String, String, u64);
+/// `(raw content, raw metadata, (stabilized content, stabilized metadata), size, published name)`.
+///
+/// The stabilized half is `None` for a member a pass removed: it was published and is not in the
+/// stabilized archive, which is a different fact from never having been on this side at all.
+type Fingerprints = (String, String, Option<(String, String)>, u64, Vec<u8>);
 type SideMembers = std::collections::BTreeMap<MemberKey, Fingerprints>;
+
+/// Which of the census's five bands a member is in. Exactly one, by construction.
+///
+/// **One classifier, for every reader of it.** The ladder, the table, the run page's sentence and
+/// the source page's lower bar each asked five overlapping predicates in their own order, and the
+/// ladder counted `identical` as the total minus the other four — so a member two predicates both
+/// claimed was subtracted twice, and the one that could make that true (a member a pass removed
+/// from the only side it was on) was dropped before any of them saw it.
+///
+/// Declared in the table's order, most interesting first; the ladder draws its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Band {
+    OneSide,
+    Differs,
+    Packed,
+    Stabilized,
+    Identical,
+}
+
+impl Band {
+    /// The word `member_verdicts` hands the source page's lower bar.
+    fn word(self) -> &'static str {
+        match self {
+            Band::OneSide => "one-side",
+            Band::Differs => "differs",
+            Band::Packed => "packed",
+            Band::Stabilized => "stabilized",
+            Band::Identical => "identical",
+        }
+    }
+}
 
 /// One member of the artifact, before and after stabilization, on both sides.
 struct MemberDiff {
+    /// The name after stabilization, which both sides are matched under.
     path: String,
+    /// The name upstream published it under, where upstream has it.
+    ///
+    /// `path` unless a pass renamed it: every nupkg's `<guid>.psmdcp` is `core.psmdcp` in `path`,
+    /// and the source page, which reads the published archive, knows it only by the GUID.
+    published: Option<String>,
     /// `None` where the member is on one side only.
     raw: (Option<String>, Option<String>),
+    /// `None` where the member is not on that side after stabilization: never published there, or
+    /// published and removed by a pass.
     stabilized: (Option<String>, Option<String>),
     /// The member's **content** after stabilization, ignoring every header field.
     ///
@@ -2357,18 +2444,38 @@ impl MemberDiff {
     fn content_differs(&self) -> bool {
         self.content.0 != self.content.1
     }
-    /// Byte-for-byte the same file, in an archive entry that is not. The diagnosis a maintainer
-    /// wants: nothing you wrote changed, and something about how it was packed did.
-    fn metadata_only(&self) -> bool {
-        self.stabilized_differs() && !self.content_differs() && !self.only_one_side()
-    }
-    /// The interesting case, and the one the whole tool exists for: the bytes differ and the
-    /// stabilized forms do not. This member is why the verdict is `normalized` rather than `exact`.
-    fn removed_by_stabilization(&self) -> bool {
-        self.raw_differs() && !self.stabilized_differs()
-    }
     fn only_one_side(&self) -> bool {
         self.raw.0.is_none() || self.raw.1.is_none()
+    }
+    /// The band this member is in, asked in the order one answer retires the others.
+    ///
+    /// - **Stabilized out**, first, for a member that differed as published and that a pass took
+    ///   out of both archives. `.signature.p7s` is on every package nuget.org serves and on none
+    ///   anybody builds: on one side as published, and on neither once `nupkg-signature` has run.
+    ///   The difference is gone because a pass took it, which is what this band means.
+    /// - **On one side only**: in one archive and not the other, as published and still after.
+    /// - **Content differs**: the stabilized bodies disagree, or one side's pass removed it and the
+    ///   other's did not.
+    /// - **Same bytes, packed differently**: byte-for-byte the same file in an archive entry that
+    ///   is not. The diagnosis a maintainer wants: nothing you wrote changed, and something about
+    ///   how it was packed did.
+    /// - **Stabilized out**, again: the bytes differ and the stabilized forms do not. The case the
+    ///   whole tool exists for, and the reason a verdict is `normalized` rather than `exact`.
+    /// - **Identical as published**: everything else.
+    fn band(&self) -> Band {
+        if self.raw_differs() && self.stabilized == (None, None) {
+            Band::Stabilized
+        } else if self.only_one_side() {
+            Band::OneSide
+        } else if self.content_differs() {
+            Band::Differs
+        } else if self.stabilized_differs() {
+            Band::Packed
+        } else if self.raw_differs() {
+            Band::Stabilized
+        } else {
+            Band::Identical
+        }
     }
 }
 
@@ -2406,37 +2513,44 @@ fn member_diffs(
             .map_err(|e| format!("parsing {}: {e}", p.display()))?;
         let mut archive = parsed.archive;
 
-        let mut seen: std::collections::BTreeMap<Vec<u8>, usize> = Default::default();
-        let mut raw: Vec<(MemberKey, (String, String, u64))> = Vec::new();
+        // By ordinal: the position as parsed, which no pass rewrites, and the key
+        // `trigon-stabilize` itself follows an entry across its passes by. Not by name, because
+        // two nupkg passes rename — every package's `<guid>.psmdcp` becomes `core.psmdcp` — and a
+        // raw row looked up under the new name found nothing and stood in the stabilized one for
+        // it.
+        let mut raw: std::collections::BTreeMap<u32, (Vec<u8>, String, String, u64)> =
+            Default::default();
         for e in &archive.entries {
-            let path = e.path.as_bytes().to_vec();
-            let n = seen.entry(path.clone()).or_default();
-            let key = (path, *n);
-            *n += 1;
             let (c, m) = member_fingerprint(e)?;
-            raw.push((key, (c, m, e.meta.size)));
+            raw.insert(e.ordinal, (e.path.as_bytes().to_vec(), c, m, e.meta.size));
         }
 
         let applied = trigon_stabilize::apply(&set, &mut archive);
 
         let mut seen: std::collections::BTreeMap<Vec<u8>, usize> = Default::default();
-        let mut out = std::collections::BTreeMap::new();
-        for (i, e) in archive.entries.iter().enumerate() {
+        let mut out = SideMembers::new();
+        for e in &archive.entries {
             let path = e.path.as_bytes().to_vec();
             let n = seen.entry(path.clone()).or_default();
-            let key = (path, *n);
+            let key = (path.clone(), *n);
             *n += 1;
-            let (after_c, after_m) = member_fingerprint(e)?;
-            // Stabilizers may reorder, so the raw entry for this key is looked up rather than
-            // taken positionally. A member that a pass *removed* has a raw row and no stabilized
-            // one, which the join below renders rather than dropping.
-            let (raw_c, raw_m, size) = raw
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| (after_c.clone(), after_m.clone(), e.meta.size));
-            let _ = i;
-            out.insert(key, (raw_c, raw_m, after_c, after_m, size));
+            let after = member_fingerprint(e)?;
+            // Taken out as it is found, so what is left afterwards is what a pass removed. No pass
+            // adds a member; one that did would have no published form, and its stabilized one is
+            // the only reading there is.
+            let (published, raw_c, raw_m, size) = match raw.remove(&e.ordinal) {
+                Some(row) => row,
+                None => (path, after.0.clone(), after.1.clone(), e.meta.size),
+            };
+            out.insert(key, (raw_c, raw_m, Some(after), size, published));
+        }
+        // A member that a pass *removed* has a raw row and no stabilized one. It keeps its
+        // published name and has nothing after stabilization, so the join below renders it rather
+        // than dropping it — `.signature.p7s` on every package nuget.org serves, for one.
+        for (path, c, m, size) in raw.into_values() {
+            let n = seen.entry(path.clone()).or_default();
+            out.insert((path.clone(), *n), (c, m, None, size, path));
+            *n += 1;
         }
         Ok((out, applied))
     };
@@ -2453,16 +2567,20 @@ fn member_diffs(
         let b = r.get(&k);
         out.push(MemberDiff {
             path: String::from_utf8_lossy(&k.0).into_owned(),
+            published: a.map(|v| String::from_utf8_lossy(&v.4).into_owned()),
             raw: (
                 a.map(|v| format!("{}{}", v.0, v.1)),
                 b.map(|v| format!("{}{}", v.0, v.1)),
             ),
             stabilized: (
-                a.map(|v| format!("{}{}", v.2, v.3)),
-                b.map(|v| format!("{}{}", v.2, v.3)),
+                a.and_then(|v| v.2.as_ref()).map(|(c, m)| format!("{c}{m}")),
+                b.and_then(|v| v.2.as_ref()).map(|(c, m)| format!("{c}{m}")),
             ),
-            content: (a.map(|v| v.2.clone()), b.map(|v| v.2.clone())),
-            bytes: (a.map(|v| v.4), b.map(|v| v.4)),
+            content: (
+                a.and_then(|v| v.2.as_ref()).map(|(c, _)| c.clone()),
+                b.and_then(|v| v.2.as_ref()).map(|(c, _)| c.clone()),
+            ),
+            bytes: (a.map(|v| v.3), b.map(|v| v.3)),
         });
     }
     let mut applied = ua;
@@ -2685,7 +2803,28 @@ async fn run(
     }
 
     body.push_str(&report_panel(report.as_ref()));
-    if let (Some(store), Some(r)) = (&sweep.store, row) {
+    if let (Some(_), Some(r)) = (&sweep.store, row)
+        && r.purl.is_empty()
+    {
+        // Not looked up. A search for no target at all finds none, and `Lookup::Absent` would then
+        // say the store was searched for this one and does not hold it — a claim about a run whose
+        // target is unknown, and one that can be false: a run can be recorded and then die before
+        // it writes its report.
+        // Which of three: a report that is there and will not parse is a torn write, and "it wrote
+        // no report" over one is the absent-run reading `View.report` warns against.
+        body.push_str(&format!(
+            "<h2>Run record</h2><p class=\"note\">nothing on disk says which target this run \
+             was{} — so the store was not searched for it. The directory's name is not a record of \
+             its target.</p>",
+            if report.is_some() {
+                " — its report names none"
+            } else if dir.join("run.json").is_file() {
+                " — its report will not parse"
+            } else {
+                " — it wrote no report"
+            }
+        ));
+    } else if let (Some(store), Some(r)) = (&sweep.store, row) {
         body.push_str(&store_panel(store, &r.purl).await);
     } else if sweep.store.is_none() {
         body.push_str(
@@ -3325,6 +3464,14 @@ pub fn serve(
     if !work.is_dir() {
         anyhow::bail!("{} is not a directory", work.display());
     }
+    // The sweep it is compared against, refused the same way and for the same reason `trigon score
+    // --baseline` refuses a file that is not there. The panel still says so if it goes missing
+    // later, but a typo is better answered before anything listens.
+    if let Some(b) = &baseline
+        && !b.is_dir()
+    {
+        anyhow::bail!("--baseline {} is not a directory", b.display());
+    }
     let sweep = std::sync::Arc::new(Sweep {
         work,
         targets,
@@ -3490,22 +3637,17 @@ fn origin_bars(
 }
 
 /// The verdict each member got, keyed by path, in the vocabulary the lower bar draws.
+///
+/// The path is the one upstream published, where upstream has the member, because the lower bar
+/// reads the published archive and looks each member up by that name. Keyed by the stabilized name
+/// instead, every nupkg's `<guid>.psmdcp` — renamed `core.psmdcp` by a pass — was drawn as never
+/// compared.
 fn member_verdicts(diffs: &[MemberDiff]) -> BTreeMap<String, &'static str> {
     diffs
         .iter()
         .map(|d| {
-            let v = if d.only_one_side() {
-                "one-side"
-            } else if d.removed_by_stabilization() {
-                "stabilized"
-            } else if d.metadata_only() {
-                "packed"
-            } else if d.content_differs() {
-                "differs"
-            } else {
-                "identical"
-            };
-            (d.path.clone(), v)
+            let path = d.published.as_ref().unwrap_or(&d.path);
+            (path.clone(), d.band().word())
         })
         .collect()
 }
@@ -3522,8 +3664,10 @@ async fn source_page(
     let v = sweep.read();
     let dir = sweep.target_dir(&v, index);
     let report = read_report(&dir);
-    // What the run page calls this run, because this page is one it links to.
+    // What the run page calls this run, because this page is one it links to — and the tab says
+    // which of the two it is, or a run and its source are two identical tabs.
     let name = sweep.name_at(&v, index);
+    let tab = sweep.tab_title(Some(&format!("{name} · source")));
 
     let mut body = format!(
         "<h1>{}</h1>{}<p><a href=\"/run/{index}\">← the run</a></p>",
@@ -3537,7 +3681,7 @@ async fn source_page(
              source, so there is no commit to compare the artifact against. A verdict without one \
              is a claim about an artifact and nothing else.</p>",
         );
-        return page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response();
+        return page(&tab, false, &body, &sweep.bind).into_response();
     };
 
     let Some((upstream, _)) = artifact_pair(&dir) else {
@@ -3547,7 +3691,7 @@ async fn source_page(
              from the comparison record, deliberately — see the note below — so a pruned work \
              directory takes it with it.</p>",
         );
-        return page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response();
+        return page(&tab, false, &body, &sweep.bind).into_response();
     };
 
     let members = match raw_members(&upstream) {
@@ -3557,7 +3701,7 @@ async fn source_page(
                 "<h2>How the source became the artifact</h2><p class=\"note\">{}</p>",
                 esc(&e)
             ));
-            return page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response();
+            return page(&tab, false, &body, &sweep.bind).into_response();
         }
     };
 
@@ -3644,7 +3788,7 @@ async fn source_page(
         took.as_millis(),
     ));
 
-    page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response()
+    page(&tab, false, &body, &sweep.bind).into_response()
 }
 
 /// A verdict's whole derivation on one line.
@@ -4911,6 +5055,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_whose_target_is_not_known_is_not_looked_up_under_no_target() {
+        // A run that left no report has an empty purl, because nothing on disk says which target
+        // it was. Looking that up searched the store for `""` and reported the run absent from it —
+        // "none of them is this target" about a target nobody named, with the sentence that
+        // explains an absence as a run that was evidence of nothing.
+        //
+        // A report that is there and will not parse leaves the same empty purl, and it is a torn
+        // write rather than no report: the note says which.
+        let w = work_dir("store-no-target");
+        put(w.join("half-a-run").join("strategy.yaml"), "id: x\n");
+        put(w.join("torn").join("run.json"), "{");
+        let store = w.join("store");
+        trigon_store::Store::local(&store).unwrap();
+        for (index, why) in [(0, "it wrote no report"), (1, "its report will not parse")] {
+            let page = run_page(
+                Sweep {
+                    store: Some(store.clone()),
+                    ..sweep_at(w.clone())
+                },
+                index,
+            )
+            .await;
+            assert!(!page.contains("none of them is this target"), "{page}");
+            assert!(!page.contains("evidence of nothing"), "{page}");
+            assert!(
+                page.contains(&format!(
+                    "<h2>Run record</h2><p class=\"note\">nothing on disk says which target this \
+                     run was — {why} — so the store was not searched for it"
+                )),
+                "{page}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn an_empty_store_and_a_store_without_this_target_are_different_answers() {
         let dir = work_dir("store-absent").join("store");
         let store = trigon_store::Store::local(&dir).unwrap();
@@ -5601,6 +5780,77 @@ mod tests {
     }
 
     #[test]
+    fn a_baseline_that_is_not_a_work_directory_is_not_read_as_an_empty_sweep() {
+        // A mistyped `--baseline` read as a sweep that attempted nothing, so every target here was
+        // "in this sweep and not the baseline" and the verdict under them was "Not a gain" — our
+        // configuration error, rendered as a finding about the change.
+        let w = work_dir("baseline-mistyped");
+        put(w.join("results.tsv"), &results(&[("a", "exact")]));
+        let empty = work_dir("baseline-empty-dir");
+        for (base, why) in [
+            (w.join("no-such-sweep"), "there is nothing at that path"),
+            (empty, "it holds no sweep, no run and no directory of runs"),
+        ] {
+            let s = Sweep {
+                baseline: Some(base.clone()),
+                ..sweep_at(w.clone())
+            };
+            let p = baseline_panel(&s, &s.read());
+            assert!(
+                p.contains(&format!(
+                    "<code>{}</code> is not a work directory this page can read — {why} — so \
+                     nothing was compared against it",
+                    esc(&base.display().to_string())
+                )),
+                "{p}"
+            );
+            for claim in [
+                "in this sweep and not the baseline",
+                "Not a gain",
+                "net gain",
+                "nothing changed",
+            ] {
+                assert!(!p.contains(claim), "`{claim}` about no comparison:\n{p}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_baseline_that_cannot_be_read_is_not_said_to_hold_no_sweep() {
+        // A directory this user may not list, or may list and not enter, is one `read` finds
+        // nothing in — so the panel said "it holds no sweep" over a sweep that is there, which is
+        // "could not look" rendered as "not there".
+        use std::os::unix::fs::PermissionsExt as _;
+        let w = work_dir("baseline-sealed");
+        put(w.join("results.tsv"), &results(&[("a", "exact")]));
+        let sealed = w.join("sealed");
+        put(sealed.join("results.tsv"), &results(&[("a", "exact")]));
+        let set = |mode: u32| {
+            std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for mode in [0o000, 0o400] {
+            set(mode);
+            // A user the permissions do not stop (root) reads everything, and there is nothing to
+            // test.
+            let stopped = std::fs::read_to_string(sealed.join("results.tsv")).is_err();
+            let s = Sweep {
+                baseline: Some(sealed.clone()),
+                ..sweep_at(w.clone())
+            };
+            let p = baseline_panel(&s, &s.read());
+            set(0o755);
+            if stopped {
+                assert!(
+                    p.contains("— it could not be read as a directory: "),
+                    "{mode:o}: {p}"
+                );
+                assert!(!p.contains("holds no sweep"), "{mode:o}: {p}");
+                assert!(!p.contains("Not a gain"), "{mode:o}: {p}");
+            }
+        }
+    }
+
+    #[test]
     fn a_baseline_names_every_flip_and_calls_a_regression_a_regression() {
         // A change that fixes one package and breaks another leaves the rate where it was. The
         // panel's job is which targets flipped, and in which direction.
@@ -6261,6 +6511,10 @@ mod tests {
         assert!(run.contains("under tar-gzip"), "{run}");
 
         let cmp = compare_page(sweep_at(w), 0).await;
+        assert!(
+            cmp.contains("<title>npm/a@1 · stabilizers · trigon watch</title>"),
+            "{cmp}"
+        );
         // Every pass in the tarball set is a builtin at metadata risk or below, so nothing caps it.
         assert!(
             cmp.contains("nothing in this set holds the verdict down"),
@@ -6384,8 +6638,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.len(), 1);
-        assert!(m[0].metadata_only(), "same bytes, different entry");
-        assert!(!m[0].content_differs() && !m[0].removed_by_stabilization());
+        assert_eq!(m[0].band(), Band::Packed, "same bytes, different entry");
+        assert!(!m[0].content_differs());
         assert_eq!(member_verdicts(&m).get("f.txt").copied(), Some("packed"));
         let panel = compare_panel(&w, 0);
         assert!(
@@ -6396,6 +6650,164 @@ mod tests {
             "{panel}"
         );
         assert!(panel.contains("<a href=\"/run/0/compare\">"), "{panel}");
+    }
+
+    #[tokio::test]
+    async fn a_member_a_pass_removed_is_counted_as_stabilized_out_rather_than_dropped() {
+        // nuget.org countersigns every package it serves and nothing anybody builds, so the
+        // published `.nupkg` carries a `.signature.p7s` the rebuild never has, and
+        // `nupkg-signature` takes it out. That is a difference a pass accounted for — the band the
+        // census note describes — and the page dropped the member instead: gone from the total,
+        // from the table, and drawn on the source page as never compared.
+        //
+        // And a member a pass *renamed* is one member, not a removal and an arrival: `dotnet pack`
+        // names the core-properties part after a fresh GUID, so the two sides publish it under two
+        // names that `nupkg-packaging-names` makes one.
+        let props = "package/services/metadata/core-properties/";
+        let (up_props, rb_props) = (format!("{props}aaaa.psmdcp"), format!("{props}bbbb.psmdcp"));
+        let up = zip_of(&[
+            (".signature.p7s", b"the gallery's countersignature", 0o644),
+            ("_rels/.rels", b"<Relationships/>", 0o644),
+            ("lib/a.dll", b"MZ the assembly", 0o644),
+            (&up_props, b"<coreProperties/>", 0o644),
+        ]);
+        let rb = zip_of(&[
+            ("_rels/.rels", b"<Relationships/>", 0o644),
+            ("lib/a.dll", b"MZ the assembly", 0o644),
+            (&rb_props, b"<coreProperties/>", 0o644),
+        ]);
+        let w = one_run(
+            "removed-by-a-pass",
+            &run_json("pkg:nuget/a@1", "normalized"),
+            "a.1.nupkg",
+            &up,
+            &rb,
+        );
+        let (m, _) = member_diffs(
+            &w.join("a.1.nupkg"),
+            &w.join("rebuild").join("1789000000-run").join("a.1.nupkg"),
+        )
+        .unwrap();
+        // Under the names upstream published, because the source page's lower bar reads the
+        // published archive: under `core.psmdcp`, the GUID-named part was drawn as never compared.
+        let verdicts = member_verdicts(&m);
+        assert_eq!(
+            verdicts,
+            BTreeMap::from([
+                (".signature.p7s".to_string(), "stabilized"),
+                ("_rels/.rels".to_string(), "identical"),
+                ("lib/a.dll".to_string(), "identical"),
+                (up_props.clone(), "stabilized"),
+            ])
+        );
+        let (joined, _) = crate::provenance::join(
+            &raw_members(&w.join("a.1.nupkg")).unwrap(),
+            None,
+            None,
+            "d50b912e",
+        );
+        let bars = origin_bars(&joined, &verdicts);
+        assert!(
+            bars.contains(&format!("{up_props} — stabilized out")),
+            "{bars}"
+        );
+        assert!(!bars.contains("not compared"), "{bars}");
+        // The total is the four members upstream published, each in one band: the count of
+        // identical members was the total minus the rest, and a member in two bands underflowed it.
+        let bar = ladder_svg(&m);
+        assert!(
+            bar.contains(
+                "4 members: 0 differ in content, 0 same bytes packed differently, 2 stabilized \
+                 out, 2 identical, 0 on one side only"
+            ),
+            "{bar}"
+        );
+        assert!(bar.contains("</i>2 stabilized out</span>"), "{bar}");
+        assert!(bar.contains("4 member(s) in total"), "{bar}");
+        let t = member_table(&m);
+        assert!(
+            t.contains(
+                "<code>.signature.p7s</code></td><td><span class=\"diff\">only in upstream</span>\
+                 </td><td><span class=\"ok\">removed — stabilized out</span>"
+            ),
+            "{t}"
+        );
+        assert!(
+            t.contains(&format!(
+                "<code>{props}core.psmdcp</code></td><td><span class=\"diff\">differs</span>\
+                 </td><td><span class=\"ok\">equal — stabilized out</span>"
+            )),
+            "{t}"
+        );
+        assert!(
+            !t.contains("aaaa.psmdcp") && !t.contains("bbbb.psmdcp"),
+            "{t}"
+        );
+        let panel = compare_panel(&w, 0);
+        assert!(
+            panel.contains(
+                "4 member(s): <strong>0</strong> differ in content, <strong>0</strong> are \
+                 byte-identical and packed differently, <strong>2</strong> were stabilized out"
+            ),
+            "{panel}"
+        );
+
+        // The same rule by hand, for the shapes a pair of real archives is slow to reach: removed
+        // from both sides after differing is stabilized out, removed from both after agreeing is
+        // identical, and removed from one side of two is a difference that is still there.
+        let m = [
+            member(
+                "gone-both-differed",
+                (Some("x"), Some("y")),
+                (None, None),
+                (None, None),
+            ),
+            member(
+                "gone-both-agreed",
+                (Some("x"), Some("x")),
+                (None, None),
+                (None, None),
+            ),
+            member(
+                "gone-one-side",
+                (Some("x"), Some("x")),
+                (Some("x"), None),
+                (Some("c"), None),
+            ),
+            member(
+                "only-rebuilt-and-gone",
+                (None, Some("y")),
+                (None, None),
+                (None, None),
+            ),
+        ];
+        assert_eq!(
+            member_verdicts(&m),
+            BTreeMap::from([
+                ("gone-both-differed".to_string(), "stabilized"),
+                ("gone-both-agreed".to_string(), "identical"),
+                ("gone-one-side".to_string(), "differs"),
+                ("only-rebuilt-and-gone".to_string(), "stabilized"),
+            ])
+        );
+        let bar = ladder_svg(&m);
+        assert!(
+            bar.contains(
+                "4 members: 1 differ in content, 0 same bytes packed differently, 2 stabilized \
+                 out, 1 identical, 0 on one side only"
+            ),
+            "{bar}"
+        );
+        // Identical as published, and in neither stabilized archive: the stabilized cell says a
+        // pass took it, not "identical" over a comparison nobody made.
+        let t = member_table(&m);
+        assert!(
+            t.contains(
+                "<code>gone-both-agreed</code></td><td><span class=\"ok\">identical</span></td>\
+                 <td><span class=\"ok\">removed by a pass</span>"
+            ),
+            "{t}"
+        );
     }
 
     #[tokio::test]
@@ -6590,6 +7002,7 @@ mod tests {
             |(a, b): (Option<&str>, Option<&str>)| (a.map(str::to_string), b.map(str::to_string));
         MemberDiff {
             path: path.into(),
+            published: raw.0.map(|_| path.into()),
             raw: own(raw),
             stabilized: own(stabilized),
             content: own(content),
@@ -6938,6 +7351,49 @@ mod tests {
                 "the {what} page names the row's target:\n{page}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn every_tab_says_which_page_it_is_and_what_is_looking_at_it() {
+        // The network and ledger tabs carried no tool name, the cluster tab was the bare key, and
+        // the source tab was the run's own — two windows on one run, indistinguishable in the tab
+        // bar and in the history.
+        let w = work_dir("tabs");
+        put(
+            w.join("results.tsv"),
+            "pkg:npm/a@1\tbuild-failed\t1.0\tcc/missing-header\t0\n",
+        );
+        let mut seen = BTreeMap::new();
+        for path in [
+            "/run/0",
+            "/run/0/network",
+            "/run/0/compare",
+            "/run/0/source",
+            "/cluster?key=cc%2Fmissing-header",
+        ] {
+            let (status, out) = served(sweep_at(w.clone()), path).await;
+            assert_eq!(status, 200, "{path}:\n{out}");
+            let tab = out
+                .split("<title>")
+                .nth(1)
+                .and_then(|t| t.split("</title>").next())
+                .unwrap_or_else(|| panic!("{path} has no title:\n{out}"))
+                .to_string();
+            assert!(tab.ends_with(" · trigon watch"), "{path}: {tab}");
+            if let Some(other) = seen.insert(tab.clone(), path) {
+                panic!("{path} and {other} are both `{tab}`");
+            }
+        }
+        assert_eq!(
+            seen.keys().cloned().collect::<Vec<_>>(),
+            [
+                "cc/missing-header · trigon watch",
+                "npm/a@1 · compare · trigon watch",
+                "npm/a@1 · network · trigon watch",
+                "npm/a@1 · source · trigon watch",
+                "npm/a@1 · trigon watch",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -7310,6 +7766,22 @@ mod tests {
         )
         .expect_err("a file is not a work directory");
         assert!(err.to_string().contains("is not a directory"), "{err}");
+    }
+
+    #[test]
+    fn a_baseline_that_is_not_a_directory_is_refused_before_anything_listens() {
+        // The address is held by this test, so a watch that let the baseline through fails on the
+        // bind rather than serving forever: the error says which of the two stopped it.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap().to_string();
+        let w = work_dir("serve-refuses-baseline");
+        let err = serve(w.clone(), None, addr, None, Some(w.join("no-such-sweep")))
+            .expect_err("a baseline that is not there");
+        assert!(
+            format!("{err:#}").contains("--baseline ")
+                && format!("{err:#}").contains("no-such-sweep is not a directory"),
+            "{err:#}"
+        );
     }
 
     #[test]

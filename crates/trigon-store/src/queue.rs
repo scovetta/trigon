@@ -29,6 +29,7 @@ use crate::{RunRecord, StoreError};
 use serde::{Deserialize, Serialize};
 use sqlx::any::{AnyPoolOptions, AnyRow};
 use sqlx::{AnyPool, Row as _};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Which backend, because exactly one statement differs between them.
@@ -205,6 +206,27 @@ pub struct HostBudget {
 pub struct Queue {
     pool: AnyPool,
     backend: Backend,
+    clock: Clock,
+}
+
+/// Where the queue reads the time: the system clock, or one a test moves by hand.
+///
+/// **Every lease, visibility and host-budget decision is a comparison against this**, and the
+/// other side of the comparison is a number in the database, so `tokio::time::pause` cannot reach
+/// it. Two tests asserted a renewed lease and a shared throttle by racing the real clock, and each
+/// failed once on a loaded machine that stalled past its margin while the queue behaved correctly.
+/// A test that moves this clock itself asserts the same property with nothing left to the
+/// scheduler. See [`Queue::with_clock`].
+#[derive(Clone)]
+struct Clock(Option<Arc<dyn Fn() -> i64 + Send + Sync>>);
+
+impl std::fmt::Debug for Clock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            Some(_) => "Clock(given)",
+            None => "Clock(system)",
+        })
+    }
 }
 
 impl Queue {
@@ -241,7 +263,33 @@ impl Queue {
             .connect(url)
             .await
             .map_err(|e| StoreError::Malformed(format!("opening the queue at {url}: {e}")))?;
-        Ok(Queue { pool, backend })
+        Ok(Queue {
+            pool,
+            backend,
+            clock: Clock(None),
+        })
+    }
+
+    /// This queue, reading the time from `now_ms` — milliseconds since the Unix epoch — instead of
+    /// the system clock.
+    ///
+    /// For tests. A lease that lapses, a job held back and a host told to wait are all decided by
+    /// the clock, and one the test moves decides them the same way however slowly the machine
+    /// runs. Every handle cloned from this one reads the same clock; another handle opened on the
+    /// same database does not, and the two would disagree about what has lapsed.
+    pub fn with_clock(self, now_ms: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        Queue {
+            clock: Clock(Some(Arc::new(now_ms))),
+            ..self
+        }
+    }
+
+    /// Now, in milliseconds since the Unix epoch, by this queue's clock.
+    fn now_ms(&self) -> i64 {
+        match &self.clock.0 {
+            Some(now) => now(),
+            None => system_now_ms(),
+        }
     }
 
     pub fn backend(&self) -> Backend {
@@ -276,7 +324,7 @@ impl Queue {
     /// The host a job must avoid is written in the same transaction as the job: written after it,
     /// a job queued to run at once could be leased by that host in between.
     pub async fn enqueue(&self, j: &NewJob) -> Result<i64, StoreError> {
-        let now = now_ms();
+        let now = self.now_ms();
         let visible = now + j.delay.as_millis() as i64;
         let mut tx = self.begin_write().await?;
         sqlx::query(
@@ -362,7 +410,7 @@ impl Queue {
         n: i64,
         lease_for: Duration,
     ) -> Result<Vec<Job>, StoreError> {
-        let now = now_ms();
+        let now = self.now_ms();
         let until = now + lease_for.as_millis() as i64;
         let kind_list = kinds
             .iter()
@@ -422,6 +470,15 @@ impl Queue {
     /// a 45-minute build heartbeating onto the job row amplifies writes on exactly the row every
     /// lease query contends for. Only `leased_until` moves here, and only for the worker holding
     /// it — `false` means somebody else has the lease and this worker should stop.
+    ///
+    /// **And the phase is recorded only for the worker holding it.** A phase is a claim about where
+    /// the job has got to, and a job whose lease lapsed and was taken is another worker's. The
+    /// displaced one often keeps building, since its container cannot always be cancelled, and
+    /// its phases used to land in the one stream a reader follows, between the holder's. So a
+    /// displaced worker's heartbeat records nothing, and says so with `false`.
+    ///
+    /// A phase reached after the job has left `leased` — `recorded`, once [`Self::finish`] has
+    /// claimed it — is not a heartbeat, and is written with [`Self::event`].
     pub async fn heartbeat(
         &self,
         job: i64,
@@ -429,7 +486,7 @@ impl Queue {
         extend: Duration,
         phase: Option<&str>,
     ) -> Result<bool, StoreError> {
-        let until = now_ms() + extend.as_millis() as i64;
+        let until = self.now_ms() + extend.as_millis() as i64;
         let n = sqlx::query(
             "UPDATE job SET leased_until = $1 WHERE id = $2 AND leased_by = $3 AND state = 'leased'",
         )
@@ -440,10 +497,13 @@ impl Queue {
         .await
         .map_err(|e| StoreError::Malformed(format!("heartbeat: {e}")))?
         .rows_affected();
+        if n == 0 {
+            return Ok(false);
+        }
         if let Some(p) = phase {
             self.event(job, p, None).await?;
         }
-        Ok(n > 0)
+        Ok(true)
     }
 
     /// Record a phase or a note against a job. Read by the API's event stream.
@@ -455,7 +515,7 @@ impl Queue {
     ) -> Result<(), StoreError> {
         sqlx::query("INSERT INTO run_event (job, at, phase, detail) VALUES ($1, $2, $3, $4)")
             .bind(job)
-            .bind(now_ms())
+            .bind(self.now_ms())
             .bind(phase)
             .bind(detail)
             .execute(&self.pool)
@@ -566,7 +626,7 @@ impl Queue {
         why: &str,
         retry_in: Option<Duration>,
     ) -> Result<bool, StoreError> {
-        let now = now_ms();
+        let now = self.now_ms();
         let sql = match retry_in {
             Some(d) => format!(
                 "UPDATE job SET state = 'ready', leased_by = NULL, leased_until = NULL, \
@@ -615,7 +675,7 @@ impl Queue {
         interval: Duration,
     ) -> Result<Duration, StoreError> {
         let interval_us = interval.as_micros() as i64;
-        let now_us = now_ms() * 1000;
+        let now_us = self.now_ms() * 1000;
         let mut tx = self.begin_write().await?;
 
         let existing: Option<i64> =
@@ -641,10 +701,10 @@ impl Queue {
         .bind(host)
         .bind(next)
         .bind(interval.as_millis() as i64)
-        .bind(now_ms())
+        .bind(self.now_ms())
         .bind(next)
         .bind(interval.as_millis() as i64)
-        .bind(now_ms())
+        .bind(self.now_ms())
         .execute(&mut *tx)
         .await
         .map_err(|e| StoreError::Malformed(format!("writing a host budget: {e}")))?;
@@ -665,7 +725,7 @@ impl Queue {
         host: &str,
         retry_after: Duration,
     ) -> Result<(), StoreError> {
-        let until_us = (now_ms() + retry_after.as_millis() as i64) * 1000;
+        let until_us = (self.now_ms() + retry_after.as_millis() as i64) * 1000;
         sqlx::query(
             "INSERT INTO host_budget (host, next_at_us, interval_ms, throttled, updated) \
              VALUES ($1, $2, 1000, 1, $3) \
@@ -677,10 +737,10 @@ impl Queue {
         )
         .bind(host)
         .bind(until_us)
-        .bind(now_ms())
+        .bind(self.now_ms())
         .bind(until_us)
         .bind(until_us)
-        .bind(now_ms())
+        .bind(self.now_ms())
         .execute(&self.pool)
         .await
         .map_err(|e| StoreError::Malformed(format!("recording a throttle: {e}")))?;
@@ -813,7 +873,7 @@ fn older_queue(doing: &str, e: sqlx::Error) -> StoreError {
     }
 }
 
-fn now_ms() -> i64 {
+fn system_now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -970,7 +1030,7 @@ impl Queue {
         daily_quota: i64,
         token: &str,
     ) -> Result<(), StoreError> {
-        let now = now_ms();
+        let now = self.now_ms();
         sqlx::query(
             "INSERT INTO principal (id, name, scopes, daily_quota, created) \
              VALUES ($1, $2, $3, $4, $5) \
@@ -1040,7 +1100,7 @@ impl Queue {
         target: &str,
         day: &str,
     ) -> Result<Requested, StoreError> {
-        let now = now_ms();
+        let now = self.now_ms();
         let mut tx = self.begin_write().await?;
 
         let spent: i64 =

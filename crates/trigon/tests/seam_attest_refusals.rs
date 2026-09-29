@@ -674,6 +674,18 @@ fn attest_without_a_run_signs_the_most_recent_one() {
     assert!(statements(&store, &older.id).is_empty());
 }
 
+/// A run the store does not hold is a mistyped id: said as the command line's, never as a bug in
+/// trigon to be reported, and nothing is signed.
+#[test]
+fn a_run_the_store_does_not_hold_is_the_command_lines_fault_and_not_trigons() {
+    let d = dir("no-such-run");
+    let err = refused(&attest(&d, "nope", &[]));
+    assert!(err.contains("no run `nope` in this store"), "{err}");
+    assert!(err.contains("the command line's: no such run"), "{err}");
+    assert!(!err.contains("bug in trigon"), "{err}");
+    assert!(filed(&d).is_empty(), "{:?}", filed(&d));
+}
+
 /// `trigon runs`: a store with nothing in it says so, and each run says what it concluded — a
 /// verdict, `void` for a run whose guard tripped, `-` for one that reached neither — and whether
 /// anything has been signed about it.

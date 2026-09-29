@@ -75,7 +75,7 @@ $ trigon verify upstream.whl rebuild.whl
 ✔ exact
 
   format         zip
-  stabilizer set wheel (58632c3c627d…)
+  stabilizer set wheel (738725964c4a…)
 
                upstream           rebuild
   raw          347ba5223fbf…      347ba5223fbf…      =
@@ -203,7 +203,7 @@ tiers, least to most invasive:
 
 - `structural` — reordering, framing. Changes no bytes of any member.
 - `metadata` — timestamps, modes, owners.
-- `content` — rewrites a member's bytes. `wheel-record` regenerating a wheel's `RECORD` is one.
+- `content` — rewrites a member's bytes. `wheel-record-v2` regenerating a wheel's `RECORD` is one.
 - `lossy` — drops information.
 
 **`normalized` is the tier gate.** Trigon will not report `normalized` if any applied stabilizer is
@@ -951,7 +951,8 @@ check; and, where a source fails it whatever was answered, `trigon/source-refuse
 source could not answer is never filed as the warning its answers alone would be. **A bare `trigon
 check` answers from the evidence sources**; it used to read
 `./trigon-store`, and `--store <path>` still does exactly that — a local store of your own runs,
-newest run per package, five rows, exit 0 — with none of the flags below.
+newest run per package, five rows, exit 0 whatever it reports — with none of the flags below; a
+store or lockfile it cannot read is the tool failing, `5`, as it is for every form of `check`.
 
 **Exit codes**, the same for `lookup`, `check` and `verify-attestation`
 ([`19`](19-distribution-and-lookup.md) §6): `0` every package at or above the threshold; `1` any
@@ -1032,6 +1033,29 @@ not made, `5`, and it asks for `--rebuild <file>`.
 `verify-attestation --record <file> --source <name>` without `--evidence` reads the same clones,
 following the source's chain into every repository its log has gone on in; it is in the verifier
 build too, and fetches nothing.
+
+**What stopped it.** Where `verify-attestation`, either form, stops before it has a record to
+report on, `--output json` prints `{exit, stopped, error, signedNotes}`: the exit code; what
+stopped it, below; why, as the text says it; and, for an equivocation or a rollback, both signed
+notes, `null` otherwise. `stopped` names the cause, so `failed-verification` is said of a record
+and of nothing else. The one stop with no document is an argument `clap` itself refuses — a flag
+it does not know, one without its value, a value it does not take — which comes before `--output`
+is read: exit `5`, `clap`'s message on stderr, and nothing on stdout.
+
+| `stopped` | exit | what stopped it |
+| --- | --- | --- |
+| `cannot-check` | `5` | it could not check at all: an unreadable input, no such source, a rebuilt artifact that could not be had, or bad arguments other than those `clap` refuses |
+| `equivocation` | `4` | two different logs under one key; `signedNotes` holds both, with the directory each came from |
+| `inconsistent` | `4` | the log does not extend the checkpoint it is held to, a rollback or a rewrite; `signedNotes` holds the checkpoint accepted and the one offered |
+| `log-failed-verification` | `4` | the log failed verification otherwise: a signature, a tree, a leaf against the log's rules, a key change |
+| `log-unreadable` | `4` | the log could not be read: a file of it missing, unreadable or malformed |
+| `failed-verification` | `4` | a record failed verification or was deleted, or a file it names is other bytes than it signs: a release asset in the repository of the source that resolved it |
+| `source-refused` | `4` | a source failed verification as a whole, its last sync refused or its clones not verifying, and no record was checked |
+| `source-unknown` | `4` | a source cannot say what it says now, required and unknown, every one asked unknown, or its clones not there to be read, and no record was checked |
+| `no-source` | `4` | `--lookup`: no source configured here has the log `--origin` names |
+| `no-current-record` | `0`–`3` | `--lookup`: the subject has no current verdict or void — never checked, withdrawn, or only a record of another predicate than `--predicate` — and exits with what the sources say of it instead |
+
+`no-current-record` is no failure, and is said as the answer it is, never with `Error:`.
 
 ---
 

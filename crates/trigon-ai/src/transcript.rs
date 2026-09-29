@@ -20,7 +20,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::provider::{LlmError, ModelCaps, Provider, Reasoning, Request, Response, Usage};
+use crate::provider::{Effort, LlmError, ModelCaps, Provider, Reasoning, Request, Response, Usage};
 
 /// One exchange, with everything a replay needs to be honest about what it is repeating.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -153,6 +153,11 @@ impl<P: Provider> Provider for Recorder<P> {
     /// was built, and recorded the default as what had been asked for.
     fn reasoning(&self) -> Reasoning {
         self.inner.reasoning()
+    }
+
+    /// The wrapped provider's too, for the same reason: `propose` starts its depth walk here.
+    fn default_effort(&self) -> Effort {
+        self.inner.default_effort()
     }
 
     fn complete(&self, req: &Request) -> Result<Response, LlmError> {
@@ -453,9 +458,15 @@ mod tests {
         assert_eq!(r.id(), "replay");
         assert_eq!(r.caps(), Replay::once("a").caps());
         assert_eq!(Replaying::new(Transcript::new("t")).id(), "replaying");
+
+        // And the depth it is asked to think at, which `propose` reads through the recorder. A
+        // provider left at the trait's default cannot show that, so this one says `high`.
+        let deep = Recorder::new(Quiet(Replay::once("a")));
+        assert_eq!(deep.default_effort(), Effort::High);
     }
 
-    /// A provider configured to ask for no reasoning, the way `ollama:<tag>+no-reasoning` is.
+    /// A provider configured to ask for no reasoning, the way `ollama:<tag>+no-reasoning` is, and
+    /// for a depth other than the trait's default.
     struct Quiet(Replay);
 
     impl Provider for Quiet {
@@ -470,6 +481,9 @@ mod tests {
         }
         fn reasoning(&self) -> Reasoning {
             Reasoning::Off
+        }
+        fn default_effort(&self) -> Effort {
+            Effort::High
         }
     }
 
@@ -491,6 +505,7 @@ mod tests {
         ));
         let outer: Box<dyn Provider> = Box::new(shared.clone());
         assert_eq!(outer.reasoning(), Reasoning::Off);
+        assert_eq!(outer.default_effort(), Effort::High);
 
         let task = crate::Task {
             purl: "pkg:npm/a@1.0.0",

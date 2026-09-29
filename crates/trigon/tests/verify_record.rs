@@ -1017,11 +1017,12 @@ fn a_log_that_continues_elsewhere_answers_unknown_and_exits_4() {
     }
 }
 
-/// A JSON reader gets a document on every exit, naming what stopped the check before any record
-/// was read (`docs/19` §6): arguments that cannot be checked, 5; a log whose checkpoint another
-/// key of its name signed, 4, as the source failing verification; one whose leaves are not there,
-/// 4, as a log that cannot be read, which says nothing of the source's honesty; and a log behind
-/// the checkpoint it is held to, 4, with both signed notes, as §8 has a client keep them.
+/// A JSON reader gets a document on every exit but `clap`'s refusals, naming what stopped the check
+/// before any record was read (`docs/19` §6): arguments that cannot be checked, 5, whether the
+/// command line or the check refused them; a log whose checkpoint another key of its name signed,
+/// 4, as the source failing verification; one whose leaves are not there, 4, as a log that cannot
+/// be read, which says nothing of the source's honesty; and a log behind the checkpoint it is held
+/// to, 4, with both signed notes, as §8 has a client keep them.
 #[test]
 fn a_json_reader_is_told_what_stopped_the_check() {
     let stopped = |out: &Output, code: i32| -> serde_json::Value {
@@ -1046,6 +1047,33 @@ fn a_json_reader_is_told_what_stopped_the_check() {
     assert_eq!(doc["stopped"], "cannot-check", "{doc}");
     assert!(doc["error"].as_str().unwrap().contains("--source"), "{doc}");
     assert_eq!(doc["signedNotes"], serde_json::Value::Null, "{doc}");
+    // So are arguments refused once they are read, whatever refuses them: a bundle's key given to
+    // the record form, a bundle beside a record, and, in the network-free verifier, `--lookup`.
+    let root = repo();
+    let (rec, r) = (rec.to_str().unwrap(), root.to_str().unwrap());
+    let subject = format!("sha256:{}", "0".repeat(64));
+    let mut refused = vec![
+        (
+            vec!["--record", rec, "--evidence", r, "--public-key", "00"],
+            "--public-key",
+        ),
+        (vec!["b.json", "--record", rec, "--evidence", r], "not both"),
+    ];
+    if cfg!(not(feature = "build")) {
+        refused.push((vec!["--lookup", &subject], "network-free verifier"));
+    }
+    for (args, says) in refused {
+        let doc = stopped(&verify(&[&args[..], &["--output", "json"]].concat()), 5);
+        assert_eq!(doc["stopped"], "cannot-check", "{args:?}: {doc}");
+        assert!(
+            doc["error"].as_str().unwrap().contains(says),
+            "{args:?}: {doc}"
+        );
+    }
+    // Only what `clap` refuses, before `--output` is read, prints no document: still 5.
+    let out = verify(&["--record", rec, "--bogus", "--output", "json"]);
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out));
+    assert!(out.stdout.is_empty(), "{}", text(&out));
 
     // The checkpoint signed again by another key under the log's own name.
     let root = scratch("json-other-key");

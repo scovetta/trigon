@@ -928,14 +928,15 @@ fn version_pin(
     };
     Some(ToolPin {
         tool: tool.into(),
-        spec: VersionSpec::classify(&resolved, full_components),
+        spec: classify_as_setup_reads(tool, &resolved, full_components),
         from,
     })
 }
 
 /// `python-version-file:` / `node-version-file:`, read out of the checkout.
 ///
-/// `.python-version` and `.nvmrc` hold a bare version and are a real pin. `pyproject.toml` is not:
+/// `.python-version` and `.nvmrc` hold a bare version and are a real pin, `.nvmrc` often with a
+/// `v` in front ([`classify_as_setup_reads`]). `pyproject.toml` is not:
 /// `actions/setup-python` reads `requires-python` from it, which is a floor rather than a version,
 /// and `flask` points its release workflow at exactly that. Emitting an exact claim from a floor
 /// would be the most confident wrong statement this module could make.
@@ -984,14 +985,78 @@ fn version_from_file(
         .unwrap_or("");
     ToolPin {
         tool: tool.into(),
-        spec: VersionSpec::classify(first, full_components),
+        spec: classify_as_setup_reads(tool, first, full_components),
         from,
+    }
+}
+
+/// Classify a version as `tool`'s setup action reads it: for Node, without one leading `v`.
+///
+/// `v20.11.1` is what `node -v > .nvmrc` writes, and nvm and `actions/setup-node` both read it as
+/// 20.11.1, so it is that pin and not an unknown. Only before a digit, and only for Node:
+/// `actions/setup-python` reads no `v`, and an alias is not a version with a prefix. `lts/iron`
+/// names whatever that line had reached on the day it was read, so it is left for `classify` to
+/// call unknown. The `v` goes only when that makes a claim: `v20.x` stays unknown either way, and
+/// its `raw` is what the workflow wrote, since that is what a note quotes.
+fn classify_as_setup_reads(tool: &str, text: &str, full_components: usize) -> VersionSpec {
+    let t = text.trim();
+    match t.strip_prefix(['v', 'V']) {
+        Some(rest) if tool == "node" && rest.starts_with(|c: char| c.is_ascii_digit()) => {
+            match VersionSpec::classify(rest, full_components) {
+                VersionSpec::Unknown { .. } => VersionSpec::classify(text, full_components),
+                spec => spec,
+            }
+        }
+        _ => VersionSpec::classify(text, full_components),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_version_with_a_v_is_the_pin_it_names_and_an_alias_is_still_unknown() {
+        // What `node -v > .nvmrc` writes, read as `actions/setup-node` reads it.
+        let unknown = |raw: &str| VersionSpec::Unknown {
+            raw: raw.to_string(),
+            why: WhyUnknown::Wildcard,
+        };
+        for (tool, raw, want) in [
+            ("node", "v20.11.1", VersionSpec::Pinned("20.11.1".into())),
+            ("node", " V20.11.1 ", VersionSpec::Pinned("20.11.1".into())),
+            (
+                "node",
+                "v20",
+                VersionSpec::Series {
+                    lo: "20".into(),
+                    hi: "21".into(),
+                },
+            ),
+            ("node", "lts/iron", unknown("lts/iron")),
+            ("node", "lts/*", unknown("lts/*")),
+            // One `v`, before a digit, and for Node alone.
+            ("node", "vv20.11.1", unknown("vv20.11.1")),
+            ("node", "v", unknown("v")),
+            ("python", "v3.12", unknown("v3.12")),
+            // A `v` that leaves no claim stays, so the unknown quotes what the workflow wrote.
+            ("node", "v20.x", unknown("v20.x")),
+            (
+                "node",
+                "v18 || v20",
+                VersionSpec::Unknown {
+                    raw: "v18 || v20".into(),
+                    why: WhyUnknown::RangeSpec,
+                },
+            ),
+        ] {
+            assert_eq!(
+                classify_as_setup_reads(tool, raw, 3),
+                want,
+                "{tool} {raw:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_download_pattern_matches_the_way_the_part_workflows_use_does() {

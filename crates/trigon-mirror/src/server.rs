@@ -1001,6 +1001,11 @@ async fn fetch_index(
         req
     })
     .await?;
+    // The client follows redirects itself, and hands back only the ones it could not: no
+    // `Location`, or one it cannot resolve. Answered as `proxy` answers them, and for its reason.
+    if resp.status().is_redirection() {
+        return Err(unfollowed(&resp));
+    }
     if !resp.status().is_success() {
         return Err(MirrorError::Upstream {
             platform: filter.platform.as_str().into(),
@@ -1627,6 +1632,14 @@ async fn proxy(
         // that host rather than against the one that redirected us.
         resp = outbound(next.as_str(), kind, || mirror.passthrough.get(next.clone())).await?;
     }
+    // **A redirect the loop did not follow is not an answer.** It ends holding one when upstream
+    // names nowhere to go, or is still redirecting after the last hop, and this used to hand that
+    // on as a bare 3xx. The build cannot follow it any more than it could the others, and pip and
+    // npm do not take a 3xx for a failure: they read the refusal text as the document or the
+    // tarball and fail further on, over something else — where a 502 is a failure they retry.
+    if resp.status().is_redirection() {
+        return Err(unfollowed(&resp));
+    }
     if !resp.status().is_success() {
         return Err(MirrorError::Upstream {
             platform: filter.platform.as_str().into(),
@@ -1687,6 +1700,18 @@ async fn proxy(
         out.headers_mut().insert(header::CONTENT_ENCODING, v);
     }
     Ok(out)
+}
+
+/// A redirect upstream answered that this mirror did not follow, named by its `Location` or by
+/// the want of one.
+fn unfollowed(resp: &reqwest::Response) -> MirrorError {
+    MirrorError::BadRedirect {
+        found: resp
+            .headers()
+            .get(header::LOCATION)
+            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+            .unwrap_or_else(|| "no Location header".into()),
+    }
 }
 
 /// Fill a cache entry from a body as it passes, completing it only where the body completes.
@@ -2322,6 +2347,99 @@ mod proxy_tests {
         );
         assert_eq!(e.status(), 502);
         assert_eq!(asked.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_that_names_nowhere_is_upstreams_failure_and_never_handed_on() {
+        // The build cannot follow a redirect itself — at `mirror-only` the destination is a host it
+        // has no route to — and a bare 3xx handed on is no failure to pip or npm: they read the
+        // refusal text as the document or the tarball, and fail further on over something else.
+        let (base, asked) = upstream(vec![answer("302 Found", &[], b"")]);
+        let m = Mirror::new().unwrap();
+        let e = proxy(&m, &format!("{base}/start"), &npm(), "artifact")
+            .await
+            .expect_err("a redirect with nowhere to go");
+        assert!(
+            matches!(&e, MirrorError::BadRedirect { found } if found == "no Location header"),
+            "{e:?}"
+        );
+        assert_eq!(e.status(), 502);
+        assert_eq!(
+            trigon_core::Classify::fault(&e),
+            trigon_core::Fault::Upstream
+        );
+        assert_eq!(asked.join().unwrap(), ["GET /start HTTP/1.1"]);
+        assert!(m.seen.exchanges().is_empty(), "nothing crossed");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_still_going_after_the_last_hop_is_upstreams_failure() {
+        // Every hop on an allowlisted host, so it is the hop limit that stops it and not the list.
+        // The name is resolved here rather than by DNS, so nothing leaves this machine.
+        let hops: Vec<Vec<u8>> = (1..=super::MAX_REDIRECTS + 1)
+            .map(|n| answer("302 Found", &[&format!("Location: /hop{n}")], b""))
+            .collect();
+        let (base, asked) = upstream(hops);
+        let port = base.rsplit(':').next().unwrap();
+        let m = Mirror {
+            passthrough: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve("static.crates.io", ([127, 0, 0, 1], 0).into())
+                .no_proxy()
+                .build()
+                .unwrap(),
+            ..Mirror::new().unwrap()
+        };
+        let url = format!("http://static.crates.io:{port}/start");
+        let e = proxy(&m, &url, &npm(), "artifact")
+            .await
+            .expect_err("a redirect that never arrives");
+        let last = format!("/hop{}", super::MAX_REDIRECTS + 1);
+        assert!(
+            matches!(&e, MirrorError::BadRedirect { found } if *found == last),
+            "{e:?}"
+        );
+        assert_eq!(e.status(), 502);
+        let asked = asked.join().unwrap();
+        assert_eq!(
+            asked.len(),
+            super::MAX_REDIRECTS + 1,
+            "the first request and one per hop, and no hop past the last: {asked:?}"
+        );
+        assert!(m.seen.exchanges().is_empty(), "nothing crossed");
+    }
+
+    #[tokio::test]
+    async fn an_index_redirect_the_client_could_not_follow_is_upstreams_failure() {
+        // The index client follows redirects itself and hands back the ones it cannot: no
+        // `Location`, or one it cannot resolve. Either is the same failure `proxy` answers.
+        for (location, found) in [(None, "no Location header"), (Some("http://["), "http://[")] {
+            let headers: Vec<String> = location
+                .map(|l| format!("Location: {l}"))
+                .into_iter()
+                .collect();
+            let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+            let (base, asked) = upstream(vec![answer("302 Found", &headers, b"")]);
+            let url = format!("{base}/demo-pkg");
+            let (m, root) = caching("index-redirect");
+            let e = super::fetch_index(&m, &url, &npm(), &[])
+                .await
+                .expect_err("a redirect is not a document");
+            assert!(
+                matches!(&e, MirrorError::BadRedirect { found: f } if f == found),
+                "{location:?}: {e:?}"
+            );
+            assert_eq!(e.status(), 502);
+            assert_eq!(asked.join().unwrap().len(), 1);
+            assert!(
+                m.cache
+                    .as_ref()
+                    .unwrap()
+                    .get(crate::Tier::Index, &url)
+                    .is_none()
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[tokio::test]

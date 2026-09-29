@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use trigon_ai::{
-    Anthropic, Flavor, LlmError, OpenAiCompatible, Prompt, Provider, Reasoning, Request,
+    Anthropic, Effort, Flavor, LlmError, OpenAiCompatible, Prompt, Provider, Reasoning, Request,
 };
 use trigon_core::Classify as _;
 
@@ -679,6 +679,25 @@ fn the_messages_api_is_sent_its_key_and_version_headers_and_no_bearer() {
     assert_eq!(r.body["system"][0]["text"], "operator instructions");
     // A temperature somebody asked for reaches the wire; zero is left out.
     assert_eq!(r.body["temperature"], 0.25);
+}
+
+#[test]
+fn a_depth_a_caller_asks_for_is_the_depth_on_the_wire() {
+    // `Request::effort` is public and its type was not: nothing outside this crate could name
+    // `Effort`, so no caller could ask for less thinking — the one lever a truncated answer has —
+    // and no provider outside it could state its own `default_effort`.
+    let e = Endpoint::ok(message(
+        json!([{"type": "text", "text": "ok"}]),
+        "end_turn",
+        json!({}),
+    ));
+    let mut req = request("claude-haiku-4-5-20251001");
+    req.effort = Some(Effort::Low);
+    anthropic(&e.base).complete(&req).unwrap();
+
+    let seen = e.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].body["output_config"]["effort"], "low");
 }
 
 #[test]

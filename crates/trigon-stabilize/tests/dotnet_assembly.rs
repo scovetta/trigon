@@ -1,4 +1,4 @@
-//! Managed (.NET) assemblies: `dotnet-assembly-identity` and `dotnet-il-canonical`.
+//! Managed (.NET) assemblies: `dotnet-assembly-identity` and `dotnet-il-canonical-v2`.
 //!
 //! Both passes walk a PE by hand, through bytes the publisher wrote, and one of them decides
 //! whether two assemblies are the same code. So the fixtures here are real managed PEs, assembled
@@ -8,8 +8,11 @@
 //!
 //! What they hold the passes to is what `passes.rs` and `docs/16-findings.md` §3.81/§3.89 promise:
 //! code-identical assemblies reduce to the same bytes, a changed body, a new method or a changed
-//! signature still shows, the identity pass zeroes its named regions and nothing else, and an
-//! assembly either pass cannot read whole is left exactly as it was.
+//! signature still shows — and so does a change only to what a token names, a method's flags, a
+//! body's header and exception handlers, or a P/Invoke target, override or implemented interface —
+//! the identity pass zeroes its named regions and nothing else, and an assembly either pass cannot
+//! read whole, or could read only past what the runtime maps from the file, is left exactly as it
+//! was.
 
 use proptest::prelude::*;
 use trigon_archive::{Limits, parse, serialize};
@@ -30,19 +33,30 @@ enum Code {
     Tiny(Vec<u8>),
     /// A twelve-byte header with the size at offset 4.
     Fat(Vec<u8>),
+    /// A fat body whose header says a section follows the code: one small exception-handling
+    /// section, holding a clause that catches the type the token names.
+    Guarded(Vec<u8>, u32),
 }
 
 #[derive(Clone, Debug)]
 struct Method {
     name: String,
     sig: Vec<u8>,
+    /// `MethodAttributes` and `MethodImplAttributes` (§II.23.1.10, §II.23.1.11).
+    flags: u16,
+    impl_flags: u16,
     code: Code,
 }
+
+/// `public hidebysig`, the flags the builder gives every method unless a case says otherwise.
+const PUBLIC_HIDEBYSIG: u16 = 0x0086;
 
 fn tiny(name: &str, sig: &[u8], il: &[u8]) -> Method {
     Method {
         name: name.into(),
         sig: sig.to_vec(),
+        flags: PUBLIC_HIDEBYSIG,
+        impl_flags: 0,
         code: Code::Tiny(il.to_vec()),
     }
 }
@@ -51,6 +65,31 @@ fn tiny(name: &str, sig: &[u8], il: &[u8]) -> Method {
 const SIG_INSTANCE_INT: &[u8] = &[0x20, 0x01, 0x01, 0x08];
 const SIG_VOID: &[u8] = &[0x00, 0x00, 0x01];
 const SIG_STATIC_INT: &[u8] = &[0x00, 0x00, 0x08];
+/// `instance void ()`, and a local signature of one `int32`.
+const SIG_INSTANCE_VOID: &[u8] = &[0x20, 0x00, 0x01];
+const LOCALS_INT: &[u8] = &[0x07, 0x01, 0x08];
+
+/// A MemberRefParent coded index naming TypeRef `row`, and a TypeDefOrRef one.
+const fn member_parent_typeref(row: u32) -> u32 {
+    (row << 3) | 1
+}
+const fn typedef_or_ref_typeref(row: u32) -> u32 {
+    (row << 2) | 1
+}
+/// A MethodDefOrRef coded index naming MethodDef `row`, and one naming MemberRef `row`.
+const fn method_def_or_ref_def(row: u32) -> u32 {
+    row << 1
+}
+const fn method_def_or_ref_ref(row: u32) -> u32 {
+    (row << 1) | 1
+}
+/// A MemberForwarded coded index naming MethodDef `row`.
+const fn member_forwarded_method(row: u32) -> u32 {
+    (row << 1) | 1
+}
+
+/// `ldstr` of the literal at `#US` offset 1, `pop`, `ret`.
+const LDSTR_FIRST: &[u8] = &[0x72, 0x01, 0x00, 0x00, 0x70, 0x26, 0x2a];
 
 #[derive(Clone, Debug)]
 struct Asm {
@@ -60,11 +99,36 @@ struct Asm {
     heap_sizes: u8,
     /// TypeRef rows, written. Enough of them widens every coded index that can name a TypeRef.
     typeref_rows: u32,
+    /// The names of the first TypeRef rows; any row past them is `Object`.
+    typeref_names: Vec<String>,
+    /// TypeDef rows: the name, Extends (a TypeDefOrRef coded index), and the first MethodDef row
+    /// the type owns.
+    types: Vec<(String, u32, u32)>,
     /// Field rows, written (and FieldPtr rows too, in the uncompressed layout).
     field_rows: u32,
-    /// Row counts for tables after `MethodDef`. Declared in the header only: a reader walking to
-    /// `MethodDef` needs their sizes, because they decide how wide an index into them is, and has
-    /// no business reading their rows.
+    /// MemberRef rows: Class (a MemberRefParent coded index), the name and the signature.
+    member_refs: Vec<(u32, String, Vec<u8>)>,
+    /// StandAloneSig rows, each the signature it holds.
+    standalone_sigs: Vec<Vec<u8>>,
+    /// AssemblyRef rows: the name and the four-part version.
+    assembly_refs: Vec<(String, [u16; 4])>,
+    /// InterfaceImpl rows: Class (a TypeDef row) and Interface (a TypeDefOrRef coded index).
+    interface_impls: Vec<(u32, u32)>,
+    /// MethodImpl rows: Class (a TypeDef row), then MethodBody and MethodDeclaration, each a
+    /// MethodDefOrRef coded index.
+    method_impls: Vec<(u32, u32, u32)>,
+    /// ModuleRef rows, each the native library it names.
+    module_refs: Vec<String>,
+    /// ImplMap rows: MappingFlags, MemberForwarded (a coded index), the entry point's name, and the
+    /// ModuleRef row it is imported from.
+    impl_maps: Vec<(u16, u32, String, u32)>,
+    /// The `#US` literals, in order, the first at offset 1.
+    user_strings: Vec<String>,
+    /// Every fat body's header: the flags word, whose top four bits are the header's own size in
+    /// dwords, then MaxStack and LocalVarSigTok.
+    fat_header: (u16, u16, u32),
+    /// Row counts for the other tables after `MethodDef`, each written as that many rows of zeros:
+    /// a reader walking to a table it keeps needs every row before it sized exactly.
     declared: Vec<(usize, u32)>,
     /// `#-` with FieldPtr/MethodPtr tables, the uncompressed layout, rather than `#~`.
     uncompressed: bool,
@@ -95,17 +159,38 @@ impl Default for Asm {
                 Method {
                     name: "Answer".into(),
                     sig: SIG_STATIC_INT.to_vec(),
+                    flags: PUBLIC_HIDEBYSIG,
+                    impl_flags: 0,
                     code: Code::Fat(vec![0x1f, 0x2a, 0x0a, 0x06, 0x2a]),
                 },
                 Method {
                     name: "Hook".into(),
                     sig: SIG_VOID.to_vec(),
+                    flags: PUBLIC_HIDEBYSIG,
+                    impl_flags: 0,
                     code: Code::Abstract,
                 },
             ],
             heap_sizes: 0,
             typeref_rows: 2,
+            typeref_names: vec!["Object".into(), "Exception".into()],
+            types: vec![("<Module>".into(), 0, 1)],
             field_rows: 1,
+            // What `.ctor`'s `call 0x0a000001` calls: `Object::.ctor`.
+            member_refs: vec![(
+                member_parent_typeref(1),
+                ".ctor".into(),
+                SIG_INSTANCE_VOID.to_vec(),
+            )],
+            standalone_sigs: vec![LOCALS_INT.to_vec()],
+            assembly_refs: vec![("System.Runtime".into(), [8, 0, 0, 0])],
+            interface_impls: Vec::new(),
+            method_impls: Vec::new(),
+            module_refs: Vec::new(),
+            impl_maps: Vec::new(),
+            user_strings: vec!["Hello, world".into()],
+            // Three dwords of header, fat, InitLocals; MaxStack 8; the first StandAloneSig.
+            fat_header: (0x3013, 8, 0x1100_0001),
             declared: Vec::new(),
             uncompressed: false,
             string_pad: 0,
@@ -121,14 +206,41 @@ impl Default for Asm {
 }
 
 impl Asm {
+    /// The default assembly, declaring what its code does beyond its bodies and its tokens: `Hook`
+    /// a P/Invoke of `puts` in `libc`, `Run` the explicit implementation of the method MemberRef 1
+    /// names, and `<Module>` an implementer of `IDisposable`.
+    fn declaring() -> Asm {
+        let mut a = Asm::default();
+        a.methods[3].flags = PUBLIC_HIDEBYSIG | 0x2010; // static pinvokeimpl
+        a.typeref_rows = 3;
+        a.typeref_names.push("IDisposable".into());
+        a.interface_impls = vec![(1, typedef_or_ref_typeref(3))];
+        a.method_impls = vec![(1, method_def_or_ref_def(2), method_def_or_ref_ref(1))];
+        a.module_refs = vec!["libc".into()];
+        // `nomangle`, `cdecl`.
+        a.impl_maps = vec![(0x0201, member_forwarded_method(4), "puts".into(), 1)];
+        a
+    }
+
     /// The same code as `self`, compiled somewhere else: every piece of build identity and every
     /// layout offset differs, and not one method does.
+    ///
+    /// The rows of a table the form keeps are what the code is, so a rebuild of the same code has
+    /// the same rows there; what moves is the layout around them. `#Blob` indexes are written a
+    /// width wider or narrower, which shifts every row from Field on, and a table the form drops
+    /// (CustomAttribute) grows, which shifts every table after it.
     fn rebuilt_elsewhere(&self) -> Asm {
+        let mut declared = self.declared.clone();
+        match declared.iter_mut().find(|(t, _)| *t == 0x0c) {
+            Some((_, n)) => *n += 3,
+            None => declared.push((0x0c, 3)),
+        }
         Asm {
             string_pad: self.string_pad + 37,
             blob_pad: self.blob_pad + 11,
             code_pad: self.code_pad + 24,
-            typeref_rows: self.typeref_rows + 3,
+            heap_sizes: self.heap_sizes ^ 0x04,
+            declared,
             mvid: [0x22; 16],
             timestamp: 0x7000_0001,
             checksum: 0x000f_eeee,
@@ -175,6 +287,8 @@ struct Layout {
     method_count: usize,
     method_rows: usize,
     method_row_size: usize,
+    /// The file offset of the first MemberRef row.
+    member_ref_rows: usize,
     /// The CLI header's own StrongNameSignature slot.
     cli_strong_name: usize,
 }
@@ -241,6 +355,197 @@ fn put_blob(heap: &mut Vec<u8>, b: &[u8]) -> u32 {
     at
 }
 
+/// A `#US` literal (§II.24.2.4): UTF-16 behind a blob length, and a final byte that is 1 when a
+/// character needs more than the plain ASCII handling. The builder's literals never do.
+fn put_user_string(heap: &mut Vec<u8>, s: &str) {
+    let mut v: Vec<u8> = s.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    v.push(0);
+    put_blob(heap, &v);
+}
+
+// --- every table's columns (§II.22), for sizing the rows the builder writes ---------------------
+
+/// One column of a metadata table.
+#[derive(Clone, Copy)]
+enum Col {
+    /// A constant this many bytes wide.
+    Fixed(usize),
+    Str,
+    Guid,
+    Blob,
+    /// A simple index into the table.
+    Table(usize),
+    /// A coded index over these tables, in tag order, with a tag this many bits wide
+    /// (§II.24.2.6). An unused tag is listed as the Module table, which always has one row.
+    Coded(&'static [usize], u32),
+}
+
+const TYPE_DEF_OR_REF: &[usize] = &[0x02, 0x01, 0x1b];
+const HAS_CONSTANT: &[usize] = &[0x04, 0x08, 0x17];
+const HAS_CUSTOM_ATTRIBUTE: &[usize] = &[
+    0x06, 0x04, 0x01, 0x02, 0x08, 0x09, 0x0a, 0x00, 0x0e, 0x17, 0x14, 0x11, 0x1a, 0x1b, 0x20, 0x23,
+    0x26, 0x27, 0x28, 0x2a, 0x2c, 0x2b,
+];
+const HAS_FIELD_MARSHAL: &[usize] = &[0x04, 0x08];
+const HAS_DECL_SECURITY: &[usize] = &[0x02, 0x06, 0x20];
+const MEMBER_REF_PARENT: &[usize] = &[0x02, 0x01, 0x1a, 0x06, 0x1b];
+const HAS_SEMANTICS: &[usize] = &[0x14, 0x17];
+const METHOD_DEF_OR_REF: &[usize] = &[0x06, 0x0a];
+const MEMBER_FORWARDED: &[usize] = &[0x04, 0x06];
+const IMPLEMENTATION: &[usize] = &[0x26, 0x23, 0x27];
+const CUSTOM_ATTRIBUTE_TYPE: &[usize] = &[0x00, 0x00, 0x06, 0x0a, 0x00];
+const RESOLUTION_SCOPE: &[usize] = &[0x00, 0x1a, 0x23, 0x01];
+const TYPE_OR_METHOD_DEF: &[usize] = &[0x02, 0x06];
+
+fn columns(t: usize) -> &'static [Col] {
+    use Col::*;
+    match t {
+        0x00 => &[Fixed(2), Str, Guid, Guid, Guid],
+        0x01 => &[Coded(RESOLUTION_SCOPE, 2), Str, Str],
+        0x02 => &[
+            Fixed(4),
+            Str,
+            Str,
+            Coded(TYPE_DEF_OR_REF, 2),
+            Table(0x04),
+            Table(0x06),
+        ],
+        0x03 => &[Table(0x04)],
+        0x04 => &[Fixed(2), Str, Blob],
+        0x05 => &[Table(0x06)],
+        0x06 => &[Fixed(4), Fixed(2), Fixed(2), Str, Blob, Table(0x08)],
+        0x07 => &[Table(0x08)],
+        0x08 => &[Fixed(2), Fixed(2), Str],
+        0x09 => &[Table(0x02), Coded(TYPE_DEF_OR_REF, 2)],
+        0x0a => &[Coded(MEMBER_REF_PARENT, 3), Str, Blob],
+        0x0b => &[Fixed(2), Coded(HAS_CONSTANT, 2), Blob],
+        0x0c => &[
+            Coded(HAS_CUSTOM_ATTRIBUTE, 5),
+            Coded(CUSTOM_ATTRIBUTE_TYPE, 3),
+            Blob,
+        ],
+        0x0d => &[Coded(HAS_FIELD_MARSHAL, 1), Blob],
+        0x0e => &[Fixed(2), Coded(HAS_DECL_SECURITY, 2), Blob],
+        0x0f => &[Fixed(2), Fixed(4), Table(0x02)],
+        0x10 => &[Fixed(4), Table(0x04)],
+        0x11 => &[Blob],
+        0x12 => &[Table(0x02), Table(0x14)],
+        0x13 => &[Table(0x14)],
+        0x14 => &[Fixed(2), Str, Coded(TYPE_DEF_OR_REF, 2)],
+        0x15 => &[Table(0x02), Table(0x17)],
+        0x16 => &[Table(0x17)],
+        0x17 => &[Fixed(2), Str, Blob],
+        0x18 => &[Fixed(2), Table(0x06), Coded(HAS_SEMANTICS, 1)],
+        0x19 => &[
+            Table(0x02),
+            Coded(METHOD_DEF_OR_REF, 1),
+            Coded(METHOD_DEF_OR_REF, 1),
+        ],
+        0x1a => &[Str],
+        0x1b => &[Blob],
+        0x1c => &[Fixed(2), Coded(MEMBER_FORWARDED, 1), Str, Table(0x1a)],
+        0x1d => &[Fixed(4), Table(0x04)],
+        0x1e => &[Fixed(4), Fixed(4)],
+        0x1f => &[Fixed(4)],
+        0x20 => &[Fixed(4), Fixed(8), Fixed(4), Blob, Str, Str],
+        0x21 => &[Fixed(4)],
+        0x22 => &[Fixed(12)],
+        0x23 => &[Fixed(8), Fixed(4), Blob, Str, Str, Blob],
+        0x24 => &[Fixed(4), Table(0x23)],
+        0x25 => &[Fixed(12), Table(0x23)],
+        0x26 => &[Fixed(4), Str, Blob],
+        0x27 => &[Fixed(8), Str, Str, Coded(IMPLEMENTATION, 2)],
+        0x28 => &[Fixed(8), Str, Coded(IMPLEMENTATION, 2)],
+        0x29 => &[Table(0x02), Table(0x02)],
+        0x2a => &[Fixed(4), Coded(TYPE_OR_METHOD_DEF, 1), Str],
+        0x2b => &[Coded(METHOD_DEF_OR_REF, 1), Blob],
+        0x2c => &[Table(0x2a), Coded(TYPE_DEF_OR_REF, 2)],
+        _ => panic!("no table {t:#04x} in ECMA-335"),
+    }
+}
+
+/// The tables `dotnet-il-canonical-v2` keeps after the methods, in the order it writes them.
+const KEPT: [usize; 31] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0d, 0x0f, 0x10, 0x11, 0x12, 0x13,
+    0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x23, 0x27, 0x29, 0x2a, 0x2b, 0x2c,
+];
+
+impl Asm {
+    fn width(&self, counts: &[u32; 64], c: Col) -> usize {
+        let wide = |bit: u8| if self.heap_sizes & bit != 0 { 4 } else { 2 };
+        match c {
+            Col::Fixed(n) => n,
+            Col::Str => wide(0x01),
+            Col::Guid => wide(0x02),
+            Col::Blob => wide(0x04),
+            Col::Table(t) => {
+                if counts[t] >= 0x1_0000 {
+                    4
+                } else {
+                    2
+                }
+            }
+            Col::Coded(ts, bits) => {
+                let max = ts.iter().map(|&t| counts[t]).max().unwrap_or(0);
+                if max >= 1 << (16 - bits) { 4 } else { 2 }
+            }
+        }
+    }
+
+    fn row_size(&self, counts: &[u32; 64], t: usize) -> usize {
+        columns(t).iter().map(|&c| self.width(counts, c)).sum()
+    }
+
+    /// Every table's row count, as the table stream's header states it.
+    fn counts(&self) -> [u32; 64] {
+        let mut counts = [0u32; 64];
+        counts[0x00] = 1;
+        counts[0x01] = self.typeref_rows;
+        counts[0x02] = self.types.len() as u32;
+        counts[0x04] = self.field_rows;
+        counts[0x06] = self.methods.len() as u32;
+        if self.uncompressed {
+            counts[0x03] = self.field_rows;
+            counts[0x05] = self.methods.len() as u32;
+        }
+        counts[0x09] = self.interface_impls.len() as u32;
+        counts[0x0a] = self.member_refs.len() as u32;
+        counts[0x11] = self.standalone_sigs.len() as u32;
+        counts[0x19] = self.method_impls.len() as u32;
+        counts[0x1a] = self.module_refs.len() as u32;
+        counts[0x1c] = self.impl_maps.len() as u32;
+        counts[0x23] = self.assembly_refs.len() as u32;
+        for &(t, n) in &self.declared {
+            assert!(
+                t > 0x06 && counts[t] == 0,
+                "table {t:#04x} is written from its own field, not declared"
+            );
+            counts[t] = n;
+        }
+        counts
+    }
+
+    fn typeref_name(&self, row: usize) -> &str {
+        self.typeref_names.get(row).map_or("Object", |s| s.as_str())
+    }
+}
+
+/// The public-key token every AssemblyRef carries, as a reference to a framework assembly does.
+const PUBLIC_KEY_TOKEN: &[u8] = &[0xb0, 0x3f, 0x5f, 0x7f, 0x11, 0xd5, 0x0a, 0x3a];
+
+/// The one exception-handling section a [`Code::Guarded`] body carries (§II.25.4.5–6): small
+/// format, sixteen bytes, and a single catch clause over the first instruction.
+fn eh_section(catch: u32) -> Vec<u8> {
+    let mut v = vec![0x01, 16, 0, 0]; // CorILMethod_Sect_EHTable, DataSize, reserved
+    put16(&mut v, 0); // COR_ILEXCEPTION_CLAUSE_EXCEPTION: a typed catch
+    put16(&mut v, 0); // TryOffset
+    v.push(1); // TryLength
+    put16(&mut v, 1); // HandlerOffset
+    v.push(1); // HandlerLength
+    put32(&mut v, catch); // ClassToken
+    v
+}
+
 impl Asm {
     fn build(&self) -> (Vec<u8>, Layout) {
         let mut lay = Layout::default();
@@ -258,14 +563,21 @@ impl Asm {
                     sec.push(((il.len() as u8) << 2) | 0x02);
                     sec.extend_from_slice(il);
                 }
-                Code::Fat(il) => {
+                Code::Fat(il) | Code::Guarded(il, _) => {
+                    let guarded = matches!(m.code, Code::Guarded(..));
+                    let (flags, max_stack, locals) = self.fat_header;
                     align(&mut sec, 4);
                     rvas.push(SECTION_RVA + sec.len() as u32);
-                    put16(&mut sec, 0x3013); // three dwords of header, fat, InitLocals
-                    put16(&mut sec, 8); // MaxStack
+                    // CorILMethod_MoreSects says a section follows the code.
+                    put16(&mut sec, if guarded { flags | 0x08 } else { flags });
+                    put16(&mut sec, max_stack);
                     put32(&mut sec, il.len() as u32);
-                    put32(&mut sec, 0x1100_0001); // LocalVarSigTok
+                    put32(&mut sec, locals);
                     sec.extend_from_slice(il);
+                    if let Code::Guarded(_, catch) = m.code {
+                        align(&mut sec, 4);
+                        sec.extend_from_slice(&eh_section(catch));
+                    }
                 }
             }
         }
@@ -299,13 +611,49 @@ impl Asm {
             strings.push(0);
         }
         let module_name = put_str(&mut strings, b"Demo.dll");
-        let module_type = put_str(&mut strings, b"<Module>");
-        let typeref_name = put_str(&mut strings, b"Object");
+        let object_name = put_str(&mut strings, b"Object");
+        let typeref_names: Vec<u32> = self
+            .typeref_names
+            .iter()
+            .map(|n| put_str(&mut strings, n.as_bytes()))
+            .collect();
+        let type_names: Vec<u32> = self
+            .types
+            .iter()
+            .map(|(n, ..)| put_str(&mut strings, n.as_bytes()))
+            .collect();
         let field_name = put_str(&mut strings, b"state");
         let names: Vec<u32> = self
             .methods
             .iter()
             .map(|m| put_str(&mut strings, m.name.as_bytes()))
+            .collect();
+        let member_names: Vec<u32> = self
+            .member_refs
+            .iter()
+            .map(|(_, n, _)| put_str(&mut strings, n.as_bytes()))
+            .collect();
+        let module_names: Vec<u32> = self
+            .module_refs
+            .iter()
+            .map(|n| put_str(&mut strings, n.as_bytes()))
+            .collect();
+        let import_names: Vec<u32> = self
+            .impl_maps
+            .iter()
+            .map(|(_, _, n, _)| put_str(&mut strings, n.as_bytes()))
+            .collect();
+        // Interned, as a compiler interns them: sixteen thousand references to one assembly name
+        // are one string, or the heap outgrows the index width the case is about.
+        let mut interned = std::collections::HashMap::new();
+        let assembly_names: Vec<u32> = self
+            .assembly_refs
+            .iter()
+            .map(|(n, _)| {
+                *interned
+                    .entry(n.as_str())
+                    .or_insert_with(|| put_str(&mut strings, n.as_bytes()))
+            })
             .collect();
         let mut blob = vec![0u8];
         if self.blob_pad > 0 {
@@ -316,32 +664,28 @@ impl Asm {
             .iter()
             .map(|m| put_blob(&mut blob, &m.sig))
             .collect();
+        let member_sigs: Vec<u32> = self
+            .member_refs
+            .iter()
+            .map(|(_, _, sig)| put_blob(&mut blob, sig))
+            .collect();
+        let standalone_sigs: Vec<u32> = self
+            .standalone_sigs
+            .iter()
+            .map(|sig| put_blob(&mut blob, sig))
+            .collect();
+        let token = put_blob(&mut blob, PUBLIC_KEY_TOKEN);
         let guid = self.mvid.to_vec();
-        let us = vec![0u8; 4];
+        let us = self.user_string_heap();
 
         // The table stream (§II.24.2.6).
         let s = if self.heap_sizes & 0x01 != 0 { 4 } else { 2 };
         let g = if self.heap_sizes & 0x02 != 0 { 4 } else { 2 };
         let bw = if self.heap_sizes & 0x04 != 0 { 4 } else { 2 };
-        let mut counts = [0u32; 64];
-        counts[0x00] = 1;
-        counts[0x01] = self.typeref_rows;
-        counts[0x02] = 1;
-        counts[0x04] = self.field_rows;
-        counts[0x06] = self.methods.len() as u32;
-        if self.uncompressed {
-            counts[0x03] = self.field_rows;
-            counts[0x05] = self.methods.len() as u32;
-        }
-        for &(t, n) in &self.declared {
-            assert!(t > 0x06, "tables up to MethodDef are written, not declared");
-            counts[t] = n;
-        }
-        let idx = |t: usize| if counts[t] >= 0x1_0000 { 4 } else { 2 };
-        let coded = |ts: &[usize], tag_bits: u32| {
-            let max = ts.iter().map(|&t| counts[t]).max().unwrap_or(0);
-            if max >= 1 << (16 - tag_bits) { 4 } else { 2 }
-        };
+        let counts = self.counts();
+        let idx = |t: usize| self.width(&counts, Col::Table(t));
+        let coded =
+            |ts: &'static [usize], tag_bits: u32| self.width(&counts, Col::Coded(ts, tag_bits));
         let valid = (0..64)
             .filter(|&t| counts[t] > 0)
             .fold(0u64, |m, t| m | 1 << t);
@@ -367,19 +711,21 @@ impl Asm {
         put_idx(&mut t, 0, g);
         put_idx(&mut t, 0, g);
         // TypeRef: ResolutionScope is Module, ModuleRef, AssemblyRef or TypeRef.
-        let scope = coded(&[0x00, 0x1a, 0x23, 0x01], 2);
-        for _ in 0..self.typeref_rows {
+        let scope = coded(RESOLUTION_SCOPE, 2);
+        for i in 0..self.typeref_rows as usize {
             put_idx(&mut t, (1 << 2) | 2, scope); // AssemblyRef 1
-            put_idx(&mut t, typeref_name, s);
+            put_idx(&mut t, *typeref_names.get(i).unwrap_or(&object_name), s);
             put_idx(&mut t, 0, s);
         }
         // TypeDef: Extends is TypeDef, TypeRef or TypeSpec.
-        put32(&mut t, 0);
-        put_idx(&mut t, module_type, s);
-        put_idx(&mut t, 0, s);
-        put_idx(&mut t, 0, coded(&[0x02, 0x01, 0x1b], 2));
-        put_idx(&mut t, 1, idx(0x04));
-        put_idx(&mut t, 1, idx(0x06));
+        for (i, (_, extends, methods)) in self.types.iter().enumerate() {
+            put32(&mut t, 0);
+            put_idx(&mut t, type_names[i], s);
+            put_idx(&mut t, 0, s);
+            put_idx(&mut t, *extends, coded(TYPE_DEF_OR_REF, 2));
+            put_idx(&mut t, 1, idx(0x04));
+            put_idx(&mut t, *methods, idx(0x06));
+        }
         if self.uncompressed {
             for i in 0..self.field_rows {
                 put_idx(&mut t, i + 1, idx(0x04));
@@ -396,15 +742,81 @@ impl Asm {
             }
         }
         let method_rows_at = t.len();
-        for i in 0..self.methods.len() {
+        for (i, m) in self.methods.iter().enumerate() {
             put32(&mut t, rvas[i]);
-            put16(&mut t, 0);
-            put16(&mut t, 0x0086);
+            put16(&mut t, m.impl_flags);
+            put16(&mut t, m.flags);
             put_idx(&mut t, names[i], s);
             put_idx(&mut t, sigs[i], bw);
             put_idx(&mut t, 1, idx(0x08));
         }
         lay.method_row_size = 4 + 2 + 2 + s + bw + idx(0x08);
+        assert_eq!(lay.method_row_size, self.row_size(&counts, 0x06));
+
+        // Every table after MethodDef, in order: the ones the fixture names, and rows of zeros for
+        // the ones it only declares.
+        let mut member_ref_rows_at = t.len();
+        for (table, &n) in counts.iter().enumerate().skip(0x07) {
+            match table {
+                // A table given rows of its own is written from them; one only declared is not.
+                0x09 if !self.interface_impls.is_empty() => {
+                    for &(class, interface) in &self.interface_impls {
+                        put_idx(&mut t, class, idx(0x02));
+                        put_idx(&mut t, interface, coded(TYPE_DEF_OR_REF, 2));
+                    }
+                }
+                0x19 if !self.method_impls.is_empty() => {
+                    for &(class, body, declaration) in &self.method_impls {
+                        put_idx(&mut t, class, idx(0x02));
+                        put_idx(&mut t, body, coded(METHOD_DEF_OR_REF, 1));
+                        put_idx(&mut t, declaration, coded(METHOD_DEF_OR_REF, 1));
+                    }
+                }
+                0x1a if !self.module_refs.is_empty() => {
+                    for &name in &module_names {
+                        put_idx(&mut t, name, s);
+                    }
+                }
+                0x1c if !self.impl_maps.is_empty() => {
+                    for (i, &(flags, member, _, scope)) in self.impl_maps.iter().enumerate() {
+                        put16(&mut t, flags);
+                        put_idx(&mut t, member, coded(MEMBER_FORWARDED, 1));
+                        put_idx(&mut t, import_names[i], s);
+                        put_idx(&mut t, scope, idx(0x1a));
+                    }
+                }
+                0x0a => {
+                    member_ref_rows_at = t.len();
+                    for (i, (class, ..)) in self.member_refs.iter().enumerate() {
+                        put_idx(&mut t, *class, coded(MEMBER_REF_PARENT, 3));
+                        put_idx(&mut t, member_names[i], s);
+                        put_idx(&mut t, member_sigs[i], bw);
+                    }
+                }
+                0x11 => {
+                    for &sig in &standalone_sigs {
+                        put_idx(&mut t, sig, bw);
+                    }
+                }
+                0x23 => {
+                    for (i, (_, version)) in self.assembly_refs.iter().enumerate() {
+                        for &part in version {
+                            put16(&mut t, part);
+                        }
+                        put32(&mut t, 0); // Flags
+                        put_idx(&mut t, token, bw);
+                        put_idx(&mut t, assembly_names[i], s);
+                        put_idx(&mut t, 0, s); // Culture
+                        put_idx(&mut t, 0, bw); // HashValue
+                    }
+                }
+                _ if n > 0 => t.extend(std::iter::repeat_n(
+                    0,
+                    self.row_size(&counts, table) * n as usize,
+                )),
+                _ => {}
+            }
+        }
 
         // The metadata root (§II.24.2.1) and its stream headers.
         let tables_name = if self.uncompressed { "#-" } else { "#~" };
@@ -452,6 +864,7 @@ impl Asm {
         lay.metadata = file_md;
         lay.method_count = file_md + offsets[0] + method_count_at.unwrap_or(0);
         lay.method_rows = file_md + offsets[0] + method_rows_at;
+        lay.member_ref_rows = file_md + offsets[0] + member_ref_rows_at;
         lay.guid_heap = (file_md + offsets[3], 16);
         sec.extend_from_slice(&md);
 
@@ -520,26 +933,162 @@ impl Asm {
         self.build().0
     }
 
-    /// The canonical form `dotnet-il-canonical` documents: per method, in table order, its name
-    /// and its signature, each behind its length as a little-endian u32; then `0` for a method
-    /// without a body, or `1` and its IL behind its length.
+    /// The `#US` heap as the builder writes it: the empty entry, then each literal.
+    fn user_string_heap(&self) -> Vec<u8> {
+        let mut us = vec![0u8];
+        for s in &self.user_strings {
+            put_user_string(&mut us, s);
+        }
+        us
+    }
+
+    /// The canonical form `dotnet-il-canonical-v2` documents, every number little-endian: `0x06`
+    /// and the method count, then per method in table order its name and its signature, each
+    /// behind its length as a u32, its ImplFlags and Flags, its ParamList as a u32, and `0` for a
+    /// method without a body or `1` and the body's header, IL and exception-handling sections, each
+    /// behind its length. Then
+    /// each kept table's id, row count and rows, column by column: a string or blob behind its
+    /// length, a row or coded index as a u32, anything else as the integer it is. Last, `0x70` and
+    /// the `#US` heap behind its length.
     fn canonical(&self) -> Vec<u8> {
         fn field(out: &mut Vec<u8>, bytes: &[u8]) {
             out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             out.extend_from_slice(bytes);
         }
-        let mut out = Vec::new();
+        let counts = self.counts();
+        let mut out = vec![0x06];
+        put32(&mut out, self.methods.len() as u32);
         for m in &self.methods {
             field(&mut out, m.name.as_bytes());
             field(&mut out, &m.sig);
+            put16(&mut out, m.impl_flags);
+            put16(&mut out, m.flags);
+            put32(&mut out, 1); // every method's ParamList, as the builder writes it
             match &m.code {
                 Code::Abstract => out.push(0),
-                Code::Tiny(il) | Code::Fat(il) => {
+                Code::Tiny(il) => {
                     out.push(1);
+                    field(&mut out, &[((il.len() as u8) << 2) | 0x02]);
                     field(&mut out, il);
+                    field(&mut out, &[]);
+                }
+                Code::Fat(il) | Code::Guarded(il, _) => {
+                    let (flags, max_stack, locals) = self.fat_header;
+                    let (flags, sections) = match m.code {
+                        Code::Guarded(_, catch) => (flags | 0x08, eh_section(catch)),
+                        _ => (flags, Vec::new()),
+                    };
+                    let mut header = Vec::new();
+                    put16(&mut header, flags);
+                    put16(&mut header, max_stack);
+                    put32(&mut header, il.len() as u32);
+                    put32(&mut header, locals);
+                    out.push(1);
+                    field(&mut out, &header);
+                    field(&mut out, il);
+                    field(&mut out, &sections);
                 }
             }
         }
+        for t in KEPT {
+            out.push(t as u8);
+            put32(&mut out, counts[t]);
+            match t {
+                0x01 => {
+                    for i in 0..self.typeref_rows as usize {
+                        put32(&mut out, (1 << 2) | 2);
+                        field(&mut out, self.typeref_name(i).as_bytes());
+                        field(&mut out, b"");
+                    }
+                }
+                0x02 => {
+                    for (name, extends, methods) in &self.types {
+                        put32(&mut out, 0);
+                        field(&mut out, name.as_bytes());
+                        field(&mut out, b"");
+                        put32(&mut out, *extends);
+                        put32(&mut out, 1);
+                        put32(&mut out, *methods);
+                    }
+                }
+                0x03 | 0x05 => {
+                    for i in 0..counts[t] {
+                        put32(&mut out, i + 1);
+                    }
+                }
+                0x04 => {
+                    for _ in 0..self.field_rows {
+                        put16(&mut out, 0x0001);
+                        field(&mut out, b"state");
+                        field(&mut out, b"");
+                    }
+                }
+                0x0a => {
+                    for (class, name, sig) in &self.member_refs {
+                        put32(&mut out, *class);
+                        field(&mut out, name.as_bytes());
+                        field(&mut out, sig);
+                    }
+                }
+                0x11 => {
+                    for sig in &self.standalone_sigs {
+                        field(&mut out, sig);
+                    }
+                }
+                0x23 => {
+                    for (name, version) in &self.assembly_refs {
+                        for &part in version {
+                            put16(&mut out, part);
+                        }
+                        put32(&mut out, 0);
+                        field(&mut out, PUBLIC_KEY_TOKEN);
+                        field(&mut out, name.as_bytes());
+                        field(&mut out, b"");
+                        field(&mut out, b"");
+                    }
+                }
+                0x09 if !self.interface_impls.is_empty() => {
+                    for &(class, interface) in &self.interface_impls {
+                        put32(&mut out, class);
+                        put32(&mut out, interface);
+                    }
+                }
+                0x19 if !self.method_impls.is_empty() => {
+                    for &(class, body, declaration) in &self.method_impls {
+                        put32(&mut out, class);
+                        put32(&mut out, body);
+                        put32(&mut out, declaration);
+                    }
+                }
+                0x1a if !self.module_refs.is_empty() => {
+                    for name in &self.module_refs {
+                        field(&mut out, name.as_bytes());
+                    }
+                }
+                0x1c if !self.impl_maps.is_empty() => {
+                    for (flags, member, name, scope) in &self.impl_maps {
+                        put16(&mut out, *flags);
+                        put32(&mut out, *member);
+                        field(&mut out, name.as_bytes());
+                        put32(&mut out, *scope);
+                    }
+                }
+                // A table the fixture only declares is rows of zeros: every integer 0, and every
+                // string and blob the empty one at offset 0.
+                _ => {
+                    for _ in 0..counts[t] {
+                        for &c in columns(t) {
+                            match c {
+                                Col::Fixed(n) => out.extend(std::iter::repeat_n(0, n)),
+                                _ => put32(&mut out, 0),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.push(0x70);
+        field(&mut out, &self.user_string_heap());
         out
     }
 }
@@ -572,7 +1121,7 @@ fn only(pass: &str) -> StabilizerSet {
 }
 
 const IDENTITY: &str = "dotnet-assembly-identity";
-const CANONICAL: &str = "dotnet-il-canonical";
+const CANONICAL: &str = "dotnet-il-canonical-v2";
 
 /// One member after a set ran over a package holding it.
 #[derive(Debug)]
@@ -639,29 +1188,35 @@ fn assert_left_whole(out: &Out, input: &[u8], why: &str) {
     );
 }
 
-// --- dotnet-il-canonical: what the form is -------------------------------------------------------
+// --- dotnet-il-canonical-v2: what the form is ----------------------------------------------------
 
 #[test]
-fn an_assembly_reduces_to_each_methods_name_signature_and_il() {
+fn an_assembly_reduces_to_its_methods_and_what_their_tokens_name() {
     let asm = Asm::default();
     let bytes = asm.bytes();
     let out = run(&only(CANONICAL), DLL, &bytes);
     assert_eq!(
         String::from_utf8_lossy(&out.body),
         String::from_utf8_lossy(&asm.canonical()),
-        "the form is the methods, in table order, and nothing else"
+        "the form is the methods in table order, the rows their tokens name, the literals, and \
+         nothing else"
     );
     // A tiny body, a fat body and a body-less method are each read for what they are: the fat
-    // body's IL follows its twelve-byte header, and the abstract method still names itself.
+    // body's IL follows its twelve-byte header, and the abstract method still names itself, its
+    // ImplFlags and Flags and its first parameter row, and says it has no body, just before the
+    // first kept table: TypeRef's two rows.
     assert!(
         out.body
             .windows(5)
             .any(|w| w == [0x1f, 0x2a, 0x0a, 0x06, 0x2a])
     );
-    assert!(
-        out.body
-            .ends_with(b"\x04\0\0\0Hook\x03\0\0\0\x00\x00\x01\x00")
-    );
+    let hook = b"\x04\0\0\0Hook\x03\0\0\0\x00\x00\x01\x00\x00\x86\x00\x01\0\0\0\x00\x01\x02\0\0\0";
+    assert!(out.body.windows(hook.len()).any(|w| w == hook));
+    // And the literals `ldstr` reads come last, whole.
+    let mut us = vec![0x70];
+    us.extend_from_slice(&(asm.user_string_heap().len() as u32).to_le_bytes());
+    us.extend_from_slice(&asm.user_string_heap());
+    assert!(out.body.ends_with(&us));
 
     let [a] = out.applied.as_slice() else {
         panic!("one pass fired: {:?}", out.applied)
@@ -683,7 +1238,8 @@ fn a_match_through_the_canonical_form_is_never_clean() {
 fn assemblies_differing_only_in_layout_and_build_identity_stabilize_identically() {
     // The moq case (docs/16-findings.md §3.87): the method IL byte for byte equal, and the whole
     // divergence heap offsets that moved, a different MVID, PDB path, strong-name signature and
-    // build stamp, and a different number of rows in a table before MethodDef.
+    // build stamp, `#Blob` indexes a width wider or narrower, which moves every row from Field on,
+    // and more rows in a table the form drops (CustomAttribute), which moves every table after it.
     let a = Asm::default();
     let b = a.rebuilt_elsewhere();
     let (ra, rb) = (a.bytes(), b.bytes());
@@ -713,9 +1269,9 @@ fn stabilizing_a_package_twice_changes_nothing_the_second_time() {
     assert!(again.is_empty(), "a second pass reported work: {again:?}");
 }
 
-// --- dotnet-il-canonical: a real code difference still shows -------------------------------------
+// --- dotnet-il-canonical-v2: a real code difference still shows ----------------------------------
 
-/// Two assemblies, laid out identically, that `dotnet-il-canonical` must still tell apart.
+/// Two assemblies, laid out identically, that `dotnet-il-canonical-v2` must still tell apart.
 fn assert_code_difference_shows(what: &str, edit: impl Fn(&mut Asm)) {
     assert_code_difference_shows_against(&Asm::default(), what, edit);
 }
@@ -780,6 +1336,150 @@ fn an_added_or_removed_method_still_shows() {
     });
 }
 
+// An IL token is a row number, or an offset into `#US`, so what a body does depends on the row or
+// the literal it names as much as on its own bytes. Each case below changes only what a token
+// names, and leaves every byte of every body as it was.
+
+#[test]
+fn a_changed_string_literal_still_shows() {
+    // `ldstr` names its literal by offset, and a literal of the same length keeps every offset.
+    let mut a = Asm::default();
+    a.methods[1].code = Code::Tiny(LDSTR_FIRST.to_vec());
+    assert_code_difference_shows_against(&a, "a same-length ldstr literal", |b| {
+        b.user_strings[0] = "Hello, World".into();
+    });
+}
+
+#[test]
+fn a_member_reference_changed_under_its_token_still_shows() {
+    // `.ctor` calls MemberRef 1, `Object::.ctor`. Each edit makes that call something else.
+    assert_code_difference_shows("a MemberRef renamed under the same token", |b| {
+        b.member_refs[0].1 = "Finalize".into();
+    });
+    assert_code_difference_shows("a MemberRef moved to another type", |b| {
+        b.member_refs[0].0 = member_parent_typeref(2);
+    });
+    assert_code_difference_shows("a MemberRef given another signature", |b| {
+        b.member_refs[0].2 = SIG_INSTANCE_INT.to_vec();
+    });
+    assert_code_difference_shows("the TypeRef a MemberRef names, renamed", |b| {
+        b.typeref_names[0] = "Activator".into();
+    });
+    assert_code_difference_shows("the assembly a TypeRef resolves in, renamed", |b| {
+        b.assembly_refs[0].0 = "System.Runtime.Evil".into();
+    });
+    assert_code_difference_shows("the assembly a TypeRef resolves in, another version", |b| {
+        b.assembly_refs[0].1 = [9, 0, 0, 0];
+    });
+}
+
+#[test]
+fn a_changed_method_flag_still_shows() {
+    // Flags and ImplFlags decide who can call a method and how it is dispatched and run.
+    assert_code_difference_shows("a public method made private", |b| {
+        b.methods[1].flags = (PUBLIC_HIDEBYSIG & !0x0007) | 0x0001;
+    });
+    assert_code_difference_shows("a method made virtual", |b| {
+        b.methods[1].flags |= 0x0040;
+    });
+    assert_code_difference_shows("a method made synchronized", |b| {
+        b.methods[1].impl_flags = 0x0020;
+    });
+}
+
+#[test]
+fn a_changed_catch_clause_still_shows() {
+    // An exception-handling section sits after the code, and its clause names the type it catches
+    // by token: which exceptions a method handles is part of what it does.
+    let il = vec![0x00, 0x26, 0x2a];
+    let mut a = Asm::default();
+    a.methods[2].code = Code::Guarded(il.clone(), 0x0100_0002);
+    assert_code_difference_shows_against(&a, "a catch clause's type changed", |b| {
+        b.methods[2].code = Code::Guarded(il.clone(), 0x0100_0001);
+    });
+    assert_code_difference_shows_against(&a, "the caught type renamed under its token", |b| {
+        b.typeref_names[1] = "ArgumentException".into();
+    });
+    assert_code_difference_shows_against(&a, "the catch clause removed", |b| {
+        b.methods[2].code = Code::Fat(il.clone());
+    });
+}
+
+#[test]
+fn a_changed_fat_header_or_local_signature_still_shows() {
+    // The fat header carries the stack depth, whether locals start zeroed, and the token of the
+    // signature that types them.
+    assert_code_difference_shows("a changed MaxStack", |b| b.fat_header.1 = 1);
+    assert_code_difference_shows("InitLocals cleared", |b| b.fat_header.0 &= !0x0010);
+    assert_code_difference_shows("a local retyped under the same token", |b| {
+        b.standalone_sigs[0] = vec![0x07, 0x01, 0x0e];
+    });
+    assert_code_difference_shows("the locals given another signature's token", |b| {
+        b.standalone_sigs.push(vec![0x07, 0x01, 0x0e]);
+        b.fat_header.2 = 0x1100_0002;
+    });
+}
+
+#[test]
+fn a_method_moved_to_another_type_or_a_changed_base_type_still_shows() {
+    // A TypeDef owns the methods from its MethodList up to the next type's, so moving that
+    // boundary changes which type a method is declared on without changing the method.
+    let mut a = Asm::default();
+    let program = ("Program".to_string(), typedef_or_ref_typeref(1), 3);
+    a.types.push(program);
+    assert_code_difference_shows_against(&a, "a method moved into another type", |b| {
+        b.types[1].2 = 2;
+    });
+    assert_code_difference_shows_against(&a, "a type given another base", |b| {
+        b.types[1].1 = typedef_or_ref_typeref(2);
+    });
+}
+
+// What code does when it runs also turns on declarations no token in a body names: the native
+// function a P/Invoke calls, the method that implements an interface method or an override, the
+// interfaces a type implements. Each case below changes one of those and leaves every body and
+// every row a token names as it was.
+
+#[test]
+fn a_changed_pinvoke_target_still_shows() {
+    let a = Asm::declaring();
+    assert_code_difference_shows_against(&a, "a P/Invoke bound to another entry point", |b| {
+        b.impl_maps[0].2 = "system".into();
+    });
+    assert_code_difference_shows_against(&a, "a P/Invoke marshalling strings otherwise", |b| {
+        b.impl_maps[0].0 |= 0x0004; // `charset unicode`
+    });
+    let mut two_libraries = a.clone();
+    two_libraries.module_refs.push("libevil".into());
+    assert_code_difference_shows_against(
+        &two_libraries,
+        "a P/Invoke bound to the same entry point in another library",
+        |b| b.impl_maps[0].3 = 2,
+    );
+}
+
+#[test]
+fn a_changed_explicit_override_still_shows() {
+    let a = Asm::declaring();
+    assert_code_difference_shows_against(&a, "another method made the implementation", |b| {
+        b.method_impls[0].1 = method_def_or_ref_def(3);
+    });
+    assert_code_difference_shows_against(&a, "the implementation of another method", |b| {
+        b.method_impls[0].2 = method_def_or_ref_def(1);
+    });
+}
+
+#[test]
+fn a_changed_implemented_interface_still_shows() {
+    let a = Asm::declaring();
+    assert_code_difference_shows_against(&a, "another interface implemented", |b| {
+        b.interface_impls[0].1 = typedef_or_ref_typeref(2);
+    });
+    assert_code_difference_shows_against(&a, "an interface no longer implemented", |b| {
+        b.interface_impls.clear();
+    });
+}
+
 // A signature blob and an IL body may each hold any byte, NUL and newline included, so a record
 // has to say where each of its fields ends. The two cases below are edits a publisher chooses to
 // make the records of a changed program spell the records of the original.
@@ -812,7 +1512,7 @@ fn a_method_folded_into_its_neighbours_body_still_shows() {
     });
 }
 
-// --- dotnet-il-canonical: every layout ECMA-335 allows is read at its real widths ---------------
+// --- dotnet-il-canonical-v2: every layout ECMA-335 allows is read at its real widths -------------
 
 /// Read through the pass, `asm` must reduce to exactly its own methods: a row or index read at
 /// the wrong width lands on the wrong bytes, and the names that come out are garbage.
@@ -849,6 +1549,17 @@ fn wide_heap_indexes_are_read_at_their_width() {
 }
 
 #[test]
+fn the_declarations_are_read_at_their_real_widths_too() {
+    for heap_sizes in [0x00, 0x01, 0x04, 0x07] {
+        let asm = Asm {
+            heap_sizes,
+            ..Asm::declaring()
+        };
+        assert_reads_back(&format!("declarations, HeapSizes {heap_sizes:#04x}"), &asm);
+    }
+}
+
+#[test]
 fn a_large_table_widens_every_index_that_can_point_at_it() {
     // A simple index is four bytes once its table outgrows a u16; a coded index once its largest
     // table outgrows the bits the tag leaves. Each case widens a different column of a row the
@@ -881,7 +1592,7 @@ fn a_large_table_widens_every_index_that_can_point_at_it() {
         (
             "16384 AssemblyRefs",
             Asm {
-                declared: vec![(0x23, 1 << 14)],
+                assembly_refs: vec![("System.Runtime".into(), [8, 0, 0, 0]); 1 << 14],
                 ..Asm::default()
             },
         ),
@@ -949,19 +1660,24 @@ fn a_long_signature_is_read_whole_through_its_length_prefix() {
 }
 
 #[test]
-fn an_assembly_with_no_methods_reduces_to_an_empty_form() {
-    // No MethodDef table at all: an assembly of types and resources. Its form is empty, which is
-    // a valid form and not a refusal.
+fn an_assembly_with_no_methods_reduces_to_a_form_with_no_method_records() {
+    // No MethodDef table at all: an assembly of types and resources. Its form has no method
+    // records, only the rows and literals it declares, which is a valid form and not a refusal.
     let asm = Asm {
         methods: Vec::new(),
         ..Asm::default()
     };
     let out = run(&only(CANONICAL), DLL, &asm.bytes());
-    assert!(out.body.is_empty(), "{:?}", out.body);
+    assert!(
+        out.body.starts_with(&[0x06, 0, 0, 0, 0, 0x01]),
+        "{:?}",
+        out.body
+    );
+    assert!(out.body == asm.canonical(), "{:?}", out.body);
     assert_eq!(out.applied.len(), 1, "{:?}", out.applied);
 }
 
-// --- dotnet-il-canonical: an assembly it cannot read whole is left exactly as it was ------------
+// --- dotnet-il-canonical-v2: an assembly it cannot read whole is left exactly as it was ----------
 
 #[test]
 fn a_member_named_like_something_else_is_not_read_as_an_assembly() {
@@ -1043,6 +1759,16 @@ fn an_assembly_it_cannot_read_whole_is_left_exactly_as_it_was() {
             let at = lay.method_rows + lay.method_row_size + 3;
             Box::new(move |b: &mut Vec<u8>| b.truncate(at))
         }),
+        // After every method body and row: what the tokens name is part of the form, so rows the
+        // file does not hold leave it unreadable too.
+        ("cut off inside the MemberRef rows", {
+            let at = lay.member_ref_rows + 3;
+            Box::new(move |b: &mut Vec<u8>| b.truncate(at))
+        }),
+        ("a #US stream that runs past the file", {
+            let at = stream("#US") - 4;
+            Box::new(move |b: &mut Vec<u8>| set32(b, at, 0x0100_0000))
+        }),
         ("cut off inside the table stream header", {
             let at = lay.method_count;
             Box::new(move |b: &mut Vec<u8>| b.truncate(at))
@@ -1058,6 +1784,82 @@ fn an_assembly_it_cannot_read_whole_is_left_exactly_as_it_was() {
         let out = run(&only(CANONICAL), DLL, &bad);
         assert_left_whole(&out, &bad, what);
     }
+}
+
+/// `asm`, with method `i`'s guarded body copied into a second section, mapped at 0x10_0000 and
+/// appended to the file, and the method pointed at the copy. That section maps the whole body,
+/// and the file holds the whole body, but `backed` of the body's `len` bytes decides how many of
+/// them the section's `SizeOfRawData` says the loader copies from the file.
+fn body_in_a_section_of_its_own(asm: &Asm, i: usize, backed: impl Fn(usize) -> usize) -> Vec<u8> {
+    let Code::Guarded(il, _) = &asm.methods[i].code else {
+        panic!("method {i} has a guarded body")
+    };
+    // The header, the IL, padding to a 4-byte boundary, then the one 16-byte handler section.
+    let len = (12 + il.len()).next_multiple_of(4) + 16;
+    let (mut f, lay) = asm.build();
+    let row = lay.method_rows + i * lay.method_row_size;
+    let rva = u32::from_le_bytes(f[row..row + 4].try_into().unwrap());
+    let at = (rva - SECTION_RVA) as usize + SECTION_RAW;
+    let body = f[at..at + len].to_vec();
+    let raw = f.len().next_multiple_of(0x200);
+    f.resize(raw, 0);
+    f.extend_from_slice(&body);
+
+    let sh = lay.cli_dir + 8 * 2 + 40; // the section table follows directory 15; its second header
+    f[sh..sh + 6].copy_from_slice(b".text2");
+    set32(&mut f, sh + 8, len as u32); // VirtualSize
+    set32(&mut f, sh + 12, 0x0010_0000); // VirtualAddress
+    set32(&mut f, sh + 16, backed(len) as u32); // SizeOfRawData
+    set32(&mut f, sh + 20, raw as u32); // PointerToRawData
+    set32(&mut f, sh + 36, 0x6000_0020);
+    set16(&mut f, lay.num_sections, 2);
+    set32(&mut f, row, 0x0010_0000);
+    f
+}
+
+#[test]
+fn a_body_is_read_only_as_far_as_the_file_backs_its_section() {
+    // Past `SizeOfRawData` the loader maps zeros, whatever the file holds next. A catch clause the
+    // file holds past that line is one the runtime never sees, and the method runs without it; read
+    // from the file anyway, an assembly cut there and one whose section backs the whole clause
+    // shared a form while running different code.
+    let mut asm = Asm::default();
+    asm.methods[2].code = Code::Guarded(vec![0x00, 0x26, 0x2a], 0x0100_0002);
+    let whole = body_in_a_section_of_its_own(&asm, 2, |len| len);
+    assert!(
+        run(&only(CANONICAL), DLL, &whole).body == asm.canonical(),
+        "the body is read through the section it was moved to"
+    );
+    for (what, cut) in [
+        ("inside the catch clause", 8),
+        ("at the handler section's header", 16),
+        ("inside the IL", 18),
+    ] {
+        let bad = body_in_a_section_of_its_own(&asm, 2, |len| len - cut);
+        let out = run(&only(CANONICAL), DLL, &bad);
+        assert_left_whole(&out, &bad, &format!("SizeOfRawData ending {what}"));
+    }
+
+    // The metadata likewise: the last heap, cut short by its section's `SizeOfRawData`, ends in
+    // zeros where the runtime reads it, and in an AssemblyRef's public-key token.
+    let (mut bad, lay) = Asm::default().build();
+    let sh = lay.cli_dir + 8 * 2;
+    let backed = u32::from_le_bytes(bad[sh + 16..sh + 20].try_into().unwrap());
+    set32(&mut bad, sh + 16, backed - 12);
+    let out = run(&only(CANONICAL), DLL, &bad);
+    assert_left_whole(&out, &bad, "SizeOfRawData ending inside #Blob");
+}
+
+#[test]
+fn a_method_whose_body_is_native_code_is_not_read_as_il() {
+    // A mixed-mode assembly's C++ methods carry machine code, which the runtime runs as it stands.
+    // Whatever its first byte parsed as, a tiny or a fat header, the form held a few bytes of it as
+    // IL and none of the rest: another native method would have read the same.
+    let mut asm = Asm::default();
+    asm.methods[1].impl_flags = 0x0001; // `native`
+    let bytes = asm.bytes();
+    let out = run(&only(CANONICAL), DLL, &bytes);
+    assert_left_whole(&out, &bytes, "a method of native code");
 }
 
 #[test]

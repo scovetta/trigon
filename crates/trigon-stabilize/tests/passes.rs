@@ -225,7 +225,7 @@ fn record_is_regenerated_after_membership_changes() {
     );
 
     let ids: Vec<_> = applied.iter().map(|a| a.id.as_str().to_string()).collect();
-    assert!(ids.contains(&"wheel-record".to_string()));
+    assert!(ids.contains(&"wheel-record-v2".to_string()));
     assert!(ids.contains(&"wheel-direct-url".to_string()));
     assert!(ids.contains(&"pyc-header".to_string()));
 }

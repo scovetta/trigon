@@ -439,6 +439,8 @@ async fn a_mirror_that_exits_at_startup_is_reported_with_what_it_said() {
         "the tail of what it said, one line per line: {detail}"
     );
     assert_eq!(e.fault(), Fault::Infra, "ours, never the package's");
+    // What it said is in the error, so the container it said it in has nothing left to tell.
+    assert_island_taken_down(&fake, "mirror-exits");
 }
 
 /// A mirror container that disappears before listening says how that happens.
@@ -459,6 +461,7 @@ async fn a_mirror_container_that_disappears_before_listening_says_how_that_happe
         detail.contains("rebuild it with `trigon mirror-image`"),
         "{detail}"
     );
+    assert_island_taken_down(&fake, "mirror-gone");
 }
 
 /// A mirror container that will not start names the image and how to build one.
@@ -482,6 +485,9 @@ async fn a_mirror_container_that_will_not_start_names_the_image_and_how_to_build
         "podman's own reason: {detail}"
     );
     assert!(detail.contains("trigon mirror-image"), "{detail}");
+    // The container is removed by name even here: a `run` that fails after creating its container
+    // leaves it behind, and podman's error does not say which kind of failure this was.
+    assert_island_taken_down(&fake, "mirror-no-image");
 }
 
 /// The island names its mirror by a stable host and finds its address by network name.
@@ -1736,6 +1742,26 @@ fn hold_the_image_store_as_a_build() -> std::fs::File {
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
     assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
     file
+}
+
+/// Assert that the island [`island`] asked for under `name` was taken down: mirror, then network.
+///
+/// A start that failed used to return with both still standing, and nothing else would take them:
+/// the orphan sweep leaves alone every island whose owner is alive, and a run id ends in the pid,
+/// so under `serve` or a sweep each one stayed until the process exited.
+#[track_caller]
+fn assert_island_taken_down(fake: &Fake, name: &str) {
+    let net = format!("trigon-{name}-{}", std::process::id());
+    let calls = fake.calls();
+    let at = |call: &str| calls.iter().position(|c| c == call);
+    let mirror = at(&format!("rm --force {net}-mirror"));
+    let network = at(&format!("network rm --force {net}"));
+    assert!(
+        at(&format!("network create --internal {net}")).is_some()
+            && mirror.is_some()
+            && mirror < network,
+        "the island was left standing: {calls:?}"
+    );
 }
 
 /// The error an island failed to come up with. `Island` is not `Debug`, so not `expect_err`.

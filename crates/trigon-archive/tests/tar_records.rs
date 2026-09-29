@@ -1,16 +1,19 @@
-//! Tar fields beyond name, mode and body: PAX records, the entry kinds, and values too wide for
-//! their ustar field.
+//! Tar fields beyond name, mode and body: PAX records, the entry kinds, values too wide for their
+//! ustar field, and what comes after the last entry.
 //!
 //! The writer is ours because stabilization depends on forcing PAX (`src/tar.rs`), so every field
 //! the ustar header cannot hold has to leave as a PAX record and come back as the same value. And
 //! the reader faces whatever the publisher's tool wrote: an unrecognized typeflag is passed through
 //! and noted, a kind that must be bodiless but is not is noted, and neither is guessed at
-//! (`docs/05-archive-and-normalization.md` §2.2 (7)).
+//! (`docs/05-archive-and-normalization.md` §2.2 (7)). Where readers disagree on where the archive
+//! ends, it is refused; bytes after an end they all agree on are kept.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use trigon_archive::{Archive, ArchiveError, EntryKind, Limits, RawMeta, SourceMap, TarRaw, tar};
+use trigon_archive::{
+    Archive, ArchiveError, EntryKind, Limits, RawMeta, SourceMap, TarRaw, parse, serialize, tar,
+};
 use trigon_core::{Note, NoteCode};
 
 fn read(bytes: Vec<u8>) -> (Archive, Vec<Note>) {
@@ -396,6 +399,153 @@ fn a_zip_member_cannot_be_written_into_a_tar() {
         Err(ArchiveError::Unsupported(what)) => assert!(what.contains("zip entry"), "{what}"),
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+#[test]
+fn a_device_number_too_wide_for_its_field_is_refused_rather_than_truncated() {
+    // Eight octal digits and no NUL fill the field, and read as a number seven digits cannot hold.
+    // The writer kept the low seven, so `77777777` went out as `7777777` — another device, and
+    // `parse(write(a)) != a`. `tar-device` zeroes both before a stabilized write; this is what is
+    // left when it does not run.
+    for (field, at) in [("devmajor", 329), ("devminor", 337)] {
+        let mut h = ustar(0);
+        h.set_entry_type(::tar::EntryType::Char);
+        h.as_mut_bytes()[at..at + 8].copy_from_slice(b"77777777");
+        let mut b = ::tar::Builder::new(Vec::new());
+        b.append_data(&mut h, "dev/wide", std::io::empty()).unwrap();
+        let (mut a, _) = read(b.into_inner().unwrap());
+        let t = raw(&mut a, 0);
+        let got = if field == "devmajor" {
+            t.devmajor
+        } else {
+            t.devminor
+        };
+        assert_eq!(got, 0o77_777_777, "{field} reads as all eight digits");
+
+        let mut out = Vec::new();
+        match tar::write(&a, &mut out) {
+            Err(ArchiveError::Unsupported(what)) => assert!(what.contains(field), "{what}"),
+            other => panic!("{field}: expected a refusal, got {other:?}"),
+        }
+        assert!(
+            out.is_empty(),
+            "{field}: nothing written before the refusal"
+        );
+    }
+}
+
+// --- the end of the archive -----------------------------------------------------------------------
+
+/// A tar of one member, ended as the `tar` crate ends one: two zero blocks.
+fn one(name: &str, body: &[u8]) -> Vec<u8> {
+    let mut h = ustar(body.len() as u64);
+    h.set_cksum();
+    let mut b = ::tar::Builder::new(Vec::new());
+    b.append_data(&mut h, name, body).unwrap();
+    b.into_inner().unwrap()
+}
+
+#[test]
+fn a_lone_zero_block_with_more_after_it_is_refused_rather_than_taken_for_the_end() {
+    // The `tar` crate, GNU tar and Python end an archive at its first zero block. node-tar, which
+    // npm installs with, ends it only at two in a row and reads on past one, so an entry after a
+    // lone zero block was in what npm installed and not in what was compared. Whatever follows the
+    // block, readers disagree about it, and the archive is refused.
+    let p = one("pkg/a.js", b"a");
+    let open = &p[..p.len() - 1024];
+    for (after, what) in [
+        (one("pkg/extra.js", b"injected"), "an entry"),
+        (b"garbage".to_vec(), "a block cut short"),
+        (
+            [&[0; 511][..], b"x"].concat(),
+            "a block zero but for its last byte",
+        ),
+    ] {
+        let bytes = [open, &[0; 512], &after].concat();
+        let src = Arc::new(SourceMap::owned(bytes));
+        match tar::read(src, &Limits::default(), &mut Vec::new()) {
+            Err(ArchiveError::Malformed { format, detail }) => {
+                assert_eq!(format, "tar", "{what}");
+                assert!(detail.contains("lone zero block"), "{what}: {detail}");
+                let at = format!("offset {}", open.len() + 512);
+                assert!(detail.contains(&at), "{what}: {detail}");
+            }
+            other => panic!(
+                "{what}: expected a refusal, got {:?}",
+                other.map(|a| a.entries.len())
+            ),
+        }
+    }
+}
+
+#[test]
+fn zero_padding_after_the_last_entry_is_dropped_as_a_blocking_factor_is() {
+    // GNU tar and Python pad to a 10 KiB record, and a writer may end with one zero block or with
+    // none. Each holds the same entries, and the writer's own two blocks replace every one of them.
+    let p = one("pkg/a.js", b"a");
+    let open = &p[..p.len() - 1024];
+    let canonical = write(&read(p.clone()).0);
+    for (end, what) in [
+        (&[][..], "no end at all"),
+        (&[0; 512][..], "one zero block"),
+        (&[0; 600][..], "one and a bit"),
+        (&[0; 10240][..], "a whole record"),
+    ] {
+        let (a, _) = read([open, end].concat());
+        assert!(a.tar_trailing.is_empty(), "{what}");
+        assert_eq!(write(&a), canonical, "{what}");
+    }
+}
+
+#[test]
+fn bytes_after_the_end_of_archive_marker_are_kept_and_written_back() {
+    // After two zero blocks every reader has stopped, node-tar too, so what follows is in no
+    // archive anyone lists. It is still in the file, and dropping it would make two files that
+    // differ only there one digest. So it is kept, written back after the marker, and compared as
+    // `container:tar.trailing`.
+    let p = one("pkg/a.js", b"a");
+    for tail in [
+        b"trailing garbage".to_vec(),
+        one("pkg/extra.js", b"injected"),
+        [&[0; 9216][..], b"after a record's padding"].concat(),
+    ] {
+        let (a, _) = read([&p[..], &tail].concat());
+        assert_eq!(a.entries.len(), 1, "no entry is read from it");
+        assert_eq!(a.tar_trailing, tail, "kept, whole");
+        let out = write(&a);
+        assert!(
+            out.ends_with(&[&[0; 1024][..], &tail].concat()),
+            "after the marker"
+        );
+        assert_eq!(read(out).0.tar_trailing, tail, "parse(write(a)) == a");
+
+        // `serialize` rebuilds the archive before it writes it, and keeps them too.
+        let parsed = parse(
+            [&p[..], &tail].concat(),
+            trigon_core::Format::Tar,
+            &Limits::default(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        for store_only in [true, false] {
+            let out = serialize(&parsed.archive, store_only).unwrap();
+            assert_eq!(read(out).0.tar_trailing, tail, "store_only {store_only}");
+        }
+    }
+}
+
+#[test]
+fn trailing_bytes_that_are_all_zero_are_refused_by_the_writer() {
+    // The reader never produces them, but a model can hold them; written out, they would read back
+    // as padding, and so as nothing at all.
+    let (mut a, _) = read(one("pkg/a.js", b"a"));
+    a.tar_trailing = vec![0; 3];
+    let mut out = Vec::new();
+    match tar::write(&a, &mut out) {
+        Err(ArchiveError::Unsupported(what)) => assert!(what.contains("padding"), "{what}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(out.is_empty(), "nothing written before the refusal");
 }
 
 /// A sink that refuses one write, at byte `at`, and takes everything before and after it.

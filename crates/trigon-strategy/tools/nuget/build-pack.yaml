@@ -221,12 +221,12 @@ steps:
       set -- "$@" -p:IncludeSymbols=false
       [ -n "$CSHARP_TARGETS" ] && set -- "$@" -p:LanguageTargets="$CSHARP_TARGETS"
       {%- if with.version %}
-      set -- "$@" -p:Version={{ with.version }}
+      set -- "$@" '-p:Version={{ with.version | msbuild_escape | shell_single_quote }}'
       {#- `PackageVersion` too: it defaults to `Version`, so this is a no-op for a normal project,
           but one that sets it explicitly from a CI property (`castle.core`'s
           `<PackageVersion>$(BuildVersion)</PackageVersion>`) ignores `Version` and would name the
           package `0.0.0` without it. A global property overrides the project's. #}
-      set -- "$@" -p:PackageVersion={{ with.version }}
+      set -- "$@" '-p:PackageVersion={{ with.version | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {#- **The assembly's own version stamps, read back from what the feed served.** A project
           that derives its version from a CI-only property — `castle.core` reads
@@ -235,18 +235,24 @@ steps:
           standard MSBuild properties, and a value passed on the command line is a global property
           that overrides whatever the project set it to, whatever it named the intermediate. The
           values are the published assembly's own, so this reproduces the stamps rather than
-          inventing them; quoted, because a copyright carries spaces. #}
+          inventing them. **Single-quoted**, so each reaches `dotnet` as one argument: a copyright
+          carries spaces, and may carry a quote, a backslash, a `$` or a backtick, each of which a
+          double-quoted word would read as the shell's. **MSBuild-escaped** inside the quotes, so
+          the property MSBuild sets is the value the assembly spells: its command line splits on
+          `;` and `,` and drops `"`, and it decodes `%XX` and expands `@(…)` where the value is
+          used. The version above, which the rung sets from the informational one, is quoted and
+          escaped for the same reasons. #}
       {%- if with.assembly_version %}
-      set -- "$@" "-p:AssemblyVersion={{ with.assembly_version }}"
+      set -- "$@" '-p:AssemblyVersion={{ with.assembly_version | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {%- if with.file_version %}
-      set -- "$@" "-p:FileVersion={{ with.file_version }}"
+      set -- "$@" '-p:FileVersion={{ with.file_version | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {%- if with.informational_version %}
-      set -- "$@" "-p:InformationalVersion={{ with.informational_version }}"
+      set -- "$@" '-p:InformationalVersion={{ with.informational_version | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {%- if with.copyright %}
-      set -- "$@" "-p:Copyright={{ with.copyright }}"
+      set -- "$@" '-p:Copyright={{ with.copyright | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {%- if project and project != '.' %}
       set -- "$@" {{ project }}

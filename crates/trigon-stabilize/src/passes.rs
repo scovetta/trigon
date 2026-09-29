@@ -406,12 +406,35 @@ entry_pass!(
         const DROP: [&str; 4] = ["\"_resolved\"", "\"_integrity\"", "\"_from\"", "\"_id\""];
         let mut out = String::with_capacity(text.len());
         let mut removed = 0u64;
+        // Where the last non-blank line kept ends in `out`, and whether a line was dropped since.
+        let mut last_kept: Option<usize> = None;
+        let mut dropped_since = false;
         for line in text.lines() {
             if DROP.iter().any(|k| line.trim_start().starts_with(k)) {
                 removed += line.len() as u64;
+                dropped_since = true;
                 continue;
             }
+            // Fields dropped from the end of an object leave the property before them carrying the
+            // comma that separated it from them, in front of the `}`: not JSON, and never the
+            // authored form. It goes with them. The pass has never run on anything this tool has
+            // verified (`docs/16-findings.md` §3.28), so no record re-derives differently under
+            // its id.
+            if dropped_since && line.trim_start().starts_with('}') {
+                if let Some(end) = last_kept {
+                    let kept = out[..end].trim_end();
+                    if kept.ends_with(',') {
+                        let comma = kept.len() - 1;
+                        out.replace_range(comma..comma + 1, "");
+                        removed += 1;
+                    }
+                }
+            }
+            dropped_since = false;
             out.push_str(line);
+            if !line.trim().is_empty() {
+                last_kept = Some(out.len());
+            }
             out.push('\n');
         }
         if removed == 0 {
@@ -705,15 +728,27 @@ entry_pass!(
 // identically and their method IL is byte-for-byte equal.
 //
 // So this replaces a managed assembly with the canonical *functional* form [`crate::ilcanon`]
-// reads out of it — every method's name, signature and IL, resolved through the heaps to values
-// rather than the offsets that moved. Two assemblies built from the same source reduce to the same
-// bytes; a real code change still shows. It drops resources, custom attributes and field data, so
-// it is `Lossy`: a match it produces is `normalized_with_caveats`, never a clean `normalized` — the
-// honest tier for "the code is the same, and we did not check the rest." An assembly it cannot read
-// whole is left exactly as it was.
+// reads out of it — every method's name, signature, flags and whole body, every row and literal
+// an IL token or a signature can name, and the declarations that decide how the code runs
+// (P/Invoke entry points, explicit overrides, implemented interfaces, parameters, layout),
+// resolved through the heaps to values rather than the offsets that moved. Two assemblies built
+// from the same source reduce to the same bytes. A change to a method, to anything its tokens
+// name or to how it is declared still shows; one only to resources, custom attributes or the data
+// a field is initialized from does not. Those it drops, so it is `Lossy`: a match it produces is
+// `normalized_with_caveats`, never a clean `normalized` — the honest tier for "the code is the
+// same, and we did not check the rest." An assembly it cannot read whole, as the runtime reads
+// it, is left exactly as it was.
+//
+// `-v2` because the form changed. The first kept each method's name, signature and IL and nothing
+// its tokens named, so a changed string literal, a MemberRef renamed under its token, a method's
+// flags, a catch clause's type or a P/Invoke's entry point all compared equal. The set digest
+// covers pass ids, not pass code (`docs/19-distribution-and-lookup.md` §11, open question 1), so a
+// new form under the old id would have re-derived old records differently under the digest they
+// were signed with. A new id is a new set digest, and a record made under the old one is
+// re-derived under its archived set.
 entry_pass!(
     DotnetIlCanonical,
-    "dotnet-il-canonical",
+    "dotnet-il-canonical-v2",
     RiskTier::Lossy,
     is_zip,
     |e| {
@@ -966,8 +1001,8 @@ entry_pass!(
     /// `dist-info/`: a wheel may ship arbitrary files there, including licences the author wrote.
     ///
     /// `Content` risk, because it rewrites bytes inside a file. Wheels are already capped below
-    /// `Normalized` by `wheel-record`, so this costs no outcome that was otherwise reachable, and
-    /// it runs at `Default` so `RECORD` is regenerated over the normalized bytes at `Finalize`.
+    /// `Normalized` by `wheel-record-v2`, so this costs no outcome that was otherwise reachable,
+    /// and it runs at `Default` so `RECORD` is regenerated over the normalized bytes at `Finalize`.
     ///
     /// Measured impact when added: one wheel in the seventeen-package M1 PyPI corpus carries CRLF
     /// metadata at all. It is a rare case that recurs rather than a common one.
@@ -1023,12 +1058,20 @@ entry_pass!(
 /// change membership: `wheel-direct-url` removes a file, and a definitions-supplied `exclude_path`
 /// can remove any file at all. Regenerating it at `Default` would produce a manifest of the wheel as
 /// it arrived rather than the wheel as it stands.
+///
+/// `-v2` because what is recorded of it changed, though not what it writes. An archive pass names
+/// no member in what it reports, so the RECORD it regenerated carried no `body` edit; now each body
+/// is compared across the pass, and a comparison's field edits name RECORD as rewritten by it. A
+/// report published with field edits before that would re-derive with one it does not carry, under
+/// the set digest it was published with, and read as a disagreement. The set digest covers pass ids
+/// and not pass code (`docs/19-distribution-and-lookup.md` §11, open question 1), so a new id is
+/// what sends such a record to its archived set.
 #[derive(Debug)]
 pub struct WheelRecord;
 
 impl Stabilizer for WheelRecord {
     fn id(&self) -> StabilizerId {
-        StabilizerId::new("wheel-record")
+        StabilizerId::new("wheel-record-v2")
     }
     fn stage(&self) -> Stage {
         Stage::Finalize
@@ -1722,9 +1765,14 @@ fn sort_doc_members(body: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// `-v2` because what it reports changed. It rewrote the file and said it had changed no bytes, so
+// `applied` signed `bytesChanged: 0` for a body it had rewritten and no edit named the member it
+// had reconciled. Now it counts the bytes it wrote, and that count is signed, so the same id would
+// re-derive old statements to a different `applied` under the digest they were made with
+// (`docs/19-distribution-and-lookup.md` §11, open question 1).
 entry_pass!(
     NupkgDocMemberOrder,
-    "nupkg-doc-member-order",
+    "nupkg-doc-member-order-v2",
     RiskTier::Structural,
     is_zip,
     |e| {
@@ -1741,10 +1789,9 @@ entry_pass!(
             return Touched::NONE;
         };
         *body = sorted;
-        Touched {
-            entries: 1,
-            bytes: 0,
-        }
+        // The body is rewritten, and saying so is what names it: a body change is attributed from
+        // the bytes an entry pass reports.
+        Touched::entry_bytes(body.len() as u64)
     }
 );
 

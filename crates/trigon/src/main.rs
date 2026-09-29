@@ -623,7 +623,8 @@ enum Cmd {
     /// package never checked or withdrawn, 3 for any void or result below the threshold, 4 for any
     /// deleted record, record or source that failed verification, required source that is
     /// unknown, or package no source could answer, and 5 when it could not check at all. The
-    /// first of 5, 4, 1, 3, 2 wins. `--store` exits 0 whatever it reports, as it always has.
+    /// first of 5, 4, 1, 3, 2 wins. `--store` exits 0 whatever it reports, as it always has, and 5
+    /// when it could not check at all.
     #[cfg(feature = "build")]
     Check {
         /// The lockfile or SBOM.
@@ -634,7 +635,8 @@ enum Cmd {
         #[arg(long, default_value = "text", value_parser = ["text", "json", "sarif"])]
         format: String,
         /// Check against this local store of your own runs instead, as `trigon check` did before
-        /// it read evidence sources: newest run per package, five rows, and exit 0.
+        /// it read evidence sources: newest run per package, five rows, and exit 0 whatever it
+        /// reports; 5 when the store or the lockfile cannot be read.
         #[arg(
             long,
             conflicts_with_all = ["min", "max_risk", "sources", "require", "offline", "remote"]
@@ -710,6 +712,10 @@ enum Cmd {
     /// agrees with the original on the verdict, the digests and the difference signature. The run
     /// record and its comparison are never changed. A run judged under a set this binary no longer
     /// has is skipped, because a different set would explain a different verdict.
+    ///
+    /// Exits 0 when every run was written or skipped, and 1, after every line and the tally, when
+    /// any run could not be re-derived or re-derived to a comparison other than the one recorded,
+    /// naming each.
     #[cfg(feature = "build")]
     Rederive {
         #[arg(long, default_value = "./trigon-store")]
@@ -1716,6 +1722,16 @@ fn report_fault(e: &anyhow::Error) {
 /// claim that does not re-derive are, and none of them is trigon's: telling the user to report a
 /// bug in trigon would point at the wrong party for evidence that may be lying. `docs/19` §4.2 and
 /// §8 report it as failed verification, and so does this; `Bug` stays for trigon's own errors.
+///
+/// Nor is a `--store` that names no directory trigon's, or a run the store does not hold where the
+/// command line named it: they are the command line's. Both are `Bug` so that they are never
+/// retried. `Store::existing` is only ever given a `--store`. A run id is not always the command
+/// line's, though, and where trigon picked it a miss is trigon's own: `rebuild --attest` signs the
+/// run it has just recorded, and puts `attestor::JustRecorded` over a miss, which is then said as a
+/// bug in trigon. A worker's ids are ours as well, but a worker's failures are the queue's to
+/// record and never reach this. An id read from the store's own listing a moment before — by
+/// `list`, by `attest` with no `--run`, and by `publish` recording what it logged — misses only if
+/// the store changed under the command, and that is still said as the command line's.
 fn whose(fault: trigon_core::Fault, e: &anyhow::Error) -> &'static str {
     use trigon_attest::AttestError;
     use trigon_attest::log::LogError;
@@ -1743,6 +1759,16 @@ fn whose(fault: trigon_core::Fault, e: &anyhow::Error) -> &'static str {
         }
         Some(AttestError::Evidence(_)) => {
             return "the evidence's: it is damaged, or is not what it says it is";
+        }
+        _ => {}
+    }
+    #[cfg(feature = "build")]
+    match e.downcast_ref::<trigon_store::StoreError>() {
+        Some(trigon_store::StoreError::NotAStore(_)) => return "the command line's: no such store",
+        Some(trigon_store::StoreError::NoSuchRun(_))
+            if e.downcast_ref::<attestor::JustRecorded>().is_none() =>
+        {
+            return "the command line's: no such run";
         }
         _ => {}
     }
@@ -1849,6 +1875,54 @@ mod fault_report {
             assert!(!whose(fault, &e).contains("bug in trigon"), "{fault:?}");
         }
         assert_eq!(whose(Fault::Bug, &e), "a bug in trigon; please report it");
+    }
+
+    /// A `--store` that names no directory, and a run the store does not hold, are `Bug` so that
+    /// they are never retried, and are the command line's and never trigon's, however they reach
+    /// `main`. The run a rebuild has just recorded is trigon's own to have lost, and any other
+    /// `Bug` the store raises is still reported as one.
+    #[cfg(feature = "build")]
+    #[test]
+    fn a_store_or_a_run_that_is_not_there_is_the_command_lines_and_not_trigons() {
+        use trigon_store::StoreError;
+        let typo = || StoreError::NotAStore("./trigon-stroe".into());
+        let nope = || StoreError::NoSuchRun("nope".into());
+        for (e, said) in [
+            (
+                anyhow::Error::new(typo()),
+                "the command line's: no such store",
+            ),
+            (
+                anyhow::Error::new(typo()).context("opening the store"),
+                "the command line's: no such store",
+            ),
+            (
+                anyhow::Error::new(nope()),
+                "the command line's: no such run",
+            ),
+            (
+                anyhow::Error::new(nope()).context("reading run `nope`"),
+                "the command line's: no such run",
+            ),
+        ] {
+            let fault = e.downcast_ref::<StoreError>().unwrap().fault();
+            assert_eq!(fault, Fault::Bug);
+            assert_eq!(whose(fault, &e), said);
+        }
+        let corrupt = StoreError::Corrupt {
+            asked: "aa".into(),
+            found: "bb".into(),
+        };
+        assert_eq!(
+            whose(corrupt.fault(), &anyhow::Error::new(corrupt)),
+            "a bug in trigon; please report it"
+        );
+        // No command line named it: `rebuild --attest` picked the id, and the miss is trigon's.
+        let lost = anyhow::Error::new(nope()).context(super::attestor::JustRecorded("nope".into()));
+        assert_eq!(
+            whose(Fault::Bug, &lost),
+            "a bug in trigon; please report it"
+        );
     }
 
     /// Whether a failure is worth trying again is the error's own answer where it has one, and its
@@ -2020,11 +2094,12 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
                 #[cfg(not(feature = "build"))]
                 {
                     let _ = (subject, predicate, origin);
-                    verify_record::usage(
+                    verify_record::refuse(
                         "--lookup resolves a record in a source's synced clone and fetches the \
                          evidence it names, which this build — the network-free verifier — does \
                          not do. Run it with the default build, or check the record here with \
                          --record <file> --evidence <dir> and the source's keys",
+                        output,
                     );
                 }
             }
@@ -2053,9 +2128,10 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
                 }
                 (None, Some(record)) => {
                     if public_key.is_some() {
-                        verify_record::usage(
+                        verify_record::refuse(
                             "--public-key checks a bundle; a record is checked against the key its \
                              source had at its leaf, from --source or --attestation-key",
+                            output,
                         );
                     }
                     verify_record::run(verify_record::Args {
@@ -2070,8 +2146,9 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
                         output,
                     })
                 }
-                (Some(_), Some(_)) => verify_record::usage(
+                (Some(_), Some(_)) => verify_record::refuse(
                     "give a bundle or --record <file>, not both: each is checked on its own",
+                    output,
                 ),
                 (None, None) => verify_record::usage(
                     "verify-attestation checks a bundle, `verify-attestation <bundle>`; a \
@@ -2482,7 +2559,10 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
             offline,
             remote,
         } => match store {
-            Some(store) => check::run(&file, &store, &format),
+            // Whatever it reports, 0; and when it could not check at all — a store that is not
+            // there, a lockfile that cannot be read — 5, the tool failing (`docs/19` §6), as the
+            // rest of `check` and this form's own bad arguments exit.
+            Some(store) => evidence::lookup::finish(check::run(&file, &store, &format).map(|()| 0)),
             None => evidence::check::run(evidence::check::Args {
                 lockfile: file,
                 // The parser admits only the three outcomes and the four tiers.
@@ -4068,7 +4148,7 @@ fn serve_corpus(
     // Loudly, not in a doc comment nobody reads at three in the morning. A store bound to a
     // routable address without `--public` serves build logs that were never redacted, and D14 says
     // in as many words that loopback was the only thing that ever mitigated that.
-    if !public && !cfg.bind.starts_with("127.") && !cfg.bind.starts_with("localhost") {
+    if !public && beyond_loopback(&cfg.bind) {
         eprintln!(
             "{} {}",
             style::bad("warning:"),
@@ -4087,6 +4167,44 @@ fn serve_corpus(
         .build()?;
     rt.block_on(trigon_api::run(store, cfg))
         .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Whether `serve` binding `bind` would listen anywhere but loopback.
+///
+/// Resolved the way the listener resolves it, rather than read as text: a prefix test warned about
+/// `[::1]`, which is loopback, and stayed quiet for a host name beginning `localhost` that names a
+/// routable address. Any address that is not loopback is beyond it, and so is one that does not
+/// resolve at all — the warning is the side to err on, and the bind will say why it failed.
+#[cfg(feature = "build")]
+fn beyond_loopback(bind: &str) -> bool {
+    use std::net::ToSocketAddrs as _;
+    match bind.to_socket_addrs() {
+        Ok(addrs) => {
+            let addrs: Vec<std::net::SocketAddr> = addrs.collect();
+            addrs.is_empty() || addrs.iter().any(|a| !a.ip().is_loopback())
+        }
+        Err(_) => true,
+    }
+}
+
+#[cfg(all(test, feature = "build"))]
+mod beyond_loopback_tests {
+    use super::beyond_loopback;
+
+    /// Every loopback spelling is loopback, `[::1]` among them, and a wildcard or an address that
+    /// does not resolve is not. Only names this machine resolves by itself: nothing here asks a
+    /// resolver on the network.
+    #[test]
+    fn loopback_is_what_the_address_resolves_to_and_not_how_it_is_spelled() {
+        for bind in ["[::1]:0", "127.0.0.2:0", "127.0.0.1:8100", "localhost:0"] {
+            assert!(!beyond_loopback(bind), "{bind}");
+        }
+        for bind in ["0.0.0.0:0", "[::]:0", "192.0.2.1:8100", "[2001:db8::1]:0"] {
+            assert!(beyond_loopback(bind), "{bind}");
+        }
+        // Not an address at all: warned about, since nothing says it is loopback.
+        assert!(beyond_loopback("no port"));
+    }
 }
 
 /// One `label   value` line of narration, the tool-wide shape: a bold-blue label padded to
@@ -4346,10 +4464,13 @@ fn short_ref(reference: &str) -> String {
         } else {
             out.push_str(run);
         }
-        if i < bytes.len() {
-            // The one non-hex byte that ended the run (ASCII in every reference we handle).
-            out.push(bytes[i] as char);
-            i += 1;
+        // The one character that ended the run, whole. Not every reference is ASCII — an npm
+        // `gitHead` is whatever the packument says — and stepping one byte into a `β` left `i`
+        // inside it, where slicing the next run panicked. A hex digit is one byte, so `i` is
+        // always on a boundary here.
+        if let Some(c) = reference[i..].chars().next() {
+            out.push(c);
+            i += c.len_utf8();
         }
     }
     out
@@ -4388,6 +4509,14 @@ mod short_ref_tests {
         ] {
             assert_eq!(short_ref(plain), plain);
         }
+        // Left exactly as it is means character for character, not byte for byte: a reference
+        // that is not ASCII comes out as it went in, beside a digest or not.
+        assert_eq!(short_ref("release/β-1"), "release/β-1");
+        assert_eq!(
+            short_ref(&format!("é{}", "a".repeat(40))),
+            format!("é{}…", "a".repeat(12))
+        );
+        assert_eq!(short_ref(&format!("{commit}→ü")), "ff8e7ba8b412…→ü");
     }
 }
 
@@ -4646,7 +4775,7 @@ mod profile_listing {
         assert!(
             capping_passes(&profile("wheel").unwrap())
                 .iter()
-                .any(|c| c.starts_with("wheel-record (content)"))
+                .any(|c| c.starts_with("wheel-record-v2 (content)"))
         );
         assert!(capping_passes(&profile("gem").unwrap()).is_empty());
     }
@@ -9023,6 +9152,41 @@ output_path: '*.tgz'
             assert!(!path.exists());
         }
 
+        /// A run the store no longer holds, when it is the one the rebuild has just recorded, is
+        /// trigon's to have lost: no command line named it, so the fault report says a bug in
+        /// trigon, and never the command line's run that is not there.
+        #[test]
+        fn rebuild_attest_of_a_run_the_store_lost_is_trigons_and_not_the_command_lines() {
+            use trigon_core::{Classify as _, Fault};
+            let work = tmpdir("attest-lost");
+            let (dir, r) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+            std::fs::remove_file(dir.join("runs").join(format!("{}.json", r.id))).unwrap();
+            let path = work.join("claim.json");
+            let config = EvidenceConfig::load(&Env {
+                cwd: work.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+            let e = attest_what_was_recorded(
+                &dir,
+                Some(&r.id),
+                &path,
+                &config,
+                &trigon_attest::Unsigned,
+            )
+            .unwrap_err();
+            let fault = e
+                .downcast_ref::<trigon_store::StoreError>()
+                .map(|s| s.fault());
+            assert_eq!(fault, Some(Fault::Bug), "{e:#}");
+            assert_eq!(
+                crate::whose(Fault::Bug, &e),
+                "a bug in trigon; please report it"
+            );
+            assert!(format!("{e:#}").contains("just recorded"), "{e:#}");
+            assert!(!path.exists());
+        }
+
         #[test]
         fn rebuild_attest_signs_a_verdict_as_trigon_attest_does() {
             let work = tmpdir("attest-verdict");
@@ -11042,7 +11206,6 @@ mod mirror {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
-    /// Build a base image that carries what an enforced tier cannot install.
     /// Mono's PCL reference assemblies, fetched and unpacked rather than installed.
     ///
     /// **Pinned to an exact file.** The archive is content-addressed by nothing, so a floating
@@ -11055,6 +11218,7 @@ mod mirror {
     /// Where the profiles land, and what the NuGet build tool looks for.
     pub const PCL_ROOT: &str = "/opt/pcl-reference-assemblies";
 
+    /// Build a base image that carries what an enforced tier cannot install.
     pub fn base_image(
         from: &str,
         packages: &[String],
@@ -13348,6 +13512,10 @@ mod attestor {
     /// used to sign the comparison it held in memory, as `equivalence/v1` or `divergence/v1`,
     /// asking no gate, so at its default `--egress open` every run it signed was a void signed as a
     /// verdict.
+    ///
+    /// **A run the store does not hold is trigon's here**, not the command line's: no command line
+    /// named `id`, the rebuild recorded it a moment ago. Such a `NoSuchRun` goes on under
+    /// [`JustRecorded`], so that [`crate::whose`] reports a bug in trigon and not a mistyped id.
     pub(crate) fn attest_recorded_with(
         store: &Path,
         id: &str,
@@ -13398,6 +13566,32 @@ mod attestor {
             }
             Ok(())
         })
+        .map_err(|e: anyhow::Error| JustRecorded::over(e, id))
+    }
+
+    /// Said over a `NoSuchRun` about the run a rebuild has just recorded, which is trigon's own id
+    /// and not one a command line named: [`crate::whose`] reports it as a bug in trigon.
+    #[derive(Debug)]
+    pub(crate) struct JustRecorded(pub(crate) String);
+
+    impl JustRecorded {
+        /// `e`, under this where it is the store not holding the run, and as it was otherwise.
+        fn over(e: anyhow::Error, id: &str) -> anyhow::Error {
+            match e.downcast_ref::<trigon_store::StoreError>() {
+                Some(trigon_store::StoreError::NoSuchRun(_)) => e.context(Self(id.to_string())),
+                _ => e,
+            }
+        }
+    }
+
+    impl std::fmt::Display for JustRecorded {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "run `{}` is the one this rebuild has just recorded, and the store does not hold it",
+                self.0
+            )
+        }
     }
 
     /// What [`sign_run`] signed and filed.
@@ -14977,15 +15171,29 @@ fn dotnet_global_json(root: &Path, subdir: Option<&str>) -> Option<String> {
 #[cfg(feature = "build")]
 fn dotnet_project_text(root: &Path, subdir: Option<&str>) -> Option<String> {
     let (dirs, whole) = dirs_in_checkout(root, subdir)?;
-    let start = dirs.last().filter(|_| whole)?.clone();
-    let mut found: Vec<std::path::PathBuf> = Vec::new();
-    let mut stack = vec![start];
-    // Bounded: a deep tree should not turn a pre-flight into a walk of the whole repository.
-    let mut seen = 0usize;
-    while let Some(dir) = stack.pop() {
+    let start = dirs.last().filter(|_| whole)?;
+    let (mut found, _) = csproj_files(start, 20_000);
+    found.sort();
+    std::fs::read_to_string(found.first()?).ok()
+}
+
+/// Every `.csproj` under `start`, in no particular order, and how many directories were read to
+/// find them.
+///
+/// Bounded: a deep tree should not turn a pre-flight into a walk of the whole repository. Past
+/// `limit` entries the whole walk stops, not only the directory it was in: stopping only that one
+/// went on to read every directory already queued, which in a wide tree is most of it. A directory
+/// counts toward `limit` as a file does, or a tree of nothing but directories would have no bound.
+#[cfg(feature = "build")]
+fn csproj_files(start: &Path, limit: usize) -> (Vec<PathBuf>, usize) {
+    let mut found = Vec::new();
+    let mut stack = vec![start.to_path_buf()];
+    let (mut seen, mut read) = (0usize, 0usize);
+    'walk: while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
+        read += 1;
         for e in entries.flatten() {
             let p = e.path();
             // The entry's own type, which is `lstat`'s, so a link found in the walk is followed
@@ -14994,27 +15202,24 @@ fn dotnet_project_text(root: &Path, subdir: Option<&str>) -> Option<String> {
             // a link back up the tree had it walk the same directories until the kernel stopped
             // resolving the path.
             let Ok(kind) = e.file_type() else { continue };
-            if kind.is_dir() {
-                if p.file_name().is_some_and(|n| n == ".git") {
-                    continue;
-                }
-                stack.push(p);
+            if kind.is_dir() && p.file_name().is_some_and(|n| n == ".git") {
                 continue;
             }
-            if !kind.is_file() {
+            if !kind.is_dir() && !kind.is_file() {
                 continue;
             }
             seen += 1;
-            if seen > 20_000 {
-                break;
+            if seen > limit {
+                break 'walk;
             }
-            if p.extension().is_some_and(|x| x == "csproj") {
+            if kind.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "csproj") {
                 found.push(p);
             }
         }
     }
-    found.sort();
-    std::fs::read_to_string(found.first()?).ok()
+    (found, read)
 }
 
 /// The directories from `root` down to `subdir` that are really inside the checkout, outermost
@@ -15224,6 +15429,42 @@ mod project_text_tests {
             dotnet_project_text(&root, Some("./src")).as_deref(),
             Some("<Real/>")
         );
+    }
+
+    /// The bound stops the whole walk at the entry that crosses it, not only the directory that
+    /// entry is in, and a directory counts toward it as a file does.
+    #[test]
+    fn the_walk_stops_where_it_crosses_its_bound() {
+        use super::csproj_files;
+        // Two projects and a directory at the top are three entries. The fourth is the first thing
+        // `sub` holds, whichever that is, and nothing is read after it: not the rest of `sub`, and
+        // not `deeper`.
+        let root = tmpdir("bound");
+        std::fs::write(root.join("A.csproj"), "<A/>").unwrap();
+        std::fs::write(root.join("B.csproj"), "<B/>").unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir_all(sub.join("deeper")).unwrap();
+        std::fs::write(sub.join("C.csproj"), "<C/>").unwrap();
+        std::fs::write(sub.join("D.csproj"), "<D/>").unwrap();
+        std::fs::write(sub.join("deeper/E.csproj"), "<E/>").unwrap();
+        let (mut found, read) = csproj_files(&root, 3);
+        found.sort();
+        assert_eq!(found, [root.join("A.csproj"), root.join("B.csproj")]);
+        assert_eq!(read, 2, "a directory was read after the bound was crossed");
+        let (found, read) = csproj_files(&root, 100);
+        assert_eq!((found.len(), read), (5, 3), "under the bound, everything");
+
+        // Nothing but directories at the top: they count as files do, so the fourth stops the walk
+        // before any of them is read.
+        let wide = tmpdir("bound-wide");
+        for n in 0..5 {
+            let d = wide.join(format!("d{n}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("P.csproj"), "<P/>").unwrap();
+        }
+        assert_eq!(csproj_files(&wide, 3), (Vec::new(), 1));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&wide);
     }
 }
 

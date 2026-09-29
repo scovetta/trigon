@@ -12,10 +12,17 @@
 //! and only under the very set the run was judged with. A run judged under a set this binary no
 //! longer has is skipped and says so: explaining a verdict with a different set would explain a
 //! different verdict.
+//!
+//! **A run that failed fails the command.** Every run is still tried and every line and the tally
+//! still printed, and then the command exits 1 naming each run that could not be re-derived and
+//! each that re-derived to a comparison other than the one recorded. An artifact the record says
+//! is kept and the store has lost, or cannot give back as the bytes the record names, is one that
+//! could not be re-derived. Skips alone exit 0: a run with nothing to fill in is not a failure, and
+//! a second backfill over a store the first one finished skips every run.
 
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use trigon_archive::Limits;
 use trigon_compare::{Comparison, compare_bytes};
 use trigon_store::Store;
@@ -32,6 +39,9 @@ pub struct Args {
 enum Done {
     Written { steps: usize, edits: usize },
     Skipped(String),
+    /// Re-derived, to something other than the recorded comparison: the first thing a verdict
+    /// rests on that the two disagree about. Not written.
+    Disagrees(String),
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -45,7 +55,10 @@ pub fn run(args: Args) -> Result<()> {
         } else {
             args.runs.clone()
         };
-        let (mut written, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+        let (mut written, mut skipped) = (0usize, 0usize);
+        // The runs that failed, apart by kind: one the store could not give us, and one whose
+        // re-derivation disagrees with its record, which is a finding about the comparator.
+        let (mut unread, mut disagreed) = (Vec::new(), Vec::new());
         for id in &ids {
             match one(&store, id, args.force, args.dry_run).await {
                 Ok(Done::Written { steps, edits }) => {
@@ -59,19 +72,50 @@ pub fn run(args: Args) -> Result<()> {
                     skipped += 1;
                     println!("{id}  skipped  {why}");
                 }
+                Ok(Done::Disagrees(why)) => {
+                    disagreed.push(id.as_str());
+                    println!(
+                        "{id}  failed   re-derivation disagrees with the recorded comparison: {why}"
+                    );
+                }
                 Err(e) => {
-                    failed += 1;
+                    unread.push(id.as_str());
                     println!("{id}  failed   {e:#}");
                 }
             }
         }
         println!(
-            "\n{written} {}, {skipped} skipped, {failed} failed, of {} run(s)",
+            "\n{written} {}, {skipped} skipped, {} failed, of {} run(s)",
             if args.dry_run { "would be written" } else { "written" },
+            unread.len() + disagreed.len(),
             ids.len()
         );
-        Ok(())
+        failures(&unread, &disagreed)
     })
+}
+
+/// The command's own verdict on a backfill: `Ok` only when no run failed, and otherwise an error
+/// naming each run that failed, by kind, which `main` prints and exits 1 on.
+fn failures(unread: &[&str], disagreed: &[&str]) -> Result<()> {
+    let mut said = Vec::new();
+    if !disagreed.is_empty() {
+        said.push(format!(
+            "{} run(s) re-derived to a comparison other than the one recorded: {}",
+            disagreed.len(),
+            disagreed.join(", ")
+        ));
+    }
+    if !unread.is_empty() {
+        said.push(format!(
+            "{} run(s) could not be re-derived: {}",
+            unread.len(),
+            unread.join(", ")
+        ));
+    }
+    if !said.is_empty() {
+        bail!("{}", said.join("; "));
+    }
+    Ok(())
 }
 
 async fn one(store: &Store, id: &str, force: bool, dry_run: bool) -> Result<Done> {
@@ -113,15 +157,14 @@ async fn one(store: &Store, id: &str, force: bool, dry_run: bool) -> Result<Done
     ) {
         (Ok(Some(u)), Ok(Some(b))) => (u, b),
         // Kept by the record's word and gone from the store: missing, and said so, never taken
-        // for a run whose bytes were pruned on purpose.
+        // for a run whose bytes were pruned on purpose. Both this and bytes the store cannot give
+        // back as the ones the record names are damage, not a run with nothing to fill in, so
+        // they fail the command: a second backfill would meet them again.
         (Err(e @ trigon_store::StoreError::Missing { .. }), _)
-        | (_, Err(e @ trigon_store::StoreError::Missing { .. })) => {
-            return Ok(Done::Skipped(format!("{e}")));
-        }
+        | (_, Err(e @ trigon_store::StoreError::Missing { .. })) => return Err(e.into()),
         (Err(e), _) | (_, Err(e)) => {
-            return Ok(Done::Skipped(format!(
-                "one of the two artifacts could not be read from the store: {e}"
-            )));
+            return Err(anyhow::Error::new(e)
+                .context("one of the two artifacts could not be read from the store"));
         }
         _ => {
             return Ok(Done::Skipped(
@@ -157,9 +200,10 @@ async fn one(store: &Store, id: &str, force: bool, dry_run: bool) -> Result<Done
     .context("re-deriving the comparison")?;
 
     if let Some(why) = disagreement(&original, &fresh) {
-        // Loud, and not written. The same bytes under the same set should give the same verdict;
-        // when they do not, that is a finding about the comparator, not a gap to paper over.
-        anyhow::bail!("re-derivation disagrees with the recorded comparison: {why}");
+        // Loud, not written, and a failure of the command. The same bytes under the same set should
+        // give the same verdict; when they do not, that is a finding about the comparator, not a
+        // gap to paper over.
+        return Ok(Done::Disagrees(why));
     }
 
     let diff = fresh.diff.as_ref();

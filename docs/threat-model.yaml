@@ -11,7 +11,7 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:2029072fe23bc529ed8dc262ca4f87a47b361cf9f5626208fd77eaa3953f5593
+prose_version: docs/threat-model.md@sha256:302b9d5e6fa65750cbb6ec00aa5d3f63beb0206453e9df63f2ce5c493156f3c3
 model_status: unratified-draft
 triage_policy: strict
 confidence:
@@ -1142,8 +1142,8 @@ contract_dimensions:
 - component: archive-parsing
   dimension: resource-complexity
   status: claimed
-  conditions: every cap is enforced against produced bytes, not declared sizes; the ceiling's size is
-    what D1 disclaims
+  conditions: every cap is enforced against produced bytes, not declared sizes, and gzip members, which
+    cost time and no bytes, are counted across the artifact; the ceiling's size is what D1 disclaims
   property_id: P1
   provenance:
     kind: documented
@@ -1387,7 +1387,8 @@ contract_dimensions:
 - component: attestation
   dimension: serialization-reconstruction
   status: claimed
-  conditions: canonical JSON is byte-stable; floats and non-ASCII keys are refused, not coerced
+  conditions: canonical JSON is byte-stable; floats, integers beyond ±(2^53 − 1) and non-ASCII keys are
+    refused, not coerced
   property_id: P9
   provenance:
     kind: documented
@@ -2459,14 +2460,17 @@ properties_claimed:
   violation_symptoms:
   - panic, hang, wrong digest
   statement: Parsing a hostile artifact does not panic, escape its enforced limits — recursion, total
-    expansion and entry count, but not the two D23 records as dead — or silently change a digest. Recursion
-    is bounded by Limits::recursion, whose default of 4 descends three levels below the top — N parses
-    N-1, stricter than the name reads — and a parse failure keeps the member inline and emits NestedParseFailed.
+    expansion, entry count and gzip member count, but not the two D23 records as dead — or silently change
+    a digest. Recursion is bounded by Limits::recursion, whose default of 4 descends three levels below
+    the top — N parses N-1, stricter than the name reads — and a parse failure keeps the member inline
+    and emits
   provenance:
     kind: documented
     source: docs/05 §2.2; crates/trigon-archive/src/zip.rs — `checked_add`; crates/trigon-archive/src/gzip.rs:25
       — the output budget; tests `an_offset_that_wraps_is_a_short_read_and_not_a_panic`, `a_gzip_bomb_is_refused_at_the_limit_rather_than_inflated`,
-      `a_zip_member_that_lies_about_its_size_is_refused`
+      `a_zip_member_that_lies_about_its_size_is_refused`, `a_second_gzip_member_is_part_of_the_artifact_and_never_skipped`,
+      `bytes_after_the_last_gzip_member_are_a_named_difference_and_not_a_match`, `one_artifact_shares_one_member_count_across_every_gz_it_holds`,
+      `a_lone_zero_block_ahead_of_more_entries_is_refused_rather_than_read_as_the_end`, `bytes_after_the_tar_end_of_archive_marker_are_a_named_difference_and_not_a_match`
 - id: P2
   kind: correctness
   components:
@@ -2476,10 +2480,14 @@ properties_claimed:
   violation_symptoms:
   - two runs disagree on a digest
   statement: 'The stabilized form is a byte-stable function of the input: parse(write(a)) == a, identical
-    across runs and threads of a single process'
+    across runs and threads of a single process. A value the writer has no spelling for that reads back
+    as itself is refused rather than written as another: a tar device number past seven octal digits,
+    which lost its high digits until 2026-09-29, gzip trailing bytes that begin with the magic, and tar
+    trailing b'
   provenance:
     kind: documented
-    source: docs/13-roadmap.md M0
+    source: docs/13-roadmap.md M0; tests `a_device_number_too_wide_for_its_field_is_refused_rather_than_truncated`,
+      `trailing_bytes_that_would_read_back_as_a_member_are_refused_by_the_writer`, `trailing_bytes_that_are_all_zero_are_refused_by_the_writer`
 - id: P3
   kind: correctness
   components:
@@ -2573,8 +2581,8 @@ properties_claimed:
   conditions: signing path
   violation_symptoms:
   - two implementations disagreeing on what was signed
-  statement: 'Canonical JSON refuses what another implementation might not reproduce: floats and non-ASCII
-    object keys are type errors, not coerced values'
+  statement: 'Canonical JSON refuses what another implementation might not reproduce: floats, integers
+    beyond ±(2^53 − 1) and non-ASCII object keys are type errors, not coerced values'
   provenance:
     kind: documented
     source: crates/trigon-core/src/jcs.rs

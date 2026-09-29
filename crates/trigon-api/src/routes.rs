@@ -1040,7 +1040,7 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/fleet",
         "get",
-        "Queue depth, who holds a lease, and the corpus's two denominators",
+        "Queue depth, how many hold a lease and how soon each lapses (worker names to an operator only), and the corpus's two denominators",
     ),
     (
         "/v1/artifacts/{digest}",

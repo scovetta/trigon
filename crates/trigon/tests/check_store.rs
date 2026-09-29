@@ -433,23 +433,60 @@ fn sarif_has_a_result_for_everything_but_a_reproduction() {
 }
 
 /// A `--store` that names nothing is refused, and not created: an empty store made on the spot
-/// would report every package as never checked, of a store that never existed, and exit 0.
+/// would report every package as never checked, of a store that never existed, and exit 0. The
+/// refusal is the command line's mistake, never a bug in trigon to be reported.
 #[test]
 fn a_store_that_is_not_there_is_refused_rather_than_read_as_empty() {
     let d = dir("typo");
     let lock = lockfile(&d, FIVE);
     let typo = d.join("trigon-stroe");
     let out = check(&lock, &typo, &[]);
-    assert!(
-        !out.status.success(),
+    // Exit 5, the tool failing (`docs/19` §6), as a bad argument to `check` exits: never 0, and
+    // not a code the rest of `check` gives to something it found.
+    assert_eq!(
+        out.status.code(),
+        Some(5),
         "a store that does not exist was read: {}",
         String::from_utf8_lossy(&out.stdout)
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("is not a directory"), "{err}");
+    assert!(err.contains("the command line's: no such store"), "{err}");
+    assert!(!err.contains("bug in trigon"), "{err}");
     assert!(!typo.exists(), "checking against a store created one");
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("never checked"),
         "a verdict table was printed about a store that does not exist"
     );
+}
+
+/// A lockfile that cannot be read is the tool failing, exit 5, with `--store` as without it: one
+/// that is not there, one that does not parse, and a file name no parser claims. Nothing is
+/// printed as though a lockfile had been checked.
+#[test]
+fn a_lockfile_that_cannot_be_read_exits_5_with_a_store_too() {
+    let d = dir("unreadable-lock");
+    let store = store_of(&d, &five_runs());
+    let broken = d.join("broken").join("package-lock.json");
+    std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+    std::fs::write(&broken, "{ this is not json").unwrap();
+    let unknown = d.join("dependencies.txt");
+    std::fs::write(&unknown, "same==1.0.0\n").unwrap();
+    for lock in [d.join("absent").join("package-lock.json"), broken, unknown] {
+        let out = check(&lock, &store, &[]);
+        assert_eq!(
+            out.status.code(),
+            Some(5),
+            "{}: {}{}",
+            lock.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stdout.is_empty(), "{}", String::from_utf8_lossy(&out.stdout));
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("Error: "),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }

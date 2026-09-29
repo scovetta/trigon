@@ -1225,8 +1225,8 @@ fn stale_and_unreachable_or_frozen_is_unknown() {
 
 /// The log wins, and the disagreement is shown (`docs/19` §8): a record file removed in a later
 /// commit is deleted, and exit 4; a record with one byte changed fails verification, and exit 4;
-/// and a record whose index entry was removed is still found, since the log is read and never the
-/// index.
+/// the falsifying command of either stops at `failed-verification`; and a record whose index entry
+/// was removed is still found, since the log is read and never the index.
 #[test]
 fn a_deleted_record_a_changed_byte_and_a_missing_index_entry() {
     let w = World::new("damage");
@@ -1281,6 +1281,22 @@ fn a_deleted_record_a_changed_byte_and_a_missing_index_entry() {
     let said = exits(&w.trigon(&["lookup", &format!("sha256:{}", c.sha256())]), 4);
     assert!(said.contains("FAILED VERIFICATION"), "{said}");
     assert!(said.contains("not-its-leaf"), "{said}");
+    // The falsifying command has no current record to check in either, and what stopped it is
+    // the record that failed, which a JSON reader is told: not a source that could not answer.
+    for p in [&b, &c] {
+        let subject = format!("sha256:{}", p.sha256());
+        let doc = json_of(
+            &w.trigon(&[
+                "verify-attestation",
+                "--lookup",
+                &subject,
+                "--output",
+                "json",
+            ]),
+            4,
+        );
+        assert_eq!(doc["stopped"], "failed-verification", "{doc}");
+    }
 
     let lock = lockfile(
         &w,
@@ -1414,8 +1430,9 @@ fn a_superseded_record_is_shown_superseded_and_a_withdrawn_one_withdrawn() {
 /// record in the source that has the log, fetches the evidence it names from the clone's remote,
 /// and re-derives the verdict, the published comparison report held to it. The wrong rebuilt file
 /// is a check not made, exit 5, and a comparison report altered since fails the record, exit 4; an
-/// origin no source has is said, exit 4; and where the source's GitHub repository publishes rebuilt
-/// artifacts, the release asset the verdict names is downloaded and held to its digest.
+/// origin no source has is said, exit 4, `no-source`; and where the source's GitHub repository
+/// publishes rebuilt artifacts, the release asset the verdict names is downloaded and held to its
+/// digest, and other bytes fail the record, `failed-verification`.
 #[test]
 fn the_falsifying_command_re_derives_a_published_verdict() {
     let w = World::new("falsify");
@@ -1508,11 +1525,14 @@ fn the_falsifying_command_re_derives_a_published_verdict() {
     let mut elsewhere = command(Some(&rebuilt));
     let at = elsewhere.iter().position(|x| x == "--origin").unwrap();
     elsewhere[at + 1] = "example.com/somewhere-else".into();
-    let said = exits(&run(elsewhere), 4);
+    let said = exits(&run(elsewhere.clone()), 4);
     assert!(
         said.contains("no evidence source configured here has the log"),
         "{said}"
     );
+    // Which a JSON reader is told is no source of the origin, and not a record that failed.
+    elsewhere.extend(["--output".into(), "json".into()]);
+    assert_eq!(json_of(&run(elsewhere), 4)["stopped"], "no-source");
     // No rebuilt file, and the source on no github.com location to look for its release asset
     // in: the tool cannot check, exit 5, and asks for it.
     let said = exits(&run(command(None)), 5);
@@ -1588,7 +1608,8 @@ fn the_falsifying_command_re_derives_a_published_verdict() {
         "{said}"
     );
     assert!(said.contains("the claim holds"), "{said}");
-    // An asset that is not the bytes its name says is refused.
+    // An asset that is not the bytes its name says is refused: the record's evidence failed
+    // verification, and a JSON reader is told so.
     server.state().assets[0].bytes = Package::new("a", true).rebuilt;
     let mut c = w.command(&[]);
     c.args(command(None)).env("TRIGON_GITHUB_API", server.url());
@@ -1596,6 +1617,14 @@ fn the_falsifying_command_re_derives_a_published_verdict() {
     assert!(
         said.contains("is not the rebuilt artifact the verdict signs"),
         "{said}"
+    );
+    let mut c = w.command(&[]);
+    c.args(command(None))
+        .args(["--output", "json"])
+        .env("TRIGON_GITHUB_API", server.url());
+    assert_eq!(
+        json_of(&c.output().unwrap(), 4)["stopped"],
+        "failed-verification"
     );
 }
 
@@ -1688,7 +1717,8 @@ fn the_falsifying_command_is_answered_in_its_origins_log_alone() {
 
 /// Every source the falsifying command asks is weighed, as `lookup` weighs it: a mirror of the
 /// log configured as a source of its own, required, and stale and unreachable, fails the command
-/// though another source holds the current record, and is said to.
+/// though another source holds the current record, and is said to; and where nothing current is
+/// logged, it stops, exit 4, `source-unknown`.
 #[test]
 fn the_falsifying_command_weighs_every_source_it_asks() {
     let w = World::new("weighs");
@@ -1727,6 +1757,26 @@ fn the_falsifying_command_weighs_every_source_it_asks() {
     let mut json = args.to_vec();
     json.extend(["--output", "json"]);
     assert_eq!(json_of(&w.trigon(&json), 4)["exit"], 4);
+    // With no record to check, it stops, a failure, and a JSON reader is told a source could not
+    // answer, and not that a record failed verification.
+    let nothing = format!("sha256:{}", "0".repeat(64));
+    let args = [
+        "verify-attestation",
+        "--lookup",
+        &nothing,
+        "--origin",
+        ORIGIN,
+    ];
+    let out = w.trigon(&args);
+    let said = exits(&out, 4);
+    assert!(said.contains("`mirror` cannot answer"), "{said}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Error:"),
+        "{said}"
+    );
+    let mut json = args.to_vec();
+    json.extend(["--output", "json"]);
+    assert_eq!(json_of(&w.trigon(&json), 4)["stopped"], "source-unknown");
 }
 
 /// Across a succession into another repository, the falsifying command of a record logged there
@@ -3698,10 +3748,11 @@ fn lookup_takes_every_form_of_key() {
 
 /// `verify-attestation --record <file> --source <name>` with no `--evidence` reads the source's
 /// clones as its last sync left them, and says what they rest on. A source not configured is the
-/// tool unable to check, 5; one never synced has no clone to read, 4; a stale one still has its
-/// record checked, and what it says of the artifact now is unknown, 4; one whose accepted
-/// checkpoint is gone after it synced is refused, never read against nothing, 4; and one trusted
-/// on first use is read under the keys its first sync recorded, and says so.
+/// tool unable to check, 5; one never synced has no clone to read, 4, `source-unknown`; a stale
+/// one still has its record checked, and what it says of the artifact now is unknown, 4; one whose
+/// accepted checkpoint is gone after it synced is refused, never read against nothing, 4,
+/// `source-refused`; and one trusted on first use is read under the keys its first sync recorded,
+/// and says so. None of these stops is called a record that failed verification.
 #[test]
 fn the_record_form_reads_a_sources_clones_as_they_stand() {
     let w = World::new("record-standing");
@@ -3713,6 +3764,19 @@ fn the_record_form_reads_a_sources_clones_as_they_stand() {
     let record = |source: &str| {
         w.trigon(&["verify-attestation", "--record", file, "--source", source])
     };
+    // What a JSON reader is told stopped it, where it stops before a record is read.
+    let stopped = |source: &str| {
+        let out = w.trigon(&[
+            "verify-attestation",
+            "--record",
+            file,
+            "--source",
+            source,
+            "--output",
+            "json",
+        ]);
+        json_of(&out, 4)["stopped"].clone()
+    };
     ok(&w.add("main", &[w.remote.to_str().unwrap()], &[]));
     let said = exits(&record("nowhere"), 5);
     assert!(said.contains("the sources configured are main"), "{said}");
@@ -3721,6 +3785,8 @@ fn the_record_form_reads_a_sources_clones_as_they_stand() {
         said.contains("cannot be read; run `trigon evidence sync --source <name>`"),
         "{said}"
     );
+    // A source that cannot answer, and not a record that failed verification.
+    assert_eq!(stopped("main"), "source-unknown");
 
     ok(&w.sync(&[]));
     let said = exits(&record("main"), 0);
@@ -3750,6 +3816,7 @@ fn the_record_form_reads_a_sources_clones_as_they_stand() {
     assert!(said.contains("do not verify"), "{said}");
     assert!(said.contains("--accept-state-loss main"), "{said}");
     assert!(!said.contains("answer    normalized"), "{said}");
+    assert_eq!(stopped("main"), "source-refused");
 
     // Trusted on first use: nothing to read it under until a sync recorded the keys it read.
     ok(&w.trigon(&[
@@ -3764,6 +3831,7 @@ fn the_record_form_reads_a_sources_clones_as_they_stand() {
         said.contains("no sync has recorded the keys it read"),
         "{said}"
     );
+    assert_eq!(stopped("tofu"), "source-unknown");
     ok(&w.sync(&["--source", "tofu"]));
     let said = exits(&record("tofu"), 0);
     assert!(
@@ -4000,10 +4068,10 @@ fn remote_answers_unknown_for_a_frozen_log() {
 /// The falsifying command resolves a subject by its sha256, as a record's command names it, and
 /// nothing else, 5. Where the subject has no current verdict or void to check, it says what the
 /// source says instead, with that answer's code: never checked, 2; a record of another predicate
-/// than the one asked for, the source's own answer; a withdrawal, 2. A JSON reader is never told
-/// that anything failed verification, which is exit 4's; what such a stop is called is not
-/// documented, so it is not held here. And without `--origin`, current records in two sources are
-/// refused as ambiguous, 5.
+/// than the one asked for, the source's own answer; a withdrawal, 2. A JSON reader is told it
+/// stopped at `no-current-record`, never that anything failed verification, which is exit 4's; and
+/// the answer is said without `Error:`, since nothing failed. And without `--origin`, current
+/// records in two sources are refused as ambiguous, 5.
 #[test]
 fn the_falsifying_command_says_what_the_source_says_where_there_is_nothing_to_re_derive() {
     let w = World::new("nothing-to-rederive");
@@ -4034,40 +4102,51 @@ fn the_falsifying_command_says_what_the_source_says_where_there_is_nothing_to_re
         );
     }
 
+    // Nothing failed: the answer is said, and never as an error.
+    let answered = |out: &Output, code: i32, answer: &str| {
+        let said = exits(out, code);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(answer), "{said}");
+        assert!(!err.contains("Error:"), "{said}");
+        said
+    };
     // A record of another predicate than the one asked for: what the source says of the
     // artifact, and its code.
-    let said = exits(
-        &lookup(&[
-            &subject,
-            "--predicate",
-            "https://trigon.dev/divergence/v2",
-            "--origin",
-            ORIGIN,
-        ]),
-        0,
-    );
+    let other_predicate = [
+        subject.as_str(),
+        "--predicate",
+        "https://trigon.dev/divergence/v2",
+        "--origin",
+        ORIGIN,
+    ];
+    let said = answered(&lookup(&other_predicate), 0, "`main` says normalized");
     assert!(
         said.contains("no current record of that predicate is logged for it"),
         "{said}"
     );
-    assert!(said.contains("`main` says normalized"), "{said}");
     // Nothing logged for it: never checked.
     let nothing = format!("sha256:{}", "0".repeat(64));
-    let said = exits(&lookup(&[&nothing]), 2);
+    let said = answered(&lookup(&[&nothing]), 2, "`main` says never checked");
     assert!(
         said.contains("no current verdict or void is logged for it"),
         "{said}"
     );
-    // Nothing failed: the stop is not called what exit 4's are.
-    let not_failed = |doc: &serde_json::Value| {
-        assert_eq!(doc["exit"], 2, "{doc}");
+    // Nothing failed: the stop is called what it is, and not what exit 4's are.
+    let not_failed = |doc: &serde_json::Value, code: i32| {
+        assert_eq!(doc["exit"], code, "{doc}");
         let stopped = doc["stopped"].as_str().unwrap_or_else(|| panic!("{doc}"));
         for failed in ["failed-verification", "log-failed-verification"] {
             assert_ne!(stopped, failed, "{doc}");
         }
+        assert_eq!(stopped, "no-current-record", "{doc}");
     };
+    let mut json = other_predicate.to_vec();
+    json.extend(["--output", "json"]);
+    let out = lookup(&json);
+    not_failed(&json_of(&out, 0), 0);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("Error:"));
     let doc = json_of(&lookup(&[&nothing, "--output", "json"]), 2);
-    not_failed(&doc);
+    not_failed(&doc, 2);
     assert!(
         doc["error"]
             .as_str()
@@ -4114,18 +4193,21 @@ fn the_falsifying_command_says_what_the_source_says_where_there_is_nothing_to_re
     );
     ok(&w.publish(&["--withdrawal", envelope.to_str().unwrap()]));
     ok(&w.sync(&["--source", "main"]));
-    let said = exits(&lookup(&[&subject, "--origin", ORIGIN]), 2);
+    let said = answered(
+        &lookup(&[&subject, "--origin", ORIGIN]),
+        2,
+        "`main` says withdrawn",
+    );
     assert!(
         said.contains("its only current record is a withdrawal, so there is no verdict to \
                        re-derive"),
         "{said}"
     );
-    assert!(said.contains("`main` says withdrawn"), "{said}");
     let doc = json_of(
         &lookup(&[&subject, "--origin", ORIGIN, "--output", "json"]),
         2,
     );
-    not_failed(&doc);
+    not_failed(&doc, 2);
     assert!(
         doc["error"]
             .as_str()
@@ -4484,7 +4566,8 @@ fn the_record_form_answers_unknown_for_a_frozen_or_refused_source() {
 /// A source of the command's origin whose last sync was refused is still one the command is
 /// answered in, found by the log key its last good sync recorded, and weighed as `lookup` weighs
 /// it: the record current in the other source is checked, and the command fails, exit 4, saying
-/// which source could not answer.
+/// which source could not answer; and where nothing current is logged, it stops, exit 4,
+/// `source-refused`.
 #[test]
 fn the_falsifying_command_weighs_a_refused_source_of_its_origin() {
     let w = World::new("weighs-refused");
@@ -4527,6 +4610,29 @@ fn the_falsifying_command_weighs_a_refused_source_of_its_origin() {
     );
     assert!(said.contains("`mirror` cannot answer"), "{said}");
     assert!(said.contains("exit 4, not this record's 0"), "{said}");
+    // With no record to check, it stops, and a JSON reader is told a source was refused, and not
+    // that a record failed verification.
+    let nothing = format!("sha256:{}", "0".repeat(64));
+    let doc = json_of(
+        &w.trigon(&[
+            "verify-attestation",
+            "--lookup",
+            &nothing,
+            "--origin",
+            ORIGIN,
+            "--output",
+            "json",
+        ]),
+        4,
+    );
+    assert_eq!(doc["stopped"], "source-refused", "{doc}");
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("`mirror` cannot answer"),
+        "{doc}"
+    );
 }
 
 /// `check` in text lists the packages that did not pass most severe first, in `docs/19` §6's order

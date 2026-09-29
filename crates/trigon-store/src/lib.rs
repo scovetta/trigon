@@ -51,7 +51,7 @@ pub use record::{
     Tokens, UpstreamDigests,
 };
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::TryStreamExt as _;
@@ -71,6 +71,16 @@ pub enum StoreError {
     /// A record the store cannot address and list back under the same name.
     #[error("{0}")]
     Malformed(String),
+
+    /// A path a reader was given to open a store at, where there is no directory: a mistyped
+    /// `--store`, and nothing about any record. Its own variant rather than `Malformed`, so the
+    /// command line can be named as the party at fault instead of trigon.
+    #[error(
+        "{} is not a directory, so there is no store here to read. A relative path is resolved \
+         against the working directory of the process that was given it.",
+        .0.display()
+    )]
+    NotAStore(PathBuf),
 
     #[error("no stabilizer set `{0}` in this store")]
     NoSuchSet(String),
@@ -140,6 +150,11 @@ impl Classify for StoreError {
             // true.
             StoreError::InconsistentSet { .. } => Fault::Bug,
             StoreError::NoSuchRun(_) | StoreError::NoSuchSet(_) | StoreError::Json(_) => Fault::Bug,
+            // The class a run that is not there has, so it is never retried. `trigon`'s fault
+            // report names the command line for it rather than trigon, since a store's path comes
+            // from there; and for a run that is not there too, where a run's id mostly comes from,
+            // though not for the run `rebuild --attest` has just recorded, which is trigon's own.
+            StoreError::NotAStore(_) => Fault::Bug,
             // Bytes a record says are kept and are not: the store lost data, which somebody should
             // look at, as a blob that does not match its address is.
             StoreError::Missing { .. } => Fault::Bug,
@@ -172,6 +187,8 @@ impl Classify for StoreError {
             // A record that is absent now may be present later, but nothing this process does will
             // make it so — the caller named a run that was never written.
             StoreError::NoSuchRun(_) | StoreError::NoSuchSet(_) => false,
+            // Nor will a directory that is not there appear by opening it again.
+            StoreError::NotAStore(_) => false,
             // A refusal we issued on purpose answers the same way every time.
             StoreError::NotAttested(_) => false,
             // The names that are taken stay taken.
@@ -300,11 +317,7 @@ impl Store {
     /// page reported "no record for this target, by design" about a store that had never existed.
     pub fn existing(root: &Path) -> Result<Self, StoreError> {
         if !root.is_dir() {
-            return Err(StoreError::Malformed(format!(
-                "{} is not a directory, so there is no store here to read. A relative path is \
-                 resolved against the working directory of the process that was given it.",
-                root.display()
-            )));
+            return Err(StoreError::NotAStore(root.to_path_buf()));
         }
         Self::local(root)
     }

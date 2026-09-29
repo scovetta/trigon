@@ -89,10 +89,12 @@ fn parse_inner(
     match format {
         Format::Tar => {
             // The artifact's shared expansion budget, spent by every nested member it holds. An
-            // uncompressed container costs nothing to open, so it starts at zero.
+            // uncompressed container costs nothing to open, so it starts at zero. The gzip
+            // members it may read are shared the same way.
             let mut spent = 0u64;
+            let mut members = limits.max_entries;
             let mut a = tar::read(Arc::new(SourceMap::owned(bytes)), limits, notes)?;
-            descend(&mut a, limits, notes, 1, &mut spent);
+            descend(&mut a, limits, notes, 1, &mut spent, &mut members);
             Ok(Parsed {
                 archive: a,
                 container: None,
@@ -102,15 +104,17 @@ fn parse_inner(
             // `zip::read` charges its own members against the ceiling internally; this is the
             // budget for whatever `.gz` members it turns out to hold.
             let mut spent = 0u64;
+            let mut members = limits.max_entries;
             let mut a = zip::read(Arc::new(SourceMap::owned(bytes)), limits, notes)?;
-            descend(&mut a, limits, notes, 1, &mut spent);
+            descend(&mut a, limits, notes, 1, &mut spent, &mut members);
             Ok(Parsed {
                 archive: a,
                 container: None,
             })
         }
         Format::TarGz => {
-            let (header, inner) = gzip::read(&bytes, limits.total_expanded_bytes)?;
+            let mut members = limits.max_entries;
+            let (header, inner) = gzip::read(&bytes, limits.total_expanded_bytes, &mut members)?;
             // One buffer, two owners. `tar::read` keeps entry bodies as offsets into this map
             // rather than copying them, so sharing the `Arc` is the whole cost of keeping the
             // container around — where cloning the `Vec` doubled the artifact.
@@ -121,14 +125,15 @@ fn parse_inner(
             let mut a = tar::read(src.clone(), limits, notes)?;
             a.format = Format::TarGz;
             a.trailer = Trailer::Gzip(header);
-            descend(&mut a, limits, notes, 1, &mut spent);
+            descend(&mut a, limits, notes, 1, &mut spent, &mut members);
             Ok(Parsed {
                 archive: a,
                 container: Some(src),
             })
         }
         Format::Gzip => {
-            let (header, inner) = gzip::read(&bytes, limits.total_expanded_bytes)?;
+            let mut members = limits.max_entries;
+            let (header, inner) = gzip::read(&bytes, limits.total_expanded_bytes, &mut members)?;
             let src = Arc::new(SourceMap::owned(inner));
             let a = single_member(header, src.clone());
             Ok(Parsed {
@@ -203,7 +208,17 @@ fn raw(bytes: Vec<u8>) -> Archive {
 ///
 /// `zip::read` already does this, with `let remaining = total_expanded_bytes.saturating_sub(
 /// expanded)`. This is the same idea in the crate's other reader.
-fn descend(a: &mut Archive, limits: &Limits, notes: &mut Vec<Note>, depth: u8, spent: &mut u64) {
+///
+/// `members` is the same idea for gzip members, which cost time that bytes do not measure (see
+/// [`gzip::read`]): how many more the artifact may read, counted down by every nested `.gz`.
+fn descend(
+    a: &mut Archive,
+    limits: &Limits,
+    notes: &mut Vec<Note>,
+    depth: u8,
+    spent: &mut u64,
+    members: &mut u32,
+) {
     if depth >= limits.recursion {
         if a.entries.iter().any(looks_nested) {
             notes.push(Note::new(
@@ -220,7 +235,7 @@ fn descend(a: &mut Archive, limits: &Limits, notes: &mut Vec<Note>, depth: u8, s
         let path = e.path.clone();
         let Ok(body) = e.body_bytes() else { continue };
         let body = body.into_owned();
-        match parse_nested(&body, limits, notes, depth, spent) {
+        match parse_nested(&body, limits, notes, depth, spent, members) {
             Ok(nested) => {
                 let original = std::mem::replace(&mut e.body, Body::empty());
                 e.body = Body::Nested {
@@ -247,13 +262,14 @@ fn parse_nested(
     notes: &mut Vec<Note>,
     depth: u8,
     spent: &mut u64,
+    members: &mut u32,
 ) -> Result<Archive> {
     // What is left of the artifact's budget, not the whole of it. Exceeding this returns an error,
     // which `descend` turns into a note and an inline body — the member stays in the archive, is
     // digested as the bytes we could not open, and the note says why. That is the right failure
     // for a large-but-legal artifact: the outer comparison still works.
     let remaining = limits.total_expanded_bytes.saturating_sub(*spent);
-    let (header, inner) = gzip::read(body, remaining)?;
+    let (header, inner) = gzip::read(body, remaining, members)?;
     *spent = spent.saturating_add(inner.len() as u64);
 
     // Members deeper in are charged against what this one already spent.
@@ -265,7 +281,7 @@ fn parse_nested(
         let mut a = tar::read(Arc::new(SourceMap::owned(inner)), &inner_limits, notes)?;
         a.format = Format::TarGz;
         a.trailer = Trailer::Gzip(header);
-        descend(&mut a, &inner_limits, notes, depth + 1, spent);
+        descend(&mut a, &inner_limits, notes, depth + 1, spent, members);
         Ok(a)
     } else {
         Ok(single_member(header, Arc::new(SourceMap::owned(inner))))
@@ -357,6 +373,7 @@ fn gzip_header(a: &Archive, store_only: bool) -> GzipHeader {
 /// Re-serialize nested archives so the parent can write them as ordinary member bodies.
 fn flatten(a: &Archive, store_only: bool) -> Result<Archive> {
     let mut out = Archive::new(a.format, a.trailer.clone());
+    out.tar_trailing = a.tar_trailing.clone();
     for e in &a.entries {
         let body = match &e.body {
             // An untouched inner archive writes back the bytes it arrived as. Re-serializing it

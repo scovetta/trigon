@@ -329,6 +329,50 @@ fn fields_an_installing_client_injects_are_dropped() {
 }
 
 #[test]
+fn fields_injected_last_leave_the_object_well_formed() {
+    // A client may append its fields after the author's rather than lead with them. Dropping
+    // their lines alone left the comma that separated the author's last property from them in
+    // front of the `}`: not JSON, and never equal to the package as its author wrote it.
+    let installed = "{\n  \"name\": \"x\",\n  \"version\": \"1.0.0\",\n  \
+                     \"_resolved\": \"https://registry.npmjs.org/x/-/x-1.0.0.tgz\",\n  \
+                     \"_integrity\": \"sha512-A\"\n}\n";
+    let authored = "{\n  \"name\": \"x\",\n  \"version\": \"1.0.0\"\n}\n";
+    let set = profile("npm-tarball").unwrap();
+    let (a, applied) = stabilized(&set, npm(installed));
+    let (b, _) = stabilized(&set, npm(authored));
+    assert_eq!(
+        body_of(a.clone(), Format::TarGz, "package/package.json"),
+        authored
+    );
+    assert_eq!(a, b);
+    // The comma is a byte the pass removed too, counted beside the lines it dropped.
+    let x = applied
+        .iter()
+        .find(|x| x.id.as_str() == "npm-install-fields")
+        .unwrap();
+    let dropped: u64 = installed
+        .lines()
+        .filter(|l| l.trim_start().starts_with("\"_"))
+        .map(|l| l.len() as u64)
+        .sum();
+    assert_eq!(x.bytes_changed, dropped + 1);
+
+    // A comma inside a nested object the injected fields did not close is the author's, and
+    // stays; so does an object that held nothing but injected fields.
+    let nested = "{\n  \"a\": {\n    \"b\": 1,\n    \"c\": 2\n  },\n  \"_id\": \"x@1.0.0\"\n}\n";
+    let (out, _) = stabilized(&set, npm(nested));
+    assert_eq!(
+        body_of(out, Format::TarGz, "package/package.json"),
+        "{\n  \"a\": {\n    \"b\": 1,\n    \"c\": 2\n  }\n}\n"
+    );
+    let (out, _) = stabilized(&set, npm("{\n  \"_id\": \"x@1.0.0\"\n}\n"));
+    assert_eq!(
+        body_of(out, Format::TarGz, "package/package.json"),
+        "{\n}\n"
+    );
+}
+
+#[test]
 fn a_package_json_with_nothing_injected_is_not_claimed() {
     let authored =
         "{\n  \"name\": \"x\",\n  \"description\": \"mentions \\\"_id\\\" in prose\"\n}\n";
@@ -404,13 +448,13 @@ fn a_sha1_that_is_not_forty_hex_digits_is_left_as_it_is() {
     }
 }
 
-// --- wheel-record --------------------------------------------------------------------------------
+// --- wheel-record-v2 -----------------------------------------------------------------------------
 
 #[test]
 fn a_record_inside_a_tarball_the_wheel_ships_is_left_as_the_tarball_has_it() {
-    // `wheel-record` rewrites the wheel's own manifest. A `.dist-info/RECORD` inside an archive the
-    // wheel ships, a vendored distribution or a test fixture, is a file the package delivers, and
-    // `apply` visits that archive too.
+    // `wheel-record-v2` rewrites the wheel's own manifest. A `.dist-info/RECORD` inside an archive
+    // the wheel ships, a vendored distribution or a test fixture, is a file the package delivers,
+    // and `apply` visits that archive too.
     let stale = "dep/x.py,sha256=stale,1\ndep-1.0.dist-info/RECORD,,\n";
     let vendored = gzip(&tar(&[
         ("dep/x.py", b"x = 1\n"),
@@ -426,7 +470,7 @@ fn a_record_inside_a_tarball_the_wheel_ships_is_left_as_the_tarball_has_it() {
     );
     let mut a = parsed(wheel, Format::Zip);
     let applied = apply(&profile("wheel").unwrap(), &mut a);
-    assert!(fired(&applied, "wheel-record"), "the wheel's own RECORD: {applied:?}");
+    assert!(fired(&applied, "wheel-record-v2"), "the wheel's own RECORD: {applied:?}");
     let shipped = a
         .entries
         .iter()

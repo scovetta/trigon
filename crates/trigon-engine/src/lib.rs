@@ -20,7 +20,8 @@
 //!
 //! **A worker never records under an expired lease.** [`trigon_store::Queue::finish`] enforces it
 //! in SQL; the loop here notices the refusal and treats it as a lost race rather than an error,
-//! because losing a race is not a fault.
+//! because losing a race is not a fault. The same goes for a failure: a worker whose job was taken
+//! while it ran neither gives the job back nor says it ended.
 //!
 //! **A run under a non-`Builtin` transform may not come back `normalized`.** The provenance cap
 //! lives in `trigon-compare` and nowhere else, and this does not re-implement it: it asserts that it
@@ -148,8 +149,9 @@ pub struct Progress {
 impl Progress {
     /// Say what is happening, and renew the lease.
     ///
-    /// `false` means the lease is gone and somebody else is doing this work. A worker that keeps
-    /// building after that is spending compute on an answer nothing will accept.
+    /// `false` means the lease is gone and somebody else is doing this work, and the phase was not
+    /// recorded: the job's stream is the holder's. A worker that keeps building after that is
+    /// spending compute on an answer nothing will accept.
     pub async fn phase(&self, name: &str) -> bool {
         self.queue
             .heartbeat(self.job, &self.worker, self.lease, Some(name))
@@ -352,17 +354,7 @@ impl Engine {
         let run = work.run(job, progress);
         tokio::pin!(run);
 
-        // A third of the lease, so two consecutive missed renewals still leave margin.
-        //
-        // **The floor must stay well under the lease.** This was first written with a one-second
-        // floor, on the reasoning that an absurdly short lease should not become a busy loop —
-        // which against a 300 ms lease renews for the first time at one second, 700 ms after the
-        // job has already been taken by somebody else. A floor that can exceed the thing it is
-        // renewing disables the renewal entirely, and silently, since everything still compiles
-        // and the common configuration still works. Ten milliseconds only exists because
-        // `interval` panics on a zero duration.
-        let every = (self.cfg.lease / 3).max(Duration::from_millis(10));
-        let mut tick = tokio::time::interval(every);
+        let mut tick = tokio::time::interval(renew_every(self.cfg.lease));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await; // fires immediately; the lease was just taken
 
@@ -430,7 +422,10 @@ impl Engine {
                     );
                     return Ok(());
                 }
-                progress.phase("recorded").await;
+                // An event, not a phase: `finish` has taken the job out of `leased`, so there is
+                // no lease left to renew, and a heartbeat records nothing for a worker that does
+                // not hold one.
+                let _ = self.queue.event(job.id, "recorded", None).await;
 
                 if self.cfg.confirm {
                     self.confirm(work, &job, &done.record).await?;
@@ -444,9 +439,23 @@ impl Engine {
                 // arithmetic that decides how much a broken thing is allowed to cost.
                 let again = failed.retryable && job.failures + 1 < self.cfg.max_failures;
                 let retry = again.then(|| self.wait_before_retry(job.failures));
-                self.queue
+                let released = self
+                    .queue
                     .fail(job.id, &self.cfg.worker, &failed.why, retry)
                     .await?;
+                if !released {
+                    // The lease expired while this ran and somebody else holds the job, so there
+                    // was nothing to give back — and nothing to say, as with `finish` above:
+                    // "dead" or "retrying" in the stream of a job another worker is still on
+                    // would tell a reader it had ended when it had not.
+                    tracing::warn!(
+                        job = job.id,
+                        worker = %self.cfg.worker,
+                        why = %failed.why,
+                        "lease expired before this failed; another worker now holds this job"
+                    );
+                    return Ok(());
+                }
                 progress
                     .note(
                         if retry.is_some() { "retrying" } else { "dead" },
@@ -588,6 +597,24 @@ fn backoff_after(cfg: &Config, failures: i32) -> Duration {
     doubled.min(cfg.backoff_cap)
 }
 
+/// How often the loop renews a lease while a job is in flight.
+///
+/// A third of the lease, so two consecutive missed renewals still leave margin.
+///
+/// **The floor must stay well under the lease.** This was first written with a one-second floor,
+/// on the reasoning that an absurdly short lease should not become a busy loop — which against a
+/// 300 ms lease renews for the first time at one second, 700 ms after the job has already been
+/// taken by somebody else. A floor that can exceed the thing it is renewing disables the renewal
+/// entirely, and silently, since everything still compiles and the common configuration still
+/// works. Ten milliseconds only exists because `interval` panics on a zero duration.
+///
+/// A free function, like [`backoff_after`], because the seam test that a long job keeps its lease
+/// waits for each renewal however long it takes to come round, so only this can say how long that
+/// is.
+fn renew_every(lease: Duration) -> Duration {
+    (lease / 3).max(Duration::from_millis(10))
+}
+
 /// A job's payload with `confirm` naming the run it is the confirmation of.
 ///
 /// Merged into what the first attempt was asked with, so an artifact choice or an overlay carries
@@ -637,6 +664,28 @@ mod tests {
         // already failing.
         assert_eq!(backoff_after(&cfg, 60), Duration::from_secs(60));
         assert_eq!(backoff_after(&cfg, -1), Duration::from_secs(10));
+    }
+
+    /// The shipped lease, the one the seam tests use, and the shortest the floor lets through:
+    /// each renewed at least three times a lease. Below thirty milliseconds the floor binds, and
+    /// nothing leases for that little but a test that wants its lease to lapse.
+    #[test]
+    fn a_lease_is_renewed_well_inside_itself() {
+        for lease in [
+            Duration::from_secs(300),
+            Duration::from_millis(300),
+            Duration::from_millis(30),
+        ] {
+            let every = renew_every(lease);
+            assert!(
+                every <= lease / 3,
+                "a {lease:?} lease renewed every {every:?}: a job longer than one lease goes back \
+                 on the queue while it is still being built"
+            );
+        }
+        // Never zero, which `interval` panics on.
+        assert!(renew_every(Duration::ZERO) > Duration::ZERO);
+        assert!(renew_every(Duration::from_millis(1)) > Duration::ZERO);
     }
 
     #[test]

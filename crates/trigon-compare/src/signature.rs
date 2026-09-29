@@ -24,6 +24,8 @@
 //!
 //! ```text
 //! container:gzip.os                       the outer gzip header's OS byte
+//! container:gzip.trailing                 bytes after the last gzip member
+//! container:tar.trailing                  bytes after the tar end-of-archive marker
 //! entry-order                             same members, different order
 //! member-only-in-reference@pkg/x.txt      membership
 //! entry:tar.uid@pkg/x.txt                 a header field
@@ -56,6 +58,11 @@ fn collect(reference: &Archive, ours: &Archive, prefix: &str, out: &mut BTreeSet
         out.insert(format!("container:format{}", at(prefix)));
     }
     trailer(&reference.trailer, &ours.trailer, prefix, out);
+    // Beside the trailer rather than in it, because a `.tar.gz`'s trailer is its gzip header. No
+    // pass clears these either.
+    if reference.tar_trailing != ours.tar_trailing {
+        out.insert(format!("container:tar.trailing{}", at(prefix)));
+    }
 
     // Members are keyed by (path, *occurrence of that path*), so a duplicate path in one archive
     // lines up with the same occurrence in the other.
@@ -245,6 +252,11 @@ fn trailer(r: &Trailer, o: &Trailer, prefix: &str, out: &mut BTreeSet<String>) {
             }
             if a.xfl != b.xfl {
                 f("xfl");
+            }
+            // Bytes after the last member. No pass clears them, so a difference here is never one
+            // a stabilizer owns.
+            if a.trailing != b.trailing {
+                f("trailing");
             }
         }
         (Trailer::Zip { comment: a }, Trailer::Zip { comment: b }) if a != b => {

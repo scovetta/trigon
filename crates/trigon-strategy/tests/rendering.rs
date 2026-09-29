@@ -178,3 +178,104 @@ fn dotnet_pack_renders_the_reconstructed_version_stamps() {
         assert!(i.build.contains(needle), "missing {needle} in:\n{}", i.build);
     }
 }
+
+/// The stamps are the published assembly's own, so they reach `dotnet` as the arguments that set
+/// the properties to what the assembly spells, whatever they hold: a word with a space in it, a
+/// quote of either kind, a backslash, a `$` or a backtick a shell would otherwise expand, the
+/// braces a template would otherwise evaluate, and the `,` `;` `%` `@` and `"` that MSBuild reads
+/// in a `-p:` value, each spelled `%XX`, which MSBuild decodes back. Run through `sh` as the build
+/// runs them, and the arguments compared byte for byte.
+#[test]
+fn dotnet_pack_passes_the_version_stamps_to_dotnet_as_they_are() {
+    let src = "schema: 1\nkind: flow\nlocation:\n  repo: https://example.invalid/x\n  ref: aa\n\
+               \x20 subdir: src/Castle.Core\n\
+               build:\n  - uses: nuget/build/pack\n    with:\n      version: 5.1.1\n\
+               output_dir: trigon-pack\noutput_path: trigon-pack/*.nupkg\n";
+    let copyright = concat!(
+        r#"Copyright "Castle" C:\x it's $HOME `true` $(true) *"#,
+        r#" {{ env.arch }} {% if x %} {# c #}, 100%; @(Items)"#,
+    );
+    let informational = "5.1.1 (commit 2dc1b1b)";
+    let info = trigon_strategy::AssemblyVersionInfo {
+        version: Some(informational.into()),
+        assembly_version: Some("5.0.0.0".into()),
+        file_version: Some("5.1.1".into()),
+        informational_version: Some(informational.into()),
+        copyright: Some(copyright.into()),
+    };
+    let s = trigon_strategy::with_assembly_version(
+        &trigon_strategy::from_yaml(src).expect("parses"),
+        &info,
+    )
+    .expect("the stamps are set");
+    let tools = trigon_strategy::ToolRegistry::builtin().expect("registry");
+    let cx = trigon_strategy::Context {
+        location: trigon_strategy::LocationCtx {
+            repo: "https://example.invalid/x".into(),
+            git_ref: "aa".into(),
+            subdir: "src/Castle.Core".into(),
+        },
+        env: trigon_strategy::EnvCtx {
+            arch: "x86_64".into(),
+            platform: "linux".into(),
+            has_repo: true,
+            timewarp_base: "timewarp:8129".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let i = trigon_strategy::render(&s, &cx, &tools).expect("renders");
+
+    // The lines that add a stamp, as the build script has them, and nothing else of it.
+    let stamps = [
+        "Version",
+        "PackageVersion",
+        "AssemblyVersion",
+        "FileVersion",
+        "InformationalVersion",
+        "Copyright",
+    ];
+    let lines: Vec<&str> = i
+        .build
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            l.starts_with("set -- \"$@\" ")
+                && stamps.iter().any(|p| l.contains(&format!("-p:{p}=")))
+        })
+        .collect();
+    assert_eq!(lines.len(), stamps.len(), "{}", i.build);
+    let script = format!("set --\n{}\nprintf '%s\\0' \"$@\"\n", lines.join("\n"));
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .env_clear()
+        .env("HOME", "/nonexistent-home")
+        .current_dir(std::env::temp_dir())
+        .output()
+        .expect("sh runs");
+    assert!(
+        out.status.success(),
+        "{script}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let argv: Vec<String> = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_terminator('\0')
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        argv,
+        [
+            format!("-p:Version={informational}"),
+            format!("-p:PackageVersion={informational}"),
+            "-p:AssemblyVersion=5.0.0.0".to_string(),
+            "-p:FileVersion=5.1.1".to_string(),
+            format!("-p:InformationalVersion={informational}"),
+            "-p:Copyright=Copyright %22Castle%22 C:\\x it's $HOME `true` $(true) * {{ env.arch }} \
+             {%25 if x %25} {# c #}%2C 100%25%3B %40(Items)"
+                .to_string(),
+        ],
+        "{script}"
+    );
+}

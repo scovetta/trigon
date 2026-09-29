@@ -1919,6 +1919,66 @@ async fn an_npm_release_through_the_publish_action_is_read_with_its_lockfile() {
     );
 }
 
+#[tokio::test]
+async fn a_node_version_written_with_a_v_is_that_pin_and_an_lts_alias_is_none() {
+    // `v20.11.1` is what `node -v > .nvmrc` writes, and nvm and `actions/setup-node` both read it
+    // as 20.11.1. Read as it is spelled, it made no claim at all, and was called a wildcard.
+    let in_the_workflow: &'static str = NPM_ACTION_RELEASE
+        .replace("node-version-file: .nvmrc", "node-version: v20.11.1")
+        .leak();
+    let lockfile = ("package-lock.json", "{\"lockfileVersion\": 3}\n");
+    for (name, wf, extra, source) in [
+        (
+            "nvmrc-v",
+            NPM_ACTION_RELEASE,
+            vec![(".nvmrc", "v20.11.1\n"), lockfile],
+            "ci:.nvmrc",
+        ),
+        (
+            "node-version-v",
+            in_the_workflow,
+            vec![lockfile],
+            "ci:actions/setup-node:node-version",
+        ),
+    ] {
+        let (root, url, commit) = repo(name, &[Wf::Inline("publish.yml", wf)], &extra);
+        let t = target(Ecosystem::Npm, name, "1.2.3", &url, &commit);
+        let r = rung(&root).read(&t).await.unwrap();
+        assert!(
+            r.evidence.iter().any(|e| e.source == source
+                && e.claim
+                    == Claim::ToolchainExact {
+                        tool: "node".into(),
+                        version: "20.11.1".into()
+                    }),
+            "{name}: {:?}",
+            r.evidence
+        );
+    }
+
+    // An LTS alias names whatever release its line had reached on the day it was read, which is
+    // no pin: it stays unknown, and makes no claim.
+    let (root, url, commit) = repo(
+        "nvmrc-lts",
+        &[Wf::Inline("publish.yml", NPM_ACTION_RELEASE)],
+        &[(".nvmrc", "lts/iron\n"), lockfile],
+    );
+    let t = target(Ecosystem::Npm, "nvmrc-lts", "1.2.3", &url, &commit);
+    let r = rung(&root).read(&t).await.unwrap();
+    assert_eq!(
+        r.ranked[0].toolchains[0].spec,
+        trigon_registry::ci::VersionSpec::Unknown {
+            raw: "lts/iron".into(),
+            why: trigon_registry::ci::WhyUnknown::Wildcard
+        }
+    );
+    assert!(
+        !r.evidence.iter().any(|e| e.source == "ci:.nvmrc"),
+        "{:?}",
+        r.evidence
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The rung, seen from the ladder
 // ---------------------------------------------------------------------------------------------

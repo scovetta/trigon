@@ -790,11 +790,13 @@ trigon verify-attestation --record <file> --source <name> \
   today — npm `integrity` and `resolved`, `requirements.txt` `--hash=` lines (which today also
   corrupt the parsed version), SPDX `checksums` — and to look up by digest first and by purl second.
   Given `--store <path>`, it keeps its earlier behaviour, checking against a local store of the
-  operator's own runs; without it, it answers from the evidence sources. That changes what a bare
-  `trigon check` means — it defaulted to `./trigon-store` — so the release notes say so, as the
-  command's help and `docs/using-trigon.md` already do; there are no release notes yet, and the
-  first to be written carries it. `--format text|json|sarif` carries over, and the JSON and the
-  SARIF carry every source's answer for every package.
+  operator's own runs and exiting 0 whatever it reports — except that a store or lockfile it cannot
+  read exits 5, the tool failing, as every form of `check` does; without it, it answers from the
+  evidence sources. That changes what a bare `trigon check` means — it defaulted to
+  `./trigon-store` — so the release notes say so, as the command's help and `docs/using-trigon.md`
+  already do; there are no release notes yet, and the first to be written carries it.
+  `--format text|json|sarif` carries over, and the JSON and the SARIF carry every source's answer
+  for every package.
 - **`verify-attestation --lookup`**, which is also the form of a record's falsifying command (§4.2
   item 6), resolves the current record in the clone of the source whose origin `--origin` names, and
   fetches the evidence it names, so `--rerun-comparison` needs only the upstream artifact from the

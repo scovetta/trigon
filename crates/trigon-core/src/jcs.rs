@@ -6,16 +6,24 @@
 //! the strategy digest and the attestation layer, because two of them is two ways to disagree.
 //!
 //! The subset is stated rather than silently partial. Floats are refused: their canonical form is
-//! the genuinely hard part of the spec and nothing we sign contains one. Non-ASCII object keys are
-//! refused because JCS orders keys by UTF-16 code unit, and this implements that ordering only
-//! where it coincides with byte order.
+//! the genuinely hard part of the spec and nothing we sign contains one. So are integers beyond
+//! ±(2^53 − 1), the range a double holds exactly: past it RFC 8785 writes the double nearest the
+//! number, often a different integer, and writing the exact digits instead would disagree with
+//! every conforming implementation. Non-ASCII object keys are refused because JCS orders keys by
+//! UTF-16 code unit, and this implements that ordering only where it coincides with byte order.
 
 use serde_json::Value;
+
+/// The largest integer every JSON reader holds exactly: 2^53 − 1, JavaScript's
+/// `Number.MAX_SAFE_INTEGER`. Its negation is the smallest.
+pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CanonError {
     /// A float, whose canonical form is implementation-dependent.
     Float(String),
+    /// An integer beyond ±[`MAX_SAFE_INTEGER`], where RFC 8785 writes the nearest double.
+    UnsafeInteger(String),
     /// A key this implementation will not claim to order correctly.
     NonAsciiKey(String),
 }
@@ -27,6 +35,11 @@ impl std::fmt::Display for CanonError {
                 f,
                 "cannot canonicalize the floating-point value {n}: its form is \
                  implementation-dependent and this output is signed"
+            ),
+            CanonError::UnsafeInteger(n) => write!(
+                f,
+                "cannot canonicalize the integer {n}: past ±{MAX_SAFE_INTEGER} its form is the \
+                 nearest double's rather than its own, and this output is signed"
             ),
             CanonError::NonAsciiKey(k) => write!(
                 f,
@@ -53,6 +66,12 @@ fn write(v: &Value, out: &mut String) -> Result<(), CanonError> {
         Value::Number(n) => {
             if n.is_f64() {
                 return Err(CanonError::Float(n.to_string()));
+            }
+            // Not a float, so a `u64` or an `i64`. Both signs, because `-(2^53)` is as far out
+            // of reach as `2^53`.
+            let magnitude = n.as_u64().or_else(|| n.as_i64().map(i64::unsigned_abs));
+            if magnitude.is_none_or(|m| m > MAX_SAFE_INTEGER) {
+                return Err(CanonError::UnsafeInteger(n.to_string()));
             }
             out.push_str(&n.to_string());
         }

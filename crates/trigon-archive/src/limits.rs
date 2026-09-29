@@ -20,7 +20,8 @@ pub struct Limits {
     pub max_inline_total: u64,
     /// Hard ceiling on everything one artifact expands to.
     pub total_expanded_bytes: u64,
-    /// Hard ceiling on member count.
+    /// Hard ceiling on member count: the entries one tar or zip holds, and the gzip members one
+    /// artifact reads, across every `.gz` inside it (see [`crate::gzip::read`]).
     pub max_entries: u32,
 }
 
