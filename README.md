@@ -18,99 +18,13 @@ tarball does not — nothing inside a `.tgz` says whose it is — so it takes th
 unless `verify` or `stabilize` is given `--profile npm-tarball`, which is why the left-pad run below
 reports `tar-gzip`.
 
+**New here?** [`docs/introduction.md`](docs/introduction.md) explains what Trigon is, how it
+works and how to use it, in ten minutes. `scripts/evidence-e2e.sh` runs the whole loop on one
+machine: rebuild a package, publish the verdict, and check it as a consumer would.
+
 **Using it?** [`docs/using-trigon.md`](docs/using-trigon.md) is the task-oriented guide: install,
 compare two artifacts, rebuild a package, read a verdict, and — the section worth reading first —
 what a verdict does *not* tell you.
-
-## Status
-
-M0, M1 and M2 are complete, and M3 has begun. The design lives in
-[`docs/`](docs/) and was written before any code; [`docs/16-findings.md`](docs/16-findings.md)
-records where building it proved the design wrong.
-
-| Milestone | | |
-|---|---|---|
-| **M0** the judgement half | done | differential against the reference implementation: 34 match, 24 deviate by a declared entry, **0 unexplained** |
-| **M1** first rebuilds | done | npm and PyPI rebuild end to end, under an enforced egress tier, against a time-filtered index |
-| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`. Publishing them is [`docs/19`](docs/19-distribution-and-lookup.md): an evidence repository with a log of our own, which replaced a Rekor client that was built, measured and removed ([ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md)) — written by `trigon publish`, synced by `trigon evidence`, and asked by `trigon lookup` and `trigon check` |
-| **M3** the search half | begun | the deterministic parts first — failure signatures, log compression, the repair-loop policy, the Builder |
-
-Tier-1 observability landed early, out of milestone order: every run at an enforced egress tier now
-records a **network transcript** of everything that crossed into the build, and `attestable` is
-derived from whether that account is complete rather than being a constant. The mirror had been
-computing all of it — it hashes every body as it streams past, which is how the artifact guard works
-— and throwing it away unless the hash matched.
-
-Measured on the **M1 common-path corpus** — 197 npm and 200 PyPI targets, stratified by build
-system rather than by popularity — at `--egress mirror-only`, the tier this README recommends, where
-the build's only route out is a time-filtered mirror that writes down everything it serves:
-
-| | reproduce | reach a comparison |
-|---|---|---|
-| npm | **100 of 132 (76%)** | 132 of 197 (67%) |
-| PyPI | **136 of 163 (83%)** | 163 of 200 (81%) |
-
-**crates.io and NuGet have no rate here, because they have no corpus yet.** Both rebuild end to end
-at `mirror-only`, but neither has a stratified corpus, and a number quoted over targets picked by
-hand is not a rate. What is known: of twelve crates tried, six reproduce — `hashbrown@0.17.1` and
-`serde@1.0.219` among them, lockfile included — and every remaining divergence is the `Cargo.toml`
-manifest rewrite that [`17-backlog.md`](docs/17-backlog.md) B20 is about.
-
-The npm row folds in a six-target re-run rather than a second full sweep. npm 7.0 through 8.2
-corrupts the tarballs it fetches concurrently — it presented as a broken mirror for months, and was
-not — and it failed exactly the six targets pinning an npm in that window. Those six were re-run
-after the fix; no other target in the corpus pins one, so nothing else could have moved.
-[`16-findings.md`](docs/16-findings.md) §3.26 has the evidence.
-
-**Quote the strata, not the aggregate.** Both totals above conceal a range wide enough to make them
-useless on their own, which is the whole argument of [`15-corpora.md`](docs/15-corpora.md) §3:
-
-| npm | compared | reproduced | | PyPI | compared | reproduced | |
-|---|---:|---:|---|---|---:|---:|---|
-| no lifecycle script | 74 of 90 | 65 | 88% | flit / hatchling | 47 of 50 | 47 | **100%** |
-| `prepare`/`prepack` | 32 of 60 | 24 | 75% | setuptools + pyproject | 49 of 60 | 40 | 81% |
-| TypeScript build | 23 of 30 | 10 | 43% | setuptools + `setup.py` | 30 of 40 | 18 | 60% |
-| monorepo member | 3 of 17 | 1 | **33%** | poetry-core | 26 of 30 | 25 | 96% |
-| | | | | maturin / C extension | 11 of 20 | 6 | **54%** |
-
-npm's aggregate 76% spans 88% down to 33%; PyPI's 83% spans 100% down to 54%. **The reach is still
-the worse number**: only 3 of 17 monorepo members get as far as a comparison at all, so the 33%
-beside them is one of the three we could measure.
-
-**Why this corpus and not an easier one.** Every figure before it came from the 37-target smoke
-corpora, which are almost entirely one stratum — small utility packages with no build step — where
-npm reproduces at 89% and PyPI at 88%. The common-path corpus adds TypeScript builds, monorepo
-members, poetry projects and native extensions, and it exists to make the table above possible.
-
-**Both ecosystems moved since the previous figures, and PyPI's rate fell for a good reason.** npm
-was 84 of 115 (73%) reaching 115 of 197; PyPI was 119 of 136 (88%) reaching 136 of 200. npm improved
-on both axes — the mirror now serves a lockfile-resolved tarball the index never offered, which
-admitted a cluster that could not build at all, most of it TypeScript: that stratum went from 1 of 8
-to 10 of 23. PyPI's *reach* rose from 68% to 81% and its *rate* fell from 88% to 83%, and the second
-is a consequence of the first: twenty-seven more targets now reach a comparison and they are the
-hard ones. A rate over a larger and harder denominator is lower and means more.
-
-**Sixteen of npm's 65 non-compared targets are ours, not the packages'** — ten a missing tool
-(3 × npx, 3 × pnpm, 3 × yarn, 1 × just), five a `workspace:` protocol npm does not speak, and one a
-workspace sibling the recipe did not build first. A further fifteen are `Fault::Policy`: the
-enforced tier doing what it was asked, mostly a host the build may not reach. Nineteen are the
-package's own build, eleven produced no strategy at all, and four are upstream's.
-
-Those first sixteen stay out of the reproduction rate by design — only `Fault::Build` says anything
-about the package ([`02-domain-model.md`](docs/02-domain-model.md) §4) — but they are inside the
-*reach* figure, which should therefore be read as a floor.
-
-The six that were a mirror handing the build a body it could not read are gone from this list: that
-was npm corrupting its own concurrent fetches, and those targets now reach a comparison. The three
-npx failures have been fixed since the sweep and are still counted above, because they have not been
-re-run.
-
-What stops a target reaching a comparison is mostly named rather than mysterious — a base image
-missing a tool, a package whose install fetches from a forge, a monorepo member we build outside its
-workspace. [`16-findings.md`](docs/16-findings.md) §3.25 has the breakdown and what each one costs.
-
-PyPI was 5 of 15 that morning. The lift came from three deterministic fixes and no model at all;
-[`docs/16-findings.md`](docs/16-findings.md) §2 has the arithmetic.
 
 ## What it does
 
@@ -118,8 +32,8 @@ PyPI was 5 of 15 that morning. The lift came from three deterministic fixes and 
 $ trigon verify left-pad-1.3.0.tgz rebuilt/left-pad-1.3.0.tgz
 ✔ normalized
 
-  format         tar+gzip
-  stabilizer set tar-gzip (4598411b636d…)
+  format       tar+gzip
+  stabilizers  tar-gzip (4598411b636d…)
 
                upstream           rebuild
   raw          870c0fe10962…      55b10c02dc3c…      ≠
@@ -224,6 +138,96 @@ three in one process and `trigon attest` is the second command in
 thing holding the key re-derives the verdict from stored bytes rather than being told it by the
 process that just executed a package's build script.
 
+## Status
+
+M0, M1 and M2 are complete, and M3 has begun. The design lives in
+[`docs/`](docs/) and was written before any code; [`docs/16-findings.md`](docs/16-findings.md)
+records where building it proved the design wrong.
+
+| Milestone | | |
+|---|---|---|
+| **M0** the judgement half | done | differential against the reference implementation: 34 match, 24 deviate by a declared entry, **0 unexplained** |
+| **M1** first rebuilds | done | npm and PyPI rebuild end to end, under an enforced egress tier, against a time-filtered index |
+| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`. Publishing them is [`docs/19`](docs/19-distribution-and-lookup.md): an evidence repository with a log of our own, which replaced a Rekor client that was built, measured and removed ([ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md)) — written by `trigon publish`, synced by `trigon evidence`, and asked by `trigon lookup` and `trigon check` |
+| **M3** the search half | begun | the deterministic parts first — failure signatures, log compression, the repair-loop policy, the Builder |
+
+Tier-1 observability landed early, out of milestone order: every run at an enforced egress tier now
+records a **network transcript** of everything that crossed into the build, and `attestable` is
+derived from whether that account is complete rather than being a constant. The mirror had been
+computing all of it — it hashes every body as it streams past, which is how the artifact guard works
+— and throwing it away unless the hash matched.
+
+Measured on the **M1 common-path corpus** — 197 npm and 200 PyPI targets, stratified by build
+system rather than by popularity — at `--egress mirror-only`, the tier this README recommends, where
+the build's only route out is a time-filtered mirror that writes down everything it serves:
+
+| | reproduce | reach a comparison |
+|---|---|---|
+| npm | **100 of 132 (76%)** | 132 of 197 (67%) |
+| PyPI | **136 of 163 (83%)** | 163 of 200 (81%) |
+
+**crates.io and NuGet have no rate here, because they have no corpus yet.** Both rebuild end to end
+at `mirror-only`, but neither has a stratified corpus, and a number quoted over targets picked by
+hand is not a rate. What is known: of twelve crates tried, six reproduce — `hashbrown@0.17.1` and
+`serde@1.0.219` among them, lockfile included — and every remaining divergence is the `Cargo.toml`
+manifest rewrite that [`17-backlog.md`](docs/17-backlog.md) B20 is about.
+
+The npm row folds in a six-target re-run rather than a second full sweep. npm 7.0 through 8.2
+corrupts the tarballs it fetches concurrently — it presented as a broken mirror for months, and was
+not — and it failed exactly the six targets pinning an npm in that window. Those six were re-run
+after the fix; no other target in the corpus pins one, so nothing else could have moved.
+[`16-findings.md`](docs/16-findings.md) §3.26 has the evidence.
+
+**Quote the strata, not the aggregate.** Both totals above conceal a range wide enough to make them
+useless on their own, which is the whole argument of [`15-corpora.md`](docs/15-corpora.md) §3:
+
+| npm | compared | reproduced | | PyPI | compared | reproduced | |
+|---|---:|---:|---|---|---:|---:|---|
+| no lifecycle script | 74 of 90 | 65 | 88% | flit / hatchling | 47 of 50 | 47 | **100%** |
+| `prepare`/`prepack` | 32 of 60 | 24 | 75% | setuptools + pyproject | 49 of 60 | 40 | 81% |
+| TypeScript build | 23 of 30 | 10 | 43% | setuptools + `setup.py` | 30 of 40 | 18 | 60% |
+| monorepo member | 3 of 17 | 1 | **33%** | poetry-core | 26 of 30 | 25 | 96% |
+| | | | | maturin / C extension | 11 of 20 | 6 | **54%** |
+
+npm's aggregate 76% spans 88% down to 33%; PyPI's 83% spans 100% down to 54%. **The reach is still
+the worse number**: only 3 of 17 monorepo members get as far as a comparison at all, so the 33%
+beside them is one of the three we could measure.
+
+**Why this corpus and not an easier one.** Every figure before it came from the 37-target smoke
+corpora, which are almost entirely one stratum — small utility packages with no build step — where
+npm reproduces at 89% and PyPI at 88%. The common-path corpus adds TypeScript builds, monorepo
+members, poetry projects and native extensions, and it exists to make the table above possible.
+
+**Both ecosystems moved since the previous figures, and PyPI's rate fell for a good reason.** npm
+was 84 of 115 (73%) reaching 115 of 197; PyPI was 119 of 136 (88%) reaching 136 of 200. npm improved
+on both axes — the mirror now serves a lockfile-resolved tarball the index never offered, which
+admitted a cluster that could not build at all, most of it TypeScript: that stratum went from 1 of 8
+to 10 of 23. PyPI's *reach* rose from 68% to 81% and its *rate* fell from 88% to 83%, and the second
+is a consequence of the first: twenty-seven more targets now reach a comparison and they are the
+hard ones. A rate over a larger and harder denominator is lower and means more.
+
+**Sixteen of npm's 65 non-compared targets are ours, not the packages'** — ten a missing tool
+(3 × npx, 3 × pnpm, 3 × yarn, 1 × just), five a `workspace:` protocol npm does not speak, and one a
+workspace sibling the recipe did not build first. A further fifteen are `Fault::Policy`: the
+enforced tier doing what it was asked, mostly a host the build may not reach. Nineteen are the
+package's own build, eleven produced no strategy at all, and four are upstream's.
+
+Those first sixteen stay out of the reproduction rate by design — only `Fault::Build` says anything
+about the package ([`02-domain-model.md`](docs/02-domain-model.md) §4) — but they are inside the
+*reach* figure, which should therefore be read as a floor.
+
+The six that were a mirror handing the build a body it could not read are gone from this list: that
+was npm corrupting its own concurrent fetches, and those targets now reach a comparison. The three
+npx failures have been fixed since the sweep and are still counted above, because they have not been
+re-run.
+
+What stops a target reaching a comparison is mostly named rather than mysterious — a base image
+missing a tool, a package whose install fetches from a forge, a monorepo member we build outside its
+workspace. [`16-findings.md`](docs/16-findings.md) §3.25 has the breakdown and what each one costs.
+
+PyPI was 5 of 15 that morning. The lift came from three deterministic fixes and no model at all;
+[`docs/16-findings.md`](docs/16-findings.md) §2 has the arithmetic.
+
 ## Verify a package end to end
 
 Two real targets, start to finish. Both need `podman` and take a few minutes each, most of it
@@ -246,8 +250,8 @@ $ trigon rebuild pkg:npm/left-pad@1.3.0 \
 
 ✔ normalized
 
-  format         tar+gzip
-  stabilizer set tar-gzip (4598411b636d…)
+  format       tar+gzip
+  stabilizers  tar-gzip (4598411b636d…)
 
                upstream           rebuild
   raw          870c0fe10962…      0ebf94afb7c6…      ≠
@@ -282,8 +286,8 @@ $ trigon rebuild pkg:pypi/chardet@7.6.0 \
 
 ✔ exact
 
-  format         zip
-  stabilizer set wheel (738725964c4a…)
+  format       zip
+  stabilizers  wheel (738725964c4a…)
 
                upstream           rebuild
   raw          4076d795897c…      4076d795897c…      =

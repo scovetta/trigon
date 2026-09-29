@@ -13,9 +13,10 @@ problem.
 
 **These documents are the design, written before the code.** Where the two disagree the code wins,
 and [`16-findings.md`](16-findings.md) records which. Two things to carry into every chapter here:
-**npm and PyPI are the only ecosystems with a registry client** — the rest are refused by name, and
-[`03-ecosystems.md`](03-ecosystems.md) §7.2 has the honest count of what adding one costs — and
-several types these documents describe were never written, each now marked where it is named.
+**npm, PyPI, crates.io and NuGet are the ecosystems with a registry client** — RubyGems and GitHub
+releases are refused by name, and [`03-ecosystems.md`](03-ecosystems.md) §7.2 has the honest count
+of what adding one costs — and several types these documents describe were never written, each
+now marked where it is named.
 
 ---
 
@@ -31,8 +32,12 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
 
 ## Document set
 
+**New here?** Start with [`introduction.md`](introduction.md): what Trigon is, how it works and how
+to use it, in ten minutes.
+
 | Doc | Read it for |
 |---|---|
+| [`introduction.md`](introduction.md) | **Start here.** What Trigon is, the five ideas it rests on, how the pieces fit, and the three things people use it for |
 | [`using-trigon.md`](using-trigon.md) | **Start here to use it.** Install, verify, rebuild, read a verdict, and what a verdict does not say |
 | [`00-overview.md`](00-overview.md) | The problem, what the prior art got right and wrong, the thesis, goals and non-goals, glossary |
 | [`01-architecture.md`](01-architecture.md) | Pipeline, crate graph, dependency policy and its CI enforcement, the trait catalogue |
@@ -63,6 +68,7 @@ Everything in this design follows from that split. See [`00-overview.md`](00-ove
 
 ## Suggested reading order
 
+- **New to Trigon?** [`introduction.md`](introduction.md), then [`using-trigon.md`](using-trigon.md).
 - **Evaluating the design?** `00`, `01`, `05`, `12`.
 - **Implementing?** `13` for what to build first, then `05` for the hard part, then `15` for the corpus it needs, then `02` and `04`.
 - **Operating it?** `10`, `08`, `11`.

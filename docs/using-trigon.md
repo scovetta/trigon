@@ -1,6 +1,7 @@
 # Using Trigon
 
-A task-oriented guide. [`README.md`](../README.md) shows what Trigon is and proves it works;
+A task-oriented guide. New to Trigon? Read [`introduction.md`](introduction.md) first: it explains
+what Trigon is and how the pieces fit in ten minutes. [`README.md`](../README.md) proves it works;
 [`docs/`](README.md) explains how it was designed. This is for the person who has a package and a
 question about it.
 
@@ -74,8 +75,8 @@ The fastest useful thing Trigon does. No network, no containers, no configuratio
 $ trigon verify upstream.whl rebuild.whl
 ✔ exact
 
-  format         zip
-  stabilizer set wheel (738725964c4a…)
+  format       zip
+  stabilizers  wheel (738725964c4a…)
 
                upstream           rebuild
   raw          347ba5223fbf…      347ba5223fbf…      =
@@ -1244,8 +1245,9 @@ Sourced from [`threat-model.md`](threat-model.md), which states the contract pre
   encrypted, or reassembled from chunks defeats it.
 - **An enforced egress tier bounds which hosts a build reaches, never what those hosts serve.**
   `registry.npmjs.org` will serve anything anybody published.
-- **A divergence has not been confirmed by a second run.** The two-agreeing-attempts policy is
-  specified and not implemented.
+- **One run is not a confirmed result.** A verdict is published only once a second attempt agrees
+  (see *Task: confirm a run*), but the verdict `trigon rebuild` prints on your screen is one attempt,
+  and a divergence in it may be the build's own nondeterminism rather than the package's.
 - **Build logs are not redacted.** If your build environment carries credentials, they may appear in
   a stored log.
 - **A published reproduction rate is a statement about the pipeline, not an ecosystem.** The corpora
@@ -1266,8 +1268,9 @@ it, pass an absolute `--work`.
 **`cannot infer a format from '…'; pass --format`** — the file name does not say what the artifact
 is. A `.gem` is a tar and only the ecosystem knows that; pass `--format` and `--profile`.
 
-**`trigon does not speak gem; this build knows npm, pypi`** — the ecosystem in your PURL has no registry client yet. crates.io,
-RubyGems and NuGet have stabilizer profiles but no resolver.
+**`trigon does not speak gem; this build knows npm, pypi, cargo, nuget`** — the ecosystem in your
+PURL has no registry client yet. RubyGems has a stabilizer profile, so `trigon verify` compares two
+`.gem` files, but nothing resolves or rebuilds one.
 
 **A build that appears to hang** — a container build is minutes of silence. `-v` says what phase it
 is in; `-vv` streams the build's own output.
