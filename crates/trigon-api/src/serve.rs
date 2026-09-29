@@ -131,9 +131,14 @@ pub async fn run(store: trigon_store::Store, cfg: Config) -> Result<(), String> 
     println!(
         "  a confirmation is a second agreeing attempt begun {}s or more after the first, on {}",
         c.interval.as_secs(),
-        match c.same_host {
-            true => "another machine, or on the same one cold with its image re-pulled",
-            false => "another machine",
+        match (c.same_host, c.local_images) {
+            (true, true) => {
+                "another machine, or on the same one cold with its image re-pulled, or cold on a \
+                 local image pinned by its content id (same_host_local_images)"
+            }
+            (true, false) => "another machine, or on the same one cold with its image re-pulled",
+            // `same_host_local_images` alone changes nothing, and the configuration's note says so.
+            (false, _) => "another machine",
         }
     );
 

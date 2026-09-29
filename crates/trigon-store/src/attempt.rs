@@ -9,7 +9,8 @@
 //!   digest. Change any of them and a second run answers a different question.
 //! - **The machine.** [`host_id`]: a stable id for the host, which names no host.
 //! - **What it could reuse.** [`CacheState`]: which caches could have handed the second attempt
-//!   the first one's answer, and whether its base image was pulled again by digest.
+//!   the first one's answer, whether its base image was pulled again by digest, and, for a
+//!   confirmation, how that image was pinned ([`ImagePin`]).
 //!
 //! The third fact that decides it, when each attempt began, is `RunRecord::started`.
 
@@ -77,6 +78,42 @@ pub struct CacheState {
     /// pulled from.
     #[serde(default)]
     pub image_repulled: bool,
+    /// How a confirming attempt's base image was pinned, which is what decided whether it could be
+    /// pulled again: a registry digest, a local image's content id, or neither.
+    ///
+    /// **Beside `image_repulled`, not folded into it**, because "not pulled again" is two
+    /// different facts. A registry's image that was not pulled again — the pull failed, or the
+    /// image would not leave the store — is the store's copy of whatever it held since the first
+    /// attempt. A local image named by its content id, which no registry digest names, had no
+    /// registry to be pulled from, and the id still names exact bytes; `[publish]
+    /// same_host_local_images` accepts that one, and only that one (`docs/19` D8).
+    ///
+    /// `None` on an attempt that was not a confirmation, which asks nothing of its image, and on
+    /// every record from before this was recorded: both read as an image that was not pulled
+    /// again, which is what `image_repulled` says of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_pin: Option<ImagePin>,
+}
+
+/// How a base image is named, as far as pulling it again goes. See [`CacheState::image_pin`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImagePin {
+    /// A registry's image: named by its digest, `<registry>/<name>@sha256:<64 hex>`, or by its
+    /// full content id where a registry digest names it in podman's `RepoDigests`. It can be taken
+    /// out of the store and pulled again by that digest, and `image_repulled` says whether it was.
+    RegistryDigest,
+    /// An image in this machine's store named by its full content id — the sha256 of its
+    /// configuration, `sha256:<64 hex>` or the hex alone — that no registry digest names, as
+    /// `trigon base-image` and `--image auto` name the images they build: podman gives those a
+    /// `localhost/` digest, which no registry serves, or none. There is nothing to pull it again
+    /// by; the id names exact bytes, but only this machine's store holds them.
+    LocalContentId,
+    /// Neither: a tag or a short id, which name no bytes in particular; a name under `localhost/`,
+    /// which no registry serves; or a content id podman could not say anything of. There is
+    /// nothing to pull it again by, and it is held to what an image that was not pulled again is
+    /// held to.
+    Other,
 }
 
 impl CacheState {
@@ -99,7 +136,9 @@ impl CacheState {
     }
 
     /// What same-host confirmation asks of the confirming attempt (`docs/19` D8): an empty build
-    /// cache, and the base image re-pulled by digest.
+    /// cache, and the base image re-pulled by digest. `[publish] same_host_local_images` accepts
+    /// one more case, a cold attempt on a local image pinned by its content id, which the gate
+    /// decides with the setting in hand (`trigon_api::publication`).
     pub fn independent(&self) -> bool {
         self.cold() && self.image_repulled
     }
@@ -293,6 +332,7 @@ mod tests {
         let cold = CacheState {
             warm: Vec::new(),
             image_repulled: true,
+            image_pin: Some(ImagePin::RegistryDigest),
         };
         assert!(cold.cold() && cold.independent());
         let not_pulled = CacheState {
@@ -309,6 +349,47 @@ mod tests {
         assert_eq!(
             serde_json::to_value(CacheState::default()).unwrap(),
             serde_json::json!({ "warm": [], "image_repulled": false })
+        );
+    }
+
+    /// How a confirmation's image was pinned is its own field, and a record written before it
+    /// existed — or by a run that was not a confirmation — reads as it always did.
+    #[test]
+    fn how_the_image_was_pinned_is_recorded_beside_whether_it_was_pulled_again() {
+        // A local image, cold: not pulled again, and not independent by the default rule, which
+        // the record still says; the pin is what lets the gate tell it from a failed pull.
+        let local = CacheState {
+            warm: Vec::new(),
+            image_repulled: false,
+            image_pin: Some(ImagePin::LocalContentId),
+        };
+        assert!(local.cold() && !local.independent());
+        let json = serde_json::to_value(&local).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "warm": [], "image_repulled": false, "image_pin": "local_content_id"
+            })
+        );
+        assert_eq!(serde_json::from_value::<CacheState>(json).unwrap(), local);
+        for (pin, wire) in [
+            (ImagePin::RegistryDigest, "registry_digest"),
+            (ImagePin::LocalContentId, "local_content_id"),
+            (ImagePin::Other, "other"),
+        ] {
+            assert_eq!(serde_json::to_value(pin).unwrap(), wire);
+        }
+
+        // A record from before the field, as every stored run file is: read, with no pin.
+        let old: CacheState =
+            serde_json::from_str(r#"{ "warm": [], "image_repulled": false }"#).unwrap();
+        assert_eq!(old.image_pin, None);
+        assert_eq!(
+            old,
+            CacheState {
+                image_pin: None,
+                ..local
+            }
         );
     }
 }

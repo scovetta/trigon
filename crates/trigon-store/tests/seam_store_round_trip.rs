@@ -74,6 +74,8 @@ fn every_field_populated() -> RunRecord {
         cache: Some(trigon_store::CacheState {
             warm: vec![trigon_store::CacheState::LAYERS.into()],
             image_repulled: true,
+            // Not `None`, the default, which a dropped field reads back as.
+            image_pin: Some(trigon_store::ImagePin::RegistryDigest),
         }),
         // Populated here even though a record with an `outcome` never carries a `terminal` in
         // production: this fixture's job is that every field survives the round trip, and a field

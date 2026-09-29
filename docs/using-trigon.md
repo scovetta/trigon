@@ -405,13 +405,15 @@ the image and egress tier it ran on. No model is asked and no repair is tried. E
 emptied — the build runs with no cached layer, the source is checked out again into a directory of
 its own, no fetch cache is used — and the base image is taken out of the image store and pulled
 again by digest where it has a registry to be pulled from. The record says which of that happened,
-with the machine it ran on and when it began, and the gate reads it:
+how the base image was pinned — a registry digest, a local image's content id, or neither — the
+machine it ran on and when it began, and the gate reads it:
 
 - the two attempts must be keyed alike — the target, the strategy and the set — and have found the
   same thing, not only reached the same outcome;
 - the second must begin at least `confirmation_interval` after the first (`1h` by default);
 - and on another machine — or on the same one, where `same_host_confirmation = true`, only if the
-  confirming attempt was cold and its image was pulled again.
+  confirming attempt was cold and its image was pulled again, or, where `same_host_local_images =
+  true` as well, was a local image pinned by its content id.
 
 A pair that falls short is withheld with the reason: `attempts_too_close`, `same_host`,
 `confirmation_not_cold`, `confirmation_unrecorded`, or `attempts_disagree`. `--confirm` refuses a
@@ -429,6 +431,27 @@ stays withheld however it is confirmed.
 A worker's second attempt is the same thing, queued by the engine for a machine other than the
 first attempt's — so a fleet of one machine confirms nothing unless `same_host_confirmation = true`
 — and never for a void verdict.
+
+**A base image built on this machine.** `trigon base-image`, and `--image auto` with it, name the
+images they build by content id, which no registry serves, so a confirmation has nothing to pull
+such an image again by: on one machine the pair is withheld as `confirmation_not_cold`, and
+`--confirm` says so as it starts, naming the setting that would accept it. With
+`same_host_local_images = true` beside `same_host_confirmation = true`, a confirmation that nothing
+warm could supply, on a local image pinned by its full content id, counts as cold, and `--confirm`
+says the setting accepts the image. What that gives up is a registry's word on the image: the
+second attempt runs on whatever the machine's image store holds under that id, which is part of
+what one machine holds constant and so beyond what a same-host confirmation can catch anyway
+([`19`](19-distribution-and-lookup.md) D8, and the [threat model](threat-model.md) D38). It is off
+by default. A registry's image that was not pulled again, and any warm cache, are refused either
+way; set alone, it changes nothing, and `serve`, `worker`, `attest`, `publish` and `--confirm` say
+so in a note.
+
+An id alone does not make an image local. `--confirm` asks podman which registry digests name it:
+a registry's image named by its id — `TRIGON_BASE_PARENT=<an image id>`, or the parent a base
+image's label names — is that registry's, taken out by the id and pulled again by the digest, and
+refused if that fails, whatever is set. And the confirmation of a run on an image `--image derive`
+built reuses that image, which is a cache: the gate refuses it on one machine however the two
+settings stand, and `--confirm` says so rather than naming a setting.
 
 ## Task: publish to an evidence repository
 
@@ -1065,8 +1088,9 @@ Publishing and looking up verdicts in an evidence repository
 ([`19-distribution-and-lookup.md`](19-distribution-and-lookup.md)) are configured, never compiled
 in. `trigon attest`, `trigon publish`, `trigon log init`, `log key-change`, `log succeed`, `trigon
 serve` and `trigon worker` read the configuration today — `serve` and `worker` for
-`same_host_confirmation` and `confirmation_interval`, which decide when two attempts count as two,
-and `serve` for `[publish] repo` and `branch` too, to report the repository's kill-switch — and
+`same_host_confirmation`, `same_host_local_images` and `confirmation_interval`, which decide when
+two attempts count as two, and `serve` for `[publish] repo` and `branch` too, to report the
+repository's kill-switch — and
 `trigon evidence` reads and writes the `[[source]]` tables and reads `[freshness]`, as `trigon
 lookup`, `trigon check` and `verify-attestation` read them.
 
@@ -1083,6 +1107,7 @@ log_key = "~/.config/trigon/log.key"                  # read only by `trigon log
 divergences = "refuse"                                # or "feed": published, with the Atom feed
 rebuilt_artifacts = "none"                            # or "github-release": `publish` uploads them
 same_host_confirmation = false
+same_host_local_images = false                        # only beside same_host_confirmation
 confirmation_interval = "1h"                          # durations: <n>s, m, h or d
 heartbeat = "7d"
 

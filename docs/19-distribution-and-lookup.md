@@ -16,7 +16,7 @@ today:
 | Subjects with sha512, and sha1 for npm, beside sha256 (§5); fetchers that verify every digest their registry declares, and runs that record what was declared (§5); the strategy, guard manifest and building version kept on the run (§4.2 items 3, 7); attestations per run, append-only | built (§10 phase 2, first half; [findings](16-findings.md) §3.95) |
 | The v2 verdicts with every §4.2 field, `void/v1` and `withdrawal/v1`, the record file's types, the versioned purl canonicalisation, and a building version that names its git revision | built (§10 phase 2, second half; [findings](16-findings.md) §3.96) |
 | The configuration of §2.4: `evidence.toml`, the project's file, the environment, locations and pinned keys | built and read by `attest`, `serve`, `worker`, `publish`, `trigon evidence`, `lookup`, `check` and `verify-attestation` (§10 phases 2, 3, 5, 6) |
-| A publishable run: every cache key built from the target, the strategy and the set, worker and CLI alike; attempts that agree on what the comparison found, not on its outcome string; `trigon rebuild --confirm <run>`, cold and re-pulled; each attempt's host, cache state and start; `decide`'s rules for a pair, from `same_host_confirmation` and `confirmation_interval`; and a worker's confirmation made on another machine unless `same_host_confirmation` allows its own | built (§10 phase 3, backlog B31; [findings](16-findings.md) §3.97) |
+| A publishable run: every cache key built from the target, the strategy and the set, worker and CLI alike; attempts that agree on what the comparison found, not on its outcome string; `trigon rebuild --confirm <run>`, cold and re-pulled; each attempt's host, cache state and start, and for a confirmation how its base image was pinned; `decide`'s rules for a pair, from `same_host_confirmation`, `same_host_local_images` and `confirmation_interval`; and a worker's confirmation made on another machine unless `same_host_confirmation` allows its own | built (§10 phase 3, backlog B31; [findings](16-findings.md) §3.97, §3.105) |
 | `rebuild --attest` signing through `attest`'s own code, so no path signs a verdict for a run the gate voids; `rebuild/v1` naming the model exchange a run kept; a `pkg1` key that is the package alone | built (§10 phase 3; [findings](16-findings.md) §3.97) |
 | The evidence log as pure code: C2SP signed notes and checkpoints, the log key in Go's format, RFC 6962 inclusion and consistency proofs, tiles and entry bundles and what an append writes, every leaf kind of §2.3, a log verified from its files, and key-change, log-end and log-continuation leaves followed as §8 says | built (§10 phase 4, first half; [findings](16-findings.md) §3.98) |
 | Records verified against the log, lookup over its leaves with every supersession applied, the paths of records, evidence and the index, and the index derived from the log; `verify-attestation --record` in the network-free verifier, with keys and checkpoint from `--source` or from flags, showing every §4.2 field; `--rerun-comparison` re-deriving what a verdict says the comparison found and holding the published report to it; two trees under one log key refused as an equivocation; and the threat model's properties for record, inclusion and consistency verification (P31–P33) | built (§10 phase 4, second half; [findings](16-findings.md) §3.99) |
@@ -332,6 +332,7 @@ log_key = "~/.config/trigon/log.key"                 # read only by `trigon log 
 divergences = "refuse"                               # or "feed" (D7)
 rebuilt_artifacts = "none"                           # or "github-release" (D4)
 same_host_confirmation = false                       # D8
+same_host_local_images = false                       # D8, for a base image built on this machine
 confirmation_interval = "1h"                         # least time between agreeing attempts
 heartbeat = "7d"                                     # §7
 
@@ -354,9 +355,9 @@ Every table rejects a key it does not know, so a misspelt security setting is an
 setting silently off. Durations are a whole number and one unit, `s`, `m`, `h` or `d`. A source
 without both keys is refused unless `trust_on_first_use = true`, the file form of
 `--trust-on-first-use`. The values shown for `branch`, `divergences`, `rebuilt_artifacts`,
-`same_host_confirmation`, `confirmation_interval`, `heartbeat`, `stale_after` and `frozen_after`
-are their defaults; `required` and `trust_on_first_use` default to `false`, and `repo`, `origin`,
-`disputes`, `log_key` and `checkpoint` to unset.
+`same_host_confirmation`, `same_host_local_images`, `confirmation_interval`, `heartbeat`,
+`stale_after` and `frozen_after` are their defaults; `required` and `trust_on_first_use` default
+to `false`, and `repo`, `origin`, `disputes`, `log_key` and `checkpoint` to unset.
 
 **A project's own sources.** `.trigon/evidence.toml` in the working directory is read too, unless
 `TRIGON_EVIDENCE_CONFIG` is set. It is chosen by whoever controls the project — in CI on a pull
@@ -388,8 +389,15 @@ directory. Every answer from such a source names the file that added it.
 pointer (§4.2 item 6) when both are set, and leaves both out, absent rather than empty, when they
 are not, so attesting for local use needs no repository. `publish` refuses a statement that lacks
 them, or names another origin, and a repository whose `keys/log.vkey` names a different origin.
-`publication::decide` reads `same_host_confirmation` and `confirmation_interval` wherever it runs,
-`trigon serve` included.
+`publication::decide` reads `same_host_confirmation`, `same_host_local_images` and
+`confirmation_interval` wherever it runs, `trigon serve` included. `same_host_local_images` matters
+only beside `same_host_confirmation`: with both set, a confirmation on the machine that made the
+first attempt may run on a local image — one built there, as `trigon base-image` and `--image
+auto` build them — pinned by its full content id, which has no registry digest to be pulled again
+by, and still count as cold (D8). An id a registry digest names is that registry's image, whatever
+built the reference, and is pulled again by the digest or refused. Set alone the setting changes
+nothing, and `serve`, `worker`, `attest`, `publish` and `rebuild --confirm` say so as a note rather
+than refusing the file.
 
 **Pins.** A source is pinned by its log key, whose name is the log's origin, and its attestation
 key. Its initial checkpoint is optional: without one, the first sync accepts the first checkpoint
@@ -1182,10 +1190,15 @@ nothing. This is backlog B31.
   started, and `decide` refuses a pair on one host unless D8 accepts same-host confirmation
   (`same_host_confirmation`), and a pair whose second attempt started less than a configured
   interval after the first.
+- A confirmation records how its base image was pinned — a registry digest, a local image's
+  content id, or neither — so that `same_host_local_images` can accept, beside
+  `same_host_confirmation`, a cold confirmation on a base image built on the host, which has
+  nothing to be pulled again by (D8; [findings](16-findings.md) §3.105). Off by default.
 
 **Done when** a CLI-originated run reaches `Published` only through a second attempt at the same
 cache key, started at least the configured interval after the first, on a different host or, if D8
-accepts it, on the same host with an empty build cache and images re-pulled by digest.
+accepts it, on the same host with an empty build cache and images re-pulled by digest — or, where
+`same_host_local_images` accepts it too, a local image pinned by its content id.
 
 ### Phase 4 — the record, the log and the index, as pure code
 
@@ -1460,6 +1473,20 @@ ambient nondeterminism dominates. With no infrastructure to run, there is one ho
 confirmation — an empty build cache, images re-pulled by digest, and a minimum interval between the
 attempts — catches a floating dependency or a fetch that happened to succeed, and cannot catch
 anything the host itself holds constant. Recommendation: accept it, and amend safeguard 1 to say so.
+
+A base image built on the host (`trigon base-image`, which `--image auto` builds on) is named by its
+content id and has no registry digest, so a confirmation cannot pull it again, and the gate
+withholds such a pair as `confirmation_not_cold` however cold it was. `same_host_local_images`
+(default `false`) accepts it: beside `same_host_confirmation`, a confirmation that nothing warm
+could supply and whose base image is a local image pinned by its full content id counts as cold.
+Set alone, it changes nothing. What it gives up is the image: it is part of what the host holds
+constant, which same-host confirmation already cannot catch, and the second attempt runs on the
+bytes the host's image store holds under that id, which no registry serves again for it. A
+registry's image that was not pulled again is still refused, and so is any warm cache. An id is not
+taken for a local image on sight: a registry's image is named by one as readily
+(`TRIGON_BASE_PARENT=<an image id>`, or the parent a base image's label names), so `rebuild
+--confirm` asks podman which registry digests name it, pulls it again by one where one does, and
+records it as local only where none does.
 
 **Open questions:**
 

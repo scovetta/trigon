@@ -1393,6 +1393,151 @@ fn a_present_base_image_is_taken_out_before_it_is_pulled_and_one_that_stays_is_n
     );
 }
 
+/// What podman records of an image's registry digests is read as it wrote them, and a question it
+/// could not answer is an `Err`, never an empty list: "no registry digest names it" is what makes
+/// an image a local one to the gate (`docs/19` D8), and podman failing to say is not that.
+#[test]
+fn the_registry_digests_of_an_image_are_podmans_and_a_failure_to_say_is_not_none() {
+    let id = "7c".repeat(32);
+    let fake = Fake::new("repo-digests");
+    fake.set(
+        "repo-digests.out",
+        &format!(
+            "docker.io/library/node@sha256:{h}\nlocalhost/trigon-base@sha256:{h}\n\n",
+            h = "ab".repeat(32)
+        ),
+    );
+    assert_eq!(
+        trigon_sandbox::repo_digests(&fake.path(), &id).unwrap(),
+        [
+            format!("docker.io/library/node@sha256:{}", "ab".repeat(32)),
+            format!("localhost/trigon-base@sha256:{}", "ab".repeat(32)),
+        ]
+    );
+    assert_eq!(
+        fake.calls(),
+        [format!(
+            "image inspect {id} --format {{{{range .RepoDigests}}}}{{{{println .}}}}{{{{end}}}}"
+        )]
+    );
+    // An image with none: podman prints the empty range, and its own newline after it.
+    for none in ["\n", "\n\n", ""] {
+        fake.set("repo-digests.out", none);
+        assert_eq!(
+            trigon_sandbox::repo_digests(&fake.path(), &id).unwrap(),
+            Vec::<String>::new(),
+            "{none}"
+        );
+    }
+
+    fake.set("repo-digests.out", "")
+        .set("repo-digests.code", "125")
+        .set("repo-digests.err", &format!("Error: {id}: image not known\n"));
+    let e = trigon_sandbox::repo_digests(&fake.path(), &id).expect_err("podman could not say");
+    assert!(e.contains("image not known"), "{e}");
+    fake.set("repo-digests.code", "0")
+        .set("repo-digests.err", "")
+        .set("repo-digests.out", "<no value>\n");
+    let e = trigon_sandbox::repo_digests(&fake.path(), &id).expect_err("not a name");
+    assert!(e.contains("not digest references: `<no value>`"), "{e}");
+    let e = trigon_sandbox::repo_digests("/nonexistent/podman", &id).unwrap_err();
+    assert!(e.contains("could not be run"), "{e}");
+}
+
+/// A registry's image a run named by its content id is pulled again by the registry digest that
+/// names it, and counts as pulled again only where the pull brought back the image the id names:
+/// the build runs on the id, not on the digest.
+#[test]
+fn an_image_named_by_its_id_is_pulled_again_by_its_digest_and_must_come_back_as_that_id() {
+    let id = "7c".repeat(32);
+    let by = format!("docker.io/library/node@sha256:{}", "ab".repeat(32));
+    let fake = Fake::new("repull-by");
+    fake.set("image.code", "1")
+        .set("image-inspect.out", &format!("sha256:{id}\n"));
+    trigon_sandbox::repull_by(&fake.path(), &id, &by).expect("pulled again as the same id");
+    assert_eq!(
+        fake.calls(),
+        [
+            format!("image exists {id}"),
+            format!("pull --quiet {by}"),
+            format!("image inspect {by} --format {{{{.Id}}}}"),
+        ]
+    );
+    // The `sha256:` form of the id is the same id.
+    trigon_sandbox::repull_by(&fake.path(), &format!("sha256:{id}"), &by).expect("the same id");
+
+    // Another image under that digest is not the one the run named.
+    fake.set("image-inspect.out", &format!("{}\n", "d0".repeat(32)));
+    let e = trigon_sandbox::repull_by(&fake.path(), &id, &by).expect_err("another image");
+    assert!(e.contains("the registry served another image"), "{e}");
+    assert!(e.contains(&"d0".repeat(32)), "{e}");
+    fake.set("image-inspect.out", "").set("image-inspect.code", "125");
+    let e = trigon_sandbox::repull_by(&fake.path(), &id, &by).expect_err("nothing to say");
+    assert!(e.contains("podman could not say which"), "{e}");
+
+    // A pull that failed is one, by the digest it was tried by.
+    fake.set("pull.code", "125")
+        .set("pull.err", "Error: initializing source: manifest unknown\n");
+    let e = trigon_sandbox::repull_by(&fake.path(), &id, &by).expect_err("the pull failed");
+    assert!(e.starts_with("pulling it again failed: "), "{e}");
+
+    // Only an id is taken out this way, and only a registry's digest is pulled by.
+    let untouched = Fake::new("repull-by-refused");
+    for (image, digest, says) in [
+        (&id[..12], &*by, "not an image's full content id"),
+        (&*id, &*format!("localhost/trigon-base@sha256:{}", "ab".repeat(32)), "only in this"),
+        (&*id, "docker.io/library/node:22", "not pinned by a registry digest"),
+    ] {
+        let e = trigon_sandbox::repull_by(&untouched.path(), image, digest).unwrap_err();
+        assert!(e.contains(says), "{image} by {digest}: {e}");
+    }
+    assert_eq!(untouched.calls(), Vec::<String>::new());
+}
+
+/// Present, it is taken out by its id — so it is those bytes that leave the store, whatever else
+/// names them — before it is pulled again by its digest; and one podman will not remove, as it
+/// will not remove by its id an image with two names, is not pulled again.
+#[test]
+fn an_image_named_by_its_id_is_taken_out_by_the_id_before_it_is_pulled_again() {
+    if !in_a_private_temp_dir(
+        "an_image_named_by_its_id_is_taken_out_by_the_id_before_it_is_pulled_again",
+    ) {
+        return;
+    }
+    let id = "7c".repeat(32);
+    let by = format!("docker.io/library/node@sha256:{}", "ab".repeat(32));
+    let fake = Fake::new("repull-by-present");
+    fake.set("image.code", "0").set("image-inspect.out", &id);
+    trigon_sandbox::repull_by(&fake.path(), &id, &by).expect("taken out and pulled again");
+    assert_eq!(
+        fake.calls(),
+        [
+            format!("image exists {id}"),
+            format!("image rm {id}"),
+            format!("image exists {id}"),
+            format!("pull --quiet {by}"),
+            format!("image inspect {by} --format {{{{.Id}}}}"),
+        ]
+    );
+
+    let named_twice = Fake::new("repull-by-named-twice");
+    named_twice
+        .set("image.code", "0")
+        .set("image-rm.code", "2")
+        .set(
+            "image-rm.err",
+            "Error: unable to delete image by ID with more than one tag: please force removal\n",
+        );
+    let e = trigon_sandbox::repull_by(&named_twice.path(), &id, &by).expect_err("it stayed");
+    assert!(e.starts_with("podman would not remove it ("), "{e}");
+    assert!(e.contains("more than one name"), "{e}");
+    assert!(
+        !named_twice.calls().iter().any(|c| c.starts_with("pull")),
+        "{:?}",
+        named_twice.calls()
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The stand-in.
 // ---------------------------------------------------------------------------------------------
@@ -1410,7 +1555,8 @@ const IMAGE: &str = concat!(
 /// told to hang writes its pid to `NAME.pid` first, so a test can see whether it was killed. The
 /// image store has one bit of state: `image rm` takes the image out, so a later `image exists`
 /// answers no — unless `image-rm.code` makes the removal fail, or `image.sticky` says the image is
-/// still there under another name.
+/// still there under another name. `image inspect` answers from `repo-digests.*` where it asks for
+/// `RepoDigests` and from `image-inspect.*` otherwise, whatever the store holds.
 const SCRIPT: &str = r#"#!/bin/sh
 D="$(dirname "$0")"
 printf '%s\n' "$*" >> "$D/calls"
@@ -1434,6 +1580,10 @@ case "$1" in
     if [ "$2" = rm ]; then
       [ -f "$D/image-rm.code" ] || [ -f "$D/image.sticky" ] || echo 1 > "$D/image.code"
       emit image-rm
+    fi
+    if [ "$2" = inspect ]; then
+      case "$*" in *RepoDigests*) emit repo-digests ;; esac
+      emit image-inspect
     fi
     emit image ;;
   images) emit images ;;

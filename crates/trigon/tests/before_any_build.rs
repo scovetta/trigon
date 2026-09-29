@@ -310,6 +310,41 @@ fn a_build_at_an_egress_tier_that_does_not_exist_is_refused() {
     assert_eq!(podman_calls(&d), "");
 }
 
+/// `rebuild` and `sweep` refuse a tier that does not exist as they read their arguments, naming
+/// the ones that do — before a registry is asked for the package or a strategy chosen, where the
+/// build used to be the first to refuse it. `mirror` is the one a help text once offered.
+#[test]
+fn a_rebuild_or_sweep_at_an_egress_tier_that_does_not_exist_is_refused_before_anything_runs() {
+    let d = dir("rebuild-egress");
+    let targets = d.join("targets.txt");
+    std::fs::write(&targets, "pkg:npm/left-pad@1.3.0\n").unwrap();
+    for args in [
+        os(&[
+            "rebuild",
+            "pkg:npm/left-pad@1.3.0",
+            "--image",
+            FROM,
+            "--egress",
+            "mirror",
+        ]),
+        [
+            os(&["sweep"]),
+            vec![targets.clone().into()],
+            os(&["--image", FROM, "--egress", "mirror"]),
+        ]
+        .concat(),
+    ] {
+        let out = run(&d, &args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        assert!(err.contains("'mirror'"), "{args:?}: {err}");
+        for tier in ["deny-all", "mirror-only", "git-and-mirror", "open"] {
+            assert!(err.contains(tier), "{args:?}: {tier}: {err}");
+        }
+        assert_eq!(podman_calls(&d), "", "{args:?}");
+    }
+}
+
 /// A recipe whose build phase renders empty would run, produce nothing, and report a build that
 /// succeeded and left no artifact — blaming the run for the recipe. It is refused before a
 /// container is asked for.

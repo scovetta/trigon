@@ -568,6 +568,29 @@ fn only_a_registry_image_pinned_by_digest_can_be_pulled_again() {
     }
 }
 
+/// A full content id names one local image's exact bytes and carries no registry digest; nothing
+/// else is one, a digest reference included, whose digest names a manifest a registry serves.
+#[test]
+fn a_content_id_is_the_whole_id_and_nothing_else() {
+    let hex = "7c".repeat(32);
+    for id in [hex.clone(), format!("sha256:{hex}")] {
+        assert!(trigon_sandbox::is_content_id(&id), "{id}");
+        assert!(trigon_sandbox::is_pinned(&id), "{id}");
+        assert!(trigon_sandbox::repullable(&id).is_err(), "{id}");
+    }
+    for other in [
+        &*hex[..12].to_string(),
+        "docker.io/library/debian:bookworm",
+        "localhost/trigon-base:auto-0123456789abcdef",
+        &*format!("docker.io/library/debian@sha256:{hex}"),
+        &*format!("localhost/trigon-base@sha256:{hex}"),
+        &*format!("sha256:{}", &hex[..63]),
+        &*format!("{}g", &hex[..63]),
+    ] {
+        assert!(!trigon_sandbox::is_content_id(other), "{other}");
+    }
+}
+
 /// And a pull that could not happen is an error, never a quiet success: with no podman to run,
 /// the answer is that it was not pulled.
 #[test]

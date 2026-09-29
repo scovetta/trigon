@@ -199,6 +199,12 @@ fn rebuild_attest_signs_from_a_store_and_says_it_needs_one() {
 /// Start `trigon serve` on an empty store, bound to a port the system picks, and return what it
 /// printed up to the line saying what a confirmation is — then stop it.
 fn serve_says(d: &Path) -> Result<String, String> {
+    serve_says_and_notes(d).map(|(said, _)| said)
+}
+
+/// [`serve_says`], and what `serve` wrote to stderr before it was stopped: the configuration's
+/// notes among it.
+fn serve_says_and_notes(d: &Path) -> Result<(String, String), String> {
     let mut child = trigon(d)
         .arg("serve")
         .arg(d.join("store"))
@@ -227,16 +233,14 @@ fn serve_says(d: &Path) -> Result<String, String> {
     // Ours to stop: it was started above, and it serves until it is.
     let _ = child.kill();
     let status = child.wait().unwrap();
+    let mut err = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        use std::io::Read as _;
+        let _ = e.read_to_string(&mut err);
+    }
     match got {
-        Ok(seen) if seen.contains("a confirmation is") => Ok(seen),
-        _ => {
-            let mut err = String::new();
-            if let Some(mut e) = child.stderr.take() {
-                use std::io::Read as _;
-                let _ = e.read_to_string(&mut err);
-            }
-            Err(format!("{status}: {err}"))
-        }
+        Ok(seen) if seen.contains("a confirmation is") => Ok((seen, err)),
+        _ => Err(format!("{status}: {err}")),
     }
 }
 
@@ -283,4 +287,44 @@ fn serve_reads_the_confirmation_settings_from_the_configuration() {
         "{}",
         text(&out)
     );
+}
+
+/// `same_host_local_images` is read by `serve` into the gate it answers from, and said in the line
+/// that says what a confirmation is. Set without `same_host_confirmation` it changes nothing, and
+/// `serve` says so as a note on stderr, naming the file, and starts all the same.
+#[test]
+fn serve_reads_same_host_local_images_and_notes_it_where_it_changes_nothing() {
+    let d = dir("serve-local-images");
+    let path = d.join("home/.config/trigon/evidence.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    std::fs::write(
+        &path,
+        "[publish]\nsame_host_confirmation = true\nsame_host_local_images = true\n",
+    )
+    .unwrap();
+    let (said, err) = serve_says_and_notes(&d).expect("serve did not start");
+    assert!(
+        said.contains(
+            "on another machine, or on the same one cold with its image re-pulled, or cold on a \
+             local image pinned by its content id (same_host_local_images)"
+        ),
+        "{said}"
+    );
+    assert!(!err.contains("note:"), "{err}");
+
+    std::fs::write(&path, "[publish]\nsame_host_local_images = true\n").unwrap();
+    let (said, err) = serve_says_and_notes(&d).expect("a note is not a refusal");
+    assert!(
+        said.contains("begun 3600s or more after the first, on another machine\n"),
+        "{said}"
+    );
+    for says in [
+        "note:",
+        "same_host_local_images",
+        "changes nothing",
+        &*path.display().to_string(),
+    ] {
+        assert!(err.contains(says), "{says}: {err}");
+    }
 }

@@ -3,8 +3,9 @@
 //! A run reaches `Published` only through a second attempt at the same cache key, begun at least
 //! `[publish] confirmation_interval` after the first, on another machine — or, where
 //! `same_host_confirmation` is set (D8), on the same machine with no build cache and its base image
-//! pulled again by digest. Each way a pair falls short of that is withheld for its own reason, and
-//! each has a test here.
+//! pulled again by digest, or, where `same_host_local_images` is set as well, with no build cache
+//! on a local base image pinned by its content id. Each way a pair falls short of that is withheld
+//! for its own reason, and each has a test here.
 //!
 //! The records are shaped as the run path writes them: a key from `trigon_store::cache_key`, an
 //! agreement digest from a real comparison, a host id from `trigon_store::host_id_from`, a cache
@@ -15,9 +16,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trigon_api::{Confirmation, Index, Publication, Switches, Withheld};
+use trigon_api::{Confirmation, Index, NotCold, Publication, Switches, Withheld};
 use trigon_core::Digest;
-use trigon_store::{ArtifactRef, CacheState, Environment, RunRecord, RunState, Store};
+use trigon_store::{ArtifactRef, CacheState, Environment, ImagePin, RunRecord, RunState, Store};
 
 const TARGET: &str = "pkg:npm/left-pad@1.3.0";
 const ARTIFACT: &str = "left-pad-1.3.0.tgz";
@@ -96,11 +97,13 @@ fn attempt(id: &str, started: &str, host: &str, cache: CacheState) -> RunRecord 
     r
 }
 
-/// A warm attempt: the layer cache and the source cache could have answered.
+/// A warm attempt: the layer cache and the source cache could have answered. A first attempt, so
+/// nothing was asked of its image.
 fn warm() -> CacheState {
     CacheState {
         warm: vec![CacheState::LAYERS.into(), CacheState::SOURCES.into()],
         image_repulled: false,
+        image_pin: None,
     }
 }
 
@@ -109,6 +112,7 @@ fn cold() -> CacheState {
     CacheState {
         warm: Vec::new(),
         image_repulled: true,
+        image_pin: Some(ImagePin::RegistryDigest),
     }
 }
 
@@ -221,8 +225,8 @@ async fn on_one_machine_a_warm_confirmation_is_withheld_as_not_cold() {
     assert_eq!(
         decided(&[first, second], same_host_allowed()).await,
         [
-            withheld(Withheld::ConfirmationNotCold),
-            withheld(Withheld::ConfirmationNotCold)
+            withheld(Withheld::ConfirmationNotCold(NotCold::Warm)),
+            withheld(Withheld::ConfirmationNotCold(NotCold::Warm))
         ],
         "the confirming attempt is the later one, and it could have replayed the first"
     );
@@ -238,13 +242,14 @@ async fn on_one_machine_a_cold_confirmation_whose_image_was_not_pulled_again_is_
         CacheState {
             warm: Vec::new(),
             image_repulled: false,
+            image_pin: Some(ImagePin::RegistryDigest),
         },
     );
     assert_eq!(
         decided(&[first, second], same_host_allowed()).await,
         [
-            withheld(Withheld::ConfirmationNotCold),
-            withheld(Withheld::ConfirmationNotCold)
+            withheld(Withheld::ConfirmationNotCold(NotCold::NotRepulled)),
+            withheld(Withheld::ConfirmationNotCold(NotCold::NotRepulled))
         ]
     );
 }
@@ -395,6 +400,7 @@ async fn the_settings_are_the_configurations() {
         configured.confirmation,
         Confirmation {
             same_host: true,
+            local_images: false,
             interval: Duration::from_secs(600),
         }
     );
@@ -414,5 +420,279 @@ async fn the_settings_are_the_configurations() {
             withheld(Withheld::AttemptsTooClose)
         ],
         "and with no configuration, the defaults"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// `[publish] same_host_local_images`: a confirmation on a base image built on this machine
+// ---------------------------------------------------------------------------------------------
+
+/// A base image `trigon base-image` built, as a run records it: its full content id.
+fn local_image_id() -> String {
+    "f21d52e1657f28329790932f70bce9d4ddc2617ddfff54af98b02cbcf3d97cf6".into()
+}
+
+/// A first attempt and its confirmation on one machine two hours later, both on the local image;
+/// the confirmation's cache state is `confirming`.
+fn on_a_local_image(confirming: CacheState) -> [RunRecord; 2] {
+    let mut first = attempt("1790500000-aa", "2026-09-27T10:00:00Z", &machine(1), warm());
+    let mut second = attempt("1790507200-ab", "2026-09-27T12:00:00Z", &machine(1), confirming);
+    for r in [&mut first, &mut second] {
+        r.environment.base_image = local_image_id();
+    }
+    [first, second]
+}
+
+/// What `rebuild --confirm` records on a local image: nothing could answer, and there was nothing
+/// to pull the image again by.
+fn cold_on_a_local_image() -> CacheState {
+    CacheState {
+        warm: Vec::new(),
+        image_repulled: false,
+        image_pin: Some(ImagePin::LocalContentId),
+    }
+}
+
+/// `same_host_confirmation` and `same_host_local_images` as given, at the default interval.
+fn settings(same_host: bool, local_images: bool) -> Switches {
+    Switches {
+        confirmation: Confirmation {
+            same_host,
+            local_images,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn with_both_settings_a_cold_confirmation_on_a_local_image_publishes() {
+    assert_eq!(
+        decided(&on_a_local_image(cold_on_a_local_image()), settings(true, true)).await,
+        [Publication::Published, Publication::Published]
+    );
+}
+
+#[tokio::test]
+async fn without_the_opt_in_a_local_image_is_withheld_as_not_cold_naming_the_setting() {
+    let records = on_a_local_image(cold_on_a_local_image());
+    let off = decided(&records, settings(true, false)).await;
+    let because = Withheld::ConfirmationNotCold(NotCold::LocalImage);
+    assert_eq!(off, [withheld(because), withheld(because)]);
+    // The same reason on the wire as every confirmation that was not cold, and a sentence that
+    // says the one thing between this pair and publishing is a setting, by name.
+    assert_eq!(because.key(), "confirmation_not_cold");
+    assert!(
+        because.sentence().contains("same_host_local_images"),
+        "{}",
+        because.sentence()
+    );
+    // And the default configuration is that: off.
+    assert_eq!(
+        off,
+        decided(&records, same_host_allowed()).await,
+        "`same_host_local_images` is off unless it is set"
+    );
+}
+
+#[tokio::test]
+async fn the_opt_in_without_same_host_confirmation_is_withheld_as_same_host() {
+    assert_eq!(
+        decided(&on_a_local_image(cold_on_a_local_image()), settings(false, true)).await,
+        [withheld(Withheld::SameHost), withheld(Withheld::SameHost)],
+        "set alone it changes nothing: one machine does not confirm itself"
+    );
+}
+
+#[tokio::test]
+async fn the_opt_in_does_not_accept_a_registry_image_that_was_not_pulled_again() {
+    // The pull failed, or the image would not leave the store: a registry could have served it
+    // again, and did not. And a reference with no digest to pull by is no better.
+    for pin in [ImagePin::RegistryDigest, ImagePin::Other] {
+        let mut records = on_a_local_image(CacheState {
+            warm: Vec::new(),
+            image_repulled: false,
+            image_pin: Some(pin),
+        });
+        for r in &mut records {
+            r.environment.base_image = match pin {
+                ImagePin::RegistryDigest => {
+                    format!("docker.io/library/node@sha256:{}", "ab".repeat(32))
+                }
+                _ => "docker.io/library/node:22-bookworm".into(),
+            };
+        }
+        assert_eq!(
+            decided(&records, settings(true, true)).await,
+            [
+                withheld(Withheld::ConfirmationNotCold(NotCold::NotRepulled)),
+                withheld(Withheld::ConfirmationNotCold(NotCold::NotRepulled))
+            ],
+            "{pin:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_opt_in_does_not_accept_a_warm_confirmation_on_a_local_image() {
+    for cache in [
+        CacheState::LAYERS,
+        CacheState::FETCH,
+        CacheState::SOURCES,
+        CacheState::DERIVED_IMAGE,
+    ] {
+        let warm_local = CacheState {
+            warm: vec![cache.into()],
+            ..cold_on_a_local_image()
+        };
+        assert_eq!(
+            decided(&on_a_local_image(warm_local), settings(true, true)).await,
+            [
+                withheld(Withheld::ConfirmationNotCold(NotCold::Warm)),
+                withheld(Withheld::ConfirmationNotCold(NotCold::Warm))
+            ],
+            "{cache}"
+        );
+    }
+    // Nor one too soon after the first, however cold.
+    let [first, mut second] = on_a_local_image(cold_on_a_local_image());
+    second.started = "2026-09-27T10:30:00Z".into();
+    assert_eq!(
+        decided(&[first, second], settings(true, true)).await,
+        [
+            withheld(Withheld::AttemptsTooClose),
+            withheld(Withheld::AttemptsTooClose)
+        ]
+    );
+}
+
+/// Run files written before `image_pin` was recorded carry `cache` with `warm` and
+/// `image_repulled` alone. They are read from disk, as `trigon serve` and `trigon publish` read
+/// them, and the gate decides about them as it did: pulled again counts, not pulled again does
+/// not, whatever `same_host_local_images` says.
+///
+/// The one not pulled again ran on a local image's content id, as the confirmations of findings
+/// §3.105 did: cold, `image_repulled: false`, no pin. Those are the records a gate that guessed the
+/// pin from `environment.base_image` would publish, and it must not: what the record does not
+/// say, the run did not check.
+#[tokio::test]
+async fn a_run_file_from_before_the_pin_was_recorded_is_decided_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let runs = dir.path().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let write = |r: &RunRecord| {
+        let mut v = serde_json::to_value(r).unwrap();
+        let cache = v["cache"].as_object_mut().expect("a cache state");
+        cache.remove("image_pin");
+        let mut keys: Vec<&str> = cache.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["image_repulled", "warm"],
+            "the shape of a cache state before the pin"
+        );
+        std::fs::write(
+            runs.join(format!("{}.json", r.id)),
+            serde_json::to_vec_pretty(&v).unwrap(),
+        )
+        .unwrap();
+    };
+    let mut first = attempt("1790500000-aa", "2026-09-27T10:00:00Z", &machine(1), warm());
+    let pulled = attempt("1790507200-ab", "2026-09-27T12:00:00Z", &machine(1), cold());
+    let mut kept = attempt(
+        "1790507300-ac",
+        "2026-09-27T12:01:40Z",
+        &machine(1),
+        CacheState {
+            warm: Vec::new(),
+            image_repulled: false,
+            image_pin: None,
+        },
+    );
+    for r in [&mut first, &mut kept] {
+        r.environment.base_image = local_image_id();
+    }
+    let store = Store::local(dir.path()).unwrap();
+    for (confirming, same_host, expect) in [
+        (&pulled, true, Publication::Published),
+        (
+            &kept,
+            true,
+            withheld(Withheld::ConfirmationNotCold(NotCold::NotRepulled)),
+        ),
+        (&pulled, false, withheld(Withheld::SameHost)),
+    ] {
+        for f in std::fs::read_dir(&runs).unwrap() {
+            std::fs::remove_file(f.unwrap().path()).unwrap();
+        }
+        write(&first);
+        write(confirming);
+        let read = store.get_run(&confirming.id).await.expect("an old run file reads");
+        assert_eq!(read.cache.as_ref().map(|c| c.image_pin), Some(None));
+        for local_images in [false, true] {
+            let ix = Index::new();
+            ix.refresh(&store, settings(same_host, local_images))
+                .await
+                .expect("refresh");
+            for id in [&first.id, &confirming.id] {
+                assert_eq!(
+                    ix.entry(id).expect("indexed").publication,
+                    expect,
+                    "{} with same_host={same_host}, local_images={local_images}",
+                    confirming.id
+                );
+            }
+        }
+    }
+}
+
+/// `same_host_local_images` is read from `evidence.toml` into the `Confirmation` that `trigon
+/// serve`, `trigon attest` and `trigon publish` each build the gate from, beside the two settings
+/// they already read that way.
+#[tokio::test]
+async fn the_opt_in_is_the_configurations() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("evidence.toml");
+    let load = |text: &str| {
+        std::fs::write(&file, text).unwrap();
+        trigon_attest::config::EvidenceConfig::load(&trigon_attest::config::Env {
+            cwd: dir.path().to_path_buf(),
+            evidence_config: Some(file.clone()),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let records = on_a_local_image(cold_on_a_local_image());
+
+    let both = load("[publish]\nsame_host_confirmation = true\nsame_host_local_images = true\n");
+    assert!(both.notes().is_empty(), "{:?}", both.notes());
+    let configured = Switches {
+        confirmation: Confirmation::from(both.publish()),
+        ..Default::default()
+    };
+    assert_eq!(
+        configured.confirmation,
+        Confirmation {
+            same_host: true,
+            local_images: true,
+            interval: Duration::from_secs(3600),
+        }
+    );
+    assert_eq!(
+        decided(&records, configured).await,
+        [Publication::Published, Publication::Published]
+    );
+
+    // Alone, it is read, it changes nothing, and the configuration says so.
+    let alone = load("[publish]\nsame_host_local_images = true\n");
+    assert_eq!(alone.notes().len(), 1, "{:?}", alone.notes());
+    let configured = Switches {
+        confirmation: Confirmation::from(alone.publish()),
+        ..Default::default()
+    };
+    assert!(configured.confirmation.local_images);
+    assert_eq!(
+        decided(&records, configured).await,
+        [withheld(Withheld::SameHost), withheld(Withheld::SameHost)]
     );
 }

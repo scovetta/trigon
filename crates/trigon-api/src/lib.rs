@@ -28,7 +28,7 @@ pub mod serve;
 pub mod ui;
 
 pub use index::Index;
-pub use publication::{Attempt, Confirmation, Publication, Switches, Withheld};
+pub use publication::{Attempt, Confirmation, NotCold, Publication, Switches, Withheld};
 pub use serve::{Config, run};
 
 use std::sync::Arc;

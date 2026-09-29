@@ -1863,7 +1863,7 @@ const withheldTitle = (pub) => ({
   confirmation_unrecorded: 'the attempts that agree do not all record which machine ran them and when they began, so whether the second is independent of the first cannot be checked.',
   attempts_too_close: 'the attempts that agree began closer together than the confirmation interval allows, so the second cannot catch a floating dependency or a fetch that happened to succeed.',
   same_host: 'the attempts that agree ran on one machine, or on machines their records cannot tell apart, and this operator does not accept a confirmation from the machine that made the first attempt.',
-  confirmation_not_cold: 'the attempts that agree ran on one machine, or on machines their records cannot tell apart, and the second was not cold, so it may have replayed the first attempt rather than repeated it.',
+  confirmation_not_cold: 'the attempts that agree ran on one machine, or on machines their records cannot tell apart, and the second is not shown to be cold: a cache could have supplied it, or its base image was not pulled again by digest, or it was a local image this operator does not accept (same_host_local_images), so it may have replayed the first attempt rather than repeated it.',
   open_egress: 'the build ran with unrestricted network access, so nothing it produced is evidence about the package.',
   guard_tripped: 'the build reached the published artifact over the network, so a match would prove only that it downloaded it.',
   non_builtin_stabilizer: 'a stabilizer a person or a model wrote was applied, so the normalization is itself a judgement call, and the run is evidence of nothing about the package in either direction.',

@@ -39,7 +39,7 @@ pub mod queue;
 mod record;
 
 pub use attempt::{
-    CACHE_KEY_VERSION, CacheState, cache_key, host_id, host_id_from, names_a_machine,
+    CACHE_KEY_VERSION, CacheState, ImagePin, cache_key, host_id, host_id_from, names_a_machine,
 };
 pub use blobs::{Blobs, digest_of};
 #[cfg(feature = "queue")]

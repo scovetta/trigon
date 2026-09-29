@@ -36,7 +36,11 @@ changes six things.
    D8 proposes accepting two attempts on one host, with an empty build cache, images re-pulled by
    digest and a minimum interval between them; it has not been decided. It is a setting,
    `same_host_confirmation`, default `false`, so the code does not wait on the decision, and this
-   amendment will say so if D8 accepts it.
+   amendment will say so if D8 accepts it. D8 now carries a second setting beside it,
+   `same_host_local_images`, also default `false`: where both are set, a confirmation on a local
+   base image pinned by its full content id, which no registry digest names and so nothing can
+   pull again, counts as cold ([findings](../16-findings.md) §3.105). Accepting D8 accepts both
+   settings, and what the second gives up (threat model D38).
 
 ## Decision
 

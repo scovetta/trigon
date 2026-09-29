@@ -383,6 +383,7 @@ pub(crate) fn succeed(args: SucceedArgs) -> Result<()> {
 fn publish(common: Common, what: What) -> Result<()> {
     let env = Env::from_process()?;
     let config = EvidenceConfig::load(&env)?;
+    crate::say_config_notes(&config);
     let settings = settings(&config, &common, &env, &what)?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

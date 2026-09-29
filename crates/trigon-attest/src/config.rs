@@ -295,6 +295,12 @@ pub struct PublishConfig {
     pub rebuilt_artifacts: RebuiltArtifacts,
     /// docs/19 D8. `false` by default.
     pub same_host_confirmation: bool,
+    /// docs/19 D8, for an image built on this machine. `false` by default. Where
+    /// `same_host_confirmation` is also set, a confirmation on the machine that made the first
+    /// attempt may run on a local base image pinned by its content id, which has no registry to be
+    /// pulled again from, and still count as cold. Set alone it changes nothing, and
+    /// [`EvidenceConfig::notes`] says so.
+    pub same_host_local_images: bool,
     /// The least time between two agreeing attempts. One hour by default.
     pub confirmation_interval: Duration,
     /// The longest the log goes without a leaf before a heartbeat is logged. Seven days by default.
@@ -312,6 +318,7 @@ impl Default for PublishConfig {
             divergences: Divergences::default(),
             rebuilt_artifacts: RebuiltArtifacts::default(),
             same_host_confirmation: false,
+            same_host_local_images: false,
             confirmation_interval: Duration::from_secs(3600),
             heartbeat: Duration::from_secs(7 * 86_400),
         }
@@ -403,6 +410,7 @@ pub struct EvidenceConfig {
     state_dir: Option<PathBuf>,
     read: Vec<PathBuf>,
     user_config: Option<PathBuf>,
+    notes: Vec<String>,
 }
 
 impl EvidenceConfig {
@@ -431,6 +439,7 @@ impl EvidenceConfig {
             state_dir: None,
             read: Vec::new(),
             user_config: env.user_config_path(),
+            notes: Vec::new(),
         };
 
         if let Some(path) = config.user_config.clone() {
@@ -475,6 +484,22 @@ impl EvidenceConfig {
                 .xdg(&env.xdg_state_home, ".local/state")
                 .map(|d| d.join("trigon").join("evidence")),
         };
+        // A note, not an error: the file is well formed and says what its author wants of a
+        // confirmation made on one machine; it is only that no such confirmation is counted for
+        // it to apply to. Said rather than left, because a setting that silently does nothing is
+        // one its author believes is on.
+        if config.publish.same_host_local_images && !config.publish.same_host_confirmation {
+            let file = config
+                .user_config
+                .as_ref()
+                .map_or("evidence.toml".into(), |p| p.display().to_string());
+            config.notes.push(format!(
+                "{file}: `[publish] same_host_local_images` is set and `same_host_confirmation` \
+                 is not, so it changes nothing. It widens what a confirmation made on the machine \
+                 that made the first attempt may run on, and with `same_host_confirmation` off no \
+                 such confirmation is counted. Set both, or neither"
+            ));
+        }
         Ok(config)
     }
 
@@ -543,6 +568,13 @@ impl EvidenceConfig {
     /// The files that were read, in order.
     pub fn files_read(&self) -> &[PathBuf] {
         &self.read
+    }
+
+    /// What the files say that is not wrong and is worth saying: a setting that, as configured,
+    /// changes nothing. Each is a sentence naming the file. A command that reads the setting says
+    /// them; none refuses on one.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     /// A source's own directory under the state directory, `<state>/<name>/`: where its last
@@ -679,6 +711,9 @@ impl EvidenceConfig {
             }
             if let Some(s) = p.same_host_confirmation {
                 publish.same_host_confirmation = s;
+            }
+            if let Some(s) = p.same_host_local_images {
+                publish.same_host_local_images = s;
             }
             if let Some(i) = p.confirmation_interval {
                 publish.confirmation_interval =
@@ -1631,6 +1666,7 @@ struct PublishDoc {
     divergences: Option<Divergences>,
     rebuilt_artifacts: Option<RebuiltArtifacts>,
     same_host_confirmation: Option<bool>,
+    same_host_local_images: Option<bool>,
     confirmation_interval: Option<String>,
     heartbeat: Option<String>,
 }

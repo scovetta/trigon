@@ -1049,6 +1049,51 @@ fn snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
+/// `same_host_local_images` set without `same_host_confirmation` changes nothing. `attest` and
+/// `publish`, which build the gate from the configuration, say so as a note on stderr naming the
+/// file, and go on: a note is not a refusal.
+#[test]
+fn attest_and_publish_note_a_setting_that_changes_nothing_and_go_on() {
+    let w = World::new("local-images-note");
+    w.init(w.remote.to_str().unwrap());
+    w.config("same_host_local_images = true\n");
+    let file = w.dir.join("home/.config/trigon/evidence.toml");
+    let noted = |out: &Output, what: &str| {
+        // As printed, wrapped to the terminal; the words are what is asserted.
+        let err = String::from_utf8_lossy(&out.stderr)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for says in [
+            "note:",
+            "`[publish] same_host_local_images` is set and `same_host_confirmation` is not",
+            "changes nothing",
+            &*file.display().to_string(),
+        ] {
+            assert!(err.contains(says), "{what}: {says}: {err}");
+        }
+    };
+
+    // `pair` attests the first attempt; the second is attested here, to read what it said.
+    let p = Package::new("a", false);
+    let (first, second) = pair(&w, &p, "aaaa");
+    let out = w.trigon(&[
+        "attest",
+        &second,
+        "--store",
+        w.store.to_str().unwrap(),
+        "--key",
+        w.key.to_str().unwrap(),
+    ]);
+    ok(&out);
+    noted(&out, "attest");
+
+    let out = w.publish(&[&first, "--dry-run"]);
+    let said = ok(&out);
+    noted(&out, "publish");
+    assert!(said.contains("write     records/"), "{said}");
+}
+
 #[test]
 fn a_dry_run_prints_what_it_would_write_and_leaves_everything_byte_identical() {
     let w = World::new("dry-run");

@@ -5801,3 +5801,78 @@ would have caught it.
   (`a_strategy_with_literals_declares_schema_two_and_one_without_still_declares_one`,
   `tests/literals.rs`). The heuristic and CI strategies' canonical forms carry `"schema":2`, so
   their digests moved once more with this change.
+
+### 3.105 Confirming on one machine, on a base image built there: an opt-in
+
+On 2026-09-29, `scripts/evidence-e2e.sh` on `pkg:npm/wrappy@1.0.2`, built behind the mirror
+(`--egress mirror-only`) and confirmed on the same machine: both attempts `normalized`, the
+confirmation cold (`"warm": []`), and `publish` refused the pair as `confirmation_not_cold`. `trigon
+base-image`, and `--image auto` with it, name the images they build by content id, which no registry
+digest names, so `rebuild --confirm` had nothing to pull again by and recorded `image_repulled:
+false`: the same record a pull that failed leaves, and the gate could not tell the two apart. A
+machine that builds its own base images could publish no verdict with the whole of D8 accepted.
+
+**What changed.**
+
+- **A confirmation records how its base image was pinned**, `CacheState::image_pin`:
+  `registry_digest`, `local_content_id` — a full content id, `sha256:<64 hex>` or the hex alone,
+  that no registry digest names — or `other`, a tag, a short id, a `localhost/` name, or an id
+  podman could say nothing of. Beside `image_repulled`, not in its place, and absent on every other
+  run and on every record written before, which the gate reads as it did. `rebuild --confirm`
+  classifies the reference by `trigon_sandbox::repullable` and the new `is_content_id`, asks podman
+  which registry digests name a content id (`repo_digests`), and pulls again only by a registry
+  digest: the reference itself, or, for a registry's image named by its id, the digest that names
+  it (`repull_by`, which takes the image out by the id and checks the pull brought that id back).
+- **`[publish] same_host_local_images`**, default `false`. Beside `same_host_confirmation`, `decide`
+  counts as cold a confirmation on the first attempt's machine that nothing warm could supply and
+  whose image is `local_content_id`. Nothing else moved: both attempts record a host and a start,
+  the interval, the agreement digest, a hostname-derived id never showing a second machine, a
+  registry image not pulled again, and any warm cache. Set alone it changes nothing, and the loader
+  says so as a note (`EvidenceConfig::notes`) that `serve`, `worker`, `attest`, `publish` and
+  `rebuild --confirm` print on stderr, not as an error.
+- **`confirmation_not_cold` says which part fell short** — unrecorded, warm, not pulled again, or a
+  local image without the setting, which its sentence names — and is one name on the wire as
+  before: `Withheld` now serializes through `key()`. The nearest of several pairs is the one that
+  got furthest: a local image the setting would accept over a registry's image not pulled again,
+  and either over a warm cache.
+- **`rebuild --confirm` reads the gate's settings** where `serve`, `attest` and `publish` read them,
+  and its line about an image it did not pull again says what the gate will make of it: accepted
+  by `same_host_local_images`, or not counted until it is set, or not counted with
+  `same_host_confirmation` off — or, where the attempt reuses a cache, not counted whatever is set.
+  `serve`'s line on what a confirmation is names the setting too.
+
+**Found in review, and fixed.** `image_pin` first took any full content id for a local image, so a
+registry's image a run named by its id — `TRIGON_BASE_PARENT=<an image id>`, or the parent a base
+image's label names, as this machine's `mcr.microsoft.com/dotnet/sdk` parent is — was recorded
+`local_content_id`, never pulled again, and published with both settings on, against D38; it is
+now asked about as above. The confirmation of a run on a derived image, whose image is also a
+local content id and is a cache, was told the setting would accept it, or that the setting was all
+it lacked. `NotRepulled` and `LocalImage` shared a rank, so which was named depended on which pair
+began first. `scripts/evidence-e2e.sh` offered `--egress mirror`, which no tier is; it now offers
+the tiers the podman runner runs, and `rebuild` and `sweep` refuse an unknown tier as they parse
+their arguments rather than after a fetch.
+
+**What it gives up**, as the threat model's D38 says: the base image is part of what one machine
+holds constant, which a same-host confirmation cannot catch (D37, `docs/19` D8), and no registry
+serves it again for the second attempt, so both attempts run on whatever the image store holds
+under that id.
+
+**Tests.** Through the index, with run records as the run path writes them
+(`crates/trigon-api/tests/seam_confirmation.rs`): the opt-in on and a cold local image published;
+off, withheld as `confirmation_not_cold` naming the setting; on without `same_host_confirmation`,
+withheld as `same_host`; on, a registry image not pulled again and a warm cache each withheld; and
+run files written before the pin, on a local image's id, read from disk, decided as before under
+either setting. In the gate (`publication.rs`), the rule clause by clause, the four sentences, and
+which pair is named, in either order. `how_a_confirmation_classifies_its_image` with podman's
+answer injected, a registry's image named by its id among them; what `--confirm` says under each
+configuration, a carried derived image among them; and `--confirm` reading its gate and notes from
+the configuration (`main.rs`). `repo_digests` and `repull_by` against a stand-in podman
+(`seam_podman_invocations.rs`); the setting, its default and the note (`evidence_config.rs`); the
+note from `serve` (`seam_publishable.rs`), `attest` and `publish` (`publish.rs`) and `worker`
+(`queue_commands.rs`); `is_content_id` (`plan.rs`); an unknown tier refused before anything runs
+(`before_any_build.rs`).
+
+**Not done here.** The script has not been run again: it needs podman and the network. `trigon
+worker`'s start-up line still says only whether `same_host_confirmation` is on. And the threat model
+still calls the two-agreeing-attempts policy designed and not built (§1.3, D17), which §3.97 made
+stale; D37 and D38 describe it as built, and the rest is left to a pass over the model.

@@ -21,17 +21,18 @@
 
 use serde::Serialize;
 use std::time::Duration;
-use trigon_store::RunRecord;
+use trigon_store::{CacheState, ImagePin, RunRecord};
 
 /// Why a run is not shown to an anonymous reader.
 ///
 /// Serialized as a string, never an ordinal, for the reason every outcome in this system is
 /// ([ADR-0002]): a consumer filtering on an integer breaks the moment a reason is inserted between
-/// two existing ones.
+/// two existing ones. The string is [`Withheld::key`], and only that: a reason that carries which
+/// part of it fell short says so in its sentence, and is one name on the wire however it fell
+/// short.
 ///
 /// [ADR-0002]: ../../../docs/adr/0002-four-match-outcomes.md
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Withheld {
     /// Safeguard 1. Fewer than two terminal attempts at the same work.
     AwaitingConfirmation,
@@ -56,8 +57,13 @@ pub enum Withheld {
     SameHost,
     /// Safeguard 1 under D8. The attempts ran on one machine, or on machines their records cannot
     /// tell apart, which the operator accepts only when the confirming attempt was cold with its
-    /// base image re-pulled by digest, and it was not.
-    ConfirmationNotCold,
+    /// base image re-pulled by digest — or, where `[publish] same_host_local_images` is set too,
+    /// cold on a local image pinned by its content id — and it was not.
+    ///
+    /// It carries which part fell short, which its sentence says: an operator told only "not
+    /// cold" about a confirmation that was cold on a local image cannot tell that the one thing
+    /// between it and publishing is a setting.
+    ConfirmationNotCold(NotCold),
     /// Safeguard 2, egress clause. The build ran at a tier that adds no network isolation, so a
     /// divergence cannot be attributed to the package.
     OpenEgress,
@@ -90,8 +96,34 @@ pub enum Withheld {
     NoOutcome,
 }
 
+/// Which part of "cold" a confirming attempt on the first attempt's machine fell short of: the
+/// detail of [`Withheld::ConfirmationNotCold`], in the order the gate checks them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotCold {
+    /// Its record does not say what could have supplied it (`RunRecord::cache` is absent), and a
+    /// cache state nobody recorded is not a cold one.
+    Unrecorded,
+    /// A cache could have supplied it: `CacheState::warm` names one.
+    Warm,
+    /// Its base image was not pulled again by digest, and is not a local image pinned by its
+    /// content id: a registry's image whose pull failed or that would not leave the store, a
+    /// reference with no digest to pull by, or a record that does not say how it was pinned.
+    NotRepulled,
+    /// Its base image was a local image pinned by its content id — one no registry digest names,
+    /// as those `trigon base-image` builds — and `[publish] same_host_local_images` is off.
+    LocalImage,
+}
+
+/// [`Withheld::key`]: one function writes the wire name, so what `serde` writes and what a page
+/// keys on cannot be two spellings of one reason.
+impl Serialize for Withheld {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.key())
+    }
+}
+
 impl Withheld {
-    /// The wire name, matching what `serde` writes for the same variant.
+    /// The wire name, which is what `serde` writes for it.
     ///
     /// Not `format!("{:?}")`. Debug gives `AwaitingConfirmation` while the serialized field gives
     /// `awaiting_confirmation`, and a page keyed on one while reading the other has two names for
@@ -103,7 +135,7 @@ impl Withheld {
             Withheld::ConfirmationUnrecorded => "confirmation_unrecorded",
             Withheld::AttemptsTooClose => "attempts_too_close",
             Withheld::SameHost => "same_host",
-            Withheld::ConfirmationNotCold => "confirmation_not_cold",
+            Withheld::ConfirmationNotCold(_) => "confirmation_not_cold",
             Withheld::OpenEgress => "open_egress",
             Withheld::GuardTripped => "guard_tripped",
             Withheld::NonBuiltinStabilizer => "non_builtin_stabilizer",
@@ -145,11 +177,28 @@ impl Withheld {
                  that made the first attempt: nothing that machine holds constant could make the \
                  two disagree."
             }
-            Withheld::ConfirmationNotCold => {
+            Withheld::ConfirmationNotCold(NotCold::Unrecorded) => {
                 "the attempts that agree ran on one machine, or on machines their records cannot \
-                 tell apart, and the second was not cold: it could reuse a build cache, or did not \
-                 pull its base image again by digest, so it may have replayed the first attempt \
-                 rather than repeated it."
+                 tell apart, and the second does not record what could have supplied it, so \
+                 whether it repeated the first attempt rather than replayed it cannot be checked."
+            }
+            Withheld::ConfirmationNotCold(NotCold::Warm) => {
+                "the attempts that agree ran on one machine, or on machines their records cannot \
+                 tell apart, and the second was not cold: a build cache or another cache could \
+                 have supplied it, so it may have replayed the first attempt rather than repeated \
+                 it."
+            }
+            Withheld::ConfirmationNotCold(NotCold::NotRepulled) => {
+                "the attempts that agree ran on one machine, or on machines their records cannot \
+                 tell apart, and the second did not pull its base image again by digest: it ran \
+                 on whatever the image store had held since the first, so it may have replayed \
+                 the first attempt rather than repeated it."
+            }
+            Withheld::ConfirmationNotCold(NotCold::LocalImage) => {
+                "the attempts that agree ran on one machine, or on machines their records cannot \
+                 tell apart, and the second ran on a local base image, pinned by its content id, \
+                 which no registry digest names, so no registry served it again. This operator \
+                 does not accept that: `[publish] same_host_local_images` is off."
             }
             Withheld::OpenEgress => {
                 "the build ran with unrestricted network access, so nothing it produced is evidence \
@@ -239,6 +288,11 @@ pub struct Confirmation {
     /// other — and then only where the confirming attempt ran cold, its base image re-pulled by
     /// digest.
     pub same_host: bool,
+    /// `[publish] same_host_local_images`. Whether, where `same_host` allows a confirmation on one
+    /// machine, a confirming attempt that ran cold on a local base image pinned by its content id
+    /// — which has no registry to be pulled again from — counts as cold. Read only beside
+    /// `same_host`: alone it changes nothing.
+    pub local_images: bool,
     /// `[publish] confirmation_interval`: the least time between the two attempts' starts.
     pub interval: Duration,
 }
@@ -256,6 +310,7 @@ impl From<&trigon_attest::config::PublishConfig> for Confirmation {
     fn from(p: &trigon_attest::config::PublishConfig) -> Self {
         Confirmation {
             same_host: p.same_host_confirmation,
+            local_images: p.same_host_local_images,
             interval: p.confirmation_interval,
         }
     }
@@ -273,9 +328,11 @@ pub struct Attempt {
     /// host: before hosts were recorded, a run that reached a comparison wrote the time it
     /// finished there.
     pub began: Option<i64>,
-    /// Whether it ran with no cache able to supply it and its base image re-pulled by digest
-    /// (`CacheState::independent`). `None` where the record does not say.
-    pub independent: Option<bool>,
+    /// What it recorded about the caches that could supply it and its base image
+    /// (`RunRecord::cache`): whether any cache could, whether the image was pulled again by
+    /// digest, and, for a confirmation, how the image was pinned. `None` where the record does
+    /// not say.
+    pub cache: Option<CacheState>,
 }
 
 impl Attempt {
@@ -287,7 +344,7 @@ impl Attempt {
                 .host
                 .as_ref()
                 .and_then(|_| trigon_core::time::rfc3339_epoch(&r.started)),
-            independent: r.cache.as_ref().map(trigon_store::CacheState::independent),
+            cache: r.cache.clone(),
         }
     }
 }
@@ -454,11 +511,12 @@ pub fn decide(r: &RunRecord, c: &Corroboration, s: Switches) -> Publication {
 /// A pair is the earlier attempt and a later one. It confirms when both record a machine and a
 /// start, the later began at least `rules.interval` after the earlier, and they ran on two
 /// machines — or on one, where `rules.same_host` allows it and the later attempt ran cold with its
-/// base image re-pulled. Two machines means two host ids that differ and were both derived from a
-/// machine id; a pair any other way is held to what one machine is held to. Any pair that confirms
-/// is enough; where none does, the reason given is the one for the pair that met the most of those
-/// conditions, in that order, because that is the one an operator is nearest to satisfying and the
-/// one worth telling them.
+/// base image re-pulled, or, where `rules.local_images` allows that too, cold on a local image
+/// pinned by its content id ([`not_cold`]). Two machines means two host ids that differ and were
+/// both derived from a machine id; a pair any other way is held to what one machine is held to.
+/// Any pair that confirms is enough; where none does, the reason given is the one for the pair
+/// that met the most of those conditions, in that order, because that is the one an operator is
+/// nearest to satisfying and the one worth telling them.
 fn confirmed(attempts: &[Attempt], rules: Confirmation) -> Result<(), Withheld> {
     let mut ordered: Vec<&Attempt> = attempts.iter().collect();
     ordered.sort_by(|a, b| a.began.cmp(&b.began).then_with(|| a.run.cmp(&b.run)));
@@ -499,19 +557,55 @@ fn pair(first: &Attempt, second: &Attempt, rules: Confirmation) -> Result<(), Wi
     // The *confirming* attempt, which is the later: one that could reuse what the first left
     // behind is the first one replayed. The first attempt's own state is not asked about, since
     // nothing ran before it on this key that it could have replayed.
-    if second.independent != Some(true) {
-        return Err(Withheld::ConfirmationNotCold);
+    match not_cold(second.cache.as_ref(), rules) {
+        Some(part) => Err(Withheld::ConfirmationNotCold(part)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// How far a pair got through [`pair`]'s conditions before one stopped it.
+/// Why a confirming attempt on the first attempt's machine could have replayed it, or `None` where
+/// it could not: no cache was allowed to supply it, and its base image was pulled again by digest
+/// — or, where `rules.local_images` accepts one, was a local image pinned by its content id.
+///
+/// **A local image is accepted by its content id and cold, and nothing else is.** The id names
+/// exact bytes, and nothing warm could hand the attempt the first one's answer. What accepting it
+/// gives up is that no registry served those bytes again for the confirmation: the image store
+/// that holds them is part of what the machine holds constant, which D8 already says a same-host
+/// confirmation cannot catch. A registry's image that was not pulled again is not that case — it
+/// could have been, and was not — so it is refused whatever the setting, as is a record that does
+/// not say how its image was pinned. The record draws that line, not this function: `rebuild
+/// --confirm` records `local_content_id` only for an id no registry digest names, and a registry's
+/// image named by its id as `registry_digest`, pulled again by that digest or not.
+fn not_cold(cache: Option<&CacheState>, rules: Confirmation) -> Option<NotCold> {
+    let Some(cache) = cache else {
+        return Some(NotCold::Unrecorded);
+    };
+    if !cache.cold() {
+        return Some(NotCold::Warm);
+    }
+    if cache.image_repulled {
+        return None;
+    }
+    match cache.image_pin {
+        Some(ImagePin::LocalContentId) if rules.local_images => None,
+        Some(ImagePin::LocalContentId) => Some(NotCold::LocalImage),
+        Some(ImagePin::RegistryDigest | ImagePin::Other) | None => Some(NotCold::NotRepulled),
+    }
+}
+
+/// How far a pair got through [`pair`]'s conditions, and [`not_cold`]'s, before one stopped it.
 fn rank(w: Withheld) -> u8 {
     match w {
         Withheld::ConfirmationUnrecorded => 0,
         Withheld::AttemptsTooClose => 1,
         Withheld::SameHost => 2,
-        Withheld::ConfirmationNotCold => 3,
+        Withheld::ConfirmationNotCold(NotCold::Unrecorded) => 3,
+        Withheld::ConfirmationNotCold(NotCold::Warm) => 4,
+        Withheld::ConfirmationNotCold(NotCold::NotRepulled) => 5,
+        // Above an image that was not pulled again: a cold confirmation on a local image is kept
+        // from publishing by a setting alone, and two reasons of one rank would be named by
+        // whichever pair began first.
+        Withheld::ConfirmationNotCold(NotCold::LocalImage) => 6,
         _ => 0,
     }
 }
@@ -552,13 +646,37 @@ mod tests {
         r
     }
 
-    /// One agreeing attempt: on a machine of its own, cold, at `began`.
+    /// One agreeing attempt, on `host` at `began`: cold with its image pulled again by digest where
+    /// `independent`, and otherwise warm.
     fn attempt(run: &str, host: &str, began: i64, independent: bool) -> Attempt {
         Attempt {
             run: run.into(),
             host: Some(host.into()),
             began: Some(began),
-            independent: Some(independent),
+            cache: Some(match independent {
+                true => CacheState {
+                    warm: Vec::new(),
+                    image_repulled: true,
+                    image_pin: Some(ImagePin::RegistryDigest),
+                },
+                false => CacheState {
+                    warm: vec![CacheState::LAYERS.into()],
+                    image_repulled: false,
+                    image_pin: None,
+                },
+            }),
+        }
+    }
+
+    /// The same, cold, on an image pinned as `pin` and not pulled again.
+    fn cold_on(run: &str, host: &str, began: i64, pin: Option<ImagePin>) -> Attempt {
+        Attempt {
+            cache: Some(CacheState {
+                warm: Vec::new(),
+                image_repulled: false,
+                image_pin: pin,
+            }),
+            ..attempt(run, host, began, false)
         }
     }
 
@@ -733,10 +851,18 @@ mod tests {
         Switches {
             confirmation: Confirmation {
                 same_host,
+                local_images: false,
                 interval: Duration::from_secs(interval),
             },
             ..Default::default()
         }
+    }
+
+    /// `rules`, with `[publish] same_host_local_images` as `local_images`.
+    fn rules_local(same_host: bool, local_images: bool, interval: u64) -> Switches {
+        let mut s = rules(same_host, interval);
+        s.confirmation.local_images = local_images;
+        s
     }
 
     const HOUR: i64 = 3600;
@@ -818,7 +944,7 @@ mod tests {
             assert_eq!(
                 decide(&r, &pair(false), rules(true, 3600)),
                 Publication::Withheld {
-                    because: Withheld::ConfirmationNotCold
+                    because: Withheld::ConfirmationNotCold(NotCold::Warm)
                 },
                 "{one} and {two}"
             );
@@ -843,7 +969,7 @@ mod tests {
             assert_eq!(
                 decide(&r, &c, rules(true, 3600)),
                 Publication::Withheld {
-                    because: Withheld::ConfirmationNotCold
+                    because: Withheld::ConfirmationNotCold(NotCold::Warm)
                 },
                 "first cold: {first_cold}"
             );
@@ -856,13 +982,152 @@ mod tests {
 
         // A cache state nobody recorded is not a cold one.
         let mut unrecorded = c.clone();
-        unrecorded.agreeing_attempts[1].independent = None;
+        unrecorded.agreeing_attempts[1].cache = None;
         assert_eq!(
             decide(&r, &unrecorded, rules(true, 3600)),
             Publication::Withheld {
-                because: Withheld::ConfirmationNotCold
+                because: Withheld::ConfirmationNotCold(NotCold::Unrecorded)
             }
         );
+    }
+
+    fn held(because: Withheld) -> Publication {
+        Publication::Withheld { because }
+    }
+
+    /// `same_host_local_images`: a confirmation on the first attempt's machine that ran cold on a
+    /// local image pinned by its content id counts where the operator set it beside
+    /// `same_host_confirmation`, and nowhere else. Every other part of the rule is asked as before.
+    #[test]
+    fn a_local_image_pinned_by_its_content_id_counts_only_where_the_operator_accepts_it() {
+        let r = record(Some("normalized"), "mirror-only");
+        let pair = |second: Attempt| with(vec![attempt("a", "machine-id:one", 0, false), second]);
+        let on = |pin| cold_on("b", "machine-id:one", 2 * HOUR, pin);
+        let local = pair(on(Some(ImagePin::LocalContentId)));
+        assert_eq!(
+            decide(&r, &local, rules_local(true, true, 3600)),
+            Publication::Published
+        );
+        assert_eq!(
+            decide(&r, &local, rules_local(true, false, 3600)),
+            held(Withheld::ConfirmationNotCold(NotCold::LocalImage)),
+            "off by default, and a local image is not an image pulled again"
+        );
+        assert_eq!(
+            decide(&r, &local, rules_local(false, true, 3600)),
+            held(Withheld::SameHost),
+            "set alone it changes nothing: one machine still cannot confirm itself"
+        );
+
+        // A registry's image that was not pulled again, a reference with nothing to pull by, and
+        // a record that does not say how its image was pinned: refused whatever the setting.
+        for pin in [Some(ImagePin::RegistryDigest), Some(ImagePin::Other), None] {
+            assert_eq!(
+                decide(&r, &pair(on(pin)), rules_local(true, true, 3600)),
+                held(Withheld::ConfirmationNotCold(NotCold::NotRepulled)),
+                "{pin:?}"
+            );
+        }
+        // Anything warm is warm, whatever the image.
+        let mut warm = local.clone();
+        if let Some(cache) = warm.agreeing_attempts[1].cache.as_mut() {
+            cache.warm = vec![CacheState::DERIVED_IMAGE.into()];
+        }
+        assert_eq!(
+            decide(&r, &warm, rules_local(true, true, 3600)),
+            held(Withheld::ConfirmationNotCold(NotCold::Warm))
+        );
+        // And the interval, and a record of where each ran.
+        let soon = pair(cold_on("b", "machine-id:one", 60, Some(ImagePin::LocalContentId)));
+        assert_eq!(
+            decide(&r, &soon, rules_local(true, true, 3600)),
+            held(Withheld::AttemptsTooClose)
+        );
+        let mut nowhere = local.clone();
+        nowhere.agreeing_attempts[1].host = None;
+        assert_eq!(
+            decide(&r, &nowhere, rules_local(true, true, 3600)),
+            held(Withheld::ConfirmationUnrecorded)
+        );
+        // A confirmation that was pulled again counts as it always did, with the setting or not.
+        let repulled = pair(attempt("b", "machine-id:one", 2 * HOUR, true));
+        for local_images in [false, true] {
+            assert_eq!(
+                decide(&r, &repulled, rules_local(true, local_images, 3600)),
+                Publication::Published
+            );
+        }
+    }
+
+    /// One reason on the wire and in the page's legend, and a sentence that says which part fell
+    /// short — and, where only the setting stood in the way, names it.
+    #[test]
+    fn a_confirmation_that_was_not_cold_says_which_part_and_names_the_setting_it_lacked() {
+        let parts = [
+            NotCold::Unrecorded,
+            NotCold::Warm,
+            NotCold::NotRepulled,
+            NotCold::LocalImage,
+        ];
+        let said = |p| Withheld::ConfirmationNotCold(p).sentence();
+        for p in parts {
+            let w = Withheld::ConfirmationNotCold(p);
+            assert_eq!(w.key(), "confirmation_not_cold", "{p:?}");
+            assert_eq!(
+                serde_json::to_value(w).unwrap(),
+                serde_json::Value::from("confirmation_not_cold"),
+                "{p:?}"
+            );
+            assert_eq!(
+                said(p).contains("same_host_local_images"),
+                p == NotCold::LocalImage,
+                "{p:?}: {}",
+                said(p)
+            );
+        }
+        let distinct: std::collections::BTreeSet<&str> = parts.iter().map(|&p| said(p)).collect();
+        assert_eq!(distinct.len(), parts.len(), "each part is its own sentence");
+        assert!(said(NotCold::Unrecorded).contains("does not record"));
+        assert!(said(NotCold::Warm).contains("cache could have supplied it"));
+        assert!(said(NotCold::NotRepulled).contains("did not pull its base image again"));
+        assert!(said(NotCold::LocalImage).contains("local base image"));
+        assert!(said(NotCold::LocalImage).contains("which no registry digest names"));
+    }
+
+    /// Of two pairs that fell short of cold, the one nearer publishing is named — a local image the
+    /// setting would accept, over a warm cache and over a registry's image that was not pulled
+    /// again, which no setting would accept — whichever is met first.
+    #[test]
+    fn of_two_pairs_that_were_not_cold_the_nearer_is_named() {
+        let r = record(Some("exact"), "mirror-only");
+        let local =
+            |run, began| cold_on(run, "machine-id:one", began, Some(ImagePin::LocalContentId));
+        let warm = |run, began| attempt(run, "machine-id:one", began, false);
+        let kept =
+            |run, began| cold_on(run, "machine-id:one", began, Some(ImagePin::RegistryDigest));
+        for c in [
+            with(vec![warm("a", 0), local("b", 2 * HOUR), warm("c", 4 * HOUR)]),
+            with(vec![warm("a", 0), warm("b", 2 * HOUR), local("c", 4 * HOUR)]),
+            // Of one rank, these were named by whichever pair began first: the operator was told
+            // the image was not pulled again where turning on the setting would have published.
+            with(vec![warm("a", 0), kept("b", 2 * HOUR), local("c", 4 * HOUR)]),
+            with(vec![warm("a", 0), local("b", 2 * HOUR), kept("c", 4 * HOUR)]),
+        ] {
+            assert_eq!(
+                decide(&r, &c, rules(true, 3600)),
+                held(Withheld::ConfirmationNotCold(NotCold::LocalImage)),
+                "{:?}",
+                c.agreeing_attempts
+            );
+        }
+        // With the setting on, the local image's pair publishes, in either order.
+        let on = rules_local(true, true, 3600);
+        for c in [
+            with(vec![warm("a", 0), kept("b", 2 * HOUR), local("c", 4 * HOUR)]),
+            with(vec![warm("a", 0), local("b", 2 * HOUR), kept("c", 4 * HOUR)]),
+        ] {
+            assert_eq!(decide(&r, &c, on), Publication::Published);
+        }
     }
 
     #[test]
@@ -886,7 +1151,7 @@ mod tests {
             assert_eq!(
                 decide(&r, &c, rules(true, 3600)),
                 Publication::Withheld {
-                    because: Withheld::ConfirmationNotCold
+                    because: Withheld::ConfirmationNotCold(NotCold::Warm)
                 }
             );
         }
@@ -969,6 +1234,7 @@ mod tests {
             Switches::default().confirmation,
             Confirmation {
                 same_host: false,
+                local_images: false,
                 interval: Duration::from_secs(3600),
             }
         );
@@ -1297,6 +1563,7 @@ mod tests {
                                         stop_divergences: stop,
                                         confirmation: Confirmation {
                                             same_host,
+                                            local_images: same_host,
                                             interval: Duration::from_secs(7 * 86_400),
                                         },
                                     },
@@ -1328,7 +1595,10 @@ mod tests {
             Withheld::ConfirmationUnrecorded,
             Withheld::AttemptsTooClose,
             Withheld::SameHost,
-            Withheld::ConfirmationNotCold,
+            Withheld::ConfirmationNotCold(NotCold::Unrecorded),
+            Withheld::ConfirmationNotCold(NotCold::Warm),
+            Withheld::ConfirmationNotCold(NotCold::NotRepulled),
+            Withheld::ConfirmationNotCold(NotCold::LocalImage),
             Withheld::OpenEgress,
             Withheld::GuardTripped,
             Withheld::NonBuiltinStabilizer,
@@ -1399,7 +1669,10 @@ mod tests {
             Withheld::ConfirmationUnrecorded,
             Withheld::AttemptsTooClose,
             Withheld::SameHost,
-            Withheld::ConfirmationNotCold,
+            Withheld::ConfirmationNotCold(NotCold::Unrecorded),
+            Withheld::ConfirmationNotCold(NotCold::Warm),
+            Withheld::ConfirmationNotCold(NotCold::NotRepulled),
+            Withheld::ConfirmationNotCold(NotCold::LocalImage),
             Withheld::OpenEgress,
             Withheld::GuardTripped,
             Withheld::NonBuiltinStabilizer,
@@ -1428,7 +1701,10 @@ mod tests {
             Withheld::ConfirmationUnrecorded,
             Withheld::AttemptsTooClose,
             Withheld::SameHost,
-            Withheld::ConfirmationNotCold,
+            Withheld::ConfirmationNotCold(NotCold::Unrecorded),
+            Withheld::ConfirmationNotCold(NotCold::Warm),
+            Withheld::ConfirmationNotCold(NotCold::NotRepulled),
+            Withheld::ConfirmationNotCold(NotCold::LocalImage),
             Withheld::OpenEgress,
             Withheld::GuardTripped,
             Withheld::NonBuiltinStabilizer,

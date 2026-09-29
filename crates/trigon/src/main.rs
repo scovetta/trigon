@@ -348,9 +348,13 @@ enum Cmd {
         /// Working directory for the fetched and rebuilt artifacts.
         #[arg(long, default_value = "./trigon-work")]
         work: PathBuf,
-        /// What the build may reach: `open` (the default), `mirror`, `mirror-only` or `deny-all`.
-        /// Taken from the run under `--confirm`.
-        #[arg(long)]
+        /// What the build may reach: `open` (the default), `mirror-only`, `deny-all`, or
+        /// `git-and-mirror`, which the podman runner does not offer yet. Taken from the run under
+        /// `--confirm`.
+        ///
+        /// Checked here, as the arguments are read: a tier that does not exist was otherwise
+        /// refused only by the build, after the package had been fetched and a strategy chosen.
+        #[arg(long, value_parser = ["deny-all", "mirror-only", "git-and-mirror", "open"])]
         egress: Option<String>,
         #[arg(long, default_value_t = 1800)]
         timeout: u64,
@@ -822,7 +826,12 @@ enum Cmd {
         image: String,
         #[arg(long, default_value = "./trigon-sweep")]
         work: PathBuf,
-        #[arg(long, default_value = "open")]
+        /// What every build may reach, as `rebuild --egress` takes it.
+        #[arg(
+            long,
+            default_value = "open",
+            value_parser = ["deny-all", "mirror-only", "git-and-mirror", "open"]
+        )]
         egress: String,
         #[arg(long, default_value_t = 600)]
         timeout: u64,
@@ -2492,11 +2501,11 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
         } => {
             // The gate's settings, which decide when a confirmation may run and where. Read once,
             // here, as `trigon serve` and `trigon attest` read them.
-            let publish = trigon_attest::config::EvidenceConfig::load(
+            let evidence = trigon_attest::config::EvidenceConfig::load(
                 &trigon_attest::config::Env::from_process()?,
-            )?
-            .publish()
-            .clone();
+            )?;
+            say_config_notes(&evidence);
+            let publish = evidence.publish().clone();
             worker::serve(
                 &queue,
                 worker::Builder {
@@ -4120,6 +4129,7 @@ fn serve_corpus(
     let evidence = trigon_attest::config::EvidenceConfig::load(
         &trigon_attest::config::Env::from_process()?,
     )?;
+    say_config_notes(&evidence);
     let cfg = trigon_api::Config {
         bind,
         unauthenticated: if public {
@@ -4227,6 +4237,26 @@ fn field_wrapped(label: &str, text: &str, paint: fn(&str) -> String) {
         style::label_col(label),
         paint(&style::wrap(text, style::VALUE_COL))
     );
+}
+
+/// What the evidence configuration notes: a setting that, as configured, changes nothing
+/// ([`trigon_attest::config::EvidenceConfig::notes`]). On stderr, beside what the command prints,
+/// and never a refusal: the file is well formed, and the command goes on.
+///
+/// Said by the commands that read the gate's settings — `serve`, `worker`, `attest`, `publish` and
+/// `rebuild --confirm` — since those are where a setting that does nothing would otherwise be
+/// believed to be on.
+#[cfg(feature = "build")]
+fn say_config_notes(config: &trigon_attest::config::EvidenceConfig) {
+    for n in config.notes() {
+        say_config_note(n);
+    }
+}
+
+/// One of [`say_config_notes`]'s notes.
+#[cfg(feature = "build")]
+fn say_config_note(note: &str) {
+    eprintln!("{} {}", style::warn("note:"), style::wrap(note, 6));
 }
 
 /// A risk tier, painted by how much latitude the pass took. Structural and metadata edits are the
@@ -5455,7 +5485,15 @@ mod rebuild {
         // anything else: one that cannot be repeated is refused before a registry is asked
         // anything, and before a work directory says a run happened.
         let confirm = match args.confirm.clone() {
-            Some(run) => Some(confirming(&mut args, &run, verbose)?),
+            Some(run) => {
+                let c = confirming(&mut args, &run, verbose)?;
+                // What the gate will make of this attempt, which it says before the build.
+                let gate = gate_settings(
+                    &trigon_attest::config::Env::from_process()?,
+                    crate::say_config_note,
+                )?;
+                Some(Confirming { gate, ..c })
+            }
             None => None,
         };
         let work = args.work.clone();
@@ -5528,6 +5566,11 @@ mod rebuild {
         /// The image an earlier run derived, where the run it confirms ran on one, as this attempt
         /// reuses it: `built_here` false. See [`confirming`].
         derived_image: Option<trigon_store::DerivedImage>,
+        /// The gate's confirmation settings, from the configuration `trigon serve`, `trigon
+        /// attest` and `trigon publish` read them from: what this attempt says, before the build,
+        /// the gate will make of a base image it did not pull again. Read by [`run_one`];
+        /// [`confirming`] reads the store and nothing else, and leaves the defaults.
+        gate: trigon_api::Confirmation,
     }
 
     /// Read `run` from the store, refuse it where it cannot be repeated, and set `args` up to
@@ -5542,7 +5585,8 @@ mod rebuild {
     ///   fetched again rather than copied from one an earlier run left;
     /// - the fetch cache (`--cache`): none, which the parser also refuses;
     /// - the base image: taken out of the image store and pulled again by digest, before the
-    ///   build, where it has a registry to be pulled from; where it does not, the record says so.
+    ///   build, where it has a registry to be pulled from — a registry's image the run named by its
+    ///   content id included ([`image_pin`]); where it does not, the record says so.
     ///
     /// **An image an earlier run derived is carried over as one**, with `built_here` false, and
     /// listed as a cache the attempt reused. The build is handed it by id, which the build reads as
@@ -5731,6 +5775,7 @@ mod rebuild {
                     ..d
                 }
             }),
+            gate: trigon_api::Confirmation::default(),
         })
     }
 
@@ -5799,6 +5844,9 @@ mod rebuild {
         checkout: bool,
         /// Whether the base image was taken out of the image store and pulled again by digest.
         repulled: bool,
+        /// How a confirmation's base image was pinned ([`image_pin`]). `None` for any other run,
+        /// which asks nothing of its image.
+        image_pin: Option<trigon_store::ImagePin>,
         /// The image the build ran on, where a run derived it.
         derived: Option<&'a trigon_store::DerivedImage>,
     }
@@ -5832,8 +5880,153 @@ mod rebuild {
             CacheState {
                 warm,
                 image_repulled: self.repulled,
+                image_pin: self.image_pin,
             }
         }
+    }
+
+    /// How a confirmation's base image is pinned, and the registry digest it is pulled again by —
+    /// or why there is none: what decides whether it is pulled again, and what its record says of
+    /// it (`docs/19` D8).
+    ///
+    /// A registry's image named by digest is pulled again by it. A reference that is neither that
+    /// nor a full content id — a tag, a short id, a `localhost/` name — names nothing a registry
+    /// serves by digest.
+    ///
+    /// **A content id is asked about, never taken for a local image on sight.** It says nothing of
+    /// where the bytes came from, and a registry's image is named by one as readily as an image
+    /// built here: `TRIGON_BASE_PARENT=<an image id>` does it, and so does the parent a trigon base
+    /// image's label names, which `--image auto` runs on wherever it carries what a strategy
+    /// needs. So `repo_digests` is asked which registry digests name it — podman's `RepoDigests`,
+    /// in the run. Where one does, it is that registry's image, and is pulled again by that
+    /// digest; only where none does — the `localhost/` digest podman gives an image built here is
+    /// no registry's — is it a local image with nothing to pull it again by, the one case
+    /// `same_host_local_images` accepts. Where podman cannot say, it is neither, and held to what
+    /// an image that was not pulled again is held to.
+    fn image_pin(
+        image: &str,
+        repo_digests: impl FnOnce(&str) -> Result<Vec<String>, String>,
+    ) -> (trigon_store::ImagePin, Result<String, String>) {
+        use trigon_store::ImagePin;
+        match trigon_sandbox::repullable(image) {
+            Ok(()) => return (ImagePin::RegistryDigest, Ok(image.to_string())),
+            Err(why) if !trigon_sandbox::is_content_id(image) => {
+                return (ImagePin::Other, Err(why));
+            }
+            Err(_) => {}
+        }
+        let id = crate::short_ref(image);
+        match repo_digests(image) {
+            Ok(names) => match names
+                .into_iter()
+                .find(|d| trigon_sandbox::repullable(d).is_ok())
+            {
+                Some(by) => (ImagePin::RegistryDigest, Ok(by)),
+                None => (
+                    ImagePin::LocalContentId,
+                    Err(format!(
+                        "`{id}` is a local image, which no registry digest names, so there is \
+                         nothing to pull it again by"
+                    )),
+                ),
+            },
+            Err(e) => (
+                ImagePin::Other,
+                Err(format!(
+                    "podman could not say whether a registry digest names `{id}` ({e}), so it is \
+                     not taken for a local image"
+                )),
+            ),
+        }
+    }
+
+    /// What a confirmation says of a base image it did not pull again, and what the gate, under
+    /// `gate`, will make of that on the machine that made the first attempt: the sentence, and
+    /// whether it is a warning. `warm` is what the attempt reuses (`CacheState::warm`).
+    ///
+    /// A cache the attempt reuses decides first: the gate refuses it on that machine whatever is
+    /// set, and a confirmation of a run on a derived image reuses the image that run derived,
+    /// which is also a local image pinned by its content id — so without this the line would
+    /// offer `same_host_local_images` as the way through, and setting it would change nothing.
+    /// Otherwise a local image pinned by its content id is the one case the configuration
+    /// decides: `same_host_local_images` accepts it, beside `same_host_confirmation`, and without
+    /// it the line names the setting, since the setting is all that stands between the attempt and
+    /// a confirmation. A registry image the pull failed for, and a reference with nothing to pull
+    /// by, are not counted on that machine whatever is set.
+    fn not_repulled(
+        image: &str,
+        pin: trigon_store::ImagePin,
+        why: &str,
+        gate: trigon_api::Confirmation,
+        warm: &[String],
+    ) -> (String, bool) {
+        use trigon_store::CacheState;
+        let reused = match warm {
+            [] => None,
+            w if w.iter().any(|c| c == CacheState::DERIVED_IMAGE) => Some(format!(
+                "it runs on an image an earlier run derived, which is a cache it reuses \
+                 (`{}`)",
+                CacheState::DERIVED_IMAGE
+            )),
+            w => Some(format!("it reuses a cache (`{}`)", w.join("`, `"))),
+        };
+        let refused = "on this machine the gate will not count this attempt as a confirmation";
+        if pin != trigon_store::ImagePin::LocalContentId {
+            return (
+                match reused {
+                    None => format!("not pulled again: {why}. The record says so, and {refused}"),
+                    Some(r) => format!(
+                        "not pulled again: {why}. The record says so, and {refused}, whatever is \
+                         set: {r}"
+                    ),
+                },
+                true,
+            );
+        }
+        let local = format!(
+            "not pulled again: `{}` is a local image, pinned by its content id, which no registry \
+             digest names, so there is nothing to pull it again by. The record says so",
+            crate::short_ref(image)
+        );
+        if let Some(r) = reused {
+            return (format!("{local}, and {refused}, whatever is set: {r}"), true);
+        }
+        match (gate.same_host, gate.local_images) {
+            (true, true) => (
+                format!(
+                    "{local}, and `same_host_local_images` accepts a local image so pinned: on \
+                     this machine the gate counts it as it would an image pulled again"
+                ),
+                false,
+            ),
+            (true, false) => (
+                format!("{local}, and {refused} unless `[publish] same_host_local_images` is set"),
+                true,
+            ),
+            (false, _) => (
+                format!("{local}, and {refused}: `[publish] same_host_confirmation` is off"),
+                true,
+            ),
+        }
+    }
+
+    /// The gate's confirmation settings, read from the configuration `serve`, `attest` and
+    /// `publish` read them from, with each note the configuration makes of them handed to `note`:
+    /// what `--confirm` says, before the build, the gate will make of a base image it did not pull
+    /// again. A file that cannot be read is refused as those commands refuse it, before anything
+    /// is fetched.
+    ///
+    /// Its own function because the run that calls it goes on to a registry: this is the part of
+    /// `--confirm` that reads the configuration, and a test can reach it.
+    fn gate_settings(
+        env: &trigon_attest::config::Env,
+        mut note: impl FnMut(&str),
+    ) -> Result<trigon_api::Confirmation> {
+        let config = trigon_attest::config::EvidenceConfig::load(env)?;
+        for n in config.notes() {
+            note(n);
+        }
+        Ok(trigon_api::Confirmation::from(config.publish()))
     }
 
     /// What a terminal record needs, gathered as the run learns it.
@@ -6496,10 +6689,29 @@ mod rebuild {
             egress: &args.egress,
             checkout: checkout.is_some(),
             repulled: false,
+            image_pin: None,
             derived: confirm.and_then(|c| c.derived_image.as_ref()),
         };
-        if confirm.is_some() {
-            match trigon_sandbox::repull("podman", &args.image) {
+        if let Some(c) = confirm {
+            // How the image is pinned, recorded beside whether it was pulled again: a local image
+            // had nothing to pull again by, which the gate tells from a pull that failed.
+            let (pin, by) = image_pin(&args.image, |id| trigon_sandbox::repo_digests("podman", id));
+            reuse.image_pin = Some(pin);
+            let pulled = by.and_then(|by| {
+                if by == args.image {
+                    return trigon_sandbox::repull("podman", &by);
+                }
+                // A registry's image the run named by its id: taken out by the id, pulled again by
+                // the digest, and counted only if the id came back.
+                trigon_sandbox::repull_by("podman", &args.image, &by).map_err(|e| {
+                    format!(
+                        "`{}` is the registry's `{}`, and {e}",
+                        crate::short_ref(&args.image),
+                        crate::short_ref(&by)
+                    )
+                })
+            });
+            match pulled {
                 Ok(()) => {
                     reuse.repulled = true;
                     if verbose {
@@ -6510,16 +6722,17 @@ mod rebuild {
                     }
                 }
                 // Not a refusal. On another machine a confirmation needs no re-pull, and on this
-                // one the gate reads what the record says and withholds; saying so here is what
-                // keeps that from being a surprise.
-                Err(why) => field_wrapped(
-                    "image",
-                    &format!(
-                        "not pulled again: {why}. The record says so, and on this machine the \
-                         gate will not count this attempt as a confirmation"
-                    ),
-                    style::warn,
-                ),
+                // one the gate reads what the record says and decides; saying here what it will
+                // decide, under the settings it reads, is what keeps that from being a surprise.
+                Err(why) => {
+                    let warm = reuse.state().warm;
+                    let (said, warning) = not_repulled(&args.image, pin, &why, c.gate, &warm);
+                    field_wrapped(
+                        "image",
+                        &said,
+                        if warning { style::warn } else { style::muted },
+                    );
+                }
             }
         }
         let no_cache = reuse.no_cache();
@@ -8747,10 +8960,11 @@ output_path: '*.tgz'
             assert_eq!(warm(open), [CacheState::LAYERS]);
 
             // A confirmation at an enforced tier, its image pulled again: nothing, and
-            // independent, which is the one state the gate accepts from one machine.
+            // independent, which is the one state the gate accepts from one machine by default.
             let confirming = Reuse {
                 confirm: true,
                 repulled: true,
+                image_pin: Some(trigon_store::ImagePin::RegistryDigest),
                 ..plain
             };
             assert!(
@@ -8762,6 +8976,7 @@ output_path: '*.tgz'
                 CacheState {
                     warm: Vec::new(),
                     image_repulled: true,
+                    image_pin: Some(trigon_store::ImagePin::RegistryDigest),
                 }
             );
             assert!(confirming.state().independent());
@@ -8771,6 +8986,23 @@ output_path: '*.tgz'
                 ..confirming
             };
             assert!(kept.state().cold() && !kept.state().independent());
+            // A local image, which had nothing to pull it again by, says so beside it: the one
+            // case `same_host_local_images` lets the gate accept.
+            let local = Reuse {
+                image_pin: Some(trigon_store::ImagePin::LocalContentId),
+                ..kept
+            };
+            assert_eq!(
+                local.state(),
+                CacheState {
+                    warm: Vec::new(),
+                    image_repulled: false,
+                    image_pin: Some(trigon_store::ImagePin::LocalContentId),
+                }
+            );
+            // Any other run asks nothing of its image, and its record says nothing of how it was
+            // pinned.
+            assert_eq!(plain.state().image_pin, None);
 
             // A derived image an earlier run built is a cache; one this run built is not.
             let mut image = trigon_store::DerivedImage {
@@ -8793,6 +9025,272 @@ output_path: '*.tgz'
                 }),
                 [CacheState::LAYERS, CacheState::SOURCES]
             );
+        }
+
+        /// How `--confirm` classifies the base image it repeats, and what it pulls it again by: a
+        /// registry's image by digest is pulled again by it; a full content id is asked about, and
+        /// is a registry's image where a registry digest names it and a local image with nothing
+        /// to pull it again by only where none does; anything else — a registry tag without a
+        /// digest above all — is neither.
+        #[test]
+        fn how_a_confirmation_classifies_its_image() {
+            use trigon_store::ImagePin;
+            let hex = "f21d52e1657f28329790932f70bce9d4ddc2617ddfff54af98b02cbcf3d97cf6";
+            let registry = format!("docker.io/library/node@sha256:{}", "ab".repeat(32));
+            let built_here = format!("localhost/trigon-base@sha256:{}", "cd".repeat(32));
+            let asked = &std::cell::RefCell::new(Vec::<String>::new());
+            // What podman says of each id, as `repo_digests` reads it.
+            let podman = move |says: Result<Vec<String>, String>| {
+                move |id: &str| {
+                    asked.borrow_mut().push(id.to_string());
+                    says
+                }
+            };
+            let never = || podman(Err("asked of a reference that is not an id".into()));
+            for (image, pin) in [
+                (
+                    format!("docker.io/library/debian@sha256:{hex}"),
+                    ImagePin::RegistryDigest,
+                ),
+                (
+                    format!("mcr.microsoft.com/dotnet/sdk@sha256:{hex}"),
+                    ImagePin::RegistryDigest,
+                ),
+                // A registry tag names no bytes in particular, and gives nothing to pull by.
+                ("docker.io/library/debian:bookworm-slim".into(), ImagePin::Other),
+                ("docker.io/library/node".into(), ImagePin::Other),
+                // A short id prefixes whichever image the store holds; a `localhost/` name, digest
+                // or tag, is no registry's.
+                (hex[..12].to_string(), ImagePin::Other),
+                (
+                    "localhost/trigon-base:auto-0123456789abcdef".into(),
+                    ImagePin::Other,
+                ),
+                (built_here.clone(), ImagePin::Other),
+            ] {
+                let (got, by) = image_pin(&image, never());
+                assert_eq!(got, pin, "{image}");
+                // A digest reference is exactly what it pulls again by, and nothing else is.
+                assert_eq!(
+                    by.as_deref().ok(),
+                    (pin == ImagePin::RegistryDigest).then_some(&*image),
+                    "{image}"
+                );
+                assert_eq!(
+                    trigon_sandbox::repullable(&image).is_ok(),
+                    pin == ImagePin::RegistryDigest,
+                    "{image}"
+                );
+            }
+            assert!(asked.borrow().is_empty(), "podman asked of {:?}", asked.borrow());
+
+            for id in [hex.to_string(), format!("sha256:{hex}")] {
+                // As `--image auto` and `trigon base-image` record the images they build: podman
+                // gives each a `localhost/` digest, which no registry serves, or none.
+                for names in [vec![built_here.clone()], Vec::new()] {
+                    let (pin, by) = image_pin(&id, podman(Ok(names.clone())));
+                    assert_eq!(pin, ImagePin::LocalContentId, "{id} named {names:?}");
+                    let why = by.unwrap_err();
+                    assert!(
+                        why.contains("is a local image, which no registry digest names"),
+                        "{why}"
+                    );
+                }
+                // A registry's image named by its id — `TRIGON_BASE_PARENT=<an image id>`, or the
+                // parent a trigon base image's label names — is that registry's, and is pulled
+                // again by the registry's digest, the `localhost/` one passed over.
+                let names = vec![built_here.clone(), registry.clone()];
+                let (pin, by) = image_pin(&id, podman(Ok(names)));
+                assert_eq!(pin, ImagePin::RegistryDigest, "{id}");
+                assert_eq!(by.as_deref(), Ok(&*registry));
+                // And where podman cannot say, it is not taken for a local image.
+                let (pin, by) = image_pin(&id, podman(Err("image not known".into())));
+                assert_eq!(pin, ImagePin::Other, "{id}");
+                let why = by.unwrap_err();
+                assert!(why.contains("podman could not say") && why.contains("image not known"));
+                assert!(why.contains("not taken for a local image"), "{why}");
+            }
+            assert_eq!(asked.borrow().len(), 8, "each id is asked about: {:?}", asked.borrow());
+        }
+
+        /// What `--confirm` says of an image it did not pull again follows the configuration the
+        /// gate reads: with `same_host_local_images` on, that the local image is accepted by it;
+        /// off, that the setting is what the attempt lacks; for a registry's image, that the gate
+        /// will not count it on this machine, whatever is set; and for an attempt that reuses a
+        /// cache — the image an earlier run derived, above all — the same, since the setting
+        /// cannot help it.
+        #[test]
+        fn what_a_confirmation_says_of_an_image_it_did_not_pull_again_follows_the_configuration() {
+            use trigon_store::ImagePin;
+            let id = "f21d52e1657f28329790932f70bce9d4ddc2617ddfff54af98b02cbcf3d97cf6";
+            let gate = |same_host, local_images| trigon_api::Confirmation {
+                same_host,
+                local_images,
+                ..Default::default()
+            };
+            let why = image_pin(id, |_| Ok(Vec::new())).1.unwrap_err();
+            let local = ImagePin::LocalContentId;
+
+            let (said, warning) = not_repulled(id, local, &why, gate(true, true), &[]);
+            assert!(!warning, "{said}");
+            assert!(said.contains("`same_host_local_images` accepts"), "{said}");
+            assert!(!said.contains("will not count"), "{said}");
+
+            let (said, warning) = not_repulled(id, local, &why, gate(true, false), &[]);
+            assert!(warning, "{said}");
+            assert!(said.contains("will not count this attempt"), "{said}");
+            assert!(said.contains("unless `[publish] same_host_local_images` is set"), "{said}");
+
+            for local_images in [false, true] {
+                let (said, warning) =
+                    not_repulled(id, local, &why, gate(false, local_images), &[]);
+                assert!(warning, "{said}");
+                assert!(said.contains("`[publish] same_host_confirmation` is off"), "{said}");
+            }
+            // Each names the image, shortened as every id is shown, as a local image, and says
+            // there was nothing to pull it by.
+            let (said, _) = not_repulled(id, local, &why, gate(true, true), &[]);
+            assert!(said.contains(&crate::short_ref(id)), "{said}");
+            assert!(said.contains("is a local image, pinned by its content id"), "{said}");
+            assert!(!said.contains("built on this machine"), "{said}");
+
+            // A registry's image the pull failed for — named by digest, or by its id — or a tag,
+            // is refused on this machine by every configuration, and the line says why the pull
+            // did not happen.
+            let failed = "pulling it again failed: manifest unknown";
+            for (image, pin, why) in [
+                (
+                    format!("docker.io/library/debian@sha256:{id}"),
+                    ImagePin::RegistryDigest,
+                    failed.to_string(),
+                ),
+                (
+                    id.to_string(),
+                    ImagePin::RegistryDigest,
+                    format!("`{}` is the registry's `…`, and {failed}", crate::short_ref(id)),
+                ),
+                (
+                    "docker.io/library/debian:bookworm".to_string(),
+                    ImagePin::Other,
+                    trigon_sandbox::repullable("docker.io/library/debian:bookworm").unwrap_err(),
+                ),
+            ] {
+                for (same_host, local_images) in [(true, true), (true, false), (false, true)] {
+                    let (said, warning) =
+                        not_repulled(&image, pin, &why, gate(same_host, local_images), &[]);
+                    assert!(warning, "{said}");
+                    assert!(
+                        said.contains("the gate will not count this attempt as a confirmation"),
+                        "{said}"
+                    );
+                    assert!(said.contains(&why), "{said}");
+                    assert!(!said.contains("same_host_local_images"), "{said}");
+                    assert!(!said.contains("local image"), "{said}");
+                }
+            }
+
+            // The confirmation of a run on a derived image: its image is the one that run
+            // derived, a local image pinned by its id, carried over and so a cache. The gate
+            // refuses it as warm whatever is set, and the line says so — never that the setting
+            // accepts it, nor that the setting is what it lacks.
+            let derived = trigon_store::DerivedImage {
+                parent: "docker.io/library/debian@sha256:aa".into(),
+                packages: vec!["build-essential".into()],
+                built_here: false,
+            };
+            let warm = Reuse {
+                confirm: true,
+                egress: "mirror-only",
+                checkout: true,
+                image_pin: Some(local),
+                derived: Some(&derived),
+                ..Reuse::default()
+            }
+            .state()
+            .warm;
+            assert_eq!(warm, [trigon_store::CacheState::DERIVED_IMAGE]);
+            for (same_host, local_images) in [(true, true), (true, false), (false, true)] {
+                let (said, warning) =
+                    not_repulled(id, local, &why, gate(same_host, local_images), &warm);
+                assert!(warning, "{said}");
+                assert!(
+                    said.contains(
+                        "the gate will not count this attempt as a confirmation, whatever is set"
+                    ),
+                    "{said}"
+                );
+                assert!(said.contains("an image an earlier run derived"), "{said}");
+                assert!(!said.contains("same_host_local_images"), "{said}");
+                assert!(!said.contains("same_host_confirmation"), "{said}");
+            }
+            // And any other cache is named as one.
+            let (said, warning) = not_repulled(
+                id,
+                local,
+                &why,
+                gate(true, true),
+                &[trigon_store::CacheState::LAYERS.into()],
+            );
+            assert!(warning, "{said}");
+            assert!(said.contains("whatever is set: it reuses a cache (`build-layers`)"), "{said}");
+        }
+
+        /// `--confirm` builds its gate from the configuration, as `serve`, `attest` and `publish`
+        /// build theirs, and says each note the configuration makes of it. Its line about an image
+        /// it did not pull again follows that gate, so a gate left at the defaults would tell an
+        /// operator who set both settings that the attempt will not count.
+        #[test]
+        fn a_confirmation_reads_the_gate_from_the_configuration_and_says_its_notes() {
+            let work = tmpdir("confirm-gate");
+            let file = work.join("evidence.toml");
+            let env = Env {
+                cwd: work.clone(),
+                evidence_config: Some(file.clone()),
+                ..Default::default()
+            };
+            let read = |text: &str| {
+                std::fs::write(&file, text).unwrap();
+                let mut notes = Vec::new();
+                gate_settings(&env, |n| notes.push(n.to_string())).map(|g| (g, notes))
+            };
+
+            let (gate, notes) = read(
+                "[publish]\nsame_host_confirmation = true\nsame_host_local_images = true\n\
+                 confirmation_interval = \"10m\"\n",
+            )
+            .unwrap();
+            assert_eq!(
+                gate,
+                trigon_api::Confirmation {
+                    same_host: true,
+                    local_images: true,
+                    interval: std::time::Duration::from_secs(600),
+                }
+            );
+            assert!(notes.is_empty(), "{notes:?}");
+
+            // Alone, it is read, and the note says it changes nothing, naming both settings and
+            // the file.
+            let (gate, notes) = read("[publish]\nsame_host_local_images = true\n").unwrap();
+            assert!(gate.local_images && !gate.same_host, "{gate:?}");
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            for says in [
+                "same_host_local_images",
+                "same_host_confirmation",
+                "changes nothing",
+                &*file.display().to_string(),
+            ] {
+                assert!(notes[0].contains(says), "{says}: {}", notes[0]);
+            }
+
+            // None: the defaults, and nothing to say.
+            let (gate, notes) = read("").unwrap();
+            assert_eq!(gate, trigon_api::Confirmation::default());
+            assert!(notes.is_empty(), "{notes:?}");
+
+            // A file that cannot be read is refused, as `serve`, `attest` and `publish` refuse it.
+            let e = read("[publish]\nsame_host_local_image = true\n").unwrap_err();
+            assert!(format!("{e:#}").contains("same_host_local_image"), "{e:#}");
         }
 
         /// A confirmation of a run on a derived image says it ran on one, and reused it. It
@@ -13378,6 +13876,7 @@ mod attestor {
         // Before anything is read or signed: a configuration file with an unknown key or a pin
         // that does not parse is refused here, and the main loop exits 5 on it.
         let config = EvidenceConfig::load(&Env::from_process()?)?;
+        crate::say_config_notes(&config);
         let signer: Box<dyn trigon_attest::Signer> = match &args.key {
             Some(p) => Box::new(crate::load_key(p)?),
             None => Box::new(trigon_attest::Unsigned),

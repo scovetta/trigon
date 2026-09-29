@@ -26,8 +26,8 @@ pub use model::{
 pub use network::{Island, MirrorLog, owner_is_gone};
 pub use podman::reap_deferred;
 pub use podman::{
-    PodmanRunner, failing_phase as failing_phase_for_test, is_pinned, repull, repullable,
-    resolvable,
+    PodmanRunner, failing_phase as failing_phase_for_test, is_content_id, is_pinned, repo_digests,
+    repull, repull_by, repullable, resolvable,
 };
 pub use runner::{BuildHandle, BuildRunner, route};
 

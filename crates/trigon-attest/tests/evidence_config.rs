@@ -102,12 +102,14 @@ fn with_nothing_configured_every_setting_has_its_default() {
     );
     assert_eq!(p.rebuilt_artifacts, RebuiltArtifacts::None, "D4's");
     assert!(!p.same_host_confirmation, "D8's");
+    assert!(!p.same_host_local_images, "D8's, for an image built here");
     assert_eq!(p.confirmation_interval, Duration::from_secs(3600));
     assert_eq!(p.heartbeat, Duration::from_secs(7 * 86_400));
     assert_eq!(c.freshness().stale_after, Duration::from_secs(86_400));
     assert_eq!(c.freshness().frozen_after, Duration::from_secs(14 * 86_400));
     assert!(c.sources().is_empty());
     assert!(c.files_read().is_empty());
+    assert!(c.notes().is_empty());
     assert_eq!(p.namespace(), None);
 }
 
@@ -194,6 +196,7 @@ log_key = "~/.config/trigon/log.key"
 divergences = "feed"
 rebuilt_artifacts = "github-release"
 same_host_confirmation = true
+same_host_local_images = true
 confirmation_interval = "30m"
 heartbeat = "3d"
 
@@ -241,6 +244,8 @@ attestation_key = "attestation.pub"
     assert_eq!(p.divergences, Divergences::Feed);
     assert_eq!(p.rebuilt_artifacts, RebuiltArtifacts::GithubRelease);
     assert!(p.same_host_confirmation);
+    assert!(p.same_host_local_images);
+    assert!(c.notes().is_empty(), "both set is what the second asks for: {:?}", c.notes());
     assert_eq!(p.confirmation_interval, Duration::from_secs(30 * 60));
     assert_eq!(p.heartbeat, Duration::from_secs(3 * 86_400));
     assert_eq!(
@@ -299,6 +304,10 @@ fn an_unknown_key_is_an_error_in_every_table() {
             "[publish]\nsame_host_confirmations = true\n".into(),
             "same_host_confirmations",
         ),
+        (
+            "[publish]\nsame_host_local_image = true\n".into(),
+            "same_host_local_image",
+        ),
         ("[freshness]\nstale = \"1d\"\n".into(), "stale"),
         (format!("[[source]]\n{source}requried = true\n"), "requried"),
         ("[publsh]\norigin = \"x\"\n".into(), "publsh"),
@@ -317,6 +326,51 @@ fn an_unknown_key_is_an_error_in_every_table() {
     }
 }
 
+/// `same_host_local_images` widens what a same-host confirmation may run on, so set without
+/// `same_host_confirmation` it changes nothing. That is said, as a note naming the file and both
+/// settings, and it is not an error: the file is well formed and the command goes on.
+#[test]
+fn same_host_local_images_alone_changes_nothing_and_the_loader_says_so() {
+    let r = root("local-images-alone");
+    for (text, noted) in [
+        ("[publish]\nsame_host_local_images = true\n", true),
+        (
+            "[publish]\nsame_host_local_images = true\nsame_host_confirmation = false\n",
+            true,
+        ),
+        (
+            "[publish]\nsame_host_local_images = true\nsame_host_confirmation = true\n",
+            false,
+        ),
+        ("[publish]\nsame_host_confirmation = true\n", false),
+        ("[publish]\nsame_host_local_images = false\n", false),
+    ] {
+        write(&user_file(&r), text);
+        let c = loads(&env(&r));
+        assert_eq!(
+            c.publish().same_host_local_images,
+            text.contains("same_host_local_images = true"),
+            "{text}"
+        );
+        match noted {
+            true => {
+                let [note] = c.notes() else {
+                    panic!("{text}: one note, and there are {:?}", c.notes());
+                };
+                for says in [
+                    "same_host_local_images",
+                    "same_host_confirmation",
+                    "changes nothing",
+                    &*user_file(&r).display().to_string(),
+                ] {
+                    assert!(note.contains(says), "{text}: {note}");
+                }
+            }
+            false => assert!(c.notes().is_empty(), "{text}: {:?}", c.notes()),
+        }
+    }
+}
+
 #[test]
 fn a_value_of_the_wrong_kind_is_refused_with_the_key_and_the_file() {
     let r = root("values");
@@ -329,6 +383,10 @@ fn a_value_of_the_wrong_kind_is_refused_with_the_key_and_the_file() {
         (
             "[publish]\nsame_host_confirmation = \"yes\"\n",
             "same_host_confirmation",
+        ),
+        (
+            "[publish]\nsame_host_local_images = 1\n",
+            "same_host_local_images",
         ),
         (
             "[publish]\nconfirmation_interval = \"1 hour\"\n",

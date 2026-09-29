@@ -907,9 +907,18 @@ pub fn resolvable(image: &str, exists_locally: bool) -> Result<(), String> {
 /// whatever `--image` the run used, which for a locally built base is exactly that form. Trigon
 /// printed a command Trigon then rejected. One definition, so they cannot drift again.
 pub fn is_pinned(image: &str) -> bool {
-    if image.contains('@') {
-        return true;
-    }
+    image.contains('@') || is_content_id(image)
+}
+
+/// Whether this reference is an image's full content id: the sha256 of its configuration, as
+/// `sha256:<64 hex>` or the 64 hex alone, which is how podman names an image in its store and how
+/// `--image auto` and `trigon base-image` name the images they build.
+///
+/// It names exact bytes in this machine's store, and says nothing of where they came from: no
+/// registry digest is part of it, and a registry's image is named by its id as readily as one built
+/// here. Whether a registry digest names it is [`repo_digests`]'s to say (`docs/19` D8). A short id
+/// is not one; twelve hex digits name whichever image in the store they happen to prefix.
+pub fn is_content_id(image: &str) -> bool {
     let id = image.strip_prefix("sha256:").unwrap_or(image);
     id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -952,6 +961,92 @@ pub fn repullable(image: &str) -> Result<(), String> {
 /// stays, and the attempt says it was not re-pulled.
 pub fn repull(binary: &str, image: &str) -> Result<(), String> {
     repullable(image)?;
+    take_out_and_pull(binary, image, image)
+}
+
+/// The registry digests podman records for an image in the local store (`RepoDigests`): each
+/// `<name>@sha256:<64 hex>`, a registry's where the image came from one, and a `localhost/` one
+/// for an image built here, which no registry serves.
+///
+/// What a confirmation asks of an image named by its content id before it takes it for a local
+/// one ([`is_content_id`]): the id says nothing of where the bytes came from, and a registry's
+/// image is named by one as readily as a build of this machine's — `TRIGON_BASE_PARENT=<an image
+/// id>`, or the parent a trigon base image's label names, which `--image auto` builds on. `Err`
+/// where podman could not say, which is not an answer of "none".
+pub fn repo_digests(binary: &str, image: &str) -> Result<Vec<String>, String> {
+    let out = std::process::Command::new(binary)
+        .args([
+            "image",
+            "inspect",
+            image,
+            "--format",
+            "{{range .RepoDigests}}{{println .}}{{end}}",
+        ])
+        .output()
+        .map_err(|e| format!("podman could not be run to inspect it: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "podman could not inspect it: {}",
+            runtime_complaint(&String::from_utf8_lossy(&out.stderr))
+        ));
+    }
+    // One to a line, and nothing but blank lines for an image with none. Anything that is not a
+    // digest reference is not an answer, and is not read as "none".
+    let mut names = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines().map(str::trim) {
+        match line {
+            "" => {}
+            name if name.contains("@sha256:") => names.push(name.to_string()),
+            other => {
+                return Err(format!(
+                    "podman's `RepoDigests` for it are not digest references: `{other}`"
+                ));
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// Take an image a run named by its full content id out of the local store, pull it again by
+/// `by`, a registry digest that names it ([`repo_digests`]), and check the pull brought back the
+/// image that id names.
+///
+/// For a registry's image named by its id: the build runs on the id, so the pull repeats what the
+/// build runs on only if the registry served the bytes the id names, and anything else is an
+/// `Err`, as is anything [`repull`] would not claim. Removed by the id, so it is those bytes that
+/// leave the store, and never forced: an image with more than one name stays, as one in use or
+/// the parent of another does, and it was not pulled again.
+pub fn repull_by(binary: &str, id: &str, by: &str) -> Result<(), String> {
+    if !is_content_id(id) {
+        return Err(format!("`{id}` is not an image's full content id"));
+    }
+    repullable(by)?;
+    take_out_and_pull(binary, id, by)?;
+    let bare = |s: &str| {
+        s.trim()
+            .strip_prefix("sha256:")
+            .unwrap_or(s.trim())
+            .to_ascii_lowercase()
+    };
+    let out = std::process::Command::new(binary)
+        .args(["image", "inspect", by, "--format", "{{.Id}}"])
+        .output()
+        .map_err(|e| format!("podman could not be run to inspect what it pulled: {e}"))?;
+    let got = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() || bare(&got) != bare(id) {
+        return Err(format!(
+            "the registry served another image by that digest ({}), not the one the run names",
+            match got.trim() {
+                "" => "podman could not say which",
+                g => g,
+            }
+        ));
+    }
+    Ok(())
+}
+
+/// [`repull`]'s steps: take `image` out of the store, where it is there, and pull `by`.
+fn take_out_and_pull(binary: &str, image: &str, by: &str) -> Result<(), String> {
     let exists = || {
         std::process::Command::new(binary)
             .args(["image", "exists", image])
@@ -980,8 +1075,9 @@ pub fn repull(binary: &str, image: &str) -> Result<(), String> {
             .map_err(|e| format!("podman could not be run to remove it: {e}"))?;
         if !out.status.success() {
             return Err(format!(
-                "podman would not remove it ({}): it is in use by a container or is the parent of \
-                 another image",
+                "podman would not remove it ({}), and it is never forced: an image in use by a \
+                 container, the parent of another image, or, removed by its id, one with more than \
+                 one name stays",
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
@@ -992,7 +1088,7 @@ pub fn repull(binary: &str, image: &str) -> Result<(), String> {
         }
     }
     let out = std::process::Command::new(binary)
-        .args(["pull", "--quiet", image])
+        .args(["pull", "--quiet", by])
         .output()
         .map_err(|e| format!("podman could not be run to pull it: {e}"))?;
     if !out.status.success() {

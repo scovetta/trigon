@@ -11,11 +11,11 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:b36fb5a75af7b2dae176c0a22631a05c01c708b033f94db593a9fd43014a49d3
+prose_version: docs/threat-model.md@sha256:dbe9094b02cc50dd1f492d02ef9e8aba4f692ab579e15799361946d78befeb24
 model_status: unratified-draft
 triage_policy: strict
 confidence:
-  documented: 266
+  documented: 270
   maintainer: 0
   inferred: 5
   assumption: 3
@@ -2482,6 +2482,26 @@ build_flags:
   provenance:
     kind: documented
     source: docs/08-execution.md §1
+- name: '[publish] same_host_confirmation'
+  default: 'off'
+  security_relevant: true
+  maintainer_stance: supported
+  affects_properties:
+  - property_id: P11
+    effect: preserves
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, D8
+- name: '[publish] same_host_local_images'
+  default: 'off'
+  security_relevant: true
+  maintainer_stance: supported
+  affects_properties:
+  - property_id: P11
+    effect: preserves
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, D8; docs/16-findings.md §3.105
 properties_claimed:
 - id: P1
   kind: memory-safety
@@ -3686,6 +3706,33 @@ properties_disclaimed:
   provenance:
     kind: documented
     source: docs/19-distribution-and-lookup.md §6, §7
+- id: D37
+  components:
+  - multiple
+  conditions: same_host_confirmation set
+  tier: security-critical
+  false_friend: false
+  statement: 'That two agreeing attempts on one machine are independent of what it holds constant. With
+    [publish] same_host_confirmation set — off by default — the gate counts a confirmation on that machine
+    when nothing warm could supply it and its base image was pulled again by digest. It catches a floating
+    dependency or a lucky fetch, never what the machine holds constant: its kernel, CPU and image store'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, D8; docs/16-findings.md §3.97
+- id: D38
+  components:
+  - multiple
+  conditions: same_host_confirmation and same_host_local_images both set
+  tier: security-critical
+  false_friend: false
+  statement: 'That a same-host confirmation''s base image was checked against a registry. [publish] same_host_local_images
+    — off by default, read only beside same_host_confirmation — accepts a cold confirmation on a local
+    base image pinned by its content id — one no registry digest names, as those built on the machine
+    — which no registry serves again: both attempts run on what the image store holds under that id'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, D8; docs/16-findings.md §3.105; crates/trigon-api/src/publication.rs
+      — `not_cold`; crates/trigon/src/main.rs — `image_pin`
 - id: D24
   components:
   - multiple

@@ -451,3 +451,43 @@ fn worker_and_serve_refuse_a_configuration_they_cannot_read() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("same_host_confirmations"), "{err}");
 }
+
+/// `same_host_local_images` set without `same_host_confirmation` changes nothing. A worker, which
+/// reads the gate's settings to decide where it confirms, says so as a note on stderr naming the
+/// file, and works all the same: a note is not a refusal.
+#[test]
+fn a_worker_notes_a_setting_that_changes_nothing_and_works_all_the_same() {
+    let d = dir("local-images-note");
+    let path = configure(&d, "[publish]\nsame_host_local_images = true\n");
+    let out = worker(&d, &[]).output().unwrap();
+    let text = ok(&out);
+    assert!(text.contains("handled 0 job(s)"), "{text}");
+    assert_eq!(
+        field(&text, "confirming"),
+        ["each verdict, on a machine other than the one that reached it"],
+        "{text}"
+    );
+    // As printed, wrapped to the terminal; the words are what is asserted.
+    let err = String::from_utf8_lossy(&out.stderr)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for says in [
+        "note:",
+        "`[publish] same_host_local_images` is set and `same_host_confirmation` is not",
+        "changes nothing",
+        &*path.display().to_string(),
+    ] {
+        assert!(err.contains(says), "{says}: {err}");
+    }
+
+    // Beside `same_host_confirmation` it is something, and there is nothing to note.
+    configure(
+        &d,
+        "[publish]\nsame_host_confirmation = true\nsame_host_local_images = true\n",
+    );
+    let out = worker(&d, &[]).output().unwrap();
+    ok(&out);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("note:"), "{err}");
+}
