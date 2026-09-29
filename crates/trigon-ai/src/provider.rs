@@ -354,6 +354,11 @@ pub trait Provider: Send + Sync {
 /// and the thing being wrapped is a `Box<dyn Provider>`, which was not one. That is the whole
 /// reason production never recorded a transcript: the wrapper existed, the store had a field for
 /// its digest, and there was no way to compose the two.
+///
+/// **Every method, including the ones with a default.** A defaulted method left out of a wrapper
+/// still compiles, and answers with the trait's value in place of the wrapped provider's.
+/// `default_effort` was missing here, so a provider that set its own depth would have been asked
+/// for `medium` through a `Box` — latent only because none sets one yet.
 impl<P: Provider + ?Sized> Provider for Box<P> {
     fn id(&self) -> &str {
         (**self).id()
@@ -366,6 +371,9 @@ impl<P: Provider + ?Sized> Provider for Box<P> {
     }
     fn reasoning(&self) -> Reasoning {
         (**self).reasoning()
+    }
+    fn default_effort(&self) -> Effort {
+        (**self).default_effort()
     }
 }
 
@@ -381,6 +389,9 @@ impl<P: Provider + ?Sized> Provider for std::sync::Arc<P> {
     }
     fn reasoning(&self) -> Reasoning {
         (**self).reasoning()
+    }
+    fn default_effort(&self) -> Effort {
+        (**self).default_effort()
     }
 }
 
@@ -550,5 +561,127 @@ mod tests {
             trigon_core::Fault::Policy
         );
         assert!(!LlmError::Refused("no".into()).is_retryable());
+    }
+
+    #[test]
+    fn every_failure_is_charged_to_whoever_owns_it_and_retried_only_where_it_could_differ() {
+        // Every variant, because this gates the repair loop's live retries both ways: a transient
+        // fault marked final throws away a run that would have succeeded, and a final one marked
+        // retryable spends the budget re-asking a question already answered. And the fault column
+        // is what says whose reliability a failure counts against.
+        use trigon_core::{Classify as _, Fault};
+        let http = |status| LlmError::Http {
+            status,
+            body: String::new(),
+        };
+        let cases = [
+            // A misconfiguration of ours; the next call goes to the same absent model.
+            (LlmError::NoModel("builder".into()), Fault::Bug, false),
+            // The budget we set was too small, and the same budget truncates the same way.
+            (
+                LlmError::Truncated {
+                    limit: 16_384,
+                    thinking: 16_382,
+                },
+                Fault::Bug,
+                false,
+            ),
+            (LlmError::Refused("no".into()), Fault::Policy, false),
+            (http(429), Fault::Infra, true),
+            (http(500), Fault::Infra, true),
+            (http(529), Fault::Infra, true),
+            (http(400), Fault::Infra, false),
+            (http(404), Fault::Infra, false),
+            (LlmError::Transport("reset".into()), Fault::Infra, true),
+            // The repair loop owns re-asking for a readable answer, with its own budget.
+            (LlmError::Malformed("?".into()), Fault::Upstream, false),
+            // No answer is not a different answer: the next attempt is the first one.
+            (LlmError::EmptyTurn("nothing".into()), Fault::Infra, true),
+        ];
+        for (e, fault, retryable) in cases {
+            assert_eq!(e.fault(), fault, "{e:?}");
+            assert_eq!(e.is_retryable(), retryable, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn the_depth_walks_down_one_notch_at_a_time_and_stops_at_the_bottom() {
+        // What a retry walks after a truncated answer. Below `Low` the only move left is
+        // `Reasoning::Off`, which is not a depth, so the walk says there is none.
+        assert_eq!(Effort::High.lower(), Some(Effort::Medium));
+        assert_eq!(Effort::Medium.lower(), Some(Effort::Low));
+        assert_eq!(Effort::Low.lower(), None);
+        assert_eq!(Effort::default(), Effort::Medium);
+        // The word sent is the word recorded.
+        for e in [Effort::Low, Effort::Medium, Effort::High] {
+            assert_eq!(serde_json::to_value(e).unwrap(), e.as_str());
+        }
+    }
+
+    /// A provider configured away from each default the trait supplies, so a wrapper that answers
+    /// with the trait's own in place of the provider's is caught: no reasoning, and when it is
+    /// asked to think, deeply.
+    struct Quiet;
+
+    impl Provider for Quiet {
+        fn id(&self) -> &str {
+            "quiet"
+        }
+        fn caps(&self) -> ModelCaps {
+            ModelCaps {
+                structured_output: false,
+                tools: false,
+                prompt_cache: true,
+                context_tokens: 4_096,
+            }
+        }
+        fn complete(&self, _: &Request) -> Result<Response, LlmError> {
+            Err(LlmError::NoModel("quiet".into()))
+        }
+        fn reasoning(&self) -> Reasoning {
+            Reasoning::Off
+        }
+        fn default_effort(&self) -> Effort {
+            Effort::High
+        }
+    }
+
+    #[test]
+    fn a_boxed_or_shared_provider_is_still_the_provider_it_wraps() {
+        // What a wrapper reports has to be what it wraps, or composing them changes the answer.
+        let boxed: Box<dyn Provider> = Box::new(Quiet);
+        let shared = std::sync::Arc::new(Quiet);
+        for p in [&boxed as &dyn Provider, &shared as &dyn Provider] {
+            assert_eq!(p.id(), "quiet");
+            assert_eq!(p.caps(), Quiet.caps());
+            assert_eq!(p.reasoning(), Reasoning::Off);
+            // The depth `propose` starts its walk from. Answering the trait's default here would
+            // ask every wrapped provider for `medium`, whatever it had said.
+            assert_eq!(p.default_effort(), Effort::High);
+            assert!(matches!(
+                p.complete(&Request {
+                    prompt: Prompt::new("s"),
+                    model: "m".into(),
+                    max_output_tokens: 1,
+                    temperature: 0.0,
+                    schema: None,
+                    reasoning: Reasoning::Default,
+                    effort: None,
+                }),
+                Err(LlmError::NoModel(_))
+            ));
+        }
+        // And a provider in a log line is named by what it is, not dumped.
+        assert_eq!(format!("{:?}", &*boxed), "Provider(quiet)");
+    }
+
+    #[test]
+    fn the_recorded_answer_provider_names_itself_and_claims_no_cache() {
+        let p = Replay::once("a");
+        assert_eq!(p.id(), "replay");
+        // Nothing is sent anywhere, so nothing is cached, and a cache-read rate measured through
+        // it would be a fiction.
+        assert!(!p.caps().prompt_cache);
+        assert!(p.caps().structured_output);
     }
 }

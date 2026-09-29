@@ -380,11 +380,18 @@ fn parse_step(s: &Value) -> RawStep {
 
 /// The matrix, as a list of concrete cells.
 ///
-/// Cross product of every scalar-sequence key, then `include` merged and `exclude` removed. The
-/// full Actions semantics for `include` are baroque — an entry whose existing keys all match
-/// extends those cells, and one that matches nothing appends a cell — and they are implemented that
-/// way here because the common use is a per-cell extra (`python-version` alongside `os`) and
-/// getting it wrong would attach the wrong toolchain to the wrong platform.
+/// Cross product of every scalar-sequence key, then `exclude` removed, then `include` merged — in
+/// that order, because Actions processes `include` after `exclude` so that an `include` can add
+/// back a cell an `exclude` took out. The full Actions semantics for `include` are baroque — an
+/// entry is added to every original cell whose *original* values it does not overwrite (values an
+/// earlier `include` added can be overwritten), and an entry that fits no original cell appends
+/// one — and they are implemented that way here because the common use is a per-cell extra
+/// (`python-version` alongside `os`) and getting it wrong would attach the wrong toolchain to the
+/// wrong platform.
+///
+/// It used to require an entry to share a key with a cell before extending it, so
+/// `include: [{python-version: '3.12'}]` beside `os: [ubuntu-latest, windows-latest]` became a
+/// third cell with a Python and no runner, while the two real cells had no Python at all.
 fn expand_matrix(matrix: Option<&Value>) -> Vec<BTreeMap<String, String>> {
     let empty = vec![BTreeMap::new()];
     let Some(Value::Mapping(m)) = matrix else {
@@ -392,6 +399,7 @@ fn expand_matrix(matrix: Option<&Value>) -> Vec<BTreeMap<String, String>> {
     };
 
     let mut cells: Vec<BTreeMap<String, String>> = vec![BTreeMap::new()];
+    let mut original: BTreeSet<String> = BTreeSet::new();
     for (k, v) in m {
         let Value::String(k) = k else { continue };
         if k == "include" || k == "exclude" {
@@ -404,6 +412,7 @@ fn expand_matrix(matrix: Option<&Value>) -> Vec<BTreeMap<String, String>> {
         if values.is_empty() {
             continue;
         }
+        original.insert(k.clone());
         let mut next = Vec::with_capacity(cells.len() * values.len());
         for cell in &cells {
             for val in &values {
@@ -417,31 +426,9 @@ fn expand_matrix(matrix: Option<&Value>) -> Vec<BTreeMap<String, String>> {
         }
         cells = next;
     }
-
-    if let Some(Value::Sequence(inc)) = m.get(Value::String("include".into())) {
-        for entry in inc {
-            let add = string_map(Some(entry));
-            if add.is_empty() {
-                continue;
-            }
-            let mut matched = false;
-            let sole_cell = cells.len() == 1;
-            for cell in cells.iter_mut() {
-                let overlaps_agree = add
-                    .iter()
-                    .all(|(k, v)| cell.get(k).is_none_or(|existing| existing == v));
-                let shares_a_key = add.keys().any(|k| cell.contains_key(k));
-                if overlaps_agree && (shares_a_key || sole_cell) {
-                    matched = true;
-                    for (k, v) in &add {
-                        cell.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-            if !matched && cells.len() < MAX_MATRIX_CELLS {
-                cells.push(add);
-            }
-        }
+    // A matrix of nothing but `include` has no original cells: each entry is a cell of its own.
+    if original.is_empty() {
+        cells.clear();
     }
 
     if let Some(Value::Sequence(exc)) = m.get(Value::String("exclude".into())) {
@@ -452,6 +439,34 @@ fn expand_matrix(matrix: Option<&Value>) -> Vec<BTreeMap<String, String>> {
                 .iter()
                 .any(|d| !d.is_empty() && d.iter().all(|(k, v)| cell.get(k) == Some(v)))
         });
+    }
+
+    if let Some(Value::Sequence(inc)) = m.get(Value::String("include".into())) {
+        // Only the cells of the cross product are extended. A cell an earlier entry appended is
+        // not one a later entry can join: Actions' own example keeps `{fruit: banana}` and
+        // `{fruit: banana, animal: cat}` apart.
+        let originals = cells.len();
+        for entry in inc {
+            let add = string_map(Some(entry));
+            if add.is_empty() {
+                continue;
+            }
+            let mut matched = false;
+            for cell in cells.iter_mut().take(originals) {
+                let keeps_the_original = add
+                    .iter()
+                    .all(|(k, v)| !original.contains(k) || cell.get(k) == Some(v));
+                if keeps_the_original {
+                    matched = true;
+                    for (k, v) in &add {
+                        cell.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            if !matched && cells.len() < MAX_MATRIX_CELLS {
+                cells.push(add);
+            }
+        }
     }
 
     if cells.is_empty() { empty } else { cells }
@@ -564,4 +579,387 @@ pub fn secrets_in(text: &str) -> BTreeSet<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matrix(yaml: &str) -> Vec<BTreeMap<String, String>> {
+        let v: Value = serde_yaml_ng::from_str(yaml).unwrap();
+        expand_matrix(Some(&v))
+    }
+
+    fn cell(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn include_follows_the_actions_documentation_example_exactly() {
+        // The example GitHub's own documentation gives for `include`, with the result it states.
+        // An entry sharing no key with the matrix (`color: green`) extends every cell; one that
+        // would overwrite an original value (`fruit: banana`) appends a cell; a value an earlier
+        // entry added (`color`) can be overwritten; an appended cell is never extended.
+        let got = matrix(
+            "fruit: [apple, pear]\nanimal: [cat, dog]\ninclude:\n  - color: green\n  \
+             - color: pink\n    animal: cat\n  - fruit: apple\n    shape: circle\n  \
+             - fruit: banana\n  - fruit: banana\n    animal: cat\n",
+        );
+        let want = vec![
+            cell(&[
+                ("fruit", "apple"),
+                ("animal", "cat"),
+                ("color", "pink"),
+                ("shape", "circle"),
+            ]),
+            cell(&[
+                ("fruit", "apple"),
+                ("animal", "dog"),
+                ("color", "green"),
+                ("shape", "circle"),
+            ]),
+            cell(&[("fruit", "pear"), ("animal", "cat"), ("color", "pink")]),
+            cell(&[("fruit", "pear"), ("animal", "dog"), ("color", "green")]),
+            cell(&[("fruit", "banana")]),
+            cell(&[("fruit", "banana"), ("animal", "cat")]),
+        ];
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_per_cell_extra_goes_to_every_cell_it_does_not_contradict() {
+        // The shape that matters for a toolchain: an interpreter named once beside a list of
+        // runners belongs to every runner, not to a runner-less cell of its own.
+        let got =
+            matrix("os: [ubuntu-latest, windows-latest]\ninclude:\n  - python-version: '3.12'\n");
+        assert_eq!(
+            got,
+            vec![
+                cell(&[("os", "ubuntu-latest"), ("python-version", "3.12")]),
+                cell(&[("os", "windows-latest"), ("python-version", "3.12")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_matrix_of_only_includes_has_one_cell_per_entry() {
+        let got =
+            matrix("include:\n  - os: ubuntu-22.04\n    python: '3.11'\n  - target: aarch64\n");
+        assert_eq!(
+            got,
+            vec![
+                cell(&[("os", "ubuntu-22.04"), ("python", "3.11")]),
+                cell(&[("target", "aarch64")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn exclude_drops_partial_matches_and_include_can_add_a_cell_back() {
+        // Actions processes `include` after `exclude`, so this is how a workflow adds back one
+        // combination it excluded wholesale — with an extra key it wanted on that one cell.
+        let got = matrix(
+            "os: [ubuntu-latest, windows-latest]\npython: ['3.11', '3.12']\nexclude:\n  \
+             - os: windows-latest\ninclude:\n  - os: windows-latest\n    python: '3.12'\n    \
+             experimental: 'true'\n",
+        );
+        assert_eq!(
+            got,
+            vec![
+                cell(&[("os", "ubuntu-latest"), ("python", "3.11")]),
+                cell(&[("os", "ubuntu-latest"), ("python", "3.12")]),
+                cell(&[
+                    ("os", "windows-latest"),
+                    ("python", "3.12"),
+                    ("experimental", "true")
+                ]),
+            ]
+        );
+        // An empty exclude entry excludes nothing, rather than everything.
+        assert_eq!(matrix("os: [a, b]\nexclude:\n  - {}\n").len(), 2);
+    }
+
+    #[test]
+    fn a_matrix_is_bounded_and_a_non_mapping_is_one_empty_cell() {
+        // A cross product over a file a package controls is a memory bomb in a sweep.
+        let got = matrix("a: [1, 2, 3, 4, 5, 6, 7, 8]\nb: [1, 2, 3, 4, 5, 6, 7, 8]\n");
+        assert_eq!(got.len(), MAX_MATRIX_CELLS);
+        // `matrix: ${{ fromJSON(...) }}` is a string; there is nothing to expand, and a job still
+        // has one cell so every loop downstream is the same loop.
+        assert_eq!(
+            matrix("'${{ fromJSON(needs.plan.outputs.m) }}'"),
+            vec![cell(&[])]
+        );
+        assert_eq!(expand_matrix(None), vec![cell(&[])]);
+        // A key whose value is a scalar is a one-value axis; one that is a mapping is no axis.
+        assert_eq!(
+            matrix("os: ubuntu-latest\nextra: {a: b}\n"),
+            vec![cell(&[("os", "ubuntu-latest")])]
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_workflow_is_skipped_rather_than_failing_the_read() {
+        // A `.github/workflows` directory holds whatever someone put there.
+        for text in [
+            "",
+            "not: [valid",
+            "name: no jobs\non: push\n",
+            "jobs: [a, b]\n",
+            "{{ jinja }}\n",
+        ] {
+            assert!(parse_workflow("w.yml", text).is_none(), "{text:?}");
+        }
+    }
+
+    fn triggers(on: &str) -> Vec<TriggerKind> {
+        let text = format!("{on}\njobs:\n  a:\n    runs-on: ubuntu-latest\n");
+        parse_workflow("w.yml", &text).unwrap().triggers
+    }
+
+    #[test]
+    fn every_shape_of_on_is_read_and_a_tag_push_is_told_from_a_branch_push() {
+        assert_eq!(triggers("on: push"), [TriggerKind::BranchPush]);
+        assert_eq!(
+            triggers("on: [push, pull_request_target, workflow_call, schedule, gollum]"),
+            [
+                TriggerKind::BranchPush,
+                TriggerKind::PullRequest,
+                TriggerKind::Schedule,
+                TriggerKind::Other("gollum".into()),
+                TriggerKind::Call,
+            ]
+        );
+        assert_eq!(
+            triggers("on:\n  push:\n    tags: ['v*']\n"),
+            [TriggerKind::TagPush]
+        );
+        assert_eq!(
+            triggers("on:\n  push:\n    tags-ignore: ['nightly']\n"),
+            [TriggerKind::TagPush]
+        );
+        assert_eq!(
+            triggers("on:\n  push:\n    branches: [main]\n    tags: ['*']\n"),
+            [TriggerKind::BranchPush, TriggerKind::TagPush]
+        );
+        assert_eq!(
+            triggers("on:\n  release:\n    types: [published]\n  workflow_dispatch:\n"),
+            [TriggerKind::Dispatch, TriggerKind::ReleasePublished]
+        );
+        assert_eq!(
+            triggers("on:\n  release:\n    types: [created, edited]\n"),
+            [TriggerKind::Other("release:created+edited".into())]
+        );
+        assert_eq!(
+            triggers("on:\n  release:\n"),
+            [TriggerKind::ReleasePublished]
+        );
+        // A YAML 1.1 reader folds `on` to `true`; a workflow written for one is still read.
+        assert_eq!(triggers("true: [release]"), [TriggerKind::ReleasePublished]);
+        assert!(triggers("name: x").is_empty());
+    }
+
+    #[test]
+    fn a_job_is_read_in_each_of_the_shapes_actions_accepts() {
+        let wf = parse_workflow(
+            "release.yml",
+            r#"
+name: Release
+env: { GLOBAL: g, NUM: 3, FLAG: true, LIST: [1, 2] }
+on:
+  workflow_dispatch:
+    inputs:
+      ref: { description: "Full git commit SHA" }
+      target: { default: pypi }
+  workflow_call:
+    inputs:
+      retries: { default: 3 }
+jobs:
+  build:
+    runs-on: { group: large, labels: [ubuntu-22.04, x64] }
+    container: { image: "python:3.12@sha256:abc", options: --privileged }
+    needs: lint
+    outputs: { artifact-id: "${{ steps.up.outputs.artifact-id }}" }
+    defaults: { run: { working-directory: pkg } }
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: 3.10, cache: pip, check-latest: false, versions: [a, b] }
+      - name: Build
+        run: python -m build
+        env: { SOURCE_DATE_EPOCH: 0 }
+        working-directory: sub
+        if: github.ref_type == 'tag'
+      - run: |
+          echo first line
+          echo second
+      - uses: ./.github/actions/local
+  publish:
+    runs-on: [ubuntu-latest]
+    container: node:20
+    needs: [build, test]
+    steps: not-a-list
+"#,
+        )
+        .expect("a workflow");
+        assert_eq!(wf.title(), "Release");
+        assert_eq!(wf.env.get("GLOBAL").map(String::as_str), Some("g"));
+        assert_eq!(wf.env.get("NUM").map(String::as_str), Some("3"));
+        assert_eq!(wf.env.get("FLAG").map(String::as_str), Some("true"));
+        assert!(!wf.env.contains_key("LIST"), "not a scalar");
+        // A dispatch input with no default is whatever a human typed, and stays unknown.
+        assert_eq!(
+            wf.input_defaults,
+            BTreeMap::from([
+                ("retries".to_string(), "3".to_string()),
+                ("target".to_string(), "pypi".to_string()),
+            ])
+        );
+
+        let build = &wf.jobs[0];
+        assert_eq!(build.id, "build");
+        assert_eq!(build.runs_on, ["ubuntu-22.04", "x64"]);
+        assert_eq!(build.container.as_deref(), Some("python:3.12@sha256:abc"));
+        assert_eq!(build.needs, ["lint"]);
+        assert_eq!(
+            build.outputs.get("artifact-id").map(String::as_str),
+            Some("${{ steps.up.outputs.artifact-id }}")
+        );
+        assert_eq!(build.defaults_working_directory.as_deref(), Some("pkg"));
+        assert_eq!(build.cells, vec![cell(&[])]);
+
+        let setup = &build.steps[0];
+        assert_eq!(
+            setup.action(),
+            Some(("actions/setup-python".to_string(), "v5".to_string()))
+        );
+        assert_eq!(setup.label(), "actions/setup-python@v5");
+        // The unquoted `3.10` is a float by the time it arrives, and is kept as what was parsed
+        // so a refusal can quote it; it never reads as a version.
+        let py = &setup.with["python-version"];
+        assert_eq!(py.version_text(), Err("3.1".to_string()));
+        assert_eq!(py.text(), None);
+        assert_eq!(setup.with["cache"].version_text(), Ok(Some("pip".into())));
+        assert_eq!(setup.with["check-latest"].text().as_deref(), Some("false"));
+        assert_eq!(setup.with["versions"], Scalar::Compound);
+        assert_eq!(setup.with["versions"].version_text(), Ok(None));
+
+        let run = &build.steps[1];
+        assert_eq!(run.label(), "Build");
+        assert_eq!(run.action(), None);
+        assert_eq!(
+            run.env.get("SOURCE_DATE_EPOCH").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(run.working_directory.as_deref(), Some("sub"));
+        assert_eq!(run.if_expr.as_deref(), Some("github.ref_type == 'tag'"));
+        assert_eq!(build.steps[2].label(), "echo first line");
+        assert_eq!(
+            build.steps[3].action(),
+            Some(("./.github/actions/local".to_string(), String::new()))
+        );
+
+        let publish = &wf.jobs[1];
+        assert_eq!(publish.runs_on, ["ubuntu-latest"]);
+        assert_eq!(publish.container.as_deref(), Some("node:20"));
+        assert_eq!(publish.needs, ["build", "test"]);
+        assert!(publish.steps.is_empty());
+    }
+
+    #[test]
+    fn a_workflow_with_no_name_is_called_by_its_path_and_an_empty_step_by_nothing() {
+        let wf = parse_workflow(
+            ".github/workflows/ci.yml",
+            "jobs:\n  a:\n    steps:\n      - {}\n",
+        )
+        .unwrap();
+        assert_eq!(wf.title(), ".github/workflows/ci.yml");
+        assert_eq!(wf.jobs[0].steps[0].label(), "(unnamed step)");
+        assert!(wf.jobs[0].runs_on.is_empty());
+    }
+
+    fn ctx<'a>(
+        env: &'a BTreeMap<String, String>,
+        matrix: &'a BTreeMap<String, String>,
+        inputs: &'a BTreeMap<String, String>,
+    ) -> ExprCtx<'a> {
+        ExprCtx {
+            env,
+            matrix,
+            inputs,
+        }
+    }
+
+    #[test]
+    fn the_small_expression_subset_resolves_and_everything_else_is_named_back() {
+        let env = cell(&[("DIST", "dist")]);
+        let m = cell(&[("python", "3.12")]);
+        let inputs = cell(&[("target", "pypi")]);
+        let c = ctx(&env, &m, &inputs);
+        assert_eq!(
+            resolve(
+                "${{ github.workspace }}/${{env.DIST}} py${{ matrix.python }} \
+                 ${{ inputs.target }} ${{ github.event.inputs.target }} ${{ 'lit' }}",
+                &c
+            ),
+            Ok("./dist py3.12 pypi pypi lit".to_string())
+        );
+        assert_eq!(resolve("no expressions", &c), Ok("no expressions".into()));
+        // The first expression that defeats the resolver is what comes back, so a decline can
+        // quote it.
+        for (raw, first) in [
+            ("${{ secrets.PYPI_TOKEN }}", "${{ secrets.PYPI_TOKEN }}"),
+            ("a ${{ env.MISSING }} b", "${{ env.MISSING }}"),
+            (
+                "${{ matrix.os || 'ubuntu' }}",
+                "${{ matrix.os || 'ubuntu' }}",
+            ),
+            ("${{ fromJSON(x) }}", "${{ fromJSON(x) }}"),
+            (
+                "${{ steps.v.outputs.version }}",
+                "${{ steps.v.outputs.version }}",
+            ),
+            ("${{ github.ref_name }}", "${{ github.ref_name }}"),
+            ("${{ bare }}", "${{ bare }}"),
+        ] {
+            assert_eq!(resolve(raw, &c), Err(first.to_string()), "{raw}");
+        }
+        // An unterminated `${{` is text that happens to start like an expression.
+        assert_eq!(
+            resolve("x ${{ env.DIST }} ${{ never closed", &c),
+            Ok("x dist ${{ never closed".to_string())
+        );
+    }
+
+    #[test]
+    fn a_needs_output_is_read_for_the_job_it_names() {
+        assert_eq!(
+            needs_output_producer("${{ needs.build.outputs.artifact-id }}"),
+            Some(("build".to_string(), "artifact-id".to_string()))
+        );
+        for raw in [
+            "${{ steps.up.outputs.artifact-id }}",
+            "${{ needs.build.result }}",
+            "${{ needs.build.outputs. }}",
+            "needs.build.outputs.x",
+            "${{ needs.build.outputs.x",
+        ] {
+            assert_eq!(needs_output_producer(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn every_secret_a_text_reads_is_found_once() {
+        let got = secrets_in(
+            "📦 ${{ secrets.PYPI_TOKEN }} and ${{secrets.GH_PAT}} and secrets.PYPI_TOKEN again; \
+             secrets. alone",
+        );
+        assert_eq!(
+            got.into_iter().collect::<Vec<_>>(),
+            ["GH_PAT".to_string(), "PYPI_TOKEN".to_string()]
+        );
+        assert!(secrets_in("no secret here").is_empty());
+    }
 }

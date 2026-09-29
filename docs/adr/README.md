@@ -14,7 +14,8 @@ considered, and the reasoning, so the reasoning outlasts the people who did the 
 | [0007](0007-observability-tiers.md) | Observability as a tier, shipping the network transcript only |
 | [0008](0008-one-implementation-per-seam.md) | Keep the traits, build one implementation of each |
 | [0009](0009-no-gha-emulation.md) | Read GitHub Actions, do not emulate runners |
-| [0010](0010-publish-divergences.md) | Publish divergences automatically, with technical safeguards |
-| [0011](0011-keyed-signing-under-a-trusted-root.md) | Sign with a key under a trusted root, and log to Rekor anyway — not keyless |
+| [0010](0010-publish-divergences.md) | Publish divergences automatically, with technical safeguards. **Amended by 0014**: publishing is an explicit `trigon publish`, corrected by supersession, and divergences wait on docs/19 D7 |
+| [0011](0011-keyed-signing-under-a-trusted-root.md) | Sign with a key under a trusted root — not keyless. **Partly superseded by 0014**: its Rekor half is gone, and until a root exists records are published under a pinned key |
 | [0012](0012-base-images-supply-bytes-not-decisions.md) | A base image supplies bytes, never decisions — few images, no version axis |
 | [0013](0013-a-cache-supplies-bytes-never-decisions.md) | A cache supplies bytes, never decisions — behind the mirror, three tiers, the index tier records its staleness |
+| [0014](0014-git-evidence-store-without-rekor.md) | Publish evidence to a public git repository with a log we sign, and drop Rekor |

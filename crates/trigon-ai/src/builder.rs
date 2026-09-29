@@ -456,6 +456,11 @@ A strategy document is YAML:
 Those are all the fields there are, and the names are exact: an unknown one is rejected, not
 ignored.
 
+A step you are shown may also carry `literal: { ... }` beside `with`: values read from the
+registry, the package or its repository, handed to the tool exactly as written and never evaluated
+as a template. Keep them there. `with` is for values that are templates, like
+`{{ intrinsics.publish_time }}`; a name belongs in one or the other, never both.
+
 `ref` must be a resolved commit, never a tag or branch: a tag moves and the claim would move with
 it.
 
@@ -654,6 +659,19 @@ mod tests {
     }
 
     #[test]
+    fn the_shape_names_the_literals_a_strategy_it_is_shown_carries() {
+        // An inferred strategy hands every parameter to its tool as a literal, so a model asked to
+        // repair one is shown `literal:` — and told, a line above, that an unknown field is
+        // rejected. Unexplained, the one thing a repair should not do is the natural one: move the
+        // values into `with`, where the package's text is evaluated as a template.
+        assert!(STRATEGY_SHAPE.contains("literal: { ... }"));
+        assert!(
+            STRATEGY_SHAPE.contains("never evaluated"),
+            "and says what it is for"
+        );
+    }
+
+    #[test]
     fn propose_asks_once_and_returns_a_candidate() {
         // One call per iteration. The prior art spends three, one of which exists to strip the
         // fence that `strip_fence` handles in nine lines.
@@ -664,6 +682,93 @@ mod tests {
             propose(&p, "replay", &task()).is_err(),
             "exactly one call was recorded"
         );
+    }
+
+    /// Replay with the one capability that decides whether a schema is asked for switched off.
+    struct Unstructured(Replay);
+
+    impl Provider for Unstructured {
+        fn id(&self) -> &str {
+            "unstructured"
+        }
+        fn caps(&self) -> crate::ModelCaps {
+            crate::ModelCaps {
+                structured_output: false,
+                ..self.0.caps()
+            }
+        }
+        fn complete(&self, req: &Request) -> Result<crate::Response, LlmError> {
+            self.0.complete(req)
+        }
+    }
+
+    #[test]
+    fn the_schema_is_sent_only_to_a_provider_that_honours_one() {
+        // Local models are unreliable at structured output. One that cannot honour a schema is
+        // asked for free-form text and the parser does the rest; sending it a schema anyway is
+        // how a provider fails for a reason that reads as ours.
+        let answer = r#"{"diagnosis":"d","strategy":"kind: flow\n"}"#;
+        let structured = Replay::once(answer);
+        propose(&structured, "claude-opus-5", &task()).unwrap();
+        let asked = structured.asked();
+        assert_eq!(asked[0].schema, Some(candidate_schema()));
+        // The rest of the request is the one the comments promise: the model named, one budget
+        // for thinking and answer, no sampling, and the provider's own depth to start from.
+        assert_eq!(asked[0].model, "claude-opus-5");
+        assert_eq!(asked[0].max_output_tokens, 16_384);
+        assert_eq!(asked[0].temperature, 0.0);
+        assert_eq!(asked[0].effort, Some(Effort::Medium));
+
+        let free = Unstructured(Replay::once(answer));
+        propose(&free, "qwen2.5:0.5b", &task()).unwrap();
+        assert_eq!(free.0.asked()[0].schema, None);
+    }
+
+    #[test]
+    fn a_candidate_object_inside_a_fence_is_read_as_the_object() {
+        // Not as a bare document: that path would keep the fence's contents as the strategy and
+        // throw the diagnosis away.
+        let fenced = "```json\n{\"diagnosis\": \"needs a pinned backend\", \"strategy\": \
+                      \"kind: flow\\n\", \"confidence\": \"likely\"}\n```";
+        let c = parse_candidate(fenced).unwrap();
+        assert_eq!(c.diagnosis, "needs a pinned backend");
+        assert_eq!(c.strategy, "kind: flow\n");
+        assert_eq!(c.confidence.as_deref(), Some("likely"));
+    }
+
+    #[test]
+    fn an_opening_fence_with_no_close_keeps_what_follows_it_and_not_the_prose_before() {
+        // A model that ran out of room, or forgot, before closing its fence. What follows the
+        // fence is the best guess at the document; the prose in front of it is certainly not it.
+        let answer = "The build needs a pinned backend.\n\n```yaml\nschema: 1\nkind: flow\n";
+        assert_eq!(strip_fence(answer), "schema: 1\nkind: flow");
+        let c = parse_candidate(answer).unwrap();
+        assert_eq!(c.strategy, "schema: 1\nkind: flow");
+    }
+
+    #[test]
+    fn an_ecosystem_with_no_prelude_of_its_own_is_given_the_general_one() {
+        // The prelude is the first cached part, so what an ecosystem without one is told still has
+        // to be true of it — and must not be npm's or PyPI's instructions.
+        for ecosystem in [Ecosystem::CratesIo, Ecosystem::RubyGems, Ecosystem::NuGet] {
+            let p = prompt(&Task {
+                ecosystem,
+                ..task()
+            });
+            let prelude = &p.parts[0].text;
+            assert!(
+                prelude.contains("standard packaging command"),
+                "{ecosystem:?}"
+            );
+            assert!(!prelude.contains("npm pack"), "{ecosystem:?}");
+            assert!(!prelude.contains("PEP 517"), "{ecosystem:?}");
+            assert!(p.is_cacheable());
+        }
+        let npm = prompt(&Task {
+            ecosystem: Ecosystem::Npm,
+            ..task()
+        });
+        assert!(npm.parts[0].text.contains("npm pack"));
     }
 
     #[test]
@@ -782,6 +887,38 @@ mod truncation {
         propose(&p, "m", &super::tests::task()).expect("answers");
         assert_eq!(p.seen.lock().unwrap().len(), 1);
     }
+
+    #[test]
+    fn each_step_down_is_logged_with_the_depths_it_went_between() {
+        // Each step is a paid call, and the log is where an operator sees why one proposal cost
+        // three: what the answer ran into, and which depth was asked for next.
+        let p = fussy(None);
+        let (answer, logged) = crate::test_log::capture(|| propose(&p, "m", &super::tests::task()));
+        answer.expect("the no-reasoning call answers");
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert!(logged.iter().all(|l| l.level == tracing::Level::WARN));
+
+        let step = &logged[0];
+        assert_eq!(
+            (step.field("from"), step.field("to")),
+            (Some("medium"), Some("low"))
+        );
+        assert_eq!(
+            (step.field("limit"), step.field("thinking")),
+            (Some("16384"), Some("16382"))
+        );
+        // Below the floor there is no depth to name, and the log says what is tried instead.
+        let last = &logged[1];
+        assert!(last.message().contains("reasoning off"), "{last:?}");
+        assert_eq!(last.field("to"), None, "{last:?}");
+        assert_eq!(last.field("thinking"), Some("16382"));
+
+        // And an answer that fits says nothing at all.
+        let (_, quiet) = crate::test_log::capture(|| {
+            propose(&fussy(Some(Effort::Medium)), "m", &super::tests::task())
+        });
+        assert!(quiet.is_empty(), "{quiet:?}");
+    }
 }
 
 #[cfg(test)]
@@ -851,5 +988,34 @@ mod wrapping {
         })
         .to_string();
         assert_eq!(parse_candidate(&json).expect("parses").strategy, DOC);
+    }
+
+    #[test]
+    fn what_is_cut_from_after_the_document_is_said_out_loud_with_its_size() {
+        // Salvaging quietly would hide a model that is no longer answering the question. The size
+        // is the signal, and the first words of the tail say what the answer had turned into.
+        let tail = "[FollRH2] I checked the SIEM. During the exact minute of the incident, your \
+                    login was from a device nobody had seen before.";
+        let json = serde_json::json!({
+            "diagnosis": "d",
+            "strategy": format!("{DOC}\n{tail}"),
+        })
+        .to_string();
+        let (c, logged) = crate::test_log::capture(|| parse_candidate(&json));
+        assert_eq!(c.expect("parses").strategy, DOC);
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert_eq!(logged[0].level, tracing::Level::WARN);
+        assert_eq!(
+            logged[0].field("dropped"),
+            Some(tail.len().to_string().as_str())
+        );
+        // Its opening, and no more of it: the tail is model-authored and can run to kilobytes.
+        let opening: String = tail.chars().take(80).collect();
+        assert_eq!(logged[0].field("tail"), Some(opening.as_str()));
+
+        // A strategy that ends where its document does has nothing cut, and says nothing.
+        let whole = serde_json::json!({"diagnosis": "d", "strategy": DOC}).to_string();
+        let (_, quiet) = crate::test_log::capture(|| parse_candidate(&whole));
+        assert!(quiet.is_empty(), "{quiet:?}");
     }
 }

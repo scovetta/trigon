@@ -282,6 +282,144 @@ fn container_digest_separates_framing_from_content() {
     assert_eq!(c.outcome, Match::Normalized);
 }
 
+/// A tar of one member, `pkg/extra.js`, that no rebuild of `tar` produces.
+fn injected() -> Vec<u8> {
+    let mut b = ::tar::Builder::new(Vec::new());
+    let mut h = ::tar::Header::new_ustar();
+    h.set_size(8);
+    h.set_mode(0o644);
+    h.set_mtime(1);
+    h.set_uid(1);
+    h.set_cksum();
+    b.append_data(&mut h, "pkg/extra.js", &b"injected"[..])
+        .unwrap();
+    b.into_inner().unwrap()
+}
+
+/// `member` with the CRC-32 its trailer stores replaced by that of `content`.
+fn with_crc_of(mut member: Vec<u8>, content: &[u8]) -> Vec<u8> {
+    let mut crc = flate2::Crc::new();
+    crc.update(content);
+    let n = member.len();
+    member[n - 8..n - 4].copy_from_slice(&crc.sum().to_le_bytes());
+    member
+}
+
+#[test]
+fn a_second_gzip_member_is_part_of_the_artifact_and_never_skipped() {
+    // Node's zlib and Python's gzip read every member of a `.tgz` or an sdist, so tar entries in
+    // a second member are part of what installs. The reader took the file's last eight bytes as
+    // the first member's trailer, and a second member whose CRC was forged to the first's made
+    // the published artifact stabilize to the digest of an honest rebuild of the first alone.
+    let p = tar(1, 1, b"same");
+    // Without its end-of-archive blocks, so the second member's tar carries straight on from it.
+    let p_open = &p[..p.len() - 1024];
+    let q = injected();
+    let set = profile("tar-gzip").unwrap();
+    let judge = |upstream: Vec<u8>| {
+        compare_bytes(upstream, gz(&p), Format::TarGz, &set, &Limits::default())
+    };
+
+    // Forged: the second member's CRC is not its own, so it is not read as that content.
+    match judge([gz(p_open), with_crc_of(gz(&q), p_open)].concat()) {
+        Err(CompareError::Archive(trigon_archive::ArchiveError::Malformed { detail, .. })) => {
+            assert!(detail.starts_with("crc32 mismatch"), "{detail}")
+        }
+        other => panic!("expected a refusal, got {:?}", other.map(|c| c.outcome)),
+    }
+
+    // Honest framing: both members are read, and the member only the second one holds is named.
+    let c = judge([gz(p_open), gz(&q)].concat()).unwrap();
+    assert_eq!(c.outcome, Match::Divergent);
+    let codes = &c.diff.as_ref().unwrap().codes;
+    assert!(
+        codes.contains("member-only-in-reference@pkg/extra.js"),
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn bytes_after_the_last_gzip_member_are_a_named_difference_and_not_a_match() {
+    // The same tar either way; one side carries bytes after its member that begin no other.
+    // gunzip ignores them with a warning, so they are framing — but framing a stabilizer does not
+    // remove, and a verdict that dropped them would call two different files one.
+    let inner = tar(1, 1, b"same");
+    let c = compare_bytes(
+        [gz(&inner), b"appended after the member".to_vec()].concat(),
+        gz(&inner),
+        Format::TarGz,
+        &profile("tar-gzip").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(c.container_bit_identical(), Some(true), "one tar");
+    assert_eq!(c.outcome, Match::Divergent);
+    let codes = &c.diff.as_ref().unwrap().codes;
+    assert_eq!(
+        codes.iter().collect::<Vec<_>>(),
+        ["container:gzip.trailing"],
+        "the one difference, named"
+    );
+}
+
+#[test]
+fn a_lone_zero_block_ahead_of_more_entries_is_refused_rather_than_read_as_the_end() {
+    // node-tar, which npm installs with, ends an archive only at two zero blocks in a row and reads
+    // on past one. The `tar` crate, GNU tar and Python stop at the first. So entries after a lone
+    // zero block installed from npm and were never seen here, and the published artifact matched an
+    // honest rebuild without them. Readers that disagree on what an archive holds leave no one
+    // answer to compare. A gzip member boundary before the zero block changes nothing.
+    let p = tar(1, 1, b"same");
+    let p_open = &p[..p.len() - 1024];
+    let q = injected();
+    let set = profile("npm-tarball").unwrap();
+    for (upstream, how) in [
+        (gz(&[p_open, &[0; 512], &q].concat()), "one member"),
+        (
+            [gz(p_open), gz(&[&[0; 512], &q[..]].concat())].concat(),
+            "the zero block opening a second member",
+        ),
+    ] {
+        match compare_bytes(upstream, gz(&p), Format::TarGz, &set, &Limits::default()) {
+            Err(CompareError::Archive(trigon_archive::ArchiveError::Malformed {
+                format,
+                detail,
+            })) => {
+                assert_eq!(format, "tar", "{how}");
+                assert!(detail.contains("lone zero block"), "{how}: {detail}");
+            }
+            other => panic!(
+                "{how}: expected a refusal, got {:?}",
+                other.map(|c| c.outcome)
+            ),
+        }
+    }
+}
+
+#[test]
+fn bytes_after_the_tar_end_of_archive_marker_are_a_named_difference_and_not_a_match() {
+    // After two zero blocks every reader has stopped, node-tar too, so a whole second tar there is
+    // in no archive anyone lists. It is still in the file, and a verdict that dropped it would call
+    // two different files one. Here it arrives as a second gzip member, which is read, and ends up
+    // after the first tar's end.
+    let p = tar(1, 1, b"same");
+    let c = compare_bytes(
+        [gz(&p), gz(&injected())].concat(),
+        gz(&p),
+        Format::TarGz,
+        &profile("npm-tarball").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(c.outcome, Match::Divergent);
+    let codes = &c.diff.as_ref().unwrap().codes;
+    assert_eq!(
+        codes.iter().collect::<Vec<_>>(),
+        ["container:tar.trailing"],
+        "the one difference, named"
+    );
+}
+
 #[test]
 fn an_uncompressed_container_reports_no_container_digest() {
     let c = compare_bytes(
@@ -398,6 +536,32 @@ fn executable_differences_are_counted_apart() {
 }
 
 #[test]
+fn a_member_is_classed_by_its_own_names_extension_in_any_case() {
+    use trigon_compare::ContentKind::{self, *};
+    let kind = |p: &str| ContentKind::classify(&trigon_core::EntryPath::from(p));
+    for (path, want) in [
+        ("lib/net45/Foo.DLL", Executable),
+        ("pkg/native/libx.so", Executable),
+        ("com/x/Main.class", Executable),
+        ("src/lib.rs", Source),
+        ("pkg/x.py", Source),
+        ("include/x.H", Source),
+        ("README.md", Documentation),
+        ("docs/guide.RST", Documentation),
+        ("LICENSE.txt", Documentation),
+        ("Cargo.toml", Metadata),
+        ("package.json", Metadata),
+        ("pkg/setup.cfg", Metadata),
+        ("logo.png", Binary),
+        // A directory's extension says nothing about the file inside it.
+        ("lib.so/notes", Binary),
+        ("src.rs/logo.png", Binary),
+    ] {
+        assert_eq!(kind(path), want, "{path}");
+    }
+}
+
+#[test]
 fn nested_members_are_named_through_the_container() {
     // A difference inside a gem should name the file, not the container.
     let build = |inner_body: &[u8]| {
@@ -444,6 +608,50 @@ fn nested_members_are_named_through_the_container() {
 }
 
 #[test]
+fn a_renamed_member_keeps_the_name_each_artifact_holds_it_under() {
+    // A member is reported under the name the set gave it, which neither artifact carries; a
+    // reader going back to the bytes needs each side's own spelling, and only where it differs.
+    use std::io::Write as _;
+    let nupkg = |folder: &str| {
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        w.start_file("Demo.nuspec", opts).unwrap();
+        w.write_all(b"<package/>\n").unwrap();
+        w.start_file(format!("lib/{folder}/Demo.dll"), opts).unwrap();
+        w.write_all(b"the same assembly").unwrap();
+        w.finish().unwrap().into_inner()
+    };
+    let c = compare_bytes(
+        nupkg("portable-net45%2Bwin8"),
+        nupkg("portable45-net45+win8"),
+        Format::Zip,
+        &profile("nupkg").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
+    let d = c.diff.as_ref().unwrap();
+    let file = |p: &str| {
+        d.files
+            .iter()
+            .find(|f| f.path.to_lossy() == p)
+            .unwrap_or_else(|| panic!("no `{p}` in {:?}", d.files))
+    };
+    let dll = file("lib/portable-net45+win8/Demo.dll");
+    assert_eq!(dll.status, FileStatus::Identical);
+    let raw = |p: &Option<trigon_core::EntryPath>| p.as_ref().map(|p| p.to_lossy().into_owned());
+    assert_eq!(
+        (raw(&dll.upstream_raw_path), raw(&dll.rebuild_raw_path)),
+        (
+            Some("lib/portable-net45%2Bwin8/Demo.dll".to_string()),
+            Some("lib/portable45-net45+win8/Demo.dll".to_string())
+        )
+    );
+    let nuspec = file("Demo.nuspec");
+    assert_eq!((&nuspec.upstream_raw_path, &nuspec.rebuild_raw_path), (&None, &None));
+}
+
+#[test]
 fn duplicate_paths_compare_positionally() {
     // Keying on path alone would make a duplicate unmatchable. Upstream's second a.txt compares
     // against the rebuild's second a.txt.
@@ -480,5 +688,215 @@ fn duplicate_paths_compare_positionally() {
         swapped.diff.as_ref().unwrap().differs,
         2,
         "both occurrences moved"
+    );
+}
+
+// --- field-level attribution ---------------------------------------------------------------------
+
+/// Every difference the comparator can name is joined to the pass that made it, from ground truth:
+/// a member reconciled only by metadata passes carries edits and no codes, and a genuine body
+/// difference no pass rewrote carries a code and no body edit.
+#[test]
+fn field_edits_attribute_each_change_to_its_pass() {
+    // a.txt: bodies differ (nothing rewrites them) -> forces Divergent, a real `body@` residual.
+    // b.txt: same body, differing mtime + uid -> reconciled by tar-time / tar-owners.
+    let c = compare_bytes(
+        tar(1_700_000_000, 1000, b"UPSTREAM"),
+        tar(1_500_000_000, 501, b"rebuilt!"),
+        Format::Tar,
+        &profile("tar").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(c.outcome, Match::Divergent);
+    let d = c.diff.as_ref().unwrap();
+
+    let edits_for = |path: &str, field: &str| -> Vec<String> {
+        d.field_edits
+            .iter()
+            .find(|e| e.path == path && e.field == field)
+            .map(|e| e.passes.clone())
+            .unwrap_or_default()
+    };
+
+    // b.txt's mtime was zeroed by tar-time, its owner ids by tar-owners — proven, not guessed.
+    assert_eq!(edits_for("pkg/b.txt", "mtime"), vec!["tar-time".to_string()]);
+    assert_eq!(edits_for("pkg/b.txt", "tar.uid"), vec!["tar-owners".to_string()]);
+    // …and those reconciliations left no residual code behind.
+    assert!(
+        !d.codes.iter().any(|c| c.ends_with("@pkg/b.txt")),
+        "b.txt should have no residual codes: {:?}",
+        d.codes
+    );
+
+    // a.txt's body genuinely differs and no pass rewrote it: a code with no body edit to own it.
+    assert!(d.codes.contains("body@pkg/a.txt"));
+    assert!(
+        edits_for("pkg/a.txt", "body").is_empty(),
+        "no pass rewrote a.txt's body, so nothing should claim it"
+    );
+}
+
+/// A pass that rewrites a body is credited for it — the `body` field is attributed from the pass's
+/// own byte-count signal, never by reading the bytes.
+#[test]
+fn a_body_rewrite_is_attributed_to_the_pass_that_made_it() {
+    // Two wheels whose RECORD/text differ only in line endings, which wheel-metadata-eol rewrites.
+    // Built as a minimal zip so the eol pass has a body to rewrite.
+    use std::io::Write as _;
+    fn whl(crlf: bool) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let eol = if crlf { "\r\n" } else { "\n" };
+        w.start_file("demo-1.0.dist-info/METADATA", opts).unwrap();
+        write!(w, "Metadata-Version: 2.1{eol}Name: demo{eol}Version: 1.0{eol}").unwrap();
+        w.finish().unwrap().into_inner()
+    }
+    let c = compare_bytes(
+        whl(true),
+        whl(false),
+        Format::Zip,
+        &profile("wheel").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
+    let d = c.diff.as_ref().unwrap();
+    let meta = d
+        .field_edits
+        .iter()
+        .find(|e| e.path.ends_with("METADATA") && e.field == "body");
+    assert!(
+        meta.is_some_and(|e| e.passes.iter().any(|p| p == "wheel-metadata-eol")),
+        "the eol pass should own the METADATA body rewrite: {:?}",
+        d.field_edits
+    );
+}
+
+// --- the pass-by-pass progression -----------------------------------------------------------------
+
+/// The set re-applied one pass at a time: the metadata-only member closes on the pass that
+/// normalizes it, the body difference survives every pass, and the last step reproduces the
+/// signature the verdict was taken on.
+#[test]
+fn progression_shows_which_pass_closed_which_member() {
+    let set = profile("tar").unwrap();
+    let c = compare_bytes(
+        tar(1_700_000_000, 1000, b"UPSTREAM"),
+        tar(1_500_000_000, 501, b"rebuilt!"),
+        Format::Tar,
+        &set,
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(c.outcome, Match::Divergent);
+    let p = c.diff.as_ref().unwrap().progression.as_ref().expect("progression recorded");
+
+    assert!(p.omitted.is_none(), "{:?}", p.omitted);
+    assert!(p.consistent, "the last step must reproduce the verdict's signature");
+    assert_eq!(p.steps.len(), set.members.len() + 1, "one step per pass, plus as-published");
+
+    let first = &p.steps[0];
+    assert!(first.pass.is_none());
+    assert_eq!(first.members, 2, "as published, both members differ");
+
+    let last = p.steps.last().unwrap();
+    assert_eq!(last.members, 1, "only the body difference survives");
+    assert_eq!(last.bodies, 1);
+
+    // b.txt differed only in metadata; exactly one pass closed it, and it was a named pass.
+    let closer: Vec<_> = p
+        .steps
+        .iter()
+        .filter(|s| s.closed.iter().any(|m| m == "pkg/b.txt"))
+        .collect();
+    assert_eq!(closer.len(), 1, "{:#?}", p.steps);
+    assert!(closer[0].pass.is_some());
+
+    // Never worse after a pass than before it.
+    for w in p.steps.windows(2) {
+        assert!(w[1].members <= w[0].members, "{:#?}", p.steps);
+    }
+}
+
+/// An exact match has nothing to close, and says so in one step rather than twelve.
+#[test]
+fn an_exact_match_has_one_step() {
+    let a = tar(1, 1, b"same");
+    let c = compare_bytes(a.clone(), a, Format::Tar, &profile("tar").unwrap(), &Limits::default())
+        .unwrap();
+    let p = c.diff.unwrap().progression.unwrap();
+    assert_eq!(p.steps.len(), 1);
+    assert_eq!(p.steps[0].differences, 0);
+    assert!(p.consistent);
+}
+
+/// Two honest builds agree on what the claim is about and not on their raw bytes.
+///
+/// Six builds of one package produced six raw artifacts and one stabilized digest
+/// (`docs/17-backlog.md` B31). A second attempt is compared with the first by `agreement`, so it
+/// has to be the same for two rebuilds that differ only in what the set stabilizes away, and
+/// different for two divergences that differ in what they found.
+#[test]
+fn the_agreement_digest_ignores_raw_bytes_and_keeps_what_was_found() {
+    let set = profile("tar").unwrap();
+    let judge = |rebuild: Vec<u8>| {
+        compare_bytes(
+            tar(1_700_000_000, 1000, b"same"),
+            rebuild,
+            Format::Tar,
+            &set,
+            &Limits::default(),
+        )
+        .unwrap()
+    };
+
+    let first = judge(tar(1_500_000_000, 501, b"same"));
+    let second = judge(tar(1_600_000_000, 777, b"same"));
+    assert_eq!(first.outcome, Match::Normalized);
+    assert_ne!(
+        first.rebuild.raw.sha256, second.rebuild.raw.sha256,
+        "the premise: two rebuilds with different raw bytes"
+    );
+    assert_eq!(
+        first.agreement(),
+        second.agreement(),
+        "two normalized rebuilds that stabilize alike are one answer"
+    );
+
+    let one_way = judge(tar(1, 1, b"diverges one way"));
+    let other_way = judge(tar(1, 1, b"diverges another"));
+    assert_eq!(one_way.outcome, Match::Divergent);
+    assert_eq!(other_way.outcome, Match::Divergent);
+    assert_ne!(
+        one_way.agreement(),
+        other_way.agreement(),
+        "two divergences that found different things do not confirm each other"
+    );
+    assert_ne!(first.agreement(), one_way.agreement());
+
+    // The published artifact is the question. One republished under the same name, differing
+    // only in what the set strips, stabilizes as the first did — and is other bytes, which a
+    // statement about the first does not describe.
+    let republished = compare_bytes(
+        tar(1_700_000_999, 1000, b"same"),
+        tar(1_500_000_000, 501, b"same"),
+        Format::Tar,
+        &set,
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_ne!(
+        republished.upstream.raw.sha256, first.upstream.raw.sha256,
+        "the premise: other published bytes"
+    );
+    assert_eq!(
+        republished.upstream.stabilized.sha256, first.upstream.stabilized.sha256,
+        "the premise: which the set makes one"
+    );
+    assert_ne!(
+        republished.agreement(),
+        first.agreement(),
+        "attempts against two published artifacts confirmed each other"
     );
 }

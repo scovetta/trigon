@@ -132,14 +132,7 @@ impl Progress {
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     if let Ok(mut s) = shared.lock() {
-                        s.heartbeat = crate::now_rfc3339();
-                        if let Some(c) = &mut s.current {
-                            c.elapsed_seconds =
-                                c.elapsed_seconds.saturating_add(HEARTBEAT.as_secs());
-                            c.phase_elapsed_seconds =
-                                c.phase_elapsed_seconds.saturating_add(HEARTBEAT.as_secs());
-                        }
-                        let _ = write_atomic(&work.join("status.json"), &*s);
+                        beat(&work, &mut s);
                     }
                     // Short sleeps rather than one long one, so a finished sweep is not held open
                     // for ten seconds waiting for its own heartbeat to notice.
@@ -227,6 +220,17 @@ impl Drop for Progress {
             let _ = t.join();
         }
     }
+}
+
+/// One heartbeat: stamp it, age the target in flight and its phase by a beat, and write it where a
+/// reader looks. Apart from the thread that calls it, so a test can beat without waiting for one.
+fn beat(work: &Path, s: &mut Status) {
+    s.heartbeat = crate::now_rfc3339();
+    if let Some(c) = &mut s.current {
+        c.elapsed_seconds = c.elapsed_seconds.saturating_add(HEARTBEAT.as_secs());
+        c.phase_elapsed_seconds = c.phase_elapsed_seconds.saturating_add(HEARTBEAT.as_secs());
+    }
+    let _ = write_atomic(&work.join("status.json"), &*s);
 }
 
 /// Write JSON to a temporary file beside the target and rename over it.
@@ -430,6 +434,241 @@ mod tests {
         assert!(!json.contains("finished"), "{json}");
         let back: Sweep = serde_json::from_str(&json).unwrap();
         assert!(back.finished.is_none());
+    }
+
+    fn workdir(what: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "trigon-progress-{}-{what}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn sweep() -> Sweep {
+        Sweep {
+            started: "2026-01-01T00:00:00Z".into(),
+            pid: 1,
+            version: "0.0.0+git.test".into(),
+            targets_path: Some("corpus.txt".into()),
+            targets_sha256: Some("ab".repeat(32)),
+            targets_count: 20,
+            resumed_from: 4,
+            image: "img".into(),
+            egress: "mirror-only".into(),
+            timewarp: None,
+            model: None,
+            store: None,
+            definitions: None,
+            timeout_seconds: 600,
+            finished: None,
+        }
+    }
+
+    /// A writer with no heartbeat thread, so what is on disk is only what the calls wrote.
+    fn quiet(work: &Path) -> Progress {
+        Progress {
+            work: work.to_path_buf(),
+            shared: Arc::new(Mutex::new(status("starting", None))),
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        }
+    }
+
+    fn on_disk(work: &Path) -> Status {
+        serde_json::from_str(&std::fs::read_to_string(work.join("status.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn starting_writes_what_the_sweep_is_before_anything_else() {
+        let work = workdir("start");
+        let p = Progress::start(&work, sweep());
+        // Written before `start` returns, not by the heartbeat.
+        let back: Sweep =
+            serde_json::from_str(&std::fs::read_to_string(work.join("sweep.json")).unwrap())
+                .unwrap();
+        assert_eq!(back.targets_count, 20);
+        assert_eq!(back.targets_sha256, Some("ab".repeat(32)));
+        assert_eq!(back.timeout_seconds, 600);
+        assert!(back.finished.is_none());
+        // Resuming counts what the earlier run of it already recorded.
+        let s = p.shared.lock().unwrap().clone();
+        assert_eq!((s.done, s.total, s.state.as_str()), (4, 20, "starting"));
+        assert_eq!(s.pid, std::process::id());
+        // And dropping it stops the heartbeat rather than leaving a thread writing after it.
+        drop(p);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// A sweep is hours of work and its page a convenience: files it cannot write are reported,
+    /// and the sweep runs on regardless.
+    #[test]
+    fn a_sweep_whose_files_cannot_be_written_still_runs() {
+        let work = workdir("unwritable").join("absent");
+        let p = Progress::start(&work, sweep());
+        p.target(0, "pkg:npm/a@1", 0);
+        p.phase("deps");
+        p.finish(1);
+        assert_eq!(p.shared.lock().unwrap().state, "finished");
+        drop(p);
+        assert!(!work.exists());
+    }
+
+    #[test]
+    fn a_target_is_written_the_moment_it_starts_not_at_the_next_beat() {
+        let work = workdir("target");
+        let p = quiet(&work);
+        p.target(7, "pkg:npm/left-pad@1.3.0", 6);
+        let s = on_disk(&work);
+        assert_eq!(s.state, "running");
+        assert_eq!(s.done, 6);
+        let c = s.current.unwrap();
+        assert_eq!((c.index, c.purl.as_str()), (7, "pkg:npm/left-pad@1.3.0"));
+        assert_eq!((c.elapsed_seconds, c.phase_elapsed_seconds), (0, 0));
+        // No phase yet is no phase, not a phase of no length.
+        assert_eq!(c.phase, None);
+    }
+
+    #[test]
+    fn a_new_phase_restarts_the_phase_clock_and_the_same_phase_does_not() {
+        let work = workdir("phase");
+        let p = quiet(&work);
+        // No target in flight: nothing to say a phase of, and nothing written.
+        p.phase("deps");
+        assert!(!work.join("status.json").exists());
+
+        p.target(0, "pkg:npm/a@1", 0);
+        let age = |p: &Progress, secs: u64| {
+            let mut s = p.shared.lock().unwrap();
+            let c = s.current.as_mut().unwrap();
+            c.elapsed_seconds = secs;
+            c.phase_elapsed_seconds = secs;
+        };
+        age(&p, 40);
+        p.phase("deps");
+        let c = on_disk(&work).current.unwrap();
+        assert_eq!(c.phase.as_deref(), Some("deps"));
+        assert_eq!(c.phase_elapsed_seconds, 0, "a new phase starts its own clock");
+        assert_eq!(c.elapsed_seconds, 40, "the target's clock runs on");
+
+        // The same phase again is not a new one: its clock keeps running.
+        age(&p, 90);
+        p.phase("deps");
+        let s = p.shared.lock().unwrap().clone();
+        assert_eq!(s.current.unwrap().phase_elapsed_seconds, 90);
+
+        p.phase("build");
+        let c = on_disk(&work).current.unwrap();
+        assert_eq!(c.phase.as_deref(), Some("build"));
+        assert_eq!(c.phase_elapsed_seconds, 0);
+        assert_eq!(c.elapsed_seconds, 90);
+    }
+
+    #[test]
+    fn a_heartbeat_ages_the_target_and_its_phase_by_one_beat_and_writes_it() {
+        let work = workdir("beat");
+        let mut s = status("running", Some(30));
+        s.current.as_mut().unwrap().phase_elapsed_seconds = 5;
+        beat(&work, &mut s);
+        let back = on_disk(&work);
+        let c = back.current.unwrap();
+        assert_eq!(c.elapsed_seconds, 30 + HEARTBEAT.as_secs());
+        assert_eq!(c.phase_elapsed_seconds, 5 + HEARTBEAT.as_secs());
+        assert_ne!(back.heartbeat, "2026-01-01T00:00:00Z", "the beat is stamped");
+
+        // Between targets there is only the stamp.
+        let mut idle = status("starting", None);
+        beat(&work, &mut idle);
+        assert!(on_disk(&work).current.is_none());
+
+        // And a clock at its end stays there rather than wrapping to a fresh target.
+        let mut worn = status("running", Some(u64::MAX));
+        beat(&work, &mut worn);
+        assert_eq!(on_disk(&work).current.unwrap().elapsed_seconds, u64::MAX);
+    }
+
+    #[test]
+    fn finishing_stamps_both_files() {
+        let work = workdir("finish");
+        write_atomic(&work.join("sweep.json"), &sweep()).unwrap();
+        let p = quiet(&work);
+        p.target(19, "pkg:npm/last@1", 19);
+        p.finish(20);
+
+        let s = on_disk(&work);
+        assert_eq!((s.state.as_str(), s.done), ("finished", 20));
+        assert!(s.current.is_none(), "nothing is in flight after the last one");
+        assert_eq!(Liveness::of(&s, 86_400, false, 600), Liveness::Finished);
+        let back: Sweep =
+            serde_json::from_str(&std::fs::read_to_string(work.join("sweep.json")).unwrap())
+                .unwrap();
+        assert!(back.finished.is_some(), "the sweep itself is stamped finished");
+        assert_eq!(back.targets_count, 20, "and is otherwise what it was");
+    }
+
+    #[test]
+    fn finishing_without_a_readable_sweep_file_finishes_the_status_and_invents_no_sweep() {
+        let work = workdir("finish-nosweep");
+        let p = quiet(&work);
+        p.finish(3);
+        assert_eq!(on_disk(&work).state, "finished");
+        assert!(!work.join("sweep.json").exists());
+
+        std::fs::write(work.join("sweep.json"), "not json").unwrap();
+        p.finish(3);
+        assert_eq!(
+            std::fs::read_to_string(work.join("sweep.json")).unwrap(),
+            "not json"
+        );
+    }
+
+    #[test]
+    fn a_sweep_that_has_not_started_a_target_is_starting_and_live() {
+        let s = status("starting", None);
+        assert_eq!(Liveness::of(&s, 0, true, 600), Liveness::Starting);
+        assert!(Liveness::Starting.is_live());
+        assert!(Liveness::Stuck { seconds: 700 }.is_live());
+        for dead in [
+            Liveness::Unknown,
+            Liveness::Unreadable,
+            Liveness::Stopped,
+            Liveness::Unresponsive,
+            Liveness::Finished,
+        ] {
+            assert!(!dead.is_live(), "{dead:?} keeps a page refreshing");
+        }
+    }
+
+    #[test]
+    fn the_corpus_digest_is_of_its_bytes() {
+        let work = workdir("digest");
+        std::fs::write(work.join("corpus.txt"), "abc").unwrap();
+        assert_eq!(
+            digest_of(&work.join("corpus.txt")).as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        assert_eq!(digest_of(&work.join("absent.txt")), None);
+    }
+
+    #[test]
+    fn a_run_report_is_written_finished_and_losing_it_does_not_stop_the_run() {
+        let work = workdir("report");
+        let mut r = RunReport::new("pkg:npm/a@1");
+        assert!(r.finished.is_none());
+        r.write(&work);
+        let back: RunReport =
+            serde_json::from_str(&std::fs::read_to_string(work.join("run.json")).unwrap())
+                .unwrap();
+        assert_eq!(back.purl, "pkg:npm/a@1");
+        assert!(back.finished.is_some());
+        assert!(!work.join("run.tmp").exists());
+
+        // A directory that is not there: reported, and the caller carries on.
+        let mut lost = RunReport::new("pkg:npm/b@1");
+        lost.write(&work.join("absent"));
+        assert!(lost.finished.is_some());
+        assert!(!work.join("absent").exists());
     }
 }
 

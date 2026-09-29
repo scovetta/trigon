@@ -252,7 +252,7 @@ applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
 [[entry]]
 file = "acid_vault-2.1.0-py3-none-any.whl"
 stabilized = "87e00f4c8084b368d8a56209c81014dfa439e18c9e8ae8ac7811121a25b5d00b"
-applied = ["pyc-header", "wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
+applied = ["pyc-header", "wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
 
 [[entry]]
 file = "aegisx-0.0.4.tar.gz"
@@ -267,29 +267,29 @@ applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
 [[entry]]
 file = "econml-0.17.0-cp310-cp310-macosx_11_0_arm64.whl"
 stabilized = "ddbb7a5091ce219edc883cfc76fba736f2d87a4dd8237a5b901442bed4a49932"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
 
 [[entry]]
 file = "feagi_bv_windows-2.3.37-py3-none-any.whl"
 stabilized = "025a9c2ef932a54ef925621ca47d935d85a57d700703a824fc3b68125e782689"
-applied = ["wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
+applied = ["wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
 
 [[entry]]
 file = "homecom_alt-1.7.2-py3-none-any.whl"
 stabilized = "7f73c34b675c3ab0db573d73e37c37f2de0e30a17a7bf975f189493ed625d21f"
-applied = ["zip-compression", "zip-entry-order", "zip-misc", "zip-time", "zip-versions", "wheel-record"]
+applied = ["zip-compression", "zip-entry-order", "zip-misc", "zip-time", "zip-versions", "wheel-record-v2"]
 
 [[entry]]
 file = "ipumspy-0.8.2-py3-none-any.whl"
 stabilized = "2bce08725247c38b2462e86f9bb20a23bcd8c392d478dbb49bba1628ca65c84b"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
 
 [[entry]]
 file = "pdspy-2.0.8-cp310-cp310-macosx_11_0_arm64.whl"
 stabilized = "dc30df2c9af3eca99b9994577a92d72485e2cf652ed1abf96d849bd4bf847660"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
 
 [[entry]]
 file = "your-0.6.7-py3-none-any.whl"
 stabilized = "523d0743e33c312c18675afe080808bd3cd8af9bd65ffa2640f29b284ea28fd5"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]

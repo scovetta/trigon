@@ -100,3 +100,30 @@ fn github_is_an_ordinary_target() {
     assert_eq!(t.ecosystem, Ecosystem::GitHub);
     assert_eq!(t.registry_name(), "stevemao/left-pad");
 }
+
+#[test]
+fn an_at_sign_with_nothing_after_it_is_no_version() {
+    let e = TargetRef::from_str("pkg:npm/left-pad@").unwrap_err();
+    assert!(matches!(e, PurlError::NoVersion(_)), "{e:?}");
+}
+
+#[test]
+fn a_purl_with_a_type_and_no_name_is_refused_rather_than_named_empty() {
+    for s in [
+        "pkg:npm@1.0.0",
+        "pkg:npm/@1.0.0",
+        "pkg:maven/org.apache.commons/@3.14.0",
+    ] {
+        let e = TargetRef::from_str(s).unwrap_err();
+        assert!(matches!(e, PurlError::NoName(_)), "{s}: {e:?}");
+    }
+}
+
+#[test]
+fn a_target_reads_as_its_purl_and_the_artifact_it_is_about() {
+    let t = trigon_core::Target::new(
+        TargetRef::from_str("pkg:npm/left-pad@1.3.0").unwrap(),
+        ArtifactId::new("left-pad-1.3.0.tgz"),
+    );
+    assert_eq!(t.to_string(), "pkg:npm/left-pad@1.3.0 (left-pad-1.3.0.tgz)");
+}

@@ -82,7 +82,13 @@ Maven, Debian, RubyGems and OCI in-tree.
   than sitting behind adapters. Running your own instance means running theirs.
 - **AI as a bolt-on.** Their agent is a three-call Diagnose, Implement, Clean cycle producing raw
   bash, reached only after normal inference fails. Useful, and not a design centre.
-- **KMS-only signing with no transparency log.** The "log" is a public GCS bucket.
+- **A bucket where a log should be.** Attestations are signed with a KMS key and published to a
+  public GCS bucket, and the bucket is the only "log": nothing commits to what was published when,
+  so an object rewritten or deleted leaves nothing a consumer can check. Trigon's design keeps an
+  append-only log over everything it publishes, signed by us and recomputed in full by every
+  consumer ([`19`](19-distribution-and-lookup.md),
+  [ADR-0014](adr/0014-git-evidence-store-without-rekor.md)). That is our own word made checkable
+  rather than a third party's, until witnesses cosign it.
 - **Positive results only.** A failed rebuild produces little durable, publishable output.
 - **No management UI** beyond a server-rendered dashboard and an operator TUI.
 - **`StrategyOneOf` as a struct of nullable pointers.** A Go workaround for missing sum types. Rust

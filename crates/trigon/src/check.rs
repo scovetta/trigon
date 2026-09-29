@@ -1,4 +1,7 @@
-//! `trigon check` — a lockfile in, a verdict table out, with an explicit *never checked* row.
+//! `trigon check --store <path>` — a lockfile in, a verdict table out, with an explicit *never
+//! checked* row, from a local store of the operator's own runs. A bare `trigon check` answers from
+//! the evidence sources instead (`crate::evidence::check`, `docs/19` §6); this is what it did
+//! before there were any.
 //!
 //! [`docs/11-interfaces.md`](../../../docs/11-interfaces.md) §"The hero": this is the only view
 //! that starts from something the reader already has. Everything else assumes they care about a
@@ -72,7 +75,10 @@ pub fn run(lockfile: &Path, store_path: &Path, format: &str) -> Result<()> {
         .enable_all()
         .build()?;
     let known = rt.block_on(async {
-        let store = Store::local(store_path)?;
+        // `existing`, not `local`: this only reads. `local` creates what it is pointed at, so a
+        // mistyped `--store` became an empty store, every package in the lockfile read as `never
+        // checked` of a store that had never existed, and the command exited 0.
+        let store = Store::existing(store_path)?;
         verdicts(&store).await
     })?;
 
@@ -104,8 +110,14 @@ pub fn run(lockfile: &Path, store_path: &Path, format: &str) -> Result<()> {
         .collect();
 
     match format {
-        "sarif" => println!("{}", serde_json::to_string_pretty(&sarif(lockfile, &checked))?),
-        "json" => println!("{}", serde_json::to_string_pretty(&as_json(lockfile, &checked))?),
+        "sarif" => println!(
+            "{}",
+            serde_json::to_string_pretty(&sarif(lockfile, &checked))?
+        ),
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&as_json(lockfile, &checked))?
+        ),
         "text" => text(lockfile, &checked),
         other => bail!("`{other}` is not a format this writes: text, json or sarif"),
     }
@@ -126,9 +138,27 @@ fn tally(checked: &[Checked]) -> BTreeMap<&'static str, usize> {
     t
 }
 
+/// A label, count, glyph or bar painted to what the status means: a reproduction is green, a
+/// caveated one yellow, a divergence red, and the two non-verdicts recede to grey. The colour is
+/// the fastest read of the view, and it is the one thing the plain glyphs already encode.
+fn paint(s: Status, text: &str) -> String {
+    match s {
+        Status::Reproduced => crate::style::good(text),
+        Status::Caveats => crate::style::warn(text),
+        Status::Divergent => crate::style::bad(text),
+        Status::Unsupported | Status::NeverChecked => crate::style::muted(text),
+    }
+}
+
 fn text(lockfile: &Path, checked: &[Checked]) {
+    use crate::style;
     let total = checked.len();
-    println!("{} · {total} package(s)\n", lockfile.display());
+    println!(
+        "{} {}",
+        style::heading(&lockfile.display().to_string()),
+        style::muted(&format!("· {total} package(s)"))
+    );
+    println!();
 
     let widest = 38usize;
     for s in [
@@ -143,12 +173,12 @@ fn text(lockfile: &Path, checked: &[Checked]) {
         // a denominator anybody has to choose.
         let filled = (n * widest).checked_div(total).unwrap_or(0);
         println!(
-            "  {} {:<14} {:>5}   {}{}",
-            s.glyph(),
-            s.label(),
-            n,
-            "▓".repeat(filled),
-            "░".repeat(widest - filled),
+            "  {} {} {}   {}{}",
+            paint(s, s.glyph()),
+            paint(s, &format!("{:<14}", s.label())),
+            paint(s, &format!("{n:>5}")),
+            paint(s, &"▓".repeat(filled)),
+            style::muted(&"░".repeat(widest - filled)),
         );
     }
 
@@ -159,23 +189,35 @@ fn text(lockfile: &Path, checked: &[Checked]) {
     if !notable.is_empty() {
         println!();
         for c in notable.iter().take(40) {
+            let detail = c.detail.as_deref().unwrap_or(c.status.label());
             println!(
-                "  {}  {:<28} {:<12} {}",
-                c.status.glyph(),
-                c.name,
-                c.version,
-                c.detail.as_deref().unwrap_or(c.status.label())
+                "  {}  {} {} {}",
+                paint(c.status, c.status.glyph()),
+                style::ident(&format!("{:<28}", c.name)),
+                style::muted(&format!("{:<12}", c.version)),
+                paint(c.status, &style::wrap(detail, 6)),
             );
         }
         if notable.len() > 40 {
-            println!("  … and {} more; --format json for all of them", notable.len() - 40);
+            println!(
+                "  {}",
+                style::muted(&format!(
+                    "… and {} more; --format json for all of them",
+                    notable.len() - 40
+                ))
+            );
         }
     }
 
+    println!();
     println!(
-        "\n  `never checked` is a count of packages with no run, and `unsupported` of runs that \
-         reached no verdict.\n  Neither is a statement about the package, and neither is summed \
-         with the three above them."
+        "  {}",
+        style::muted(&style::wrap(
+            "`never checked` is a count of packages with no run, and `unsupported` of runs that \
+             reached no verdict. Neither is a statement about the package, and neither is summed \
+             with the three above them.",
+            2,
+        ))
     );
 }
 
@@ -309,7 +351,9 @@ mod tests {
         // the package, and calling either `divergent` would be an accusation nobody made.
         assert_eq!(rec(None, &[]).status().0, Status::Unsupported);
         assert_eq!(
-            rec(Some("divergent"), &["fetched its own artifact"]).status().0,
+            rec(Some("divergent"), &["fetched its own artifact"])
+                .status()
+                .0,
             Status::Unsupported,
             "a tripped guard voids the run whatever the comparison said"
         );
@@ -351,7 +395,10 @@ mod tests {
 
         // **The load-bearing assertion.** A package nobody has checked must appear. A blank cell
         // reads as verified, and reading as verified is the one mistake this view cannot afford.
-        let ids: Vec<&str> = results.iter().map(|r| r["ruleId"].as_str().unwrap()).collect();
+        let ids: Vec<&str> = results
+            .iter()
+            .map(|r| r["ruleId"].as_str().unwrap())
+            .collect();
         assert!(ids.contains(&"trigon/never-checked"), "{ids:?}");
         assert!(
             !ids.contains(&"trigon/reproduced"),
@@ -361,10 +408,7 @@ mod tests {
 
         // Severity is ordered the way a reviewer needs it.
         let level = |id: &str| {
-            results
-                .iter()
-                .find(|r| r["ruleId"] == id)
-                .unwrap()["level"]
+            results.iter().find(|r| r["ruleId"] == id).unwrap()["level"]
                 .as_str()
                 .unwrap()
                 .to_string()
@@ -378,6 +422,24 @@ mod tests {
         assert_eq!(t["packages"], 3);
         assert_eq!(t["tally"]["reproduced"], 1);
         assert_eq!(t["tally"]["never checked"], 1);
+    }
+
+    /// `clap` admits only the three formats, and `run` refuses anything else by name rather than
+    /// falling back to one of them, before it prints a line.
+    #[test]
+    fn a_format_it_does_not_write_is_refused_by_name() {
+        let d = std::env::temp_dir().join(format!("trigon-check-format-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("store")).unwrap();
+        let lock = d.join("package-lock.json");
+        std::fs::write(
+            &lock,
+            r#"{"packages": {"": {}, "node_modules/a": {"version": "1.0.0"}}}"#,
+        )
+        .unwrap();
+        let e = run(&lock, &d.join("store"), "yaml").unwrap_err().to_string();
+        assert!(e.contains("`yaml` is not a format this writes"), "{e}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// No rate, anywhere, over any of it.

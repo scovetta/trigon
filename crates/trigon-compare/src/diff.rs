@@ -97,6 +97,34 @@ pub struct DiffReport {
     /// Differences in files classified `Executable`. Never benign.
     pub executable_differs: u32,
     pub files: Vec<FileDiff>,
+    /// Which passes changed which field of which member — the ground-truth join partner for
+    /// [`codes`](Self::codes). A code names a difference the stabilizers *left*; this names, for
+    /// every field either side's passes touched, the passes that touched it. The two together
+    /// distinguish a difference a pass erased (a `(field, path)` here with no matching code) from
+    /// one it could not (a code here) from one nothing addressed (a code with no entry here).
+    ///
+    /// Empty on an exact match, where nothing fired, and absent from every comparison written
+    /// before this field existed — which is what the default is for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub field_edits: Vec<FieldProvenance>,
+    /// The differences left after each pass of the set, from the artifacts as published to the
+    /// last pass — how the gap closed, or how far it got. Explanation only; see
+    /// [`crate::progression`]. Absent from every comparison written before it existed, and from
+    /// one produced by [`crate::compare`] alone, which never saw the published bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progression: Option<crate::progression::Progression>,
+}
+
+/// Which passes changed one field of one member, merged and deduplicated across both sides.
+///
+/// `field` and `path` are spelled exactly as a difference [`code`](DiffReport::codes) spells them
+/// (`mode`, `zip.crc32`, `body`; `outer!inner` for a nested member), so the join is a string match.
+/// `passes` is sorted, so the blob is stable and signable.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FieldProvenance {
+    pub path: String,
+    pub field: String,
+    pub passes: Vec<String>,
 }
 
 /// Compare two stabilized archives member by member.
@@ -169,7 +197,36 @@ pub fn report(upstream: &Archive, rebuild: &Archive) -> DiffReport {
         only_rebuild: counts.3,
         executable_differs: counts.4,
         files,
+        field_edits: Vec::new(),
+        progression: None,
     }
+}
+
+/// Merge both sides' per-field edits into one deduplicated attribution, keyed by `(path, field)`.
+///
+/// A field is normalized to one value across the pair, so the pass that wrote it on the upstream
+/// side and the pass that wrote it on the rebuild side are, in the intended case, the same id; the
+/// union is taken anyway so an asymmetry (a pass that fired on one side only) is not silently
+/// dropped. Sorted throughout, so the blob is deterministic.
+pub fn merge_edits(sides: [&[trigon_stabilize::FieldEdit]; 2]) -> Vec<FieldProvenance> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut by_key: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for side in sides {
+        for e in side {
+            by_key
+                .entry((e.path.clone(), e.field.clone()))
+                .or_default()
+                .insert(e.pass.to_string());
+        }
+    }
+    by_key
+        .into_iter()
+        .map(|((path, field), passes)| FieldProvenance {
+            path,
+            field,
+            passes: passes.into_iter().collect(),
+        })
+        .collect()
 }
 
 type Key = (EntryPath, u32);

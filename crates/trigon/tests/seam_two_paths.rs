@@ -51,7 +51,7 @@ fn dir(name: &str) -> PathBuf {
 // ---------------------------------------------------------------------------------------------
 
 /// A wheel whose `METADATA` and `WHEEL` carry CRLF (so `wheel-metadata-eol` fires) and whose
-/// `RECORD` is wrong (so `wheel-record` regenerates it). Under the plain zip set both are inert,
+/// `RECORD` is wrong (so `wheel-record-v2` regenerates it). Under the plain zip set both are inert,
 /// which is exactly what makes this the fixture that separates the two profiles.
 const WHEEL_MEMBERS: &[(&str, &[u8])] = &[
     ("demo/__init__.py", b"x = 1\n"),
@@ -267,7 +267,7 @@ fn a_wheel_runs_the_wheel_passes_from_stabilize_and_not_only_from_verify() {
 
     let s = stabilize_chose(&whl, &[]);
     assert_eq!(s.set_id, "wheel", "a .whl must not get the plain zip set");
-    for pass in ["wheel-metadata-eol", "wheel-record"] {
+    for pass in ["wheel-metadata-eol", "wheel-record-v2"] {
         assert!(
             s.applied.contains(&pass.to_string()),
             "`trigon stabilize` on a wheel did not run `{pass}`; it applied {:?}",

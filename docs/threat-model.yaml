@@ -11,11 +11,11 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:762aa2e06694a8dbee8dd8059be516dc924fbe2cc60d918c8e1b51b5eb3e3aea
+prose_version: docs/threat-model.md@sha256:dbe9094b02cc50dd1f492d02ef9e8aba4f692ab579e15799361946d78befeb24
 model_status: unratified-draft
 triage_policy: strict
 confidence:
-  documented: 195
+  documented: 270
   maintainer: 0
   inferred: 5
   assumption: 3
@@ -40,7 +40,10 @@ components:
     source: docs/threat-model.md §1.2
 - name: attestation
   scope: in
-  reachability_precondition: a statement this process built, or an attestation handed to verify-attestation
+  reachability_precondition: a statement this process built, an attestation handed to verify-attestation,
+    a record file and an evidence directory handed to verify-attestation --record, which whoever can push
+    to that repository wrote (A8, A9), or a tree handed to trigon log sign, which publish wrote over a
+    clone of such a repository
   provenance:
     kind: documented
     source: docs/threat-model.md §1.2
@@ -76,7 +79,10 @@ components:
     source: docs/threat-model.md §1.2
 - name: operator-surface
   scope: in
-  reachability_precondition: a flag, a work directory on disk, or an HTTP request to watch
+  reachability_precondition: a flag, a work directory on disk, an HTTP request to watch, the evidence
+    repository trigon publish fetches, or those trigon evidence sync clones — every location of every
+    source, and every successor a log-end names — which whoever can push to them wrote, or serves (A8,
+    A9); or a project's .trigon/evidence.toml, chosen by the thing under test
   provenance:
     kind: documented
     source: docs/threat-model.md §1.2
@@ -109,27 +115,44 @@ host_side_effects:
     kind: documented
     source: docs/01-architecture.md §2.2
 - effect: Environment variables
-  stance: absent
+  stance: conditional
   components: []
-  conditions: ''
+  conditions: 'only verify-attestation --record: under --source <name>, the evidence configuration''s
+    — TRIGON_EVIDENCE_CONFIG, TRIGON_EVIDENCE_STATE, TRIGON_EVIDENCE_REPO and the keys beside it, XDG_CONFIG_HOME,
+    XDG_STATE_HOME, HOME — and HOME to expand ~/ in --attestation-key, as trigon log sign --attestation-key
+    does too; and trigon log sign''s XDG_STATE_HOME and HOME, for the host''s state directory'
   provenance:
     kind: documented
-    source: docs/01-architecture.md §2.2
+    source: crates/trigon-attest/src/config.rs — `Env::from_process`; crates/trigon/src/verify_record.rs;
+      crates/trigon/src/evidence_log.rs
 - effect: Filesystem writes
   stance: conditional
   components: []
-  conditions: 'only paths the operator named: the stabilize output and the --attest file. SpillFile exists
-    as a type and is never constructed, so nothing spills'
+  conditions: 'only paths the operator named: the stabilize output, the --attest file, the key file keygen
+    or log keygen makes — created 0600, never over a file already there — and under trigon log sign, the
+    named tree''s log/checkpoint, replaced by a rename from a file made new beside it, and with --init
+    its keys/log.vkey, and with --continuing a successor''s first checkpoint at the --log it names; and
+    the newest checkpoint of the log it has built on, in the host''s state directory ($XDG_STATE_HOME/trigon/publish/).
+    SpillFile exists as a type and is never constructed, so nothing spills'
   provenance:
     kind: documented
-    source: 'verified: no construction of `Body::Spilled` anywhere in `crates/`'
+    source: 'verified: no construction of `Body::Spilled` anywhere in `crates/`; crates/trigon/src/evidence_log.rs'
 - effect: Filesystem reads
   stance: conditional
   components: []
-  conditions: only paths the operator named, plus a signing key file
+  conditions: only paths the operator named, plus a signing key file; and under verify-attestation --record,
+    the files of the evidence directory it names — checkpoints, tiles, entry bundles, records and evidence,
+    each inside the directory once links are followed, a regular file, and no longer than its kind can
+    be — and under --source, evidence.toml, the working directory's .trigon/evidence.toml, the source's
+    state checkpoint, and for a source trusting on first use the keys its first sync recorded (<state>/<name>/keys);
+    and under trigon log sign, the log key file — with --successor-key, the successor's too — the newest
+    checkpoint of its log kept in the host's state directory, and the files of the tree it names, and
+    with --continuing of the tree whose chain it continues, read the same way; and under trigon log public-key
+    and trigon log key-change-leaf, the key files named
   provenance:
     kind: documented
-    source: crates/trigon/src/main.rs — every read path is a CLI argument
+    source: crates/trigon/src/main.rs — every other read path is a CLI argument; crates/trigon-attest/src/log/files.rs;
+      crates/trigon-attest/src/evidence/repository.rs; crates/trigon-attest/src/config.rs; crates/trigon-attest/src/evidence/sign.rs
 - effect: stdout / stderr
   stance: present
   components: []
@@ -168,10 +191,195 @@ host_side_effects:
 - effect: Spawning git
   stance: present
   components: []
-  conditions: with GIT_CONFIG_NOSYSTEM and a restricted GIT_ALLOW_PROTOCOL
+  conditions: 'for a package''s source, with GIT_CONFIG_NOSYSTEM and a restricted GIT_ALLOW_PROTOCOL ;
+    for trigon publish and trigon log init, with the operator''s own git configuration, where its credential
+    helper is, GIT_TERMINAL_PROMPT=0, and GIT_DIR and its kin removed, so it writes its own clone and
+    no other. Nothing in that configuration changes what is committed or read: core.autocrlf and the operator''s
+    attributes file are switched off, commits and pushes are never signed, a publication''s files are
+    staged as blobs of exactly their bytes rather than by git add, and a repository is looked for in the
+    directory named and never above it (GIT_CEILING_DIRECTORIES)'
   provenance:
     kind: documented
     source: crates/trigon-registry/src/source.rs
+- effect: Pushing to an evidence repository
+  stance: conditional
+  components: []
+  conditions: 'only trigon publish, trigon log init, trigon log key-change and trigon log succeed: one
+    commit, pushed without force to the repository --repo, TRIGON_PUBLISH_REPO or [publish] repo names,
+    over whatever transport that location names. A publication''s signed checkpoint leaves the host only
+    in that push; a push that loses is discarded, never forced (P34, D26). log succeed --url first clones
+    the repository its first URL names into the temporary directory and asks it git push --dry-run, which
+    sends nothing, and then, only once the old log''s end is pushed, pushes a second commit there, the
+    successor''s first (P37)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/mod.rs; docs/19-distribution-and-lookup.md §10 phase 5
+- effect: Fetching evidence repositories
+  stance: conditional
+  components: []
+  conditions: 'only trigon evidence sync; trigon lookup, trigon check without --store, and verify-attestation
+    --lookup, each of which syncs every source it asks that is stale, once, before it answers anything,
+    and says so — none under --offline or --remote, and no request per package after it; and trigon publish
+    of runs or a withdrawal into a repository whose chain begins by continuing a log elsewhere, which
+    syncs the configured source that reaches that log — and, where none serves, every configured source
+    it did not just sync, however fresh; a dry run syncs none: git clone and git fetch of every location
+    of every source synced, and of every location a log-end names for a successor in another repository,
+    over whatever transport each names, with git run as publish runs it — never prompting, ssh in batch
+    mode, no repository looked for above the clone, no credential on argv or in what is printed. A remote
+    is cloned --depth 1 --filter=blob:none --sparse and set to check out keys, log and records, and a
+    local path in full; a sync is a fetch of the branch and reset --hard FETCH_HEAD, never a pull. The
+    branch is the repository''s to name: it is refused unless git would make a branch of the name, and
+    is fetched as refs/heads/<branch> after --, so no name is ever an option. A project''s source is followed
+    to a successor elsewhere only at an HTTPS location. Nothing is pushed (P39)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/evidence/sync.rs; docs/19-distribution-and-lookup.md §6
+- effect: Writing the evidence cache
+  stance: conditional
+  components: []
+  conditions: 'only what syncs a source: one clone per location at <cache>/<name>/<sha256 of the location>/,
+    <cache> being TRIGON_EVIDENCE_CACHE or $XDG_CACHE_HOME/trigon/evidence, each with a .git/info/attributes
+    that unsets every attribute that could make a checked-out file other than its blob. A clone is made
+    beside where it goes, under a name beginning with a dot, marked unaccepted in its git directory, and
+    only then moved into place; the mark comes off when the sync is accepted, and a clone still marked,
+    or what a killed clone left, is made again. A clone a refused sync made is removed and one it moved
+    is put back; a sync accepted removes, from the cache and never from the state, the clone of every
+    location its source no longer names — no URL of it, and no successor location its chain reaches —
+    and says which; trigon evidence remove removes a source''s (P39)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/evidence/sync.rs — `forget_unconfigured`; crates/trigon/tests/lookup.rs
+      — `a_sync_removes_the_clone_of_a_location_no_longer_configured`
+- effect: Fetching an evidence file on demand
+  stance: conditional
+  components: []
+  conditions: 'only verify-attestation --lookup: each evidence file the resolved record names is read
+    from its clone''s working tree where it is there, and otherwise from its objects, git cat-file at
+    HEAD in the clone, run as publish runs git and only in a clone a sync accepted; where the clone is
+    partial and does not hold the blob, git fetches it from the clone''s remote, which names the record
+    to that host. Whether it held the blob is asked first with lazy fetching off, and the report says
+    which files were fetched and from where. Nothing is written but git''s objects in the clone (P45,
+    D35)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/evidence/rerun.rs — `GitFiles`; crates/trigon/src/publish/git.rs — `blobs_fetching`,
+      `blobs_held`; docs/19-distribution-and-lookup.md §6, §7
+- effect: Outbound HTTPS for --remote
+  stance: conditional
+  components: []
+  conditions: 'only trigon lookup --remote and trigon check --remote: GETs, with no credential, from https://raw.githubusercontent.com/<owner>/<repo>/HEAD/,
+    or the base TRIGON_EVIDENCE_RAW_BASE names (HTTPS, or plain HTTP to loopback only, and no user or
+    password), of each source''s log/checkpoint, the entry bundle and hash tiles of its last leaf, the
+    checkpoint, first leaf and last leaf of each successor its chain reaches on github.com, the index
+    file for each key asked, each record it lists, and the entry bundles and hash tiles that prove each
+    record''s leaf; a redirect is followed only to HTTPS. Every request after the first names the key
+    asked about to GitHub. No git runs, no clone is made, and no state is written; a source with no https://github.com/<owner>/<repo>
+    URL is refused before any request, exit 5, and so, with nothing requested, is one whose last sync
+    was refused; each report says the three caveats of docs/19 §6 (P44, D36)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/evidence/remote.rs; crates/trigon/tests/lookup.rs — `remote_proves_inclusion_and_refuses_what_it_cannot_prove`,
+      `remote_answers_unknown_for_what_it_cannot_read_and_holds_to_the_state`
+- effect: Writing the evidence state directory
+  stance: conditional
+  components: []
+  conditions: 'only what syncs a source: <state>/<name>/, <state> being TRIGON_EVIDENCE_STATE or $XDG_STATE_HOME/trigon/evidence
+    — the checkpoint last accepted, the key history, the record of the last sync, and a lock two syncs
+    of one source take turns on. The checkpoint and the key history are written only once everything is
+    verified, each file whole by rename, and once the checkpoint is, the clones it was read from are kept
+    whatever happens to the record of the sync; a sync that fails records only that it failed. trigon
+    evidence remove removes a source''s (P39)'
+  provenance:
+    kind: documented
+    source: crates/trigon-attest/src/state.rs; crates/trigon/src/evidence/sync.rs
+- effect: Writing evidence.toml
+  stance: conditional
+  components: []
+  conditions: 'only trigon evidence add and remove: the user''s file, or the file TRIGON_EVIDENCE_CONFIG
+    names — made where it is not there — rewritten whole by rename beside the file a symlinked path leads
+    to, the link kept, its permissions, comments and order kept, and only once the file as it would be
+    loads under every rule; never a project''s file'
+  provenance:
+    kind: documented
+    source: crates/trigon-attest/src/config.rs — `add_source`, `remove_source`
+- effect: Reading a git credential
+  stance: conditional
+  components: []
+  conditions: 'never by Trigon. The git that publish runs reads the operator''s own — an SSH key, a credential
+    helper, GIT_ASKPASS — and a missing one fails rather than prompts: GIT_TERMINAL_PROMPT=0 for git''s
+    own, and ssh runs with BatchMode=yes, added to a configured command that runs ssh, so neither a passphrase
+    nor a host key is asked for. A program the operator configures to answer — a helper, an askpass, an
+    ssh wrapper that is not ssh — runs as configured. A location carrying a credential is refused when
+    it is parsed, so none is on argv, and what git prints is shown with any URL''s user part replaced
+    by'
+  provenance:
+    kind: documented
+    source: crates/trigon-attest/src/location.rs; crates/trigon/src/publish/git.rs — `scrub`
+- effect: Outbound HTTPS to GitHub's REST API
+  stance: conditional
+  components: []
+  conditions: 'only trigon publish of runs with [publish] rebuilt_artifacts = "github-release": to https://api.github.com,
+    or the server TRIGON_GITHUB_API names (HTTPS, or HTTP to loopback only), and to the upload URL it
+    names on GitHub''s upload host or that server — listing the repository''s releases and their assets,
+    creating a release rebuilt-YYYY-MM or the next of its series, uploading each rebuilt artifact as sha256-<hex>,
+    and removing an asset of that name GitHub left unfinished or reports no digest for, to upload it again
+    — before the commit that names them. Redirects are not followed (P36)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/release.rs
+- effect: Outbound HTTPS to GitHub's REST API, anonymously
+  stance: conditional
+  components: []
+  conditions: only verify-attestation --lookup --rerun-comparison given no --rebuild, for a verdict that
+    signs its rebuilt artifact's sha256 and is not exact, where a repository that holds the resolved record's
+    leaf — the source's own, or the successor's its chain went on in, and then every other source's that
+    holds the record, but never one a project's .trigon/evidence.toml added where the record was resolved
+    in the user's own — has a location on github.com, HTTPS or SSH; whatever this host's own [publish]
+    rebuilt_artifacts, which governs only what publish uploads. Listing each such repository's releases,
+    and the assets of the releases of its rebuilt-YYYY-MM series for the month the record was logged in
+    and the months either side, where publish puts the asset, and of no other release, from https://api.github.com
+    or the server TRIGON_GITHUB_API names (HTTPS, or HTTP to loopback only), with no token; and downloading
+    the finished asset sha256-<hex> the verdict names from the download URL GitHub gives, HTTPS only —
+    or, where that server is on loopback, loopback — redirects followed to the same, streamed into a new
+    0600 file, created exclusively, in a directory made 0700 for it under a name of 128 random bits in
+    the temporary directory, refused past GitHub's 2 GiB, hashed as it is written and held to the verdict's
+    digest, and removed with its directory when the command ends; a download that fails goes on to the
+    next release that holds the asset. A download names the artifact, and so the record, to GitHub, and
+    says so whether or not it was had (P45, D35). An exact verdict, a repository with no github.com location,
+    and --rebuild <file> given make no request; GitHub refusing or unreachable is a check not made, exit
+    5
+  provenance:
+    kind: documented
+    source: crates/trigon/src/evidence/rerun.rs — `rebuilt_asset`, `wanted`, `candidates`, `fetch_asset`,
+      `Download`, `a_download_is_made_where_no_other_user_can_reach_it`, `plain_http_is_followed_to_this_machine_alone`,
+      `an_exact_verdicts_rebuilt_artifact_is_the_upstream_file_and_any_others_its_signed_asset`; crates/trigon/tests/lookup.rs
+      — `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`, `the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`,
+      `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`, `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`,
+      `an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`, `the_falsifying_command_re_derives_a_published_verdict`,
+      `the_falsifying_command_across_a_succession_and_for_a_void`
+- effect: Reading a GitHub token
+  stance: conditional
+  components: []
+  conditions: 'only then: GITHUB_TOKEN, else GH_TOKEN, from the environment and nowhere else — never argv,
+    never a file — and missing, the publication is refused before anything is written. It is sent only
+    as the Authorization header, only to the API and to an upload URL on GitHub''s upload host or the
+    overridden API''s own origin, and is in no URL, message or Debug print (P38, D28)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/release.rs — `Token`, `may_carry_token`
+- effect: Spawning trigon log sign
+  stance: conditional
+  components: []
+  conditions: publish, log init, log key-change and log succeed run it as a child of the same binary —
+    log succeed twice, with --successor-key to sign the final checkpoint and cosign it, and with --continuing
+    to begin the successor; it, and not they, opens a log key. log succeed names the successor by trigon
+    log public-key, a child too, and log key-change has trigon log key-change-leaf, a child that opens
+    no socket, open the two attestation keys and sign the leaf — or, in a dry run, trigon public-key,
+    a child that signs nothing, read their public halves — so the process that fetches and pushes opens
+    neither kind of key (P35, P37)
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/mod.rs — `sign`, `key_change_leaf`, `public_key_of`
 - effect: Spawning podman
   stance: present
   components: []
@@ -214,6 +422,53 @@ host_side_effects:
   provenance:
     kind: documented
     source: docs/18-management-ui.md §2
+- effect: Writing <store>/publish/
+  stance: conditional
+  components: []
+  conditions: 'only trigon publish, log key-change and log succeed: the working clone of each repository
+    they publish to, and the store''s lock; and in a working tree published into in place, a lock file
+    in its git directory'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/mod.rs; docs/19-distribution-and-lookup.md §2.4
+- effect: Dropping a rebuilt artifact from the store
+  stance: conditional
+  components: []
+  conditions: trigon attest --prune, as it always has, and trigon publish --prune, for each run it published,
+    once the publication is pushed and recorded on the run; a divergence keeps its bytes. Where a publish
+    repository is configured with rebuilt_artifacts = "github-release", attest --prune refuses, before
+    signing anything, a run not yet published whose publication would upload its artifact — not an exact
+    rebuild, not one the gate calls void, and not the second of an agreeing pair whose first is published.
+    The bytes are deleted only where no other run's record names them as kept — as its published artifact,
+    or as the rebuild of the other attempt of an agreeing pair, which rebuilt the same bytes into one
+    blob — and otherwise only this run's reference is dropped. Asking who names the bytes and deleting
+    them hold <store>/blobs.lock alone, made where it is not there, which a run writing bytes it names
+    as kept holds shared from before its put until its record is written (P42)
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/mod.rs — `prune_published`; crates/trigon/src/main.rs — `refuse_prune_before_publication`;
+      crates/trigon-store/src/lib.rs — `prune_rebuild`
+- effect: trigon serve reading the publisher's working clone
+  stance: conditional
+  components: []
+  conditions: 'where a publish repository is configured: git rev-parse and git ls-tree in <store>/publish/<…>/clone,
+    read-only, and the commit and time publish records in its .git/trigon-fetched once a fetch succeeds,
+    to report the repository''s kill-switch — on starting and every ten seconds after, on a blocking thread,
+    never for a request; with no clone, or no record of a fetch that succeeded, the report is unknown'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/publish/switch.rs; crates/trigon-api/src/lib.rs — `cached_switch`
+- effect: Writing $XDG_STATE_HOME/trigon/publish/
+  stance: conditional
+  components: []
+  conditions: 'only trigon publish, log key-change, log succeed and trigon log sign: the host''s lock,
+    which keeps one publish at a time on the host whatever store it runs from, and the newest checkpoint
+    of each log the host has published or verified, named by the log''s origin, which every later publication
+    and signature there must extend (P34, P35)'
+  provenance:
+    kind: documented
+    source: crates/trigon/src/evidence_log.rs — `NewestPublished`; docs/19-distribution-and-lookup.md
+      §2.4
 entry_points:
 - id: archive::parse
   component: multiple
@@ -335,10 +590,15 @@ entry_points:
     control_kinds:
     - data
     - size
-    caller_must_enforce: bytes are re-hashed and checked against the declared digest
+    caller_must_enforce: 'hashed as it streams and checked against every digest the registry declares
+      that this build can compute, and refused on the first mismatch: npm''s whole integrity string and
+      its shasum, PyPI''s digests, crates.io''s checksum, and NuGet''s catalog packageHash. PyPI''s blake2b_256
+      is recorded as declared and unchecked; a NuGet version whose catalog carries no hash is recorded
+      as declaring nothing, and a catalog that cannot be read refuses the download. The run records each
+      declaration and what checking it found (RunRecord.upstream_digests)'
     provenance:
       kind: documented
-      source: crates/trigon-registry/src/registry.rs
+      source: crates/trigon-registry/src/declared.rs; docs/16-findings.md §3.95
 - id: SourceCache::checkout
   component: multiple
   parameters:
@@ -383,6 +643,19 @@ entry_points:
     provenance:
       kind: documented
       source: docs/12-security.md §5
+  - name: npm's _nodeVersion and _npmVersion, and the script a release workflow runs as npm run <name>
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - resource-name
+    - x-shell-script
+    caller_must_enforce: lowered into a tool only as a plain x.y.z and a bare name (is_plain_version,
+      bare_program), on the heuristic rung and on the CI rung that displaces it; otherwise the rung declines
+      by name, and a _nodeVersion built from master is left to the heuristic, which replaces it with the
+      nearest release and says so
+    provenance:
+      kind: documented
+      source: docs/16-findings.md §3.104; crates/trigon-registry/tests/ci.rs — `the_values_the_heuristic_checks_are_checked_before_they_are_lowered`
 - id: strategy parse
   component: multiple
   parameters:
@@ -407,6 +680,18 @@ entry_points:
     provenance:
       kind: documented
       source: docs/04-strategies.md §3
+  - name: 'a value a rung read from outside the strategy: a .NET version stamp or copyright, a package.json
+      script body, a registry''s versions and publish time, a wheel''s Generator:, a workflow''s directory
+      and script'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - x-template-source
+    caller_must_enforce: nothing — it is carried as the step's literal and never parsed as a template
+      (P46)
+    provenance:
+      kind: documented
+      source: docs/04-strategies.md §3.3; docs/16-findings.md §3.104
 - id: build container
   component: multiple
   parameters:
@@ -491,6 +776,248 @@ entry_points:
     provenance:
       kind: documented
       source: README.md
+- id: verify-attestation --record
+  component: multiple
+  parameters:
+  - name: the record file
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - serialized-state
+    caller_must_enforce: 'nothing — P31: its sha256 must be a verified leaf''s, and one leaf''s only,
+      every envelope must verify under the key its source had at that leaf, its statement must agree with
+      the leaf, its unsigned map with its statement, and every evidence file present with its digest;
+      a record no leaf names is unlogged and fails, and so does one the log holds twice'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §4.1, §8; crates/trigon-attest/tests/evidence_repo/records.rs
+  - name: 'the evidence directory: log/, records/, evidence/, index/'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - object-topology
+    - resource-name
+    caller_must_enforce: 'nothing — P32, P33: the log is verified whole under the pinned log key, and
+      against the checkpoint last accepted, before a record is read; every file is read inside the directory,
+      as a regular file of at most its kind''s length; index/ is never read; a leaf whose record file
+      is missing is deleted'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §6, §8; crates/trigon-attest/src/log/files.rs; crates/trigon-attest/tests/evidence_repo/
+- id: trigon publish
+  component: multiple
+  parameters:
+  - name: 'the evidence repository it fetches: keys/, log/, records/, evidence/, index/, feed/, kill-switch,
+      README.md'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - object-topology
+    - resource-name
+    caller_must_enforce: 'nothing — P34: the chain of logs keys/log.vkey begins must end, in this repository,
+      at [publish] origin''s log; the feed and the README''s account of rotations are regenerated from
+      the log, never edited; a branch that names git attributes is refused before it is checked out; the
+      log is verified whole under it, and against the newest checkpoint of the log this host has published
+      or verified, whatever store or spelling of the location, before anything is built on it; nothing
+      past the checkpoint is read; a file at a path a publication writes is replaced, never written through,
+      and a link where it writes a directory, or planted as index, is refused; its .gitignore changes
+      nothing committed; where the repository''s chain begins by continuing a log in another repository,
+      the chain before it is read through a configured source, verified as evidence sync verifies one,
+      and followed into this repository''s first log'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §2.4, §8, §10 phase 5; crates/trigon/tests/publish.rs
+- id: trigon log sign
+  component: multiple
+  parameters:
+  - name: the tree it is handed
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - object-topology
+    caller_must_enforce: 'nothing — P35: it signs only a tree extending a checkpoint its own key opens
+      and the newest checkpoint of the log published from this host, whose every new leaf names a record
+      every client would accept, is a heartbeat, a key change from the current key signed by both, or
+      a log-end naming the key --successor-key holds, and reads nothing past the size it is told to sign;
+      the checkpoint it writes is renamed over the old from a file made new, never written through a link'
+    provenance:
+      kind: documented
+      source: crates/trigon-attest/src/evidence/sign.rs; crates/trigon-attest/tests/evidence_repo/sign.rs
+- id: trigon log sign --continuing
+  component: multiple
+  parameters:
+  - name: the tree holding the log it continues, and the successor's first tree
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - object-topology
+    caller_must_enforce: 'nothing — P37: a successor is begun only as the log a verified chain''s log-end
+      names by its key, from a log-continuation holding that log''s final checkpoint signed by both log
+      keys and logged no earlier than the log-end, extending what this host published of the old log,
+      and held to follow before it is signed'
+    provenance:
+      kind: documented
+      source: crates/trigon-attest/src/evidence/sign.rs — `check_to_begin`; crates/trigon-attest/tests/evidence_repo/sign.rs
+        — `a_successor_is_begun_only_as_the_one_its_predecessor_names`
+- id: trigon evidence sync
+  component: multiple
+  parameters:
+  - name: 'the repositories it clones — every location of a source, and every successor location a log-end
+      names: keys/, log/, records/'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - object-topology
+    - resource-name
+    caller_must_enforce: 'nothing — P39, P40: every clone is verified whole under the source''s keys before
+      anything from it is accepted, and every location is held to every other; the chain is held to the
+      checkpoint last accepted; a clone''s files are read inside it, as regular files of at most their
+      kind''s length, and exactly as their blobs, whatever attributes the tree names; the default branch
+      a clone takes from the repository is refused unless git would make a branch of the name, and reaches
+      git only as refs/heads/<branch> after --, never as an option'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §6, §6.1, §8; crates/trigon/tests/evidence.rs — `a_repositorys_own_attributes_never_change_what_is_verified`,
+        `a_branch_named_as_an_option_is_never_fetched`
+- id: trigon evidence sync, trusting on first use
+  component: multiple
+  parameters:
+  - name: keys/log.vkey and keys/attestation.pub of the first location reached, on the source's first
+      sync
+    attacker_controllable: true
+    control_kinds:
+    - data
+    caller_must_enforce: 'the operator, who chose trust on first use: nothing checks the keys against
+      anything else. They are recorded in the state directory, pin every later sync, and every answer
+      from the source says it rests on them (D33)'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §2.4, §6.1; crates/trigon/tests/evidence.rs — `trust_on_first_use_is_recorded_once_and_every_answer_says_it_rests_on_it`
+- id: trigon lookup, trigon check, verify-attestation --lookup
+  component: multiple
+  parameters:
+  - name: 'a source''s clones, as a sync left them: keys/, log/, records/'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - object-topology
+    - resource-name
+    caller_must_enforce: 'nothing — P43: every answer is read from the chain P39–P41 verified, opened
+      again from the clones against the checkpoint last accepted before anything is answered, never from
+      index/; each record is held to its leaf and its source''s keys at that leaf, and a record at a leaf
+      of one source''s log is never judged under another''s keys'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §6, §6.1, §8; crates/trigon/tests/lookup.rs
+- id: trigon check
+  component: multiple
+  parameters:
+  - name: the lockfile or SBOM
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - resource-name
+    caller_must_enforce: 'nothing that makes it an answer: each package is looked up by every digest it
+      declares that a record is filed under, and by its purl only where no digest finds one; a purl whose
+      records are all about another artifact than every digest declared is never checked, not answered;
+      a package with neither is never checked, never left out; a file that will not parse is exit 5, and
+      one named as a kind this does not read is refused by its name; nothing in it is fetched — resolved
+      is kept and said, never followed'
+    provenance:
+      kind: documented
+      source: crates/trigon-core/src/lockfile.rs; crates/trigon/src/evidence/check.rs; crates/trigon/tests/lookup.rs
+        — `check_holds_answers_to_the_threshold_and_refuses_what_it_cannot_read`
+- id: trigon lookup --remote, trigon check --remote
+  component: multiple
+  parameters:
+  - name: 'the files served under the raw base: the checkpoint, tiles, entry bundles, index files and
+      records'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - resource-name
+    caller_must_enforce: 'nothing — P44: the checkpoint is opened under the pinned key and held to the
+      checkpoint last accepted by a consistency proof from the tiles; a successor is followed only where
+      its first leaf, proven, is the log-continuation its predecessor''s log-end requires; every record''s
+      leaf is read from its entry bundle and proven included from the hash tiles against the signed root,
+      and one that does not prove fails verification, while one whose proof or record cannot be read —
+      not served, refused, rate-limited, or listed past the checkpoint read — leaves the source unknown
+      for that question; an index file served for another key, or naming a leaf that is not the record''s,
+      lists nothing that is answered; every file is read up to its kind''s length'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §6; crates/trigon/tests/lookup.rs — `remote_proves_inclusion_and_refuses_what_it_cannot_prove`,
+        `remote_answers_unknown_for_what_it_cannot_read_and_holds_to_the_state`, `remote_follows_a_succession_only_through_its_continuation`
+- id: verify-attestation --lookup
+  component: multiple
+  parameters:
+  - name: the evidence files fetched on demand, the rebuilt artifact downloaded from a release asset,
+      and the log keys the configured sources give the origin asked for
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - size
+    - resource-name
+    caller_must_enforce: 'nothing — P45: each evidence file is held to the digest the signed statement
+      names, and one that is other bytes fails the record; the release asset — looked for only in the
+      rebuilt-YYYY-MM releases, of the record''s month and the months either side, of the repositories
+      that hold the record, never by the consumer''s own setting, and never in the repository of a source
+      a project''s .trigon/evidence.toml added where the record was resolved in the user''s own — is held
+      to the rebuilt artifact''s digest the verdict signs as it is written, and one that is other bytes
+      is refused: exit 4 in the repository of the source the record was resolved in, and in another source''s
+      a check not made, exit 5, since those bytes are that repository''s and not the record''s; a project''s
+      source that gives the origin to a key of its own is set aside where the user''s own sources hold
+      it, and sources that give it to two keys otherwise are refused as ambiguous'
+    provenance:
+      kind: documented
+      source: crates/trigon/tests/lookup.rs — `the_falsifying_command_re_derives_a_published_verdict`,
+        `the_falsifying_command_is_answered_in_its_origins_log_alone`, `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`,
+        `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`
+- id: trigon publish of rebuilt artifacts
+  component: multiple
+  parameters:
+  - name: 'GitHub''s answers: the releases and assets it lists, the upload URL a release names, an uploaded
+      asset''s state, size and digest'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - resource-name
+    caller_must_enforce: 'nothing — P36, P38: an asset of an artifact''s name is taken for it only where
+      GitHub reports its digest and its size and digest are the artifact''s, one of another size or digest
+      is refused, and one GitHub reports no digest for is uploaded again in its place; no asset is put
+      in a draft release; the token is sent to an upload URL only on GitHub''s upload host, or the overridden
+      API''s own origin, no redirect is followed, and a refusal that quotes the token back has it taken
+      out; nothing GitHub says reaches the log or a record, which names the asset by the digest its verdict
+      signs'
+    provenance:
+      kind: documented
+      source: crates/trigon/src/publish/release.rs — `the_token_goes_only_to_the_apis_upload_host`, `the_token_is_in_no_print_and_no_refusal`;
+        crates/trigon/tests/publish.rs — `a_rebuilt_artifact_is_a_release_asset_uploaded_before_its_record_is_committed`,
+        `an_asset_is_reused_on_retry_and_a_full_release_continues_its_series`, `an_asset_of_the_artifacts_name_is_taken_for_it_only_when_it_is_it`,
+        `the_token_goes_to_no_other_host_and_no_asset_into_a_draft`
+- id: trigon serve
+  component: multiple
+  parameters:
+  - name: the kill-switch of the publish repository, as the publisher's working clone last fetched it
+    attacker_controllable: true
+    control_kinds:
+    - data
+    caller_must_enforce: 'nothing: it is reported as set wherever git lists anything of that name, clear
+      only where it lists nothing, and unknown where nothing could be read, with when the fetch that succeeded
+      began; it gates nothing serve shows, which only --stop-divergences does; where it is read from is
+      shown to an operator only; and it is read on a timer, never for a request'
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §3; crates/trigon-api/tests/seam_kill_switches.rs; crates/trigon/tests/publish.rs
+        — `serve_reports_the_repositorys_kill_switch_beside_its_own`, `serve_reports_the_switch_as_of_the_last_fetch_that_succeeded`
 - id: trigon watch GET /run/{index}
   component: multiple
   parameters:
@@ -553,6 +1080,33 @@ entry_points:
     provenance:
       kind: documented
       source: docs/12-security.md §8
+- id: evidence sources — the configuration (trigon_attest::config) and trigon evidence
+  component: multiple
+  parameters:
+  - name: a project's .trigon/evidence.toml, read from the working directory
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - resource-name
+    - x-git-remote-url
+    caller_must_enforce: nothing; Trigon holds the file to less than the user's own configuration. It
+      may only add [[source]] entries, each under a new name, with both keys and an initial checkpoint
+      pinned and HTTPS URLs only, and any file it names — a PEM key, the checkpoint — must be inside the
+      working directory once symlinks are followed, as must the file itself, which is also a regular file
+      of at most 64 KiB; a file that tries anything else is refused whole, with the rule it broke and
+      its strings escaped, and a parse error gives a line and column without quoting the file; and every
+      answer from such a source names the file that added it. It can add a claim and cannot change what
+      any other source answers. A source it adds is synced like any other, and the log-end its pinned
+      key signs is followed only to HTTPS locations, a successor at any other refused, so the file never
+      chooses where the client connects, or with which of the user's credentials; evidence sync, evidence
+      list and the standing every command asking it reads name the file, and evidence remove leaves it
+      to the project
+    provenance:
+      kind: documented
+      source: docs/19-distribution-and-lookup.md §2.4, §8; crates/trigon-attest/tests/evidence_config.rs
+        — `a_project_file_that_breaks_a_rule_is_refused_whole_with_the_rule`, `a_project_file_that_links_outside_the_project_is_not_read`;
+        crates/trigon/tests/evidence.rs — `a_projects_file_is_held_to_its_rules_and_its_sources_name_it`,
+        `a_projects_source_follows_its_successor_over_https_only`
 contract_dimensions:
 - component: archive-parsing
   dimension: numeric-domain
@@ -613,8 +1167,8 @@ contract_dimensions:
 - component: archive-parsing
   dimension: resource-complexity
   status: claimed
-  conditions: every cap is enforced against produced bytes, not declared sizes; the ceiling's size is
-    what D1 disclaims
+  conditions: every cap is enforced against produced bytes, not declared sizes, and gzip members, which
+    cost time and no bytes, are counted across the artifact; the ceiling's size is what D1 disclaims
   property_id: P1
   provenance:
     kind: documented
@@ -833,7 +1387,8 @@ contract_dimensions:
 - component: attestation
   dimension: failure-atomicity
   status: claimed
-  conditions: trigon attest refuses a void run rather than signing a weaker claim
+  conditions: 'no path signs a void run as anything but void/v1: trigon attest and rebuild --attest share
+    the code'
   property_id: P6
   provenance:
     kind: documented
@@ -857,7 +1412,8 @@ contract_dimensions:
 - component: attestation
   dimension: serialization-reconstruction
   status: claimed
-  conditions: canonical JSON is byte-stable; floats and non-ASCII keys are refused, not coerced
+  conditions: canonical JSON is byte-stable; floats, integers beyond ±(2^53 − 1) and non-ASCII keys are
+    refused, not coerced
   property_id: P9
   provenance:
     kind: documented
@@ -882,6 +1438,52 @@ contract_dimensions:
   status: disclaimed
   conditions: a statement is as large as the difference summary it carries
   property_id: D9
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: attestation
+  dimension: x-record-verification
+  status: claimed
+  conditions: a record is shown verified only when its leaf, the key its source had at that leaf, its
+    statement, its unsigned map and every evidence file present all check
+  property_id: P31
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: attestation
+  dimension: x-log-inclusion
+  status: claimed
+  conditions: an answer comes only from a record the verified log holds, found from its leaves and never
+    from index/
+  property_id: P32
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: attestation
+  dimension: x-log-consistency
+  status: claimed
+  conditions: the log is verified whole under the pinned key, and against the checkpoint last accepted;
+    two trees under one key is refused
+  property_id: P33
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: attestation
+  dimension: x-log-signing
+  status: claimed
+  conditions: the log key signs only a tree extending a checkpoint it opens itself, whose new leaves name
+    records every client would accept
+  property_id: P35
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: attestation
+  dimension: x-rotation
+  status: claimed
+  conditions: a key change is logged only from the current key, signed by both; a log ends only where
+    the step signing holds the successor's key, and a successor is begun only as the log its predecessor's
+    log-end names
+  property_id: P37
   provenance:
     kind: documented
     source: docs/threat-model.md §1.7
@@ -944,6 +1546,15 @@ contract_dimensions:
   status: claimed
   conditions: render depth is bounded
   property_id: P27
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: strategy-rendering
+  dimension: x-template-source
+  status: claimed
+  conditions: a value a rung read from the package, its registry document or its repository is the step's
+    literal, handed on as written and never parsed as a template
+  property_id: P46
   provenance:
     kind: documented
     source: docs/threat-model.md §1.7
@@ -1194,6 +1805,96 @@ contract_dimensions:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-publication
+  status: claimed
+  conditions: publish builds only on a remote log it has verified, writes nothing the gate withholds,
+    and pushes one commit, never forced
+  property_id: P34
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-release-assets
+  status: claimed
+  conditions: a rebuilt artifact is found or uploaded, by the digest its verdict signs, before the commit
+    that names it
+  property_id: P36
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-credential
+  status: claimed
+  conditions: the GitHub token is read from the environment and sent only to GitHub, in a header
+  property_id: P38
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-evidence-sync
+  status: claimed
+  conditions: a source is accepted only verified whole and against the checkpoint last accepted, its state
+    written only then; a refused sync keeps every clone and the state as they were
+  property_id: P39
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-mirrors
+  status: claimed
+  conditions: every location of a source is one log with every other, or the sync is refused as an equivocation
+  property_id: P40
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-freshness
+  status: claimed
+  conditions: a stale source is synced first or answers unknown, a frozen one answers unknown, a refused
+    one is exit 4 for every package
+  property_id: P41
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-evidence-lookup
+  status: claimed
+  conditions: every answer is from a verified chain's leaves, per source and never merged, every §4.2
+    state told apart with its §6 exit code, and a record judged only under its own source's keys
+  property_id: P43
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-remote
+  status: claimed
+  conditions: every record --remote answers from has its leaf proven included in a checkpoint held to
+    the one last accepted, a successor is followed only through its log-continuation, one whose leaf does
+    not prove fails verification, and one it cannot read is unknown
+  property_id: P44
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-falsifying-command
+  status: claimed
+  conditions: --lookup resolves only in the source of the origin it names, never in a project's source
+    that gives the origin to another key than the user's own, weighs every source it asks, and holds every
+    file it fetches to the digest signed for it
+  property_id: P45
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: operator-surface
+  dimension: x-store-retention
+  status: claimed
+  conditions: pruning deletes bytes only where no other record names them as kept, and bytes a record
+    says are kept and the store lost are reported missing
+  property_id: P42
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
 - component: definitions
   dimension: numeric-domain
   status: not-applicable
@@ -1324,49 +2025,115 @@ outputs:
       signature present and unchecked
     provenance: *id006
 - component: multiple
+  channel: the verify-attestation --record report
+  taint: constrained
+  taint_provenance: &id007
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.2, §6, §6.1
+  invariants: []
+  downstream_must_not_assume:
+  - id: mna-7
+    statement: that an unchecked evidence file was checked; that the answer is current — it is the log
+      as the directory holds it, checked against the checkpoint given or against none, with no freshness
+      clock (D25); or that a record verified in one source says anything in another
+    provenance: *id007
+- component: multiple
+  channel: a publication to an evidence repository (trigon publish)
+  taint: constrained
+  taint_provenance: &id008
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.3, §8
+  invariants: []
+  downstream_must_not_assume:
+  - id: mna-8
+    statement: 'that the commit''s author vouches for anything — it is trigon publish, whoever ran it,
+      and a client never treats who committed a file as who signed it; or that index/ is authoritative:
+      the log is'
+    provenance: *id008
+- component: multiple
+  channel: trigon evidence sync and evidence list
+  taint: constrained
+  taint_provenance: &id009
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6, §6.1
+  invariants: []
+  downstream_must_not_assume:
+  - id: mna-9
+    statement: 'that a fresh source is current: within stale_after and frozen_after a newer checkpoint
+      withheld is not detected (D32); that keys trusted on first use are the log''s (D33); that a source
+      can answer at all (D34); or that list fetched anything — it touches no network'
+    provenance: *id009
+- component: multiple
+  channel: trigon lookup and trigon check reports
+  taint: constrained
+  taint_provenance: &id010
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.2, §6, §6.1
+  invariants: []
+  downstream_must_not_assume:
+  - id: mna-10
+    statement: that an answer is current beyond what D32 bounds; that a package never checked is safe,
+      or that one is exact because a different source says so; that --remote saw every supersession (D36);
+      that a record's evidence was checked — lookup and check read none of it, and say which files went
+      unchecked
+    provenance: *id010
+- component: multiple
+  channel: verify-attestation --lookup report
+  taint: constrained
+  taint_provenance: &id011
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.2 item 6, §6
+  invariants: []
+  downstream_must_not_assume:
+  - id: mna-11
+    statement: that the rebuilt artifact was built independently — a release asset is the publisher's
+      own bytes, so re-deriving from it checks the arithmetic, not the build (§1.12); or that a record
+      not current in the source was checked
+    provenance: *id011
+- component: multiple
   channel: the build log (stored, rendered, prompted)
   taint: same-as-input
-  taint_provenance: &id007
+  taint_provenance: &id012
     kind: documented
     source: docs/18-management-ui.md §2
   invariants: []
   downstream_must_not_assume:
-  - id: mna-7
+  - id: mna-12
     statement: that credentials were redacted. They were not
-    provenance: *id007
+    provenance: *id012
 - component: multiple
   channel: trigon watch HTML
   taint: constrained
-  taint_provenance: &id008
+  taint_provenance: &id013
     kind: documented
     source: crates/trigon/src/main.rs
   invariants: []
   downstream_must_not_assume:
-  - id: mna-8
+  - id: mna-13
     statement: that the page is authenticated, or safe to serve on a routable address
-    provenance: *id008
+    provenance: *id013
 - component: multiple
   channel: /api/state JSON
   taint: same-as-input
-  taint_provenance: &id009
+  taint_provenance: &id014
     kind: documented
     source: crates/trigon/src/watch.rs
   invariants: []
   downstream_must_not_assume:
-  - id: mna-9
+  - id: mna-14
     statement: that it is access-controlled. It is not
-    provenance: *id009
+    provenance: *id014
 - component: multiple
   channel: the model transcript
   taint: same-as-input
-  taint_provenance: &id010
+  taint_provenance: &id015
     kind: documented
     source: docs/07-ai.md §8
   invariants: []
   downstream_must_not_assume:
-  - id: mna-10
+  - id: mna-15
     statement: that replaying it reproduces the result. It replays the model, not the world
-    provenance: *id010
+    provenance: *id015
 adversaries:
 - name: forged-attestation-attacker
   scope: in
@@ -1435,6 +2202,39 @@ adversaries:
   provenance:
     kind: documented
     source: docs/05-archive-and-normalization.md §1
+- name: evidence-repository-operator
+  scope: in
+  capabilities:
+  - hold-the-attestation-key
+  - hold-the-log-key
+  - hold-the-push-credential
+  - hold-the-github-token
+  - rewrite-repository-history
+  - serve-different-clients-different-logs
+  excluded_capabilities:
+  - change-a-checkpoint-a-client-already-holds
+  goals:
+  - publish-a-record-clients-accept
+  - silently-retract-a-record
+  - equivocate
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §8
+- name: stale-or-split-view-host
+  scope: in
+  capabilities:
+  - serve-an-old-clone
+  - withhold-a-newer-checkpoint
+  - serve-different-clients-different-histories
+  excluded_capabilities:
+  - sign-a-checkpoint
+  - sign-a-record
+  goals:
+  - turn-a-withdrawal-back-into-a-verdict
+  - split-view
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6.1, §7, §8
 - name: operator
   scope: out
   capabilities:
@@ -1682,6 +2482,26 @@ build_flags:
   provenance:
     kind: documented
     source: docs/08-execution.md §1
+- name: '[publish] same_host_confirmation'
+  default: 'off'
+  security_relevant: true
+  maintainer_stance: supported
+  affects_properties:
+  - property_id: P11
+    effect: preserves
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, D8
+- name: '[publish] same_host_local_images'
+  default: 'off'
+  security_relevant: true
+  maintainer_stance: supported
+  affects_properties:
+  - property_id: P11
+    effect: preserves
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, D8; docs/16-findings.md §3.105
 properties_claimed:
 - id: P1
   kind: memory-safety
@@ -1694,14 +2514,17 @@ properties_claimed:
   violation_symptoms:
   - panic, hang, wrong digest
   statement: Parsing a hostile artifact does not panic, escape its enforced limits — recursion, total
-    expansion and entry count, but not the two D23 records as dead — or silently change a digest. Recursion
-    is bounded by Limits::recursion, whose default of 4 descends three levels below the top — N parses
-    N-1, stricter than the name reads — and a parse failure keeps the member inline and emits NestedParseFailed.
+    expansion, entry count and gzip member count, but not the two D23 records as dead — or silently change
+    a digest. Recursion is bounded by Limits::recursion, whose default of 4 descends three levels below
+    the top — N parses N-1, stricter than the name reads — and a parse failure keeps the member inline
+    and emits
   provenance:
     kind: documented
     source: docs/05 §2.2; crates/trigon-archive/src/zip.rs — `checked_add`; crates/trigon-archive/src/gzip.rs:25
       — the output budget; tests `an_offset_that_wraps_is_a_short_read_and_not_a_panic`, `a_gzip_bomb_is_refused_at_the_limit_rather_than_inflated`,
-      `a_zip_member_that_lies_about_its_size_is_refused`
+      `a_zip_member_that_lies_about_its_size_is_refused`, `a_second_gzip_member_is_part_of_the_artifact_and_never_skipped`,
+      `bytes_after_the_last_gzip_member_are_a_named_difference_and_not_a_match`, `one_artifact_shares_one_member_count_across_every_gz_it_holds`,
+      `a_lone_zero_block_ahead_of_more_entries_is_refused_rather_than_read_as_the_end`, `bytes_after_the_tar_end_of_archive_marker_are_a_named_difference_and_not_a_match`
 - id: P2
   kind: correctness
   components:
@@ -1711,10 +2534,14 @@ properties_claimed:
   violation_symptoms:
   - two runs disagree on a digest
   statement: 'The stabilized form is a byte-stable function of the input: parse(write(a)) == a, identical
-    across runs and threads of a single process'
+    across runs and threads of a single process. A value the writer has no spelling for that reads back
+    as itself is refused rather than written as another: a tar device number past seven octal digits,
+    which lost its high digits until 2026-09-29, gzip trailing bytes that begin with the magic, and tar
+    trailing b'
   provenance:
     kind: documented
-    source: docs/13-roadmap.md M0
+    source: docs/13-roadmap.md M0; tests `a_device_number_too_wide_for_its_field_is_refused_rather_than_truncated`,
+      `trailing_bytes_that_would_read_back_as_a_member_are_refused_by_the_writer`, `trailing_bytes_that_are_all_zero_are_refused_by_the_writer`
 - id: P3
   kind: correctness
   components:
@@ -1759,13 +2586,21 @@ properties_claimed:
   components:
   - attestation
   tier: security-critical
-  conditions: the guard was armed
+  conditions: the run was recorded, and the facts that void it are on its record
   violation_symptoms:
-  - a signed statement about a run that fetched its own answer
-  statement: trigon attest refuses to sign a void run
+  - a signed equivalence or divergence about a run that fetched its own answer or had the whole network
+  - a void/v1 that says which way the comparison went
+  statement: 'No path signs a verdict for a void run; it is signed as void/v1 and only that, by trigon
+    attest and by trigon rebuild --attest, which signs through the same code (sign_run). A void run is
+    one the publication gate calls void (trigon_api::publication::voided, which is decide''s own answer):
+    its guard tripped, whether or not it reached an outcome, or it reached an outcome at open egress or
+    with a stab'
   provenance:
     kind: documented
-    source: docs/12-security.md §2.4; crates/trigon/src/main.rs:4223
+    source: docs/19-distribution-and-lookup.md §4.3; docs/16-findings.md §3.96, §3.97; crates/trigon/tests/seam_attest_v2.rs
+      — `a_guard_tripped_run_yields_void_v1_and_never_a_verdict`, `an_open_egress_run_yields_void_too`,
+      `a_run_a_hand_written_stabilizer_applied_to_is_signed_as_void_and_only_void`, `a_verdict_is_not_signed_for_a_record_that_hides_a_hand_written_stabilizer`;
+      crates/trigon/src/main.rs — `rebuild_attest_at_open_egress_signs_void_and_never_a_verdict`
 - id: P7
   kind: integrity
   components:
@@ -1800,8 +2635,8 @@ properties_claimed:
   conditions: signing path
   violation_symptoms:
   - two implementations disagreeing on what was signed
-  statement: 'Canonical JSON refuses what another implementation might not reproduce: floats and non-ASCII
-    object keys are type errors, not coerced values'
+  statement: 'Canonical JSON refuses what another implementation might not reproduce: floats, integers
+    beyond ±(2^53 − 1) and non-ASCII object keys are type errors, not coerced values'
   provenance:
     kind: documented
     source: crates/trigon-core/src/jcs.rs
@@ -2074,6 +2909,375 @@ properties_claimed:
   provenance:
     kind: documented
     source: crates/trigon/src/main.rs:199
+- id: P31
+  kind: integrity
+  components:
+  - attestation
+  tier: security-critical
+  conditions: the source's keys are the operator's pins (§1.10)
+  violation_symptoms:
+  - a record shown verified that its leaf, its key, its map or its evidence contradicts
+  - a failure reported as never checked
+  statement: A published record is shown as verified only when all of it checks (verify-attestation --record,
+    trigon_attest::evidence::check_record). Its sha256 is the record of a leaf of the verified log — a
+    record no leaf names is unlogged and fails, and one the log holds at two leaves is logged twice and
+    fails at both, since a record logged again after what withdraws it would otherwise read as current
+    again
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.1, §4.2, §8; docs/16-findings.md §3.99; crates/trigon-attest/tests/evidence_repo/records.rs
+      — `a_record_whose_statement_disagrees_with_its_leaf_fails_verification`, `a_record_signed_by_a_key_retired_before_its_leaf_fails_verification`,
+      `a_record_signed_by_a_key_the_source_never_had_fails_verification`, `an_unlogged_record_fails_verification`,
+      `an_unsigned_map_that_disagrees_with_the_signed_statement_fails_verification`, `every_evidence_file_is_checked_and_one_absent_is_unchecked_never_passed`,
+      `what_accompanies_a_verdict_is_about_its_run`, `record_leaf_refuses_a_statement_whose_leaf_every_client_would_refuse`,
+      `a_verdict_without_what_answers_it_fails_verification`; lookup.rs — `a_record_logged_again_after_its_withdrawal_fails_and_never_answers_again`;
+      rerun.rs — `a_published_report_is_held_member_by_member_and_by_its_field_edits`; crates/trigon/tests/verify_record.rs
+      — `a_claim_rerun_comparison_refutes_exits_4`, `a_record_logged_twice_fails_verification_and_exits_4`
+- id: P32
+  kind: integrity
+  components:
+  - attestation
+  tier: security-critical
+  conditions: P33 holds for the log
+  violation_symptoms:
+  - a verdict answered that no leaf logs
+  - a deletion answered as never checked or as its outcome
+  - a supersession applied that §3's rules refuse, or a record hidden
+  statement: 'Nothing is answered from a record the verified log does not hold, and nothing the log holds
+    is hidden. A key — a sha256, sha512 or sha1 digest, an integrity string, a purl with or without its
+    version, a file — is resolved from the verified leaves, never from index/, so a missing, altered or
+    planted index file changes no answer. A leaf whose record file is missing is deleted, whatever its
+    outcome, '
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §3, §5, §6, §8; crates/trigon-attest/tests/evidence_repo/lookup.rs
+      — `a_record_whose_index_entries_are_removed_or_altered_is_still_found`, `a_record_file_deleted_is_deleted_whatever_its_leaf_says`,
+      `supersession_takes_every_clause_of_docs_19_3`, `a_record_logged_again_after_its_withdrawal_fails_and_never_answers_again`;
+      crates/trigon/tests/verify_record.rs — `a_log_that_continues_elsewhere_answers_unknown_and_exits_4`
+- id: P33
+  kind: integrity
+  components:
+  - attestation
+  tier: security-critical
+  conditions: the checkpoint last accepted is given, from --checkpoint or the source's state or initial
+    checkpoint — without one, D25
+  violation_symptoms:
+  - a log whose files are not its signed tree accepted
+  - a checkpoint that does not extend the accepted one, or a second tree under the key, accepted or set
+    aside
+  statement: The log is verified whole, and held to what was accepted before, before any record is read.
+    The checkpoint must verify under the pinned log key and name its origin; every leaf is rehashed and
+    the root compared with the signed one; leaf times never go backwards; every tile holds the leaves'
+    hashes; a successor is followed only through a log-end and a log-continuation signed by both keys.
+    A checkpoi
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6, §6.1, §8; docs/16-findings.md §3.98, §3.99; crates/trigon-attest/tests/evidence_log/verify.rs;
+      crates/trigon-attest/tests/evidence_log/rotation.rs — `a_planted_directory_does_not_move_or_stop_a_client_pinned_to_a_successor`;
+      crates/trigon/tests/verify_record.rs — `two_trees_under_one_log_key_are_an_equivocation_and_exit_4`,
+      `a_log_that_continues_elsewhere_answers_unknown_and_exits_4`, `a_source_is_read_from_the_configuration_and_its_state_directory`
+- id: P34
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: the remote is reached, and the operator's store and statements are the operator's (§1.10
+    out of scope)
+  violation_symptoms:
+  - a publication built on a log that does not verify or that a rollback rewound
+  - a withheld run, or a void as a verdict, published
+  - two records for one run
+  - a partial publication visible
+  statement: 'trigon publish builds only on a remote log it has verified, and publishes only what the
+    gate releases, as one commit pushed without force. Before anything is written: the repository''s chain
+    of logs, from the one its keys/log.vkey names and through every succession in the repository, must
+    end at [publish] origin''s log, which a publication appends to, and one that ended in favour of a
+    successor else'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.2, §3, §10 phase 5; docs/16-findings.md §3.100; crates/trigon/tests/publish.rs
+      — `a_run_publishes_in_one_commit_and_a_fresh_clone_verifies_it`, `a_withheld_run_is_refused_and_a_void_run_publishes_only_as_void`,
+      `a_verdict_without_its_falsifying_command_or_for_a_current_artifact_is_refused`, `two_publishers_leave_one_linear_history_and_one_root_per_size`,
+      `a_publisher_killed_between_steps_leaves_the_old_state_or_the_new`, `files_planted_in_the_log_beyond_the_checkpoint_are_never_signed`,
+      `a_remote_rolled_back_behind_what_this_host_published_is_refused`, `what_a_publication_writes_is_committed_whatever_git_is_told_to_ignore`,
+      `a_branch_that_names_git_attributes_is_refused_before_it_is_checked_out`, `the_operators_git_configuration_changes_nothing_that_is_committed`,
+      `a_working_clone_without_its_git_directory_is_made_again_and_never_the_checkout_around_it`, `one_publish_runs_at_a_time_on_a_host_whatever_store_it_runs_from`,
+      `a_push_the_remote_took_is_published_even_when_the_connection_goes_before_it_answers`, `reconcile_never_reads_through_a_link_planted_as_index`,
+      `a_run_completed_after_its_record_file_was_removed_names_the_commit_that_logged_it`, `a_divergence_is_published_with_its_feed_entry_in_the_same_commit`,
+      `the_kill_switch_withholds_a_divergence_the_feed_would_publish`, `a_run_logged_before_a_succession_is_completed_against_its_own_log`,
+      `a_key_change_is_followed_and_publish_then_expects_the_new_key`, `a_rebuilt_artifact_is_pruned_only_once_its_run_is_published`,
+      `publishing_into_a_successor_elsewhere_reads_the_whole_chain`, `publishing_into_a_successor_elsewhere_reads_the_chain_from_its_first_log`;
+      docs/16-findings.md §3.101, §3.102
+- id: P35
+  kind: integrity
+  components:
+  - attestation
+  tier: security-critical
+  conditions: the tree's keys/attestation.pub, or --attestation-key, names the attestation key current
+    at the checkpoint the tree extends; for a successor's tree, the chain keys/log.vkey begins is followed
+    from it
+  violation_symptoms:
+  - the log key signing a leaf nobody checked, a rewrite of what it signed, or a second tree begun over
+    a log
+  statement: The log key signs only a tree it has checked, and only trigon log sign holds it. publish
+    never opens the key file; it runs trigon log sign, a child process of the same binary that opens no
+    socket, which reads the new tree from disk and signs its checkpoint only where the checkpoint the
+    tree extends opens under the log key itself; the tree's first leaves hash to that checkpoint's root,
+    and to the r
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §8, §10 phase 5 step 5; crates/trigon-attest/tests/evidence_repo/sign.rs
+      — `a_tree_that_does_not_extend_what_was_published_is_not_signed`, `a_log_end_is_signed_only_with_the_successor_key_it_names`,
+      `a_key_change_is_signed_only_from_the_current_key`; crates/trigon/tests/publish.rs — `log_sign_is_its_own_step_and_what_it_refuses_is_never_committed`,
+      `a_remote_rolled_back_behind_what_this_host_published_is_refused`, `the_repository_named_each_way_publishes`
+- id: P36
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: rebuilt_artifacts = "github-release"; the API is GitHub's, or the one the operator names
+  violation_symptoms:
+  - a record naming an asset nobody uploaded
+  - an asset of another artifact taken for it
+  statement: A rebuilt artifact is a release asset uploaded before its record, named by the digest its
+    verdict signs. With rebuilt_artifacts = "github-release", publish refuses, before anything is read
+    or written, a location that is not a repository on github.com and a run with no token in GITHUB_TOKEN
+    or GH_TOKEN; and at step 2, a verdict whose run's rebuilt artifact is not the one its verdict signs,
+    or is no
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.3, §10 phase 5 step 3; crates/trigon/src/publish/release.rs
+      — `a_github_location_names_its_repository_and_no_other_does`; crates/trigon/tests/publish.rs — `a_rebuilt_artifact_is_a_release_asset_uploaded_before_its_record_is_committed`,
+      `an_asset_is_reused_on_retry_and_a_full_release_continues_its_series`, `an_asset_of_the_artifacts_name_is_taken_for_it_only_when_it_is_it`,
+      `the_token_goes_to_no_other_host_and_no_asset_into_a_draft`
+- id: P37
+  kind: integrity
+  components:
+  - attestation
+  tier: security-critical
+  conditions: the operator runs the rotation, holding the keys it takes
+  violation_symptoms:
+  - a record signed by a retired key accepted
+  - a succession clients do not follow, or one they follow to a log nobody named
+  - a key opened by the process that pushes
+  statement: 'A rotation is logged only as every client follows it, and the processes that fetch and push
+    hold no key. trigon log key-change logs a key-change leaf only from the attestation key the log has
+    now, to one it has never had, signed by both over the log''s origin and the leaf''s time; the leaf
+    is signed by trigon log key-change-leaf, a child that opens no socket, and held by the parent to everything
+    it '
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §8, §10 phase 5; ADR-0014 Decision 8; crates/trigon-attest/tests/evidence_repo/sign.rs
+      — `a_successor_is_begun_only_as_the_one_its_predecessor_names`; crates/trigon/tests/publish.rs —
+      `a_key_change_is_followed_and_publish_then_expects_the_new_key`, `a_succession_is_followed_and_publish_continues_into_the_successor`,
+      `a_successor_the_log_end_does_not_name_is_refused`, `a_succession_into_another_repository_is_begun_there_after_the_end_is_pushed`,
+      `a_log_is_ended_only_naming_a_place_its_successor_can_be_begun`, `a_run_logged_before_a_succession_is_completed_against_its_own_log`;
+      crates/trigon/tests/evidence.rs — `a_succession_into_another_repository_is_followed_on_sync`
+- id: P38
+  kind: confidentiality
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: rebuilt_artifacts = "github-release"
+  violation_symptoms:
+  - the token on argv or in a message, or sent to another host
+  statement: The GitHub token that uploads rebuilt artifacts is read from the environment and sent only
+    to GitHub. It is GITHUB_TOKEN, else GH_TOKEN, and never read from argv or a file; without one, a publication
+    that would upload is refused before anything is written. It is held in a type whose Debug prints ,
+    sent only as the Authorization header, only to the API — https://api.github.com, or under TRIGON_GITH
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, §10 phase 5; crates/trigon/src/publish/release.rs
+      — `the_token_is_in_no_print_and_no_refusal`, `the_api_is_https_or_loopback_and_names_no_user`, `the_token_goes_only_to_the_apis_upload_host`;
+      crates/trigon/tests/publish.rs — `a_rebuilt_artifact_is_a_release_asset_uploaded_before_its_record_is_committed`,
+      `the_token_goes_to_no_other_host_and_no_asset_into_a_draft`
+- id: P39
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: the source's keys are the operator's pins, or those trust on first use recorded (D33)
+  violation_symptoms:
+  - a clone accepted that does not verify, or does not extend what was accepted
+  - the state moved by a sync that was refused
+  - a lost state made again silently
+  statement: 'A source is accepted only once all of it verifies, and its state is written only then. trigon
+    evidence sync fetches every location of a source — cloning one it has no clone of, shallow, partial
+    and sparse for a remote and in full for a local path, and otherwise a fetch of the branch and reset
+    --hard FETCH_HEAD — and verifies each clone whole with the phase 4 code: the checkpoint under the
+    source''s'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6, §6.1, §8; docs/16-findings.md §3.102; crates/trigon/tests/evidence.rs
+      — `a_source_syncs_from_a_file_url_a_bare_path_and_a_relative_path`, `a_checkpoint_that_does_not_extend_the_accepted_one_is_refused_and_the_clone_kept`,
+      `a_rollback_behind_the_accepted_checkpoint_is_refused_served_or_on_disk`, `a_key_change_and_a_succession_are_followed_on_sync`,
+      `a_succession_into_another_repository_is_followed_on_sync`, `a_lost_state_is_reported_and_accepted_only_when_asked`,
+      `a_sync_stopped_before_it_was_accepted_is_made_again_and_a_later_loss_refused`, `accepting_a_lost_state_keeps_what_survives_of_it`,
+      `a_branch_named_as_an_option_is_never_fetched`, `a_repositorys_own_attributes_never_change_what_is_verified`,
+      `full_history_keeps_the_history_and_says_when_it_was_rewritten`; crates/trigon/src/evidence/mod.rs
+      — `a_sync_whose_record_cannot_be_written_keeps_the_clones_it_accepted`; crates/trigon-attest/tests/evidence_log/chains.rs
+- id: P40
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: at least one location of the source is reached
+  violation_symptoms:
+  - two copies of one log that disagree, accepted
+  - a smaller one answering over the larger
+  statement: 'The locations of a source are one log, or the source is refused. Every URL of a source —
+    one log and its mirrors — and every location a log-end names for a successor is fetched and verified
+    by itself, and then every copy is held to every other, over every log of the chain both hold: at the
+    same size their roots are one root, and at different sizes the smaller''s root is the root of the
+    larger''s fir'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6.1, §8; crates/trigon/tests/evidence.rs — `mirrors_in_agreement_lagging_and_equivocating`;
+      crates/trigon-attest/tests/evidence_log/chains.rs — `copies_of_one_chain_are_one_chain_or_an_equivocation`
+- id: P41
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: the host's clock
+  violation_symptoms:
+  - a stale or frozen source answered from
+  - a refused source forgotten
+  - an unknown required source not failing a check
+  - an answer from a project's source, or one trusting on first use, that does not say so
+  statement: 'A source answers only while it is fresh, and every answer says what it rests on. Its standing
+    is read from two clocks: stale when its last successful sync is older than stale_after, and frozen
+    when its newest leaf is older than frozen_after or it has no leaf, a log''s checkpoint of size 0 being
+    the oldest consistent state there is. A command that needs a source syncs a stale one first and says
+    so; '
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, §6, §6.1; crates/trigon-attest/src/evidence/standing.rs
+      — its tests; crates/trigon/src/evidence/mod.rs — `a_command_that_needs_a_source_syncs_a_stale_one_first_and_says_so`,
+      `what_a_source_says_is_weighed_by_how_it_stands`; crates/trigon/tests/evidence.rs — `stale_from_the_last_sync_and_frozen_from_the_newest_leaf`,
+      `trust_on_first_use_is_recorded_once_and_every_answer_says_it_rests_on_it`, `a_projects_file_is_held_to_its_rules_and_its_sources_name_it`,
+      `a_source_whose_state_cannot_be_read_is_unknown_and_the_others_answer`
+- id: P42
+  kind: correctness
+  components:
+  - operator-surface
+  tier: correctness-only
+  conditions: —
+  violation_symptoms:
+  - 'a record saying stored: true over bytes another run''s prune deleted'
+  - bytes that are gone reported as there, or as retention's choice
+  statement: A rebuilt artifact's bytes go only when no run still names them, and bytes gone are said
+    to be missing. Store::prune_rebuild, which attest --prune and publish --prune run, drops a run's reference
+    to its rebuilt artifact, and deletes the blob only where no other run's record names it as kept —
+    the rebuild of the other attempt of an agreeing pair, which rebuilt the same bytes into one blob,
+    or any r
+  provenance:
+    kind: documented
+    source: docs/16-findings.md §3.102; crates/trigon-store/tests/store.rs — `bytes_two_runs_share_are_kept_until_neither_names_them`,
+      `a_prune_waits_for_a_writer_naming_the_bytes_and_keeps_them`, `bytes_a_record_says_are_kept_and_the_store_lost_are_missing_never_present`;
+      crates/trigon-api/tests/seam_member_bytes.rs — `bytes_the_record_says_are_kept_and_the_store_lost_are_reported_missing`;
+      crates/trigon/tests/evidence.rs — `pruning_one_of_an_agreeing_pair_keeps_the_bytes_the_other_names`
+- id: P43
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: P39–P41 hold for each source
+  violation_symptoms:
+  - an answer from index/ or from a source's unverified files
+  - one source's key accepting another's record
+  - a divergence masked by another source's match
+  - a package dropped, or a stale source answering
+  - a record found by sha1 alone not saying so
+  - a record about another artifact answering for the one pinned, or one artifact's record answering for
+    another of its name and version
+  statement: Every answer about an artifact or a package comes from a verified chain's leaves, per source,
+    and never from anything the log does not vouch for. trigon lookup, trigon check and verify-attestation
+    --lookup make each source they ask ready once — a stale one synced first and said to be, none under
+    --offline — and open it from its clones with P39–P41's verification against the checkpoint last accepte
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.2, §5, §6, §6.1; docs/16-findings.md §3.103; crates/trigon/tests/lookup.rs
+      — `a_lockfile_is_checked_after_one_sync_and_nothing_is_fetched_again`, `stale_and_unreachable_or_frozen_is_unknown`,
+      `a_deleted_record_a_changed_byte_and_a_missing_index_entry`, `a_superseded_record_is_shown_superseded_and_a_withdrawn_one_withdrawn`,
+      `a_source_answers_however_it_was_configured`, `two_sources_are_answered_each_and_never_merged`,
+      `the_record_form_reads_a_sources_clones_across_repositories`, `check_holds_answers_to_the_threshold_and_refuses_what_it_cannot_read`,
+      `check_answers_for_the_artifact_the_lockfile_pins`, `lookup_takes_every_form_of_key`; crates/trigon/src/evidence/lookup.rs
+      — `a_leaf_is_about_the_pinned_artifact_by_the_strongest_digest_it_can_be_compared_with`; crates/trigon-attest/tests/evidence_repo/lookup.rs
+      — `a_verdict_is_held_to_the_risk_it_was_reached_through`, `of_two_current_verdicts_one_above_the_risk_cap_answers_whatever_their_order`
+- id: P44
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: the raw base serves what GitHub holds, or is the operator's own
+  violation_symptoms:
+  - a record answered whose leaf was not proven
+  - a served checkpoint behind the accepted one accepted
+  - a record answered for a key its proven leaf is not filed under
+  - a successor not bound to its predecessor followed
+  - a refused source answering
+  - a record under a key the user re-pinned away from accepted
+  statement: --remote answers only from records whose leaves it has proven included in a checkpoint held
+    to what was accepted. A source whose last sync was refused answers nothing. For each other, the checkpoint
+    served under the raw base is opened under its pinned log key — or, past a succession, the key the
+    proven log-end before it names, followed only where the successor's first leaf, proven, is the log-cont
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6; crates/trigon/src/evidence/remote.rs — `the_raw_base_is_https_or_loopback_and_names_no_user`;
+      crates/trigon/tests/lookup.rs — `remote_proves_inclusion_and_refuses_what_it_cannot_prove`, `remote_answers_unknown_for_what_it_cannot_read_and_holds_to_the_state`,
+      `remote_follows_a_succession_only_through_its_continuation`
+- id: P45
+  kind: integrity
+  components:
+  - operator-surface
+  tier: security-critical
+  conditions: the source's clone was accepted by a sync (P39)
+  violation_symptoms:
+  - a falsifying command answered from another source, or from a project's source that gives the origin
+    to a key of its own
+  - an evidence file or a release asset of other bytes used
+  - a release asset looked for outside the repositories that hold the record and their series, or in a
+    project's source's repository where the user's own resolved the record, or an artifact guessed at
+    where it has none
+  - GitHub failing or refusing reported as the record failing
+  - a withdrawn artifact reported as a verdict
+  - a source asked and then dropped from the answer
+  statement: A falsifying command is answered only where it was signed to be, from files held to what
+    was signed. verify-attestation --lookup sha256:<subject> --origin <origin> resolves the current record
+    — and --predicate's type where given — only in a configured source whose chain holds a log of that
+    origin, synced first where it is stale, and syncs no source of another origin; a client with none
+    says so, ex
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.2 item 6, §6; crates/trigon/tests/lookup.rs — `the_falsifying_command_re_derives_a_published_verdict`,
+      `the_falsifying_command_is_answered_in_its_origins_log_alone`, `the_falsifying_command_weighs_every_source_it_asks`,
+      `the_falsifying_command_across_a_succession_and_for_a_void`, `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`,
+      `the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`, `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`,
+      `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`, `an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`
+- id: P46
+  kind: integrity
+  components:
+  - strategy-rendering
+  tier: security-critical
+  conditions: a strategy a rung wrote; a strategy an author or a model wrote keeps its templates, and
+    what a package can make a model write is P7's boundary, not this
+  violation_symptoms:
+  - 'the package under test evaluating a template in its own build recipe: a stamp, a directory or a pin
+    built as another value, a render the package fails, a recipe conditioned on the rebuilder''s host'
+  statement: Nothing a rung read from outside the strategy is template source. A step's runs, if and with
+    values are templates; what a rung copies from the package under test, its registry document or its
+    repository goes in the step's literal map instead, which the renderer hands to the tool as the parameter
+    of that name exactly as written, or prints where a template reads it as {{ literal.<name> }}, and
+    never
+  provenance:
+    kind: documented
+    source: docs/04-strategies.md §3.3; docs/16-findings.md §3.104; crates/trigon-strategy/tests/literals.rs
+      — `a_copyright_reaches_the_dotnet_invocation_byte_for_byte_and_is_never_evaluated`, `a_literal_is_passed_as_written_where_the_same_text_in_with_is_rendered`,
+      `a_parameter_given_both_ways_is_refused_when_parsed_and_when_rendered`, `a_tool_receives_a_literal_as_a_parameter_and_never_sees_its_callers_literals`;
+      crates/trigon-strategy/src/yarn.rs — `a_script_body_reaches_the_build_as_written_and_is_never_evaluated`;
+      crates/trigon-registry/tests/infer.rs — `the_backend_the_wheel_names_reaches_the_build_as_written_and_is_never_evaluated`;
+      crates/trigon-registry/tests/ci.rs — `what_a_workflow_says_reaches_the_build_as_written_and_is_never_evaluated`
 - id: P30
   kind: resource-bound
   components:
@@ -2352,6 +3556,196 @@ properties_disclaimed:
   provenance:
     kind: documented
     source: docs/12-security.md §8
+- id: D25
+  components:
+  - multiple
+  conditions: verify-attestation --record
+  tier: security-critical
+  false_friend: false
+  statement: 'That a record verified with verify-attestation --record is the source''s current word. It
+    is checked against the log the directory holds and the checkpoint it is given: with none, a rewrite
+    or a fork signed by the log key is not detected, and even with one a newer checkpoint withheld — a
+    supersession or a withdrawal the directory does not hold — is not, since the record form judges no
+    freshness; st'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6, §7, §8
+- id: D26
+  components:
+  - multiple
+  conditions: more than one host publishing to one repository
+  tier: security-critical
+  false_friend: false
+  statement: That a checkpoint signed for a push that loses never leaves the host. A push rejected because
+    the remote had already moved is refused before any object is sent, and the commit and its checkpoint
+    are discarded in the losing clone (P34). A push that loses in the instant between the server advertising
+    its refs and updating them has already sent its objects, the signed checkpoint among them, and a ser
+  provenance:
+    kind: documented
+    source: ADR-0014 "Why git, and not an OCI registry"; docs/19-distribution-and-lookup.md §2.2, D5
+- id: D27
+  components:
+  - multiple
+  conditions: a publisher whose state directory does not hold the log's newest checkpoint
+  tier: security-critical
+  false_friend: false
+  statement: 'That a publisher with no memory of the log detects a repository rolled back. The newest
+    checkpoint of a log a host has published is kept in that host''s state directory, and publish and
+    log sign hold every tree to it (P34, P35). A host that has never published the log, or whose state
+    directory is gone — an ephemeral CI runner — builds on whatever checkpoint the repository holds: on
+    one rolled back '
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, §8
+- id: D28
+  components:
+  - multiple
+  conditions: rebuilt_artifacts = "github-release"
+  tier: correctness-only
+  false_friend: false
+  statement: 'That a release asset is still the artifact its record names, or is there at all. GitHub,
+    and whoever holds a token with contents-write on the repository — which can push to it as well — can
+    replace or delete an asset, or the release that holds it; the log commits to an artifact''s digest,
+    which its verdict signs, and to nothing about where it is. A reader must hold what it fetches to that
+    digest: -'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.3, §4.1, §8
+- id: D29
+  components:
+  - multiple
+  conditions: divergences = "feed"
+  tier: security-critical
+  false_friend: false
+  statement: 'That anyone is told of a divergence. Under divergences = "feed" a divergence is published
+    with its entry in feed/divergences.atom, in the same commit, and nobody is notified: ADR-0010 safeguard
+    4 becomes "published at publish time", as docs/19 D7 proposes. The feed holds the 200 most recent
+    divergences, and the log every one. Between publications, whoever can push can edit it; the next publication'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §3, D7
+- id: D30
+  components:
+  - multiple
+  conditions: a publish repository configured
+  tier: correctness-only
+  false_friend: false
+  statement: That the repository's kill-switch trigon serve reports is current. It is read from the publisher's
+    working clone as of that clone's last fetch that succeeded, and says when that fetch began; a fetch
+    that fails changes neither, so a time that stops moving is the sign the remote is not being read.
+    The repository may have changed since, and a store with no clone, or no record of a fetch that succeede
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §3
+- id: D32
+  components:
+  - multiple
+  conditions: a synced source
+  tier: security-critical
+  false_friend: false
+  statement: 'That an answer is current. A source answers from its clone until its last successful sync
+    is stale_after old — a day by default — and is frozen only once its newest leaf is frozen_after old
+    — fourteen days: within those, a host or a mirror that withholds a newer checkpoint, holding a withdrawal
+    or a supersession, is not detected, since what it serves is consistent, and a split view served alike
+    to'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6, §7, §8
+- id: D33
+  components:
+  - multiple
+  conditions: trust_on_first_use
+  tier: security-critical
+  false_friend: false
+  statement: 'That keys trusted on first use are the log''s. A source configured with trust_on_first_use,
+    or by TRIGON_EVIDENCE_TOFU=1, pins a key it does not configure by reading the repository''s keys/
+    from the first location reached on its first sync: whoever serves that location then — the repository''s
+    operator, a thief of its push credential, or anyone between (A8, A9) — chooses the keys, and every
+    later syn'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, §6.1
+- id: D34
+  components:
+  - multiple
+  conditions: a synced source
+  tier: security-critical
+  false_friend: false
+  statement: 'That a source, or a record in it, is available. Whoever serves a repository can withhold
+    it: a source that cannot be reached answers from its clone until it is stale and then answers unknown,
+    which fails a check only where the source is required; a successor elsewhere that cannot be reached
+    fails the sync; a record whose leaf is logged and whose file is gone reads as deleted, and nothing
+    here rest'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.2, §6, §6.1, §8
+- id: D35
+  components:
+  - multiple
+  conditions: verify-attestation --lookup
+  tier: correctness-only
+  false_friend: false
+  statement: 'That the evidence behind a record can be had when it is needed. A record names its evidence
+    by digest and the log commits only to the record: whoever can push can delete an evidence file or
+    leave it unserved, and whoever writes the repository''s releases can delete a rebuilt artifact''s
+    asset (D28). verify-attestation --lookup then reports the file unchecked, or cannot find the asset
+    and asks for --'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §4.1, §6, §7
+- id: D36
+  components:
+  - multiple
+  conditions: --remote
+  tier: security-critical
+  false_friend: false
+  statement: That --remote is private, unlimited, or complete. It tells GitHub, and anything that can
+    read the connection's metadata, which key — which package — was asked about, per question; it is rate-limited
+    for an unauthenticated client, so a large lockfile fails partway and those packages answer unknown,
+    as does a key whose index file lists a record logged after the checkpoint it read — each file is read
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §6, §7
+- id: D37
+  components:
+  - multiple
+  conditions: same_host_confirmation set
+  tier: security-critical
+  false_friend: false
+  statement: 'That two agreeing attempts on one machine are independent of what it holds constant. With
+    [publish] same_host_confirmation set — off by default — the gate counts a confirmation on that machine
+    when nothing warm could supply it and its base image was pulled again by digest. It catches a floating
+    dependency or a lucky fetch, never what the machine holds constant: its kernel, CPU and image store'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, D8; docs/16-findings.md §3.97
+- id: D38
+  components:
+  - multiple
+  conditions: same_host_confirmation and same_host_local_images both set
+  tier: security-critical
+  false_friend: false
+  statement: 'That a same-host confirmation''s base image was checked against a registry. [publish] same_host_local_images
+    — off by default, read only beside same_host_confirmation — accepts a cold confirmation on a local
+    base image pinned by its content id — one no registry digest names, as those built on the machine
+    — which no registry serves again: both attempts run on what the image store holds under that id'
+  provenance:
+    kind: documented
+    source: docs/19-distribution-and-lookup.md §2.4, D8; docs/16-findings.md §3.105; crates/trigon-api/src/publication.rs
+      — `not_cold`; crates/trigon/src/main.rs — `image_pin`
+- id: D24
+  components:
+  - multiple
+  conditions: a key the operator holds
+  tier: security-critical
+  false_friend: false
+  statement: 'Any bound on a stolen signing key. A statement carries no third-party time, so a key stolen
+    today signs statements that verify like those it signed before the theft. The external log check once
+    meant to bound this was never enforced, and went with the log. docs/19 D6 chooses the bound: key epochs
+    sealed in the evidence log, or a certificate chain checked against witnessed or time-stamped time'
+  provenance:
+    kind: documented
+    source: ADR-0014 "What this costs"; docs/19-distribution-and-lookup.md §8, §10 phase 7a
 - id: FF1
   components:
   - multiple
@@ -2506,9 +3900,10 @@ downstream_responsibilities:
   component: multiple
   statement: Check the signing identity against your own policy with --public-key <hex> (trigon public-key
     <keyfile> prints it). Without it the tool still re-derives and tells you the signature was present
-    and unchecked, which is a different answer from unsigned. Where the run was logged, --transparency
-    <entry.j
-  enforces: []
+    and unchecked, which is a different answer from unsigned. A verified signature says which key signed,
+    never
+  enforces:
+  - D24
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
@@ -2560,13 +3955,25 @@ downstream_responsibilities:
     source: docs/threat-model.md §1.13
 - id: dr-9
   component: multiple
+  statement: Hold a published record's log to a checkpoint you already hold. verify-attestation --record
+    detects a rollback, a rewrite or a fork only back to the checkpoint it is given — --checkpoint, or
+    the source's state or initial checkpoint under --source — and says when it was given none (P33, D25).
+    Keep th
+  enforces:
+  - D25
+  - P33
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.13
+- id: dr-10
+  component: multiple
   statement: Choose the egress tier deliberately. --egress open is the default and it voids the strong
     claim. An enforced tier needs a mirror image and a base image you built first
   enforces: []
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-10
+- id: dr-11
   component: multiple
   statement: Only you may name a local path as a source. file:// chosen by the thing under test is the
     dangerous one
@@ -2574,7 +3981,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-11
+- id: dr-12
   component: multiple
   statement: Read crates/trigon-ai/src/copilot.rs's module docs before --model copilot:. Prefer a provider
     with a real system message where the choice exists
@@ -2582,7 +3989,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-12
+- id: dr-13
   component: multiple
   statement: Keep trigon watch on loopback unless you have thought about it. Build logs are not redacted
     (D14)
@@ -2591,7 +3998,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-13
+- id: dr-14
   component: multiple
   statement: Set total_expanded_bytes to something your host can absorb. The default ceiling is 4 GiB
     and a hostile artifact may reach it before being refused
@@ -2599,7 +4006,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-14
+- id: dr-15
   component: multiple
   statement: Treat the rebuilt artifact as untrusted. It is the package's own build output; do not install
     or execute it because it reproduced
@@ -2607,7 +4014,7 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-15
+- id: dr-16
   component: multiple
   statement: 'Before a real sweep, talk to the registries: a User-Agent with a contact URL, Retry-After
     honoured, per-host token buckets'
@@ -2615,7 +4022,23 @@ downstream_responsibilities:
   provenance:
     kind: documented
     source: docs/threat-model.md §1.13
-- id: dr-16
+- id: dr-17
+  component: multiple
+  statement: 'Publish to an evidence repository from one host, and give the push credential nothing else.
+    The host''s lock keeps one publish at a time on it, whatever store it runs from; a second host publishing
+    to the same repository can lose a push in a window that sends its signed checkpoint anyway (D26).
+    Keep '
+  enforces:
+  - D26
+  - D27
+  - D28
+  - P35
+  - P37
+  - P38
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.13
+- id: dr-18
   component: multiple
   statement: Two-party review for anything touching a stabilizer , a non-empty prose reason:, and the
     corpus-wide impact preview before merging. ---

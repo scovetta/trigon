@@ -9,6 +9,15 @@ pub struct Archive {
     pub format: Format,
     pub entries: Vec<Entry>,
     pub trailer: Trailer,
+    /// Bytes after a tar's end-of-archive marker that are not zero padding. Empty for almost every
+    /// tar, and for everything that is not one.
+    ///
+    /// Every reader has stopped by then, node-tar included, so no entry is there; dropping them
+    /// would still make two files that differ only there stabilize to one digest. So they are kept
+    /// as [`GzipHeader::trailing`] is: written back after the marker and compared
+    /// (`container:tar.trailing`), and no pass clears them. They live here and not in the trailer
+    /// because a `.tar.gz`'s trailer is its gzip header. See [`crate::tar::read`].
+    pub tar_trailing: Vec<u8>,
     /// Set when a pass changes the container itself, as distinct from any of its members. Only the
     /// trailer lives there, so only a trailer pass sets it.
     pub(crate) trailer_dirty: bool,
@@ -25,6 +34,9 @@ pub enum Trailer {
 /// The gzip member header, captured so a stabilizer can normalize it and the writer can reproduce
 /// it. `mtime: None` means the field is absent, which is how the format encodes "unset": writing an
 /// epoch value instead would not round-trip.
+///
+/// A file of several members is read as one, the way gunzip reads it, and this is the first
+/// member's header: the one every reader reports. See [`crate::gzip::read`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GzipHeader {
     pub mtime: Option<u32>,
@@ -35,6 +47,13 @@ pub struct GzipHeader {
     /// The XFL byte. Tracked because a stabilizer that changes the compression level has to change
     /// it too, and `flate2` does not expose it.
     pub xfl: u8,
+    /// Bytes after the last member that do not begin another one. Empty for almost every file.
+    ///
+    /// Not a header field, but the container's, and this is where the container's fields live.
+    /// gunzip warns about them and ignores them; dropping them here would make two files that
+    /// differ only there stabilize to one digest. So they are kept, written back after the last
+    /// member, and compared (`container:gzip.trailing`), and no pass clears them.
+    pub trailing: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -276,7 +295,9 @@ impl Body {
                 .map(Cow::Borrowed)
                 .ok_or_else(|| crate::ArchiveError::Malformed {
                     format: "archive",
-                    detail: format!("body range {off}..{} out of bounds", off + len),
+                    // Saturating: a range whose end overflows is exactly the one being refused,
+                    // and `+` panicked on it under the workspace's overflow checks.
+                    detail: format!("body range {off}..{} out of bounds", off.saturating_add(*len)),
                 }),
             Body::Spilled { file, off, len } => {
                 let mut f = file.file.try_clone()?;
@@ -349,6 +370,7 @@ impl Archive {
             format,
             entries: Vec::new(),
             trailer,
+            tar_trailing: Vec::new(),
             trailer_dirty: false,
         }
     }
@@ -448,5 +470,41 @@ impl Entry {
             Body::Inline(v) => Ok(v),
             _ => unreachable!("just promoted to Inline"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::sync::Arc;
+
+    use super::{Body, SpillFile};
+
+    /// Nothing constructs `Body::Spilled` yet (`docs/16-findings.md` §3.15), but the read is here
+    /// and whoever wires spilling inherits it, so it is held to its window now.
+    #[test]
+    fn a_spilled_body_reads_exactly_its_window_of_the_spill_file() {
+        let mut f = tempfile::tempfile().unwrap();
+        f.write_all(b"....window....").unwrap();
+        let file = Arc::new(SpillFile { file: f });
+        let body = Body::Spilled {
+            file: file.clone(),
+            off: 4,
+            len: 6,
+        };
+        assert_eq!(body.len(), 6);
+        assert_eq!(body.bytes().unwrap().as_ref(), b"window");
+        // Twice: each read seeks, rather than trusting where the last one left the handle.
+        assert_eq!(body.bytes().unwrap().as_ref(), b"window");
+
+        let past_the_end = Body::Spilled {
+            file,
+            off: 10,
+            len: 10,
+        };
+        assert!(matches!(
+            past_the_end.bytes(),
+            Err(crate::ArchiveError::Io(_))
+        ));
     }
 }

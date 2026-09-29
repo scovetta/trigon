@@ -40,11 +40,11 @@ immediate coverage. Risk tiers exist for the people who disagree: they can deman
 
 | Need | Crate | Verdict |
 |---|---|---|
-| tar **read** | `tar` | **Use it.** PAX and GNU long-name parsing is battle-tested. |
+| tar **read** | `tar` | **Use it.** PAX and GNU long-name parsing is battle-tested. It ends an archive at the first zero block, and node-tar, which npm installs with, reads on past a lone one, so what follows the crate's stop is checked: a lone zero block with more of the archive after it is refused, and bytes after two that are not padding are kept, written back and compared (`container:tar.trailing`). |
 | tar **write** | none | **Hand-roll (~400 lines).** `tar::Header` is a `[u8; 512]` newtype with no first-class PAX-record emission, and we depend on forcing PAX format so that a timestamp field survives at all. Header checksum, name and prefix split, the PAX `"%d %s=%s\n"` length fixpoint, ordered records, and the long-name rule below. |
 | zip **read** | none | **Hand-roll (~250 lines).** Started out delegating to the `zip` crate, and that crate hides the four fields stabilization has to control: version-made-by, version-needed, general-purpose flags, and internal attributes. Walking the central directory ourselves costs 250 lines and gives every field. The crate stays a dev-dependency, where it cross-checks our output the way an external implementation should. |
 | zip **write** | none | **Hand-roll (~300 lines).** The crate cannot set general-purpose bit flags, creator/reader version, or zeroed CRC and size fields, and stabilization needs all three. |
-| gzip read | `flate2` (`MultiGzDecoder`) | Use it; supplement with a small header reader, since `GzHeader` does not expose XFL and FEXTRA reliably. |
+| gzip read | `flate2` (`DeflateDecoder`) | **Frame it ourselves, inflate with the crate.** Our header reader exposes XFL and FEXTRA, which `GzHeader` does not. It reads what `MultiGzDecoder` and gunzip read: every member, each held to its own CRC-32 and ISIZE, contents concatenated. Bytes after the last member that begin no other are kept, written back and compared (`container:gzip.trailing`), never dropped. Reading only the first member, with the file's last eight bytes as its trailer, let a second member hide behind a forged CRC. |
 | gzip write | `flate2::GzBuilder` at `Compression::none()` | Workable. Verify the XFL byte, and hand-roll if it comes out wrong. The container runs about 100 lines, and stored-deflate framing is a few more. |
 | CRC32 | `crc32fast` | Fine. |
 | `ar` (for `.deb`, later) | none | Hand-roll (~60 lines). No maintained crate worth the dependency. |
@@ -85,6 +85,7 @@ pub struct Archive {
     pub format: Format,
     pub entries: Vec<Entry>,
     pub trailer: Trailer,
+    pub tar_trailing: Vec<u8>, // after a tar's end-of-archive marker, not padding; kept
 }
 
 pub enum Trailer { Zip { comment: Vec<u8> }, Gzip(GzipHeader), Tar, None }
@@ -179,7 +180,7 @@ deletion is how a stabilizer turns a real difference into a false match.
 | `MaxInlineBytes` (per entry) | 8 MiB | spill to `SpooledTempFile`; `NoteCode::SpilledToDisk` |
 | `MaxInlineTotal` (per archive) | 256 MiB | spill |
 | `TotalExpandedBytes` | 4 GiB | abort with `Unsupported { ArtifactTooLarge }` |
-| `MaxEntries` | 1,000,000 | abort |
+| `MaxEntries` | 1,000,000 | abort. It also counts the gzip members one artifact reads, across every nested `.gz`, and refuses the one past it: an empty member costs time and no bytes |
 
 **(6) `ordinal` makes the sort total.** Both tar and zip permit **duplicate entry paths**, and real
 archives contain them: a tar built by appending, a zip with a stale local header, a wheel repacked by
@@ -343,7 +344,7 @@ present and zero is its unset value. Our model carries `Option<u32>` so that rea
 
 | id | Transform | Risk | Stage |
 |---|---|---|---|
-| `wheel-record` | recompute `RECORD` from actual members: `path,sha256=<urlsafe-b64>,<size>`, sorted, PEP 376 CSV quoting, `RECORD,,` last | Content | **Finalize** |
+| `wheel-record-v2` | recompute `RECORD` from actual members: `path,sha256=<urlsafe-b64>,<size>`, sorted, PEP 376 CSV quoting, `RECORD,,` last | Content | **Finalize** |
 | `wheel-generator` | normalize the `Generator:` line in `WHEEL` | Metadata | Default |
 | `wheel-direct-url` | drop `direct_url.json` | Lossy | Default |
 | `pyc-header` | zero the timestamp/hash field in `.pyc` headers | Content | Default |

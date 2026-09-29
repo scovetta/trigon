@@ -12,7 +12,7 @@
 //! predicate nobody can regenerate.
 
 use serde::{Deserialize, Serialize};
-use trigon_core::{Digest, FailureSignature};
+use trigon_core::{Digest, DigestCheck, FailureSignature, Sha1, Sha512};
 
 /// How far a run got. The five persisted states of `docs/03` §1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +72,10 @@ pub struct Environment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<PinEvidence>,
     /// The digest of the guard manifest the mirror was armed with, where it was armed.
+    ///
+    /// The manifest itself is stored as a blob under this digest by every run recorded since
+    /// `docs/19` §10 phase 2, so the digest names bytes a reader can fetch; it used to be left in
+    /// the work directory and lost with it.
     ///
     /// **`None` means nobody looked, and that is why it is recorded rather than inferred.** The
     /// signed `artifactHashCheck` block derives `performed` from this field being present, so a
@@ -142,6 +146,54 @@ impl PinEvidence {
     pub fn bound(&self) -> bool {
         self.index_requests > 0
     }
+}
+
+/// Where a run's record was published (`docs/19` §10 phase 5 step 7): written by `trigon publish`
+/// once the commit that logs it is pushed, or found there by the next `publish` when a crash came
+/// between the push and this.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Published {
+    /// The evidence repository, as `git` was given it: a URL as configured, or a local path made
+    /// absolute. Never a credential, which a location may not carry.
+    pub repository: String,
+    /// The commit that logged the record.
+    pub commit: String,
+    /// The sha256 of the record file.
+    pub record: Digest,
+    /// The record's leaf, by its index in its log.
+    pub leaf: u64,
+    /// The log the leaf is in, where it is not the repository's first: its directory, `log/<n>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
+}
+
+/// Every digest of the published bytes beyond `upstream.sha256`: what the run computed over them,
+/// and what the registry declared and whether the bytes agreed.
+///
+/// **Computed, then declared, and never one standing in for the other.** `sha512` and `sha1` are
+/// hashed from the bytes as they were fetched, and are what a statement's subject carries: a
+/// consumer holding an npm lockfile has the sha512 and nothing else, and a subject that lacks it is
+/// unfindable (`docs/19` §5). `declared` is what the registry claimed, which the fetch checked and
+/// would have refused on a mismatch. Kept on the run rather than recomputed at attest time because
+/// a run that reached no verdict does not keep the bytes, and its statement still needs a subject.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamDigests {
+    pub sha512: Sha512,
+    /// Only where the ecosystem publishes one, which is npm's `dist.shasum`: a lookup key there and
+    /// nowhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha1: Option<Sha1>,
+    /// One entry per digest the registry declared, with the field it came from and what checking
+    /// it found: `matched`, or `unchecked` for an algorithm this build cannot compute.
+    ///
+    /// **Written even when empty.** An empty list is a finding — the registry declared nothing —
+    /// and `note` says so; a missing key would read as a record from before this field existed.
+    #[serde(default)]
+    pub declared: Vec<DigestCheck>,
+    /// Why `declared` is empty, or which of it went unchecked, in words. `None` when every
+    /// declaration was checked and held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// What one run cost, in the units `docs/03-pipeline-and-run-record.md` §3 asks for.
@@ -222,6 +274,10 @@ fn one() -> u32 {
 }
 
 /// Everything one run produced, with the large parts left in the blob store.
+///
+/// Deliberately without `deny_unknown_fields`: a store holds run files written by every earlier
+/// version, some carrying keys this struct has since dropped, and each must still read.
+/// `tests/old_run_files.rs` holds one such file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
     pub id: String,
@@ -247,6 +303,12 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused_artifact: Vec<String>,
 
+    /// When this attempt began, before anything was resolved: RFC 3339, UTC.
+    ///
+    /// The publication gate reads it to hold two attempts that began less than
+    /// `confirmation_interval` apart (`docs/19` §10 phase 3). **A run that reached a comparison
+    /// wrote the time it was recorded here** until that phase, which is the end of the run and not
+    /// its start; the gate reads the field only beside a recorded `host`, which no such run has.
     pub started: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<String>,
@@ -270,18 +332,71 @@ pub struct RunRecord {
     /// What makes two attempts attempts *at the same thing*.
     ///
     /// The target, the strategy digest and the stabilizer set: change any of them and the second
-    /// run is a different question, not a confirmation of the first. `None` on a record written
-    /// before the field existed, which the gate reads as unconfirmable rather than as confirmed.
+    /// run is a different question, not a confirmation of the first. Built by
+    /// [`crate::cache_key`] and nothing else, by the run once it knows the strategy it ran and the
+    /// set it was judged under, worker and CLI alike. `None` on a record written before the field
+    /// existed, and on a run that never had a strategy, which the gate reads as unconfirmable
+    /// rather than as confirmed.
+    ///
+    /// **Runs recorded before `docs/19` §10 phase 3 keep what they had**: a worker's run carries
+    /// its job's key, which was the purl alone, and a CLI run carries none. Neither is a key this
+    /// function builds, so neither is counted beside a run recorded since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
+    /// What two attempts at the same `cache_key` must share to agree: a digest over the outcome,
+    /// the stabilizer set, the published artifact's raw digest and both sides' stabilized digests
+    /// (`Comparison::agreement`). The raw upstream digest is in it because the key does not name
+    /// the published bytes, and two attempts against two of them are not one question.
+    ///
+    /// **Not `comparison`**, the digest of the stored comparison report, which also names the
+    /// rebuilt artifact's raw bytes: six honest builds of one package produced six raw artifacts
+    /// and one stabilized digest (`docs/17-backlog.md` B31), so two attempts that agree in every
+    /// way the claim cares about never share a report digest. And **not the outcome alone**,
+    /// which let a divergence in one member confirm a divergence in every other. `None` on a run
+    /// that reached no comparison, and on one recorded before the field existed, which agrees
+    /// with nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agreement: Option<Digest>,
+    /// The machine this attempt ran on, as an id that names no machine ([`crate::host_id`]).
+    ///
+    /// ADR-0010 safeguard 1 asks for attempts "on different workers", and two runs on one machine
+    /// share everything it holds constant. `None` on a record written before the field existed,
+    /// and on a machine with neither a machine id nor a hostname; the gate then cannot tell one
+    /// machine from two, and withholds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Which caches this attempt let supply it, and whether its base image was pulled again. See
+    /// [`crate::CacheState`]. `None` on a record written before the field existed, which is "not
+    /// recorded" and never "cold".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::CacheState>,
 
     pub environment: Environment,
-    /// Canonical JSON of the strategy, and its digest. The digest is what a cache key is built from
-    /// and what the attestation names; the blob is what a person reads.
+    /// The blob holding the strategy that ran, as canonical JSON (`trigon_core::jcs`): the digest
+    /// of a file a reader can fetch, and what a published record binds its strategy evidence by
+    /// (`docs/19` §4.2 item 7).
+    ///
+    /// **Not `strategy_digest`**, and the two must not be confused. This is the sha256 of the
+    /// file's bytes; that one is a domain-separated hash over the canonical strategy *and every
+    /// tool it reaches*, which is what a cache key needs and is the digest of no file. The field
+    /// was declared long before anything wrote it — none of 371 stored runs had it — so `None`
+    /// means a run recorded before `docs/19` §10 phase 2, or one that never chose a strategy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<Digest>,
+    /// `strategyDigest`: what a cache key is built from and what the `rebuild` statement's
+    /// `internalParameters` names. See `strategy` above for why it is not a file digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_digest: Option<String>,
+    /// The Trigon that ran the build: the crate version and the git revision the binary was built
+    /// from, as `0.0.0+git.<40 hex>`, with `.dirty` after it for a tree with uncommitted changes
+    /// and `+git.unknown` for a build outside a checkout. Runs recorded before builds embedded the
+    /// revision carry `0.0.0` alone, which identifies nothing.
+    ///
+    /// Recorded because the only version signed anywhere was the *attestor's*, in `rebuild`, and a
+    /// run attested by a later binary claimed that binary had built it (`docs/19` §4.2 item 3).
+    /// `None` on a record written before the run kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigon_version: Option<String>,
     /// How the strategy was arrived at: `definition`, `heuristic`, `ci_derived`, `model_assisted`.
     /// A provenance fact beside the claim, never inside it (`docs/09` §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -303,6 +418,14 @@ pub struct RunRecord {
     pub instructions: Option<Digest>,
 
     pub upstream: ArtifactRef,
+    /// The published artifact's other digests, and what its registry declared. See
+    /// [`UpstreamDigests`].
+    ///
+    /// `None` on a record written before the fetch kept them, and on one whose fetch never
+    /// finished, which are both "not known" and never "nothing declared": that is an empty
+    /// `declared` with a note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_digests: Option<UpstreamDigests>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebuild: Option<ArtifactRef>,
 
@@ -393,6 +516,17 @@ pub struct RunRecord {
     /// discard the bytes a signature is about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attestations: Vec<String>,
+    /// Statements this run named in the per-target layout, set aside when it was attested again
+    /// under its own id ([`crate::Store::record_attestations`]).
+    ///
+    /// Kept so the history is not lost, and **served by nothing**. A per-target path was shared by
+    /// every run of the target, so what it holds now is whichever run attested last — 40 of the
+    /// 93 in the local store were shared when this was measured — and neither a build observation
+    /// nor an equivalence statement says which run it is about. Left in `attestations`, a re-attest
+    /// went on serving another run's statements, possibly a withheld divergence, as this run's.
+    /// Empty on every run that was never attested under both layouts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub per_target_attestations: Vec<String>,
     /// Whether any stabilizer that actually fired carried non-`Builtin` provenance.
     ///
     /// ADR-0010 safeguard 2's provenance clause needs this, and the fact lives in the comparison
@@ -417,19 +551,11 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_opinion: Option<trigon_core::DiffOpinion>,
 
-    /// What a transparency log said about this run's equivalence statement, where one was asked.
-    ///
-    /// The log index, the UUID, the instant, and the log's signature over all three. Kept on the
-    /// record rather than only in the log because it is what a verifier needs in order to check
-    /// *when* the statement was signed — the number a certificate's validity window is tested
-    /// against, and under [ADR-0011] the only thing bounding a compromise of a key we hold.
-    ///
-    /// `None` means no log was asked, which is the common case for a local run and is not the same
-    /// as a log that refused.
-    ///
-    /// [ADR-0011]: ../../../docs/adr/0011-keyed-signing-under-a-trusted-root.md
+    /// Where this run's record was published. `None` until `trigon publish` has logged it, which
+    /// is also every run the publication gate withholds; a run whose record is logged and has none
+    /// here is one a crash stopped after the push, and the next `publish` completes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transparency: Option<trigon_attest::LogEntry>,
+    pub published: Option<Published>,
 }
 
 impl RunRecord {
@@ -505,13 +631,18 @@ impl RunRecord {
             finished: None,
             attempt: 1,
             cache_key: None,
+            agreement: None,
+            host: None,
+            cache: None,
             environment,
             strategy: None,
             strategy_digest: None,
+            trigon_version: None,
             derivation: None,
             source: None,
             instructions: None,
             upstream,
+            upstream_digests: None,
             rebuild: None,
             comparison: None,
             build_log: None,
@@ -525,9 +656,10 @@ impl RunRecord {
             network_transcript: None,
             costs: None,
             attestations: Vec::new(),
+            per_target_attestations: Vec::new(),
             non_builtin_stabilizer: None,
             diff_opinion: None,
-            transparency: None,
+            published: None,
         }
     }
 

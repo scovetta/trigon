@@ -1,6 +1,17 @@
 # ADR-0011. Sign with a key under a trusted root, and log to Rekor anyway
 
-**Status:** accepted, superseding the keyless default in [`09-attestations.md`](../09-attestations.md) §3
+**Status:** accepted, superseding the keyless default in
+[`09-attestations.md`](../09-attestations.md) §3. **Partly superseded** by
+[ADR-0014](0014-git-evidence-store-without-rekor.md), accepted 2026-09-27, which removed Rekor and
+every other Sigstore dependency. Superseded: the Rekor half — the third sentence of the Decision,
+"and log to Rekor anyway" in the title, "Combined with a log timestamp" in item 2 of "Why a
+certificate rather than a pinned public key", "Why Rekor is still required", the Rekor arm of
+"Shape", the `verify` and `Attestation` rows of "What has to change in the code", verification steps
+2 and 3, "and by the log" in the costs, and "Testing, and what staging already told us". Amended
+until a root exists: "Verifiers pin the root, not the key", the `verify-attestation` row, and
+"`LocalKey` … is not a deployment mode for anything published" — records are published under a
+single pinned ed25519 key (ADR-0014 Decision 8). The keyed-signing half stands. Each superseded or
+amended part below carries a short note; the text is kept as the record of what was decided.
 
 ## Decision
 
@@ -8,6 +19,10 @@ Sign attestations with a **key we hold, carrying an X.509 certificate that chain
 publish**. Verifiers pin the root, not the key. Publish every signature to a **Rekor transparency
 log**, and treat the log's signed timestamp as part of what makes the signature checkable rather
 than as an optional extra.
+
+> **Superseded, and amended, by ADR-0014.** Nothing is published to Rekor: published records go to
+> an evidence repository with an append-only log we sign (`docs/19-distribution-and-lookup.md`).
+> Until a root exists, verifiers pin the attestation key, not a root.
 
 Sigstore keyless — an ephemeral key, an OIDC identity, a ten-minute Fulcio certificate — is **not**
 the default and is not planned.
@@ -54,11 +69,18 @@ A bare pinned ed25519 key already gives authenticity, and that is what `LocalKey
 2. **A validity window.** A signature is good only if it was made while the certificate was valid.
    Combined with a log timestamp this bounds the damage from a compromise to the window, where a
    bare long-lived key's compromise is retroactively unbounded.
+   *(Superseded by ADR-0014: there is no Rekor timestamp. A window can be checked only against a
+   witness cosignature's time or an RFC 3161 token, or replaced by key epochs sealed in the log;
+   docs/19 D6 chooses.)*
 3. **Revocation.** Short leaves make it mostly unnecessary, and CRL/OCSP exist for when it is not.
 4. **Identity.** The attestor instance, the `trigon` version and the environment go in the
    certificate rather than being asserted inside the payload that the same key signed.
 
 ## Why Rekor is still required, and is required *more*
+
+> **Superseded by ADR-0014.** Rekor is gone. The SET check this section argues for was never live
+> (`within_validity` was called only from tests), so removing it lost a designed guarantee, not an
+> enforced one. What bounds a stolen key now is docs/19 D6 and phase 7a.
 
 This is the part most likely to be read as optional and is not.
 
@@ -86,6 +108,9 @@ infrastructure and not the CA.
         └────────────────── verification ◀──── chain + validity          Rekor entry → SET
 ```
 
+> **Superseded by ADR-0014:** the Rekor arm on the right. A statement is published inside a record
+> in the evidence repository, and its leaf in our log is what dates it.
+
 - **Root**: offline, long-lived, published by digest and compiled into the verifier. Its digest is
   named in every attestation, so a statement says which root it expects rather than leaving a
   verifier to guess.
@@ -94,6 +119,8 @@ infrastructure and not the CA.
   rarely the mechanism that saves us.
 - **`LocalKey` stays** for development and air-gapped use, and produces a statement that says it is
   unchained. It is not a deployment mode for anything published.
+  *(Amended by ADR-0014: until a root exists, records are published under a single pinned ed25519
+  key, rotated by a key-change leaf signed by the old key and the new.)*
 
 ## What has to change in the code
 
@@ -106,6 +133,10 @@ Each is small and none is optional.
 | `verify` | one raw ed25519 key from `--public-key` | chain-to-root, validity at the log time, then the signature |
 | Attestation | no log reference | the Rekor entry's log index, UUID and SET |
 | `verify-attestation` | `--public-key <hex>` | `--root <pem>` defaulting to the compiled-in root |
+
+> **Superseded by ADR-0014:** the `verify` row (no log time to check a window against) and the
+> `Attestation` row (no Rekor entry; a published record is bound to its leaf in our log instead).
+> Amended until a root exists: the `verify-attestation` row, which keeps `--public-key`.
 
 `Signature` gaining a field is a wire-format change and the envelope is already versioned by
 `payloadType`, so old bundles keep verifying against a pinned key and new ones carry a chain.
@@ -120,6 +151,9 @@ Each is small and none is optional.
 4. **Verify the DSSE signature** over the PAE.
 5. **`--rerun-comparison`**, unchanged: re-derive the equivalence claim from the artifact bytes.
 
+> **Superseded by ADR-0014:** steps 2 and 3. There is no Rekor entry; a published record's
+> inclusion in our log is checked instead (docs/19 §6), and a time check waits on docs/19 D6.
+
 Step 5 is what an attestation from a *rebuilder* is worth anything for, and it is independent of all
 of the above — a verifier who distrusts our signing entirely can still falsify the claim.
 
@@ -127,12 +161,16 @@ of the above — a verifier who distrusts our signing entirely can still falsify
 
 - **Key custody becomes the crown jewel.** Keyless had nothing to steal; we now do. Mitigated by the
   intermediate living in a KMS, by short leaves, and by the log — not eliminated.
+  *(Superseded by ADR-0014: "and by the log". No external log bounds a compromise now.)*
 - **We run a CA.** Root ceremony, rotation, revocation, and publishing the root somewhere durable.
   That is operational work keyless does not have.
 - **Verifiers need our root.** Pinned in the verifier binary is the honest answer, and it means the
   verifier binary is itself a trust distribution mechanism.
 
 ## Testing, and what staging already told us
+
+> **Superseded by ADR-0014.** The client, the fixtures and the tests this section describes were
+> removed. It stays as the record of what was measured; `16-findings.md` §3.92 has why Rekor went.
 
 Against **Rekor staging** (`https://rekor.sigstage.dev`) before anything touches production, because
 a transparency log is append-only: a malformed entry published to `rekor.sigstore.dev` is there

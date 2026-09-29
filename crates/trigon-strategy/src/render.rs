@@ -1,7 +1,9 @@
 //! Rendering: a pure function of `(strategy, context, tools)`.
 //!
 //! Four settings depart from `minijinja`'s defaults, each blocking a class of silent wrongness.
-//! See `docs/04-strategies.md` §3.2.
+//! See `docs/04-strategies.md` §3.2. A fifth rule is about what reaches the template engine at
+//! all: a step's `literal` values, which is where a rung puts what it read from the package, its
+//! registry document or its repository, are handed on or printed by name and never parsed (§3.3).
 //!
 //! 1. `UndefinedBehavior::Strict`. A typo'd `{{ targt.version }}` renders empty by default, which
 //!    turns into `pip install ==` and a failure nobody can trace back to the typo. Here it is an
@@ -139,6 +141,12 @@ fn expand(
 
     for (i, step) in steps.iter().enumerate() {
         let at = |e: StrategyError| prefix(&format!("[{i}]"), e);
+        // The step's own literals, readable by name in its templates. Replaced rather than merged,
+        // so a tool's steps never see what their caller was given as data.
+        let cx = &Context {
+            literal: step.literal.clone(),
+            ..cx.clone()
+        };
 
         if let Some(cond) = &step.when {
             let rendered = render_str(env, cond, cx).map_err(at)?;
@@ -173,6 +181,18 @@ fn expand(
                 for (k, v) in with {
                     resolved.insert(k.clone(), render_str(env, v, cx).map_err(&at)?);
                 }
+                // **Literals are never rendered.** They are what a step carries from outside the
+                // strategy — a stamp read from the published assembly, a version from the registry
+                // — and handing one to `render_str` is evaluating the package's text as a template.
+                // Checked here as well as at parse time, because a rung builds its steps in code.
+                if let Some(name) = step.given_twice() {
+                    return Err(at(StrategyError::Invalid(
+                        crate::model::given_twice_message(name),
+                    )));
+                }
+                for (k, v) in &step.literal {
+                    resolved.insert(k.clone(), v.clone());
+                }
                 for (name, p) in &t.params {
                     if let Some(d) = &p.default
                         && !resolved.contains_key(name)
@@ -205,6 +225,16 @@ fn expand(
         }
     }
     Ok(out.join("\n"))
+}
+
+/// Whether a template renders to exactly its own text, whatever the context.
+///
+/// Nothing in it for the engine to read — no `{{`, `{%` or `{#` — and no trailing newline, which
+/// the engine trims: one `\n` and then one `\r` (`keep_trailing_newline` is off). No line-statement
+/// syntax is configured, so nothing else is read. A rung asks this of a `with` value it would
+/// otherwise move into `literal`: one that renders to itself already says what the literal would.
+pub(crate) fn renders_as_itself(text: &str) -> bool {
+    !["{{", "{%", "{#"].iter().any(|m| text.contains(m)) && !text.ends_with(['\n', '\r'])
 }
 
 fn render_str(
@@ -292,6 +322,22 @@ fn environment(cx: &Context) -> Environment<'static> {
     // Shell quoting is the one thing these templates actually need a regex for, and getting it
     // wrong is a command injection rather than a typo.
     env.add_filter("shell_single_quote", |s: String| s.replace('\'', r"'\''"));
+    // A value for an MSBuild `-p:Name=value`, escaped so MSBuild sets the property to exactly it.
+    // Its command line splits properties on `;` and `,` and strips `"`, and it decodes `%XX` and
+    // item-expands `@(…)` in the value where it is used, so each of those is spelled `%XX`, which
+    // it decodes back. Measured against `dotnet pack` from SDK 10.0.112: unescaped, a comma fails
+    // with MSB1006 and a quote is dropped; escaped, the assembly attribute is the value as given.
+    // ASCII only, because MSBuild decodes `%XX` a byte to a character.
+    env.add_filter("msbuild_escape", |s: String| {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '%' | ';' | ',' | '"' | '@' => out.push_str(&format!("%{:02X}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out
+    });
     env.add_filter("indent", |s: String, n: usize| {
         let pad = " ".repeat(n);
         s.lines()
@@ -375,4 +421,38 @@ fn environment(cx: &Context) -> Environment<'static> {
         },
     );
     env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule is only worth having if it is the engine's: every text it passes renders, through
+    /// the environment a strategy renders in, to itself, and the texts it refuses include the ones
+    /// that do not — a trailing newline the engine trims, a `\r\n`, each of the three openers.
+    #[test]
+    fn a_text_that_renders_as_itself_is_what_the_engine_renders_unchanged() {
+        let cx = Context::default();
+        let env = environment(&cx);
+        for text in [
+            "5.1.1",
+            "Copyright (c) 2004-2022 Castle Project",
+            "© 2004 } } % # { x",
+            "a\nb",
+            "\n5.1.1",
+            " spaced ",
+            "",
+        ] {
+            assert!(renders_as_itself(text), "{text:?}");
+            assert_eq!(render_str(&env, text, &cx).unwrap(), text, "{text:?}");
+        }
+        for (text, rendered) in [("5.1.1\n", "5.1.1"), ("5.1.1\r\n", "5.1.1"), ("5\r", "5")] {
+            assert!(!renders_as_itself(text), "{text:?}");
+            assert_eq!(render_str(&env, text, &cx).unwrap(), rendered, "{text:?}");
+        }
+        for text in ["{{ 7*7 }}", "{% raw %}x{% endraw %}", "a {# b #}"] {
+            assert!(!renders_as_itself(text), "{text:?}");
+            assert_ne!(render_str(&env, text, &cx).unwrap(), text, "{text:?}");
+        }
+    }
 }

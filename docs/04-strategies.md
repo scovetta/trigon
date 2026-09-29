@@ -195,16 +195,73 @@ target    { ecosystem, namespace, name, version, artifact }
 env       { registry_moment, source_date_epoch, arch, platform, mirror_urls }
 intrinsics{ publish_time, toolchains, backend, evidence_summary }
 with      { …tool parameters… }
+literal   { …the step's own literals, §3.3… }
 ```
 
 A template can reach nothing else. No filesystem access, no environment-variable lookup, no
 clock.
 
+### 3.3 Literals: what a step carries from outside the strategy
+
+`runs`, `if` and every `with` value are templates, and that is what lets an author write
+`{{ intrinsics.publish_time }}`. It also means a value copied into one of them is evaluated as the
+template it happens to look like. The rungs that write strategies copy text from the thing under
+test: the .NET rung reads the version stamps and copyright out of the published assembly, the yarn
+rung expands script bodies from the checkout's `package.json`, and the heuristic and CI rungs pass
+on versions, a publish time, a backend pin, a script name and a directory read from a registry
+document, the published artifact or a workflow. Any of it carrying `{{ 7*7 }}` rendered as `49`,
+and any carrying `{% if %}` failed the render: the package was writing part of its own recipe
+([`16-findings.md`](16-findings.md) §3.104).
+
+So a step has a second map beside `with`, and nothing in it is ever parsed as a template:
+
+```yaml
+build:
+  - uses: nuget/build/pack
+    with:
+      dir: "{{ location.subdir }}"                  # the author's template
+    literal:
+      copyright: "© 2004 {{ 7*7 }} Castle Project"  # the assembly's text, as it is
+  - runs: cd {{ location.subdir }} && ( {{ literal.script_build }} )
+    literal:
+      script_build: npm run umd && npm run umd-min
+```
+
+- In a `uses` step each literal is handed to the tool as the parameter of that name, exactly as
+  written. The tool reads it as `{{ with.<name> }}` like any other parameter, which prints the value
+  and does not evaluate it.
+- Any template of the step — `runs`, `if`, a `with` value — can read a literal by name as
+  `{{ literal.<name> }}`. That is how the yarn rung keeps a script body out of the template it
+  splices it into.
+- A literal belongs to its step. A tool's own steps never see their caller's literals, only the
+  parameters they were handed.
+- A name given both in `with` and in `literal` is refused, at parse and at render, because which of
+  two values the tool received would depend on the order two maps were merged in.
+- An empty map is omitted, so a strategy that carries no literal has the canonical form and the
+  `strategy_digest` it had before the field existed. One that carries any declares `schema: 2`
+  (§4).
+
+The rule the rungs follow is that **nothing a rung read from outside the strategy is template
+source**: the .NET rung sets the stamps as literals, the yarn rung puts each expansion in a literal
+the step reads by name, and a heuristic or CI-derived strategy carries no `with` at all. A strategy
+an author writes — in the definitions repository, by hand, or as a model's proposal — keeps its
+templates as before. What a model writes is authored text and is not covered by this rule; the
+prompt-injection boundary for it is `docs/12-security.md` §4.
+
 ## 4. Versioning and the digest
 
-Every strategy document begins `schema: 1`. The prior art carries no version field, and we decline
-to inherit that problem.
+Every strategy document begins with its `schema`. The prior art carries no version field, and we
+decline to inherit that problem.
 
+- **A document declares the oldest schema that can read it.** 1 is the format as first written; 2
+  adds a step's `literal` map (§3.3), and a document declares it only where a step carries one, so a
+  strategy without literals is still schema 1 and keeps its canonical form and digest. A build that
+  knows only 1 refuses a schema-2 document as newer than it understands, which tells its reader to
+  upgrade; declared as 1, the same document was refused for an unknown field `literal`, which does
+  not. The canonical JSON a record stores says `schema` where it is above 1, for the same reason.
+- **Every version is read.** 2 only added a field, so a document of 1 is a document of 2 as it
+  stands and needs no structs of its own. One that declares 1 and carries a literal is read too: a
+  model is shown the shape as schema 1, and the document can mean nothing else.
 - Parse as `{ schema: u32, #[serde(flatten)] rest: Value }`, dispatch to `v1::Strategy`, then
   `From`-chain forward to the current version. **We keep every historical version's structs.**
 - **`strategy_digest` covers an RFC 8785 (JCS) canonical serialization of the migrated-to-latest

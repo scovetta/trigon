@@ -85,7 +85,8 @@ contained no implementation of any of the five, and carried forward `verdicts.pu
 
 Today safeguard 1 — two agreeing attempts — is enforced by *nothing*
 ([`12-security.md`](12-security.md), invariant 12). §7.1 makes the gate a schema object with one
-producer.
+producer. (Since [`19`](19-distribution-and-lookup.md) §10 phase 3 the gate enforces it, with the
+settings §7.1 describes.)
 
 ### 2.4 A request button is a remote-code-execution button at the shipped default
 
@@ -131,9 +132,11 @@ doing right now, on this disk* — and the second is the one that has to survive
 - `Provenance::Human { reviewer }` is not the right variant for an ADR-0006 model-proposed
   stabilizer a human approved. That is `Model { model_id, run_id }` with an approval reference.
   Provenance is hashed into the set digest, so a misattribution here is permanent.
-- `put_attestation` overwrites one file per predicate, contradicting
-  [`09-attestations.md`](09-attestations.md) §8's appendable JSONL. Fixed with the `attestations`
-  table, not after it.
+- `put_attestation` overwrote one file per predicate, per target, contradicting
+  [`09-attestations.md`](09-attestations.md) §8's appendable JSONL. Since
+  [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §10 phase 2 statements are filed
+  per run and never overwritten ([`09-attestations.md`](09-attestations.md) §6). The `attestations`
+  table and the JSONL bundle are still to come, and land together.
 - The `runs/<run-id>/` write-only blob credential **cannot be expressed** by a content-addressed
   store — every writer writes under `blobs/sha256/`. The document's own fallback, a sidecar that
   holds the credential and derives the path from the bytes, is what gets built, and
@@ -158,7 +161,7 @@ doing right now, on this disk* — and the second is the one that has to survive
 | Evidence gateway | Authenticated, digest-addressed, class-gated fetch of blob bytes with retention bounds. | Serve a build log or network transcript anonymously. Return bytes without re-hashing them against the digest asked for. | **new**, inside `trigon-api` |
 | Publication gate | The ADR-0010 safeguards as one object with one producer: agreement, the `Void` rule, the dispute pointer, notification, the SLO kill-switch. | Let anything reach a public read path with `published` unset. | **new** — §7.1 |
 | `trigon watch` | The local, database-free, directory-rooted reader. Loopback. Survives the sweep's death. | Gain a write path, a database client, an auth layer, or a routable default bind. | exists, frozen in scope |
-| Attestor | Signing, unchanged: re-derives `RunFacts` from blob **bytes**; refuses a void run. | Take any fact from a database column. Sign a statement reassembled from rows. | exists; gains a DB *trigger*, never a DB *input* |
+| Attestor | Signing, unchanged: re-derives `RunFacts` from blob **bytes**; signs a void run as `void/v1` alone, never as a verdict. | Take any fact from a database column. Sign a statement reassembled from rows. | exists; gains a DB *trigger*, never a DB *input* |
 
 ## 4. The schema
 
@@ -177,7 +180,7 @@ scalars**, every payload over 8 KB in blob storage addressed by content hash.
 | `runs` written **live** and on **every terminal outcome** | `record_run` has one call site, past the early return that unwraps the comparison. A browse page over today's store reports a 100 % reproduction rate on a sweep where nothing built. `RunState::Queued` gets a producer. |
 | `target_digests(target_id, algorithm, digest)` replacing singular `targets.upstream_digest` | The lookup key is the published artifact's digest, and an npm consumer holds sha1 and sha512 and never sha256. Must land before anything is signed at scale. |
 | `run_events`, `host_budget` as separate tables | ADR-0005: heartbeats and progress off the queue's hot path. `host_budget` is the only carrier fleet-global backoff can have — the mirror runs in a per-run container with no route to a database. |
-| `attestations(...)`, append-only | Attestations are keyed by purl path and **overwritten** today, against [`09-attestations.md`](09-attestations.md) §8. The object layout becomes JSONL-append at the same time. |
+| `attestations(...)`, append-only | Attestations were keyed by purl path and **overwritten**, against [`09-attestations.md`](09-attestations.md) §8; since [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) §10 phase 2 they are filed per run and never overwritten ([`09-attestations.md`](09-attestations.md) §6). The object layout becomes JSONL-append when this table lands. |
 | `proposals`, `approvals`, `overlays` | The write half. The approval record copies `PrebuiltStrategy { approved_by, reason }` rather than inventing a shape. |
 | `publications` | §7.1: the ADR-0010 gate, and the only thing that may set `verdicts.published`. |
 | `explanations(comparison_digest, model_id, text, created)` | The one thing an ADR puts in the database by name: ADR-0010, "stays in the database and the UI, unsigned, with its model id attached". Improvise it at the UI layer and the model id is what gets dropped. |
@@ -270,8 +273,10 @@ GET  /v1/evidence/{digest}   class-gated, retention-bounded, re-hashed
 
 `POST /v1/runs` takes **a target and a purpose**. It cannot express a strategy, a stabilizer, a base
 image, an egress tier, or a platform, and the engine independently refuses a non-operator job whose
-plan is not mirrored (§2.4). It is idempotent on `cache_key`; a repeat inside the window returns the
-existing run rather than enqueuing a second. It is admitted into the `interactive` tier — whose
+plan is not mirrored (§2.4). It is idempotent on the request — the target's canonical purl,
+`trigon_store::request_key`, which is all a request knows before a strategy is inferred and is not
+the cache key the run records; a repeat inside the window returns the existing run rather than
+enqueuing a second. It is admitted into the `interactive` tier — whose
 stated source in [`10-scale.md`](10-scale.md) is literally "a UI request" — and charged against a
 per-principal budget **inside the same transaction as the insert**, so admission stops rather than
 overspending and reporting it afterwards.
@@ -391,7 +396,7 @@ which refuses to set it unless all five hold:
 
 | Safeguard | As built |
 |---|---|
-| 1. Two agreeing attempts, different workers, different times | `runs.attempt`, a shared `cache_key`, and a gate that requires two terminal runs with equal `outcome` and equal comparison digest. Enforced by nothing today (invariant 12). |
+| 1. Two agreeing attempts, different workers, different times | `runs.attempt`; a `cache_key` every run builds for itself, worker and CLI alike, from the target, the strategy digest and the stabilizer-set digest (`trigon_store::cache_key`); and a gate that corroborates two terminal, non-void attempts at one key only where their outcome and **agreement digest** match — a digest over the outcome, the set, the published artifact's raw digest and both sides' stabilized digests (`Comparison::agreement`), because honest rebuilds differ in raw bytes and the outcome string alone let any divergence confirm any other — and the second began at least `[publish] confirmation_interval` after the first, on another machine, or on the same one where `same_host_confirmation` (`docs/19` D8) allows it and the confirming attempt ran cold with its base image re-pulled by digest — or, where `same_host_local_images` is set as well (off by default), cold on a local image pinned by its full content id, which no registry digest names. Another machine is another host id derived from a machine id: a hostname names a container as readily, so a pair told apart only by hostnames is held to the same-host rule. Each attempt records its host, its cache state and its start; no anonymous reader is shown the host. A worker's confirmation is queued under the first attempt's key, names that run, repeats it as `trigon rebuild --confirm <run>` does, and is leased by no worker on the first attempt's machine unless `same_host_confirmation` is set — so a fleet of one machine confirms nothing without it. A void verdict is not confirmed, and a confirmation whose run cannot be repeated goes dead at once rather than being retried ([`19`](19-distribution-and-lookup.md) §10 phase 3). Each shortfall is its own withheld reason; an anonymous reader is given one withheld total. |
 | 2. Publishes as `Void`, never as a divergence, when the egress tier was `Open`, the artifact-hash guard tripped, any applied stabilizer was non-`Builtin`, or the attempts disagreed | A computed column on the gate, not a rule in a renderer. |
 | 3. A machine-readable dispute pointer, and the exact falsifying command | Already in the `divergence/v1` predicate; the site serves the route the pointer names, and §6's disputing-maintainer principal is how the grant is issued. |
 | 4. Maintainer notification at publish time, best-effort | A queue job, so a notification outage cannot block or silently skip a publication. |
@@ -548,6 +553,18 @@ independent attempt at `Regression` tier, delayed, because the risk safeguard 1 
 ambient nondeterminism and two runs back to back on a warm cache sample the same moment twice. A
 run that reached *no* verdict is not confirmed — a `no-strategy` asked twice is still a
 `no-strategy` — and a confirmation does not confirm itself.
+
+Since [`19`](19-distribution-and-lookup.md) §10 phase 3 the second attempt is also **on another
+machine**. The engine queues it to avoid the host the first attempt recorded (`job_avoid`), and
+`Queue::lease_on` never hands it to a worker on that host, unless `[publish] same_host_confirmation`
+is set: with it off the gate does not count a confirmation made there, and nothing asks a third
+time, so a confirmation leased by the first machine because it was idle first was a build spent on a
+pair withheld for good. **A fleet of one machine therefore confirms nothing unless
+`same_host_confirmation` is on**; its confirmations wait on the queue, and the first job's events
+say for which machine. A verdict the gate calls void is not confirmed at all
+(`Work::unconfirmable`), and a confirmation the worker cannot repeat — a set or a tool this binary
+no longer carries as it was — fails as not retryable, because every worker running the same Trigon
+gives the same answer.
 
 Measured end to end: `enqueue` → worker `w1` builds `left-pad@1.3.0` and records `normalized` →
 the engine enqueues attempt 2 → worker `w2` builds it and agrees → `trigon serve --public` shows

@@ -1,22 +1,67 @@
 //! What a registry tells us about a package.
 
 use serde::{Deserialize, Serialize};
-use trigon_core::{ArtifactId, Digest, Intrinsics, SourceProvenance, TargetRef};
+use trigon_core::{
+    ArtifactId, DeclaredDigest, Digest, DigestCheck, Intrinsics, Sha1, Sha512, SourceProvenance,
+    TargetRef,
+};
 
 /// One downloadable file of one version.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactMeta {
     pub id: ArtifactId,
     pub url: String,
-    /// What the registry says the bytes hash to.
+    /// Every digest the registry declared for these bytes, in the order it declared them, each
+    /// with the field it came from.
     ///
-    /// `Option` because not every registry publishes one: npm has served sha1 for most of its
-    /// history and only newer entries carry a sha512 integrity string. Where it is absent we say
-    /// so rather than inventing a check that always passes.
+    /// A list rather than one expected algorithm, because no two registries agree: npm declares
+    /// sha512 and sha1 and never sha256, PyPI sha256, md5 and blake2b_256, crates.io sha256, and
+    /// NuGet a sha512 `packageHash` in its catalog. This was an `Option<Digest>` of sha256, so it
+    /// was empty for every npm package and the fetch checked those bytes against nothing.
+    ///
+    /// Empty where the registry declared nothing, which [`Self::declared_note`] then explains.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared: Vec<DeclaredDigest>,
+    /// Why `declared` is empty, where the resolver knows more than that it is: "npm declared
+    /// neither `dist.integrity` nor `dist.shasum`", "the NuGet catalog entry carries no
+    /// `packageHash`". Carried to the run record, so an absence there says why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared_sha256: Option<Digest>,
+    pub declared_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+}
+
+impl ArtifactMeta {
+    /// The sha256 the registry declared, where it declared one.
+    pub fn declared_sha256(&self) -> Option<Digest> {
+        self.declared
+            .iter()
+            .find(|d| d.algorithm == "sha256")
+            .and_then(|d| Digest::from_hex(&d.value).ok())
+    }
+}
+
+/// What a fetch established about the bytes it wrote.
+///
+/// Every digest here is **computed over the bytes as they streamed past**, never taken from a
+/// declaration. The declarations are in `checks`, beside what came of checking each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fetched {
+    /// What the run key, the store and every signature address the bytes by.
+    pub sha256: Digest,
+    /// Computed on every fetch, because it is a digest a consumer holds the artifact by (npm's
+    /// `integrity`) and so one a statement's subject carries.
+    pub sha512: Sha512,
+    /// Computed on every fetch for the price of one more hasher, and meaningful only where the
+    /// ecosystem publishes a sha1 ([`trigon_core::Ecosystem::publishes_sha1`]).
+    pub sha1: Sha1,
+    pub bytes: u64,
+    /// One entry per declaration, in the order the registry made them. A mismatch never appears:
+    /// it refuses the fetch instead.
+    pub checks: Vec<DigestCheck>,
+    /// Why `checks` is empty, or which declarations could not be checked; `None` when every
+    /// declaration was checked and held.
+    pub note: Option<String>,
 }
 
 /// A package coordinate, resolved against the registry that holds it.

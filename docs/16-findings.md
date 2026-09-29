@@ -3497,6 +3497,14 @@ an era-appropriate SDK the residual is the structural debug layout ([B46](17-bac
 ([B45](17-backlog.md)). Two of the three layers are now built; the third is the SDK-by-publish-date
 frontier.
 
+**Correction.** "Sets them on the `nuget/build/pack` step" set them as `with` values, and a `with`
+value is a template. The stamps are the publisher's text — ILSpy writes a copyright with its braces
+as they are — so a copyright carrying `{{ 7*7 }}` would have been built as `49`, and one carrying
+`{% if %}` failed the render and lost the rung. They are the step's literals now, handed to the
+tool as written, and reach `dotnet` MSBuild-escaped, since `-p:` splits a value on `;` and `,` and
+decodes `%XX`
+([3.104](#3104-text-from-the-package-under-test-was-template-source)).
+
 ### 3.83 SDK by publish date: build with the toolchain the CI had, not the one the target names
 
 Piece three of the castle.core work, and the layer [3.82](#382-version-reconstruction-build-the-assembly-with-the-version-the-feed-served)
@@ -3537,3 +3545,2334 @@ codegen divergence, retries under the floor SDK, and is the natural next step pa
 The verdict and the build report were correct and hard to skim: one weight, one colour, labels and values and prose all the same grey. A `style` module now paints them, under three rules that keep the colour honest — colour follows the terminal (a result piped to a file or a program is plain, the same principle the log subscriber already applies to stderr); `NO_COLOR` set to anything non-empty wins, per <https://no-color.org>, with `CLICOLOR_FORCE` to override back on for a pager; and colour is only ever an accent, never the message, so every distinction it draws is also in the words and the symbols and the plain output says exactly what the coloured one does.
 
 The module is zero-dependency — a hand-rolled SGR wrapper, in keeping with the verifier's small-tree ethos — and not gated behind the `build` feature, because the verifier prints a verdict too and it should read as well as a build's does. Widths are computed on the plain text with the colour wrapped around the result, since an escape sequence has bytes but no width; pad first, paint second, or the columns drift by the length of the codes. What it paints: the verdict green/yellow/red to its outcome, the digest rows' `=`/`≠` green and red, a non-zero differ count red, noteworthy codes yellow, section titles bold, field labels and explanatory asides dim, and identifiers cyan. The same vocabulary carries across `verify`, the build run, `resolve`, and the `stabilizers` listings, so the whole tool reads as one report rather than a dozen ad-hoc formats.
+
+**Extended to the whole rebuild run.** The first pass painted the verdict and the verbose build block; the bulk of what a `rebuild` prints is the run narration itself — `artifact`, `published`, `source`, `strategy`, `guarding`, `image`, `repair`, `mirror` — one `  label   value` line at a time, deliberately on stdout rather than through `tracing` (so a `no-strategy` run's reasons are not lost at the default log level). A `note(label, value)` helper now renders each in the shared vocabulary: a dim label in a fixed column, the value styled by its role — identifiers and digests cyan, assumptions and asides dim, a repair that succeeded green, one that stopped or was discarded yellow, a `no-strategy` outcome yellow. Resolve through strategy through repair through verdict now reads as a single coloured report, and piped it is byte-for-byte the layout it always was.
+
+**Contrast, one column, and overflow.** A first look at the painted output read as washed out — the labels and asides leaned on SGR `2` (faint), which is the lowest-contrast code a terminal has and which several render nearly invisible, so most of the run was grey on grey. The palette is now built from bright colours and weight: labels are **bold bright blue**, identifiers **bright cyan**, headings **bold bright white**, and asides a real **grey** (bright black) rather than faint — every line carries colour and none of it disappears. Risk tiers are painted by how much latitude a pass took (structural and metadata cool, content and lossy warm), so the `applied` and profile tables say at a glance which passes could hold only a caveated match. Two structural fixes came with it: every `label   value` line pads its label to one tool-wide width (`style::LABEL`), so values line up down a single edge across the resolve narration, the build stats, the verdict and the listings — where before each section chose its own width and the columns stepped in and out; and a full hex object name (a 40-char commit, a 64-char image id) is shortened to twelve for display, because at full length it wrapped the terminal and threw the next line back to the margin.
+
+### 3.85 Wrapping, one column everywhere, and an audit of the whole surface
+
+Using the coloured output on a real NuGet rebuild turned up three faults the first passes had left: long explanations (`assuming`, the SDK rationale, the tag-mutability caveat) ran off the right edge and wrapped ragged back to the margin; a few lines still used their own label width and stepped out of the column; and identifiers with an *embedded* digest — `mcr.microsoft.com/dotnet/sdk@sha256:<64hex>` — overflowed because the shortener only fired on a whole-string hash.
+
+The fix has three parts. A `style::wrap(text, indent)` folds a long value to the terminal width with a hanging indent, so an explanation flows *under* its value column instead of back to the margin; the width comes from `TIOCGWINSZ` (behind the `libc` the crate already links) or an explicit `COLUMNS`, and is `None` when stdout is piped — so a redirected run stays byte-for-byte the single lines it always was, and only a terminal (or a reader who sets `COLUMNS`) wraps. `short_ref` now shortens *every* long hex run inside a reference, so the digest after `@sha256:` collapses while the readable `mcr.microsoft.com/dotnet/sdk` part stays. And the label column is one tool-wide `field(label, value)` helper (`style::LABEL`), so the resolve narration, the build stats, the verdict, `resolve`, the `stabilizers` listings, `check`, `worker` and the grant/enqueue/keygen commands all read down one edge.
+
+To stop finding one missed line at a time, a six-way parallel audit read the entire output surface and returned 59 sites — unstyled lines, wrong widths, overflow-prone values, tracing that read out of place — which this closes in one pass. The pre-run banner (`image`/`egress`/`store`/`work`) moved out of `rebuild-and-attest.sh`, where it was plain and a column narrower, into `trigon rebuild` itself, so a direct run shows it too and one place owns the colour and the `NO_COLOR` rule; the script's remaining headings now guard their bold on a TTY and `NO_COLOR` the same way the binary does.
+
+### 3.86 Why `moq@4.20.72` did not build, and the hermetic rung that lets it
+
+`moq@4.20.72` failed to build at all under `mirror-only`: three attempts, each `net/unreachable`, no verdict. The error named NuGetizer — `NuGetizer.Shared.targets(326,5): error : Network is unreachable (raw.githubusercontent.com:443)` — and the first guess was the referenced `TypeNameFormatter.Sources` package's legacy `<iconUrl>`. It was not: a diagnostic pack with `-v diag` showed the fetch is NuGetizer resolving a **readme `<!-- include URL -->` directive**. Moq's `readme.md` carries `<!-- include https://raw.githubusercontent.com/devlooped/sponsors/main/footer.md -->`, and NuGetizer inlines the target at pack time. A local include resolves from the checkout; a remote one is a network fetch, and the build's island has no route to it, so `dotnet pack` dies before it writes a package. (SourceLink also names `raw.githubusercontent.com`, but only as embedded PDB metadata — it makes no request; the icon download is a red herring, since Moq ships its own `<icon>` and the published nuspec carries no `iconUrl`.)
+
+The rung, in `nuget/build/pack`: before packing, neutralise **only remote** `<!-- include http(s)://… -->` directives in the checkout's markdown, leaving local includes to resolve as they do. The pack then stays offline and produces a package. The remote target is a moving branch (`…/main/…`) whose content — a sponsor list refreshed at release time and absent from the checkout — is not reproducible even for the publisher and is not the package's own source, so there is nothing to reproduce; neutralising it is the honest hermetic choice, not a loss.
+
+Proven end to end: `moq@4.20.72` now **builds** and reaches a comparison rather than failing. It is `divergent`, and the residual is now legible: the four `Moq.dll` targets differ throughout (the SDK/Roslyn toolchain frontier, [B45](17-backlog.md)); `Moq.nuspec` differs; and `readme.md` differs by exactly three lines once EOL is normalised — the neutralised remote-include directive, a marker whose pairing shifted with it, and a trailing blank — while the sponsor avatars and links, which come from a *local* include, reproduce byte for byte. A build that never ran became a divergence a reader can see and attribute.
+
+### 3.87 `moq@4.20.72`'s DLL divergence is embedded debug provenance, not code or toolchain
+
+With the readme build fixed ([3.86](#386)), `moq@4.20.72` is `divergent` with four `Moq.dll` targets differing throughout (~56 KB of ~312 KB, "never benign"). Peeled apart, it is none of the usual suspects:
+
+- **Not the code.** ILSpy-decompiled C# of the published and rebuilt `net6.0` `Moq.dll` is byte-identical (11,520 lines, empty diff). The differing bytes concentrate entirely in the tail (offsets ~229–312 KB); the IL/metadata region differs by ~33 bytes (MVID, timestamp, strong-name signature).
+- **Not the SDK patch.** Building with `sdk:8.0.400` (the patch current at the 2024-09-07 publish) gives 56,301 differing bytes — the same as `8.0.423` (56,252). The patch is not the variable.
+- **Not non-determinism.** Two identical `8.0.400` builds are byte-for-byte equal (0 differing bytes). The build is deterministic; the difference vs published is a genuine *input*.
+
+The tail is the **embedded PDB** — Moq builds `DebugType=embedded`, so the portable PDB rides inside the DLL. Extracting and comparing both PDBs, the inputs that differ are all git provenance that SourceLink embeds, none of it functional:
+
+- **SourceLink URL** — published `https://raw.githubusercontent.com/devlooped/moq/<sha>/*`, rebuilt `…/moq/moq/<sha>/*`. Moq's GitHub org was renamed `moq` → `devlooped`; trigon resolved and cloned the package's recorded `github.com/moq/moq` (which still redirects), so its `origin` — and thus SourceLink — carries the old name while the publisher's build carried the new one. The nuspec `<repository url>` is `moq/moq` in *both*, so this is SourceLink's remote resolution specifically.
+- **nuspec `branch`** — the published `<repository>` carries `branch="v4.20.72"`; the rebuilt one omits it, because trigon checks out a detached commit rather than the tag ref the publisher built from.
+- A source-generator document (`IFluentInterface.g.cs`) ordered one position differently, and the PDB id/size that cascade from all of the above.
+
+So the assembly is **code-identical and divergent only in embedded debug provenance** — the SourceLink map and the git ref, which say where the source lives, not what it is. That is normalizable (a `Content`/`Lossy`-tier concern: debug info is not the functional artifact), and is the natural next extension of `dotnet-assembly-identity` — normalize the embedded PDB's SourceLink/provenance the way it already normalizes the signing identity — rather than a toolchain or source problem. Reconstructing the exact git state cannot close it: the publisher's own nuspec (`moq/moq`) and PDB (`devlooped/moq`) disagree, so no single remote value matches both.
+
+### 3.88 `--theme`: the reader picks the palette
+
+The colour work settled one palette; different readers want different ones, so `--theme` (global, so it reaches the run narration `--output` never did) selects it: `auto` (the default — colour on a terminal), `textnocolor` (always plain, for a clean pipe), `textcolor` (the base palette forced on even into a pipe), `neon` (the palette one step brighter), and `bbs` (neon plus the flourishes — a block-prefixed heading and a reverse-video verdict badge). `NO_COLOR` still overrides all of them. The theme is chosen once at startup and read by the `style` palette functions, so every call site is unchanged; the palette is a table swapped by theme, and BBS's difference from neon is flourish, not colour. It is orthogonal to `--output text|json` — a theme never touches the machine-readable output.
+
+### 3.89 `dotnet-il-canonical`: compare a managed assembly by its code, not its layout
+
+[3.87](#387) established that `moq@4.20.72`'s four assemblies are code-identical (their method IL is byte-for-byte equal) and diverge only in metadata and debug *layout* that a byte-zeroing pass cannot align. So a new stabilizer stops trying to align it and reads past it.
+
+`dotnet-il-canonical` walks the assembly's own ECMA-335 tables — by hand, no decompiler or metadata crate for the verifier to link and a sceptic to re-audit, the same stance `passes.rs` already takes to a PE — and emits, per method, its name, its signature (resolved through the `#Strings`/`#Blob` heaps to values, not the offsets that shifted) and its IL body. Two assemblies built from the same source reduce to the same bytes; a changed body, a new method or a changed signature still shows. It is **lossy** — it drops resources, custom attributes and field data — so a match it makes is `normalized_with_caveats`, the honest tier for "the code is the same and we did not check the rest", never a clean `normalized`. It runs last in the nupkg set, after `dotnet-assembly-identity` has taken the fixed-location identity; an assembly it cannot read whole is left exactly as it was, and one whose code genuinely differs (castle.core's stale SDK-6 rebuild, say) still diverges — it does not manufacture a match.
+
+Two smaller residuals closed with it, both build provenance rather than code: `nupkg-repository-branch` drops the `<repository branch="…">` git ref (a tag the publisher built from, nameless in trigon's detached checkout), and `nupkg-readme-markers` strips NuGetizer's `<!-- include … -->` marker comments and the whitespace neutralising a remote include ([3.86](#386)) left spelled differently than the publisher's networked build. With all three, `moq@4.20.72` — build-failed three weeks ago, `divergent` last week — is now **`normalized_with_caveats`**: its stabilised digest matches, and the caveat says plainly that the match is of the code, normalised of everything the compiler wrote around it.
+
+**The trade.** Every managed assembly now compares by code, so a `.nupkg` that once rebuilt byte-clean under `dotnet-assembly-identity` alone reads `normalized_with_caveats` rather than `normalized`. That is honest for a compiled artifact — one always carries an embedded PDB and a build stamp it can rarely reproduce exactly — and it turns the common case, a `divergent` that was really code-identical, into a caveated match a reader can trust. The cost is that a difference only in resources or attributes now reads as a caveat too, which the Lossy tier exists to say out loud.
+
+**Correction.** "A real code change still shows" was true only of the method's own bytes. The form kept each method's name, signature and IL, and an IL token is a row number or a `#US` offset — `ldstr` names its literal, `call` a MemberRef row — so a same-length string literal, a MemberRef renamed or moved to another type under the same token, a method's Flags and ImplFlags, the fat header's MaxStack and locals, and the exception-handling sections after the IL (a catch clause's type) all compared equal: a changed program could read as a caveated match. So could one that changed only what no token names but the runtime acts on — a P/Invoke's entry point (`puts` made `system`, same signature), the method that implements an explicit override, the interfaces a type implements. And it read a body or heap as the file holds it, past the `SizeOfRawData` after which the loader maps zeros, so an exception table the runtime never sees was in the form. The form now keeps every method's flags, first parameter row and whole body — header, IL and sections — and, row by row and resolved to values, every table a token or a signature can name (TypeRef, TypeDef, Field, MemberRef, StandAloneSig, ModuleRef, TypeSpec, MethodSpec) with the AssemblyRef rows a TypeRef resolves in; the declarations that decide how the code runs (Param, Constant, FieldMarshal, InterfaceImpl, MethodImpl, ImplMap, ClassLayout, FieldLayout, NestedClass, GenericParam, GenericParamConstraint, EventMap, Event, PropertyMap, Property, MethodSemantics, ExportedType); the pointer tables of the uncompressed layout; and the `#US` heap whole. Whatever a token names is in the form at that position, so a retarget under an unchanged token shows, and so does a changed declaration. Everything is read from the bytes the file backs of the section an address falls in; a body or blob that runs past them declines the assembly. Checked against `System.Reflection.Metadata` over the 6,707 PE files in a local NuGet cache and SDK: of the 6,659 the form reads, every method's name, signature, flags, first parameter row and IL, every kept row and every `#US` heap read identically, apart from two places the reference normalises what the form keeps raw (a nil ResolutionScope's tag, a ClassLayout row of zeros). The form is at most 2.2× its assembly. Ten it no longer reads are the mixed-mode C++/CLI `System.EnterpriseServices.Wrapper.dll`s, whose native method bodies were never IL the form could hold; the other 38 carry no metadata. On the rebuilds kept on disk, `moq`'s four assemblies, `castle.core`'s four from the rebuild that reproduced and the twelve in the three `polly` packages still reduce to identical forms, and `Newtonsoft.Json`'s and the stale `castle.core` rebuild's still differ. What the form still drops is named in `ilcanon.rs`: resources, custom attributes and security declarations, the data a field is initialized from (FieldRVA), the Module and Assembly rows, and the exact metadata encoding. The pass is `dotnet-il-canonical-v2`: the set digest covers pass ids and not pass code ([`19`](19-distribution-and-lookup.md) §11, open question 1), so the new form under the old id would have changed what old records re-derive to under the digest they were signed with, and a new id is a new digest that sends them to their archived set.
+
+### 3.90 `trigon serve` shows what the stabilizers did, and how a member was reconciled
+
+A normalized verdict is only as trustworthy as a reader's ability to see what earned it. The corpus browser stated *that* passes fired; it now shows *what* each did and, where the record allows, *how* it erased a specific member's divergence.
+
+**Each pass in the ledger unfolds a description.** Every stabilizer id gets two lines — what it does, and why doing it is safe — keyed by the id the ledger already prints, so a reader can tell what `dotnet-il-canonical` or `zip-time` changed without leaving the page or reading `passes.rs`. A pass with no entry simply shows none.
+
+**A reconciled member opens.** The comparison blob records, per member, the rule codes that diverged *before any pass ran* (`body`, `entry:mode`, `entry:size`, `entry:zip.crc32`) and that the member is now byte-identical. A member that is `identical` *with* such a code on record is the interesting case — it differed and a pass put it right — so it is now openable, to a "differed → reconciled by" flow: the codes that diverged, each glossed in a sentence, beside the passes that erased them. Across the corpus this is the common metadata-reconciliation story — Newtonsoft.Json@11.0.1 reconciles 13 of 23 members this way, their archive entries renormalized while their bytes never moved.
+
+**Attribution is by family, because that is what the blob supports.** The record says a pass fired and that a member's difference is gone, not which pass touched which field. So an `entry:*` difference is credited to the archive-framing passes that fired (`zip-*`, `tar-*`, `gzip-*`), a `body` difference to the content passes for a file of that kind (a `.dll` to `dotnet-il-canonical`/`dotnet-assembly-identity`, a `.nuspec` to the nupkg identity passes, and so on) — always intersected with the ledger, so the list names passes that ran, never passes that merely could. Claiming a precise field→pass mapping the blob does not hold would be a fabrication; naming the family that fired is the honest reflection.
+
+**Moq is the exception the ledger already covers.** `dotnet-il-canonical` replaces each DLL's body with its canonical form *upstream* of the comparator ([3.89](#389)), so the comparator sees no `body@` divergence and records no per-member code — every one of `moq@4.20.72`'s ten members projects as untouched-identical. Its transform is therefore invisible at the member level and visible only in the ledger, where the pass shows its description, the entries and bytes it changed, and the `caps` badge that holds the verdict at `normalized_with_caveats`. The two views are complementary: the member view carries the metadata-reconciliation story, the pass view carries the code-canonicalization one.
+
+### 3.91 Which pass changed which field of which member — attribution from ground truth
+
+[3.90](#390) attributed a member's reconciliation by family: an `entry:*` difference, so *some* archive-framing pass did it. That is a guess, and building the serve UI on it surfaced two deeper facts. First, the difference `codes` a comparison stores are what stabilization *left*, not what it *erased* — measured directly: a member whose only differing fields are ones the passes normalize (mtime, uid) carries no code at all. So the "reconciled member" the UI drew was reading residuals, not reconciliations. Second, the blob recorded which passes fired but not what each one touched, so no precise attribution was possible from it.
+
+Both are fixed at the source. `apply_traced` fingerprints every entry before and after each pass — exactly the fields `signature` compares, metadata only, so a 2 GB wheel's bodies are never read — and records each field that moved and the pass that moved it; a body rewrite is taken from the pass's own `Touched::bytes` rather than by hashing. The comparison merges both sides' edits and stores them beside its codes, keyed by `(field, path)`. The join is exact: a field a pass wrote that left no surviving code was **reconciled** by it; a field that still has a code was **touched but not resolved**; a code with no edit is a difference **nothing addressed**.
+
+This makes the transform legible member by member, and closes the two gaps [3.90](#390) could not. A `.dll` whose body a pass rewrote shows that work *even when it ends byte-identical* — Moq's assemblies, reconciled by `dotnet-il-canonical`, left no code and so were invisible at the member level before; now the member opens to `body ✓ dotnet-il-canonical`. And where the code survives, the residual names the pass that tried: Newtonsoft.Json@11.0.1's DLLs read `body ↳ dotnet-assembly-identity, dotnet-il-canonical` — compared by IL and divergent anyway, which is the honest statement that the divergence is a real source-level change (its stale-SDK rebuild), not packaging. Of the run's 23 members, 13 now read fully reconciled, each field joined to the exact pass behind it.
+
+**A comparator wart this exposed, and where it is handled.** `signature` compares the stabilized archive *in memory*, where three fields are stale shadows of what the writer will emit: an entry's `size` and `zip.crc32` are recomputed from the body on every write (`trigon_archive::zip`), and a zip's `meta.mode` is a parse-time shadow of `external_attrs`, which is what the writer actually stores. So a member the passes made byte-identical can still carry `entry:size`, `entry:zip.crc32` and `entry:mode` codes that cannot reach the output. These are filtered from the *projection* — `size` and `crc32` always (redundant with `body@`), `mode` when `external_attrs` was reconciled — so the UI does not report "still differs" on a member that is byte-for-byte identical. The stored blob keeps every code, and the real fix (not emitting a difference for a field the writer recomputes) belongs in `signature` itself, where it changes the published divergence signature and so is deferred to a change that can version it — see B47.
+
+**Correction.** "A body rewrite is taken from the pass's own `Touched::bytes`" held for entry passes only, and not for all of those. An archive pass reports its work for the archive as a whole, so `wheel-record` regenerating RECORD and `nupkg-packaging-names` rewriting `_rels/.rels` named no member, and `nupkg-doc-member-order` rewrote a documentation file and reported no bytes — each reconciled body read as a difference nothing addressed, the opposite of what an edit's absence is meant to say. An archive pass that reports work now has every body compared across it: one the archive still borrows is compared only if the pass promoted it, against the bytes it borrowed, so a 2 GB wheel's bodies are still never copied; one already in memory by its digest, kept from pass to pass, since reading it is a pass over memory and not a copy. Promotion alone is not a change — `nupkg-packaging-names` asks for `_rels/.rels` mutably whether or not it rewrites it. The doc-member pass reports the bytes it wrote, as `nupkg-doc-member-order-v2`: its signed `bytesChanged` changed, and the same id would have re-derived old statements differently under the digest they were signed with. `apply`, which the archived set runs and nothing reads edits from, takes no fingerprints at all. Measured on a 256 MB wheel of deflated members, `apply_traced` went from 0.20 s to 1.0 s — each body read four times, before the first archive pass and after the three that reported work — and `apply` is unchanged. That changes what a wheel comparison re-derives to: nearly every wheel's RECORD is regenerated, so a report published with field edits before this would re-derive with a `body` edit on RECORD it does not carry, which `check_report` counts as a disagreement and `verify-record --rerun-comparison` as a refutation of an honest record. The `wheel` set's ids did not change with it, so neither did its digest, and the record would have been re-derived here rather than under its archived set. So the regenerating pass is `wheel-record-v2`, writing the same RECORD under a new id: a new set digest, which sends such a record to its archived set, where the report is unchecked rather than refuted. The `nupkg` set, whose `_rels/.rels` edit is the other new one, has a new digest already through `nupkg-doc-member-order-v2` and `dotnet-il-canonical-v2`.
+
+**The id, confirmed** (2026-09-29). What the rename rests on, checked rather than argued:
+
+- **The id alone moved the digest.** Today's `wheel` set with its RECORD pass given back the id
+  `wheel-record` hashes to `58632c3c627d…`, the digest every wheel record signed before 62781a8
+  names; under `wheel-record-v2` it is `738725964c4a…`. Nothing else in the set's rows moved
+  (`the_new_id_alone_is_what_moved_the_wheel_digest`, `crates/trigon-attest/tests/renamed_pass.rs`).
+- **An old record goes to its archived set, and is not refuted.** A statement made under that set,
+  naming `wheel-record` in `applied`, is refused by today's set as a set mismatch, which fails no
+  verification, and re-derived through the archived one: the outcome and both stabilized digests
+  hold, and `differences`, `applied`, `members` and a published report with no `body` edit on
+  RECORD are unchecked, never refuted
+  (`a_record_naming_wheel_record_is_re_derived_through_its_archived_set_and_never_refuted`). Had the
+  digest stayed, the same honest report re-derived natively disagrees on `diff.field_edits` at
+  RECORD (`under_an_unchanged_digest_an_honest_report_would_have_read_as_refuted`).
+- **Against the code that signed them.** The archived module built from 16ffc71, the commit before
+  62781a8, gives `wheel@58632c3c627d`. Each of the eight corpus wheels was paired with a copy
+  re-zipped deflated, with other times and its RECORD reversed; today's binary signed the pair, and
+  the statement was rewritten to what 16ffc71 would have signed — that digest, `wheel-record` in
+  `applied`. `verify-attestation --rerun-comparison --stabilizers` held every one through the old
+  module, so the old code stabilizes each to the bytes today's does. Today's set refuses the same
+  statements as a set mismatch, and the old module refuses one made under today's set.
+- **The corpus.** The 63 golden digests of `m0` and `m0-smoke`, eight of them wheels, did not move,
+  so `wheel-record-v2` writes the RECORD they were golded under. Their `applied` lists named
+  `wheel-record` and now name `wheel-record-v2`; that is the only change, so nothing was re-golded.
+- **Where it is named.** The rename itself — `passes.rs`, the profile, the UI's descriptions with
+  the old id kept as superseded, docs/03, docs/05's table, the tests that match on it — is
+  62781a8's. What still called the current pass by the old id is renamed now: docs/14's worked
+  example, docs/02's triage example and the `watch` comment quoting it, `predicate_sides.rs`'s
+  fixture, `corpora/deviations.toml`, and a comment each in `statement.rs`, `main.rs`,
+  `seam_two_paths.rs` and `seam_provenance_cap.rs`. ADR-0002, docs/05's argument against the six
+  rungs, its table of defects, and the comments recounting finding 2 name the pass as it was then,
+  and keep that name.
+
+### 3.92 What a review of the publication design measured, and why Rekor is being removed
+
+`docs/19` was reviewed against the code, against Rekor, GHCR and the OCI specifications, and for
+internal consistency. Every finding went to an independent verifier that tried to refute it: 55
+findings, 54 survived (34 as stated, 20 with a correction). The ones that decided
+[ADR-0014](adr/0014-git-evidence-store-without-rekor.md), all measured between 2026-09-17 and
+2026-09-23:
+
+- **A Rekor entry commits hashes and no field of the statement.** The committed body of an `intoto`
+  v0.0.1 entry is the envelope hash, the payload hash and the verification key or certificate
+  (staging index 56040866, decoded, commits a whole self-signed certificate; `Canonicalize()` in
+  Rekor's source). The previous `docs/19` §2.2's log entry "carrying" the outcome and set digest,
+  and the "full statement" row of its §3 table, could not have been built with any entry type that
+  takes an in-toto statement.
+- **Rekor v1 serves the full statement anyway.** Its uncommitted attestation store keeps a decoded
+  payload of 100 KiB or less and serves it: staging entry 56042318 returns a whole `equivalence/v1`,
+  whose sha256 equals the committed payload hash. `attest --rekor` never consulted
+  `publication::decide`, so a divergence published that way would have sat in full in storage we
+  cannot correct.
+- **The index claim in `docs/09` §3 and the previous `docs/19` §2.1 was wrong.** Querying Rekor's
+  index by the artifact's sha256 returns our entries (the chardet wheel returns two). The earlier
+  `[]` came from a fixture whose subject digest was a placeholder. Querying by the public key does
+  return `[]`, but because the search and the index spell the key's hash differently, not because of
+  Fulcio.
+- **Rekor v2 cannot take our statements.** GA 2025-10-10; `intoto` dropped, `dsse` dropped in
+  rekor-tiles v2.3.0 (2026-06-10), no attestation storage, no Signed Entry Timestamp, no search, and
+  `hashedrekord` rejects pure Ed25519, which is what Trigon signs with. The public instance keeps
+  Rekor v1 as its default log "for the foreseeable future".
+- **ADR-0011's time bound was never live.** `within_validity`, the check that would compare the
+  log's time with a certificate window, is called only from tests, and no certificate chain exists
+  to check against.
+- **GHCR has no OCI 1.1 referrers API.** `GET /v2/<name>/referrers/<digest>` returns 404 even for
+  manifests that exist. The spec's fallback, a `sha256-<hex>` tag naming an image index, works there
+  and is what GitHub's own attest action uses, and concurrent writers to one such tag drop entries
+  (miracum/.github#212). cosign and oras have no mode for attaching to a subject outside the
+  registry, which the previous `docs/19` §2.1 said they had.
+- **Nothing in the local store is publishable.** `decide` requires two agreeing attempts counted by
+  cache key, and 0 of 370 runs have one, because only worker jobs set it.
+- **Signed history is being overwritten.** Attestations are stored per target, so a later `attest`
+  overwrites an earlier one: 40 of 93 attestation paths are shared by more than one run.
+- **`POST /v1/check` leaks withheld verdicts.** It is anonymous and answers from
+  `Index::newest_for`, which ignores publication, so it reports a withheld divergence as divergent;
+  its doc comment says the opposite. Confirmed by reading `fleet.rs` and `index.rs`; the fix is
+  phase 0 of the build plan in `docs/19` §10.
+- **npm downloads are not verified against the registry.** The fetcher reads only a `sha256-`
+  integrity string and npm publishes sha512 and sha1, so `declared_sha256` is always absent. The
+  code says so rather than pretending, and the fix belongs with multi-digest subjects (`docs/19`
+  §5).
+
+`docs/19` was rewritten from these, and its build plan (§10) is ordered by them: close the gate
+bypass, accept the decisions, remove Rekor, change what the statements carry before anything is
+published, make a run publishable at all, and only then build the store.
+
+A second review of the git design, against GitHub's documentation, the C2SP specifications and `git`
+2.43 itself, changed it in these places:
+
+- **The checkpoint's time line would never have become third-party.** C2SP tlog-checkpoint calls
+  extension lines not recommended, an Ed25519 cosignature makes no statement about them, and an
+  ML-DSA-44 cosignature does not cover them. The time moved into every leaf, with a weekly heartbeat
+  leaf, and a source whose newest leaf is too old now answers unknown, because a host serving an old
+  but consistent log could otherwise turn a withdrawal back into a verdict.
+- **A sparse checkout alone still downloads every blob.** Measured: only `--filter=blob:none` keeps
+  `evidence/` out of a clone. A depth-1 clone cannot fast-forward, so a sync is a depth-1 fetch and
+  a hard reset, and a shallow clone is a copy of the log, not of the history.
+- **Two hex characters of fan-out would have put some 4,000 files in a directory** at a million
+  records. GitHub recommends at most 3,000, and its file browser lists 1,000. It is four everywhere.
+- **Classic branch protection exempts admins by default**, so the repository uses a ruleset with an
+  empty bypass list; a write deploy key never expires, so a fine-grained or GitHub App token is the
+  narrower credential; a release holds at most 1,000 assets; and unauthenticated clones are
+  rate-limited like any other request.
+- **The index was a way to hide a record.** Clients now resolve keys from the verified leaves, which
+  carry every digest and the purl, and read `index/` only for `--remote`, which proves inclusion
+  from the tiles.
+- **`publish` would have signed leaves it did not write.** A holder of the push credential could
+  plant leaves beyond the checkpoint for our next publication to sign. `publish` now builds only on
+  the leaves a verified checkpoint covers, and `log sign` checks every new leaf against a record it
+  can verify.
+
+### 3.93 The anonymous surface asks the gate before it says `divergent`
+
+`POST /v1/check` answered anonymous callers from `Index::newest_for`, which does not consult
+publication, so a withheld divergence reached anyone as `divergent` ([3.92](#392)). Filtering on
+"public" would not have fixed it: `Publication::is_public` is true for a `Void` run, and an
+open-egress divergence still carries the outcome `divergent`. `GET /v1/runs`, `/v1/runs/{id}`,
+`/v1/targets/{purl}` and `/v1/artifacts/{digest}` serialized that outcome to anybody, and so did
+the record beside the entry, the rendered diff, the run page's boot island, `?outcome=divergent`
+(which listed the row even with the word removed) and the `/v1/stats` counts.
+
+`docs/19` §10 phase 0 closes it. An anonymous check answers only from runs the gate calls
+`Published`; a `Void` run is `unsupported`, with the gate's reason; a `Withheld` run is absent, so
+the newest older run the gate releases answers, or `never checked`. An operator is answered from
+the whole store, ungated, as `trigon check` answers from a local one, and the handler's doc comment
+now says both. An anonymous reader of a void run gets the row with its reason and without its
+outcome, not counted as evidence; the record with nothing the comparison decided on it; and a
+`published_as_void` refusal in place of the rendered diff. The serve UI draws that row as `void`,
+with the reason.
+
+The first version was checked against `trigon serve --public` with no queue, and said no anonymous
+route returned `divergent`. Review found that wrong, and found more:
+
+- **`GET /v1/jobs/{id}/events` served the worker's `outcome` note**, the comparison's label, written
+  for every attempt before the gate runs, and `/v1/queue` hands out job ids. The route was missing
+  from `routes::ROUTES`, which the seam sweep is built from, as were `/v1/queue`, `/v1/me` and
+  `GET /v1/runs`. An anonymous reader now gets phases and times and no notes, and a test holds the
+  table to the router.
+- **The void's record said the verdict in other words**: `rebuild` (its digest is `upstream`'s on
+  `exact`, and a prune keeps only a divergence's bytes), `transparency` (the verdict statement's log
+  entry), `costs` and `transcript` (the rebuild's and the comparison's bytes, and a model asked only
+  about a divergence). `record_shown` now names every field, so a new one does not compile until it
+  is classified.
+- **A withheld row was matched on its real outcome**, so `?q=<package>&outcome=divergent` answered
+  `"withheld":1` where `outcome=exact` answered 0. It is matched without one, and still counted.
+- The `non_builtin_stabilizer` sentence told a reader of a package that matched that it would
+  otherwise have been a divergence; the per-run routes refused a withheld id and an absent one
+  differently; and the `void` bar filtered to nothing.
+
+Confirmed by `crates/trigon-api/tests/seam_publication_gate.rs`: a test per done-when item; a sweep
+of every route in the contract, over a sqlite queue holding the worker's notes; and §4.3 in its
+strongest form, that a void which matched and one which diverged, and a withheld match and a
+withheld divergence, get byte-identical answers to every anonymous request (the comparison's
+digest, kept on purpose, held equal). Each fix was reverted in turn to see a test fail.
+
+**Also closed: withheld counts by reason.** `/v1/stats` and `/v1/fleet` counted withheld runs by
+reason, and `kill_switch`, `image_derived_outside_boundary` and `provenance_unknown` are given only
+to a confirmed divergence, so `by_withheld` published how many there were, and on a small corpus one
+held-back package and its reason key were the accusation. An anonymous reader now gets one total,
+`withheld`; a total is safe because every outcome can be awaiting confirmation. The operator view is
+unchanged. `an_anonymous_reader_gets_one_withheld_total_and_no_reason_that_only_a_divergence_has`
+holds it.
+
+### 3.94 Rekor and Sigstore removed, with the decisions accepted first
+
+`docs/19` §10 phases 0b and 1, on 2026-09-27.
+
+**The decisions came first, because the removal takes out a path an accepted ADR mandated.**
+[ADR-0014](adr/0014-git-evidence-store-without-rekor.md) is accepted. ADR-0011 says it is partly
+superseded, names the parts, and carries a short note at each so a reader of its body is not misled.
+ADR-0010 is amended, with an Amendments section ahead of its Decision: publishing is an explicit
+`trigon publish`; correction is by supersession; disagreeing attempts are withheld rather than void;
+safeguard 1 covers verdicts only; safeguard 4 is whatever D7 decides, and divergences are refused
+until then; and same-host confirmation stays a setting, `same_host_confirmation`, default `false`,
+because D8 has not accepted it. ADR-0008 gains the evidence store row, and its Signer row now says
+what exists, a local file key. Backlog B10 points at `docs/19` and takes its phases as its
+done-when; B21 is the chain alone, done when a statement under a real chain verifies in the verifier
+and the negatives fail, with the time check deferred to phase 7a and dropped if D6 chooses key
+epochs; and B29's three items about the log client are written off with the code they were about.
+
+The threat model keeps the operator — whoever passes the flags — out of scope, and gains A8, the
+operator of an evidence repository a client trusts, and A9, a host or mirror serving a stale or
+split view, both marked as adversaries of a store not yet built. A project's `.trigon/evidence.toml`
+is a §1.7 row, input chosen by the thing under test. The one transparency-log passage, §1.13's
+`--transparency` paragraph, is gone, and what it disclaimed is now D24: nothing bounds a stolen
+signing key. The sidecar generator's adversary list gained A8 and A9 and `docs/threat-model.yaml`
+was regenerated from the prose. **The prose census had drifted before this change**: it said 192
+documented tags, and the generator counted 195 at `d85ed4b`. It says 201 now, which is what the
+generator counts.
+
+**What was removed.** `trigon-attest`'s `transparency` module and everything it exported
+(`LogEntry`, `intoto_entry`, `known_log`, `log_key_id`, `payload_id`, `utc_rfc3339`,
+`within_validity`), and `p256`, which took ten crates out of `Cargo.lock`. The binary's log client
+and its tests, including the `TRIGON_LIVE` fetch from staging; the attest flag that logged a
+statement and its dry run; `verify-attestation`'s entry check, its log-key flag and the matching
+key of `--output json`; `RunRecord.transparency`, with the arm of `record_shown` that hid it from an
+anonymous reader of a void (phase 0's test lost it from the fields it checks are gone); the fifth
+column of `trigon runs`; the log options of `scripts/rebuild-and-attest.sh`, and the verify line it
+printed for them; six fixtures and two test files; and the two dry-run tests in
+`crates/trigon/tests/keys_and_dry_run.rs`. The prose followed: `README.md`, `docs/00`, `01`, `09`,
+`11`, `13` and `using-trigon.md`. `docs/09` §2's `buildobservation` row was wrong on its own
+account, and now says its subject is the upstream artifact and that every attested run emits one.
+`crates/trigon` keeps `reqwest`, which nothing in it calls now, for phases 5 and 6; its manifest
+says so.
+
+**What the greps show.** `git grep -i -e rekor -e sigstore -- crates scripts xtask` is empty, and
+so is `git grep -e '--rekor' -e '--transparency' -- README.md docs ':!docs/16-findings.md'
+':!docs/adr' ':!docs/19-distribution-and-lookup.md'`. `transparency` survives in `crates/` in one
+file, `crates/trigon-store/tests/old_run_files.rs`.
+
+**The archive.** One stored run, `1789588410-870c0fe1`, carried a `transparency` value, staging
+index 56044745, which its next rewrite drops. The file is copied byte for byte to
+`crates/trigon-store/tests/fixtures/run-1789588410-870c0fe1.json.gz`. It is gzipped because its
+`log` field names the removed log, and the first grep above has to come back empty over `crates/`;
+the test checks the decompressed bytes against the stored file's sha256, `d8e29e04…`, so the
+archive cannot quietly stop being that file. It reads the file through `Store::get_run`, as `trigon
+runs`, `attest` and `serve` do, and then writes it back: the key is gone and every other value is
+unchanged. `RunRecord`'s doc comment now says why it has no `deny_unknown_fields`.
+
+**Two small things found on the way.** The SPKI PEM test in `signer.rs` said it checked the
+hand-built DER "against a parser that did not write it", `p256`'s, and parsed nothing; it now reads
+the PEM back with `ed25519-dalek`'s own SPKI decoder and compares keys. And nothing pinned the keys
+of `verify-attestation --output json`, so the one removed here could have gone, or another come,
+without a test noticing; `verify_attestation_json_carries_exactly_the_keys_its_help_names` pins the
+five that remain, and `runs_prints_the_id_first_and_the_target_second` now fails on a fifth column.
+
+### 3.95 Every digest in the subject, every declaration checked, and what a run threw away
+
+`docs/19` §10 phase 2, first half, on 2026-09-27. The statements' predicates are unchanged; the
+second half moves them to v2.
+
+**What was measured first.** The npm fetcher checked nothing: it read only a `sha256-` integrity
+string, npm sends sha512 and sha1, and the one field the fetch compared against was empty for
+every npm package. PyPI's md5 and blake2b_256 were never read, and a crates.io `checksum` that was
+not a sha256 was dropped, which reads the same as none. NuGet's registration `catalogEntry` carries
+no hash; the catalog leaf it names by `@id` does, as a base64 sha512 `packageHash`, and for
+Newtonsoft.Json 13.0.3 and 3.5.8 (published 2011) it is the sha512 of the bytes the flat container
+serves. In the local store, 0 of 371 runs had `strategy`; 167 carried a guard manifest digest and
+none had the manifest in the store; and 40 of 93 attestation paths were shared by more than one
+run, so each of those runs' records names a statement a later run wrote over.
+
+**What changed.**
+
+- `Subject::with_digests` carries sha256 and sha512, and sha1 where the ecosystem publishes one
+  (`Ecosystem::publishes_sha1`, npm alone); `Subject::of_bytes` computes all three. The attestor
+  computes the upstream subject from the blob it fetched by hash and checks it against what the
+  run recorded; `equivalence_for` refuses a subject the comparison is not about; and `rederive`
+  checks every digest a subject names, so a statement signed with sha256 alone verifies as before.
+  The rebuilt artifact's subject is sha256 and sha512.
+- Every fetcher hands its declarations to one verifier (`trigon-registry/src/declared.rs`) that
+  checks each one this build can compute and refuses on the first that does not hold, naming the
+  algorithm, the field and both values. npm's `integrity` and `shasum`, PyPI's whole `digests`
+  object, crates.io's `checksum`, and NuGet's `packageHash` from the catalog leaf. A refused or
+  broken download is deleted rather than left under the artifact's name. Declarations all of
+  algorithms this build cannot compute are recorded as a download checked against nothing.
+- `RunRecord.upstream_digests` holds the upstream's sha512 and sha1, computed at fetch, and one
+  entry per declaration with its source field and `matched` or `unchecked`. Nothing declared is an
+  empty list and a note. The record also keeps the strategy as a blob of its canonical JSON
+  (`RunRecord.strategy`, distinct from `strategy_digest`), the guard manifest as a blob under the
+  digest it already carried, and `trigon_version`. `rebuild`'s `strategy.json` byproduct now names
+  the blob, and is left out for a run that stored none.
+- Statements are filed at `…/<artifact>/<run-id>/<predicate>.intoto.json`, created only if the
+  name is free. One that differs from what is there is written beside it as `.2`, `.3`, and the run
+  record lists every path; the same bytes again are the same statement. Readers go by the paths a
+  record names, so runs attested before this still read. A run attested again names only what is
+  filed under it and sets its per-target paths aside in `per_target_attestations`, which nothing
+  serves, since another run may have written over any of them.
+
+**Found on the way.** The build loop kept the build of a divergence while a repair ran, so that a
+repair that failed would not lose it, and never let go of it: a repair that went on to reproduce was
+recorded with the divergent attempt's isolation, transcript and attestability, and every run's
+strategy digest described the last attempt even where the verdict came from an earlier one. The
+stash is now cleared when an attempt reaches its own comparison, whether the comparison succeeds or
+fails, and carries the strategy beside the build. `record_terminal` wrote `guard_manifest: None`
+for every run it recorded, so a void — the one run whose story is the guard — said the guard had
+not been armed. And the digest length error said "expected 64 hex characters" for a sha512 too.
+
+**What this does not do.** blake2b_256 is recorded and not checked, because nothing in the
+workspace implements it and adding a crate for it is a dependency decision. `trigon_version` is the
+crate version alone, since no build embeds a git revision. The 40 overwritten per-target paths
+cannot be repaired: each still reads, as whichever run attested last, and only `rebuild`'s
+`invocationId` says which run that was.
+
+Tests: `crates/trigon-registry/tests/declared_digests.rs` runs each fetcher against a registry on
+loopback, the npm case pinned to left-pad 1.3.0's real version document and tarball; subjects and
+their verification are in `crates/trigon-attest/tests/rederive.rs`; the store's layout in
+`crates/trigon-store/tests/store.rs`, the old run file in `old_run_files.rs`, the route in
+`crates/trigon-api/tests/seam_attestation_layouts.rs`, the attestor end to end in
+`crates/trigon/tests/seam_attest_per_run.rs`, and what `record_run` and `record_terminal` keep in
+`record_keeps_what_the_run_threw_away` in `crates/trigon/src/main.rs`, beside
+`an_attempt_that_reaches_a_comparison_lets_go_of_the_one_before`, which pins the stash's order.
+
+**What review found in it.** Six defects, each now with a test that fails without its fix.
+
+- The NuGet fetcher read an unreadable catalog as an empty one. A registration or leaf that
+  answered 503, or 429 past the retries, came back as "no catalog entry for this version", so the
+  download went ahead checked against nothing and the run recorded that NuGet had declared nothing.
+  It now refuses the resolve (`RegistryError::CatalogUnreadable`, retried where the failure was
+  transient), and "no catalog entry" is recorded only for an index that was read and does not list
+  the version (`declared_digests.rs`, against a catalog on loopback whose documents fail).
+- A repair whose comparison failed was recorded with the strategy and build of the divergent
+  attempt before it, whose own comparison had worked: the stash was cleared on success only.
+- The attestor wrote back the copy of the record it had read before signing, so a second attestor
+  finishing in between dropped the first's paths. `Store::record_attestations` merges into the
+  record as it is now, under a conditional write where the backend has one; the local filesystem
+  has none, and a window of one read and one write remains there.
+- Appending without ever removing kept a run's per-target paths beside its per-run ones, so a
+  re-attested run went on being served whatever a later run had written over them, possibly a
+  withheld divergence. Those paths are now set aside, as above.
+- The attestor signed the `strategy.json` byproduct's digest as the record gave it. It now fetches
+  the blob by hash, requires it to be the strategy's canonical JSON, and recomputes
+  `strategy_digest` from it, before any statement is filed. A binary whose definition of a tool the
+  strategy reaches has changed since the build refuses an honest record too; the attestor cannot
+  tell that from an altered one.
+- `trigon fetch --out` unlinked whatever `--out` named on any error, `/dev/null` included. It now
+  stages a regular file beside the target and renames it into place on success, and writes in
+  place, never removing, anything that is not a regular file.
+
+Two checks had no test: a declared sha384, which the fetch hashes only on demand, and
+`equivalence_for`'s sha512 comparison, the only check `rebuild --attest` and `verify --attest` make
+before signing. Both do now.
+
+### 3.96 What a published statement signs: v2 verdicts, void and withdrawal, and the configuration
+
+`docs/19` §10 phase 2, second half, on 2026-09-27. Everything here is signed, so it lands before the
+first publication; `publish` itself is phase 5.
+
+**What changed.**
+
+- **`equivalence/v2` and `divergence/v2`**, signed by `trigon attest`, carry every `docs/19` §4.2
+  field: the outcome and the stabilizer set as v1 had them, the run's id and times, the Trigon that
+  built it (`RunRecord.trigon_version`) and the one signing, the egress tier and `attestable`, the
+  derivation method where one was recorded, the evidence digests — the set manifest's file, the
+  comparison report, the rebuilt artifact, the strategy blob and the guard manifest — the canonical
+  purl with `purlCanon`, and, when `[publish] origin` and `disputes` are both set, the falsifying
+  command as argv and a typed dispute pointer. A v2 verdict is a v1 verdict with fields added, so
+  `rederive` reads both with one path. Field by field in `docs/09` §2.5.
+- **`void/v1`** is what `attest` signs, and all it signs, for a run the publication gate calls void:
+  the gate's reason (`because`), the guard's trips and manifest, any stabilizer a person or a model
+  wrote, the egress tier, and no outcome, difference data, comparison report or rebuilt-artifact
+  digest. The attestor asks `trigon_api::publication::voided`, which is `decide`'s own answer, so
+  it and `serve` cannot disagree about which runs are void. `GET /v1/runs/{id}/attestation` serves
+  an anonymous reader of a void run its `void/v1` and nothing else, and refuses one whose only
+  statements are verdicts.
+- **`withdrawal/v1`** (`attest --withdraw <record> --reason <code>`) names the record by sha256 and
+  a reason from the closed list, with the record's own subject and purl and no verdict; it is filed
+  at `withdrawals/sha256/<record>/`. **`attest <run> --supersedes <record> --reason <code>`** signs
+  `supersedes` and `reason` into the run's verdict or void, and refuses a record about another
+  artifact or purl, since a client would never apply it. `<record>` is a path to a record file,
+  whose types, `trigon.record/v1`, are in `trigon_attest::Record` with nothing but reading.
+- **`rebuild/v1`** names its stabilizer set, additively, and signs `derivation.method` only where
+  the run recorded one.
+- **The canonical purl, version 1** (`trigon_core::purl`), with its vectors in
+  `crates/trigon-core/testdata/purl-canon-v1.json`, which every writer and reader of the `purl1` and
+  `pkg1` keys is held to.
+- **The configuration of `docs/19` §2.4** (`trigon_attest::config`), in the crate the verifier
+  already links, so phase 4's `verify-attestation --source` reads the same code: the user's file or
+  `TRIGON_EVIDENCE_CONFIG`'s, the project's file under its rules, the environment, locations
+  classified by transport, C2SP log keys parsed and their key hash recomputed, attestation keys as
+  hex or PEM, and the error a command that needs a source and has none gives. A configuration error
+  exits 5.
+- **The building version names its build.** `build.rs` embeds `0.0.0+git.<rev>`, `.dirty` for a
+  tree with changes the commit does not have, `+git.unknown` outside a checkout; `--version` prints
+  it, runs record it, and statements sign it. `0.0.0` alone identified nothing.
+
+**Found on the way.**
+
+- **The gate withheld the very runs it voids.** `decide` read the outcome first and withheld a run
+  with none as `no_outcome`, and a tripped guard ends the build, so every real void run — no
+  comparison, no outcome — was withheld rather than shown as a void, and `attest` would have had no
+  void to sign. A guard trip is now the first clause, outcome or not; open egress and a
+  non-builtin stabilizer still void only a run that reached an outcome, since a build that failed
+  at open egress is a failed build. `voided_agrees_with_decide_whatever_it_cannot_see` holds the
+  attestor's question to the gate's answer over every combination.
+- **An open-egress run was signed as a verdict.** The attestor refused a tripped guard and nothing
+  else, so at `trigon rebuild`'s default `--egress open` every run was signed as `equivalence/v1`
+  or `divergence/v1`, and only the API's gate kept the divergence from an anonymous reader. None of
+  the 371 runs in the local store is affected — all are `mirror-only`, none tripped a guard, none
+  applied a non-builtin pass — but the README's own signing walkthrough ran at `open`, and now says
+  that such a run is signed as a void.
+- **`rebuild/v1` signed `heuristic` for a run that recorded no derivation**, and its
+  `stabilizer_set` was declared and never passed, so no statement named the set.
+- **`build.rs` baked in the workspace root at compile time.** Cargo reuses a compiled build script
+  across a moved tree, so a copy of the source without `.git` was stamped with the original
+  checkout's commit. It reads `CARGO_MANIFEST_DIR` at run time now, and a build from such a copy
+  says `+git.unknown`.
+
+**Decisions made here that the owner may want to revisit.**
+
+- PyPI names are normalised as PEP 503 says (runs of `-_.` become one `-`), stricter than the purl
+  specification's `_`-only rule, because PyPI resolves all those spellings to one project. Case is
+  folded only for the types the purl specification says are case-insensitive, so NuGet ids, Go
+  module paths and Maven coordinates keep their case, and `pkg1` keeps a purl's qualifiers, as "the
+  canonical purl without its version" reads.
+- A project's file may name files — its checkpoint, a PEM key — only inside the working directory,
+  once symlinks are followed, and its refusals print its strings with control characters escaped.
+  `docs/19` §2.4 did not say this; without it, a pull request's `.trigon/evidence.toml` could have
+  Trigon read any file on a CI runner as a "key".
+- A location with a colon before its first slash is SSH where the part before the colon is
+  `user@host`, a dotted name or a bracketed IPv6 address, and refused otherwise, with the advice to
+  write `./`, `file://` or `ssh://alias/…`. A URL with a password, an `https://`, `http://` or
+  `git://` URL with any user name (added in review, below), a git remote helper (`ext::` runs a
+  command) and any scheme but the five listed are refused.
+- `[[source]]` gained `trust_on_first_use`, the file form of `evidence add --trust-on-first-use`,
+  which the project rule "cannot turn on trust on first use" presupposes.
+
+**What this does not do.**
+
+- Nothing verifies a record file's signatures or checks its unsigned parts against them; that is
+  phase 4, and phase 6 resolves `<record>` by digest in a clone.
+- No command needs a source yet, so the no-source refusal and its exit 5 have no caller outside
+  their tests; phase 6 is the first.
+- `trigon rebuild --attest` and `trigon verify --attest` still write v1 bundles, the first in the
+  process that ran the build. `rebuild --attest` at `--egress open` therefore still signs a verdict
+  for a run the gate calls void: P6 as reworded covers `trigon attest`, and whether the in-process
+  path should sign a void, refuse, or go now that `attest` exists is a decision for the owner.
+- `rebuild/v1` signs `derivation.transcript` as `null` even where the run kept the model exchange:
+  24 of the 75 attested runs in the local store have a transcript digest nobody signed. Left as it
+  was, since changing it is outside this phase.
+- The build script re-runs on every build, because its `rerun-if-changed` paths for the mirror
+  (`crates/trigon-mirror`) are relative to the workspace and cargo reads them relative to the
+  package, so the file is "missing" every time. That also keeps the version's dirty flag current;
+  corrected, the flag would be as of the last change to `HEAD`, a ref or the index.
+
+Tests: `crates/trigon/tests/seam_attest_v2.rs` is the done-when through the binary — one assertion
+per §4.2 field, the v1 fixtures signed at `255d2f5` verifying, a guard-tripped run with and without
+a comparison and an open-egress run each yielding `void/v1` alone, the falsifying command and
+dispute pointer absent and present, supersession, withdrawal, and a bad configuration exiting 5.
+The same fields at the library in `crates/trigon-attest/tests/verdicts.rs`; the configuration in
+`evidence_config.rs` and locations in `locations.rs` beside it; the purl vectors in
+`crates/trigon-core/tests/purl_canon.rs`; the route in
+`crates/trigon-api/tests/seam_void_statement.rs` and the gate's new order in `publication.rs`; the
+withdrawal's filing in `crates/trigon-store/tests/store.rs`; and the build version in
+`build_version_tests` in `crates/trigon/src/main.rs`.
+
+**What review found in it.** Nine defects, each now with a test that fails without its fix; two
+things no test checked; a doc comment moved off its function; and two questions that are the
+owner's.
+
+- **A record could hide the stabilizer that voids it.** `attest` chose between void and verdict
+  from the record's `non_builtin_stabilizer` alone and checked it against nothing, with the
+  comparison in hand. A record saying `false`, or nothing (written before the bit existed), beside
+  a comparison in which a hand-written pass applied got a verdict, which the gate, reading the same
+  bit, would publish. It now refuses a record whose bit disagrees with `AuthoredPass::of` its
+  comparison, as it refuses one whose outcome does
+  (`a_verdict_is_not_signed_for_a_record_that_hides_a_hand_written_stabilizer`).
+- **The void whose facts come from the comparison had never been signed in a test**, only refused,
+  so a regression in `AuthoredPass::of` — counting built-in passes, dropping the dedupe — passed
+  everything (`a_run_a_hand_written_stabilizer_applied_to_is_signed_as_void_and_only_void`).
+- **`voided` and the index disagreed** for every run without a cache key, which is every run the
+  CLI records. `index::corroboration` returned `Corroboration::default()` there, dropping the
+  record's provenance bit, so `serve` withheld as awaiting confirmation a run `attest` signed as
+  void. The bit is a fact about the record and is carried whatever the attempts; the new test
+  `the_index_voids_exactly_the_runs_the_attestor_calls_void` compares the two through the index,
+  where `voided_agrees_with_decide_whatever_it_cannot_see` built the corroboration by hand.
+- **A project's `.trigon/evidence.toml` was read through symlinks**, with no size or type check,
+  and toml's error quotes the offending line: a link to a runner's secrets file, or to
+  `/proc/self/environ`, printed it into the CI log, and one to `/dev/zero` read without end. The
+  file is held to the rule the files it names are — inside the project once links are followed —
+  and must be a regular file of at most 64 KiB; a parse error gives its line and column and toml's
+  description, escaped, and not the line.
+- **Some refusals still printed a project's control characters**: a name refused as a name, a log
+  key, a PEM's path. Each is escaped where the message is written, and `project_file` escapes what
+  `source_from` says once more.
+- **Source names were unique only case-sensitively**, and a name is a directory: on macOS's default
+  filesystem a project's `Trigon` would have shared the user's `trigon`'s checkpoint and key
+  history once phase 6 writes them. Names, and the reserved `env`, are compared ignoring ASCII case.
+- **`https://<token>@github.com/…` was accepted**, which is how GitHub takes a token, and would have
+  been printed wherever the location is named. Any user name in an `https://`, `http://` or
+  `git://` URL is refused, with how to tell a credential helper the user instead; an SSH user
+  stays. Every refusal of a URL shows its user part as `***`, which the password refusal did not.
+- **The canonical purl was not a fixed point** for an encoded dot segment. `.` and `..` were dropped
+  before decoding, so `#%2E%2E/a` became `#../a`, which canonicalises to `#a`: two keys for one
+  purl, and a record its own writer produced that phase 4's check would refuse. Segments are
+  dropped by what they decode to, the vectors pin it, and a sweep over awkward spellings holds the
+  fixed point beyond them.
+- **Lowercasing was Unicode's**, so `%E2%84%AAeras` (KELVIN SIGN) canonicalised to `keras`, and
+  full and simple case mapping disagree across languages (`İ`). It is ASCII only now, which changes
+  no name any of these registries accepts; vectors pin both characters.
+- **The build script's `git status` took the index lock** on every build, so a `git commit` at the
+  moment an editor's background `cargo check` ran could fail on it. It runs with
+  `GIT_OPTIONAL_LOCKS=0` (`asking_whether_the_tree_is_dirty_writes_nothing`). And nothing checked
+  that the binary embeds a revision: every assertion passed for `+git.unknown`. Built from a
+  checkout with git to ask, `this_binary_names_the_revision_it_was_built_from` requires forty hex
+  digits.
+- The withdrawal test was inserted between `unattested`'s doc comment and the function, and took
+  the comment. It is back where it belongs.
+
+For the owner:
+
+- **`trigon rebuild --attest` still signs a v1 verdict for a run the gate calls void** — at
+  `--egress open`, its default, or for a hand-written stabilizer — as this entry says above. What
+  review added is that the code and the docs said otherwise: its comment said every void returned
+  before it, and `docs/09` and the threat model said without qualification that a void is never
+  signed as a verdict. The comment, the flag's help, `docs/09` §2 and §2.5, and threat model §1.1
+  now say what it does. Whether it refuses, signs `void/v1`, or goes is threat model Q2.
+- **`pkg1` keeps qualifiers**, so a purl with a qualifier that names one version — `file_name`,
+  `checksum`, `download_url` — has a `pkg1` key per version, where `docs/19` §2.3 says the key is
+  "every version". Dropping every qualifier would merge a package across `repository_url`s, the
+  merge that keeping case exists to avoid; dropping only the version-bearing ones is a list that
+  becomes protocol. The vectors are protocol too, so this is decided before the first record is
+  published.
+
+### 3.97 A run can be published: keys from what it ran, agreement on what it found, a confirmation
+
+`docs/19` §10 phase 3 (backlog B31), and three things phase 2 left, on 2026-09-28. Nothing
+publishes yet — that is phase 5 — but a run can now reach `Published` in the gate `serve` asks and
+`publish` will ask, and before this none could.
+
+**What changed.**
+
+- **One function builds every cache key**, `trigon_store::cache_key`: the canonical purl, the
+  artifact's name, the strategy digest and the stabilizer-set digest, as canonical JSON, hashed and
+  prefixed `ck1:`. The run builds it where it writes its record, from what the record holds —
+  `record_run` from the comparison's set, `record_terminal` from the set the artifact would be
+  judged under — so a worker, `rebuild` and `sweep` key alike, and a run with no strategy has no
+  key rather than part of one. The worker no longer copies its job's key onto the record.
+- **A job's key names the request.** `trigon enqueue` and `POST /v1/runs` key a first attempt on
+  `trigon_store::request_key`, the canonical purl, because nothing that enqueues knows the strategy
+  a worker will infer. The engine queues a confirmation under the first attempt's record key, names
+  that run in the payload as `confirm`, and delays it by the configured `confirmation_interval`
+  (`trigon worker` reads it), where it used five minutes against an interval of an hour.
+- **Attempts agree on what they found.** `RunRecord::agreement` is `Comparison::agreement`, a digest
+  over the outcome, the set, the published artifact's raw digest and both sides' stabilized digests.
+  The index counts two attempts at a key as agreeing only where both carry one and it is one digest,
+  as disagreeing where the outcomes differ or the digests do, and neither where a record carries
+  none. A void attempt is left out of both counts. `corroboration_is_counted_as_its_doc_says` holds
+  `index::build` to `Corroboration`'s doc.
+- **Each attempt records where, how and when it ran**: `RunRecord::host`, an HMAC-SHA256 of
+  `/etc/machine-id` (or D-Bus's `/var/lib/dbus/machine-id`) under a key of Trigon's own, or of the
+  hostname where there is neither, prefixed with which; `RunRecord::cache`, the caches the attempt
+  let supply it (`build-layers`, `fetch`, `sources`, `derived-image`; empty is cold) and whether its
+  base image was re-pulled; and `started`, which is now when the attempt began on every path.
+- **`trigon rebuild --confirm <run>`** repeats a stored run: its target and artifact, the strategy
+  from its blob, its set, the image and tier it ran on, with no model, no ladder and no repair. It
+  builds with `--no-cache`, checks the source out into a directory of its own emptied first, uses
+  no fetch cache, and removes the base image from the store and pulls it again by digest
+  (`trigon_sandbox::repull`), recording what of that happened. It refuses, before any registry is
+  asked, a run with no verdict, a void run, one with no strategy blob, one whose strategy digest
+  these tools do not reproduce, one judged under a set this binary does not carry as it was, one
+  not keyed as runs are now keyed, and one that does not record its source; after the fetch, it
+  refuses a registry that now serves other bytes. A worker's second attempt is the same code.
+- **`decide` holds a pair to the operator's settings** (`Switches::confirmation`, from `[publish]`
+  wherever the gate runs): some pair of agreeing attempts must record a machine and a start, the
+  later must begin at least `confirmation_interval` after the earlier, and they must be on two
+  machines, or on one where `same_host_confirmation` is set and the later was cold and re-pulled.
+  Four new reasons say which fell short — `confirmation_unrecorded`, `attempts_too_close`,
+  `same_host`, `confirmation_not_cold` — the nearest pair's, and an anonymous reader still sees one
+  withheld total. `trigon serve` reads the settings, prints them, and starts with the defaults when
+  there is no `evidence.toml`; `attest` asks `voided`, which no setting can change, and a test now
+  says so.
+- **`rebuild --attest` signs through `trigon attest`'s code** (`attestor::sign_run`): it needs
+  `--store`, signs the recorded run whatever it ended as, files every statement under it, and writes
+  the verdict or the void to its path. At `--egress open`, its default, it signed every run as a
+  verdict. P6 holds without a qualification now: no path signs a verdict for a run the gate voids.
+  `verify --attest` still signs `equivalence/v1` about two local files, and its help, `docs/09` and
+  the threat model say that is not publishable.
+- **`rebuild/v1` signs `derivation.transcript`** as `{"sha256": …}` where the run kept a model
+  exchange, and `null` only where it kept none. 24 of the 75 attested runs in the local store kept
+  one that no statement named.
+- **`pkg1` is the package.** The versionless form is `pkg:<type>/<namespace>/<name>` with the
+  `repository_url` qualifier where there is one, and no version, subpath or other qualifier, so a
+  `file_name` or a `checksum` no longer gives each version its own key. The vectors changed with it;
+  this is still `purlCanon` 1, since nothing has been published under it.
+
+**Found on the way.**
+
+- **The compared path wrote the moment it recorded as `started`**, which is when the run ended. A
+  terminal run wrote when it began. The gate subtracts two of these, so the field is now the start
+  on both paths, and the gate reads it only beside a recorded host, which no older run has.
+- **Every worker confirmation would have been withheld.** The engine delayed it five minutes and the
+  default interval is an hour; the delay is the configured interval now.
+- **A void attempt could confirm a clean one**: an open-egress run at the key of a `mirror-only`
+  run was counted as agreeing with it. A void is evidence of nothing, so it is counted neither way.
+- **The agreement digest names the verdict**: it hashes the outcome and two digests a reader holding
+  the published artifact can compute, so four guesses find the outcome. `record_shown` drops it for
+  an anonymous reader of a void, beside the outcome.
+- **The attestor now refuses a record whose agreement digest is not its comparison's**, as it
+  refuses one whose outcome is not: the gate counts attempts by that digest.
+- **No stored run can be confirmed.** All 371 runs in the local store carry no cache key and no
+  strategy blob, so `--confirm` refuses each; a publishable pair starts with a new rebuild.
+
+**Decisions made here that the owner may want to revisit.**
+
+- **"Comparison digest" is read as a digest of what the comparison found, not of the report.** The
+  report names the rebuilt artifact's raw bytes, and six honest builds of `Newtonsoft.Json@11.0.1`
+  gave six raw artifacts and one stabilized digest (B31), so a report digest would never let a
+  `normalized` run be confirmed.
+- **A deliberate pair is `--confirm`, not a `--cache-key` flag** as B31's done-when put it: a key a
+  person types is the invented key the old comment warned about, and `--confirm` gets the same pair
+  with the key computed.
+- **"Target" in the key includes the artifact's name**, which is what `trigon_core::Target` means,
+  so an sdist and a wheel of one version are two questions.
+- **Re-pulled means removed, seen gone and pulled by digest**, never forced. An image that exists
+  only on this machine — anything under `localhost/`, a derived image, a bare id — cannot be pulled
+  again, so a run on one can be confirmed only from another machine.
+- **"Warm" lists the caches an attempt let answer**, not the ones that did; a consulted cache that
+  missed leaves the same bytes behind as one that was not consulted, and only the first is a fact
+  the run can state.
+- **The host id is in the run record, and no anonymous reader is shown it.** From a machine id it
+  reveals nothing; from a hostname it can be checked against a guess, since the key is in the
+  source. A key of each installation's own was considered and not taken: two installations on one
+  machine — two users, or a container beside its host — would record two ids for it, which is the
+  one mistake the gate must not be able to make.
+- **Only machine ids tell machines apart.** Two different ids where either came from a hostname are
+  held to the same-host rule, so a fleet whose workers all lack a machine id — containers, most
+  often — publishes only with `same_host_confirmation` on and cold confirmations.
+- **Any pair that confirms is enough**, and where none does the reason is the nearest pair's.
+
+**What this does not do.**
+
+- Nothing runs two real builds: `repull` is tested only where it refuses, and B15's test of two
+  clean re-runs needs podman and a registry.
+- Re-enqueueing a target after a change of set or strategy is still one job: a request is keyed on
+  the target, and a first attempt that exists answers it.
+- `publish` (phase 5) is where a confirmed run is published, and it is not built.
+
+**What review found in it.** Eight defects, each now with a test that fails without its fix;
+three things no test checked; and one question that is the owner's.
+
+- **A confirmation could run on the machine that made the first attempt**, and with
+  `same_host_confirmation` off, the default, the gate then withheld the pair as `same_host` for
+  good: `Queue::lease` chose by kind, visibility and tier, nothing in the job said which machine to
+  avoid, and nothing asks a third time. A fleet lost the one confirmation of every target whose
+  first machine happened to be idle first. The engine now queues a confirmation to avoid the host
+  the first attempt recorded (the `job_avoid` table, written in the job's own transaction; a table
+  rather than a column, so `migrate` gives an older queue it), `Queue::lease_on` leases no job to a
+  worker on a host it avoids, and `trigon worker` names its host and reads D8. With D8 on, any
+  machine may take it. A fleet of one machine confirms nothing with D8 off, which `trigon worker`
+  says when it starts and the job's events say while it waits
+  (`a_confirmation_is_made_on_another_machine`,
+  `one_machine_confirms_itself_where_the_operator_accepts_it`,
+  `a_job_is_never_leased_on_the_machine_it_avoids`).
+- **A confirmation of a run on a derived image recorded that it derived nothing and was cold.** The
+  build is handed the recorded image by id, and treats an id as an image the operator named, so
+  `derived_image` was `None` and `derived-image` was not listed. The gate withholds an accusation on
+  a derived image by reading the record under decision, so a confirmation made on another machine
+  would have published the divergence the first attempt is withheld for. `--confirm` carries the
+  image over with `built_here: false`, the build's report is corrected from it, and it is listed as
+  reused (`a_confirmation_of_a_run_on_a_derived_image_says_it_ran_on_one`).
+- **The engine queued a confirmation for every void verdict**, which `--confirm` refuses, and the
+  worker called every refusal retryable, so each was leased, refused and backed off until dead — one
+  dead job per void verdict. `Work::unconfirmable` is asked first, and the worker answers from
+  `publication::voided`; and `--confirm`'s refusals are a type of their own (`Unrepeatable`) that
+  the worker marks not retryable, since every worker running this Trigon gives them again
+  (`a_void_verdict_is_not_asked_again`, `a_run_a_confirmation_cannot_repeat_goes_dead_at_once`).
+- **Two different host ids were two machines, whatever they were derived from.** A container has a
+  hostname of its own and no machine id, so two workers in containers on one machine, or a run on
+  the machine beside one in a container on it, counted as a confirmation from elsewhere with D8 off.
+  Only two ids both derived from machine ids are two machines now; any other pair of different ids
+  is held to the same-host rule (`ids_derived_from_hostnames_do_not_show_two_machines`). The host id
+  also reads D-Bus's machine id where systemd's is absent, so fewer machines fall back to a
+  hostname.
+- **The host id was served to anonymous readers**, on every published and void run. Under a key in
+  the source, one derived from a hostname can be checked against a guess, which is the leak it
+  exists to prevent, and the gate never needed a reader to have it. `record_shown` removes it for
+  every anonymous reader (`no_anonymous_reader_is_told_which_machine_a_run_ran_on`).
+- **The agreement digest did not bind the published artifact's bytes**, so two attempts against two
+  artifacts under one name that the set makes one — a tarball republished with new timestamps —
+  confirmed each other, and `docs/01` said they could not. It hashes the upstream's raw digest now;
+  two honest attempts fetch the same bytes
+  (`the_agreement_digest_ignores_raw_bytes_and_keeps_what_was_found`).
+- **`--confirm` discarded the error from emptying its source cache**, and `create_dir_all` succeeds
+  on a directory that is still there, so a checkout that would not go was copied while the record
+  said nothing supplied the source. It refuses now
+  (`a_source_cache_that_will_not_empty_is_refused`).
+- **Requests keyed canonically missed the jobs a queue made before**, which were keyed on the target
+  as typed, so `pkg:npm/@babel/core@7.24.0` was queued, built and charged a second time.
+  `request_rebuild`, `job_for` and `trigon enqueue` look under both
+  (`a_request_finds_the_job_a_queue_keyed_on_the_target_as_typed`,
+  `enqueue_finds_a_job_keyed_on_the_target_as_typed`).
+- **Nothing tested that a void attempt neither confirms nor contradicts**: removing the filter left
+  every test passing, because the test that named it grouped the attempts with its own copy of the
+  filter. `build` and the test now share `attempts_by_key`, and
+  `a_void_attempt_neither_confirms_nor_contradicts_another_at_its_key` goes through `build`.
+- **Nothing tested what an attempt says it could reuse**, the fact the same-host rule rests on: the
+  one test read back its own fixture. The mapping is `Reuse`, one value that gives both the record
+  and the build's `--no-cache`, and each input has an assertion
+  (`what_an_attempt_could_reuse_is_stated_from_how_it_was_set_up`).
+- **The test cited for `rebuild --attest` never went through `rebuild`'s code**; it called `trigon
+  attest`'s. `run_inner` now signs through `attest_what_was_recorded`, which the test calls.
+
+For the owner:
+
+- **Re-asking for a target is deduplicated by the target alone**, whatever set or strategy it would
+  now be judged under, as `docs/01` now says: a first attempt on the queue, or done, answers the
+  request, where `docs/01` §1.1 has the scheduler admit a new attempt when the key has no terminal
+  verdict. Nothing that enqueues knows the strategy; a request key could carry the digest of every
+  set and tool this binary has, so that a change of either starts new first attempts — for every
+  target at once, on each such release, and decided by whichever binary enqueues. That trade is a
+  scheduling policy, and it is not made here.
+
+### 3.98 The evidence log as pure code: notes, checkpoints, proofs, tiles, leaves, rotation
+
+`docs/19` §10 phase 4, first half, on 2026-09-28: the log's formats and its verification, in
+`trigon_attest::log`, with no network and no filesystem beyond the directory it is given. Nothing
+writes an evidence repository with it yet (phase 5), and nothing reads one: records verified
+against the log, lookup, index paths and `verify-attestation --record` are the second half.
+`docs/09` §2.10 has the formats as built.
+
+**What changed.**
+
+- **C2SP signed notes and the log key.** Notes are read as Go's `golang.org/x/mod/sumdb/note`
+  reads them, a line by a key not pinned read past; the log key's private half is Go's
+  `PRIVATE+KEY+<name>+<hash>+<keydata>`, its hash recomputed, and never quoted in a refusal.
+  Signing Go's example text with Go's example key gives Go's signature line byte for byte.
+- **C2SP checkpoints**: three lines and no extension lines when written, extension lines read past
+  when read, the origin required to be the key's name, and size 0 signing SHA-256 of nothing.
+- **RFC 6962 trees and RFC 9162 proofs**, generated and verified, over a tree held in memory as the
+  rows tiles hold, or over tiles read from files, with one generator for both.
+- **C2SP tiles**: paths, which tiles and bundles a tree of a size has, uint16 framing, what an
+  append writes and which `.p` directories it makes obsolete, and a reader that opens the tiles of
+  its checkpoint's size and nothing beside them.
+- **Every leaf kind of §2.3**, typed, canonical JSON, decoded strictly: unknown kind, unknown
+  field, broken rule or non-canonical bytes refused, the writer held to the same rules.
+- **`verify_log`**, **`verify_source`** and **`KeyHistory`**: a log verified whole from its files,
+  consistency with the checkpoint last accepted by the recomputed tree and, for a reader with only
+  tiles, by proof; a repository's chain of logs followed through log-end and log-continuation; and
+  attestation-key changes followed from the pinned key. A clone is written by whoever can push, so
+  it is read defensively: no file through a link out of the repository, a log directory that is
+  such a link included, nothing but regular files, and nothing longer than its format allows.
+- **Golden files** in `crates/trigon-attest/testdata/log/`: Go's note vectors, the RFC 6962 vectors,
+  one leaf of each kind, and a repository of two logs — the first grown by five publications until
+  it ends, its successor by two — with the proofs between the first's checkpoints. 110 tests in
+  `tests/evidence_log/`, property tests among them.
+
+**Checked against implementations that are not this one.** The repository was opened with Go's
+`note` and `tlog` (v0.40.0, from the module cache, offline): both checkpoints open; the roots
+`tlog` computes from the entry bundles are the signed ones; every tile, and every older partial
+still on disk, is `tlog`'s tile data at height 8; the consistency proofs pass `tlog.CheckTree` and
+the inclusion proofs `tlog.CheckRecord`; the continuation opens under both keys; and C2SP's tile
+paths are Go's with the height left out. The RFC 6962 vectors were computed in Python from the RFC,
+and their roots are the certificate-transparency constants. Python also verified the key-change and
+release signatures over the messages as `docs/09` writes them, and found every golden leaf equal
+to its own canonical JSON.
+
+**Found on the way.**
+
+- **The signed-note vector this phase was specified with is not Go's.** Its line, `— PeterNeumann
+  yvTSo2EF…BwA=`, begins with the key hash `caf4d2a3`, where PeterNeumann's key hashes to
+  `c74f20a3`, and its 64 signature bytes do not verify under that key over the text, with or
+  without its final newline. Go's own tests and example have `x08go/ZJku…JnAM=`, which starts with
+  `c74f20a3`, verifies, and is exactly what signing the text with Go's example private key gives,
+  since Ed25519 is deterministic. The tests pin Go's line, and pin the other as refused: it names
+  another key, so a note carrying only it is not signed by PeterNeumann, and given PeterNeumann's
+  hash its bytes fail.
+- **An inclusion proof binds the tree's size only by its shape.** Leaf 3's audit path in a tree of 7
+  leaves also verifies as leaf 3 of a tree of 5, 6 or 8 against the same root, because the paths
+  have one shape. That is RFC 9162, not a defect, and it means a client must check every proof
+  against the size of the signed checkpoint and never a size that came with the proof; the tests
+  say so where they found it.
+- **Go's reader is laxer than it needs to be in one place.** It verifies the first line by a known
+  key and skips any later line by the same key, so a note with a good line and a bad one by the
+  pinned key opens. Ed25519 is deterministic, so an honest signer writes one line; here every line
+  naming the pinned key must verify.
+
+**Decisions made here that the owner may want to revisit.** Everything below is signed into the
+tree once phase 5 publishes, so it is cheap to change now and expensive later.
+
+- **What each leaf holds, field by field** (`docs/09` §2.10). The record leaf is §2.3's example,
+  with `subject` requiring sha256, digests written `sha256:<hex>`, and only the four predicates
+  `publish` logs; a void's `stabilizerSet` is optional, since a build the guard stopped compared
+  under no set, as `void/v1` has it — `docs/19` §2.3 and §4.1 said a void's leaf always has one,
+  and now give it one only where its run compared.
+- **The key-change message**: `trigon.dev/key-change/v1`, the origin, the time, the old and new
+  keys in hex, a line each. Binding the origin stops a change being replayed into another source
+  that shares the key; binding the time stops it being moved within the log.
+- **The release leaf** — `name`, `version`, `artifacts` by file name with sha256 and optional
+  sha512, `keyId`, `signature` over `trigon.dev/release/v1`, the origin, the time and the canonical
+  JSON of the rest — fixed now so phase 9 has a format to write, and not written by anything yet.
+- **A log-end's successor** is `origin`, `logKey`, `urls` and `dir`; an empty `urls` means this
+  repository, so every mirror of it serves the successor too, and `dir` is `log/<n>`, or `log` in
+  another repository. A successor elsewhere is returned for the caller to clone and `follow`, since
+  this crate opens no socket.
+- **Times are at most 2^53 − 1**, the largest integer a JavaScript reader holds exactly.
+- **A key change from a key that is not current is read past and reported**, not refused: a client
+  pinned after a rotation sees the change that led to its pin that way. One from the current key
+  that does not verify under both keys refuses the source, since that is what a stolen log key
+  without the attestation key would write. A new key covers the leaves after its change, not the
+  change itself or anything before it.
+- **A `log/<n>` that no log-end names is reported as refused**, and the source still answers from
+  the logs that are named, rather than failing whole: whoever holds the push credential could
+  otherwise stop a source by planting a directory.
+- **Where a chain starts is the newest checkpoint the pinned key opens**, and the first directory
+  holding it whose files verify; every other directory claiming that log is reported in
+  `VerifiedSource::refused` and set aside. That includes a checkpoint signed by the log's key that
+  the newest tree does not extend — two trees under one key, which only the log key can make — so
+  such a fork found among a repository's directories is reported, not a refusal of the source. A
+  client's own accepted checkpoint is what refuses a fork (§8); making this one refuse too is a
+  choice for the owner.
+- **A client pinned to a successor's key starts at that log**, and does not read the logs before
+  it.
+- **`verify_log` checks every tile against the leaves**, which §6 does not list: a client with the
+  leaves does not need the tiles, but a `--remote` reader proves inclusion from them, and a full
+  monitor should catch tiles that would mislead it.
+- **A reader of tiles opens only the tiles of its checkpoint's size.** tlog-tiles lets a client
+  read a full tile in place of a partial; this one does not, so nothing a later publication or a
+  planted file put beside the partial is read. Phase 6's `--remote` may want the full tile as a
+  fallback when a partial disappears between fetching the checkpoint and the tile.
+- **A private key file is read whatever its permissions.** Refusing a world-readable key is a
+  policy for `trigon log sign` to set in phase 5.
+
+**What this does not do.**
+
+- Verify a record against its leaf, look a key up, apply supersessions, derive index paths, or give
+  the network-free verifier `--record`: the second half of phase 4, built on this.
+- Add the threat model's properties for inclusion and consistency verification (`docs/19` phase 8):
+  no command uses this code yet, so there is no shipped property to state, and they belong with the
+  record verification that makes them one. The deferral is recorded in `docs/19`'s status table
+  and in the threat model's §1.3, which routes a finding against the library there until then.
+- Keep a verified log small at scale: every leaf is held decoded, about a kilobyte each, so a
+  million leaves is on the order of a gigabyte in memory. Leaves are not also kept as bytes, since
+  a canonical leaf writes back to the bytes it was read from; streaming the rest is for when D2's
+  numbers say it is needed.
+
+**What review found in it.** Fourteen findings: eleven defects, each now with a test that fails
+without its fix; two places where the documents disagreed; and a gap in the tests.
+
+- **A bundle altered after signing was blamed on the log key.** `verify_log` decoded each leaf and
+  applied the log's rules before it compared the root, so a bundle rewritten by whoever can push
+  read as the signed log breaking its own rules (`Rule`), or as a leaf from a newer Trigon ("update
+  it"). The root is compared first now, and a leaf refused only once the checkpoint signs it
+  (`a_bundle_altered_after_signing_is_a_mismatch_whatever_its_leaves_say`).
+- **A damaged tile was reported as an equivocation.** `verify_extension_from_tiles` called every
+  failed consistency proof `Inconsistent`, whose text accuses the operator and offers two
+  consistent notes as evidence. A failed proof is an equivocation now only when its hashes lead to
+  the new signed root, which authenticates them; tiles that do not are a `Mismatch`
+  (`a_checkpoint_extends_the_accepted_one_by_its_tiles_alone`).
+- **A planted directory could stop a client pinned to a successor**, or move it onto an older
+  state: the chain started at the first directory whose checkpoint merely said the pinned origin.
+  It starts where the pinned key opens the newest checkpoint now, as the decision above says
+  (`a_planted_directory_does_not_move_or_stop_a_client_pinned_to_a_successor`).
+- **The writer accepted leaves every reader refuses.** `VerifiedLog::plan_append` did not check a
+  key change's signatures over its own log's origin, a log-end's successor origin, or a
+  continuation's signature by its own key, and the free `plan_append` did not check its tail
+  against the tree; each would have broken the log for good
+  (`a_verified_log_does_not_plan_a_leaf_every_reader_would_refuse`,
+  `an_append_whose_tail_is_not_the_trees_leaves_is_refused`).
+- **A record leaf under an earlier `purlCanon` would have stopped decoding** the day the rule
+  moved to 2, refusing every existing log. It is checked under its own rule, by the new
+  `trigon_core::purl::canonicalize_under`, which keeps each rule this build has had
+  (`every_rule_this_build_has_had_is_still_the_rule_it_was`,
+  `a_record_leaf_under_any_rule_this_build_has_reads`).
+- **Refusals carried raw control characters** from unsigned input: serde's text quoting an
+  unknown field or variant, a signature line's name, and the notes an equivocation shows, which it
+  now keeps as read and shows escaped (`a_refusal_never_carries_a_leafs_control_characters`,
+  `the_notes_a_refusal_shows_are_escaped_and_kept_as_read`,
+  `a_refusal_of_a_leaf_carries_none_of_its_control_characters`).
+- **A signer could be made under a name no verifier key can carry**, with DEL or a C1 control in
+  it, and `vkey()` then panicked; signer and verifier key share one rule now, and the signer holds
+  its verifier key (`a_signer_is_made_only_under_a_name_its_verifier_key_can_carry`, and a property
+  test that every signer's key reads back).
+- **A bare seed's first byte was shown** in the refusal of a key file missing its type byte. The
+  length is checked first and the type byte never shown
+  (`a_bare_seed_is_refused_without_showing_a_byte_of_it`).
+- **`prove_inclusion_from_tiles` took an unsigned checkpoint**, so nothing kept a caller from
+  proving against a root nobody signed. It takes a `SignedCheckpoint`.
+- **`trigon`'s fault report called a log that fails verification "a bug in trigon"**. It names
+  the evidence source now, as having failed verification, and one whose log could not be read as
+  the source's too (`a_log_that_fails_verification_is_the_sources_fault_and_not_trigons`).
+- **The documents**: `docs/19` said a void's leaf always carries a set digest, which `void/v1` does
+  not always have; and the threat model's inclusion and consistency properties, which phase 8
+  gives phase 4, were deferred in this entry only. `docs/19` §2.3, §4.1 and its status table, and
+  the threat model's §1.3, now say both.
+- **No test tampered with a tile above level 0 or read a proof from level 2.** `verify_log` is now
+  held to a full level-0 tile and a level-1 partial, and a tree of 65,836 leaves to the proofs its
+  level-2 tile gives (`a_tile_that_does_not_hold_the_leaves_hashes_is_refused`,
+  `hashes_read_from_tiles_are_the_trees_past_level_two`).
+
+### 3.99 Records checked against the log, lookup over its leaves, and the verifier's record form
+
+`docs/19` §10 phase 4, second half, on 2026-09-28: what reads an evidence repository, as pure code
+in `trigon_attest::evidence`, and the network-free verifier's `verify-attestation --record <file>
+--evidence <dir>`, the first command to reach `trigon_attest::log`. Nothing writes a repository yet
+(phase 5), and nothing clones, syncs or answers a lockfile from one (phase 6). `docs/09` §2.8,
+§2.11 and §7 have it as built.
+
+**What changed.**
+
+- **A record checked against its leaf** (`check_record`): its sha256 is a verified leaf's `record`,
+  or it is *unlogged*, and one leaf's only, or it is *logged twice*; its leaf's key id names the
+  attestation key the source had at that leaf, by `KeyHistory`, and every envelope carries a
+  signature by that key that verifies; the signed statement agrees with the leaf on subject
+  digests, purl and its rule, predicate type, outcome, set digest, `supersedes` and `reason`; a void
+  or a withdrawal is one statement; a verdict's `rebuild` is of its run (`invocationId` is the
+  verdict's `run.id`), under its set, and about the rebuilt artifact it names, and its
+  `buildobservation` is about its subject, under its egress tier and the guard manifest it names as
+  evidence, with no guard tripped; the unsigned `subject` and `evidence` map agree with the
+  statement; the signed subject is the key it was found under, and a purl key is the signed purl
+  canonicalised under the rule it was signed under; and every evidence file present is the bytes
+  the statement names, one absent reported unchecked, never passed. Each failure is a typed
+  `RecordFailure` with its reason.
+- **Lookup over the verified leaves** (`Key`, `Lookup`, `Answer`): a sha256, sha512 or sha1 digest,
+  an SRI string such as npm's `integrity`, a purl with or without its version, or a file hashed as
+  it is read; never `index/`. A leaf whose file is missing is `deleted`. Supersession exactly as §3
+  says, the superseded record returned marked with the reason and both leaves; two current records
+  for one subject both returned, the more severe answering. The answers are the §4.2 states, each
+  with §6's exit code: never checked, withdrawn, deleted, failed verification with its reason, each
+  outcome, and void.
+- **Where everything is** (`evidence::paths`): records, evidence, and the index under `sha256`,
+  `sha512`, `sha1`, `purl1` and `pkg1`, each with the four-hex fan-out and the digest whole, held to
+  the shared purl vectors; the index file, and the whole index derived from a verified log, for
+  phase 5's writer and `--reconcile`. `Record::assemble`, `Record::encode` and `record_leaf` are
+  the writer's other halves; `record_leaf` holds the leaf it builds to the comparison
+  `check_record` makes before it returns it.
+- **`--rerun-comparison` checks what a verdict says the comparison found**: its `differences`,
+  `applied` and `members`, re-derived by the one function that builds a verdict and compared
+  whole, where before only the outcome and the stabilized digests were. A subject whose sha256 is
+  the artifact's and whose sha512 or sha1 is not is a new `AttestError::SubjectRefuted`: a signed
+  claim refuted, not the wrong file. With a record, the published comparison report is read again,
+  held to its digest again, and held to the same re-derivation field by field, then member by
+  member — status, kind, digests and sizes — and by its field edits where it carries any; its
+  progression, its notes and the members' raw paths are reported unchecked, never passed. Through
+  an archived set, which gives digests and no report, all of that is reported unchecked.
+- **`verify-attestation --record <file> --evidence <dir>`**, in both builds: the source's keys and
+  checkpoint from `--source <name>` — `evidence.toml`, then the state directory's
+  `<name>/checkpoint`, then the source's initial checkpoint — or from `--log-vkey`,
+  `--attestation-key` and `--checkpoint`; the log verified whole and held to that checkpoint; the
+  record, shown with every §4.2 field — set, run, both versions, egress tier and `attestable`,
+  derivation, and for a verdict the falsifying command and dispute pointer, absent shown as
+  absent; what the source says of its artifact now, or *unknown*, exit 4, where the log continues
+  in a repository the directory does not hold; and `--rerun-comparison`. A bundle is checked as it
+  was. `xtask policy` passes: the verifier still links no network client.
+- **Carried over from phase 4a.** Two trees under one log key found side by side in one repository
+  — the same size with two roots, or an older checkpoint the newest does not extend — refuse the
+  source as `LogError::Equivocation`, with both signed notes, and the record form exits 4; 4a had
+  only listed them among the directories set aside. And a signature that does not verify, a claim
+  that does not re-derive and damaged evidence are labelled the evidence's fault
+  (`AttestError::fails_verification`, a new `AttestError::Evidence`), where `trigon` said "a bug in
+  trigon; please report it" for a refuted claim and, for a bundle whose signature failed, said
+  nothing about whose fault it was, since that error was untyped. `Fault::Bug` stays their class,
+  so they are never retried, and stays trigon's own for its own errors.
+- **Golden files** in `crates/trigon-attest/testdata/evidence/`: a repository of two logs — every
+  leaf kind — holding verdicts `exact`, `normalized` and `divergent`, a void, a superseding verdict,
+  a withdrawal, a deleted record, an unlogged one, and three built to fail: signed by a key the
+  source never had, by one retired before its leaf, and one whose leaf disagrees with its statement;
+  with their evidence, the index the log implies, every checkpoint the first log had, and the
+  artifacts three verdicts re-derive from. Its build observations name the guard manifest their
+  verdicts name as evidence, as the attestor signs both from one run. 40 tests in
+  `tests/evidence_repo/` and 14 in `crates/trigon/tests/verify_record.rs`, which builds the
+  repositories the golden one does not hold with `tests/evidence_repo/build.rs` itself.
+
+**Decisions made here that the owner may want to revisit.**
+
+- **The record form's exit code is what the source says of the record's artifact now**, not the
+  record's own outcome: a verified verdict that a withdrawal superseded exits 2, and a record of an
+  artifact another record of which is deleted exits 4. A record handed in is checked first, and its
+  own failure exits 4 whatever else is there.
+- **A claim `--rerun-comparison` refutes exits 4**, as failed verification: a signed statement that
+  the bytes contradict is the loudest thing a record can be. The wrong artifact, a set this build
+  does not carry, or a void handed to `--rerun-comparison` exit 5: a check not made is not a check
+  failed.
+- **Bad arguments to the record form exit 5, as §6 says**, those `clap` refuses included: `main`
+  parses with `try_parse`, and when `verify-attestation` was given `--record` a `clap` error exits
+  5, since `clap`'s 2 is the code §6 gives "never checked". Everywhere else, the bundle form
+  included, `clap`'s errors exit 2 as they did. `--rerun-comparison`'s arguments — both files,
+  readable, and none of its files without it — are checked before the record, so a bad one exits
+  5 whatever the record is; a checkpoint, given or in the state directory, that is not one exits 5
+  and is never blamed on the source.
+- **A record file is its canonical JSON**, so a record's name is a function of what it holds.
+- **An index entry names its log** — `"log": "log/1"` — where its leaf is in a successor, since a
+  leaf index alone names a leaf of one log; and an index file's `key` is `<kind>:<value>`, the
+  canonical purl in the clear, so a reader can check the file is at the path its key derives.
+- **A verdict record's other statements are held to its run**, each at most once: its `rebuild`
+  by its invocation id, its set and the rebuilt artifact it names, and its `buildobservation` by
+  its subject, egress tier and guard manifest, and refused if it says the guard tripped, since a
+  run whose guard tripped is void. `buildobservation` names no run, so an observation of another
+  attempt at the same artifact, under the same tier and guard, is not told apart; the `rebuild` is
+  what ties a verdict to its run. A statement of a kind this build does not read has its signature
+  checked and is read past, so a later writer can add one. A void or a withdrawal is refused with
+  any second statement, as §4.1 says.
+- **A record the log holds at two leaves fails verification at both**, and its subject answers
+  failed, exit 4. Judged leaf by leaf, a record logged again after the withdrawal of it had a leaf
+  later than the withdrawal's and read as current again: anyone with the log key alone could undo
+  a withdrawal in the one public history, with no fork, which §8 says only a fork or a split view
+  does. Resolving supersession by the record's first leaf would also have held; refusing is louder,
+  and costs an honest publisher nothing, since a record is logged once.
+- **A source whose log continues in a repository the directory does not hold answers *unknown***,
+  exit 4, and never shows the record as current: a withdrawal of it may be logged there. A
+  checkpoint given for a log the directory does not hold is said to be unchecked, and not refused,
+  since it may be for a log past the successor the directory names.
+- **A published comparison report is held to what the same bytes under the same set give back**:
+  every member and the field edits, besides what a verdict signs, and not its progression, notes or
+  the members' raw paths, which a later build may word differently or a report written before them
+  lacks. Those are listed as unchecked, and so are field edits a report does not carry.
+- **The state directory holds the last accepted checkpoint as `<name>/checkpoint`**, the signed
+  note as accepted. Phase 6 writes it; the verifier only reads it, and says when it is not there,
+  including when the source's initial checkpoint stands in for it.
+- **A source that trusts on first use is refused by the record form**, which reads no repository's
+  `keys/`: its keys are settled by a first sync, which phase 6 records.
+- **Record files are read up to 4 MiB, evidence files up to 100 MiB** (GitHub's own ceiling), each
+  inside the directory once links are followed and as a regular file, as the log's are. An evidence
+  file that cannot be read is unchecked, not failed; one that is there and is other bytes fails.
+
+**What this does not do.**
+
+- Judge freshness. The record form answers from the log the directory holds, against the checkpoint
+  it is given or none, and says which; `unknown`, and the stale and frozen clocks, are phase 6's,
+  and the threat model disclaims them for this form as D25.
+- Follow a successor log in another repository: one the chain continues into is reported, what
+  the source says now is *unknown*, exit 4, and a record logged there is not seen.
+- Decide whether a verified verdict that signs no falsifying command or dispute pointer should
+  fail verification. §4.2 says every record carries them, and §8 that a client never renders an
+  outcome it cannot show with them; the record form shows each as absent, loudly, and still renders
+  the outcome. Refusing them is a rule for `publish` (phase 5) and a decision for the owner.
+- Read or write the key history the state directory will keep (§8): the history is recomputed from
+  the log every time, which is the same answer while the chain is in one repository.
+- Anything over the network: `--remote`, `evidence sync`, `lookup` and `check` from sources are
+  phase 6, and publishing is phase 5.
+
+**Found on the way.**
+
+- **The threat model's census disagreed with its sidecar**: the prose said 201 documented claims
+  and `threat-model.yaml`, generated from it, counted 202. Regenerated with this phase's
+  properties, both say 209.
+
+**Found in review, and fixed.**
+
+- **The record form rendered an outcome without the fields §4.2 has every client render**: no set,
+  run, versions, egress tier, derivation, falsifying command or dispute pointer, in text or JSON.
+- **A record logged a second time after its withdrawal answered again**, exit 0: supersession was
+  applied leaf by leaf (above).
+- **A log continuing in another repository still answered "current yes"**, exit 0, even when the
+  checkpoint given was the successor's; and a checkpoint of any origin was said to hold the log.
+- **Some bad arguments still exited 2**: `--upstream` or `--rebuild` without
+  `--rerun-comparison`, and an unknown flag, all through `clap`; and this entry said otherwise.
+- **A `--checkpoint`, or a state file, that is not a checkpoint exited 4**, blamed on the source.
+- **`--rerun-comparison`'s arguments were checked only for a record that verified**, so the same
+  missing `--upstream` exited 5 or 4 by the record.
+- **A subject whose sha512 or sha1 lies, beside a sha256 that holds, exited 5** as the wrong file,
+  where it is a signed claim refuted.
+- **The comparison report was held only to what the verdict signs**, and printed as agreeing: its
+  members and field edits were never compared. And it was read a second time to be judged without
+  its digest checked again.
+- **`record_leaf` gave leaves `check_record` refuses for ever**: a `supersedes` without `sha256:`,
+  or hex in capitals, parsed leniently and logged as the log writes it.
+- **"About its run" was said of `rebuild` and `buildobservation` and checked by artifact alone**,
+  and three of `accompanies`' branches had no test.
+- **A missing state file went unsaid when an initial checkpoint stood in**, which §6.1 forbids.
+- **`--output json` wrote nothing** when the check stopped before a record: an equivocation, a log
+  that fails, a claim refuted outright. It now prints a document on every exit, and a refuted
+  claim is folded into the full report.
+- **`trigon attest` refused a claim whose outcome held and whose `applied` did not as "the run
+  recorded `normalized` and the bytes give `normalized`"**: the refusal names the fields now.
+- **No test held a refuted claim to exit 4**: setting it to never refute passed every test.
+
+### 3.100 `trigon publish`: one verified commit, and a log key only `trigon log sign` holds
+
+`docs/19` §10 phase 5, first half, on 2026-09-28: the evidence repository's writer. `trigon log
+keygen`, `log init` and `log sign`, and `trigon publish` for runs, withdrawals and heartbeats, with
+`--dry-run` and `--reconcile`. The second half — rebuilt artifacts as release assets, the
+divergence feed, `log key-change` and `log succeed`, `--prune`, `serve`'s report of the repository's
+kill-switch, and the spike against a scratch GitHub repository — is phase 5b, and each of its
+settings is refused here rather than half-honoured.
+
+**What changed.**
+
+- **`trigon log keygen --origin <o> --out <file>`**: an Ed25519 log key in Go's private-key
+  format, named by the origin, written `0600` and never over a file already there, with the
+  verifier key a client pins printed whole. The origin is held to `[publish] origin`'s rule
+  (`config::check_origin`).
+- **`trigon log sign --tree <dir> --size <n> --key <file>`**: the one step that holds the log key.
+  It reads the tree from disk and signs its checkpoint only where the checkpoint the tree extends
+  opens under the key itself, the new tree's first leaves hash to its root, every leaf decodes and
+  keeps its place and time, every tile holds its leaves' hashes, and every new leaf is a heartbeat,
+  a key change signed by both keys, or names a record file in the tree, logged at no other leaf,
+  that passes `check_record` under the attestation key the tree names, with every evidence file it
+  names beside it (`trigon_attest::evidence::check_to_sign`, over the new
+  `log::verify_extension`). A release, log-end or log-continuation leaf is refused: no command of
+  this build writes one. Nothing past `--size` is read. `--init` writes `keys/log.vkey` and the
+  empty checkpoint, and only in a tree with neither.
+- **`trigon log init --origin <o> --repo <location> --attestation-key <key>`**: the first commit —
+  `keys/`, the README (origin, both keys, "once per publication, and at least every `[publish]
+  heartbeat`", and `[publish] disputes`), and the checkpoint of size 0 that `log sign --init`
+  signs. A repository with `log/` or `keys/` is refused. It prints the `gh api` call that sets a
+  ruleset forbidding force-pushes and deletion with an empty bypass list, naming the repository
+  where the origin or the location is on GitHub, and never runs it.
+- **`trigon publish [RUN…] [--repo] [--withdrawal <envelope>] [--heartbeat] [--dry-run]
+  [--reconcile]`**, steps 1 to 7 as §10 phase 5 lists them (step 3 is D4's). The repository is
+  `--repo`, `TRIGON_PUBLISH_REPO` or `[publish] repo`; a working clone is kept at
+  `<store>/publish/<sha256 of the location as git is given it>/clone`, beside the newest checkpoint
+  verified there, and `<store>/publish/lock` keeps one `publish` at a time, refusing a second with
+  the first's pid, start and repository. A local working tree is published into in place, with a
+  lock in its git directory, and refused unless clean and on `[publish] branch`. Step 1 resets the
+  clone to the remote and verifies its log whole under `keys/log.vkey`, whose origin must be
+  `[publish] origin`, and against the stored checkpoint. Step 2 asks `decide` through
+  `trigon_api::Index` with the repository's `kill-switch`, and refuses every run it must at once:
+  withheld; a divergence under `divergences = "refuse"`; already published; the second of an
+  agreeing pair whose first is (the new `Index::agreeing`); a verdict or void for an artifact with
+  a current record it does not supersede; a verdict without its falsifying command naming
+  `[publish] origin` or the dispute pointer `[publish] disputes` names; and a record every client
+  would refuse, checked with `check_record` at the leaf it will have, against the evidence it
+  stages (`log::Staged`). Step 4 writes records and evidence deduplicated, one leaf each at a time
+  never earlier than the newest, the tiles and bundles `plan_append` gives and the partials it
+  makes obsolete removed, and each index file of every new record's keys derived from the log whole
+  (`evidence::index_files_after`). Step 5 runs `trigon log sign` as a child process and holds its
+  checkpoint to the one planned. Step 6 commits once and pushes without force. Step 7 records
+  `RunRecord.published` — repository, commit, record, leaf, and the log where it is not the first —
+  through `Store::record_published`, merged into the record as it is now, as attestations are.
+- **The forms without runs.** `--withdrawal` publishes a `withdrawal/v1` of a record the log holds
+  and nothing supersedes yet, of the same subject and purl, with an entry in every index file of its
+  keys. `--heartbeat` logs a heartbeat leaf when the newest is older than `[publish] heartbeat`, or
+  none, on a log with no leaves, and otherwise says why and writes nothing. `--reconcile` writes
+  every index file the log implies and removes every other under `index/`, in one commit, or says
+  there is nothing to reconcile. `--dry-run` reads a clone of its own, prints every file and leaf
+  and the checkpoint body, unsigned, and runs no `log sign`; the repository, the working clone and
+  the store's runs are left byte-identical.
+- **Carried over from phase 4b, decided by the lead.** `check_record` takes the origin of the log a
+  leaf is in, and fails a logged v2 verdict without its falsifying command, one whose command is not
+  `trigon verify-attestation` naming its own subject, its own predicate type and that origin, and a
+  divergence without an `https://` dispute pointer, as a new `RecordFailure::Recourse` (kind
+  `no-recourse`); a verdict that carries a dispute pointer it need not is held to the same. The
+  golden repository is regenerated: `k`, in the successor log, now names the successor's origin.
+  `verify-attestation --record`'s test of a verdict with no command, which pinned it rendering with
+  "falsify none signed", now expects exit 4.
+
+**Decided here, and why.**
+
+- **`log keygen` and `log sign` are in the verifier build too**, as `keygen` is: neither opens a
+  socket, and D5's option of a log key held apart wants a binary that can sign where nothing else
+  runs. `log init` and `publish` are the build half's.
+- **`log sign` takes `--size` and `--log`** beside the `--tree` and `--key` §10 names, so that what
+  it signs is exactly a size it was told, and a wider bundle planted beside the new one is never
+  read. It takes the attestation key from the tree's `keys/attestation.pub`, or `--attestation-key`;
+  a push credential that swaps the file stops publishing, since every honest record then fails, and
+  gets no record of its own signed, since only `publish` writes new leaves.
+- **A lost race is decided by asking the remote**, not by reading `git`'s wording: a rejected push
+  whose remote branch has moved from the commit the publication was built on is a lost race, and
+  any other failure is an error. `git` says `[rejected] (fetch first)` for one refused before the
+  pack is sent and `[remote rejected] (failed to update ref)` for one refused after it.
+- **A publication is committed as `trigon publish <publish@trigon.invalid>`**, not as the
+  operator: who committed a file is never who signed it (§8), and the operator's address would
+  otherwise enter a public history with every publication. `--no-verify`, so no pre-commit hook of
+  a tree published into changes what `log sign` checked. `git` keeps the operator's own
+  configuration, where the credential helper is, with `GIT_TERMINAL_PROMPT=0`, and `GIT_DIR` and
+  its kin removed, which a `publish` run from a git hook needs.
+- **A void, like a verdict, must supersede a current record for its artifact.** §3 said "a
+  verdict"; a void published beside a current verdict is a second current record, which a client
+  can only show beside the first, and §3 now says so.
+- **At publish, a verdict needs both the falsifying command and the dispute pointer, equal to
+  `[publish] origin` and `disputes`**, as §2.4 says; a client requires the pointer only on a
+  divergence, as §4.2 item 6 does.
+- **A withdrawal of a record already superseded is refused**, naming the record that supersedes it:
+  it would be a second current record, and it is that one that should be withdrawn.
+- **`TRIGON_PUBLISH_DIE_AT=written|signed|committed|pushed`** stops `publish` there as a kill would,
+  with nothing cleaned up, for the tests of a killed publisher. It is in every build: a kill can
+  stop `publish` at any of those points anyway.
+
+**What this does not do.**
+
+- Phase 5b, above. `rebuilt_artifacts = "github-release"` is refused rather than publishing records
+  that name assets nobody uploaded, and `divergences = "feed"` still refuses divergences.
+- Push to HTTPS or SSH in a test: nothing here reaches GitHub. That a location reaches `git` exactly
+  as configured is a unit test; the spike of §10 phase 5 is where a real push is measured.
+- Make the race of D26 impossible. A push that loses between the server advertising its refs and
+  updating them has sent its objects, the signed checkpoint among them: measured against a local
+  bare repository, whose object store kept the losing commit, unreachable, after `[remote
+  rejected] (failed to update ref)`. One publishing host under the lock is what makes the race
+  impossible, as ADR-0014 says. The test of two racing publishers has the second publish from a
+  `post-commit` hook in the first's clone, with a state directory of its own as a second host has,
+  so the first is refused before its pack is sent, and checks every object the remote holds.
+- `attest --prune`'s refusal of an unpublished run, which waits on D4.
+
+**Found on the way.**
+
+- **`index_files` could derive the index only from a verified log**, and the writer needs the index
+  of a tree whose checkpoint is not signed yet; `index_files_after` is the same derivation with the
+  new leaves appended.
+- **Nothing could write `keys/attestation.pub`** from a public key: only a private `LocalKey`
+  wrote SPKI PEM. `AttestationKey::to_pem` shares its writer.
+- **A test built on the golden repository pinned a record rendering an outcome without its
+  falsifying command**, the behaviour §8 forbids and this phase removes.
+
+**What review found in it.** Eighteen findings, of twelve defects — several found more than once —
+and a test that could not see what it was named for. Each defect now has a test that fails without
+its fix.
+
+- **A `.gitignore` could make `publish` push a signed checkpoint without its leaves.**
+  `git add --all` staged the publication, and follows the tree's `.gitignore`, the operator's
+  excludes and every filter or line-end conversion an attribute names; nothing checked that the
+  commit held what `log sign` checked. A `.gitignore` naming `tile/`, which whoever can push may
+  commit, left the remote with a signed checkpoint and no bundle, and the next run's `clean -x`
+  deleted the only copy: the log could never verify again. `log init` could push `keys/` without
+  `log/checkpoint`. The commit is now made from exactly the bytes written —
+  `hash-object --no-filters` and `update-index`, never `git add` — and read back before the push:
+  its parent, every path it changes and every blob must be the publication's, each blob's id
+  computed here from the bytes rather than taken from `git`. A branch that names git attributes is
+  refused before it is checked out, so no filter the operator's configuration defines ever runs on
+  it; `core.autocrlf` and the operator's attributes file are switched off for every run; and a
+  working tree published into must hold nothing git ignores where a publication reads and writes,
+  and is discarded there, ignored files included, when a publication fails
+  (`what_a_publication_writes_is_committed_whatever_git_is_told_to_ignore`,
+  `a_branch_that_names_git_attributes_is_refused_before_it_is_checked_out`,
+  `a_commit_holds_exactly_what_was_written_whatever_the_tree_ignores`).
+- **The operator's `commit.gpgSign` signed, or stopped, every publication**: a public commit signed
+  with the operator's own key, which the fixed committer is there to keep out of the history, or a
+  passphrase prompt, or `gpg failed to sign the data`. `push.gpgSign` would fail every push to a
+  server without signed pushes. Commits are made `--no-gpg-sign` and pushes `--no-signed`
+  (`the_operators_git_configuration_changes_nothing_that_is_committed`).
+- **ssh could wait on a terminal nobody watches.** `GIT_TERMINAL_PROMPT=0` stops `git`'s own prompt,
+  not ssh's passphrase or host-key question, and a scheduled `publish --heartbeat` from a session
+  with a terminal held its lock while ssh waited. ssh runs with `BatchMode=yes` now, added to a
+  configured `ssh` command too; a command that is not `ssh` runs as configured, and the documents
+  say so (`ssh_is_told_never_to_ask`).
+- **A working clone whose `.git` was gone was taken for the repository around the store.**
+  `git -C <clone> rev-parse` looked up through the parents, found the checkout the store sat in —
+  the owner's own sits in this repository — and `publish` rewrote its `origin`, reset its branch to
+  the evidence commit and discarded its uncommitted work. A clone is used only where its git
+  directory is its own, and every `git` run in a directory looks for a repository there and no
+  further up
+  (`a_working_clone_without_its_git_directory_is_made_again_and_never_the_checkout_around_it`,
+  `a_directory_without_a_repository_of_its_own_is_never_taken_for_the_one_around_it`).
+- **A remote rolled back could make the log key sign a second root for a size it had published.**
+  The newest checkpoint verified was kept per store and per spelling of the location, and `log sign`
+  accepted any checkpoint in the tree its key opened, so a fresh store, or `file://` for a path,
+  built on the rolled-back log and signed. It is kept by the log's origin in the host's state
+  directory now, and `log sign` holds every tree to it as well as to the tree's own base (below)
+  (`a_remote_rolled_back_behind_what_this_host_published_is_refused`,
+  `a_tree_that_does_not_extend_what_was_published_is_not_signed`).
+- **`log sign` wrote its checkpoint through a link.** The file it renamed from was opened with a
+  plain write at a predictable name, which follows a link planted there, and `log init` wrote the
+  README the same way. Both are made new now, never opened, and renamed over the old
+  (`a_file_is_replaced_and_never_written_through_a_link`).
+- **One `publish` per host was one per store.** Two stores on one host raced into D26's window. A
+  lock in the host's state directory keeps one `publish` at a time on it, whatever store it runs
+  from, beside the store's (`one_publish_runs_at_a_time_on_a_host_whatever_store_it_runs_from`).
+- **Any branch ending in the publish branch's name was read as it.** `ls-remote` matches a pattern
+  against a ref's end, so `refs/heads/a/refs/heads/main`, which anyone who can push can make, turned
+  every push failure into a lost race, five times over, with the real error unsaid. Only the exact
+  ref is read (`the_remote_head_is_the_branch_named_and_no_other_ending_in_its_name`).
+- **A push the remote took was taken for a lost one** when the connection went before the remote
+  answered: `publish` said it discarded what was published, and a withdrawal then refused itself as
+  already logged. A remote at the commit just pushed is a publication
+  (`a_push_the_remote_took_is_published_even_when_the_connection_goes_before_it_answers`).
+- **`--reconcile` walked a directory of the host's** through an `index` planted as a link, and a dry
+  run listed its files. The start of the walk is held to be a directory of the tree's own
+  (`reconcile_never_reads_through_a_link_planted_as_index`).
+- **A run completed after its record file was removed named the branch's tip** as the commit that
+  logged it. The commit is now the first whose checkpoint, opened under the log's key, covers the
+  leaf, and the missing file is said
+  (`a_run_completed_after_its_record_file_was_removed_names_the_commit_that_logged_it`).
+- **The ruleset `log init` prints protected the default branch**, whatever `[publish] branch` is. It
+  names the branch the log is on (`the_ruleset_protects_the_branch_the_log_is_on`).
+- **The test of files planted in `log/` could not see the leaf it planted**: its heartbeat's time
+  broke the order rule, and it counted record leaves only. The heartbeat is a valid one now, and the
+  test asserts the log's size and that no heartbeat was signed.
+
+**Decided in review, and why.**
+
+- **What `log sign` holds a tree to is the newest checkpoint *published*, never the newest
+  *signed*.** A checkpoint signed for a push that loses, or one a kill stops, never leaves the host;
+  holding the key to it would refuse every tree after a crash between signing and pushing, and stop
+  the log for good. So the host keeps what it has verified on the repository and what it has pushed,
+  `publish` moves it forward at step 1 and after the push, and `log sign` moves it forward to the
+  base of every tree it signs. It is kept by origin, not by vkey, so that a second key under one
+  origin is refused rather than given a memory of its own. And `log sign --init` refuses a log the
+  host has published: the same key beginning a second repository's log signs a second root for every
+  size. `the_repository_named_each_way_publishes` now begins each repository as a log of its own,
+  since four logs under one key and one origin were four roots for size 1.
+- **The host's state directory is `$XDG_STATE_HOME/trigon/publish/`**, the store's `publish/`
+  keeping only the working clone and its lock; `docs/19` §2.4 said the checkpoint was kept in the
+  store, and says where it is now, and why.
+- **A branch with attributes is refused, not neutralised.** Recent `git` can read attributes from
+  another tree, `--attr-source`, which an empty tree would neutralise, and older `git` cannot;
+  `info/attributes` applies either way. A refusal is the same on every version, and the branch is
+  checked before it is checked out.
+- **D27, new**: a host with no memory of the log — a fresh CI runner — is held only to what the
+  repository holds, and on one rolled back its log key signs a second root. The ruleset is what
+  forbids the rollback, and keeping the state directory between runs is what catches one.
+
+### 3.101 The rest of `trigon publish`: release assets, the feed, rotation, pruning, and the switch
+
+`docs/19` §10 phase 5, second half, on 2026-09-28. Everything phase 5a refused rather than
+half-honoured is built: `rebuilt_artifacts = "github-release"`, `divergences = "feed"`, a log that
+has ended, and the release, log-end and log-continuation leaves `log sign` would not sign. The
+spike is written and has **not** been run.
+
+**What changed.**
+
+- **Rebuilt artifacts as release assets** (`crates/trigon/src/publish/release.rs`). Step 3 finds or
+  uploads each verdict's rebuilt artifact as the asset `sha256-<hex>` of the digest the verdict
+  signs, in the month's release `rebuilt-YYYY-MM`, continued as `.2`, `.3` once a release holds
+  1,000 assets, before anything that names it is written. An asset of the name already in this
+  month's or last month's series is reused only where GitHub reports its digest and its size and
+  digest are the artifact's, and refused where either is another's; one GitHub left unfinished, or
+  reports no digest for, is removed and uploaded again from the store, once the store has yielded
+  the bytes to put in its place. No asset goes into a draft release. An exact rebuild, the published
+  artifact itself, is not uploaded, and a void has none. Refused before anything is written: a
+  location that is not a github.com repository, a missing token, an artifact not under 2 GiB, and a
+  run whose stored rebuilt artifact is not the one its verdict signs. GitHub's REST API over the
+  `reqwest` client the crate already links, with the shared User-Agent; the token comes from
+  `GITHUB_TOKEN` or `GH_TOKEN` only, prints as `***`, rides only in the `Authorization` header, and
+  goes only to the API and to an upload URL on GitHub's upload host — or, under `TRIGON_GITHUB_API`,
+  which must be HTTPS or loopback, to that server's own origin. No redirect is followed, and a
+  refusal that quotes the token back has it taken out. A dry run says where each asset would go and
+  uploads nothing, token or not.
+- **The divergence feed** (`publish/feed.rs`). Under `divergences = "feed"` a divergence is
+  published, and `feed/divergences.atom` is regenerated from the log whole in the same commit — and
+  in the commit of any record superseding a divergence, and by `--reconcile`, which also removes
+  anything else under `feed/`. The most recent 200 divergences, newest first; each entry's id is
+  its record's digest as an RFC 6920 `ni:` URI, it links the record file and the dispute pointer
+  the record signs, carries the falsifying command, and says so where its record is superseded,
+  missing or failing verification. Written by hand, escaped for XML with the characters XML cannot
+  carry replaced, and tested by parsing it with `roxmltree`, a dev-dependency that knows nothing of
+  how it was written. `log init`'s README states the count.
+- **`trigon log key-change --key <current> --new-key <new>`** logs a key-change leaf through
+  publish's steps 1 and 4 to 6. The leaf is signed by `trigon log key-change-leaf`, a hidden child
+  that opens no socket, as `attest` is, and held by the parent to the origin, time and keys it asked
+  for; the parent refuses a `--key` that is not the key the log has now, and a new key the log has
+  retired. From that leaf on, `publish` refuses a record not signed by the current key, with the key
+  it needs, and says after the change how to switch: `trigon attest --key <new key>`; nothing in
+  `evidence.toml` names the signing key, and `keys/attestation.pub` stays the key the chain starts
+  at. `--dry-run` signs nothing: the keys' public halves come from `trigon public-key`, a child, and
+  the leaf is shown with its signatures empty.
+- **`trigon log succeed --origin <o> --log-key <file> [--url <location>]… [--dir <dir>]`** logs a
+  log-end naming the successor's origin, log key, URLs and directory — the next free `log/<n>` by
+  default — and begins the successor with its log-continuation. `publish` learns the successor's
+  key from `trigon log public-key <file>`, new and in both builds, run as a child; `log sign
+  --successor-key` signs the final checkpoint and cosigns it with the successor's key, which is
+  written as the old log's `checkpoint` with both signatures; `publish` writes the continuation,
+  holding that note and logged at the log-end's time, and `log sign --continuing <tree>` signs the
+  successor's first checkpoint. In the same repository all of it is one commit. With `--url`, the
+  repository at the first URL is cloned and looked at before the log-end is written — refused with
+  nothing written where it is the evidence repository itself, cannot be reached, holds `keys/`,
+  `log/` or the successor's directory, names git attributes, or would not take a push, which `git
+  push --dry-run` asks — then the old log's end is pushed and the successor begun as that
+  repository's first commit, carrying the old repository's `kill-switch` where it is set. A
+  publisher stopped between (`TRIGON_PUBLISH_DIE_AT=ended`) leaves an ended log that refuses every
+  publication, and the same `log succeed` run again begins the successor from the final checkpoint
+  published. Both rotations regenerate the README's account of key changes and successors from the
+  log.
+- **`log sign`** accepts the new leaves under the rules phase 4a's rotation code applies
+  (`trigon_attest::evidence::check_to_sign`, which now takes the successor's key, and the new
+  `check_to_begin`, over `log::verify_beginning` and `log::find_predecessor`): a log-end only with
+  the successor's key in hand and equal to the one named, and a successor key never for a tree that
+  does not end naming it; a successor's first tree only as its log-continuation alone, holding the
+  predecessor's final checkpoint signed by both keys, logged no earlier than the log-end, from a
+  predecessor extending what this host published of it, and only once `follow` — the client's own
+  code — accepts the pair over the checkpoint staged before it is written. For a successor's later
+  trees it follows the whole chain's key changes from `keys/attestation.pub`. A release leaf is
+  still refused.
+- **`publish` into a chain.** The chain of logs `keys/log.vkey` begins must end, in the repository,
+  at `[publish] origin`'s log, which a publication appends to; `RunRecord.published.log` names
+  `log/<n>`. Publishing under the ended log's origin is refused with where publishing goes on.
+- **Pruning.** `publish --prune` prunes the rebuilt artifact of each run it published or completed,
+  with the store's own prune, after step 7. `attest --prune` refuses, before signing anything, a
+  run not yet published where a publish repository is configured with `rebuilt_artifacts =
+  "github-release"` and a publication would upload its artifact — one the gate withholds now
+  included, since a confirmation can release it — and prunes as it always did an exact rebuild, a
+  void run, the second of an agreeing pair whose first is published, and anything anywhere else.
+- **`trigon serve`** reports the repository's kill-switch beside `--stop-divergences`
+  (`publish/switch.rs`, injected into `trigon-api` as the decompiler is): read with `git ls-tree`
+  from the commit the working clone's last fetch that succeeded brought the branch to, as of when
+  that fetch began, both of which `publish` records in the clone's git directory
+  (`trigon-fetched`) only once a fetch succeeds; from the branch itself for a working tree
+  published into. Set wherever git lists anything named `kill-switch`, as `publish` counts it;
+  clear only where it lists nothing; and `unknown`, never clear, with no clone, no record of a
+  fetch, or a tree git cannot read. `serve` reads it on starting and every ten seconds after, on a
+  blocking thread, and hands every request the last reading (`trigon_api::cached_switch`).
+  `/v1/health` and the page's boot island carry `kill_switches`, each with what it stops; an
+  anonymous reader is told the state and when, not the repository or the clone's path. The header
+  shows both. `serve` now prints the address it bound, so `--bind 127.0.0.1:0` says which port.
+- **The spike** is `scripts/evidence-spike.sh`: with `TRIGON_LIVE=1`, against a scratch repository
+  its user names, it grows synthetic records shaped as §7 sizes them to each of 10⁴ and 10⁵,
+  timing each growth push, the consumer's partial shallow sparse clone at each size, and that
+  clone's fetch after a publication-sized push at that size; times further publication-sized
+  pushes of a few hundred files, paced under GitHub's six pushes a minute, with the largest
+  clone's fetch after each; makes unauthenticated git reads of the public URL above GitHub's
+  advice of about 15 a second — `ls-remote`s and shallow blobless fetches into empty repositories —
+  and records what each answered; uploads small assets and one large one to a release and times
+  listing them, and with `--probe-asset-limit` tries a 1,001st; and records the repository's size
+  and the API's rate limits. Before anything is pushed it refuses a push or clone URL that does
+  not name the repository, a branch other than `main`, a release it did not make, and a `main`
+  holding anything but its own `SPIKE.md`, `keys/`, `log/`, `records/` and `index/`. It never
+  force-pushes or deletes, and keeps its token off every command line. Its record
+  generator was run offline (8 KB records, 200-byte index files, bundles and tiles in tlog-tiles
+  paths); **the spike itself has not been run**: it needs a GitHub repository this environment
+  must not create. Its results belong here, and in D2, when it is.
+
+**Decided here, and why.**
+
+- **`keys/` stays the keys the chain starts at.** Every client pins them, and follows each change
+  from them; rewriting `keys/attestation.pub` on a key change would have `publish`'s own
+  verification refuse every record signed before it, and rewriting `keys/log.vkey` on a succession
+  would start its chain at the successor and hide the old log's records from the supersession
+  check. The README, regenerated from the log, names the keys after each rotation.
+- **The final checkpoint carries the successor's cosignature in the old log's `checkpoint` file
+  too.** It makes the continuation reproducible from what was published, which is what lets a
+  succession into another repository be finished after a stop between its two pushes without the
+  old key signing anything twice; a reader of the old log ignores the second line, as it ignores a
+  witness's.
+- **The processes that push hold no key.** `publish` never opened the log key; now neither
+  `log succeed`, which asks `log public-key` for the successor's verifier key, nor `log key-change`,
+  which has a socketless child sign the leaf with both attestation keys. Only `attest`,
+  `key-change-leaf` and `log sign` open a key, and none of them opens a socket.
+- **An asset is found across two months of releases, not every release.** A retry is minutes
+  after the attempt it retries; a duplicate asset in a later month's release is harmless, since no
+  record names a release, and listing every release's every asset on every publication would grow
+  without bound.
+- **A token is required whenever the mode is on and runs are published**, even when every run named
+  turns out to be void: the refusal is before anything is read, which is where a missing credential
+  is cheapest to hear about.
+- **An exact rebuild is not uploaded.** Its bytes are the published artifact's, which docs/19 §4.1
+  says is not ours to redistribute and which every reader of the record already holds.
+
+**What this does not do.**
+
+- **Run the spike.** Above; `docs/19`'s status table says so too.
+- **Notify anyone of a divergence.** The feed is published; safeguard 4 becomes "published at
+  publish time", as D7 proposes, and D29 says what that is and is not.
+- **See across repositories.** A successor in another repository is published into on its own
+  chain, so a verdict for an artifact with a current record in the old repository is not refused
+  there as a second current record (D31); following a chain across repositories is phase 6's.
+- **Run a live test against GitHub in CI.** `live_an_asset_is_uploaded_to_github_and_reused` runs
+  only with `TRIGON_LIVE=1` and `TRIGON_LIVE_GITHUB_REPO`, and skips otherwise; every other test of
+  the release path speaks to a server on `127.0.0.1:0` that serves the five endpoints used, and to
+  a git repository reached by a GitHub URL through `url.<local>.insteadOf`, with
+  `GIT_ALLOW_PROTOCOL=file` so that nothing could reach the network if the rewrite failed.
+
+**Found on the way.**
+
+- **A test world inherited the developer's GitHub token.** `World::command` removed every
+  `TRIGON_*` and nothing else, so a `GITHUB_TOKEN` in the shell running the tests would have reached
+  a publish with no `TRIGON_GITHUB_API` — `api.github.com`. It removes `GITHUB_TOKEN` and `GH_TOKEN`
+  now, and every test git is let reach files only.
+- **An operator's mistake read as the evidence source's fault.** A key-change signed with one key
+  twice surfaced as a `LogError`, which the fault report labels "the evidence source's: its log
+  could not be read". The child says what it is, in the operator's words, and so does `succeed` of
+  a `--dir` no log-end can name.
+- **`serve` printed the address it was asked for**, `127.0.0.1:0`, not the one it bound.
+
+**Found in review, and fixed.**
+
+- **`serve` stamped an old switch with a new time.** The report was as of `FETCH_HEAD`'s time, and
+  a fetch that fails rewrites `FETCH_HEAD` too: with the remote unreachable and a daily heartbeat
+  failing, a switch set meanwhile read "clear, as of today". The time and the commit are now
+  recorded by `publish` only after a fetch succeeds.
+- **"Clear" meant "git said no".** `cat-file -e` failing for any reason — a spawn that failed, an
+  unreadable object, a `kill-switch` committed as a submodule entry whose commit the clone does not
+  hold, which `publish` counts as set — read as clear. It is `ls-tree` now, and only an empty
+  listing is clear.
+- **Every request forked `git`.** `/v1/health` and every page read the switch on the request path,
+  four `git` processes blocking a runtime worker, for anonymous readers too. Read on a timer now.
+- **A log could be ended naming a place no successor could be begun.** `log succeed --url` pushed
+  the log-end before looking at the URL; naming the evidence repository itself, or any repository
+  with a log, ended the log for good with nowhere to go, and every later `log succeed` refused the
+  same way. Looked at first now, with nothing written on a refusal.
+- **A succession elsewhere cleared the kill-switch.** The successor's first commit carried no
+  `kill-switch`, so switching `[publish] repo` to it published divergences again although nobody
+  had cleared safeguard 5. It is carried over now.
+- **A run completed after a succession was completed against the wrong log.** Its leaf was looked
+  for in the last log's history under the last log's key; it is looked for in the log of the chain
+  that holds it, which `published.log` now names.
+- **An asset was reused on its size alone where GitHub reported no digest**, and a failed release
+  creation could fall back on a draft of the same tag, uploading into a release the public cannot
+  see. The first is uploaded again, and the second refused.
+- **`log key-change --dry-run` signed the leaf with both keys and printed it**, though its help said
+  it signs nothing; a preview left in a CI log was a hand-over anyone holding the log key could
+  append.
+- **`attest --prune` refused for ever** a run no publication would upload an artifact for, such as
+  the second of an agreeing pair whose first is published.
+- **Nothing tested the checks the release path's security rests on**: the kill-switch stopping a
+  divergence the feed would publish, an asset of the artifact's name that is not the artifact, one
+  left unfinished, an upload URL on another host, a server quoting the token back, and the API
+  base's own rules. Each has a test now that fails when the check is removed.
+- **The spike measured less than it said, and guarded less.** The fetch was timed at the largest
+  size only, git reads were not probed at all, and the guard took any repository with a `SPIKE.md`
+  and never checked that the repository the API wrote releases to was the one it had read.
+
+### 3.102 `trigon evidence`: sources, their clones and state, and verification on sync
+
+`docs/19` §10 phase 6, first half, on 2026-09-28, with two things phase 5b left: pruning that
+counts who else names a blob, and `publish` reading a chain across repositories. The commands that
+answer from the clones — `lookup`, a `check` against evidence repositories, `verify-attestation
+--lookup`, `--remote` and `serve`'s record view — are the second half.
+
+**What changed.**
+
+- **`trigon evidence add <name> <url>… --log-key <vkey> --attestation-key <key> [--checkpoint
+  <file>] [--required] [--trust-on-first-use]`** writes a `[[source]]` into the user's
+  `evidence.toml`, or the file `TRIGON_EVIDENCE_CONFIG` names, made where it is not there, with
+  `toml_edit`, so every comment and the order of everything already there is kept
+  (`trigon_attest::config::add_source`). `toml_edit` was already in both builds' trees through
+  `toml`; it is a workspace dependency now, resolved offline from the local registry, and adds no
+  crate to either tree. The file as it would be is loaded under every rule — the environment's and
+  the project's sources included — before it is written, whole, by rename, keeping its
+  permissions. A relative path is taken from the working directory and written absolute; the
+  checkpoint must open under the log key; a name any source has, in any case, is refused, as is a
+  source that pins neither key without `--trust-on-first-use`, and one that pins both with it.
+  **`evidence remove <name>`** takes a source out of the user's file the same way, with its clones
+  and its state, and refuses one a project's file or `TRIGON_EVIDENCE_REPO` added, saying whose it
+  is to remove.
+- **`trigon evidence sync [--source <name>]… [--full-history] [--accept-state-loss <name>]…`**
+  (`crates/trigon/src/evidence/sync.rs`), every source on a thread of its own. Each location has a
+  clone at `<cache>/<name>/<sha256 of the location>/`: `git clone --depth 1 --filter=blob:none
+  --sparse --no-checkout`, then `sparse-checkout set keys log records`, for a remote, and a full
+  clone for a local path, which `-v` says; a sync is `git fetch --depth 1 origin <branch>` and
+  `reset --hard FETCH_HEAD`, then `clean`, never a pull. `git` is `publish`'s own
+  (`crate::publish::git`, now shared): never prompting, ssh in batch mode, no repository above the
+  clone, nothing of a credential on argv or in what is printed. Each clone is verified by itself
+  with the phase 4 code, a successor in another repository is cloned from the URLs its log-end
+  names and followed there (`log::verify_continuation`), every location is held to every other
+  (`log::compare_chains`, `same_log`), the largest answers, and the whole chain is held to the
+  checkpoint in `<state>/<name>/checkpoint` (`log::check_accepted`, `VerifiedLog::extends`,
+  `evidence::Repository::chain`). Only then are `keys`, `checkpoint` and `sync` written
+  (`trigon_attest::state`), each by rename. A refused sync puts back every clone it moved, removes
+  every one it made, records the refusal, and exits 4 with both signed notes; a source not reached
+  is recorded as failed and answers from its clone until it is stale. `--full-history` keeps each
+  clone's history and says when a fetch is not a fast-forward.
+- **A chain across repositories** (`evidence::Repository`) is now a list of repositories, each log
+  of the chain read from the one that holds it: records, evidence, lookup and `verify_record` read a
+  leaf's files from its own repository, and `read_evidence_checked` takes the record's leaf to know
+  which. `Repository::open` is as it was for one repository; `Repository::chain` puts parts
+  together, refuses a part its predecessor does not name or an origin twice, and holds the
+  checkpoint last accepted to whichever log of the whole chain it is of.
+- **The key history is kept** in `<state>/<name>/keys`: the log key and attestation key the chain
+  starts at, every log of the chain with its key, every attestation key with the leaves that made
+  and retired it, and for a source trusting on first use where and when its keys were read. Each
+  sync recomputes it from the log, writes the log's, and reports where the one kept disagreed — a
+  history the log has only gone on from is not a disagreement; one the log no longer holds is.
+- **Trust on first use.** A source that pins a key only under trust on first use reads it from
+  `keys/` of the first location reached on its first sync, and is held to it ever after. Every
+  answer says so: `evidence sync`, `evidence list`, the standing phase 6b reads, and
+  `verify-attestation --record --source`, which reads the recorded keys (`config::pins`,
+  `Pins::first_use`) instead of refusing the source as phase 4b did. Offline, a clone's own `keys/`
+  is never read as a key.
+- **A lost state is refused, not remade.** A source with a clone a sync accepted, or a record of a
+  sync that worked, whose checkpoint — or whose keys trusted on first use — is gone is refused until
+  `--accept-state-loss <name>`, which starts it over as a first sync. A new clone carries a marker
+  in its git directory until the state is written, so a sync killed before that leaves no clone
+  that reads as a sync that happened.
+- **Freshness** (`trigon_attest::evidence::Standing`, `Said`, `exit_code`): fresh; usable from the
+  clone after a failed sync until `stale_after`; unknown when stale or never synced; frozen when the
+  newest leaf is older than `frozen_after` or there is none; refused. `exit_code` is §6's
+  aggregation: the most severe answer that is not unknown, never checked only where no source that
+  answered holds a record, an unknown source 4 only where required, a refused one 4 always, none
+  able to answer 4, none configured 5. `crate::evidence::ready` is the typed value phase 6b
+  consumes: every source asked, a stale one synced first and said to be, each opened from its
+  clones with the same verification, with its standing, the file that added it and the keys it
+  rests on. `evidence list` reads it offline; `publish` reads it syncing.
+- **`publish` reads the whole chain** (the second carry-over). Where the repository's first log
+  continues a log in another repository, step 2 asks a configured source whose chain reaches that
+  log, syncs it where it is stale, follows this repository's first log from it, and asks every
+  refusal of the whole chain: a verdict for an artifact with a current record in the old repository
+  is refused as a second current record, a withdrawal may be of a record logged there, and a run
+  logged there is refused as published. Where no source reaches it, runs and withdrawals are
+  refused, saying which to add. D31 is gone from the threat model.
+- **Pruning counts who names a blob** (the first carry-over). `Store::prune_rebuild` deletes the
+  rebuilt artifact's blob only where no other run's record names it as kept, as a published or a
+  rebuilt artifact, and otherwise drops only this run's reference (`Pruned::Shared`); a record that
+  cannot be read refuses the prune. `Store::artifact` and `Store::kept` read by a record's word and
+  report bytes a record says are kept and the store has lost as `StoreError::Missing`, which the
+  attestor, `rederive`, `serve`'s member routes and run rows, and `watch`'s run page now use.
+- **Threat model**: P39–P42 and D32–D34; the side effects of the cache, the state directory and
+  `evidence.toml`; the repositories a sync clones, and keys trusted on first use, in the trust
+  table; D31 removed; the sidecar regenerated.
+
+**Decided here, and why.**
+
+- **Clones are verified where they are, and put back on a refusal**, rather than checked out into a
+  second tree first: the objects are in the clone either way, and `reset --hard <previous>` restores
+  what was accepted. A command that reads a clone verifies it against the state every time, so one
+  a kill left ahead of the state is still held to it.
+- **Every clone's `.git/info/attributes` unsets every attribute that changes bytes.** Measured: a
+  `.gitattributes` of `* text eol=crlf` in the repository makes a sparse checkout write
+  `log/checkpoint` with CRLF endings, and the signature then fails, blaming the source for what git
+  did on the client. `publish` refuses a branch naming attributes; a reader cannot refuse what it
+  reads, so it reads the blobs.
+- **Mirrors are verified without the accepted checkpoint, then held to one another, and only the
+  largest to the accepted one.** A mirror behind what was accepted, and a prefix of the largest, is
+  lagging and not a rollback; the largest behind it is a rollback.
+- **A location that fails verification refuses the whole source**, while one that cannot be reached
+  is reported and passed over: a mirror disagreeing is exactly the split view mirrors exist to
+  catch, and answering past it would hide it.
+- **A log with no leaf is frozen.** Its checkpoint of size 0 is the oldest consistent state there
+  is, which a host can serve for ever; §6's frozen clock exists for exactly that.
+- **`evidence sync` exits 0 or 4.** Any source not synced — refused, or not reached — is 4, and the
+  report says what each still answers from; bad arguments and configuration are 5.
+- **The state is written keys, then checkpoint, then the record of the sync**, so a sync stopped
+  between them is stale sooner, never fresher than what it accepted, and a key history ahead of the
+  checkpoint is the log's anyway.
+- **Syncs of one source take turns on a lock in its state directory, and wait**; a read takes it
+  shared, and makes no state directory where there is none.
+- **`publish` finds the chain through configured sources**, not through the host's own memory: the
+  log-continuation names no location for the log it continues, and configuration travels with a CI
+  job where the host's state directory may not. The refusal names the command that fixes it.
+- **`evidence list` verifies the clones, offline.** A standing read from the sync record alone
+  would call a clone rolled back on disk fresh.
+
+**What this does not do.**
+
+- **Phase 6b**: `lookup`, `check` against evidence repositories, `verify-attestation --lookup`,
+  `--remote`, the lockfile parser keeping integrity digests, and `serve`'s record view.
+- **The record form across repositories.** `verify-attestation --record --source` reads the
+  directory `--evidence` names and still answers unknown where the log continues in a repository
+  it does not hold; it does not look for the successor's clone in the cache.
+- **Sync over the network in a test.** Every sync test reaches a local bare repository, by a
+  `file://` URL, a path, or an HTTPS URL `url.<local>.insteadOf` rewrites, with
+  `GIT_ALLOW_PROTOCOL=file`.
+- **Remove a clone of a location no longer configured.** It stays in the cache, unread.
+
+**Found on the way.**
+
+- **Pruning one of an agreeing pair deleted the other's bytes.** The pair phase 3 builds rebuilds
+  byte-identical artifacts, which the store keeps as one blob, and `prune_rebuild` deleted it by
+  digest; the second run's record went on saying `stored: true`, and attesting it failed with an
+  object-store "not found". `publish.rs`'s own prune test pruned exactly that pair and asserted
+  success.
+- **A test world could write the developer's cache.** `publish.rs`'s `World` set `XDG_STATE_HOME`
+  and not `XDG_CACHE_HOME`, which a sync through a source now reaches; it sets both.
+
+**What review found in it.** Twenty-one findings, of sixteen defects — several found more than
+once: thirteen in the code, one in the documents, and two tests that could not see what they were
+named for. Each code defect now has a test that fails without its fix.
+
+- **A repository's default branch reached `git fetch` as a bare word.** A clone takes its branch
+  from the remote's `HEAD`, and `git fetch … origin <branch>` parses options after the remote, so a
+  branch named `--upload-pack=touch${IFS}$HOME/ran;git-upload-pack` — which `update-ref` and
+  `symbolic-ref` both accept — ran the command on every sync after the first, before anything was
+  verified; reproduced with git 2.43. The branch is refused unless `git check-ref-format --branch`
+  accepts it, which no name beginning with a dash passes, and is fetched as `refs/heads/<branch>`
+  after `--` (`a_branch_named_as_an_option_is_never_fetched`).
+- **A clone left marked by a stopped first sync stayed marked for good.** The marker came off only a
+  clone the sync made; one it fetched into kept it, so every later sync reported success while
+  every offline read called the location never synced and the source answered unknown, and the
+  marker hid a later loss of the state. §3.102 said a sync killed before its state was written left
+  no clone that read as a sync that happened; it left one that read as none ever would. A marked
+  clone is made again now, never fetched into — its contents were never accepted — and a clone is
+  made beside where it goes under a name beginning with a dot, marked, and only then moved into
+  place, so a kill while `git clone` runs no longer leaves an unmarked clone that reads as an
+  accepted one and refuses a source that never synced
+  (`a_sync_stopped_before_it_was_accepted_is_made_again_and_a_later_loss_refused`).
+- **`--accept-state-loss` threw away what survived.** Losing only the checkpoint of a source
+  trusting on first use dropped the keys it first read too, and `keys/` was read again from whatever
+  the repository served: a log under keys swapped in by a thief of the push credential alone, which
+  the recorded keys refused, was accepted once the user acknowledged a lost checkpoint. Losing only
+  the keys dropped the checkpoint that would have caught the swap. Only what is lost starts over
+  now, the refusal says what accepting will do, and `verify-attestation --record --source` refuses a
+  source that has synced before and lost its checkpoint, as the sync does, rather than checking the
+  log against nothing (`accepting_a_lost_state_keeps_what_survives_of_it`).
+- **`publish` into a successor elsewhere read the chain from partway** through a source pinned at a
+  later log's key — a successor's, in place or elsewhere — so a current record in a log before it
+  was missed and a second current record published. A source whose chain begins by continuing a log
+  is passed over, saying it must be pinned to the chain's first log key. The same test holds two
+  more: a source synced before the log it reaches ended, the usual order right after `log succeed
+  --url`, was fresh, so not synced, and `publish` refused with advice to add it; every source not
+  just synced is now synced again before a refusal. And `--dry-run` synced sources, writing their
+  clones and state; it reads each from its clone as it is
+  (`publishing_into_a_successor_elsewhere_reads_the_chain_from_its_first_log`).
+- **A project's source could be led anywhere by its own log-end.** The rule that a project's file
+  names HTTPS URLs only did not reach the successor a log-end names, which the project's own key
+  signs, so a pull request could have CI clone an `ssh://` or scp-form location with the runner's
+  identity, or fetch in plain text. A successor at any location but HTTPS is refused for a source a
+  project's file added (`a_projects_source_follows_its_successor_over_https_only`).
+- **Pruning asked who named a blob and deleted it with nothing between.** A confirming attempt that
+  rebuilt the same bytes and wrote its record in that gap lost them, which is the loss the first
+  carry-over was to prevent. The prune now holds `<store>/blobs.lock` alone, with `flock`, from the
+  question to the delete, and `record_run` holds it shared from before its first `put` until its
+  record is written (`a_prune_waits_for_a_writer_naming_the_bytes_and_keeps_them`, which lets the
+  prune try for 300 ms while a writer holds the lock, and fails without it).
+- **A sync whose record could not be written put its clones back behind the checkpoint it had just
+  written**, so every later read refused the source as a rollback of its own state, with exit 4.
+  Once the checkpoint is written the clones are kept; a record that cannot be written is said, and
+  the source is stale sooner, never later
+  (`a_sync_whose_record_cannot_be_written_keeps_the_clones_it_accepted`).
+- **One unreadable state file failed every source.** `ready` and `evidence list` stopped at the
+  first state file they could not read, so `list`, `publish`'s chain and phase 6b's commands failed
+  outright. That source answers unknown now, saying why, and the others answer
+  (`a_source_whose_state_cannot_be_read_is_unknown_and_the_others_answer`).
+- **`evidence add` and `remove` replaced a symlinked `evidence.toml` with a file**, leaving the file
+  a dotfiles manager keeps unchanged. The file is written beside where the link leads, the link
+  kept, and a link to a file not yet made makes it there
+  (`a_source_is_added_to_the_file_a_link_leads_to_and_the_link_is_kept`).
+- **The documents told CI to keep the cache and not said to keep the state beside it.** A cache
+  restored without the state is a lost state, refused until `--accept-state-loss`; `using-trigon.md`
+  and `docs/19` §6 say to keep both in one cache step.
+- **Two tests saw less than their names.** The attributes protection was checked by reading the
+  file it writes, and no test committed a `.gitattributes`: a tree with `* text eol=crlf ident` is
+  now cloned from a `file://` URL and a path, and fetched into clones made before it, and every
+  checkout is the blob byte for byte (`a_repositorys_own_attributes_never_change_what_is_verified`).
+  And the lost-state test removed only the checkpoint, so its detection by the last sync's record
+  hid the other path, a clone kept; the whole state directory is removed now, clones kept, and a
+  marked clone planted with no state is a first sync, not a refusal.
+
+**Decided in review, and why.**
+
+- **A marked clone is made again, not unmarked.** Its files were never accepted, and fetching into
+  it would carry forward whatever a killed sync, or whoever writes the cache, left there; a clone is
+  the cheap part of a sync.
+- **The branch is checked by `git check-ref-format --branch`**, which takes the argument after it
+  as the name whatever it begins with, so the rule is `git`'s own on every version; `--` and the
+  whole ref are there as well, so one check missed is not a command run.
+- **What survives a lost state is kept, and the loss is still refused until acknowledged.** Keys
+  first read are a source's only pin, and a checkpoint is what keys read again must open; neither
+  is worth less for the other having gone.
+- **Where no source serves the chain, every source not just synced is synced again**, not only one
+  whose last sync reached the log continued: that last sync may be from before the log went on. It
+  costs a fetch per source, once, on a publication that would otherwise be refused.
+- **The store's lock is `flock` on a file in the store**, through `rustix`, since `trigon-store`
+  has no unsafe code and the standard library's `File::lock` is newer than the declared MSRV;
+  `rustix` was in the tree already, with `fs`, through `tar`. Writers share the lock and never
+  wait on one another, and a store in memory has a lock of its own. Waiting blocks the thread,
+  which in `record_run` and `attest --prune` has nothing else to run.
+- **A project's successor at another transport is refused, not skipped.** A log-end naming a
+  location the project may not is the project's own signed statement, and answering past it would
+  hide it.
+
+**Left for the owner.** Whether a cache restored without its state should count as a fresh client,
+held only to its configured checkpoint as §8 describes a fresh CI runner, rather than as a state
+lost. Phase 6a's brief says a source whose clone exists and whose state is missing is reported, not
+silently recreated, and that is what is built; the documents now say to keep the two together.
+
+### 3.103 `trigon lookup`, `trigon check` against evidence sources, the falsifying command, and `--remote`
+
+`docs/19` §10 phase 6, second half, on 2026-09-28: the commands that answer from the clones phase 6a
+keeps, the lockfile parser keeping what a lockfile pins, `--remote`, `serve`'s view of a published
+record, and the phase's done-when.
+
+**What changed.**
+
+- **`trigon lookup <key> [--source <name>]… [--offline | --remote] [--output text|json]`**
+  (`crates/trigon/src/evidence/lookup.rs`). The key is npm's `integrity` string, `sha256:`,
+  `sha512:` or `sha1:` with hex, a purl with or without its version, or a file, whose three digests
+  are computed. Every source is made ready once by `evidence::ready` — a stale one synced first and
+  said to be — and the key resolved over its verified leaves (`Repository::lookup`), never `index/`.
+  Each source answers for itself, labelled with its name, the file that added it, the keys it rests
+  on and the checkpoint it answered from; every record is printed with the §4.2 fields as signed; a
+  superseded one is struck through (`~~…~~` without colour) with the record that superseded it, both
+  leaves and the reason; a deleted one says so without its leaf's outcome; a failed one says why; a
+  record found by sha1 alone says sha1 is collision-broken; sources whose claims differ are said to
+  disagree, and neither is taken over the other. §6's exit code, from `evidence::exit_code`.
+- **`trigon check <lockfile>`** answers from the evidence sources (`evidence/check.rs`); `--store
+  <path>` is the old check, and none of the new flags go with it. One `askers` call makes every
+  source ready before the first package, so a lockfile costs one sync and no request per package.
+  Each package is looked up by every digest its lockfile declares that a record is filed under —
+  sha512, then sha256, then sha1 — and by its purl only where no digest found a record; a purl whose
+  records are all about another artifact than those digests is never checked, with the record found
+  said. A package's status is the most severe answer of the sources that answered, never checked
+  only where none of them holds a record, `unknown` where none answered, as `exit_code` weighs it.
+  `--min` is `Match::is_at_least`; `--max-risk` holds a normalized verdict to the riskiest tier its
+  `provenanceCap.maxRiskApplied` signs (`Answer::AboveMaxRisk`, exit 3,
+  `VerifiedRecord::max_risk_applied`, `Lookup::answer_under`). `--require <name>` makes a source's
+  unknown an error as `required = true` and `TRIGON_EVIDENCE_REPO` do. Text lists the most severe
+  packages first with every source's answer, falsifying command and dispute pointer; JSON and SARIF
+  carry each source's records per package. Any error before an answer is exit 5, `clap`'s refusals
+  included (`exits_as_section_6`).
+- **The lockfile parser** (`trigon_core::lockfile`) keeps what a lockfile pins: `Package::digests`,
+  each a `DeclaredDigest` in hex — npm's `integrity`, every hash in it, in v1 and v2/v3 lockfiles;
+  every `--hash` of a requirement; an SBOM's `checksums` — and npm's `resolved`. Requirements are
+  read as pip reads them: a line ending in `\` goes on in the next, a comment begins at a `#` after
+  whitespace, and the words up to the first beginning with `-` are the requirement, the rest its
+  options. `flask==3.0.0 --hash=sha256:…` used to parse as version `3.0.0 --hash=sha256:…`, and a
+  pin pip-compile continues onto hash lines as version `8.1.7 \`. The SPDX reader keeps every
+  package, whatever its ecosystem and whether it has a purl.
+- **`verify-attestation --lookup sha256:<subject> [--predicate] [--origin] [--rerun-comparison
+  --upstream <file> [--rebuild <file>]]`** (`evidence/rerun.rs`), the form of every verdict's
+  falsifying command. It resolves the current record only in a source whose chain holds a log of
+  `--origin` — none is exit 4 — through the log and its supersessions, reads each evidence file the
+  record names from the clone's working tree or its objects (`git cat-file` at `HEAD`, which fetches
+  a blob a partial clone does not hold from its remote, and the report says so), and takes the
+  rebuilt artifact from `--rebuild`, or, under `rebuilt_artifacts = "github-release"` with none
+  given, from the release asset `sha256-<hex>` of the source's GitHub repository, listed and
+  downloaded without a token and held to the verdict's digest — whatever that setting says, since
+  phase 6c (*Left for the owner*, below). It then reports as `--record` does:
+  `verify_record::report`, which now takes a borrowed `Reading` and an evidence reader, and returns
+  the report for printing. In the verifier build `--lookup` is refused, exit 5, since it fetches.
+- **`verify-attestation --record <file> --source <name>`** without `--evidence` reads the source's
+  clones, in either build: the code that opens a source's clones moved from `evidence/sync.rs` to
+  `crates/trigon/src/clones.rs`, which both builds compile, and its check that a clone is one a sync
+  accepted no longer runs `git`. A record logged in a successor elsewhere is checked where it is
+  logged, and a source that is stale or frozen answers unknown for the artifact now.
+- **`--remote`** (`evidence/remote.rs`) reads
+  `https://raw.githubusercontent.com/<owner>/<repo>/HEAD/`, or `TRIGON_EVIDENCE_RAW_BASE` (HTTPS, or
+  loopback): the checkpoint under the pinned key, held to the one last accepted by
+  `verify_extension_from_tiles`; the last leaf, proven, for the frozen clock and a log-end; each
+  successor on github.com; the index file for each key; each record; and each leaf proven by
+  `prove_inclusion_from_tiles` and held to the record by `check_record`, with the key history the
+  last sync recorded (`KeysFile::history`, `KeyHistory::from_epochs`) and its evidence unchecked. An
+  entry it cannot prove fails verification; one proven to be another key's is not answered. It
+  prints the three caveats of §6, and refuses a source with no github.com HTTPS URL, exit 5.
+  `Lookup::resolve` is public for it.
+- **`trigon serve`**: `GET /v1/runs/{id}` and the run page's boot island carry `published` —
+  repository, commit, record digest and path, leaf and log — from `RunRecord.published`, and the run
+  page shows it as a panel. `GET /v1/artifacts/{alg}:{digest}` matches the digest of the algorithm
+  asked for, `sha256`, `sha512` or `sha1`, a bare digest by its length, over every run
+  (`Index::for_artifact`); it discarded the algorithm and compared whatever hex it was given with
+  the sha256, over the newest 500 rows, so an npm lockfile's sha512 matched nothing and an older run
+  read as never checked.
+- **`evidence sync`** removes, from the cache only, the clone of every location a source no longer
+  names — none of its URLs and no successor its chain reaches — and says which location each was.
+- **Threat model**: P43–P45, D35–D36; D32 and D34 extended to `lookup` and `check`; the side effects
+  of a sync by `lookup` and `check`, the evidence fetched on demand, `--remote`'s requests and the
+  anonymous release listing; `lookup`, `check`, `--remote` and `--lookup` in the trust table and the
+  matrix; the scope and the conditions updated; the sidecar regenerated.
+
+**Decided here, and why.**
+
+- **Digest first, and a purl for another artifact is no answer.** A lockfile's integrity names the
+  artifact it installs, and a record is about an artifact: a record found by purl about other bytes
+  says nothing about the ones pinned, and reporting its verdict would pass a swapped tarball.
+- **An exact verdict meets any `--max-risk`.** Its raw digests matched, so no transform was needed,
+  though its statement still signs the passes that ran — which is what the test found (below).
+  `docs/05` §1 names `Exact` and `Normalized` with `risk <= Structural` as separate demands.
+- **`--remote` reads the key history the last sync recorded**, since it holds no leaves to follow a
+  key change through, where that history starts at the keys pinned now; with no state, or a pin
+  changed since, only the pinned key, and a record under a key changed since fails verification, as
+  the report and D36 say. The chain is followed through log-ends by proving each log's last leaf,
+  and each successor's first leaf is held to be its log-continuation, so a succession is not
+  missed, nor followed into a log not bound to it; one into a repository not on github.com answers
+  unknown rather than past it.
+- **Two sources of one origin and one log key are one log configured twice**: `--lookup` checks a
+  record found in both once, and looks for its release asset in the GitHub repository that holds
+  its leaf. Two of one origin and different keys are not one log (below).
+- **A consumer's `[publish] rebuilt_artifacts` says whether assets are fetched.** It is D4's
+  setting, and the only one there is; a per-source setting would be the finer answer (below).
+  Undone in phase 6c: no setting says it, and the record and its source decide (below).
+- **`check` reads nothing a lockfile names**: `resolved` is kept and shown, never followed.
+
+**What this does not do.**
+
+- **The phase 5 spike** is still not run: it needs a scratch repository of the owner's naming.
+- **`--remote` over GitHub itself** is not tested, per the rule that no test touches the network;
+  every `--remote` test reads a published repository's working tree from a server on `127.0.0.1:0`,
+  and the release-asset test lists and downloads from one too.
+- **The standalone client** (phase 9) waits on D3.
+
+**Found on the way.**
+
+- **Phase 6a's partial clones were not partial in its tests.** A `file://` remote refuses `--filter`
+  unless `uploadpack.allowFilter` is set, and says so only as a warning, so every test clone held
+  `evidence/` in its objects and the on-demand fetch had never run. The falsifying-command test now
+  serves filters as GitHub does, and asserts the fetch happens and is said.
+- **`git cat-file --batch-check` with lazy fetching off dies** at the first missing blob of a
+  partial clone — `fatal: could not fetch … from promisor remote` — instead of printing `missing`,
+  so asking whether a blob is held reported every evidence file unreadable. It is asked per blob
+  with `git cat-file -e`, whose exit answers (`git::blobs_held`).
+- **A package's status let one source's never checked outweigh another's verdict**: `most_severe`
+  over every answer ranks never checked (2) above a pass (0). It is weighed as `exit_code` weighs it
+  now (`lookup::weighed`); the two-source test caught it.
+- **An exact verdict signs `maxRiskApplied`** of the passes that ran, `metadata` in the fixtures, so
+  a first `--max-risk structural` read every exact verdict as above the cap.
+- **A wrong rebuilt file is not a refutation**: re-deriving from bytes that are not the artifact the
+  verdict names is a check not made, exit 5, as the record form already said; the test holds the
+  lookup form to it, and refutes the published comparison report instead, altered in a later commit,
+  which the fetched evidence fails at its digest, exit 4.
+- **`lookup` and `check` exited 1 for an error before an answer**, `anyhow`'s default; §6 gives the
+  tool failing 5, and a CI job that treats 1 as a divergence would read a mistyped source as one.
+
+**Left for the owner.**
+
+- **Whether `rebuilt_artifacts` should also be a per-source setting.** A consumer reads the one
+  `[publish]` setting to decide whether `--lookup` fetches a release asset, which fits a consumer
+  who also publishes and asks one repository; one asking another operator's repository would want
+  the setting of that source. **Settled by the lead on 2026-09-28, and built as `docs/19` §10
+  phase 6c: neither.** What a consumer's host publishes says nothing of what the source it checks
+  publishes, so `--lookup` reads no setting for it, and `[publish] rebuilt_artifacts` governs only
+  what `publish` uploads. With `--rebuild <file>` nothing is fetched. Without it, for a verdict
+  that signs its rebuilt artifact and is not exact, the release asset `sha256-<hex>` is looked for
+  through GitHub's API without a token in the `rebuilt-YYYY-MM` releases of the repository that
+  holds the record in the source it was resolved in, by any location of it on github.com, HTTPS or
+  SSH, and then in those of every other source that holds the record, but never one a project's
+  `.trigon/evidence.toml` added where the record was resolved in the user's own; only in the series
+  of the month the record was logged in and the months either side, where `publish` puts it, and
+  in no other release, which holds nothing a record names and was listed before. Only an upload
+  GitHub finished is taken, and one release's failed download goes on to the next. It is
+  downloaded into a new `0600` file in a `0700` directory named by 128 random bits (it was named by
+  the process id and the clock), held to the signed digest as it is written, and said to have named
+  the artifact to GitHub however the download ended. Other bytes in the resolving source's
+  repository are the evidence failing, exit 4; in another source's they are that repository's, and
+  the next is asked. An exact verdict, whose rebuilt artifact is the upstream artifact and is never
+  uploaded, asks GitHub nothing, and neither does a record no repository of which is on github.com;
+  there, where no repository asked holds the asset, where GitHub refuses or cannot be reached, or
+  where the verdict signs no rebuilt artifact, the check is not made, exit 5, asking for `--rebuild
+  <file>` and guessing at nothing: the last three were exit 4, which blamed the evidence for GitHub
+  being down or the asset never having been published. Plain HTTP is followed only to loopback,
+  and only where `TRIGON_GITHUB_API` is there; it was followed anywhere under a loopback API. Held
+  by `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone` — each case under the
+  consumer's setting unset, `"none"` and `"github-release"` —
+  `the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`,
+  `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`, which refuses and fails the
+  listings and the download under each setting,
+  `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`,
+  `an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`, and
+  `rerun::tests`. Phase 6c's review, below, found what the first cut of it missed.
+- **Whether an exact verdict's falsifying command should take `--upstream` as its rebuilt
+  artifact.** An exact verdict signs a rebuilt artifact whose sha256 is the subject's, so the
+  upstream file the command is given, which is held to the subject, is that artifact byte for byte,
+  and the signed command could run as written. It asks for `--rebuild <file>` instead, exit 5, and
+  says the upstream file is it: whether a falsifying command should re-derive a claim from one file
+  given once and used twice is a decision, not an inference, and `docs/19` §4.2 item 6 says the
+  command takes `--rebuild` where the rebuilt artifact is not published. **Changed in the test
+  coverage pass of 2026-09-28, for the owner to confirm: it takes it.** The same item promises
+  that the same signed command works either way, and for an exact verdict it never ran as signed:
+  it exited 5 every time. Without `--rebuild`, an exact verdict — by its outcome, or by the sha256
+  it signs for its rebuilt artifact being the subject's — takes the `--upstream` file as its
+  rebuilt artifact, held to the digest the verdict signs as any rebuilt artifact is, so the wrong
+  file is still a check not made, exit 5, never a refutation; GitHub is asked nothing, and
+  `--rebuild` given is used as given. `docs/19` §4.2 item 6 and §6, `docs/09`,
+  `docs/using-trigon.md`, the threat model (P45), the `--rebuild` help and `FalsifyingCommand`'s
+  doc comment say so. Held by
+  `an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`
+  (`crates/trigon/tests/lookup.rs`, which replaced
+  `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`) and
+  `rerun::tests::an_exact_verdicts_rebuilt_artifact_is_the_upstream_file_and_any_others_its_signed_asset`
+  (which replaced `an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects`).
+- **Whether `--remote` should refuse a source it cannot hold to a key history**, rather than answer
+  under the pinned key alone and say so. Built: it answers, fails any record under a changed key,
+  and says why.
+- **The release notes.** §6 has the change of what a bare `trigon check` means said in the release
+  notes; there are none yet, so it is said in the command's help and `docs/using-trigon.md`, and
+  the first release notes written carry it. The review restored §6's wording, which this phase had
+  changed to say only the help and the guide.
+
+**Review, and what it changed.** A review of this phase found these, each fixed with a test that
+fails without the fix (`crates/trigon/tests/lookup.rs` unless named):
+
+- **`--remote` called a request it could not complete an attack.** A record, entry bundle or tile
+  that could not be fetched — a timeout, a 5xx, GitHub's rate limit — failed verification, exit 4,
+  where §4.2 has a failed `--remote` lookup answer unknown; only the index file's own failure did.
+  `Remote::record` now tells what cannot be read (`LogError::fails_verification` false, as `open`
+  already did) from a proof that does not prove, and the first leaves the source unknown for that
+  question (`remote_answers_unknown_for_what_it_cannot_read_and_holds_to_the_state`).
+- **`--remote` read every file at whatever commit GitHub served then**, so an index read after a
+  publish listed a record at a leaf past the checkpoint read before it, and an honest record failed
+  verification. An entry past the checkpoint of the log still being written is now unknown for that
+  question — a race, or an altered index, which could hide the key by deleting its index file
+  anyway — and past an ended log's final checkpoint still fails. Reading every file at one commit
+  would need a request to GitHub's API, a host §6 does not name for `--remote`.
+- **`--remote` followed a log-end into its successor without its log-continuation leaf**, which
+  §6.1 and §8 require and a sync checks. The successor's first leaf is proven and held to the checks
+  `follow` makes, now shared as `log::check_continuation` and `log::successor_vkey`
+  (`remote_follows_a_succession_only_through_its_continuation`).
+- **`--remote` ignored a refused sync, and a re-pinned attestation key.** A source whose last sync
+  failed verification answered over HTTPS, and a key history recorded under a pin the user had
+  changed kept accepting records under the key pinned away from. Both are held now as a clone is.
+- **`check` merged digests that name different artifacts.** Two entries of one name and version
+  with different `integrity` — a nested copy from another registry, a substitute — were one package
+  answered by either's record (`dedupe`); they are two packages now, merged only where one's digests
+  are part of the other's. And each declared digest was looked up alone: a record found by sha1
+  whose sha512 contradicted the declared one answered for the package. A record answers now only
+  where the strongest digest the lockfile declares that the record carries is its own, as npm
+  installs by the strongest in `integrity`; a requirement's `--hash`es stay alternatives, any one of
+  which pip installs (`Package::alternatives`, `lookup::pinned_by`). A purl's record whose subject
+  carries none of the declared algorithms — a PyPI record and an SBOM's sha1 — was called another
+  artifact's; it answers now, and says it could not be compared
+  (`check_answers_for_the_artifact_the_lockfile_pins`).
+- **An SBOM's purl without a version** was looked up as every version of the package, and two
+  versions of it were one package: the version `versionInfo` gives is built into the purl
+  (`trigon_core::lockfile`), and a purl with no version at all is looked up by its digests alone.
+- **A requirements comment ending in `\`** took the next requirement into the comment, out of the
+  check; pip never continues a comment line (`trigon_core::lockfile`).
+- **SARIF filed only failing packages, and filed a package failing for a source under what the
+  other sources said** — `trigon/below-threshold`, a warning, for a package a required source's
+  silence failed with exit 4. Every package is filed now, `trigon/pass` for one that passes, and a
+  source that fails a package adds `trigon/source-refused` or `trigon/required-source-unknown`, an
+  error; `unknown` is an error too. The text and JSON name the failing source beside the answer.
+- **`--require` of a source `--source` leaves out** was checked to exist and never asked, so the
+  check passed without it; it is refused, exit 5.
+- **`verify-attestation --lookup` took any source that named the origin**, so a project's
+  `.trigon/evidence.toml` could give its own log key the origin's name and answer the falsifying
+  command beside, or instead of, the source that logged it. A project's source that gives the
+  origin to another key than the user's own sources is set aside and said to be; two of the user's
+  own that disagree are refused as ambiguous
+  (`the_falsifying_command_is_answered_in_its_origins_log_alone`). It synced every stale source,
+  not only the origin's, and it dropped every other source's answer once one held a current record
+  — a required source's silence, a withdrawal in a fresher mirror; both are weighed now, as `lookup`
+  weighs them (`the_falsifying_command_weighs_every_source_it_asks`).
+- **The rebuilt artifact was looked for in the source's own repository**, never in the successor
+  elsewhere whose publisher uploaded it; it is looked for in the repository that holds the record's
+  leaf. It was downloaded to a predictable path in the shared temporary directory and hashed after
+  it was written; it is downloaded into a `0700` directory made for it and hashed as it is written
+  (`rerun::tests`). A void asked to re-derive exited 5; it is reported as the void it is, exit 3
+  (`the_falsifying_command_across_a_succession_and_for_a_void`).
+- **`lookup` struck a superseded record through without its §4.2 fields**; they are shown, struck
+  through too, since §8 never shows an outcome without its dispute pointer and falsifying command.
+- **Of two current verdicts one above `--max-risk` and one caveated**, the order of the log decided
+  which answered, and a caveated one logged later passed the check. An answer above the cap ranks
+  above every outcome but a divergence (`crates/trigon-attest`,
+  `of_two_current_verdicts_one_above_the_risk_cap_answers_whatever_their_order`).
+- **The configuration test** covers every way a source is configured with every location form now,
+  and a check the environment's required source fails. It found that a source whose URL changed
+  since its last sync, fresh, answered unknown — no location it named had a clone — until synced by
+  hand; a command syncs such a source first now, as it does one never synced.
+
+**Phase 6c's review, and what it changed.** A review of phase 6c found these, each fixed with a
+test that fails without the fix (`crates/trigon/tests/lookup.rs`):
+
+- **An exact verdict's falsifying command asked GitHub for an asset that cannot exist.** `publish`
+  never uploads an exact verdict's rebuilt artifact (`docs/19` §4.1), and the lookup listed every
+  series release and every page of its assets on the anonymous rate limit, then exited 5 saying
+  the repository did not publish it. It asks nothing now, and says the upstream file is the
+  rebuilt artifact
+  (`an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`, first
+  `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`); whether to take it
+  without being asked was left for the owner, and the coverage pass took it (above).
+- **Every series release was searched**, each up to ten pages of assets, against the sixty requests
+  an hour GitHub allows a client with no token, so a record behind six full releases could not be
+  reached, and every lookup that found nothing spent the hour's quota. Only the series of the
+  record's month and the months either side are listed now — where `publish` puts the asset: this
+  month's, the month before's that it reuses from, and the month after's that its time, read after
+  the leaves', can have crossed into — three requests to find it past six full releases of other
+  months. An upload GitHub left unfinished under the name hid the finished copy in another release,
+  and a failed download ended the search; the first is passed over, and the second goes on to the
+  next release (`the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`).
+- **A source on github.com by SSH was not on github.com**, and exit 5 said the repository had no
+  releases, though `publish` uploads to one so configured
+  (`the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`).
+- **Only the first GitHub repository among the sources that hold the record was asked**: a mirror
+  with no releases, configured first, hid the operator's asset, and a repository a project's
+  `.trigon/evidence.toml` added was taken where the user's own was not on github.com over HTTPS,
+  so the thing under test chose which bytes a genuine verdict was held to, could fail it, exit 4,
+  and had GitHub asked where no source of the user's is on github.com. The source the record was
+  resolved in is asked first, then every other that holds it, never a project's where the user's
+  own resolved it; other bytes in another source's repository are that repository's, exit 5, not
+  the record failing (`the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`).
+- **A download that failed, or gave other bytes, did not say it had named the artifact to
+  GitHub**, which `docs/19` §7 promises whenever it does; both say so now
+  (`the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`,
+  `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`).
+- **GitHub refusing or failing, and plain HTTP off this machine, were untested.** A 403 or a 500
+  on the release listing, an asset listing or the download is exit 5 with the advice, never a
+  refutation; a redirect to plain HTTP off loopback is not followed, and such a download URL is not
+  asked, which the test shows with `0.0.0.0` — not loopback, and reaching the test's own server,
+  which would see the request (`the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`). A
+  verdict that signs no rebuilt artifact, exit 5 too, is held by `rerun::tests`
+  (`an_exact_verdicts_rebuilt_artifact_is_the_upstream_file_and_any_others_its_signed_asset`,
+  first `an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects`), since
+  `publish` signs no such verdict to test it through. `docs/19` §6 says GitHub refusing or
+  unreachable is exit 5, which it had left out.
+- **The falsifying-command test resolved its record in a source not on github.com** and held
+  another source's asset to it; it removes that source first now, as it meant to.
+
+### 3.104 Text from the package under test was template source
+
+A follow-up to 62781a8, on 2026-09-29. `crates/trigon-strategy/src/render.rs` renders every `runs`,
+`if` and `with` value of a strategy as a minijinja template, which is what lets an author write `{{
+intrinsics.publish_time }}`. The rungs that write strategies put text from the thing under test into
+those same places, so the package's text was evaluated as the template it happened to look like, and
+the package was writing part of its own build recipe.
+
+**Every path, found by reading each producer of a strategy.**
+
+- **The .NET version rung** (`with_assembly_version`,
+  [3.82](#382-version-reconstruction-build-the-assembly-with-the-version-the-feed-served)):
+  `AssemblyVersion`, `AssemblyFileVersion`, `AssemblyInformationalVersion` and the copyright, read
+  from ILSpy's decompilation of the published assembly (`decompile::assembly_attr`). ILSpy does not
+  escape braces, so a copyright is exactly what the publisher typed. Into the pack step's `with`.
+- **The yarn rung** (`without_yarn`, [3.67](#367-two-ways-to-run-yarn-and-the-code-had-neither)):
+  script bodies from the checkout's `package.json`, spliced into a `runs` template where a script
+  reaches yarn.
+- **The heuristic rungs** (`trigon-registry/src/heuristic.rs`): npm's `_nodeVersion` and
+  `_npmVersion`, the publish time, the name of the script the registry document says nothing runs;
+  PyPI's backend pin from the wheel's own `Generator:` line and `<name>!=<version>`; the Rust
+  version and the crate's name; NuGet's feed version and the feed URL built around the publish time.
+- **The CI rung** (`trigon-registry/src/ci/lower.rs`): the Python version, the project directory and
+  the npm script, all from the repository's workflow, beside the registry's versions, the publish
+  time and the backend pin.
+
+Not paths: the context (`location`, `target`, `intrinsics`, `env`) is read through variables, and a
+variable prints its value without evaluating it; a composite tool forwards `"{{ with.x }}"`, which
+is the same; a tool parameter's default is never rendered. A definitions entry, a strategy written
+by hand, an imported prior-art definition and a model's proposal are authored text, and their
+templates are meant; what a package can make a model write is the prompt-injection boundary of
+`docs/12-security.md` §4, not this.
+
+**What it allowed.** `{{ 7*7 }}` rendered as `49`, so a stamp or a directory was built as something
+the package never said. `{% if %}` or an unclosed `{#` failed the render, and a rung whose proposal
+does not render is a repair lost: a package could switch off its own version reconstruction with its
+copyright. `{% if env.arch == 'x86_64' %}` made the recipe depend on the rebuilder's host, and
+`{{ env.timewarp_base }}` wrote the mirror's address into the artifact. Evaluation gave the package
+nothing the shell would have: a stamp is shell-quoted and MSBuild-escaped after it is rendered, and
+a script body is shell the build runs anyway. The harm is a recipe, and so a verdict, steered by the
+thing it judges.
+
+62781a8 closed part of it for the .NET stamps: a stamp carrying `{{`, `{%` or `{#` was wrapped in
+`{% raw %}…{% endraw %}`, and one that said `endraw` was left out. That kept the text out of the
+evaluator only as long as the wrapping was spelled right, set no copyright at all for a publisher
+whose copyright said `endraw`, and left the other three rungs as they were.
+
+**The fix: `literal:`, a map beside `with` that is never parsed** (`docs/04-strategies.md` §3.3). A
+`uses` step hands each literal to its tool as the parameter of that name, exactly as written, and
+any template of the step can read one as `{{ literal.<name> }}`, which prints it. A tool's own steps
+never see their caller's literals; a name given both in `with` and in `literal` is refused at parse
+and at render; and an empty map is omitted, so a strategy that carries none has the canonical form
+and the `strategy_digest` it had, while one that carries any declares `schema: 2`. Each rung now
+puts what it read there:
+
+- the .NET rung sets the stamps as literals, and a `with` template for the same parameter gives way
+  to the stamp, unless it is the stamp already as plain text — a definition's `version: 5.1.1` —
+  which renders to it and stays;
+- the yarn rung keeps each expansion as `literal.script_<name>`, the key spelled from the script's
+  name in ASCII letters, digits and `_` alone, since the name is the repository's and `umd-min`
+  would read as `umd - min`, and the `runs` template reads it by name: `( {{ literal.script_build }}
+  )`;
+- the heuristic and CI rungs pass every parameter as a literal, and a strategy either writes has no
+  `with` at all.
+
+The heuristic and CI strategies' canonical forms moved with it, so their `strategy_digest`s did, and
+a cached verdict keyed by one is rebuilt once, as after any change to what a rung writes. The model
+is told what `literal:` is (`STRATEGY_SHAPE`), since a repair prompt now shows it one and says an
+unknown field is rejected.
+
+**How a stamp reaches MSBuild.** `-p:Name=value` splits the value on `;` and `,`, drops `"`, and
+decodes `%XX`, and MSBuild expands `@(…)` where the property is used; `msbuild_escape` (62781a8)
+spells each of those `%XX`, which MSBuild decodes back. Measured again, end to end, with the
+arguments the renderer writes for a pack step whose literals are the copyright `© 2004 {{ 7*7 }} {%
+if %} {# Castle; a,b 100%3B "q" it's @(I) $(P) %(M) *? \` and the informational version `5.1.1+{{
+7*7 }};x,y`: a class library built with them by SDK 10.0.401, in a container with `--network none`,
+carries both attributes byte for byte, and no `49`.
+
+**Tests.** `crates/trigon-strategy/tests/literals.rs`:
+`a_copyright_reaches_the_dotnet_invocation_byte_for_byte_and_is_never_evaluated` (through `sh` as
+the build runs it, and decoded as MSBuild decodes it),
+`a_literal_is_passed_as_written_where_the_same_text_in_with_is_rendered`,
+`an_authored_template_still_renders_beside_a_literal`,
+`a_parameter_given_both_ways_is_refused_when_parsed_and_when_rendered`,
+`a_literal_the_tool_does_not_declare_is_refused`,
+`a_tool_receives_a_literal_as_a_parameter_and_never_sees_its_callers_literals`,
+`literals_round_trip_and_a_strategy_without_them_is_unchanged`. In the rungs:
+`a_stamp_that_reads_as_a_template_is_set_as_written_and_does_not_loop`,
+`a_stamp_that_says_endraw_is_set_like_any_other`,
+`a_template_the_step_gave_a_stamp_gives_way_to_the_literal` (`dotnet.rs`);
+`a_script_body_reaches_the_build_as_written_and_is_never_evaluated`,
+`two_scripts_whose_names_spell_one_key_keep_two_and_one_script_keeps_one` (`yarn.rs`);
+`the_backend_the_wheel_names_reaches_the_build_as_written_and_is_never_evaluated`
+(`trigon-registry/tests/infer.rs`); and
+`what_a_workflow_says_reaches_the_build_as_written_and_is_never_evaluated` (`tests/ci.rs`). The
+helpers every heuristic and CI test reads parameters through now fail on any `with` value, so each
+of those tests holds the rule too. Rendering literals as templates, tried on purpose, fails three of
+the first seven.
+
+**What review found after, and what changed** (2026-09-29). Four defects, each with the test that
+would have caught it.
+
+- **The CI npm rung checked nothing the heuristic checks.** With template evaluation closed, the
+  shell and npm's own spec parser were still open, on the rung that runs above the heuristic and
+  replaces its candidate. The heuristic declines an `_npmVersion` that is not a plain `x.y.z`,
+  replaces a `_nodeVersion` no host serves, and lowers a script name only where `bare_program`
+  passes it; `lower_npm` took all three as they came. The argv split strips a workflow's quotes, so
+  `npm run "x'$(id)'"` lowered to the script `x'$(id)'`, and `npm/npx` writes it inside
+  `TRIGON_NPM_CMD='… npm run <name> …'`, where its own `'` ends the quoting and `$(id)` runs. A
+  user-agent `_npmVersion` reached `npm install -g "npm@…"`, where npm reads `npm:<alias>@<v>` or a
+  git URL as which npm packs the artifact, and a user-agent fails the deps phase and is charged to
+  the package — the failure `is_plain_version` was written for. The CI rung now applies the
+  heuristic's own `is_plain_version` and `bare_program`, and declines by name
+  (`Decline::UnfitValue`); a `_nodeVersion` from master goes back to the heuristic, which replaces
+  it and says so, since that takes Node's release index and this rung reads only the repository
+  (`the_values_the_heuristic_checks_are_checked_before_they_are_lowered`, `tests/ci.rs`).
+- **The .NET rung reported a change it did not make.** A step already carrying every stamp as plain
+  `with` text equal to it — a strategy this rung wrote in 62781a8, kept as a definitions entry or by
+  hand — had each value moved to `literal`: the rendered script was byte for byte the same, the
+  `strategy_digest` was not, and `changes_anything`, which compares digests, rebuilt an identical
+  .NET recipe and recorded a repair that changed nothing. A `with` value that is the stamp and that
+  the engine renders to itself — no `{{`, `{%` or `{#`, no trailing newline for it to trim — now
+  stays, and the rung returns `None` as its documentation says
+  (`a_step_already_carrying_the_stamps_as_plain_values_is_left_alone`, `dotnet.rs`; the rule held
+  to the engine by `a_text_that_renders_as_itself_is_what_the_engine_renders_unchanged`,
+  `render.rs`).
+- **The yarn rung flattened a multi-line step into one line.** This predates the literal splice
+  and lives in the same function: `rewrite` split a fragment on whitespace and joined it with
+  spaces, so `runs: |` holding `cd {{ location.subdir }}`, `npm ci` and `npm run build` became
+  `cd pkg npm ci ( npm run umd && npm run umd-min )`, which `sh` refuses at the `(`, and a manual
+  `build: |` the same. `usable` only renders, so the rewrite was accepted and a build spent on a
+  syntax error reported against the package; a step with no yarn in it came back respaced, which
+  read as a change. The rewrite is line by line now, replacing only the call and copying the rest
+  through as it was, and a call does not run on into the next line, as it would not for the shell
+  (`a_multi_line_step_keeps_its_lines_and_only_the_call_is_rewritten`,
+  `a_multi_line_manual_script_keeps_its_lines`, `yarn.rs`, each read back by `sh -n`).
+- **A document with literals still said `schema: 1`.** `StepRaw` denies unknown fields, so a build
+  from before `literal` refused such a document as having an unknown field `literal` — safe, and
+  nothing in it says to upgrade, which is what the version field exists to say (`docs/04` §4). A
+  document now declares the oldest schema that can read it: 2 where a step carries a literal, and
+  1 otherwise, so a strategy without literals keeps its canonical form and digest. The YAML and the
+  canonical JSON a record stores both say it, the second only where it is above 1, and an older
+  build refuses either as a schema newer than it understands. Both versions are read, and so is a
+  literal under a declared 1, which is how a model shown the shape as schema 1 writes one
+  (`a_strategy_with_literals_declares_schema_two_and_one_without_still_declares_one`,
+  `tests/literals.rs`). The heuristic and CI strategies' canonical forms carry `"schema":2`, so
+  their digests moved once more with this change.
+
+### 3.105 Confirming on one machine, on a base image built there: an opt-in
+
+On 2026-09-29, `scripts/evidence-e2e.sh` on `pkg:npm/wrappy@1.0.2`, built behind the mirror
+(`--egress mirror-only`) and confirmed on the same machine: both attempts `normalized`, the
+confirmation cold (`"warm": []`), and `publish` refused the pair as `confirmation_not_cold`. `trigon
+base-image`, and `--image auto` with it, name the images they build by content id, which no registry
+digest names, so `rebuild --confirm` had nothing to pull again by and recorded `image_repulled:
+false`: the same record a pull that failed leaves, and the gate could not tell the two apart. A
+machine that builds its own base images could publish no verdict with the whole of D8 accepted.
+
+**What changed.**
+
+- **A confirmation records how its base image was pinned**, `CacheState::image_pin`:
+  `registry_digest`, `local_content_id` — a full content id, `sha256:<64 hex>` or the hex alone,
+  that no registry digest names — or `other`, a tag, a short id, a `localhost/` name, or an id
+  podman could say nothing of. Beside `image_repulled`, not in its place, and absent on every other
+  run and on every record written before, which the gate reads as it did. `rebuild --confirm`
+  classifies the reference by `trigon_sandbox::repullable` and the new `is_content_id`, asks podman
+  which registry digests name a content id (`repo_digests`), and pulls again only by a registry
+  digest: the reference itself, or, for a registry's image named by its id, the digest that names
+  it (`repull_by`, which takes the image out by the id and checks the pull brought that id back).
+- **`[publish] same_host_local_images`**, default `false`. Beside `same_host_confirmation`, `decide`
+  counts as cold a confirmation on the first attempt's machine that nothing warm could supply and
+  whose image is `local_content_id`. Nothing else moved: both attempts record a host and a start,
+  the interval, the agreement digest, a hostname-derived id never showing a second machine, a
+  registry image not pulled again, and any warm cache. Set alone it changes nothing, and the loader
+  says so as a note (`EvidenceConfig::notes`) that `serve`, `worker`, `attest`, `publish` and
+  `rebuild --confirm` print on stderr, not as an error.
+- **`confirmation_not_cold` says which part fell short** — unrecorded, warm, not pulled again, or a
+  local image without the setting, which its sentence names — and is one name on the wire as
+  before: `Withheld` now serializes through `key()`. The nearest of several pairs is the one that
+  got furthest: a local image the setting would accept over a registry's image not pulled again,
+  and either over a warm cache.
+- **`rebuild --confirm` reads the gate's settings** where `serve`, `attest` and `publish` read them,
+  and its line about an image it did not pull again says what the gate will make of it: accepted
+  by `same_host_local_images`, or not counted until it is set, or not counted with
+  `same_host_confirmation` off — or, where the attempt reuses a cache, not counted whatever is set.
+  `serve`'s line on what a confirmation is names the setting too.
+
+**Found in review, and fixed.** `image_pin` first took any full content id for a local image, so a
+registry's image a run named by its id — `TRIGON_BASE_PARENT=<an image id>`, or the parent a base
+image's label names, as this machine's `mcr.microsoft.com/dotnet/sdk` parent is — was recorded
+`local_content_id`, never pulled again, and published with both settings on, against D38; it is
+now asked about as above. The confirmation of a run on a derived image, whose image is also a
+local content id and is a cache, was told the setting would accept it, or that the setting was all
+it lacked. `NotRepulled` and `LocalImage` shared a rank, so which was named depended on which pair
+began first. `scripts/evidence-e2e.sh` offered `--egress mirror`, which no tier is; it now offers
+the tiers the podman runner runs, and `rebuild` and `sweep` refuse an unknown tier as they parse
+their arguments rather than after a fetch.
+
+**What it gives up**, as the threat model's D38 says: the base image is part of what one machine
+holds constant, which a same-host confirmation cannot catch (D37, `docs/19` D8), and no registry
+serves it again for the second attempt, so both attempts run on whatever the image store holds
+under that id.
+
+**Tests.** Through the index, with run records as the run path writes them
+(`crates/trigon-api/tests/seam_confirmation.rs`): the opt-in on and a cold local image published;
+off, withheld as `confirmation_not_cold` naming the setting; on without `same_host_confirmation`,
+withheld as `same_host`; on, a registry image not pulled again and a warm cache each withheld; and
+run files written before the pin, on a local image's id, read from disk, decided as before under
+either setting. In the gate (`publication.rs`), the rule clause by clause, the four sentences, and
+which pair is named, in either order. `how_a_confirmation_classifies_its_image` with podman's
+answer injected, a registry's image named by its id among them; what `--confirm` says under each
+configuration, a carried derived image among them; and `--confirm` reading its gate and notes from
+the configuration (`main.rs`). `repo_digests` and `repull_by` against a stand-in podman
+(`seam_podman_invocations.rs`); the setting, its default and the note (`evidence_config.rs`); the
+note from `serve` (`seam_publishable.rs`), `attest` and `publish` (`publish.rs`) and `worker`
+(`queue_commands.rs`); `is_content_id` (`plan.rs`); an unknown tier refused before anything runs
+(`before_any_build.rs`).
+
+**Not done here.** The script has not been run again: it needs podman and the network. `trigon
+worker`'s start-up line still says only whether `same_host_confirmation` is on. And the threat model
+still calls the two-agreeing-attempts policy designed and not built (§1.3, D17), which §3.97 made
+stale; D37 and D38 describe it as built, and the rest is left to a pass over the model.

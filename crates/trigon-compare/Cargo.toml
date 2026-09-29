@@ -21,3 +21,4 @@ tracing.workspace = true
 trigon-stabilize.workspace = true
 tar = "0.4"
 flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }

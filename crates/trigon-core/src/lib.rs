@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+mod declared;
 mod digest;
 mod evidence;
 mod failure;
@@ -18,9 +19,12 @@ mod note;
 mod opinion;
 mod outcome;
 mod path;
+pub mod purl;
 mod target;
+pub mod time;
 
-pub use digest::{Digest, MultiDigest, ParseDigestError, Sha512};
+pub use declared::{CheckResult, DeclaredDigest, DigestCheck};
+pub use digest::{Digest, MultiDigest, ParseDigestError, Sha1, Sha512};
 pub use evidence::{
     Claim, Confidence, Evidence, Intrinsics, RegistryMoment, SourceDiscovery, SourceProvenance,
     ToolchainResolution, resolve_toolchain,

@@ -163,7 +163,7 @@ We set `SOURCE_DATE_EPOCH` to the publish timestamp and set `umask 022`. Between
 lines account for most of PyPI's historical irreproducibility.
 
 ### Output and stabilizer profile
-A `.whl` (zip) or a `.tar.gz` (sdist). The wheel profile is the zip set plus `wheel-record` at
+A `.whl` (zip) or a `.tar.gz` (sdist). The wheel profile is the zip set plus `wheel-record-v2` at
 **`StageFinalize`** plus `pyc-header`. `RECORD` regeneration runs last, because earlier stabilizers
 change archive membership (any `exclude_path` in particular) and `RECORD` is a manifest of
 membership.
@@ -405,7 +405,7 @@ which is most of them, historically — differs from any Linux rebuild in its `.
 `Content` risk and the cap is meant to bite: a package that matches only after its line endings are
 rewritten has not been reproduced byte for byte, and `NormalizedWithCaveats` is the honest ceiling.
 
-`nupkg-doc-member-order` is the other: Roslyn emits `<member>` elements in the host's collation
+`nupkg-doc-member-order-v2` is the other: Roslyn emits `<member>` elements in the host's collation
 order, and Windows and ICU disagree about where `.` sorts. One block moves, in four of the nine doc
 files, with no content difference.
 

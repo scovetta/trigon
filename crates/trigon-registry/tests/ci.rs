@@ -11,7 +11,7 @@
 //! The repository is made on the spot with `git`, so the suite needs nothing but a local git.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -31,11 +31,12 @@ const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/work
 // Harness
 // ---------------------------------------------------------------------------------------------
 
-fn tmpdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("trigon-ci-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// A directory of this test's own, removed when the test is done with it.
+fn tmpdir(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("trigon-ci-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -65,10 +66,15 @@ enum Wf {
     Inline(&'static str, &'static str),
 }
 
-/// A repository at a pinned commit holding these workflows and these extra files.
-fn repo(name: &str, workflows: &[Wf], extra: &[(&str, &str)]) -> (PathBuf, String, String) {
+/// A repository at a pinned commit holding these workflows and these extra files. The directory
+/// holding it goes when the first element is dropped, so a test keeps it for as long as it reads.
+fn repo(
+    name: &str,
+    workflows: &[Wf],
+    extra: &[(&str, &str)],
+) -> (tempfile::TempDir, String, String) {
     let root = tmpdir(name);
-    let repo = root.join("origin");
+    let repo = root.path().join("origin");
     std::fs::create_dir_all(repo.join(".github").join("workflows")).unwrap();
     for w in workflows {
         let (file, text) = match w {
@@ -112,7 +118,8 @@ fn target(
         artifacts: vec![ArtifactMeta {
             id: ArtifactId::new(format!("{name}-{version}-py3-none-any.whl")),
             url: String::new(),
-            declared_sha256: None,
+            declared: Vec::new(),
+            declared_note: None,
             size: None,
         }],
         intrinsics: Intrinsics {
@@ -135,9 +142,10 @@ fn target(
 }
 
 /// The rung, pointed at a cache under this test's own directory.
-fn rung(root: &Path) -> CiInferrer {
-    let sources =
-        Arc::new(trigon_registry::SourceCache::new(root.join("cache")).trusting_local_paths());
+fn rung(root: &tempfile::TempDir) -> CiInferrer {
+    let sources = Arc::new(
+        trigon_registry::SourceCache::new(root.path().join("cache")).trusting_local_paths(),
+    );
     CiInferrer::new(sources)
 }
 
@@ -148,12 +156,21 @@ async fn read_pypi(name: &str, workflows: &[Wf], extra: &[(&str, &str)]) -> Arc<
 }
 
 async fn read_npm(name: &str, workflows: &[Wf], toolchain: bool) -> Arc<CiReading> {
+    read_npm_recorded(name, workflows, toolchain.then_some(("24.1.0", "11.3.0"))).await
+}
+
+/// [`read_npm`], with the `_nodeVersion` and `_npmVersion` the registry recorded, if any.
+async fn read_npm_recorded(
+    name: &str,
+    workflows: &[Wf],
+    recorded: Option<(&str, &str)>,
+) -> Arc<CiReading> {
     let (root, url, commit) = repo(name, workflows, &[]);
     let mut t = target(Ecosystem::Npm, name, "1.2.3", &url, &commit);
-    if toolchain {
+    if let Some((node, npm)) = recorded {
         for (tool, version, source) in [
-            ("node", "24.1.0", "npm:_nodeVersion"),
-            ("npm", "11.3.0", "npm:_npmVersion"),
+            ("node", node, "npm:_nodeVersion"),
+            ("npm", npm, "npm:_npmVersion"),
         ] {
             t.intrinsics.evidence.push(Evidence::new(
                 Claim::ToolchainExact {
@@ -177,8 +194,13 @@ fn params(strategy: &Strategy, phase: &str) -> BTreeMap<String, String> {
         "build" => &f.build,
         _ => &f.src,
     };
+    // A workflow is the repository's text, so every parameter lowered from one is a literal and
+    // none a template the repository could steer.
     match &steps[0].body {
-        StepBody::Uses { with, .. } => with.clone(),
+        StepBody::Uses { with, .. } => {
+            assert!(with.is_empty(), "a lowered parameter is a template: {with:?}");
+            steps[0].literal.clone()
+        }
         other => panic!("expected a tool step, got {other:?}"),
     }
 }
@@ -497,6 +519,52 @@ async fn a_secret_in_the_build_is_a_decline_and_a_token_in_the_publish_step_is_n
     );
 }
 
+/// A release that writes its version into the package with `echo` before it builds.
+const VERSION_BY_ECHO: &str = r#"
+name: Release
+on:
+  release:
+    types: [published]
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - run: echo "__version__ = '${GITHUB_REF_NAME#v}'" > src/widget/_version.py
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn a_version_written_into_the_package_by_echo_is_a_rewrite_and_not_an_echo() {
+    // Read as an `echo`, the step was incidental and the recipe built the tree as checked out: a
+    // package without the version the release wrote into it.
+    let r = read_pypi(
+        "echo-version",
+        &[Wf::Inline("release.yml", VERSION_BY_ECHO)],
+        &[],
+    )
+    .await;
+    assert!(r.candidate.is_none());
+    assert_eq!(
+        r.declined,
+        Some(Decline::BuildRewritesTheTree {
+            command: "echo \"__version__ = '${GITHUB_REF_NAME#v}'\" > src/widget/_version.py"
+                .into()
+        })
+    );
+
+    // The same `echo` into the runner's output file writes nothing the build reads.
+    let to_output = VERSION_BY_ECHO.replace("> src/widget/_version.py", ">> \"$GITHUB_OUTPUT\"");
+    let to_output: &'static str = Box::leak(to_output.into_boxed_str());
+    let r = read_pypi("echo-output", &[Wf::Inline("release.yml", to_output)], &[]).await;
+    assert!(r.candidate.is_some(), "{:?}", r.declined);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The single-job shape, and the interpreter
 // ---------------------------------------------------------------------------------------------
@@ -647,6 +715,91 @@ async fn a_partial_version_is_a_range_so_it_narrows_the_registry_rather_than_fig
         },
         "the two have to compose rather than contradict"
     );
+}
+
+/// **What the heuristic checks, this rung checks too.** It displaces the heuristic's candidate, so
+/// a value the heuristic declines or replaces and this rung passes on is the check undone for every
+/// package whose release workflow runs a script. Each of these reached the build unchecked: the
+/// script name inside `TRIGON_NPM_CMD='… npm run <name> …'`, where its own `'` ends the quoting
+/// and `$(id)` runs; a publishing client's user-agent as `npm install -g "npm@<it>"`, where npm's
+/// spec parser reads it, and the build failure is charged to the package; a Node built from master
+/// as a download that 404s. Each is declined by name, and the evidence still gets out.
+#[tokio::test]
+async fn the_values_the_heuristic_checks_are_checked_before_they_are_lowered() {
+    let crafted: &'static str = NODE_SERIES
+        .replace("npm run build", r#"npm run "x'$(id)'""#)
+        .leak();
+    for (name, workflow, recorded, what, value) in [
+        (
+            "npm-script",
+            crafted,
+            ("24.1.0", "11.3.0"),
+            "the script the release runs",
+            "x'$(id)'",
+        ),
+        (
+            "npm-agent",
+            NODE_SERIES,
+            ("22.14.0", "lerna/4.0.0/node@v22.14.0+arm64 (darwin)"),
+            "the registry's `_npmVersion`",
+            "lerna/4.0.0/node@v22.14.0+arm64 (darwin)",
+        ),
+        (
+            "npm-agent-spaces",
+            NODE_SERIES,
+            ("18.17.1", "npm/9.6.7 node/v18.17.1 linux x64"),
+            "the registry's `_npmVersion`",
+            "npm/9.6.7 node/v18.17.1 linux x64",
+        ),
+        (
+            "npm-alias",
+            NODE_SERIES,
+            ("18.17.1", "npm:evil@1.0.0"),
+            "the registry's `_npmVersion`",
+            "npm:evil@1.0.0",
+        ),
+        (
+            "npm-master",
+            NODE_SERIES,
+            ("8.0.0-pre", "4.4.2"),
+            "the registry's `_nodeVersion`",
+            "8.0.0-pre",
+        ),
+    ] {
+        let r =
+            read_npm_recorded(name, &[Wf::Inline("release.yml", workflow)], Some(recorded)).await;
+        assert!(r.candidate.is_none(), "{name}: {:?}", r.candidate);
+        let Some(Decline::UnfitValue {
+            what: got_what,
+            value: got_value,
+            ..
+        }) = &r.declined
+        else {
+            panic!("{name}: {:?}", r.declined)
+        };
+        assert_eq!((*got_what, got_value.as_str()), (what, value), "{name}");
+        assert!(
+            r.evidence
+                .iter()
+                .any(|e| matches!(&e.claim, Claim::ToolchainRange { tool, .. } if tool == "node")),
+            "{name}: the evidence still gets out: {:?}",
+            r.evidence
+        );
+    }
+
+    // A Node the heuristic can replace is left to it, and the reason says so.
+    let r = read_npm_recorded(
+        "npm-master-says",
+        &[Wf::Inline("release.yml", NODE_SERIES)],
+        Some(("8.0.0-pre", "4.4.2")),
+    )
+    .await;
+    let why = r
+        .declined
+        .as_ref()
+        .map(Decline::to_string)
+        .unwrap_or_default();
+    assert!(why.contains("the heuristic"), "{why}");
 }
 
 #[tokio::test]
@@ -914,6 +1067,54 @@ async fn only_the_workflows_directory_itself_is_read() {
 // ---------------------------------------------------------------------------------------------
 // The candidate has to be executable, not merely well-typed
 // ---------------------------------------------------------------------------------------------
+
+/// A release that builds a directory whose name the repository chose to look like a template.
+const TEMPLATE_IN_A_DIRECTORY: &str = r#"
+name: Release
+on:
+  release:
+    types: [published]
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - run: python -m build pkg{{7*7}}{%if%}{#
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn what_a_workflow_says_reaches_the_build_as_written_and_is_never_evaluated() {
+    // The directory is the repository's text, lowered into a tool parameter. As a template it
+    // built `pkg49`, or failed the render on `{% if %}`, so the repository under test chose what
+    // the recipe built; as a literal it is the directory the workflow named.
+    let r = read_pypi(
+        "template-dir",
+        &[Wf::Inline("release.yml", TEMPLATE_IN_A_DIRECTORY)],
+        &[],
+    )
+    .await;
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    assert_eq!(params(&c.strategy, "build")["dir"], "pkg{{7*7}}{%if%}{#");
+
+    let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+    let rendered = trigon_strategy::render(&c.strategy, &Default::default(), &tools)
+        .unwrap_or_else(|e| panic!("the lowered strategy does not render: {e}"));
+    assert!(
+        rendered
+            .build
+            .ends_with("-m build --wheel pkg{{7*7}}{%if%}{#"),
+        "{}",
+        rendered.build
+    );
+}
 
 #[tokio::test]
 async fn a_ci_derived_candidate_renders_against_the_builtin_tools() {
@@ -1400,4 +1601,929 @@ async fn an_ordinary_publish_job_is_not_made_suspicious_by_this() {
         "an ordinary publish job now declines: {:?}",
         r.declined
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// What the recipe builds, and the fields a workflow pins it with
+// ---------------------------------------------------------------------------------------------
+
+/// A single-job release that lowers: checkout, an interpreter, a build, the trusted publisher.
+const PLAIN_RELEASE: &str = r#"
+name: Release
+on:
+  release:
+    types: [published]
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn the_ci_recipe_builds_the_kind_of_artifact_the_run_is_about() {
+    // A package with only platform wheels is verified against its sdist, and the caller says so
+    // through `about`. The build tool defaults to a wheel, and the heuristic learned to pass the
+    // kind; the CI lowering did not, so its recipe built a wheel and the run compared a wheel
+    // against an sdist — which the comparator reports as a malformed gzip.
+    let (root, url, commit) = repo("kind", &[Wf::Inline("release.yml", PLAIN_RELEASE)], &[]);
+    let mut t = target(Ecosystem::PyPI, "kind", "1.2.3", &url, &commit);
+    t.about = Some(ArtifactId::new("kind-1.2.3.tar.gz"));
+    let r = rung(&root).read(&t).await.unwrap();
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    assert_eq!(params(&c.strategy, "build")["kind"], "sdist");
+
+    // And a wheel under test, or nothing chosen yet, builds a wheel.
+    for about in [Some("kind-1.2.3-py3-none-any.whl"), None] {
+        let (root, url, commit) = repo(
+            &format!("kind-{}", about.is_some()),
+            &[Wf::Inline("release.yml", PLAIN_RELEASE)],
+            &[],
+        );
+        let mut t = target(Ecosystem::PyPI, "kind", "1.2.3", &url, &commit);
+        t.about = about.map(ArtifactId::new);
+        let r = rung(&root).read(&t).await.unwrap();
+        let c = r.candidate.as_ref().expect("a candidate");
+        assert_eq!(params(&c.strategy, "build")["kind"], "wheel", "{about:?}");
+    }
+}
+
+const UV_RELEASE: &str = r#"
+name: Release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.4.20"
+      - run: uv build --python 3.11 --sdist --wheel
+        working-directory: python
+      - run: uv publish
+"#;
+
+#[tokio::test]
+async fn a_uv_release_pins_uv_and_takes_the_interpreter_from_the_frontend() {
+    let r = read_pypi("uv", &[Wf::Inline("release.yml", UV_RELEASE)], &[]).await;
+    let best = r.ranked.first().expect("a recipe");
+    assert_eq!(best.working_directory.as_deref(), Some("python"));
+    assert!(
+        r.evidence.iter().any(|e| e.claim
+            == Claim::ToolchainExact {
+                tool: "uv".into(),
+                version: "0.4.20".into()
+            }
+            && e.confidence == Confidence::Strong),
+        "{:?}",
+        r.evidence
+    );
+    assert!(
+        r.evidence.iter().any(|e| e.claim
+            == Claim::SubdirIs {
+                path: "python".into()
+            }),
+        "{:?}",
+        r.evidence
+    );
+
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    // `setup-uv` named no interpreter, and `uv build --python 3.11` did.
+    assert_eq!(params(&c.strategy, "deps")["python_version"], "3.11");
+    // The step's working directory is where the project is, and where its output lands.
+    let Strategy::Flow(f) = &c.strategy else {
+        unreachable!()
+    };
+    assert_eq!(f.location.subdir.as_deref(), Some("python"));
+    assert_eq!(f.output_dir.as_deref(), Some("python/dist"));
+    // A different frontend driving the same backend is an approximation, and said to be one.
+    assert!(
+        c.assumptions.iter().any(|a| a.contains("`uv build`")),
+        "{:?}",
+        c.assumptions
+    );
+}
+
+/// `actions/setup-python` pointed at a file, which is only a pin when the file holds a version.
+fn version_file_release(file: &str) -> String {
+    format!(
+        "on:\n  push:\n    tags: ['*']\njobs:\n  release:\n    runs-on: ubuntu-22.04\n    steps:\n      \
+         - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          \
+         python-version-file: {file}\n      - run: python -m build\n      \
+         - uses: pypa/gh-action-pypi-publish@release/v1\n"
+    )
+}
+
+#[tokio::test]
+async fn a_version_file_is_a_pin_where_it_holds_a_version_and_nothing_where_it_is_missing() {
+    let text = version_file_release(".python-version");
+    let wf = text.leak();
+    let r = read_pypi(
+        "pyversion",
+        &[Wf::Inline("release.yml", wf)],
+        &[(".python-version", "# the interpreter\n3.11.7\n")],
+    )
+    .await;
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    assert_eq!(params(&c.strategy, "deps")["python_version"], "3.11.7");
+    assert!(
+        r.evidence.iter().any(|e| e.source == "ci:.python-version"),
+        "{:?}",
+        r.evidence
+    );
+
+    // The same workflow, and no such file at this commit: no claim, and the recipe says it is
+    // building on whatever interpreter the image carries.
+    let r = read_pypi("pyversion-missing", &[Wf::Inline("release.yml", wf)], &[]).await;
+    let pin = &r.ranked[0].toolchains[0];
+    assert_eq!(
+        pin.spec,
+        trigon_registry::ci::VersionSpec::Unknown {
+            raw: ".python-version".into(),
+            why: trigon_registry::ci::WhyUnknown::FileMissing
+        }
+    );
+    assert!(!r.evidence.iter().any(|e| matches!(
+        &e.claim,
+        Claim::ToolchainExact { tool, .. } | Claim::ToolchainRange { tool, .. } if tool == "python"
+    )));
+    let c = r.candidate.as_ref().expect("a candidate without a pin");
+    assert!(!params(&c.strategy, "deps").contains_key("python_version"));
+    assert!(
+        c.assumptions
+            .iter()
+            .any(|a| a.contains("pins no interpreter version")),
+        "{:?}",
+        c.assumptions
+    );
+}
+
+#[tokio::test]
+async fn an_interpreter_the_workflow_does_not_name_as_one_version_makes_no_claim() {
+    // An expression this resolver cannot evaluate, and a list: each is a statement about several
+    // possible interpreters, and a claim built from one would carry CI's authority behind a guess.
+    for (name, field, why) in [
+        (
+            "py-expr",
+            "python-version: ${{ vars.PYTHON }}",
+            trigon_registry::ci::WhyUnknown::Expression,
+        ),
+        (
+            "py-list",
+            "python-version: ['3.11', '3.12']",
+            trigon_registry::ci::WhyUnknown::Multiple,
+        ),
+    ] {
+        let text = PLAIN_RELEASE.replace("python-version: \"3.12\"", field);
+        let wf = text.leak();
+        let r = read_pypi(name, &[Wf::Inline("release.yml", wf)], &[]).await;
+        let pin = &r.ranked[0].toolchains[0];
+        assert!(
+            matches!(&pin.spec, trigon_registry::ci::VersionSpec::Unknown { why: w, .. } if *w == why),
+            "{field}: {:?}",
+            pin.spec
+        );
+        assert!(
+            !r.evidence.iter().any(
+                |e| matches!(&e.claim, Claim::ToolchainExact { tool, .. } if tool == "python")
+            ),
+            "{field}: {:?}",
+            r.evidence
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_container_is_a_statement_about_userspace_and_not_about_the_host() {
+    // On a Windows host the job is out of scope whatever image it names: the image says what
+    // userspace the build sees, not what kernel runs it.
+    let text = PLAIN_RELEASE.replace(
+        "runs-on: ubuntu-22.04",
+        "runs-on: windows-latest\n    container: python:3.12",
+    );
+    let wf = text.leak();
+    let r = read_pypi("container-windows", &[Wf::Inline("release.yml", wf)], &[]).await;
+    assert!(
+        matches!(
+            &r.declined,
+            Some(Decline::RunnerOutOfScope(OutOfScope::Windows(l))) if l == "windows-latest"
+        ),
+        "{:?}",
+        r.declined
+    );
+    assert!(r.out_of_scope.is_some());
+
+    // On a Linux host, a digest-pinned image is the one runner statement that is not an
+    // approximation, and a tag is said to be a tag.
+    for (image, says) in [
+        (
+            "python:3.12@sha256:0123abcd",
+            "already pinned by digest (sha256:0123abcd)",
+        ),
+        ("python:3.12", "a tag rather than a digest"),
+    ] {
+        let text = PLAIN_RELEASE.replace(
+            "runs-on: ubuntu-22.04",
+            &format!("runs-on: ubuntu-22.04\n    container: {{ image: \"{image}\" }}"),
+        );
+        let wf = text.leak();
+        let r = read_pypi(
+            &format!("container-{}", image.len()),
+            &[Wf::Inline("release.yml", wf)],
+            &[],
+        )
+        .await;
+        let c = r
+            .candidate
+            .as_ref()
+            .unwrap_or_else(|| panic!("{:?}", r.declined));
+        assert!(
+            c.assumptions.iter().any(|a| a.contains(says)),
+            "{image}: {:?}",
+            c.assumptions
+        );
+        assert_eq!(r.base_image, None, "a container is not an approximation");
+    }
+
+    // An image behind an expression the resolver cannot evaluate is not an image; the rung
+    // declines and names what it could not read, rather than guessing at a container.
+    let text = PLAIN_RELEASE.replace(
+        "runs-on: ubuntu-22.04",
+        "runs-on: ubuntu-22.04\n    container: ${{ vars.IMAGE }}",
+    );
+    let wf = text.leak();
+    let r = read_pypi("container-expr", &[Wf::Inline("release.yml", wf)], &[]).await;
+    assert!(r.candidate.is_none(), "{:?}", r.candidate);
+    let said = r.declined.as_ref().expect("a decline").to_string();
+    assert!(said.contains("vars.IMAGE"), "{said}");
+}
+
+const UNREACHABLE_BUILD: &str = r#"
+name: Release
+on:
+  release:
+    types: [published]
+jobs:
+  build-a:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-a
+          path: dist/
+  build-b:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-b
+          path: dist/
+  publish:
+    needs: [build-a, build-b]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn a_publish_job_whose_build_is_not_in_the_file_says_which_artifact_it_wanted() {
+    // The job carries a publish marker, so "no job publishes" would be false about this run and
+    // would send a reader to the wrong half of the file. What failed is the edge back to a build.
+    let r = read_pypi(
+        "unreachable",
+        &[Wf::Inline("release.yml", UNREACHABLE_BUILD)],
+        &[],
+    )
+    .await;
+    assert_eq!(
+        r.declined,
+        Some(Decline::BuildJobUnreachable {
+            publish_job: "publish".into(),
+            artifact: "wheels".into(),
+        })
+    );
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.contains("publishes something no reachable job builds")),
+        "{:?}",
+        r.notes
+    );
+    assert!(r.ranked.is_empty());
+}
+
+#[tokio::test]
+async fn a_build_step_behind_a_condition_the_rung_cannot_evaluate_is_noted() {
+    // It may not have run at all. The recipe assumes it did, and says so beside the verdict.
+    let text = PLAIN_RELEASE.replace(
+        "      - run: python -m build\n",
+        "      - run: python -m build\n        if: ${{ github.event_name == 'release' }}\n",
+    );
+    let wf = text.leak();
+    let r = read_pypi("guarded", &[Wf::Inline("release.yml", wf)], &[]).await;
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.contains("which this rung cannot evaluate, so the recipe assumes it ran")),
+        "{:?}",
+        r.notes
+    );
+    assert!(r.candidate.is_some(), "{:?}", r.declined);
+}
+
+#[tokio::test]
+async fn a_cibuildwheel_build_is_one_unmodelled_step_and_says_why() {
+    let text = PLAIN_RELEASE
+        .replace("      - run: python -m pip install build\n", "")
+        .replace(
+            "      - run: python -m build\n",
+            "      - uses: pypa/cibuildwheel@v2.16\n",
+        );
+    let wf = text.leak();
+    let r = read_pypi("cibw", &[Wf::Inline("release.yml", wf)], &[]).await;
+    assert_eq!(
+        r.declined,
+        Some(Decline::BuildIsOneUnmodelledStep {
+            action: "pypa/cibuildwheel".into()
+        })
+    );
+    assert!(
+        r.notes.iter().any(|n| n.contains("manylinux")),
+        "{:?}",
+        r.notes
+    );
+    // The evidence survives the decline: the interpreter is still known.
+    assert!(
+        r.evidence.iter().any(|e| e.claim
+            == Claim::ToolchainExact {
+                tool: "python".into(),
+                version: "3.12".into()
+            }),
+        "{:?}",
+        r.evidence
+    );
+}
+
+const NPM_ACTION_RELEASE: &str = r#"
+name: Publish
+on:
+  release:
+    types: [published]
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - run: npm run build
+      - uses: JS-DevTools/npm-publish@v3
+"#;
+
+#[tokio::test]
+async fn an_npm_release_through_the_publish_action_is_read_with_its_lockfile() {
+    let (root, url, commit) = repo(
+        "npm-action",
+        &[Wf::Inline("publish.yml", NPM_ACTION_RELEASE)],
+        &[
+            (".nvmrc", "20.11.1\n"),
+            ("package-lock.json", "{\"lockfileVersion\": 3}\n"),
+        ],
+    );
+    let mut t = target(Ecosystem::Npm, "npm-action", "1.2.3", &url, &commit);
+    for (tool, version, source) in [
+        ("node", "20.11.1", "npm:_nodeVersion"),
+        ("npm", "10.2.4", "npm:_npmVersion"),
+    ] {
+        t.intrinsics.evidence.push(Evidence::new(
+            Claim::ToolchainExact {
+                tool: tool.into(),
+                version: version.into(),
+            },
+            Confidence::Certain,
+            source,
+        ));
+    }
+    let r = rung(&root).read(&t).await.unwrap();
+    // `npm ci` resolves nothing: the lockfile is the answer, so the moment is the lockfile's
+    // digest and it is the one registry moment this rung can state as certain.
+    assert!(
+        r.evidence.iter().any(|e| matches!(
+            &e.claim,
+            Claim::RegistryMomentIs {
+                moment: trigon_core::RegistryMoment::Lockfile { .. }
+            }
+        ) && e.confidence == Confidence::Certain),
+        "{:?}",
+        r.evidence
+    );
+    assert!(
+        r.evidence.iter().any(|e| e.source == "ci:.nvmrc"),
+        "{:?}",
+        r.evidence
+    );
+    // The release ran a build `npm pack` would not, which is the one thing it knows that the
+    // registry does not.
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    assert_eq!(tool(&c.strategy, "build"), "npm/build/custom");
+    assert_eq!(params(&c.strategy, "build")["command"], "build");
+    assert_eq!(params(&c.strategy, "deps")["node_version"], "20.11.1");
+    assert!(
+        r.notes.iter().any(|n| n.contains("the registry's is used")),
+        "{:?}",
+        r.notes
+    );
+}
+
+#[tokio::test]
+async fn a_node_version_written_with_a_v_is_that_pin_and_an_lts_alias_is_none() {
+    // `v20.11.1` is what `node -v > .nvmrc` writes, and nvm and `actions/setup-node` both read it
+    // as 20.11.1. Read as it is spelled, it made no claim at all, and was called a wildcard.
+    let in_the_workflow: &'static str = NPM_ACTION_RELEASE
+        .replace("node-version-file: .nvmrc", "node-version: v20.11.1")
+        .leak();
+    let lockfile = ("package-lock.json", "{\"lockfileVersion\": 3}\n");
+    for (name, wf, extra, source) in [
+        (
+            "nvmrc-v",
+            NPM_ACTION_RELEASE,
+            vec![(".nvmrc", "v20.11.1\n"), lockfile],
+            "ci:.nvmrc",
+        ),
+        (
+            "node-version-v",
+            in_the_workflow,
+            vec![lockfile],
+            "ci:actions/setup-node:node-version",
+        ),
+    ] {
+        let (root, url, commit) = repo(name, &[Wf::Inline("publish.yml", wf)], &extra);
+        let t = target(Ecosystem::Npm, name, "1.2.3", &url, &commit);
+        let r = rung(&root).read(&t).await.unwrap();
+        assert!(
+            r.evidence.iter().any(|e| e.source == source
+                && e.claim
+                    == Claim::ToolchainExact {
+                        tool: "node".into(),
+                        version: "20.11.1".into()
+                    }),
+            "{name}: {:?}",
+            r.evidence
+        );
+    }
+
+    // An LTS alias names whatever release its line had reached on the day it was read, which is
+    // no pin: it stays unknown, and makes no claim.
+    let (root, url, commit) = repo(
+        "nvmrc-lts",
+        &[Wf::Inline("publish.yml", NPM_ACTION_RELEASE)],
+        &[(".nvmrc", "lts/iron\n"), lockfile],
+    );
+    let t = target(Ecosystem::Npm, "nvmrc-lts", "1.2.3", &url, &commit);
+    let r = rung(&root).read(&t).await.unwrap();
+    assert_eq!(
+        r.ranked[0].toolchains[0].spec,
+        trigon_registry::ci::VersionSpec::Unknown {
+            raw: "lts/iron".into(),
+            why: trigon_registry::ci::WhyUnknown::Wildcard
+        }
+    );
+    assert!(
+        !r.evidence.iter().any(|e| e.source == "ci:.nvmrc"),
+        "{:?}",
+        r.evidence
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The rung, seen from the ladder
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_rung_explains_itself_through_the_ladder_and_its_summary() {
+    // A candidate: the ladder asks nothing further, and the summary names the recipe.
+    let (root, url, commit) = repo(
+        "ladder-yes",
+        &[Wf::Inline("release.yml", PLAIN_RELEASE)],
+        &[],
+    );
+    let t = target(Ecosystem::PyPI, "ladder-yes", "1.2.3", &url, &commit);
+    let r = rung(&root);
+    assert_eq!(r.name(), "ci-derived");
+    let got = r.infer(&t).await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].derivation, Derivation::CiDerived);
+    assert_eq!(r.why_not(&t).await, None);
+    let summary = r.read(&t).await.unwrap().summary();
+    assert_eq!(
+        summary,
+        "a candidate from .github/workflows/release.yml:release"
+    );
+
+    // A decline: the ladder gets the decline's own sentence as the reason, which is the only
+    // explanation a `no-strategy` verdict carries.
+    let (root, url, commit) = repo("ladder-no", &[Wf::Fixture("attrs-pypi-package")], &[]);
+    let t = target(Ecosystem::PyPI, "attrs", "1.2.3", &url, &commit);
+    let r = rung(&root);
+    assert!(r.infer(&t).await.unwrap().is_empty());
+    let why = r.why_not(&t).await.expect("a reason");
+    let reading = r.read(&t).await.unwrap();
+    assert_eq!(
+        Some(why.clone()),
+        reading.declined.as_ref().map(Decline::to_string)
+    );
+    assert_eq!(reading.summary(), format!("no candidate: {why}"));
+}
+
+#[tokio::test]
+async fn a_target_the_rung_cannot_read_declines_for_that_reason() {
+    let (root, url, commit) = repo(
+        "unreadable",
+        &[Wf::Inline("release.yml", PLAIN_RELEASE)],
+        &[],
+    );
+
+    // An ecosystem with no lowering is said to be one, rather than read and misdescribed.
+    let t = target(Ecosystem::CratesIo, "unreadable", "1.2.3", &url, &commit);
+    let r = rung(&root).read(&t).await.unwrap();
+    assert!(
+        matches!(&r.declined, Some(Decline::NothingTheHeuristicLacks { because })
+            if because.contains("no CI lowering yet")),
+        "{:?}",
+        r.declined
+    );
+
+    // A repository the tag rung does not ask about, and no commit: the workflow at `HEAD` is not
+    // the one that built this release. Nothing is fetched to find that out.
+    let mut t = target(
+        Ecosystem::PyPI,
+        "unreadable",
+        "1.2.3",
+        "https://codeberg.org/o/unreadable",
+        "",
+    );
+    t.source.as_mut().unwrap().how = SourceDiscovery::RegistryMetadata;
+    let r = rung(&root).read(&t).await.unwrap();
+    assert_eq!(r.declined, Some(Decline::NoPinnedCommit));
+
+    // A commit the repository does not have — force-pushed away — is a decline, not an error that
+    // would turn the target into no strategy at all.
+    let t = target(
+        Ecosystem::PyPI,
+        "unreadable",
+        "1.2.3",
+        &url,
+        &"0".repeat(40),
+    );
+    let r = rung(&root).read(&t).await.unwrap();
+    assert!(
+        matches!(&r.declined, Some(Decline::SourceUnreadable { detail }) if !detail.is_empty()),
+        "{:?}",
+        r.declined
+    );
+    assert!(r.evidence.is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// What a lowering carries beside the recipe
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_build_that_fetches_and_installs_system_packages_says_both() {
+    // A fetch from outside the registry is a fact the egress tier depends on; a system package is
+    // something `FlowStrategy` can carry on the build step's `needs`, and says it did.
+    let text = PLAIN_RELEASE.replace(
+        "      - run: python -m build\n",
+        "      - run: |\n          sudo apt-get install -y libffi-dev\n          \
+         curl -sSL https://example.invalid/vendor.tgz -o vendor.tgz\n          \
+         python -m build\n",
+    );
+    let r = read_pypi("fetches", &[Wf::Inline("release.yml", text.leak())], &[]).await;
+    assert!(
+        r.evidence
+            .iter()
+            .any(|e| e.claim == Claim::RequiresNetwork { required: true }),
+        "{:?}",
+        r.evidence
+    );
+    assert!(
+        r.notes
+            .iter()
+            .any(|n| n.contains("fetches from outside the registry")
+                && n.contains("example.invalid")),
+        "{:?}",
+        r.notes
+    );
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    let Strategy::Flow(f) = &c.strategy else {
+        unreachable!()
+    };
+    assert_eq!(f.build[0].needs, ["libffi-dev"]);
+    assert!(
+        c.assumptions
+            .iter()
+            .any(|a| a.contains("installs system packages (libffi-dev)")),
+        "{:?}",
+        c.assumptions
+    );
+}
+
+#[tokio::test]
+async fn how_the_workflow_checked_out_is_stated_where_it_matters_and_refused_where_it_breaks() {
+    // A named ref other than the pinned commit, and the full history a VCS-versioned build reads
+    // its version from: both are assumptions about the verdict, not reasons to refuse it.
+    let text = PLAIN_RELEASE.replace(
+        "      - uses: actions/checkout@v4\n",
+        "      - uses: actions/checkout@v4\n        with:\n          ref: main\n          \
+         fetch-depth: 0\n",
+    );
+    let r = read_pypi(
+        "checkout-ref",
+        &[Wf::Inline("release.yml", text.leak())],
+        &[],
+    )
+    .await;
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    assert!(
+        c.assumptions
+            .iter()
+            .any(|a| a.contains("checked out `main` rather than the commit this run pins")),
+        "{:?}",
+        c.assumptions
+    );
+    assert!(
+        c.assumptions
+            .iter()
+            .any(|a| a.contains("checks out the full history")),
+        "{:?}",
+        c.assumptions
+    );
+
+    // A checkout into a subdirectory moves the tree the build runs in, and no field of the
+    // recipe can say where; the rung declines rather than build in the wrong place.
+    let text = PLAIN_RELEASE.replace(
+        "      - uses: actions/checkout@v4\n",
+        "      - uses: actions/checkout@v4\n        with:\n          path: src\n",
+    );
+    let r = read_pypi(
+        "checkout-path",
+        &[Wf::Inline("release.yml", text.leak())],
+        &[],
+    )
+    .await;
+    assert_eq!(
+        r.declined,
+        Some(Decline::UnresolvedExpression {
+            field: "actions/checkout path",
+            raw: "src".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn the_registry_moment_and_the_backend_the_wheel_names_reach_the_recipe() {
+    let (root, url, commit) = repo("moment", &[Wf::Inline("release.yml", PLAIN_RELEASE)], &[]);
+    let mut t = target(Ecosystem::PyPI, "moment", "1.2.3", &url, &commit);
+    t.intrinsics.evidence.push(Evidence::new(
+        Claim::ToolchainExact {
+            tool: "hatchling".into(),
+            version: "1.21.0".into(),
+        },
+        Confidence::Certain,
+        "wheel:Generator",
+    ));
+    let r = rung(&root)
+        .with_mirror(Some("mirror:8080".into()))
+        .read(&t)
+        .await
+        .unwrap();
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    let deps = params(&c.strategy, "deps");
+    assert_eq!(deps["registry_time"], "2024-03-01T00:00:00Z");
+    assert_eq!(deps["build_backend"], "hatchling==1.21.0");
+    // The constraint file that pins the backend is where the build looks.
+    assert!(
+        params(&c.strategy, "build")["constraints"].ends_with("/constraints.txt"),
+        "{:?}",
+        params(&c.strategy, "build")
+    );
+    assert!(
+        !c.assumptions
+            .iter()
+            .any(|a| a.contains("no registry mirror"))
+    );
+
+    // With no publish time there is no moment to pin, and the recipe says it resolves today.
+    let (root, url, commit) = repo(
+        "no-moment",
+        &[Wf::Inline("release.yml", PLAIN_RELEASE)],
+        &[],
+    );
+    let mut t = target(Ecosystem::PyPI, "no-moment", "1.2.3", &url, &commit);
+    t.intrinsics.publish_time = None;
+    let r = rung(&root)
+        .with_mirror(Some("mirror:8080".into()))
+        .read(&t)
+        .await
+        .unwrap();
+    let c = r.candidate.as_ref().expect("a candidate");
+    assert!(!params(&c.strategy, "deps").contains_key("registry_time"));
+    assert!(
+        c.assumptions
+            .iter()
+            .any(|a| a.contains("no publish time recorded")),
+        "{:?}",
+        c.assumptions
+    );
+    // No backend was read, so nothing constrains the build environment.
+    assert_eq!(params(&c.strategy, "build")["constraints"], "");
+}
+
+#[tokio::test]
+async fn an_action_the_rung_does_not_read_lowers_the_candidate_and_is_named() {
+    // An unmodelled step is where the next inference failure comes from; hiding it is the worst
+    // option available, so the candidate is weaker and says which step it could not read.
+    let text = PLAIN_RELEASE.replace(
+        "      - run: python -m build\n",
+        "      - uses: example/prepare-sources@v1\n      - run: python -m build\n",
+    );
+    let r = read_pypi("unmodelled", &[Wf::Inline("release.yml", text.leak())], &[]).await;
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    assert_eq!(c.confidence, Confidence::Weak);
+    assert!(
+        c.assumptions
+            .iter()
+            .any(|a| a.contains("1 step this rung does not interpret (example/prepare-sources)")),
+        "{:?}",
+        c.assumptions
+    );
+}
+
+#[tokio::test]
+async fn a_release_job_that_builds_nothing_says_so() {
+    // Selected for its publish marker, and running no step that produces an artifact. On PyPI
+    // that is a job that tags a release, not a description of a build.
+    let text = PLAIN_RELEASE
+        .replace("      - run: python -m pip install build\n", "")
+        .replace(
+            "      - run: python -m build\n",
+            "      - run: echo publishing\n",
+        );
+    let r = read_pypi(
+        "builds-nothing",
+        &[Wf::Inline("release.yml", text.leak())],
+        &[],
+    )
+    .await;
+    assert_eq!(
+        r.declined,
+        Some(Decline::BuildJobRunsNoBuild {
+            job: "release".into()
+        })
+    );
+}
+
+const NPM_PUBLISH_ONLY: &str = r#"
+name: Publish
+on:
+  release:
+    types: [published]
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm publish --provenance
+"#;
+
+#[tokio::test]
+async fn an_npm_release_that_only_publishes_leaves_the_heuristic_to_answer() {
+    // `npm publish` runs `prepare` and `prepack` itself, which is the heuristic's own recipe. A
+    // CI candidate here would only displace a better-informed one.
+    let r = read_npm(
+        "publish-only",
+        &[Wf::Inline("publish.yml", NPM_PUBLISH_ONLY)],
+        true,
+    )
+    .await;
+    assert!(r.candidate.is_none());
+    assert!(
+        matches!(&r.declined, Some(Decline::NothingTheHeuristicLacks { because })
+            if because.contains("no build script beyond what `npm pack` runs")),
+        "{:?}",
+        r.declined
+    );
+    // The workflow's `node-version: 20` is a series, carried as a range that intersects with the
+    // registry's exact version rather than contradicting it.
+    assert!(
+        r.evidence.iter().any(|e| e.claim
+            == Claim::ToolchainRange {
+                tool: "node".into(),
+                lo: Some("20".into()),
+                hi: Some("21".into())
+            }),
+        "{:?}",
+        r.evidence
+    );
+}
+
+#[tokio::test]
+async fn equally_ranked_recipes_are_a_tie_whatever_they_disagree_about() {
+    // The runner, the build command, the directory: each is a different build, and the ranking
+    // did not decide between them.
+    for (name, from, to, disagree) in [
+        (
+            "tie-runner",
+            "runs-on: ubuntu-24.04",
+            "runs-on: ubuntu-22.04",
+            "the runner",
+        ),
+        (
+            "tie-build",
+            "- run: python -m build",
+            "- run: python -m build --wheel",
+            "the build command",
+        ),
+        (
+            "tie-dir",
+            "- run: python -m build",
+            "- run: python -m build\n        working-directory: pkg",
+            "the working directory",
+        ),
+    ] {
+        let r = read_pypi(
+            name,
+            &[
+                Wf::Inline("a-release.yml", OTHER_RELEASE),
+                Wf::Inline("b-release.yml", OTHER_RELEASE.replace(from, to).leak()),
+            ],
+            &[],
+        )
+        .await;
+        match r.declined.as_ref() {
+            Some(Decline::RecipesTie { disagree_on, .. }) => {
+                assert_eq!(*disagree_on, disagree, "{name}")
+            }
+            other => panic!("{name}: expected a tie, got {other:?}"),
+        }
+    }
+
+    // Two identical release workflows are interchangeable, and either is correct.
+    let r = read_pypi(
+        "tie-none",
+        &[
+            Wf::Inline("a-release.yml", OTHER_RELEASE),
+            Wf::Inline("b-release.yml", OTHER_RELEASE),
+        ],
+        &[],
+    )
+    .await;
+    assert!(r.candidate.is_some(), "{:?}", r.declined);
 }

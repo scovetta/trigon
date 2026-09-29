@@ -89,8 +89,8 @@ fn leaves_normalized_reachable(risk: RiskTier, provenance: &Provenance) -> bool 
         RiskTier::Structural => true,
         // Timestamps, modes, owners: the benign nondeterminism this project exists to absorb.
         RiskTier::Metadata => true,
-        // Rewrites bytes inside a distributed file. `wheel-record` is the builtin example, and it
-        // is why a wheel that needed its RECORD regenerated cannot present as a clean match.
+        // Rewrites bytes inside a distributed file. `wheel-record-v2` is the builtin example, and
+        // it is why a wheel that needed its RECORD regenerated cannot present as a clean match.
         RiskTier::Content => false,
         // Discards information outright.
         RiskTier::Lossy => false,
@@ -166,6 +166,7 @@ fn summary(raw: u8, stabilized: u8, applied: Vec<Applied>) -> Summary {
         // Both sides must report the same set digest or `compare` refuses outright, which is a
         // different invariant (`comparing_across_stabilizer_sets_is_refused`) and not this one.
         set: (ProfileId::new("tar"), Digest::from_bytes([0xEE; 32])),
+        edits: Vec::new(),
     }
 }
 

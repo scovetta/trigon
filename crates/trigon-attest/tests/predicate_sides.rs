@@ -2,7 +2,7 @@
 //!
 //! `trigon_stabilize::apply` returns only the passes that actually changed something, so the two
 //! sides of a comparison routinely differ: a wheel whose `RECORD` needed regenerating on the
-//! rebuild and not upstream produces a `wheel-record` entry on one side only, and that pass is
+//! rebuild and not upstream produces a `wheel-record-v2` entry on one side only, and that pass is
 //! `RiskTier::Content`.
 //!
 //! `equivalence_predicate` used to read `c.upstream.applied` for the `applied` array, for
@@ -30,6 +30,7 @@ fn side(applied: Vec<Applied>, stabilized: u8) -> Summary {
         applied,
         notes: Vec::new(),
         set: (ProfileId::new("wheel"), digest(0x5E)),
+        edits: Vec::new(),
     }
 }
 
@@ -56,7 +57,7 @@ fn a_pass_that_fired_only_on_the_rebuild_reaches_the_signed_statement() {
         rebuild: side(
             vec![
                 pass("zip-time", RiskTier::Metadata, Provenance::Builtin),
-                pass("wheel-record", RiskTier::Content, Provenance::Builtin),
+                pass("wheel-record-v2", RiskTier::Content, Provenance::Builtin),
             ],
             0x11,
         ),
@@ -74,7 +75,7 @@ fn a_pass_that_fired_only_on_the_rebuild_reaches_the_signed_statement() {
         .map(|a| a["id"].as_str().unwrap())
         .collect();
     assert!(
-        ids.contains(&"wheel-record"),
+        ids.contains(&"wheel-record-v2"),
         "a pass that fired only on the rebuild is missing from the signed statement: {ids:?}"
     );
 

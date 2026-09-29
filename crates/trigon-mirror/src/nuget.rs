@@ -282,3 +282,184 @@ pub fn versions(pages: &[Value]) -> Vec<String> {
 pub fn normalized(id: &str) -> String {
     id.trim().to_ascii_lowercase()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(id: &str, version: &str, published: Option<&str>, listed: Option<bool>) -> Value {
+        let mut entry = json!({ "id": id, "version": version });
+        if let Some(p) = published {
+            entry["published"] = json!(p);
+        }
+        if let Some(l) = listed {
+            entry["listed"] = json!(l);
+        }
+        json!({
+            "@id": format!("{REGISTRATION_BASE}/{}/{version}.json", normalized(id)),
+            "packageContent": format!("{FLAT_BASE}/{}/{version}/x.nupkg", normalized(id)),
+            "catalogEntry": entry,
+        })
+    }
+
+    fn page(leaves: Vec<Value>) -> Value {
+        json!({ "count": leaves.len(), "items": leaves })
+    }
+
+    fn kept(page: &Value) -> Vec<String> {
+        versions(std::slice::from_ref(page))
+    }
+
+    #[test]
+    fn a_leaf_that_cannot_be_dated_or_was_withdrawn_is_not_offered() {
+        // A leaf with no `published` cannot be placed in time, the 1900 sentinel means unlisted
+        // rather than ancient, and `listed: false` says so outright. None of them is a version a
+        // resolver should be offered, and each is counted as removed.
+        let mut p = page(vec![
+            leaf("Demo", "1.0.0", Some("2018-01-01T00:00:00+00:00"), None),
+            leaf("Demo", "1.1.0", None, None),
+            leaf("Demo", "1.2.0", Some("1900-01-01T00:00:00+00:00"), None),
+            leaf(
+                "Demo",
+                "1.3.0",
+                Some("2018-06-01T00:00:00+00:00"),
+                Some(false),
+            ),
+            leaf(
+                "Demo",
+                "1.4.0",
+                Some("2018-07-01T00:00:00+00:00"),
+                Some(true),
+            ),
+            leaf("Demo", "2.0.0", Some("2021-01-01T00:00:00+00:00"), None),
+        ]);
+        assert_eq!(filter_page(&mut p, "2020-01-01T00:00:00"), 4);
+        assert_eq!(kept(&p), ["1.0.0", "1.4.0"]);
+        // `count` is the client's own check on the page; left stale, NuGet reports a corrupt feed.
+        assert_eq!(p["count"], 2);
+    }
+
+    #[test]
+    fn the_toolchains_own_packages_pass_the_date_but_not_the_other_rules() {
+        // Pinned by the SDK rather than resolved by date — but an unlisted targeting pack is still
+        // one its author withdrew.
+        let mut p = page(vec![
+            leaf(
+                "Microsoft.NETCore.App.Ref",
+                "6.0.36",
+                Some("2024-11-12T00:00:00+00:00"),
+                None,
+            ),
+            leaf(
+                "NETStandard.Library",
+                "2.0.3",
+                Some("2024-01-01T00:00:00+00:00"),
+                None,
+            ),
+            leaf(
+                "Microsoft.NETCore.App.Ref",
+                "5.0.0",
+                Some("1900-01-01T00:00:00+00:00"),
+                None,
+            ),
+            leaf(
+                "Microsoft.Extensions.Logging",
+                "8.0.0",
+                Some("2023-11-14T00:00:00+00:00"),
+                None,
+            ),
+        ]);
+        assert_eq!(filter_page(&mut p, "2020-01-01T00:00:00"), 2);
+        assert_eq!(kept(&p), ["6.0.36", "2.0.3"]);
+        assert!(is_toolchain_package("microsoft.net.sdk.web"));
+        assert!(!is_toolchain_package("Microsoft.Extensions.Logging"));
+    }
+
+    #[test]
+    fn a_page_without_its_leaves_filters_to_nothing_and_says_it_removed_nothing() {
+        // Which is exactly why the route resolves remote pages first: this answer is
+        // indistinguishable from a page where nothing needed removing.
+        let mut remote = json!({ "@id": format!("{REGISTRATION_BASE}/demo/page/1.json") });
+        assert!(!page_is_inline(&remote));
+        assert_eq!(
+            page_url(&remote),
+            Some(format!("{REGISTRATION_BASE}/demo/page/1.json").as_str())
+        );
+        assert_eq!(filter_page(&mut remote, "2020-01-01T00:00:00"), 0);
+        let w = crate::Withheld {
+            project: "demo".into(),
+            version: "1.0.0".into(),
+        };
+        assert_eq!(withhold_version(&mut remote, &w), 0);
+        assert!(versions(&[remote]).is_empty());
+    }
+
+    #[test]
+    fn the_version_under_test_is_withheld_by_folded_id_and_exact_version() {
+        // NuGet ids fold case and a published version string is served back verbatim, so an exact
+        // match on version and a folded one on id is what the feed itself guarantees.
+        let mut p = page(vec![
+            leaf(
+                "Polly.Core",
+                "8.1.0",
+                Some("2023-01-01T00:00:00+00:00"),
+                None,
+            ),
+            leaf(
+                "Polly.Core",
+                "8.2.0",
+                Some("2023-06-01T00:00:00+00:00"),
+                None,
+            ),
+            leaf(
+                "Polly.Core",
+                "8.2.0-beta",
+                Some("2023-05-01T00:00:00+00:00"),
+                None,
+            ),
+            leaf("Polly", "8.2.0", Some("2023-06-01T00:00:00+00:00"), None),
+            json!({ "catalogEntry": { "version": "8.2.0" } }),
+        ]);
+        let w = crate::Withheld {
+            project: "polly.core".into(),
+            version: "8.2.0".into(),
+        };
+        assert_eq!(withhold_version(&mut p, &w), 1);
+        assert_eq!(p["count"], 4);
+        let left: Vec<String> = versions(std::slice::from_ref(&p));
+        assert_eq!(left, ["8.1.0", "8.2.0-beta", "8.2.0", "8.2.0"]);
+    }
+
+    #[test]
+    fn only_urls_on_the_registry_and_flat_container_are_pointed_back_here() {
+        // A URL this mirror did not recognise is left alone rather than rewritten into something
+        // that resolves to nothing.
+        let base = "http://timewarp:8129/-nuget/2020-01-01T00:00:00Z/";
+        let mut p = json!({
+            "@id": format!("{REGISTRATION_BASE}/demo/index.json#page/1"),
+            "items": [{
+                "@id": "https://elsewhere.example/leaf.json",
+                "packageContent": format!("{FLAT_BASE}/demo/1.0.0/demo.1.0.0.nupkg"),
+                "catalogEntry": { "packageContent": "https://elsewhere.example/x.nupkg" },
+            }],
+        });
+        rewrite_urls(&mut p, base);
+        let base = base.trim_end_matches('/');
+        assert_eq!(p["@id"], format!("{base}/reg/demo/index.json#page/1"));
+        let leaf = &p["items"][0];
+        assert_eq!(
+            leaf["packageContent"],
+            format!("{base}/flat/demo/1.0.0/demo.1.0.0.nupkg")
+        );
+        assert_eq!(leaf["@id"], "https://elsewhere.example/leaf.json");
+        assert_eq!(
+            leaf["catalogEntry"]["packageContent"],
+            "https://elsewhere.example/x.nupkg"
+        );
+
+        // And a page with no leaves has only its own address to rewrite.
+        let mut bare = json!({ "@id": format!("{REGISTRATION_BASE}/demo/page/2.json") });
+        rewrite_urls(&mut bare, base);
+        assert_eq!(bare["@id"], format!("{base}/reg/demo/page/2.json"));
+    }
+}

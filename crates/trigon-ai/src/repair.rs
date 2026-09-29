@@ -543,4 +543,115 @@ mod tests {
         l.record(attempt("a/one", Phase::Deps));
         assert_eq!(l.cache_read_rate(), Some(0.8));
     }
+
+    #[test]
+    fn a_sweep_with_no_history_refuses_nothing_for_want_of_it() {
+        // `NoPrior` is the cold start: every signature is novel and none has been repaired. Read as
+        // "never repaired, so unfixable" it would refuse every target of a first sweep, and
+        // novelty is what outranks prevalence, so even an obscure target is worth the attempt.
+        assert!(NoPrior.is_novel("x/unseen"));
+        assert!(!NoPrior.ever_repaired("x/unseen"));
+        for prevalence in [0.0, 0.5, 1.0] {
+            let l = RepairLoop::new(Budget::default(), Trigger::Sweep { prevalence });
+            assert_eq!(
+                l.next(&sig("x/unseen", true), &NoPrior, 0),
+                Decision::Attempt { escalate: false },
+                "prevalence {prevalence}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prevalence_threshold_is_the_callers_to_set_and_is_a_strict_floor() {
+        let seen = Known {
+            novel: false,
+            repaired: true,
+        };
+        let f = sig("y/seen", true);
+        let sweep = |prevalence| RepairLoop::new(Budget::default(), Trigger::Sweep { prevalence });
+
+        // At the default of 1%, a target at 30% is well above it.
+        assert!(matches!(
+            sweep(0.3).next(&f, &seen, 0),
+            Decision::Attempt { .. }
+        ));
+        // Raised, the same target is below it, and the stop says by how much.
+        assert_eq!(
+            sweep(0.3).with_prevalence_threshold(0.5).next(&f, &seen, 0),
+            Decision::Stop(StopReason::BelowPrevalenceThreshold {
+                score: 0.3,
+                threshold: 0.5
+            })
+        );
+        // At the threshold is not below it.
+        assert!(matches!(
+            sweep(0.5).with_prevalence_threshold(0.5).next(&f, &seen, 0),
+            Decision::Attempt { .. }
+        ));
+    }
+
+    #[test]
+    fn output_tokens_are_a_budget_of_their_own() {
+        // Output is the expensive side of a call, and a loop well inside its input budget can
+        // still have spent all of it.
+        let mut l = RepairLoop::new(
+            Budget {
+                max_iterations: 99,
+                tokens_in: 1_000_000,
+                tokens_out: 150,
+                wall_seconds: 3_600,
+            },
+            Trigger::Interactive,
+        );
+        l.record(attempt("a/one", Phase::Deps));
+        assert!(matches!(
+            l.next(&sig("b/two", true), &NoPrior, 0),
+            Decision::Attempt { .. }
+        ));
+        l.record(attempt("b/two", Phase::Deps));
+        assert_eq!(l.tokens_out(), 200);
+        assert_eq!(
+            l.next(&sig("c/three", true), &NoPrior, 0),
+            Decision::Stop(StopReason::BudgetExhausted {
+                what: "output tokens"
+            })
+        );
+    }
+
+    #[test]
+    fn a_repeated_failure_at_the_cap_is_reported_as_no_progress_rather_than_the_cap() {
+        // Checked before the budget, because the two stops mean different things: the cap is a
+        // knob, and a signature the model keeps restating is a gap in the rules somebody should
+        // look at. Reported as the cap, it would never reach the cluster view.
+        let f = sig("cc/missing-header", true);
+        let mut l = RepairLoop::new(
+            Budget {
+                max_iterations: 2,
+                ..Budget::default()
+            },
+            Trigger::Interactive,
+        );
+        l.record(attempt(&f.key(), Phase::Build));
+        l.record(attempt(&f.key(), Phase::Build));
+        let d = l.next(&f, &NoPrior, 0);
+        assert_eq!(
+            d,
+            Decision::Stop(StopReason::NoProgress { signature: f.key() })
+        );
+        let Decision::Stop(why) = d else {
+            unreachable!()
+        };
+        assert!(why.wants_attention());
+    }
+
+    #[test]
+    fn the_attempts_are_kept_in_the_order_they_were_made() {
+        let mut l = RepairLoop::new(Budget::default(), Trigger::Interactive);
+        assert!(l.attempts().is_empty());
+        l.record(attempt("a/one", Phase::Setup));
+        l.record(attempt("b/two", Phase::Build));
+        let got: Vec<&str> = l.attempts().iter().map(|a| a.signature.as_str()).collect();
+        assert_eq!(got, ["a/one", "b/two"]);
+        assert_eq!((l.tokens_in(), l.tokens_out()), (2_000, 200));
+    }
 }

@@ -406,12 +406,35 @@ entry_pass!(
         const DROP: [&str; 4] = ["\"_resolved\"", "\"_integrity\"", "\"_from\"", "\"_id\""];
         let mut out = String::with_capacity(text.len());
         let mut removed = 0u64;
+        // Where the last non-blank line kept ends in `out`, and whether a line was dropped since.
+        let mut last_kept: Option<usize> = None;
+        let mut dropped_since = false;
         for line in text.lines() {
             if DROP.iter().any(|k| line.trim_start().starts_with(k)) {
                 removed += line.len() as u64;
+                dropped_since = true;
                 continue;
             }
+            // Fields dropped from the end of an object leave the property before them carrying the
+            // comma that separated it from them, in front of the `}`: not JSON, and never the
+            // authored form. It goes with them. The pass has never run on anything this tool has
+            // verified (`docs/16-findings.md` §3.28), so no record re-derives differently under
+            // its id.
+            if dropped_since && line.trim_start().starts_with('}') {
+                if let Some(end) = last_kept {
+                    let kept = out[..end].trim_end();
+                    if kept.ends_with(',') {
+                        let comma = kept.len() - 1;
+                        out.replace_range(comma..comma + 1, "");
+                        removed += 1;
+                    }
+                }
+            }
+            dropped_since = false;
             out.push_str(line);
+            if !line.trim().is_empty() {
+                last_kept = Some(out.len());
+            }
             out.push('\n');
         }
         if removed == 0 {
@@ -467,11 +490,16 @@ archive_pass!(
 
 // --- .NET assemblies -----------------------------------------------------------------------------
 
+// Checked, because the stream directory's count sits wherever the metadata's version length puts
+// it, up to `u32::MAX`, and in the archived wasm32 guest that is `usize::MAX`: `o + 2` there traps
+// rather than failing the read. Each `u32le` offset is a bounded step from one inside the file.
 fn u16le(b: &[u8], o: usize) -> Option<u16> {
-    b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]))
+    b.get(o..o.checked_add(2)?)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
 }
 fn u32le(b: &[u8], o: usize) -> Option<u32> {
-    b.get(o..o + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    b.get(o..o + 4)
+        .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
 }
 
 /// The byte ranges of a managed assembly that a rebuild cannot reproduce and a consumer does not
@@ -486,7 +514,7 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
         return None;
     }
     let pe = u32le(b, 0x3c)? as usize;
-    if b.get(pe..pe + 4)? != b"PE\0\0" {
+    if b.get(pe..pe.checked_add(4)?)? != b"PE\0\0" {
         return None;
     }
     let coff = pe + 4;
@@ -513,7 +541,15 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
             let vsize = u32le(b, s + 8)? as usize;
             let vaddr = u32le(b, s + 12)? as usize;
             let praw = u32le(b, s + 20)? as usize;
-            (rva >= vaddr && rva < vaddr + vsize.max(1)).then_some(praw + (rva - vaddr))
+            // `then`, not `then_some`: an eager `rva - vaddr` panics on any RVA below the section.
+            // A difference rather than `vaddr + vsize`, and an offset past the file clamped to its
+            // end, because the archived wasm32 guest runs this with a 32-bit `usize` and traps on
+            // overflow; every caller reads the end of the file as nothing there, as it reads any
+            // offset past it.
+            (rva >= vaddr && rva - vaddr < vsize.max(1)).then(|| {
+                praw.checked_add(rva - vaddr)
+                    .map_or(b.len(), |o| o.min(b.len()))
+            })
         })
     };
 
@@ -561,7 +597,9 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
                 let ptr_raw = u32le(b, ent + 24)? as usize;
                 if ptr_raw != 0
                     && size_of_data != 0
-                    && ptr_raw.checked_add(size_of_data).is_some_and(|e| e <= b.len())
+                    && ptr_raw
+                        .checked_add(size_of_data)
+                        .is_some_and(|e| e <= b.len())
                 {
                     regions.push((ptr_raw, size_of_data));
                 }
@@ -579,8 +617,8 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
     {
         let ver_len = u32le(b, md + 12)? as usize;
         let ver_padded = ver_len.checked_add(3)? & !3;
-        let after_ver = md + 16 + ver_padded;
-        let streams = u16le(b, after_ver + 2)? as usize;
+        let after_ver = (md + 16).checked_add(ver_padded)?;
+        let streams = u16le(b, after_ver.checked_add(2)?)? as usize;
         let mut q = after_ver + 4;
         for _ in 0..streams {
             let s_off = u32le(b, q)? as usize;
@@ -589,16 +627,32 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
             let name_end = name_start + b.get(name_start..)?.iter().position(|&c| c == 0)?;
             let name = b.get(name_start..name_end)?;
             let name_padded = (name_end - name_start + 1).checked_add(3)? & !3;
-            if name == b"#GUID" {
-                let heap = md.checked_add(s_off)?;
-                if heap.checked_add(s_size).is_some_and(|end| end <= b.len()) {
-                    regions.push((heap, s_size));
-                }
+            // A heap too far out for `md + s_off` to name is past the file like any other, and
+            // skipped like one: a `?` here declined the whole assembly on 32 bits alone.
+            if name == b"#GUID"
+                && let Some(heap) = md.checked_add(s_off)
+                && heap.checked_add(s_size).is_some_and(|end| end <= b.len())
+            {
+                regions.push((heap, s_size));
             }
             q = name_start + name_padded;
         }
     }
-    Some(regions)
+    // Merged before they are returned. Each debug entry names a region the file states, so a
+    // crafted directory can name the whole file once per entry, and zeroed one region at a time
+    // that is entries × file: 2000 entries over a 65 KB file took half a second in a debug build,
+    // growing with the square of the file. The union names exactly the same bytes. A region past
+    // the end was never zeroed, so it is dropped first rather than merged into one in range.
+    regions.retain(|&(o, l)| o + l <= b.len());
+    regions.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(regions.len());
+    for (o, l) in regions {
+        match merged.last_mut() {
+            Some((mo, ml)) if o <= *mo + *ml => *ml = (*ml).max(o + l - *mo),
+            _ => merged.push((o, l)),
+        }
+    }
+    Some(merged)
 }
 
 entry_pass!(
@@ -666,6 +720,160 @@ entry_pass!(
     }
 );
 
+// **The last resort for a managed assembly, and a lossy one.** `dotnet-assembly-identity` zeroes
+// the fixed-location build identity, but a rebuild whose SourceLink URL, source-generator document
+// order or a heap's length differs from the publisher's lays its metadata and embedded PDB out at
+// shifted offsets that a byte-zeroing pass cannot align ([B46](../../../docs/17-backlog.md),
+// `docs/16-findings.md` §3.87). None of that is code: `moq@4.20.72`'s four assemblies decompile
+// identically and their method IL is byte-for-byte equal.
+//
+// So this replaces a managed assembly with the canonical *functional* form [`crate::ilcanon`]
+// reads out of it — every method's name, signature, flags and whole body, every row and literal
+// an IL token or a signature can name, and the declarations that decide how the code runs
+// (P/Invoke entry points, explicit overrides, implemented interfaces, parameters, layout),
+// resolved through the heaps to values rather than the offsets that moved. Two assemblies built
+// from the same source reduce to the same bytes. A change to a method, to anything its tokens
+// name or to how it is declared still shows; one only to resources, custom attributes or the data
+// a field is initialized from does not. Those it drops, so it is `Lossy`: a match it produces is
+// `normalized_with_caveats`, never a clean `normalized` — the honest tier for "the code is the
+// same, and we did not check the rest." An assembly it cannot read whole, as the runtime reads
+// it, is left exactly as it was.
+//
+// `-v2` because the form changed. The first kept each method's name, signature and IL and nothing
+// its tokens named, so a changed string literal, a MemberRef renamed under its token, a method's
+// flags, a catch clause's type or a P/Invoke's entry point all compared equal. The set digest
+// covers pass ids, not pass code (`docs/19-distribution-and-lookup.md` §11, open question 1), so a
+// new form under the old id would have re-derived old records differently under the digest they
+// were signed with. A new id is a new set digest, and a record made under the old one is
+// re-derived under its archived set.
+entry_pass!(
+    DotnetIlCanonical,
+    "dotnet-il-canonical-v2",
+    RiskTier::Lossy,
+    is_zip,
+    |e| {
+        if !trigon_core::is_managed_assembly(&String::from_utf8_lossy(e.path.as_bytes())) {
+            return Touched::NONE;
+        }
+        let Ok(body) = e.body_bytes() else {
+            return Touched::NONE;
+        };
+        let Some(canon) = crate::ilcanon::canonical_managed(&body) else {
+            return Touched::NONE;
+        };
+        drop(body);
+        match e.body_mut() {
+            Ok(b) => {
+                *b = canon;
+                let n = b.len() as u64;
+                e.meta.size = n;
+                Touched::entry_bytes(n)
+            }
+            Err(_) => Touched::NONE,
+        }
+    }
+);
+
+// The `<repository>` element's `branch` attribute is the git ref the package was built from, and
+// nothing the package does depends on it. A publisher who builds from the release tag stamps
+// `branch="v4.20.72"`; trigon checks the same commit out detached, so the ref is nameless and the
+// attribute is absent — `moq@4.20.72`'s nuspec differed in exactly this and nothing else. The commit
+// is the identity and is kept; the branch is a label on how the commit was reached, so it is
+// dropped from both sides. `Metadata`, the tier the other provenance stamps sit at.
+entry_pass!(
+    NupkgRepositoryBranch,
+    "nupkg-repository-branch",
+    RiskTier::Metadata,
+    is_zip,
+    |e| {
+        if !e.path.as_bytes().ends_with(b".nuspec") {
+            return Touched::NONE;
+        }
+        rewrite_body(e, drop_repository_branch)
+    }
+);
+
+/// Remove ` branch="…"` from the `<repository …>` element, or `None` when there is none.
+fn drop_repository_branch(t: &str) -> Option<String> {
+    let open = t.find("<repository")?;
+    let close = t[open..].find('>')? + open;
+    let attr = t[open..close].find(" branch=\"")? + open;
+    let val = attr + " branch=\"".len();
+    let end = t[val..close].find('"')? + val;
+    Some(format!("{}{}", &t[..attr], &t[end + 1..]))
+}
+
+// NuGetizer (devlooped) assembles a package readme from `<!-- include <path-or-url> -->` directives
+// and leaves the directive and its close marker in the file as comments. A remote include is
+// fetched at pack time, which `mirror-only` forbids, so `nuget/build/pack` neutralises it
+// (`docs/16-findings.md` §3.86) — and that leaves the markers spelled a hair differently than the
+// publisher's networked build did (`<!-- include … -->` kept vs dropped, a stray blank). The sponsor
+// list itself, which comes from a *local* include, reproduces byte for byte; only the invisible
+// markers and the whitespace around them differ. So strip the single-token marker comments from
+// both, squeeze the blank runs that removing them leaves, and trim trailing space. `Content`: it
+// edits the readme's bytes, though not a glyph a reader sees.
+entry_pass!(
+    NupkgReadmeMarkers,
+    "nupkg-readme-markers",
+    RiskTier::Content,
+    is_zip,
+    |e| {
+        if !e.path.as_bytes().ends_with(b".md") {
+            return Touched::NONE;
+        }
+        rewrite_body(e, normalize_readme_markers)
+    }
+);
+
+/// A single-token `<!-- include foo -->` or `<!-- foo -->` marker — NuGetizer's, not a prose comment
+/// (which carries spaces inside). Only these are stripped.
+fn is_nugetizer_marker(line: &str) -> bool {
+    let l = line.trim();
+    let Some(inner) = l.strip_prefix("<!--").and_then(|r| r.strip_suffix("-->")) else {
+        return false;
+    };
+    let inner = inner.trim();
+    let inner = inner
+        .strip_prefix("include")
+        .map(str::trim)
+        .unwrap_or(inner);
+    !inner.is_empty() && !inner.contains(char::is_whitespace)
+}
+
+/// Drop NuGetizer marker comments, squeeze the blank runs that leaves, and trim trailing whitespace.
+/// `None` when nothing changed, so a readme with no markers stays on its original body.
+fn normalize_readme_markers(t: &str) -> Option<String> {
+    let mut out = String::with_capacity(t.len());
+    let mut prev_blank = true; // treat the start as "after a blank" so a leading blank is squeezed
+    let mut changed = false;
+    for line in t.split('\n') {
+        let trimmed = line.trim_end();
+        if trimmed != line {
+            changed = true;
+        }
+        if is_nugetizer_marker(trimmed) {
+            changed = true;
+            continue;
+        }
+        let blank = trimmed.is_empty();
+        if blank && prev_blank {
+            changed = true;
+            continue;
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+        prev_blank = blank;
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
+        changed = true;
+    }
+    // The pop above also fires on the empty piece `split` yields after a final newline, so
+    // `changed` alone claimed every readme that ends in one — a `Content` pass in `applied`, and a
+    // capped verdict, for a file left byte for byte as it was.
+    (changed && out != t).then_some(out)
+}
+
 /// Every builtin pass. Used by the profile registry and by the dependency-policy test.
 pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
     vec![
@@ -692,6 +900,18 @@ pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
         Arc::new(NupkgPackagingNames),
         Arc::new(NupkgPackagerVersion),
         Arc::new(DotnetAssemblyIdentity),
+        Arc::new(DotnetIlCanonical),
+        Arc::new(NupkgRepositoryBranch),
+        Arc::new(NupkgReadmeMarkers),
+        // The wheel and gemspec passes were missing, so the "every builtin pass" this returns
+        // omitted the one `Finalize` pass and every pass that runs inside `metadata.gz`.
+        Arc::new(WheelDirectUrl),
+        Arc::new(PycHeader),
+        Arc::new(WheelMetadataEol),
+        Arc::new(WheelRecord),
+        Arc::new(GemMetadataDate),
+        Arc::new(GemMetadataRubygemsVersion),
+        Arc::new(GemMetadataCertChain),
     ]
 }
 
@@ -781,8 +1001,8 @@ entry_pass!(
     /// `dist-info/`: a wheel may ship arbitrary files there, including licences the author wrote.
     ///
     /// `Content` risk, because it rewrites bytes inside a file. Wheels are already capped below
-    /// `Normalized` by `wheel-record`, so this costs no outcome that was otherwise reachable, and
-    /// it runs at `Default` so `RECORD` is regenerated over the normalized bytes at `Finalize`.
+    /// `Normalized` by `wheel-record-v2`, so this costs no outcome that was otherwise reachable,
+    /// and it runs at `Default` so `RECORD` is regenerated over the normalized bytes at `Finalize`.
     ///
     /// Measured impact when added: one wheel in the seventeen-package M1 PyPI corpus carries CRLF
     /// metadata at all. It is a rare case that recurs rather than a common one.
@@ -838,12 +1058,20 @@ entry_pass!(
 /// change membership: `wheel-direct-url` removes a file, and a definitions-supplied `exclude_path`
 /// can remove any file at all. Regenerating it at `Default` would produce a manifest of the wheel as
 /// it arrived rather than the wheel as it stands.
+///
+/// `-v2` because what is recorded of it changed, though not what it writes. An archive pass names
+/// no member in what it reports, so the RECORD it regenerated carried no `body` edit; now each body
+/// is compared across the pass, and a comparison's field edits name RECORD as rewritten by it. A
+/// report published with field edits before that would re-derive with one it does not carry, under
+/// the set digest it was published with, and read as a disagreement. The set digest covers pass ids
+/// and not pass code (`docs/19-distribution-and-lookup.md` §11, open question 1), so a new id is
+/// what sends such a record to its archived set.
 #[derive(Debug)]
 pub struct WheelRecord;
 
 impl Stabilizer for WheelRecord {
     fn id(&self) -> StabilizerId {
-        StabilizerId::new("wheel-record")
+        StabilizerId::new("wheel-record-v2")
     }
     fn stage(&self) -> Stage {
         Stage::Finalize
@@ -1149,7 +1377,9 @@ fn normalize_rels(body: &mut Vec<u8>) -> bool {
                     out.extend_from_slice(b"Target=\"/");
                     out.extend_from_slice(PSMDCP_CANONICAL);
                     out.push(b'"');
-                    changed = true;
+                    // Only a target not already canonical is a change, or a second pass over
+                    // stabilized bytes claims work and the set stops being idempotent.
+                    changed |= value.strip_prefix(b"/") != Some(PSMDCP_CANONICAL);
                     i = end + 1;
                     continue;
                 }
@@ -1535,9 +1765,14 @@ fn sort_doc_members(body: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// `-v2` because what it reports changed. It rewrote the file and said it had changed no bytes, so
+// `applied` signed `bytesChanged: 0` for a body it had rewritten and no edit named the member it
+// had reconciled. Now it counts the bytes it wrote, and that count is signed, so the same id would
+// re-derive old statements to a different `applied` under the digest they were made with
+// (`docs/19-distribution-and-lookup.md` §11, open question 1).
 entry_pass!(
     NupkgDocMemberOrder,
-    "nupkg-doc-member-order",
+    "nupkg-doc-member-order-v2",
     RiskTier::Structural,
     is_zip,
     |e| {
@@ -1554,10 +1789,9 @@ entry_pass!(
             return Touched::NONE;
         };
         *body = sorted;
-        Touched {
-            entries: 1,
-            bytes: 0,
-        }
+        // The body is rewritten, and saying so is what names it: a body change is attributed from
+        // the bytes an entry pass reports.
+        Touched::entry_bytes(body.len() as u64)
     }
 );
 
@@ -1667,7 +1901,11 @@ mod dotnet_assembly_tests {
         // fixed-location and close here, but a residual can remain when the two builds laid their
         // debug/PDB data out differently (a different PDB path length shifts it) — that is the
         // build environment, not something a byte-zeroing stabilizer can reach. See B46.
-        assert!(after < before, "identity normalization changed nothing ({before} bytes)");    }
+        assert!(
+            after < before,
+            "identity normalization changed nothing ({before} bytes)"
+        );
+    }
 
     /// A non-managed input is left whole: no `MZ`, or a PE with no CLI header, yields no regions.
     #[test]
@@ -1676,5 +1914,60 @@ mod dotnet_assembly_tests {
         assert!(dotnet_build_identity_regions(&[]).is_none());
         // `MZ` but nothing after: must not panic, must decline.
         assert!(dotnet_build_identity_regions(b"MZ").is_none());
+    }
+
+    /// The regions come back merged: sorted, apart, and inside the file. A crafted debug directory
+    /// names the whole file from each of its entries, and zeroing those one at a time costs entries
+    /// × file. Zeroing either list reaches the same bytes, so only the list can show the merge.
+    #[test]
+    fn the_regions_come_back_merged_so_each_byte_is_named_once() {
+        fn set16(f: &mut [u8], at: usize, x: u16) {
+            f[at..at + 2].copy_from_slice(&x.to_le_bytes());
+        }
+        fn set32(f: &mut [u8], at: usize, x: u32) {
+            f[at..at + 4].copy_from_slice(&x.to_le_bytes());
+        }
+        // A PE32 image with one section at RVA 0x2000, file offset 0x200: a CLI header, then the
+        // debug entries, each naming every byte of the file but the first.
+        const ENTRIES: usize = 2000;
+        let len = 0x200 + 72 + 28 * ENTRIES;
+        let mut f = vec![0u8; len];
+        f[0..2].copy_from_slice(b"MZ");
+        set32(&mut f, 0x3c, 0x80);
+        f[0x80..0x84].copy_from_slice(b"PE\0\0");
+        let coff = 0x84;
+        set16(&mut f, coff + 2, 1);
+        set32(&mut f, coff + 4, 0x6543_2100);
+        set16(&mut f, coff + 16, 96 + 16 * 8);
+        let opt = coff + 20;
+        set16(&mut f, opt, 0x10b);
+        set32(&mut f, opt + 64, 0x0001_2345);
+        let dir = opt + 96;
+        set32(&mut f, dir + 6 * 8, 0x2000 + 72);
+        set32(&mut f, dir + 6 * 8 + 4, (28 * ENTRIES) as u32);
+        set32(&mut f, dir + 14 * 8, 0x2000);
+        set32(&mut f, dir + 14 * 8 + 4, 72);
+        let sh = dir + 16 * 8;
+        set32(&mut f, sh + 8, (len - 0x200) as u32);
+        set32(&mut f, sh + 12, 0x2000);
+        set32(&mut f, sh + 16, (len - 0x200) as u32);
+        set32(&mut f, sh + 20, 0x200);
+        set32(&mut f, 0x200, 72);
+        for i in 0..ENTRIES {
+            let e = 0x200 + 72 + 28 * i;
+            set32(&mut f, e + 4, 1);
+            set32(&mut f, e + 16, (len - 1) as u32);
+            set32(&mut f, e + 24, 1);
+        }
+
+        let regions = dotnet_build_identity_regions(&f).expect("a managed image");
+        for w in regions.windows(2) {
+            let ((o1, l1), (o2, _)) = (w[0], w[1]);
+            assert!(o2 > o1 + l1, "{:?} and {:?} overlap or touch", w[0], w[1]);
+        }
+        assert!(regions.iter().all(|&(o, l)| o + l <= len), "{regions:?}");
+        // The timestamp, the checksum, the directory slot and every entry's own stamp lie inside
+        // what the entries name, so the union is that one region.
+        assert_eq!(regions, [(1, len - 1)]);
     }
 }

@@ -1,0 +1,179 @@
+{
+  "about": "Proofs over the golden repository's first log, log/ (testdata/log/repo). Every checkpoint the log had, as a signed note, with the RFC 6962 consistency proof from it to the final one; and inclusion proofs in the final tree for leaves either side of the first tile boundary, each leaf as the canonical JSON it is. Hashes are base64. Written by crates/trigon-attest's writer and checked by an implementation that is not it (docs/16-findings.md section 3.98).",
+  "checkpoints": [
+    {
+      "consistencyToFinal": [],
+      "note": "example.com/trigon-evidence\n0\n47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\n\n— example.com/trigon-evidence dU+NGX/QbjPnoVl7o6Zbg3T9RxPFOWHoC8uMN2x7oQE4YkJdiJCVfvvXCmfpdBy5KbcD7q4F8q0yQDklHVN+v1b1+AE=\n",
+      "root": "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+      "size": 0
+    },
+    {
+      "consistencyToFinal": [
+        "Hrt6KlXPHdusfPUoF9aaXNxcPvVJn4LpTMk4LfkItPk=",
+        "H0gbR2f7nY12/HP5jES56wI/KMSQhX7dhOT+TSPwvQc=",
+        "BjkcoQ89sLaE85L39fq9l+w3irJOc0S2BKWCIwDH0yw=",
+        "pUVYzfik8Ys7X3pyOTandTWJI7OGej7DTizYMzzKiu4=",
+        "BwQsbXdj4mAjsqTHCLgGV48kILOGff0q+ULEjv5+wlc=",
+        "apBzFZu0QmITkUIvCVgEKEmau/y6NhEgGf/wiY/hADc=",
+        "Y1Ay4G6qB9YgYtoB5riSY53UcGO659wt7Z5bdGLJfgs=",
+        "9xNLy4D5pl/ANZNpm6w6MckRw2tc34DNgVWU2F7LJZI=",
+        "2NmxXq5HX/PS4nQaeox2JAL/L6qSxw/sZ9iibk2VWrY=",
+        "B35vz1X4xyMLcWD0ZN2C0aTgdvsyIZFdSm6eDqjF/jY="
+      ],
+      "note": "example.com/trigon-evidence\n3\norC3qWGJEJtQPOZUR4pgF7QiQDD+BPJMy1PZUs/V9/g=\n\n— example.com/trigon-evidence dU+NGeInJF+fM9ZSlhn7J2TddUdGRWMYhVhW+LUogcP+7VAKHugGk8+fKWfkbheOrNL9qIZ1kjZnFWh7nZlAtFaWSQM=\n",
+      "root": "orC3qWGJEJtQPOZUR4pgF7QiQDD+BPJMy1PZUs/V9/g=",
+      "size": 3
+    },
+    {
+      "consistencyToFinal": [
+        "dBmoKvoE4FlqNJ5tNwAk10/Nz1QVR+gFOUVmm6JrL4k=",
+        "dyrkemdfJXxDTWYaP1T3t0kCCZz7u1ivlmDVuCPm11o=",
+        "1LRORmP/YYnS8xqEB8rBzITt2wEbAzb9toJ4FgqGKwg=",
+        "U+affDsFvhz1j4a+s2xUaUIFBzA5u47RRdQLik3BTGw=",
+        "V4rhg7A96FUuPEFRRO9Cpzlce40FFaJFJ/rXZyBWXDU=",
+        "aVhkcxSvXYKM030MlLimGUJ3+ae40iSXZauKvuV68+w=",
+        "I+/S72DN1o67M1bHVfziY2fVIkG27os+LF67qHovQ6k=",
+        "zoGhB+EWKOl3KsZ94Nqx+qC9RmIKx9DWuzudJyCuWT0=",
+        "/q81PGgYaDvrCVjubFEZvVN5nZbEXLZcxsg8PI/QOg4=",
+        "B35vz1X4xyMLcWD0ZN2C0aTgdvsyIZFdSm6eDqjF/jY="
+      ],
+      "note": "example.com/trigon-evidence\n253\n2Ir9CPA337RTITzgQ+lGrwZSEeuBI/Mtx/LrQO1IDjg=\n\n— example.com/trigon-evidence dU+NGVeT31FiHE+8/yYHczkdLCjR/DRfJoR6i+zSbIOt7pSZKZB7Ahbh/GA+izBeUvtA16RQgMUoW810ulxoN5HG3AE=\n",
+      "root": "2Ir9CPA337RTITzgQ+lGrwZSEeuBI/Mtx/LrQO1IDjg=",
+      "size": 253
+    },
+    {
+      "consistencyToFinal": [
+        "7kgxi51+YIWLQAZfbsoCcdYcJq+oC+ACVbZV3Q+yIws=",
+        "Qs3bkTfb4K2x6eoAULeYeUgwPyHJe3eUrM00yfmfzpM=",
+        "HrXsbhUXtfXO3w9bpWtIqbzKXZHW1sjqy/v9hknzm4M="
+      ],
+      "note": "example.com/trigon-evidence\n258\nsqiIm+jdJC4hcqrDYzLMXTcoJdZ4lwU9DPMuplLIRcU=\n\n— example.com/trigon-evidence dU+NGTQPzh55VJNQGxgkuIing93x7koU7US+ILpJ5DqsBDLFXHwEFWzrcoNblQORHKTeTyOiLigJ1XDaKf+VOJDq2A8=\n",
+      "root": "sqiIm+jdJC4hcqrDYzLMXTcoJdZ4lwU9DPMuplLIRcU=",
+      "size": 258
+    },
+    {
+      "consistencyToFinal": [
+        "p0OUkCbJtrC0cSjDKfTKenbsqgcu9UuQHbz32lSXTGo=",
+        "BFUpWBylBuPewDjbYoL3qw1ZwEueJNExeGnspZdpa04=",
+        "7kgxi51+YIWLQAZfbsoCcdYcJq+oC+ACVbZV3Q+yIws=",
+        "HrXsbhUXtfXO3w9bpWtIqbzKXZHW1sjqy/v9hknzm4M="
+      ],
+      "note": "example.com/trigon-evidence\n259\nQhm5k8Mkppp8ptptkoskHCiGvBiyq+go9OVWSAE1bhE=\n\n— example.com/trigon-evidence dU+NGVjURQsZ591i5oDakcJ5VdsymtOuypGIpkqeg7TfQUmQQJrWvfLAXYLnIdcleMsuUQqsXE7yvcN7ob842RlUCgI=\n",
+      "root": "Qhm5k8Mkppp8ptptkoskHCiGvBiyq+go9OVWSAE1bhE=",
+      "size": 259
+    },
+    {
+      "consistencyToFinal": [],
+      "note": "example.com/trigon-evidence\n260\nTy1SzNoY5RvKe9YXSjUs9yVLD3njlYg5yi6B6Yxup2c=\n\n— example.com/trigon-evidence dU+NGVOziBJ6+LTQROvKKk6k9Bp3vSoRz0nMFKjrn1VOGbBMUAUhJqJVZbO8+n8Ntk/5xozY/oXii0wazVgaIWaOpQo=\n",
+      "root": "Ty1SzNoY5RvKe9YXSjUs9yVLD3njlYg5yi6B6Yxup2c=",
+      "size": 260
+    }
+  ],
+  "inclusion": [
+    {
+      "index": 0,
+      "leaf": "{\"keyId\":\"b62e867fa2f33afe\",\"kind\":\"record\",\"outcome\":\"normalized\",\"predicateType\":\"https://trigon.dev/equivalence/v2\",\"purl\":\"pkg:npm/left-pad@1.3.1\",\"purlCanon\":1,\"record\":\"sha256:3dba37bb0871edefb95b6655128dbe1922522f17be0cd1089ef7dd45c9badcd1\",\"stabilizerSet\":\"sha256:2510f133a6b002429c2e7f408264290dfd4c1e2b7ece2a3e4888fad61ebddda2\",\"subject\":{\"sha1\":\"9479aee743a8bb56eb98eb483f3a55ef000e805c\",\"sha256\":\"3b4fa32d36c4cc802b3932df5da8eb8497c05fa8419f8fd95edb2fb4f432158f\",\"sha512\":\"42c1d4fb1dbbad3880b5835b3f9ffffe473f87b0f229618105934ff985bc02b140c8a7149ac8cf8ec0ab71f8e05e02ba28c635aad84ea8af71faa0d2850adf34\"},\"time\":1790467200}",
+      "proof": [
+        "GfceM3jC0wHP225HjOPvCMPz3r/0RewlX6vfVemlJOI=",
+        "VKLjIEPKBn8ROrXfZrCNgj1uhjIUYwyE8Uxe9nQJtrU=",
+        "pUVYzfik8Ys7X3pyOTandTWJI7OGej7DTizYMzzKiu4=",
+        "BwQsbXdj4mAjsqTHCLgGV48kILOGff0q+ULEjv5+wlc=",
+        "apBzFZu0QmITkUIvCVgEKEmau/y6NhEgGf/wiY/hADc=",
+        "Y1Ay4G6qB9YgYtoB5riSY53UcGO659wt7Z5bdGLJfgs=",
+        "9xNLy4D5pl/ANZNpm6w6MckRw2tc34DNgVWU2F7LJZI=",
+        "2NmxXq5HX/PS4nQaeox2JAL/L6qSxw/sZ9iibk2VWrY=",
+        "B35vz1X4xyMLcWD0ZN2C0aTgdvsyIZFdSm6eDqjF/jY="
+      ]
+    },
+    {
+      "index": 2,
+      "leaf": "{\"keyId\":\"b62e867fa2f33afe\",\"kind\":\"record\",\"outcome\":\"void\",\"predicateType\":\"https://trigon.dev/void/v1\",\"purl\":\"pkg:npm/left-pad@1.3.3\",\"purlCanon\":1,\"record\":\"sha256:7322e1c393bf2dffd7c20450a6b421b8681388696b5faee4e5d21cf2d358eb58\",\"stabilizerSet\":\"sha256:2510f133a6b002429c2e7f408264290dfd4c1e2b7ece2a3e4888fad61ebddda2\",\"subject\":{\"sha256\":\"09016af1fbcafbe6ad8cbfc931adda63d995b010cb38d0f2ca17d56c1f113f87\",\"sha512\":\"f700e9636203f93aab4b9e803df7f1f0c338112a4de12a54115976892461ffa8de5d5822aa1d9859cd5cc9a4f84e35610c4ac13d4ed3037a6dcb1d6658cb8219\"},\"time\":1790467320}",
+      "proof": [
+        "H0gbR2f7nY12/HP5jES56wI/KMSQhX7dhOT+TSPwvQc=",
+        "BjkcoQ89sLaE85L39fq9l+w3irJOc0S2BKWCIwDH0yw=",
+        "pUVYzfik8Ys7X3pyOTandTWJI7OGej7DTizYMzzKiu4=",
+        "BwQsbXdj4mAjsqTHCLgGV48kILOGff0q+ULEjv5+wlc=",
+        "apBzFZu0QmITkUIvCVgEKEmau/y6NhEgGf/wiY/hADc=",
+        "Y1Ay4G6qB9YgYtoB5riSY53UcGO659wt7Z5bdGLJfgs=",
+        "9xNLy4D5pl/ANZNpm6w6MckRw2tc34DNgVWU2F7LJZI=",
+        "2NmxXq5HX/PS4nQaeox2JAL/L6qSxw/sZ9iibk2VWrY=",
+        "B35vz1X4xyMLcWD0ZN2C0aTgdvsyIZFdSm6eDqjF/jY="
+      ]
+    },
+    {
+      "index": 3,
+      "leaf": "{\"kind\":\"heartbeat\",\"time\":1790467380}",
+      "proof": [
+        "Hrt6KlXPHdusfPUoF9aaXNxcPvVJn4LpTMk4LfkItPk=",
+        "BjkcoQ89sLaE85L39fq9l+w3irJOc0S2BKWCIwDH0yw=",
+        "pUVYzfik8Ys7X3pyOTandTWJI7OGej7DTizYMzzKiu4=",
+        "BwQsbXdj4mAjsqTHCLgGV48kILOGff0q+ULEjv5+wlc=",
+        "apBzFZu0QmITkUIvCVgEKEmau/y6NhEgGf/wiY/hADc=",
+        "Y1Ay4G6qB9YgYtoB5riSY53UcGO659wt7Z5bdGLJfgs=",
+        "9xNLy4D5pl/ANZNpm6w6MckRw2tc34DNgVWU2F7LJZI=",
+        "2NmxXq5HX/PS4nQaeox2JAL/L6qSxw/sZ9iibk2VWrY=",
+        "B35vz1X4xyMLcWD0ZN2C0aTgdvsyIZFdSm6eDqjF/jY="
+      ]
+    },
+    {
+      "index": 252,
+      "leaf": "{\"kind\":\"heartbeat\",\"time\":1790482320}",
+      "proof": [
+        "dyrkemdfJXxDTWYaP1T3t0kCCZz7u1ivlmDVuCPm11o=",
+        "1LRORmP/YYnS8xqEB8rBzITt2wEbAzb9toJ4FgqGKwg=",
+        "U+affDsFvhz1j4a+s2xUaUIFBzA5u47RRdQLik3BTGw=",
+        "V4rhg7A96FUuPEFRRO9Cpzlce40FFaJFJ/rXZyBWXDU=",
+        "aVhkcxSvXYKM030MlLimGUJ3+ae40iSXZauKvuV68+w=",
+        "I+/S72DN1o67M1bHVfziY2fVIkG27os+LF67qHovQ6k=",
+        "zoGhB+EWKOl3KsZ94Nqx+qC9RmIKx9DWuzudJyCuWT0=",
+        "/q81PGgYaDvrCVjubFEZvVN5nZbEXLZcxsg8PI/QOg4=",
+        "B35vz1X4xyMLcWD0ZN2C0aTgdvsyIZFdSm6eDqjF/jY="
+      ]
+    },
+    {
+      "index": 255,
+      "leaf": "{\"keyId\":\"c5b940ed3f65c391\",\"kind\":\"record\",\"outcome\":\"normalized\",\"predicateType\":\"https://trigon.dev/equivalence/v2\",\"purl\":\"pkg:npm/left-pad@1.3.5\",\"purlCanon\":1,\"record\":\"sha256:28fdd77254977237364a167ba289ff718fbe76799cfd983dbf447346fa62a033\",\"stabilizerSet\":\"sha256:2510f133a6b002429c2e7f408264290dfd4c1e2b7ece2a3e4888fad61ebddda2\",\"subject\":{\"sha256\":\"542b66717669a2ad10ce298db787c22ad6b57330ea99cf99a17b119692c148f2\",\"sha512\":\"7cccfa4867c1d1098355349fe07db98875e363562dceefff234a1142ac313f6b017e4e78930091872098058b4e8448095e047186624584fd838080f8b3c87bc2\"},\"time\":1790482500}",
+      "proof": [
+        "mXnyzI6qp5ffATYZ3ts7X0OYCTLZ5eqlIKd0eTYJ3f0=",
+        "+UoodCBj+uYMahai0Nnxp+LtBn/jkOPyBLFpeEQvl9M=",
+        "U+affDsFvhz1j4a+s2xUaUIFBzA5u47RRdQLik3BTGw=",
+        "V4rhg7A96FUuPEFRRO9Cpzlce40FFaJFJ/rXZyBWXDU=",
+        "aVhkcxSvXYKM030MlLimGUJ3+ae40iSXZauKvuV68+w=",
+        "I+/S72DN1o67M1bHVfziY2fVIkG27os+LF67qHovQ6k=",
+        "zoGhB+EWKOl3KsZ94Nqx+qC9RmIKx9DWuzudJyCuWT0=",
+        "/q81PGgYaDvrCVjubFEZvVN5nZbEXLZcxsg8PI/QOg4=",
+        "B35vz1X4xyMLcWD0ZN2C0aTgdvsyIZFdSm6eDqjF/jY="
+      ]
+    },
+    {
+      "index": 256,
+      "leaf": "{\"artifacts\":{\"trigon-check-0.1.0.tgz\":{\"sha256\":\"516bc21f7d31ac00463187aaa6a0e226d6f36f7b28cf74d82fd395ed7f6bd13a\",\"sha512\":\"ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d\"}},\"keyId\":\"7599776c3085e3f9\",\"kind\":\"release\",\"name\":\"trigon-check\",\"signature\":\"M5GT454Jhex0A5esWRj+XGEBhwdwK+Bjyi6fq7RHlYaCtP5Xn0AM2U1PoGZU32suWiVek40hJOcVWQLX4QpGBw==\",\"time\":1790482560,\"version\":\"0.1.0\"}",
+      "proof": [
+        "OcvpA0HN4+GjJxHOzs3cxqQQc0gMy7S8Y8Z9QEjaXJg=",
+        "Qs3bkTfb4K2x6eoAULeYeUgwPyHJe3eUrM00yfmfzpM=",
+        "HrXsbhUXtfXO3w9bpWtIqbzKXZHW1sjqy/v9hknzm4M="
+      ]
+    },
+    {
+      "index": 257,
+      "leaf": "{\"keyId\":\"c5b940ed3f65c391\",\"kind\":\"record\",\"predicateType\":\"https://trigon.dev/withdrawal/v1\",\"purl\":\"pkg:npm/left-pad@1.3.2\",\"purlCanon\":1,\"reason\":\"withdrawn\",\"record\":\"sha256:18c49c3d2bbfb66335adf138654aaaf638f695f1e8824850eca26819675e844e\",\"subject\":{\"sha256\":\"e0ba41bf3dcdb57970cfb1b38ada79eed07a51cdbde4d639c316f7d02ad2eddb\",\"sha512\":\"5c88960e4263a49543cb63bea509eb811eea9194627ef91ee2183a9595bf86a919fba59d14511a79a7580ceabf8b4fd5ec77226fd2517afde5b39b4bc9ce6e9e\"},\"supersedes\":\"sha256:55f3858e9bf30865a06984a61ea4e7c0f078549cd1106a11281ab39ff8cd7801\",\"time\":1790482620}",
+      "proof": [
+        "uooRdxrPF0I3PcziI2+JJjY7gQqGwQkj+3stb5dJ5rk=",
+        "Qs3bkTfb4K2x6eoAULeYeUgwPyHJe3eUrM00yfmfzpM=",
+        "HrXsbhUXtfXO3w9bpWtIqbzKXZHW1sjqy/v9hknzm4M="
+      ]
+    },
+    {
+      "index": 259,
+      "leaf": "{\"kind\":\"log-end\",\"successor\":{\"dir\":\"log/1\",\"logKey\":\"example.com/trigon-evidence/1+e29f7097+AYE5dw6ofRdfVqNUZsNMfszLjYqRtO43ol32D1uPybOU\",\"origin\":\"example.com/trigon-evidence/1\",\"urls\":[]},\"time\":1790482740}",
+      "proof": [
+        "p0OUkCbJtrC0cSjDKfTKenbsqgcu9UuQHbz32lSXTGo=",
+        "7kgxi51+YIWLQAZfbsoCcdYcJq+oC+ACVbZV3Q+yIws=",
+        "HrXsbhUXtfXO3w9bpWtIqbzKXZHW1sjqy/v9hknzm4M="
+      ]
+    }
+  ],
+  "logKey": "example.com/trigon-evidence+754f8d19+AYqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c",
+  "origin": "example.com/trigon-evidence",
+  "size": 260
+}

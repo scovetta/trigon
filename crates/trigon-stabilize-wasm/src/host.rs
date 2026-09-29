@@ -82,7 +82,9 @@ impl ArchivedSet {
             .context("calling trigon_set_digest")?;
         if packed == 0 {
             bail!(
-                "this module does not implement the profile `{profile}`. It was archived before                  that profile existed, or it is a set that never had it. Either way the artifact                  is not the problem."
+                "this module does not implement the profile `{profile}`. It was archived before \
+                 that profile existed, or it is a set that never had it. Either way the artifact \
+                 is not the problem."
             );
         }
         let bytes = self.read(packed)?;

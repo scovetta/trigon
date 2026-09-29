@@ -45,7 +45,10 @@ fn unrun_build(target: &ResolvedTarget) -> Option<(String, String)> {
 /// this rung has checked nothing about. A rung that cannot tell what it is about to run should not
 /// be the one deciding to run it; that is the Builder's job, and the divergence that says so is
 /// how it gets there.
-fn bare_program(command: &str) -> bool {
+///
+/// The CI rung applies the same check to the script a release workflow runs, since it displaces
+/// this rung's candidate.
+pub(crate) fn bare_program(command: &str) -> bool {
     !command.is_empty()
         && command
             .chars()
@@ -60,14 +63,23 @@ fn plural(n: usize, what: &str) -> String {
     }
 }
 
-fn uses(tool: &str, with: BTreeMap<String, String>) -> Step {
+/// A step whose every parameter is a literal: handed to the tool as written, never rendered.
+///
+/// **What this rung passes a tool is data.** A Node or npm version, a publish time, a backend pin,
+/// a script name, a crate's name, the version the feed served — each was read from a registry
+/// document, the published artifact or the repository, or put together from what was, and a `with`
+/// value is a template: text from any of them carrying `{{`, `{%` or `{#` would be evaluated, and
+/// the package under test would be writing part of its own recipe. The values this code chooses
+/// itself — a path, a flag — are not templates either, so nothing here is.
+fn uses(tool: &str, literal: BTreeMap<String, String>) -> Step {
     Step {
         body: StepBody::Uses {
             tool: tool.into(),
-            with,
+            with: BTreeMap::new(),
         },
         needs: Vec::new(),
         when: None,
+        literal,
     }
 }
 
@@ -161,7 +173,9 @@ pub struct NpmInferrer {
 /// `npm install -g npm@…` unquoted and the parenthesis ended the deps phase with
 /// `Syntax error: "(" unexpected`, filed as `unknown` and charged to the package. A value that is
 /// not a version cannot be installed, so there is nothing to salvage and the rung declines.
-fn is_plain_version(version: &str) -> bool {
+///
+/// The CI rung gates both fields on it too, since it displaces this rung's candidate.
+pub(crate) fn is_plain_version(version: &str) -> bool {
     let numeric =
         |p: Option<&str>| p.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
     let mut parts = version.split('.');
@@ -207,6 +221,11 @@ async fn highest_node_release_at(client: &Client, instant: &str) -> Option<Strin
         .await
         .ok()?;
     let index: Vec<serde_json::Value> = serde_json::from_str(&body).ok()?;
+    highest_release_in(&index, day)
+}
+
+/// The choice [`highest_node_release_at`] makes, apart from the fetch, over `index.json`'s entries.
+fn highest_release_in(index: &[serde_json::Value], day: &str) -> Option<String> {
     index
         .iter()
         .filter(|e| e["date"].as_str().is_some_and(|d| d <= day))
@@ -1587,7 +1606,7 @@ mod nuget_package_id_tests {
 
 #[cfg(test)]
 mod node_substitution_tests {
-    use super::{is_plain_version, node_order};
+    use super::{highest_release_in, is_plain_version, node_order};
 
     /// What counts as a version a toolchain host will serve.
     ///
@@ -1667,5 +1686,39 @@ mod node_substitution_tests {
 
         assert!(node_order("7.7.4") > node_order("4.8.1"));
         assert!(node_order("8.0.0") > node_order("7.7.4"));
+    }
+
+    #[test]
+    fn the_substitute_is_the_highest_linux_release_out_by_the_publish_day() {
+        // Entries shaped as `nodejs.org/dist/index.json` writes them. On 2017-03-21 Node released
+        // both 4.8.1 and 7.7.4, and `isexe@2.0.0` reproduces only under the second.
+        let entry = |version: &str, date: &str, files: &[&str]| {
+            serde_json::json!({ "version": version, "date": date, "files": files })
+        };
+        let index = [
+            entry("v7.8.0", "2017-03-29", &["linux-x64", "osx-x64-tar"]),
+            entry("v7.7.4", "2017-03-21", &["linux-x64", "win-x64-exe"]),
+            entry("v4.8.1", "2017-03-21", &["linux-x64"]),
+            entry("v6.10.1", "2017-03-21", &["linux-x64"]),
+            entry("v6.9.5", "2017-01-31", &["linux-x64"]),
+            // Higher, earlier, and useless here: nothing `npm/install-node` could fetch.
+            entry("v7.9.9", "2017-03-01", &["win-x64-exe"]),
+            entry("v7.10.0-rc.1", "2017-03-01", &["linux-x64"]),
+            serde_json::json!({ "version": "v7.11.0", "files": ["linux-x64"] }),
+            serde_json::json!({ "version": 7, "date": "2017-03-01", "files": ["linux-x64"] }),
+            serde_json::json!({ "version": "7.12.0", "date": "2017-03-01", "files": ["linux-x64"] }),
+        ];
+        assert_eq!(
+            highest_release_in(&index, "2017-03-21").as_deref(),
+            Some("7.7.4")
+        );
+        // By number: 6.10.1 is above 6.9.5 although it sorts below it as a string.
+        assert_eq!(
+            highest_release_in(&index[2..], "2017-03-21").as_deref(),
+            Some("6.10.1")
+        );
+        // Nothing out yet is nothing, not the earliest release there is.
+        assert_eq!(highest_release_in(&index, "2016-01-01"), None);
+        assert_eq!(highest_release_in(&[], "2017-03-21"), None);
     }
 }

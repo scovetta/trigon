@@ -7,9 +7,11 @@
 //!
 //! Two rules hold across every implementation.
 //!
-//! **Fetched bytes are checked against what the registry declared.** A run against bytes the
+//! **Fetched bytes are checked against everything the registry declared.** A run against bytes the
 //! registry does not vouch for proves nothing about what it published, and a silent mismatch is
-//! indistinguishable from a successful reproduction of the wrong thing.
+//! indistinguishable from a successful reproduction of the wrong thing. Every declared digest this
+//! build can compute is checked, and what was declared is recorded beside the result — absence
+//! included — so an unchecked download never reads as a checked one (`declared.rs`).
 //!
 //! **Source discovery starts with what the registry already told us.** npm records the commit it
 //! published from; PyPI records a project URL. That is one request we were making anyway, and it
@@ -18,6 +20,7 @@
 mod cargo;
 pub mod ci;
 mod client;
+mod declared;
 mod definitions;
 mod embedded;
 mod error;
@@ -40,10 +43,10 @@ pub use client::{
 };
 pub use definitions::DefinitionsInferrer;
 pub use embedded::{crate_commit, nupkg_source};
-pub use error::RegistryError;
+pub use error::{DigestMismatch, RegistryError};
 pub use heuristic::{CratesIoInferrer, NpmInferrer, NuGetInferrer, PyPiInferrer};
 pub use infer::{Candidate, Climb, Derivation, StrategyInferrer, climb, infer};
-pub use model::{ArtifactMeta, BlobSink, ResolvedTarget};
+pub use model::{ArtifactMeta, BlobSink, Fetched, ResolvedTarget};
 pub use npm::NpmRegistry;
 pub use nuget::NuGetRegistry;
 pub use promised::{promised, shortfall};

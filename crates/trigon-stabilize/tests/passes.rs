@@ -127,6 +127,28 @@ fn set_digest_is_stable_and_order_independent() {
 }
 
 #[test]
+fn a_filter_keeps_the_passes_it_names_and_none_is_a_keyword_only_on_its_own() {
+    // `["all"]` keeps everything and `["none"]` nothing; any other list names the passes to keep,
+    // so `none` beside a pass id is one more id that no pass has, not an order to drop the rest.
+    // Read the other way, `--enable-passes none,tar-time` would bisect a mismatch to no pass.
+    let tar = profile_of("tar");
+    let names = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+    let kept = |enable: &[&str], disable: &[&str]| -> Vec<String> {
+        let set = tar.filtered(&names(enable), &names(disable));
+        assert_eq!(set.id, tar.id, "a filtered set keeps its profile's name");
+        set.ids().iter().map(|i| i.to_string()).collect()
+    };
+    let every: Vec<String> = tar.ids().iter().map(|i| i.to_string()).collect();
+    assert_eq!(kept(&["all"], &[]), every);
+    assert!(kept(&["none"], &[]).is_empty());
+    assert_eq!(kept(&["none", "tar-time"], &[]), ["tar-time"]);
+    assert_eq!(kept(&["tar-time", "tar-mode"], &[]), ["tar-mode", "tar-time"]);
+    // `disable` then removes from whatever survived.
+    assert_eq!(kept(&["tar-time", "tar-mode"], &["tar-mode"]), ["tar-time"]);
+    assert_eq!(kept(&["all"], &["tar-time"]).len(), every.len() - 1);
+}
+
+#[test]
 fn default_profile_follows_the_format() {
     assert_eq!(default_for(Format::TarGz).id.as_str(), "tar-gzip");
     assert_eq!(default_for(Format::Zip).id.as_str(), "zip");
@@ -203,7 +225,7 @@ fn record_is_regenerated_after_membership_changes() {
     );
 
     let ids: Vec<_> = applied.iter().map(|a| a.id.as_str().to_string()).collect();
-    assert!(ids.contains(&"wheel-record".to_string()));
+    assert!(ids.contains(&"wheel-record-v2".to_string()));
     assert!(ids.contains(&"wheel-direct-url".to_string()));
     assert!(ids.contains(&"pyc-header".to_string()));
 }
@@ -236,6 +258,26 @@ fn record_lines_are_sorted_and_digests_are_base64url() {
     assert!(
         b64.bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    );
+}
+
+#[test]
+fn record_is_what_pip_computes_for_the_same_members() {
+    // A shape is not a digest: the rows are checked against values computed outside this crate
+    // (Python's `hashlib.sha256` and `base64.urlsafe_b64encode`, padding stripped), so a
+    // hand-rolled encoder that is merely well formed does not pass. The first is the digest every
+    // wheel's RECORD carries for an empty `__init__.py`.
+    let wheel = wheel_with(&[
+        ("pkg/m.py", b"import os\n"),
+        ("pkg/__init__.py", b""),
+        ("pkg-1.0.dist-info/RECORD", b"stale\n"),
+    ]);
+    let (out, _) = stabilize(wheel, Format::Zip, "wheel");
+    assert_eq!(
+        record_of(out),
+        "pkg/__init__.py,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0\n\
+         pkg/m.py,sha256=Nyet_1JOBhYCLq3Y9K8hoHeLKfxMd73-_Rr84sv15Lc,10\n\
+         pkg-1.0.dist-info/RECORD,,\n"
     );
 }
 

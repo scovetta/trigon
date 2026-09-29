@@ -88,12 +88,13 @@ struct StoredNote {
 
 #[derive(Debug, Deserialize)]
 struct Diff {
-    /// `rule@path` for every difference the comparator found, before stabilization.
+    /// `rule@path` for every difference that *survived* stabilization — the residual that keeps a
+    /// run divergent, not the pre-stabilization difference the passes erased.
     ///
     /// `body@lib/x.dll` is the file's own bytes; `entry:mode@lib/x.dll` is the archive entry's
-    /// mode. The distinction is most of what a reader wants and it was in the blob and nowhere
-    /// else: on `Newtonsoft.Json@11.0.1` every one of the 23 members' entry metadata differed and
-    /// a pass accounted for all of it, while 10 members' *bodies* differed and nothing did.
+    /// mode. A member listed identical with an `entry:mode` code beside it has bytes that match and
+    /// an archive frame that still differs. What the passes *did* erase is not here — it left no
+    /// code precisely because it was erased — it is in [`field_edits`](Self::field_edits).
     #[serde(default)]
     codes: Vec<String>,
     identical: usize,
@@ -103,6 +104,74 @@ struct Diff {
     executable_differs: usize,
     #[serde(default)]
     files: Vec<StoredFile>,
+    /// Which passes changed which field of which member — the ground-truth join partner for
+    /// `codes`. A `(field, path)` here whose field is not among that member's codes was reconciled
+    /// by these passes; one that is among them was touched but not resolved; a code with no entry
+    /// here is a difference nothing addressed.
+    #[serde(default)]
+    field_edits: Vec<StoredEdit>,
+    /// The differences left after each pass, as `trigon_compare::progression` recorded them. Absent
+    /// from every comparison judged before it existed, unless `trigon rederive` has filled it in.
+    #[serde(default)]
+    progression: Option<Progression>,
+}
+
+/// How the differences between the two artifacts shrank as each pass of the set ran, from the
+/// artifacts as published to the last pass. Explanation, never verdict: the recording side checks
+/// its last step against the signature the verdict was taken on, and `consistent` says whether it
+/// matched.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Progression {
+    #[serde(default)]
+    pub steps: Vec<Step>,
+    #[serde(default)]
+    pub consistent: bool,
+    /// Why there are no steps, where there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<String>,
+}
+
+/// One point on the way from published to stabilized.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Step {
+    /// The pass applied to reach this step; absent for the artifacts as published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass: Option<String>,
+    /// Differences left, counted as the comparator names them.
+    #[serde(default)]
+    pub differences: u32,
+    /// Members with a difference left.
+    #[serde(default)]
+    pub members: u32,
+    /// Members whose own bytes still differ.
+    #[serde(default)]
+    pub bodies: u32,
+    /// Members this step closed, up to the recorder's bound; `closed_total` is the whole count.
+    #[serde(default)]
+    pub closed: Vec<String>,
+    #[serde(default)]
+    pub closed_total: u32,
+    /// Members this step re-opened. A pass should never do this; one that did is a finding.
+    #[serde(default)]
+    pub opened: Vec<String>,
+    #[serde(default)]
+    pub opened_total: u32,
+    /// Whether the pass changed anything on either side — whether it is in the ledger. A pass
+    /// that fired and closed nothing changed fields that already agreed.
+    #[serde(default)]
+    pub fired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+}
+
+/// One `field_edits` row: the passes that wrote one field of one member. `field` is bare (`mode`,
+/// `zip.crc32`, `body`); a code spells the same field `entry:mode` / `body`.
+#[derive(Debug, Deserialize)]
+struct StoredEdit {
+    path: String,
+    field: String,
+    #[serde(default)]
+    passes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +237,8 @@ pub struct View {
     pub notes: Vec<NoteGroup>,
     pub upstream_bytes: u64,
     pub rebuild_bytes: u64,
+    /// How the gap closed pass by pass, where the comparison recorded it.
+    pub progression: Option<Progression>,
 }
 
 #[derive(Debug, Serialize)]
@@ -228,12 +299,24 @@ pub struct Member {
     /// Whether the two sides' stored digests differ. Distinct from `status`, which is the
     /// comparator's word for it.
     pub digests_differ: bool,
-    /// What differed about this member, before any pass ran: `body`, `entry:mode`, `entry:size`.
-    ///
-    /// A member listed as identical with `entry:mode` here is the interesting case — the file is
-    /// byte for byte what was published and its archive entry was not, so the divergence was about
-    /// how it was packed rather than about what anybody wrote, and a pass removed it.
+    /// What *still* differs about this member after stabilization: `body`, `entry:mode`. Each is
+    /// annotated with the passes that touched that field, if any — an empty list means nothing in
+    /// the set addresses it. The residual half of the transform.
+    pub residual: Vec<FieldWork>,
+    /// What a pass *changed and reconciled* on this member: a field some pass wrote that no longer
+    /// differs. This is how the transform is made visible — `body` reconciled by `dotnet-il-canonical`
+    /// on a `.dll`, `mtime` by `zip-time`, and so on. Empty for a member no pass touched.
+    pub reconciled: Vec<FieldWork>,
+    /// The raw residual codes, kept for readers written before `residual`/`reconciled` existed.
     pub differences: Vec<String>,
+}
+
+/// One field of a member and the passes that wrote it. `field` is spelled as the comparator's
+/// difference code spells it — `entry:mode`, `body` — so the reader sees one vocabulary.
+#[derive(Debug, Serialize)]
+pub struct FieldWork {
+    pub field: String,
+    pub passes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -263,6 +346,80 @@ pub fn raw_name(bytes: &[u8], path: &str, side: &str) -> Option<String> {
         _ => f.rebuild_raw_path,
     }?;
     Some(String::from_utf8_lossy(&raw).into_owned())
+}
+
+/// A residual difference code that cannot reach the serialized output, so presenting it as "still
+/// differs" would mislead. Each is proven at the writer (`trigon_archive::zip`):
+///   - `entry:zip.crc32` is the checksum of the body and `entry:size` is the body's length; the
+///     writer recomputes both from the body on every write. Neither is ever an independent
+///     difference — equal when the body is, following the body when not, and in that case `body@`
+///     already names it. So both are redundant with `body@` and dropped.
+///   - `entry:mode` on a zip is a stale parse-time shadow of `external_attrs`, which is what the
+///     writer emits; once `external_attrs` is reconciled the serialized mode is equal. A tar has no
+///     `external_attrs`, so this never fires there and a genuine tar mode difference is kept.
+///
+/// This filters the *projection* only. The stored comparison keeps every code, so an attestation
+/// and anyone reading the blob still see exactly what the comparator found.
+fn spurious_residual(
+    rule: &str,
+    reconciled_rules: &std::collections::BTreeSet<String>,
+    residual_rules: &std::collections::BTreeSet<String>,
+) -> bool {
+    match rule {
+        "entry:zip.crc32" | "entry:size" => true,
+        "entry:mode" => {
+            reconciled_rules.contains("entry:zip.external_attrs")
+                && !residual_rules.contains("entry:zip.external_attrs")
+        }
+        _ => false,
+    }
+}
+
+/// The comparison a page should render for a recorded comparison digest.
+///
+/// A re-derivation written by `trigon rederive` is preferred where one exists **and agrees with the
+/// recorded comparison on everything the verdict rests on** — checked here, field by field, so a
+/// derived blob that says anything different about the run is ignored rather than shown. Only the
+/// rendering uses this. The raw evidence route serves what the run recorded, always.
+pub async fn bytes_for_view(
+    store: &trigon_store::Store,
+    recorded: &trigon_core::Digest,
+) -> Result<Vec<u8>, trigon_store::StoreError> {
+    let original = store.blobs().get(recorded).await?;
+    if let Ok(Some(derived)) = store.get_derived_comparison(recorded).await
+        && agrees(&original, &derived)
+    {
+        return Ok(derived.to_vec());
+    }
+    Ok(original.to_vec())
+}
+
+/// Whether two comparisons agree on what a verdict rests on: the outcome, both sides' raw and
+/// stabilized digests, the set, the member counts and the difference signature.
+fn agrees(a: &[u8], b: &[u8]) -> bool {
+    let (Ok(a), Ok(b)) = (
+        serde_json::from_slice::<serde_json::Value>(a),
+        serde_json::from_slice::<serde_json::Value>(b),
+    ) else {
+        return false;
+    };
+    [
+        "/outcome",
+        "/upstream/raw/sha256",
+        "/upstream/stabilized/sha256",
+        "/upstream/set",
+        "/rebuild/raw/sha256",
+        "/rebuild/stabilized/sha256",
+        "/rebuild/set",
+        "/diff/codes",
+        "/diff/identical",
+        "/diff/differs",
+        "/diff/only_upstream",
+        "/diff/only_rebuild",
+        "/diff/executable_differs",
+    ]
+    .iter()
+    .all(|p| a.pointer(p) == b.pointer(p))
 }
 
 pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
@@ -331,6 +488,25 @@ pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
         }
     }
 
+    // Ground-truth attribution: which passes wrote which field of which member, indexed by path.
+    // Joined against the residual codes above, this splits each member's fields into what a pass
+    // reconciled (a field it wrote that left no surviving code) and what still differs.
+    let mut edits_by_path: BTreeMap<&str, Vec<(&str, &Vec<String>)>> = BTreeMap::new();
+    for e in &c.diff.field_edits {
+        edits_by_path
+            .entry(e.path.as_str())
+            .or_default()
+            .push((e.field.as_str(), &e.passes));
+    }
+    // A bare field name as a difference code spells it: `body`, else `entry:<field>`.
+    let rule_of = |field: &str| -> String {
+        if field == "body" {
+            "body".to_string()
+        } else {
+            format!("entry:{field}")
+        }
+    };
+
     let mut files: Vec<&StoredFile> = c.diff.files.iter().collect();
     files.sort_by_key(|f| (rank(&f.status), path_of(&f.path)));
     let members: Vec<Member> = files
@@ -340,11 +516,58 @@ pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
             // Decoded once and used twice: as the member's own path and as the key into the rule
             // map. Two calls would be two allocations per member, five hundred times.
             let path = path_of(&f.path);
+            let residual_rules: std::collections::BTreeSet<String> = why
+                .get(path.as_str())
+                .map(|v| v.iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default();
+            let edits = edits_by_path.get(path.as_str());
+            // Reconciled: a field a pass wrote whose rule is not among the surviving codes.
+            let reconciled_all: Vec<FieldWork> = edits
+                .map(|es| {
+                    es.iter()
+                        .filter(|(field, _)| !residual_rules.contains(&rule_of(field)))
+                        .map(|(field, passes)| FieldWork {
+                            field: rule_of(field),
+                            passes: (*passes).clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // From the unfiltered set, so `entry:mode`'s test still sees a reconciled `external_attrs`.
+            let reconciled_rules: std::collections::BTreeSet<String> =
+                reconciled_all.iter().map(|fw| fw.field.clone()).collect();
+            // A body-derived field (size, crc32) reconciled on its own is an echo of the body being
+            // reconciled — dropped so the list shows the work, not its shadow.
+            let reconciled: Vec<FieldWork> = reconciled_all
+                .into_iter()
+                .filter(|fw| !spurious_residual(&fw.field, &reconciled_rules, &residual_rules))
+                .collect();
+            // Residual: each surviving code that can actually reach the output, annotated with any
+            // pass that touched that field. A code the writer recomputes away is dropped, so a
+            // member the passes truly reconciled does not read as still-differing.
+            let residual: Vec<FieldWork> = residual_rules
+                .iter()
+                .filter(|rule| !spurious_residual(rule, &reconciled_rules, &residual_rules))
+                .map(|rule| {
+                    let field = rule.strip_prefix("entry:").unwrap_or(rule);
+                    let passes = edits
+                        .and_then(|es| es.iter().find(|(fld, _)| *fld == field))
+                        .map(|(_, p)| (*p).clone())
+                        .unwrap_or_default();
+                    FieldWork {
+                        field: rule.clone(),
+                        passes,
+                    }
+                })
+                .collect();
             Member {
-                differences: why
-                    .get(path.as_str())
-                    .map(|v| v.iter().map(|s| s.to_string()).collect())
-                    .unwrap_or_default(),
+                differences: residual_rules
+                    .iter()
+                    .filter(|rule| !spurious_residual(rule, &reconciled_rules, &residual_rules))
+                    .cloned()
+                    .collect(),
+                residual,
+                reconciled,
                 path,
                 status: f.status.clone(),
                 kind: f.kind.clone(),
@@ -379,7 +602,20 @@ pub fn render(bytes: &[u8], set_members: Option<&[String]>) -> Option<View> {
         }
     }
 
+    // Each step's pass joined to the ledger, so the page can say which steps a pass reached by
+    // changing something and which it reached by finding nothing to change.
+    let progression = c.diff.progression.clone().map(|mut p| {
+        for step in &mut p.steps {
+            if let Some(pass) = step.pass.as_ref().and_then(|id| by_id.get(id)) {
+                step.fired = true;
+                step.risk = Some(pass.risk.clone());
+            }
+        }
+        p
+    });
+
     Some(View {
+        progression,
         ladder: ladder(&c),
         outcome: c.outcome.clone(),
         format: c.upstream.format.clone(),
@@ -561,5 +797,242 @@ mod tests {
         assert!(cap_reason(&p("metadata", "human", "reviewed by ada")).contains("reviewed by ada"));
         let both = cap_reason(&p("lossy", "model", "proposed by m"));
         assert!(both.contains("proposed by m") && both.contains("above metadata"));
+        // A row core says caps, spelt so that neither half reads as fired here: the reason says it
+        // cannot tell, rather than being empty or blaming a half that did not fire.
+        let neither = cap_reason(&p("metadata", "builtin", "builtin"));
+        assert!(neither.contains("cannot say which half"), "{neither}");
+        assert!(
+            !neither.contains("above metadata") && !neither.contains("not compiled in"),
+            "{neither}"
+        );
+    }
+
+    /// A member path as a stored comparison spells it: bytes, since a name need not be UTF-8.
+    fn bytes(s: &str) -> serde_json::Value {
+        serde_json::json!(s.as_bytes())
+    }
+
+    /// A divergent comparison with one differing member, `path`, and the codes, edits and passes
+    /// a test gives it. Hand-built, because these tests are about the projection's own rules; that
+    /// it reads what the comparator writes is `the_projection_reads_a_real_comparison`'s job.
+    fn stored(
+        path: &str,
+        codes: &[&str],
+        edits: serde_json::Value,
+        applied: (serde_json::Value, serde_json::Value),
+    ) -> Vec<u8> {
+        let side = |raw: &str, applied: serde_json::Value| {
+            serde_json::json!({
+                "format": "zip",
+                "bytes": 100,
+                "raw": { "sha256": raw },
+                "stabilized": { "sha256": format!("{raw}-stabilized") },
+                "applied": applied,
+                "set": ["zip", "sha256:set"],
+            })
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "outcome": "divergent",
+            "upstream": side("aa", applied.0),
+            "rebuild": side("bb", applied.1),
+            "diff": {
+                "codes": codes,
+                "identical": 0,
+                "differs": 1,
+                "only_upstream": 0,
+                "only_rebuild": 0,
+                "executable_differs": 0,
+                "files": [{
+                    "path": bytes(path),
+                    "status": "differs",
+                    "kind": "binary",
+                    "upstream_digest": "11",
+                    "rebuild_digest": "22",
+                }],
+                "field_edits": edits,
+            },
+        }))
+        .unwrap()
+    }
+
+    fn fields(work: &[FieldWork]) -> Vec<(&str, Vec<&str>)> {
+        work.iter()
+            .map(|w| {
+                (
+                    w.field.as_str(),
+                    w.passes.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn none() -> (serde_json::Value, serde_json::Value) {
+        (serde_json::json!([]), serde_json::json!([]))
+    }
+
+    #[test]
+    fn a_member_whose_name_holds_an_at_sign_keeps_what_still_differs_about_it() {
+        // A code is `rule@path`, and a rule id never holds an `@` while a member's path may. A code
+        // with no `@` at all names no member and is attributed to none.
+        let view = render(
+            &stored(
+                "lib/a@b.dll",
+                &["body@lib/a@b.dll", "unattributed"],
+                serde_json::json!([]),
+                none(),
+            ),
+            None,
+        )
+        .expect("renders");
+        let m = &view.members[0];
+        assert_eq!(m.path, "lib/a@b.dll");
+        assert_eq!(fields(&m.residual), [("body", vec![])]);
+        assert_eq!(m.differences, ["body"]);
+        assert!(m.digests_differ);
+    }
+
+    #[test]
+    fn a_zip_mode_still_differs_only_while_the_attributes_it_shadows_do() {
+        // `entry:mode` on a zip is a parse-time shadow of `external_attrs`, which is what the
+        // writer emits. Once a pass reconciled the attributes, the mode cannot reach the output, so
+        // it is not shown as still differing; while the attributes still differ, it is.
+        let attrs = serde_json::json!([
+            { "path": "bin/x.sh", "field": "zip.external_attrs", "passes": ["zip-attrs"] }
+        ]);
+        let view = render(
+            &stored("bin/x.sh", &["entry:mode@bin/x.sh"], attrs.clone(), none()),
+            None,
+        )
+        .expect("renders");
+        let m = &view.members[0];
+        assert!(m.residual.is_empty(), "{:?}", fields(&m.residual));
+        assert!(m.differences.is_empty());
+        assert_eq!(
+            fields(&m.reconciled),
+            [("entry:zip.external_attrs", vec!["zip-attrs"])]
+        );
+
+        let view = render(
+            &stored(
+                "bin/x.sh",
+                &["entry:mode@bin/x.sh", "entry:zip.external_attrs@bin/x.sh"],
+                attrs,
+                none(),
+            ),
+            None,
+        )
+        .expect("renders");
+        let m = &view.members[0];
+        assert_eq!(
+            fields(&m.residual),
+            [
+                ("entry:mode", vec![]),
+                ("entry:zip.external_attrs", vec!["zip-attrs"]),
+            ],
+            "a pass that touched a field and left it differing is named beside it"
+        );
+        assert!(m.reconciled.is_empty());
+    }
+
+    #[test]
+    fn a_body_a_pass_reconciled_is_named_as_the_body_and_its_echoes_are_not() {
+        // The size and the checksum follow the body. Listing them as reconciled beside it shows
+        // the shadow of the work as though it were more work.
+        let edits = serde_json::json!([
+            { "path": "lib/x.dll", "field": "body", "passes": ["dotnet-il-canonical"] },
+            { "path": "lib/x.dll", "field": "size", "passes": ["dotnet-il-canonical"] },
+            { "path": "lib/x.dll", "field": "zip.crc32", "passes": ["dotnet-il-canonical"] },
+        ]);
+        let view = render(&stored("lib/x.dll", &[], edits, none()), None).expect("renders");
+        let m = &view.members[0];
+        assert_eq!(
+            fields(&m.reconciled),
+            [("body", vec!["dotnet-il-canonical"])]
+        );
+        assert!(m.residual.is_empty());
+    }
+
+    #[test]
+    fn a_pass_somebody_wrote_says_who_and_holds_the_ceiling_below_normalized() {
+        // `docs/00-overview.md` §3.1: a pass a person reviewed or a model proposed caps a verdict
+        // as firmly as a content-risk builtin, and the reader is told whose pass it was rather
+        // than only that it was not built in.
+        let applied = (
+            serde_json::json!([{
+                "id": "reviewed-pass",
+                "risk": "metadata",
+                "provenance": { "kind": "human", "reviewer": "ada" },
+                "entries_touched": 2,
+                "bytes_changed": 30,
+            }]),
+            serde_json::json!([{
+                "id": "proposed-pass",
+                "risk": "structural",
+                "provenance": { "kind": "model", "model_id": "m-1", "run_id": "r-9" },
+                "entries_touched": 1,
+                "bytes_changed": 4,
+            }]),
+        );
+        let view =
+            render(&stored("x", &[], serde_json::json!([]), applied), None).expect("renders");
+        assert_eq!(view.ceiling, "normalized_with_caveats");
+
+        let rows: Vec<(&str, &str, &str, bool)> = view
+            .applied
+            .iter()
+            .map(|p| (p.id.as_str(), p.provenance.as_str(), p.who.as_str(), p.caps))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("proposed-pass", "model", "proposed by m-1", true),
+                ("reviewed-pass", "human", "reviewed by ada", true),
+            ]
+        );
+        let caps: Vec<(&str, &str)> = view
+            .caps
+            .iter()
+            .map(|c| (c.id.as_str(), c.why.as_str()))
+            .collect();
+        assert_eq!(
+            caps,
+            [
+                ("proposed-pass", "proposed by m-1 — not compiled in"),
+                ("reviewed-pass", "reviewed by ada — not compiled in"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_passes_that_stayed_silent_are_the_members_of_the_set_that_fired_on_neither_side() {
+        // Known only where the caller holds the set's membership. A pass that found nothing to
+        // change is evidence — no signature to strip says the package was not signed.
+        let applied = (
+            serde_json::json!([{
+                "id": "zip-time",
+                "risk": "metadata",
+                "provenance": { "kind": "builtin" },
+                "entries_touched": 3,
+                "bytes_changed": 12,
+            }]),
+            serde_json::json!([]),
+        );
+        let members = [
+            "zip-time".to_string(),
+            "nupkg-signature".to_string(),
+            "zip-order".into(),
+        ];
+        let view = render(
+            &stored("x", &[], serde_json::json!([]), applied),
+            Some(&members),
+        )
+        .expect("renders");
+        assert_eq!(
+            view.silent.as_deref(),
+            Some(&["nupkg-signature".to_string(), "zip-order".to_string()][..])
+        );
+        // A builtin metadata pass costs the verdict nothing.
+        assert_eq!(view.ceiling, "normalized");
+        assert!(view.caps.is_empty());
     }
 }

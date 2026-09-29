@@ -237,6 +237,12 @@ fn a_profile_the_module_does_not_have_blames_the_module_not_the_artifact() {
         e.contains("does not implement the profile `no-such-profile`"),
         "asking for a missing profile must name the profile: {e}"
     );
+    // One sentence after another, as a reader sees them: a literal joined across source lines
+    // without a continuation kept each line's indentation in the middle of the message.
+    assert!(
+        !e.contains("  "),
+        "a run of spaces inside the message: {e:?}"
+    );
     assert!(
         !e.contains("parse"),
         "and must not blame the artifact, which was never passed: {e}"
@@ -274,4 +280,305 @@ fn a_profile_the_module_does_not_have_blames_the_module_not_the_artifact() {
         "check must distinguish `this module lacks the profile` from `this module has a different \
          set`, because the two have different remedies: {e}"
     );
+}
+
+// --- a managed assembly whose header values overflow 32 bits -------------------------------------
+
+/// Where [`assembly`] wrote what the cases below overwrite, as file offsets.
+struct Fields {
+    /// The section header's PointerToRawData.
+    section_raw: usize,
+    /// The metadata root's `BSJB`.
+    metadata: usize,
+    version_len: usize,
+    /// Each stream header's offset field, in the order `#~`, `#Strings`, `#GUID`, `#Blob`.
+    streams: [usize; 4],
+    typeref_count: usize,
+}
+
+fn put16(v: &mut Vec<u8>, x: u16) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+fn put32(v: &mut Vec<u8>, x: u32) {
+    v.extend_from_slice(&x.to_le_bytes());
+}
+fn set16(v: &mut [u8], at: usize, x: u16) {
+    v[at..at + 2].copy_from_slice(&x.to_le_bytes());
+}
+fn set32(v: &mut [u8], at: usize, x: u32) {
+    v[at..at + 4].copy_from_slice(&x.to_le_bytes());
+}
+fn align4(v: &mut Vec<u8>) {
+    while v.len() % 4 != 0 {
+        v.push(0);
+    }
+}
+
+/// A managed PE both .NET passes read whole (ECMA-335 §II.24–§II.25): one section, mapped at
+/// `rva` with `vsize` bytes of address space, holding the CLI header, one method body and, `pad`
+/// bytes further on, the metadata, with a row each in Module, TypeRef, TypeDef and MethodDef.
+fn assembly(rva: u32, vsize: u32, pad: usize) -> (Vec<u8>, Fields) {
+    const RAW: usize = 0x200;
+    let mut sec = vec![0u8; 72];
+    // `Run`: a tiny header, then `nop; ret`.
+    let body = sec.len();
+    sec.extend_from_slice(&[(2 << 2) | 0x02, 0x00, 0x2a, 0x00]);
+    sec.extend(std::iter::repeat_n(0, pad));
+
+    // The table stream: version 2.0, narrow heaps, and Module, TypeRef, TypeDef and MethodDef.
+    let mut t = Vec::new();
+    put32(&mut t, 0);
+    t.extend_from_slice(&[2, 0, 0, 1]);
+    t.extend_from_slice(&0b100_0111u64.to_le_bytes());
+    t.extend_from_slice(&0u64.to_le_bytes());
+    put32(&mut t, 1);
+    let typeref_count = t.len();
+    for _ in 0..3 {
+        put32(&mut t, 1);
+    }
+    // Module: Generation, Name, Mvid, EncId, EncBaseId.
+    for x in [0, 10, 1, 0, 0] {
+        put16(&mut t, x);
+    }
+    // TypeRef: ResolutionScope (AssemblyRef 1), TypeName, TypeNamespace.
+    for x in [(1 << 2) | 2, 1, 0] {
+        put16(&mut t, x);
+    }
+    // TypeDef: Flags, Name, Namespace, Extends, FieldList, MethodList.
+    put32(&mut t, 0);
+    for x in [1, 0, 0, 1, 1] {
+        put16(&mut t, x);
+    }
+    // MethodDef: RVA, ImplFlags, Flags, Name, Signature (`void ()`), ParamList.
+    put32(&mut t, rva + body as u32);
+    for x in [0, 0x0086, 19, 1, 1] {
+        put16(&mut t, x);
+    }
+    let streams: [(&str, Vec<u8>); 4] = [
+        ("#~", t),
+        ("#Strings", b"\0<Module>\0Demo.dll\0Run\0".to_vec()),
+        ("#GUID", vec![0x11; 16]),
+        ("#Blob", vec![0, 3, 0x00, 0x00, 0x01]),
+    ];
+
+    // The metadata root and its stream headers.
+    let md_at = sec.len();
+    let mut md = b"BSJB".to_vec();
+    put16(&mut md, 1);
+    put16(&mut md, 1);
+    put32(&mut md, 0);
+    let version_len = RAW + md_at + md.len();
+    put32(&mut md, 12);
+    md.extend_from_slice(b"v4.0.30319\0\0");
+    put16(&mut md, 0);
+    put16(&mut md, streams.len() as u16);
+    let header_len = md.len()
+        + streams
+            .iter()
+            .map(|(name, _)| 8 + ((name.len() + 1 + 3) & !3))
+            .sum::<usize>();
+    let mut off = header_len;
+    let mut headers = [0; 4];
+    for (i, (name, data)) in streams.iter().enumerate() {
+        headers[i] = RAW + md_at + md.len();
+        put32(&mut md, off as u32);
+        put32(&mut md, data.len() as u32);
+        md.extend_from_slice(name.as_bytes());
+        md.push(0);
+        align4(&mut md);
+        off += (data.len() + 3) & !3;
+    }
+    for (_, data) in &streams {
+        md.extend_from_slice(data);
+        align4(&mut md);
+    }
+    sec.extend_from_slice(&md);
+
+    // The CLI header: its size, runtime 2.5, the metadata's RVA and size, ILONLY.
+    set32(&mut sec, 0, 72);
+    set16(&mut sec, 4, 2);
+    set16(&mut sec, 6, 5);
+    set32(&mut sec, 8, rva + md_at as u32);
+    set32(&mut sec, 12, md.len() as u32);
+    set32(&mut sec, 16, 1);
+
+    // DOS stub, PE signature, COFF header, PE32 optional header and the one section header.
+    let mut f = vec![0u8; RAW];
+    f[0..2].copy_from_slice(b"MZ");
+    set32(&mut f, 0x3c, 0x80);
+    f[0x80..0x84].copy_from_slice(b"PE\0\0");
+    set16(&mut f, 0x84, 0x014c);
+    set16(&mut f, 0x86, 1);
+    set32(&mut f, 0x88, 0x6543_2100);
+    set16(&mut f, 0x94, 96 + 16 * 8);
+    set16(&mut f, 0x96, 0x2102);
+    let opt = 0x98;
+    set16(&mut f, opt, 0x10b);
+    set32(&mut f, opt + 64, 0x0001_2345);
+    set32(&mut f, opt + 92, 16);
+    set32(&mut f, opt + 96 + 14 * 8, rva);
+    set32(&mut f, opt + 96 + 14 * 8 + 4, 72);
+    let sh = opt + 96 + 16 * 8;
+    f[sh..sh + 5].copy_from_slice(b".text");
+    set32(&mut f, sh + 8, vsize);
+    set32(&mut f, sh + 12, rva);
+    set32(&mut f, sh + 16, sec.len() as u32);
+    set32(&mut f, sh + 20, RAW as u32);
+    set32(&mut f, sh + 36, 0x6000_0020);
+    f.extend_from_slice(&sec);
+    let fields = Fields {
+        section_raw: sh + 20,
+        metadata: RAW + md_at,
+        version_len,
+        streams: headers,
+        typeref_count: RAW + md_at + header_len + typeref_count,
+    };
+    (f, fields)
+}
+
+fn nupkg(dll: &[u8]) -> Vec<u8> {
+    wheel(&[
+        (
+            "Demo.nuspec",
+            b"<package><metadata><id>Demo</id></metadata></package>",
+        ),
+        ("lib/net8.0/Demo.dll", dll),
+    ])
+}
+
+/// The passes that fired, natively, over `bytes` under `profile`.
+fn native_applied(profile: &str, bytes: Vec<u8>) -> Vec<String> {
+    let set = trigon_stabilize::profile(profile).expect("profile");
+    let mut notes = Vec::new();
+    let mut parsed =
+        trigon_archive::parse(bytes, Format::Zip, &Limits::default(), &mut notes).unwrap();
+    trigon_stabilize::apply(&set, &mut parsed.archive)
+        .iter()
+        .map(|a| a.id.as_str().to_string())
+        .collect()
+}
+
+/// Stabilizers are total, and the archived set is the same set. But the guest is wasm32: its
+/// `usize` is 32 bits, and release builds keep overflow checks, so a header value the publisher
+/// chose that overflows a sum there traps the guest where the native build returns bytes, and the
+/// archived set cannot re-check that artifact at all. Each assembly below puts one such value
+/// where a PE walker adds to it.
+#[test]
+fn the_archived_set_reads_an_assembly_whose_offsets_overflow_32_bits_as_the_native_one_does() {
+    let Some(path) = module() else {
+        panic!("the stabilizer module is not built; see the sibling test");
+    };
+    let mut archived = trigon_stabilize_wasm::ArchivedSet::load(&path).unwrap();
+
+    let (high, _) = assembly(0xffff_f000, 0x2000, 0);
+    let (base, at) = assembly(0x2000, 0x1000, 0);
+    // The metadata two bytes off a 4-byte boundary, as nothing but the publisher's word puts it.
+    let (skewed, skewed_at) = assembly(0x2000, 0x1000, 2);
+    // Each is an assembly both .NET passes read, so each case below changes one value and
+    // nothing else about what the walkers reach.
+    for (what, dll) in [
+        ("mapped at 0x2000", &base),
+        ("mapped at 0xffff_f000", &high),
+        ("with its metadata off a 4-byte boundary", &skewed),
+    ] {
+        let applied = native_applied("nupkg", nupkg(dll));
+        for id in ["dotnet-assembly-identity", "dotnet-il-canonical-v2"] {
+            assert!(
+                applied.iter().any(|a| a == id),
+                "{what}: `{id}` did not read the fixture: {applied:?}"
+            );
+        }
+    }
+    let patched = |dll: &[u8], edits: &[(usize, u32)]| {
+        let mut b = dll.to_vec();
+        for &(at, x) in edits {
+            set32(&mut b, at, x);
+        }
+        b
+    };
+    // A version-string length that puts the stream directory at `end` bytes into the address
+    // space, for a metadata root at `md`.
+    let directory_at = |md: usize, end: u64| {
+        let len = end - (md as u64 + 16);
+        assert_eq!(len % 4, 0, "the reader pads the length to 4");
+        u32::try_from(len).unwrap()
+    };
+    let [tables, strings, guid, blob] = at.streams;
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "a section whose address range ends past 4 GiB",
+            high.clone(),
+        ),
+        (
+            "a section whose raw data starts 8 bytes short of 4 GiB",
+            patched(&base, &[(at.section_raw, 0xffff_fff8)]),
+        ),
+        (
+            "a PE header 2 bytes short of 4 GiB",
+            patched(&base, &[(0x3c, 0xffff_fffe)]),
+        ),
+        (
+            "0x3000_0000 TypeRef rows",
+            patched(&base, &[(at.typeref_count, 0x3000_0000)]),
+        ),
+        (
+            "a metadata version string u32::MAX bytes long",
+            patched(&base, &[(at.version_len, u32::MAX)]),
+        ),
+        (
+            "a metadata version string that ends past 4 GiB",
+            patched(&base, &[(at.version_len, 0xffff_fff0)]),
+        ),
+        (
+            "a stream directory 4 bytes short of 4 GiB",
+            patched(
+                &base,
+                &[(at.version_len, directory_at(at.metadata, 0xffff_fffc))],
+            ),
+        ),
+        (
+            "a stream directory 2 bytes short of 4 GiB",
+            patched(
+                &skewed,
+                &[(
+                    skewed_at.version_len,
+                    directory_at(skewed_at.metadata, 0xffff_fffe),
+                )],
+            ),
+        ),
+        (
+            "a #~ stream 0xffff_ff00 past the metadata",
+            patched(&base, &[(tables, 0xffff_ff00)]),
+        ),
+        (
+            "a #Strings stream 0xffff_ff00 past the metadata",
+            patched(&base, &[(strings, 0xffff_ff00)]),
+        ),
+        (
+            "a #Blob stream 0xffff_ff00 past the metadata",
+            patched(&base, &[(blob, 0xffff_ff00)]),
+        ),
+        (
+            // `dotnet-il-canonical-v2` would replace whatever the identity pass zeroed, so it is
+            // made to decline, and the identity pass's own reading is what reaches the bytes.
+            "a #GUID stream 0xffff_ff00 past the metadata, in an assembly read only for identity",
+            patched(
+                &base,
+                &[(guid, 0xffff_ff00), (at.typeref_count, 0x3000_0000)],
+            ),
+        ),
+    ];
+    for (what, dll) in cases {
+        let bytes = nupkg(&dll);
+        let want = native("nupkg", Format::Zip, bytes.clone());
+        let got = archived
+            .stabilize("nupkg", Format::Zip, &bytes)
+            .unwrap_or_else(|e| {
+                panic!("{what}: the archived set failed where native did not: {e:#}")
+            });
+        assert!(
+            got == want,
+            "{what}: stabilized differently in wasm than natively"
+        );
+    }
 }

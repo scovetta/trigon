@@ -30,10 +30,6 @@ usage: rebuild-and-attest.sh <purl> [options]
                     are a surprise. `replay:<transcript.json>` answers from a recording and opens
                     no socket, which is the form to use in a test.
   --prune           drop the rebuilt bytes after attesting, keeping the digests
-  --rekor <url>     publish the equivalence statement to a transparency log and record what it
-                    said. Needs --key. Use https://rekor.sigstage.dev while working things out:
-                    a log is append-only, so a production entry is there permanently.
-  --dry-run         with --rekor, print the exact entry that would be posted and post nothing
 USAGE
     exit 2
 }
@@ -49,8 +45,6 @@ EGRESS="mirror-only"
 IMAGE=""
 MODEL=""
 PRUNE=""
-REKOR=""
-DRYRUN=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -61,24 +55,10 @@ while [ $# -gt 0 ]; do
         --image)  IMAGE="$2";  shift 2 ;;
         --model)  MODEL="$2";  shift 2 ;;
         --prune)  PRUNE=1;     shift ;;
-        --rekor)  REKOR="$2";  shift 2 ;;
-        --dry-run) DRYRUN=1;   shift ;;
         -h|--help) usage ;;
         *) echo "unknown option: $1" >&2; usage ;;
     esac
 done
-
-# Checked here rather than after the rebuild: the attestor refuses this too, but by then a build has
-# already run, and finding out then costs minutes for a mistake visible now.
-if [ -n "$REKOR" ] && [ -z "$KEY" ]; then
-    echo "--rekor needs --key: a log entry for an unsigned statement records that nobody stands" >&2
-    echo "behind it, and the log is append-only. Make a key with: trigon keygen --out <path>" >&2
-    exit 2
-fi
-if [ -n "$DRYRUN" ] && [ -z "$REKOR" ]; then
-    echo "--dry-run previews the log entry, so it needs --rekor <url>" >&2
-    exit 2
-fi
 
 # Prefer a built binary over whatever is on PATH, so a checkout tests itself.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -90,7 +70,10 @@ if [ -z "$WORK" ]; then
     WORK="./work/$(printf '%s' "$PURL" | tr -c 'A-Za-z0-9._@-' '-')"
 fi
 
-say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+# Bold headings, but only where the binary would colour too: stdout is a terminal and NO_COLOR is
+# unset. This mirrors `style::enabled()` so the script and `trigon`'s own output agree about colour.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then B='\033[1;97m'; R='\033[0m'; else B=''; R=''; fi
+say() { printf '\n%b%s%b\n' "$B" "$*" "$R"; }
 
 # ---------------------------------------------------------------------------------------------
 # The images. This is the step that is worth scripting: a stale `--image` digest is reported as a
@@ -130,9 +113,9 @@ fi
 # the only way to know which that is, is to know which were there before.
 RUNS_BEFORE="$("$TRIGON" runs --store "$STORE" 2>/dev/null | awk '$1 != "no" { print $1 }' | sort)"
 
-say "rebuilding $PURL"
-printf '  image   %s\n  egress  %s\n  store   %s\n  work    %s\n' \
-    "$IMAGE" "$EGRESS" "$STORE" "$WORK"
+# The invocation banner — image, egress, store, work — is printed by `trigon rebuild` itself now,
+# styled and in the tool-wide column, so a direct run shows it too and there is one place that owns
+# the colour. Nothing to echo here.
 
 rm -rf "$WORK"
 set +e
@@ -201,23 +184,23 @@ fi
 # ---------------------------------------------------------------------------------------------
 # The attestation. A separate invocation on purpose: it reads the blobs back by hash, checks each
 # against the hash it asked for, recomputes the equivalence claim from the artifact bytes, and
-# refuses if the record disagrees with its own evidence or if the guard tripped.
+# refuses if the record disagrees with its own evidence. A run the publication gate calls void —
+# the guard tripped, egress was open, or a stabilizer somebody wrote applied — is signed as
+# `void/v1` and nothing else, never as a verdict (docs/19 §4.3).
 # ---------------------------------------------------------------------------------------------
 
 say "attesting $LATEST"
 ATTEST_ARGS=(attest "$LATEST" --store "$STORE")
 [ -n "$KEY" ] && ATTEST_ARGS+=(--key "$KEY")
 [ -n "$PRUNE" ] && ATTEST_ARGS+=(--prune)
-[ -n "$REKOR" ] && ATTEST_ARGS+=(--rekor "$REKOR")
-[ -n "$DRYRUN" ] && ATTEST_ARGS+=(--dry-run)
 
 if ! "$TRIGON" "${ATTEST_ARGS[@]}"; then
     cat >&2 <<'WHY'
 
 The attestor refused, and its message above says which gate. All four are deliberate:
 
-  the guard tripped        the artifact reached the build over the network, so a match proves
-                           only that the build downloaded it
+  a void it cannot show    the record says the run is void for a reason its own evidence does
+                           not show, and a void is signed only on facts that hold
   artifacts pruned         the claim cannot be re-derived, so it will not be re-signed
   record disagrees         the record claims something its own comparison does not say
   re-derivation failed     the bytes give a different answer from the one recorded
@@ -228,18 +211,6 @@ fi
 
 if [ -z "$KEY" ]; then
     printf '\n  note: written unsigned. Pass --key for an attributable statement.\n'
-fi
-
-# A dry run wrote nothing, so it must not close with the paths and the verify line a real run ends
-# on: the statements directory does not exist, and this script's own contract is that exit 0 means a
-# statement was written. Say what happened and stop.
-if [ -n "$DRYRUN" ]; then
-    printf '\n\033[1mdry run\033[0m — the entry above was not posted, and no statement was signed\n'
-    printf '  or stored. The rebuild before it is real and its record and blobs are in the store,\n'
-    printf '  which is what makes a later run able to attest without building again.\n\n'
-    printf '  Drop --dry-run to publish. The signature is deterministic, so the entry will be byte\n'
-    printf '  for byte the one you just read.\n'
-    exit 0
 fi
 
 say "done"
@@ -276,8 +247,8 @@ done
 
 # The claim's path, from the record the attestor just wrote rather than from a glob over the
 # glob over the store: a store accumulates runs, and the bundle this line should name is the one
-# this run produced. Read with sed because the record puts one path per line, so the script keeps
-# working on a machine without jq — the `--transparency` line below is the only part that needs it.
+# this run produced. Read with sed because the record puts one path per line, so the script needs
+# no jq.
 # **`equivalence` OR `divergence`.** A run that reproduces writes the first and a run that does not
 # writes the second, and this matched only the first — so every divergent run, which is exactly the
 # run someone most wants to check by hand, printed a placeholder for a bundle sitting in the store
@@ -286,12 +257,24 @@ done
 # nothing to re-derive from either.
 BUNDLE=""
 INCOMPLETE=""
+# A void has no claim to re-derive, so no verify line: say what was signed instead.
+if [ -f "$STORE/runs/$LATEST.json" ] &&
+   grep -q '/void\(\.[0-9]\+\)\?\.intoto\.json"' "$STORE/runs/$LATEST.json"; then
+    printf '\n  void        this run is evidence of nothing about the package, so its statement is\n'
+    printf '              void/v1, with the reason and no verdict; there is nothing to re-derive\n'
+    printf '  statements  %s/attestations/\n' "$STORE"
+    exit 0
+fi
 if [ -f "$STORE/runs/$LATEST.json" ]; then
     # `#` as the delimiter, not `|`. With `|` delimiting the s-command, the `\|` below reads as an
     # escaped delimiter rather than an alternation, so the expression matched nothing at all and
     # every run printed a placeholder — including the ones that did reproduce.
-    REL="$(sed -n 's#.*"\(attestations/[^"]*/\(equivalence\|divergence\)\.intoto\.json\)".*#\1#p' \
-           "$STORE/runs/$LATEST.json" | head -1)"
+    # **The last match, and an optional `.N`.** Statements are filed per run and never overwritten
+    # (docs/19 §10 phase 2): attesting a run again writes `equivalence.2.intoto.json` beside the
+    # first, and the record lists paths in the order they were written, so the newest is last.
+    CLAIM='\(equivalence\|divergence\)\(\.[0-9]\+\)\?\.intoto\.json'
+    REL="$(sed -n 's#.*"\(attestations/[^"]*/'"$CLAIM"'\)".*#\1#p' \
+           "$STORE/runs/$LATEST.json" | tail -1)"
     [ -n "$REL" ] && [ -f "$STORE/$REL" ] && BUNDLE="$STORE/$REL"
 fi
 
@@ -312,16 +295,6 @@ else
     INCOMPLETE=1
 fi
 [ -n "$KEY" ] && printf ' \\\n                --public-key $(%s public-key %s)' "$TRIGON" "$KEY"
-# Only where there is an entry to check. Naming the flag after a run that never logged would send
-# someone looking for a file that was never written.
-[ -n "$REKOR" ] && [ -z "$DRYRUN" ] &&
-    if command -v jq >/dev/null 2>&1; then
-        printf ' \\\n                --transparency <(jq .transparency %s/runs/%s.json)' "$STORE" "$LATEST"
-    else
-        # Without jq the line would not run, and a command that does not run is not a command.
-        printf ' \\\n                --transparency <entry.json>   # the `transparency` field of'
-        printf '\n                                              # %s/runs/%s.json' "$STORE" "$LATEST"
-    fi
 printf '\n'
 if [ -n "$INCOMPLETE" ]; then
     # A placeholder in that line is a command nobody can paste, which is the whole reason the rest

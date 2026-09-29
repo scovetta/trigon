@@ -183,3 +183,138 @@ impl RunnerSpec {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(spec: &RunnerSpec) -> Option<(&str, Confidence)> {
+        spec.approximation()
+            .map(|a| (a.image.as_str(), a.confidence))
+    }
+
+    #[test]
+    fn a_named_ubuntu_release_maps_to_that_distribution_at_strong() {
+        let spec = map_label("ubuntu-22.04", None);
+        assert_eq!(
+            image(&spec),
+            Some(("docker.io/library/ubuntu:22.04", Confidence::Strong))
+        );
+        assert_eq!(spec.platform(), Some("linux/amd64"));
+        assert_eq!(spec.out_of_scope(), None);
+        // Labelled as the approximation it is, not an equality.
+        assert!(spec.approximation().unwrap().why.contains("approximation"));
+        // Case and surrounding space are the author's, not a different label.
+        assert_eq!(
+            image(&map_label(" Ubuntu-24.04 ", None)),
+            Some(("docker.io/library/ubuntu:24.04", Confidence::Strong))
+        );
+    }
+
+    #[test]
+    fn ubuntu_latest_is_what_it_pointed_at_on_the_day_and_nothing_inside_a_rollout() {
+        for (when, want) in [
+            ("2020-06-01T00:00:00Z", Some("18.04")),
+            ("2022-01-10T00:00:00Z", Some("20.04")),
+            ("2024-03-01T00:00:00Z", Some("22.04")),
+            ("2026-01-01T00:00:00Z", Some("24.04")),
+            // Inside the 20.04 -> 22.04 and 22.04 -> 24.04 rollouts: the label was both.
+            ("2022-11-20T00:00:00Z", None),
+            ("2024-12-20T00:00:00Z", None),
+            // Before the table, or not a date: no moment to resolve against.
+            ("2017-01-01T00:00:00Z", None),
+            ("yesterday", None),
+            ("2024/03/01", None),
+        ] {
+            let spec = map_label("ubuntu-latest", Some(when));
+            let got = spec.approximation().map(|a| a.image.clone());
+            assert_eq!(
+                got,
+                want.map(|r| format!("docker.io/library/ubuntu:{r}")),
+                "{when}"
+            );
+            if let Some(a) = spec.approximation() {
+                // Two guesses stacked, and the confidence says so.
+                assert_eq!(a.confidence, Confidence::Weak);
+                assert_eq!(a.from_label, "ubuntu-latest");
+            }
+            // Recognised as Linux either way: not knowing the release is not out of scope.
+            assert_eq!(spec.platform(), Some("linux/amd64"), "{when}");
+        }
+        // No publish time at all resolves to nothing, rather than to today's answer.
+        assert_eq!(map_label("ubuntu-latest", None).approximation(), None);
+        // `ubuntu-slim` names no release and goes the same way.
+        assert_eq!(
+            image(&map_label("ubuntu-slim", Some("2026-01-01T00:00:00Z"))),
+            Some(("docker.io/library/ubuntu:24.04", Confidence::Weak))
+        );
+    }
+
+    #[test]
+    fn a_runner_we_do_not_build_on_is_out_of_scope_with_its_reason() {
+        for (label, want) in [
+            ("macos-14", OutOfScope::MacOs("macos-14".into())),
+            ("mac-studio", OutOfScope::MacOs("mac-studio".into())),
+            ("windows-2022", OutOfScope::Windows("windows-2022".into())),
+            ("self-hosted", OutOfScope::SelfHosted),
+            ("self-hosted-gpu", OutOfScope::SelfHosted),
+            (
+                "ubuntu-24.04-arm",
+                OutOfScope::NonX86("ubuntu-24.04-arm".into()),
+            ),
+            (
+                "ubuntu-latest-arm64",
+                OutOfScope::NonX86("ubuntu-latest-arm64".into()),
+            ),
+            (
+                "ubuntu-24.04-ppc64le",
+                OutOfScope::NonX86("ubuntu-24.04-ppc64le".into()),
+            ),
+            ("", OutOfScope::UnknownLabel(String::new())),
+            (
+                "buildjet-4vcpu",
+                OutOfScope::UnknownLabel("buildjet-4vcpu".into()),
+            ),
+            (
+                "ubuntu-jammy",
+                OutOfScope::UnknownLabel("ubuntu-jammy".into()),
+            ),
+            ("ubuntu-22", OutOfScope::UnknownLabel("ubuntu-22".into())),
+        ] {
+            let spec = map_label(label, Some("2024-03-01T00:00:00Z"));
+            assert_eq!(spec.out_of_scope(), Some(&want), "{label:?}");
+            assert_eq!(spec.approximation(), None, "{label:?}");
+        }
+        // A macOS or Windows runner is still a platform worth claiming; the rest are not.
+        assert_eq!(map_label("macos-14", None).platform(), Some("macos"));
+        assert_eq!(
+            map_label("windows-latest", None).platform(),
+            Some("windows")
+        );
+        assert_eq!(map_label("ubuntu-24.04-arm", None).platform(), None);
+        assert_eq!(map_label("self-hosted", None).platform(), None);
+    }
+
+    #[test]
+    fn a_container_pinned_by_digest_says_so_and_a_tag_does_not() {
+        assert_eq!(
+            map_container(" python:3.12@sha256:0123abcd "),
+            RunnerSpec::Container {
+                image: "python:3.12@sha256:0123abcd".into(),
+                digest: Some("sha256:0123abcd".into()),
+            }
+        );
+        let tagged = map_container("node:20");
+        assert_eq!(
+            tagged,
+            RunnerSpec::Container {
+                image: "node:20".into(),
+                digest: None,
+            }
+        );
+        // A container is not an approximation of a runner: it is the environment itself.
+        assert_eq!(tagged.approximation(), None);
+        assert_eq!(tagged.platform(), Some("linux/amd64"));
+        assert_eq!(tagged.out_of_scope(), None);
+    }
+}

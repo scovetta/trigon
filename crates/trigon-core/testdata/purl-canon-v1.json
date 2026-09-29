@@ -1,0 +1,303 @@
+{
+  "purlCanon": 1,
+  "about": "Test vectors for Trigon's package-URL canonicalisation, version 1. Every writer and reader of the purl1 and pkg1 lookup keys (docs/19-distribution-and-lookup.md section 5) must produce `canonical` and `package` exactly from `input`, and refuse every entry of `invalid`. `canonical` is what a statement signs as `purl` and what the purl1 key hashes; `package` is the package with nothing that names one version of it, what the pkg1 key hashes: pkg:<type>/<namespace>/<name>, plus the repository_url qualifier where there is one, and no version, no subpath and no other qualifier. The rules are in crates/trigon-core/src/purl.rs and docs/09-attestations.md.",
+  "vectors": [
+    {
+      "input": "pkg:npm/left-pad@1.3.0",
+      "canonical": "pkg:npm/left-pad@1.3.0",
+      "package": "pkg:npm/left-pad",
+      "why": "already canonical"
+    },
+    {
+      "input": "PKG:npm/left-pad@1.3.0",
+      "canonical": "pkg:npm/left-pad@1.3.0",
+      "package": "pkg:npm/left-pad",
+      "why": "the scheme is case-insensitive"
+    },
+    {
+      "input": "pkg://npm/left-pad@1.3.0",
+      "canonical": "pkg:npm/left-pad@1.3.0",
+      "package": "pkg:npm/left-pad",
+      "why": "slashes after the scheme are ignored, as the purl spec requires of a parser"
+    },
+    {
+      "input": "pkg:NPM/left-pad@1.3.0",
+      "canonical": "pkg:npm/left-pad@1.3.0",
+      "package": "pkg:npm/left-pad",
+      "why": "the type is lowercased"
+    },
+    {
+      "input": "pkg:npm/Left-Pad@1.3.0",
+      "canonical": "pkg:npm/left-pad@1.3.0",
+      "package": "pkg:npm/left-pad",
+      "why": "an npm name is lowercased"
+    },
+    {
+      "input": "pkg:npm/%40babel/core@7.24.0",
+      "canonical": "pkg:npm/%40babel/core@7.24.0",
+      "package": "pkg:npm/%40babel/core",
+      "why": "an npm scope is a namespace, and its @ is encoded"
+    },
+    {
+      "input": "pkg:npm/@babel/core@7.24.0",
+      "canonical": "pkg:npm/%40babel/core@7.24.0",
+      "package": "pkg:npm/%40babel/core",
+      "why": "an unencoded scope: an @ that begins a path segment is never the version separator"
+    },
+    {
+      "input": "pkg:npm/@babel/core",
+      "canonical": "pkg:npm/%40babel/core",
+      "package": "pkg:npm/%40babel/core",
+      "why": "no version: the scope's @ is still not a separator"
+    },
+    {
+      "input": "pkg:npm/@Babel/Core@7.24.0",
+      "canonical": "pkg:npm/%40Babel/core@7.24.0",
+      "package": "pkg:npm/%40Babel/core",
+      "why": "the purl spec lowercases an npm name and says nothing of the namespace"
+    },
+    {
+      "input": "pkg:npm/left%2dpad@1.3.0",
+      "canonical": "pkg:npm/left-pad@1.3.0",
+      "package": "pkg:npm/left-pad",
+      "why": "an escape of an unreserved character is decoded"
+    },
+    {
+      "input": "pkg:pypi/Django_Rest.Framework@3.15.2",
+      "canonical": "pkg:pypi/django-rest-framework@3.15.2",
+      "package": "pkg:pypi/django-rest-framework",
+      "why": "PEP 503: lowercase, and each run of - _ . is one -"
+    },
+    {
+      "input": "pkg:pypi/zope.interface@6.0",
+      "canonical": "pkg:pypi/zope-interface@6.0",
+      "package": "pkg:pypi/zope-interface",
+      "why": "PEP 503 maps . as well as _, where the purl spec maps only _"
+    },
+    {
+      "input": "pkg:pypi/a__b--c..d@1",
+      "canonical": "pkg:pypi/a-b-c-d@1",
+      "package": "pkg:pypi/a-b-c-d",
+      "why": "a run of separators is one -"
+    },
+    {
+      "input": "pkg:pypi/requests@2.31.0?file_name=requests-2.31.0-py3-none-any.whl",
+      "canonical": "pkg:pypi/requests@2.31.0?file_name=requests-2.31.0-py3-none-any.whl",
+      "package": "pkg:pypi/requests",
+      "why": "a qualifier that names one version's file is not in the versionless form, which finds every version"
+    },
+    {
+      "input": "pkg:github/Package-URL/Purl-Spec@244fd47e07d1004",
+      "canonical": "pkg:github/package-url/purl-spec@244fd47e07d1004",
+      "package": "pkg:github/package-url/purl-spec",
+      "why": "github lowercases namespace and name; the version keeps its case"
+    },
+    {
+      "input": "pkg:bitbucket/Birkenfeld/Pygments-Main@244fd47e07d1014f0aed9c",
+      "canonical": "pkg:bitbucket/birkenfeld/pygments-main@244fd47e07d1014f0aed9c",
+      "package": "pkg:bitbucket/birkenfeld/pygments-main",
+      "why": "bitbucket lowercases namespace and name"
+    },
+    {
+      "input": "pkg:composer/Laravel/Framework@10.0.0",
+      "canonical": "pkg:composer/laravel/framework@10.0.0",
+      "package": "pkg:composer/laravel/framework",
+      "why": "composer lowercases namespace and name"
+    },
+    {
+      "input": "pkg:deb/Debian/Curl@1:7.50.3-1?arch=i386&distro=jessie",
+      "canonical": "pkg:deb/debian/curl@1:7.50.3-1?arch=i386&distro=jessie",
+      "package": "pkg:deb/debian/curl",
+      "why": "deb lowercases namespace and name; a colon is never encoded; the versionless form keeps no qualifier but repository_url"
+    },
+    {
+      "input": "pkg:rpm/Fedora/Curl@7.50.3-1.fc25?arch=i386",
+      "canonical": "pkg:rpm/fedora/Curl@7.50.3-1.fc25?arch=i386",
+      "package": "pkg:rpm/fedora/Curl",
+      "why": "rpm lowercases the namespace and keeps the name's case; arch is not part of the package"
+    },
+    {
+      "input": "pkg:hex/Phoenix@1.7.0",
+      "canonical": "pkg:hex/phoenix@1.7.0",
+      "package": "pkg:hex/phoenix",
+      "why": "hex lowercases the name"
+    },
+    {
+      "input": "pkg:nuget/Newtonsoft.Json@13.0.3",
+      "canonical": "pkg:nuget/Newtonsoft.Json@13.0.3",
+      "package": "pkg:nuget/Newtonsoft.Json",
+      "why": "the purl spec gives nuget no case rule, so the name keeps its case"
+    },
+    {
+      "input": "pkg:maven/org.apache.xmlgraphics/batik-anim@1.9.1?type=pom&Classifier=sources",
+      "canonical": "pkg:maven/org.apache.xmlgraphics/batik-anim@1.9.1?classifier=sources&type=pom",
+      "package": "pkg:maven/org.apache.xmlgraphics/batik-anim",
+      "why": "qualifier keys are lowercased and sorted; maven keeps its case; the versionless form drops them"
+    },
+    {
+      "input": "pkg:maven/org.apache.xmlgraphics/batik-anim@1.9.1?repository_url=repo.spring.io/release",
+      "canonical": "pkg:maven/org.apache.xmlgraphics/batik-anim@1.9.1?repository_url=repo.spring.io/release",
+      "package": "pkg:maven/org.apache.xmlgraphics/batik-anim?repository_url=repo.spring.io/release",
+      "why": "a slash in a qualifier value is not encoded; repository_url stays in the versionless form, because the same name on another registry is another package"
+    },
+    {
+      "input": "pkg:maven//org.apache//commons-lang3/@3.12.0",
+      "canonical": "pkg:maven/org.apache/commons-lang3@3.12.0",
+      "package": "pkg:maven/org.apache/commons-lang3",
+      "why": "empty namespace segments and a trailing slash are dropped"
+    },
+    {
+      "input": "pkg:golang/github.com/Azure/azure-sdk-for-go@v68.0.0#sdk/./storage/../azblob/",
+      "canonical": "pkg:golang/github.com/Azure/azure-sdk-for-go@v68.0.0#sdk/storage/azblob",
+      "package": "pkg:golang/github.com/Azure/azure-sdk-for-go",
+      "why": "golang keeps its case; subpath segments that are empty, . or .. are dropped; the versionless form has no subpath"
+    },
+    {
+      "input": "pkg:npm/x@1#%2E%2E/a",
+      "canonical": "pkg:npm/x@1#a",
+      "package": "pkg:npm/x",
+      "why": "a subpath segment is dropped by what it decodes to: %2E%2E is .., which is dropped, and not written back out as .."
+    },
+    {
+      "input": "pkg:npm/x@1#a/%2e/%2E%2e/b",
+      "canonical": "pkg:npm/x@1#a/b",
+      "package": "pkg:npm/x",
+      "why": "encoded . and .. segments are dropped whatever the case of their hex"
+    },
+    {
+      "input": "pkg:npm/x@1#%2E",
+      "canonical": "pkg:npm/x@1",
+      "package": "pkg:npm/x",
+      "why": "a subpath that is only an encoded . is no subpath"
+    },
+    {
+      "input": "pkg:npm/x@1#a%2F..",
+      "canonical": "pkg:npm/x@1#a%2F..",
+      "package": "pkg:npm/x",
+      "why": "an encoded slash is part of one segment and never splits it, so a%2F.. is one segment and not a .."
+    },
+    {
+      "input": "pkg:docker/customer/dockerimage@sha256%3A244fd47e07d10?repository_url=gcr.io",
+      "canonical": "pkg:docker/customer/dockerimage@sha256:244fd47e07d10?repository_url=gcr.io",
+      "package": "pkg:docker/customer/dockerimage?repository_url=gcr.io",
+      "why": "an encoded colon is decoded; repository_url stays in the versionless form"
+    },
+    {
+      "input": "pkg:cargo/serde@1.0.0+build.1",
+      "canonical": "pkg:cargo/serde@1.0.0%2Bbuild.1",
+      "package": "pkg:cargo/serde",
+      "why": "a + is encoded, with uppercase hex"
+    },
+    {
+      "input": "pkg:cargo/serde@1.0.0%2bbuild.1",
+      "canonical": "pkg:cargo/serde@1.0.0%2Bbuild.1",
+      "package": "pkg:cargo/serde",
+      "why": "lowercase hex in an escape becomes uppercase"
+    },
+    {
+      "input": "pkg:crates.io/serde@1.0.0",
+      "canonical": "pkg:cargo/serde@1.0.0",
+      "package": "pkg:cargo/serde",
+      "why": "crates.io, which Trigon accepts as a type, is cargo"
+    },
+    {
+      "input": "pkg:rubygems/rails@7.1.0",
+      "canonical": "pkg:gem/rails@7.1.0",
+      "package": "pkg:gem/rails",
+      "why": "rubygems, which Trigon accepts as a type, is gem"
+    },
+    {
+      "input": "pkg:generic/openssl@1.1.10g?download_url=https://openssl.org/source/openssl-1.1.0g.tar.gz&checksum=sha256:de4d501267da",
+      "canonical": "pkg:generic/openssl@1.1.10g?checksum=sha256:de4d501267da&download_url=https://openssl.org/source/openssl-1.1.0g.tar.gz",
+      "package": "pkg:generic/openssl",
+      "why": "qualifiers are sorted, and a colon or a slash in a qualifier value is written as itself; download_url and checksum name one version's file, so the versionless form has neither"
+    },
+    {
+      "input": "pkg:generic/a%40b@1%3F2?q=a%23b%26c%3Dd",
+      "canonical": "pkg:generic/a%40b@1%3F2?q=a%23b%26c%3Dd",
+      "package": "pkg:generic/a%40b",
+      "why": "@ ? # & and = stay encoded wherever they would be read as separators"
+    },
+    {
+      "input": "pkg:generic/café@1?note=caf%c3%a9",
+      "canonical": "pkg:generic/caf%C3%A9@1?note=caf%C3%A9",
+      "package": "pkg:generic/caf%C3%A9",
+      "why": "non-ASCII is UTF-8, percent-encoded, whether it arrived raw or encoded"
+    },
+    {
+      "input": "pkg:npm/%E2%84%AAeras@1.0",
+      "canonical": "pkg:npm/%E2%84%AAeras@1.0",
+      "package": "pkg:npm/%E2%84%AAeras",
+      "why": "lowercasing is of ASCII letters only: KELVIN SIGN (U+212A) stays itself, and never becomes the k of keras"
+    },
+    {
+      "input": "pkg:pypi/%E2%84%AAeras@1.0",
+      "canonical": "pkg:pypi/%E2%84%AAeras@1.0",
+      "package": "pkg:pypi/%E2%84%AAeras",
+      "why": "PEP 503's lowercasing is of ASCII letters too, so this is not pkg:pypi/keras"
+    },
+    {
+      "input": "pkg:npm/%C4%B0NFO@1",
+      "canonical": "pkg:npm/%C4%B0nfo@1",
+      "package": "pkg:npm/%C4%B0nfo",
+      "why": "U+0130 keeps its case, since full and simple case mapping lowercase it differently; the ASCII letters after it are lowercased"
+    },
+    {
+      "input": "pkg:github/%C3%84Bc/Repo@1",
+      "canonical": "pkg:github/%C3%84bc/repo@1",
+      "package": "pkg:github/%C3%84bc/repo",
+      "why": "a namespace is lowercased in ASCII only as well: A-diaeresis (U+00C4) keeps its case"
+    },
+    {
+      "input": "pkg:npm/left-pad@1.3.0?a=&b=1&&",
+      "canonical": "pkg:npm/left-pad@1.3.0?b=1",
+      "package": "pkg:npm/left-pad",
+      "why": "a qualifier with an empty value is dropped, and so are empty pairs"
+    },
+    {
+      "input": "pkg:npm/left-pad@1.3.0?",
+      "canonical": "pkg:npm/left-pad@1.3.0",
+      "package": "pkg:npm/left-pad",
+      "why": "an empty qualifier string is no qualifiers"
+    },
+    {
+      "input": "pkg:npm/left-pad@1.3.0#",
+      "canonical": "pkg:npm/left-pad@1.3.0",
+      "package": "pkg:npm/left-pad",
+      "why": "an empty subpath is no subpath"
+    },
+    {
+      "input": "pkg:maven/org.example/Lib@1.0?type=jar&Repository_URL=https://repo.example.com/maven%20two#src/main",
+      "canonical": "pkg:maven/org.example/Lib@1.0?repository_url=https://repo.example.com/maven%20two&type=jar#src/main",
+      "package": "pkg:maven/org.example/Lib?repository_url=https://repo.example.com/maven%20two",
+      "why": "the versionless form keeps repository_url, encoded as any qualifier value is, and drops the version, the subpath and every other qualifier"
+    },
+    {
+      "input": "pkg:npm/left-pad@1.3.0?file_name=left-pad-1.3.0.tgz&checksum=sha1:5b8a3a77",
+      "canonical": "pkg:npm/left-pad@1.3.0?checksum=sha1:5b8a3a77&file_name=left-pad-1.3.0.tgz",
+      "package": "pkg:npm/left-pad",
+      "why": "two versions that name their own files share one versionless key, which is what finds every version"
+    }
+  ],
+  "invalid": [
+    { "input": "npm/left-pad@1.3.0", "why": "no scheme" },
+    { "input": "http://npm/left-pad@1.3.0", "why": "the wrong scheme" },
+    { "input": "pkg:", "why": "no type" },
+    { "input": "pkg:npm", "why": "no name" },
+    { "input": "pkg:npm/", "why": "no name" },
+    { "input": "pkg:npm/@1.3.0", "why": "the @ begins the last segment, so it is the version separator, and there is no name before it" },
+    { "input": "pkg:9npm/left-pad@1.3.0", "why": "a type does not start with a digit" },
+    { "input": "pkg:n_pm/left-pad@1.3.0", "why": "_ is not a type character" },
+    { "input": "pkg:npm/left-pad@", "why": "a version separator with no version" },
+    { "input": "pkg:npm/left%2pad@1.3.0", "why": "an escape needs two hex digits" },
+    { "input": "pkg:npm/left-pad@1.3.0%", "why": "a trailing % is not an escape" },
+    { "input": "pkg:npm/left-pad@1.3.0%+f", "why": "a sign is not a hex digit" },
+    { "input": "pkg:npm/%FF@1.3.0", "why": "decodes to bytes that are not UTF-8" },
+    { "input": "pkg:npm/left-pad@1.3.0?a=1&A=2", "why": "a qualifier key given twice, compared lowercased" },
+    { "input": "pkg:npm/left-pad@1.3.0?a=&a=1", "why": "a qualifier key given twice, even where one value is empty" },
+    { "input": "pkg:npm/left-pad@1.3.0?1a=2", "why": "a qualifier key does not start with a digit" },
+    { "input": "pkg:npm/left-pad@1.3.0?a%20b=2", "why": "a qualifier key is never percent-encoded" },
+    { "input": "pkg:npm/left-pad@1.3.0 ", "why": "whitespace" },
+    { "input": "pkg:npm/left pad@1.3.0", "why": "whitespace inside a component: encode it as %20" }
+  ]
+}

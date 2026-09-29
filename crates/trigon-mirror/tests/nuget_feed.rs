@@ -56,23 +56,6 @@ async fn the_service_index_points_every_resource_back_at_this_mirror() {
         assert!(id.contains(NOW), "resource {id} lost the moment");
     }
 
-    // **Follow them.** Asserting the prefix let a doubled path through — the resources read
-    // `/-nuget/<moment>/-nuget/flat/`, which still starts with `/-nuget/` and still contains the
-    // moment, and which restore reported as `NU1101 … No packages exist with this id`: a message
-    // about the package, for a URL that was never going to resolve. A URL is only advertised
-    // correctly if asking for it answers.
-    for r in resources {
-        let id = r["@id"].as_str().unwrap();
-        let path = id.strip_prefix(&format!("http://{}", m.addr)).unwrap();
-        // A base address is a prefix, so probe it the way a client composes one.
-        let probe = format!("{path}newtonsoft.json/index.json");
-        let (status, body) = get(&m.addr, &probe).await;
-        assert_ne!(
-            status, 404,
-            "the index advertises {id}, and composing a request onto it 404s: {probe} -> {body}"
-        );
-    }
-
     // Both resources a restore needs.
     let types: Vec<&str> = resources
         .iter()
@@ -83,6 +66,34 @@ async fn the_service_index_points_every_resource_back_at_this_mirror() {
         types.iter().any(|t| t.starts_with("RegistrationsBaseUrl")),
         "{types:?}"
     );
+
+    // **Follow them.** Asserting the prefix let a doubled path through — the resources read
+    // `/-nuget/<moment>/-nuget/flat/`, which still starts with `/-nuget/` and still contains the
+    // moment, and which restore reported as `NU1101 … No packages exist with this id`: a message
+    // about the package, for a URL that was never going to resolve. A URL is only advertised
+    // correctly if asking for it answers.
+    //
+    // **Live, and only live.** Everything above is this mirror talking to itself; composing onto
+    // a resource asks api.nuget.org. It went out ungated once, asserting only that the answer was
+    // not a 404 — which the 502 a machine with no network gets passed, so a plain `cargo test`
+    // made the requests and proved nothing by them. Offline, `seam_routes_served_from_the_cache`'s
+    // `the_service_index_points_every_resource_back_here_and_each_one_answers` holds this line
+    // against a seeded cache.
+    if !live() {
+        return;
+    }
+    for r in resources {
+        let id = r["@id"].as_str().unwrap();
+        let path = id.strip_prefix(&format!("http://{}", m.addr)).unwrap();
+        // A base address is a prefix, so probe it the way a client composes one.
+        let probe = format!("{path}newtonsoft.json/index.json");
+        let (status, body) = get(&m.addr, &probe).await;
+        assert_eq!(
+            status, 200,
+            "the index advertises {id}, and composing a request onto it does not answer: \
+             {probe} -> {body}"
+        );
+    }
 }
 
 #[tokio::test]

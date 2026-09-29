@@ -1,0 +1,41 @@
+Yes. The flow is to rebuild, confirm the rebuild with a second attempt, attest, then publish, with the repository named in evidence.toml as a local path. I can't run anything from here, so the flags below are as the phase reports described them; check them against trigon <cmd> --help and the publish section of docs/using-trigon.md. Build from the evidence-store branch at dde0ea9 or later. The coverage agents are editing the working tree right now, so a fresh checkout or worktree is safer than building in place.
+
+1. Create the repository and keys (once)
+git init --bare ~/trigon-evidence.git   # or a clean non-bare repo on the configured branch
+trigon keygen --out ~/.config/trigon/attest.key
+trigon log keygen --origin example.org/mike/trigon-evidence --out ~/.config/trigon/log.key
+
+2. ~/.config/trigon/evidence.toml
+[publish]
+repo = "~/trigon-evidence.git"          # a local path works; a non-bare repo is committed into directly
+branch = "main"
+origin = "example.org/mike/trigon-evidence"
+disputes = "https://example.org/disputes"   # must be set, or publish refuses the statement
+log_key = "~/.config/trigon/log.key"
+same_host_confirmation = true           # needed if you only have one machine
+confirmation_interval = "1h"            # minimum gap between the two attempts; shorten it for a trial
+
+3. Initialise the log
+trigon log init --origin example.org/mike/trigon-evidence --repo ~/trigon-evidence.git
+It also prints a GitHub ruleset command, which you can ignore for a local repository.
+
+4. Rebuild, then confirm
+trigon rebuild pkg:npm/left-pad@1.3.0 --image auto --egress mirror-only --timewarp auto --store ./trigon-store
+# after confirmation_interval has passed:
+trigon rebuild --confirm <run-id> --store ./trigon-store
+Don't use --egress open. A run the build could reach the network from counts as void, and publishes only as a void/v1 record.
+
+5. Attest and publish
+trigon attest <run-id> --key ~/.config/trigon/attest.key --store ./trigon-store
+trigon publish <run-id> --store ./trigon-store --dry-run   # shows exactly what it would write
+trigon publish <run-id> --store ./trigon-store
+
+6. Read it back as a consumer (optional)
+trigon evidence add local ~/trigon-evidence.git --log-key <vkey printed by log keygen> --attestation-key <public key hex from keygen>
+trigon evidence sync
+trigon lookup pkg:npm/left-pad@1.3.0
+
+Things that will stop it:
+- A divergence is refused while divergences = "refuse", which is the default. Set divergences = "feed" to publish divergences.
+- Your existing runs: none of the 371 runs already in the store can be published, because they have no cache key or saved strategy. You need a fresh pair of runs.
+- A single attempt, two attempts closer together than confirmation_interval, or a same-host confirmation without same_host_confirmation = true all leave the run withheld.

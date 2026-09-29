@@ -15,22 +15,34 @@
 //! substitute PyPI's `home_page` is: often a docs site, occasionally a forge. Recorded at
 //! `Confidence::Weak` and only when it looks like one.
 //!
-//! No `declared_sha256`. The flat container serves the package and the API publishes no digest for
-//! it beside the URL — the catalog carries `packageHash` in some entries and not others, and a
-//! check that is present for some packages and silently absent for the rest is worse than one that
-//! says it is absent. See [`ArtifactMeta::declared_sha256`].
+//! **The digest is in the catalog, one request further.** The flat container publishes no digest
+//! beside the package, and the registration's `catalogEntry` is a summary that carries none either.
+//! The catalog leaf it names by `@id` carries `packageHash`, a base64 sha512 of the `.nupkg` with
+//! `packageHashAlgorithm` beside it — for most entries, and not all. So the download is verified
+//! against it where the catalog carries it, and where it does not, the absence is recorded with its
+//! reason rather than passed over: a check present for some packages and silently absent for the
+//! rest would be worse than one that says which it is. Measured on Newtonsoft.Json 13.0.3 and
+//! 3.5.8 (2011): both leaves carry one, and it is the sha512 of the bytes the flat container
+//! serves.
+//!
+//! **Absent is something read, never something assumed.** A registration or a leaf that could not
+//! be read — a 503, a 429 past the retries, a dropped connection, a body that is not the document —
+//! refuses the resolve ([`RegistryError::CatalogUnreadable`], retried where the failure was
+//! transient). It used to come back as "no catalog entry for this version", so a moment of catalog
+//! trouble turned a verified download into one checked against nothing, and the run recorded that
+//! the registry had declared nothing.
 
 use async_trait::async_trait;
 use serde_json::Value;
 use trigon_core::{
-    ArtifactId, Claim, Confidence, Digest, Ecosystem, Evidence, Intrinsics, RegistryMoment,
+    ArtifactId, Claim, Confidence, DeclaredDigest, Ecosystem, Evidence, Intrinsics, RegistryMoment,
     SourceDiscovery, SourceProvenance, TargetRef,
 };
 
 use crate::client::Client;
+use crate::declared::fetch_verified;
 use crate::error::RegistryError;
-use crate::model::{ArtifactMeta, BlobSink, ResolvedTarget};
-use crate::npm::fetch_verified;
+use crate::model::{ArtifactMeta, BlobSink, Fetched, ResolvedTarget};
 use crate::registry::Registry;
 
 const ECO: &str = "nuget";
@@ -78,33 +90,136 @@ impl NuGetRegistry {
             .unwrap_or_default()
     }
 
-    /// The `catalogEntry` for one version, out of the registration index.
+    /// A catalog document, or the reason it could not be read.
+    ///
+    /// Every failure is kept as [`RegistryError::CatalogUnreadable`], naming the document, so that
+    /// nothing downstream can mistake "could not read" for "read, and it declares nothing".
+    async fn document(&self, url: &str, what: &str) -> Result<Value, RegistryError> {
+        let read = match self.client.get(url, ECO).await {
+            Ok(r) => r.json::<Value>().await.map_err(RegistryError::from),
+            Err(e) => Err(e),
+        };
+        read.map_err(|cause| RegistryError::CatalogUnreadable {
+            what: what.to_string(),
+            cause: Box::new(cause),
+        })
+    }
+
+    /// The `catalogEntry` for one version, out of the registration index, or `None` where the index
+    /// was read and does not list it.
     ///
     /// The index is paged, and a package with enough releases has `items` that are *references* to
     /// pages rather than the pages themselves — `Newtonsoft.Json` is one. Following one page is
     /// enough because the pages are ordered and each declares the range it covers.
-    async fn catalog_entry(&self, id: &str, version: &str) -> Option<Value> {
+    ///
+    /// **An error where the index or a page could not be read, or is not the document it should
+    /// be**, never `None`. `None` is recorded as "the registration has no catalog entry for this
+    /// version", and that sentence has to be a fact about the registry.
+    async fn catalog_entry(&self, id: &str, version: &str) -> Result<Option<Value>, RegistryError> {
         let url = format!("{}/{id}/index.json", self.registration);
-        let doc: Value = self.client.get(&url, ECO).await.ok()?.json().await.ok()?;
-        for page in doc.get("items")?.as_array()? {
+        let what = format!("the NuGet registration index for `{id}`");
+        let malformed = |detail: &str| RegistryError::Malformed {
+            ecosystem: ECO.into(),
+            what: what.clone(),
+            detail: detail.to_string(),
+        };
+        let doc = self.document(&url, &what).await?;
+        let pages = doc
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or_else(|| malformed("no `items` list"))?;
+        for page in pages {
             // An inline page carries its items; a reference has to be followed.
-            let items = match page.get("items") {
-                Some(i) => i.clone(),
+            let fetched;
+            let page = match page.get("items") {
+                Some(_) => page,
                 None => {
-                    let href = page.get("@id").and_then(Value::as_str)?;
-                    let fetched: Value =
-                        self.client.get(href, ECO).await.ok()?.json().await.ok()?;
-                    fetched.get("items")?.clone()
+                    let href = page
+                        .get("@id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| malformed("a page with neither `items` nor an `@id`"))?;
+                    fetched = self
+                        .document(
+                            href,
+                            &format!("a page of the NuGet registration for `{id}`"),
+                        )
+                        .await?;
+                    &fetched
                 }
             };
-            for item in items.as_array()? {
-                let entry = item.get("catalogEntry")?;
-                if entry.get("version").and_then(Value::as_str) == Some(version) {
-                    return Some(entry.clone());
+            let items = page
+                .get("items")
+                .and_then(Value::as_array)
+                .ok_or_else(|| malformed("a page whose `items` is not a list"))?;
+            for item in items {
+                let entry = item
+                    .get("catalogEntry")
+                    .ok_or_else(|| malformed("an item with no `catalogEntry`"))?;
+                // NuGet versions compare without case, as `resolve`'s check of the flat container's
+                // list does.
+                let listed = entry.get("version").and_then(Value::as_str);
+                if listed.is_some_and(|v| v.eq_ignore_ascii_case(version)) {
+                    return Ok(Some(entry.clone()));
                 }
             }
         }
-        None
+        Ok(None)
+    }
+
+    /// The `packageHash` the catalog declares for one version, where it declares one.
+    ///
+    /// Read from the registration's own `catalogEntry` if it ever carries one, and otherwise from
+    /// the catalog leaf that entry names by `@id`, which is where nuget.org puts it. **Never
+    /// silent**: no entry, no leaf named, or a leaf with no hash each come back as an empty list
+    /// with the reason, which the run records. A leaf that could not be read refuses the resolve
+    /// instead, as a hash that is present and is not a digest does: dropping either would make a
+    /// declaration nobody saw read as no declaration.
+    async fn package_hash(
+        &self,
+        entry: Option<&Value>,
+        what: &str,
+    ) -> Result<(Vec<DeclaredDigest>, Option<String>), RegistryError> {
+        let absent = |why: String| Ok((Vec::new(), Some(why)));
+        let Some(entry) = entry else {
+            return absent(
+                "the NuGet registration has no catalog entry for this version, so there was no \
+                 `packageHash` to check the package against"
+                    .into(),
+            );
+        };
+        let leaf = if entry.get("packageHash").is_some() {
+            entry.clone()
+        } else {
+            let Some(href) = entry.get("@id").and_then(Value::as_str) else {
+                return absent(
+                    "the NuGet catalog entry for this version names no catalog leaf, so there was \
+                     no `packageHash` to check the package against"
+                        .into(),
+                );
+            };
+            self.document(href, &format!("the NuGet catalog leaf for {what}"))
+                .await?
+        };
+        let Some(hash) = leaf.get("packageHash").and_then(Value::as_str) else {
+            return absent(
+                "the NuGet catalog entry for this version carries no `packageHash`, and the flat \
+                 container publishes no digest, so the package was checked against nothing"
+                    .into(),
+            );
+        };
+        // Always `SHA512` on nuget.org, and named beside every hash it writes. Absent, the
+        // catalog's own default is assumed rather than the hash being thrown away.
+        let algorithm = leaf
+            .get("packageHashAlgorithm")
+            .and_then(Value::as_str)
+            .unwrap_or("SHA512");
+        let d = crate::declared::from_base64(algorithm, hash, "nuget:catalog.packageHash")
+            .map_err(|detail| RegistryError::Malformed {
+                ecosystem: ECO.into(),
+                what: what.to_string(),
+                detail,
+            })?;
+        Ok((vec![d], None))
     }
 }
 
@@ -144,7 +259,10 @@ impl Registry for NuGetRegistry {
         let file = format!("{id}.{version}.nupkg");
         let url = format!("{}/{id}/{version}/{file}", self.flat);
 
-        let entry = self.catalog_entry(&id, &target.version).await;
+        let entry = self.catalog_entry(&id, &target.version).await?;
+        let (package_hash, hash_note) = self
+            .package_hash(entry.as_ref(), &format!("{name} {}", target.version))
+            .await?;
         let published = entry
             .as_ref()
             .and_then(|e| e.get("published"))
@@ -189,9 +307,10 @@ impl Registry for NuGetRegistry {
             artifacts: vec![ArtifactMeta {
                 id: ArtifactId::new(file),
                 url,
-                // See the module docs: the API publishes no digest beside this URL for every
-                // package, and a check that silently covers some is worse than a stated absence.
-                declared_sha256: None,
+                // See the module docs: from the catalog leaf where it carries one, and a stated
+                // absence where it does not.
+                declared: package_hash,
+                declared_note: hash_note,
                 size: None,
             }],
             intrinsics: Intrinsics {
@@ -216,7 +335,7 @@ impl Registry for NuGetRegistry {
         &self,
         meta: &ArtifactMeta,
         sink: &mut (dyn BlobSink + Send),
-    ) -> Result<Digest, RegistryError> {
+    ) -> Result<Fetched, RegistryError> {
         fetch_verified(&self.client, ECO, meta, sink).await
     }
 }

@@ -200,3 +200,58 @@ fn a_spec_with_nothing_to_change_is_left_untouched() {
     // The cert chain is still there, so that one does fire.
     assert!(ids.contains(&"gem-metadata-cert-chain"), "{ids:?}");
 }
+
+#[test]
+fn a_file_the_gem_ships_is_not_read_as_its_gemspec() {
+    // The three passes rewrite lines of the gemspec, which lives in `metadata.gz`. A YAML file in
+    // the payload may hold the same keys, and there they are the package's own data.
+    let shipped = "date: 2024-03-15\nrubygems_version: 3.5.6\ncert_chain:\n- a certificate\n";
+    let mut payload = ::tar::Builder::new(Vec::new());
+    let mut h = ::tar::Header::new_ustar();
+    h.set_size(shipped.len() as u64);
+    h.set_mode(0o644);
+    h.set_cksum();
+    payload
+        .append_data(&mut h, "lib/defaults.yml", shipped.as_bytes())
+        .unwrap();
+    let mut data_gz = Vec::new();
+    trigon_archive::gzip::write(
+        &trigon_archive::GzipHeader::default(),
+        &payload.into_inner().unwrap(),
+        flate2::Compression::default(),
+        &mut data_gz,
+    )
+    .unwrap();
+    let mut outer = ::tar::Builder::new(Vec::new());
+    let mut h = ::tar::Header::new_ustar();
+    h.set_size(data_gz.len() as u64);
+    h.set_mode(0o644);
+    h.set_cksum();
+    outer
+        .append_data(&mut h, "data.tar.gz", &data_gz[..])
+        .unwrap();
+
+    let mut notes: Vec<Note> = Vec::new();
+    let mut p = parse(
+        outer.into_inner().unwrap(),
+        Format::Tar,
+        &Limits::default(),
+        &mut notes,
+    )
+    .unwrap();
+    let applied = apply(&profile("gem").unwrap(), &mut p.archive);
+    let ids: Vec<&str> = applied.iter().map(|a| a.id.as_str()).collect();
+    assert!(
+        !ids.iter().any(|id| id.starts_with("gem-metadata-")),
+        "{ids:?}"
+    );
+    let Body::Nested { inner, .. } = &p.archive.entries[0].body else {
+        panic!("data.tar.gz should be nested")
+    };
+    let file = inner
+        .entries
+        .iter()
+        .find(|e| e.path.to_lossy() == "lib/defaults.yml")
+        .unwrap();
+    assert_eq!(file.body_bytes().unwrap().as_ref(), shipped.as_bytes());
+}

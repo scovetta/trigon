@@ -13,5 +13,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# npm's `integrity` is Subresource Integrity, a digest in base64: the lockfile parser keeps it as
+# the hex every other digest here is (`lockfile`). Already in the tree, through `trigon-attest`.
+base64.workspace = true
 
 [dev-dependencies]

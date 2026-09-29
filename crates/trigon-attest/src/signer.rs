@@ -3,7 +3,7 @@
 //! Synchronous, which departs from `docs/09` §3. The reason is the verifier build: it links this
 //! crate and must contain no async runtime, and a synchronous trait can be called from an async
 //! context by whatever holds the runtime while the reverse needs an executor everywhere. Local and
-//! subprocess signers are the ones that exist; a network signer (sigstore, KMS) blocks in its own
+//! subprocess signers are the ones that exist; a network signer (a KMS) blocks in its own
 //! implementation or lives behind an async façade in a crate below the line.
 
 use base64::Engine as _;
@@ -36,7 +36,8 @@ impl Signer for Unsigned {
     }
 }
 
-/// An ed25519 key held in a file. Development and air-gapped use.
+/// An ed25519 key held in a file. Development and air-gapped use, and, until a root exists, the
+/// single pinned key records are published under (ADR-0014 Decision 8).
 pub struct LocalKey {
     key: SigningKey,
     key_id: String,
@@ -77,30 +78,37 @@ impl LocalKey {
         hex(self.key.verifying_key().as_bytes())
     }
 
-    /// The public key as SPKI PEM, which is what a transparency log takes.
-    ///
-    /// Hand-built rather than pulled from a PEM crate, because for ed25519 the SPKI DER is a fixed
-    /// twelve-byte prefix and the thirty-two key bytes — `SEQUENCE { SEQUENCE { OID 1.3.101.112 },
-    /// BIT STRING }`, where every length is known at compile time. RFC 8410 §4. A crate would be
-    /// more code in the judgement half to emit forty-four constant-shaped bytes.
+    /// The public key as SPKI PEM, which is what `openssl` and most other tools read, and the form
+    /// an evidence repository publishes its attestation key in (`keys/attestation.pub`, docs/19
+    /// §2.3).
     pub fn public_pem(&self) -> String {
-        const SPKI_ED25519: [u8; 12] = [
-            0x30, 0x2a, // SEQUENCE, 42 bytes
-            0x30, 0x05, // SEQUENCE, 5 bytes — the algorithm identifier
-            0x06, 0x03, 0x2b, 0x65, 0x70, // OID 1.3.101.112, id-Ed25519
-            0x03, 0x21, 0x00, // BIT STRING, 33 bytes, 0 unused bits
-        ];
-        let mut der = SPKI_ED25519.to_vec();
-        der.extend_from_slice(self.key.verifying_key().as_bytes());
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
-        let mut out = String::from("-----BEGIN PUBLIC KEY-----\n");
-        for line in b64.as_bytes().chunks(64) {
-            out.push_str(std::str::from_utf8(line).unwrap_or_default());
-            out.push('\n');
-        }
-        out.push_str("-----END PUBLIC KEY-----\n");
-        out
+        spki_pem(&self.key.verifying_key())
     }
+}
+
+/// An ed25519 public key as SPKI PEM.
+///
+/// Hand-built rather than pulled from a PEM crate, because for ed25519 the SPKI DER is a fixed
+/// twelve-byte prefix and the thirty-two key bytes — `SEQUENCE { SEQUENCE { OID 1.3.101.112 },
+/// BIT STRING }`, where every length is known at compile time. RFC 8410 §4. A crate would be more
+/// code in the judgement half to emit forty-four constant-shaped bytes.
+pub(crate) fn spki_pem(key: &VerifyingKey) -> String {
+    const SPKI_ED25519: [u8; 12] = [
+        0x30, 0x2a, // SEQUENCE, 42 bytes
+        0x30, 0x05, // SEQUENCE, 5 bytes — the algorithm identifier
+        0x06, 0x03, 0x2b, 0x65, 0x70, // OID 1.3.101.112, id-Ed25519
+        0x03, 0x21, 0x00, // BIT STRING, 33 bytes, 0 unused bits
+    ];
+    let mut der = SPKI_ED25519.to_vec();
+    der.extend_from_slice(key.as_bytes());
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+    let mut out = String::from("-----BEGIN PUBLIC KEY-----\n");
+    for line in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(line).unwrap_or_default());
+        out.push('\n');
+    }
+    out.push_str("-----END PUBLIC KEY-----\n");
+    out
 }
 
 impl Signer for LocalKey {
@@ -136,10 +144,10 @@ pub fn verify(pae: &[u8], sig: &Signature, public_hex: &str) -> Result<(), Attes
 
     let raw = base64::engine::general_purpose::STANDARD
         .decode(&sig.sig)
-        .map_err(|e| AttestError::Malformed(format!("signature is not base64: {e}")))?;
+        .map_err(|e| AttestError::Evidence(format!("signature is not base64: {e}")))?;
     let raw: [u8; 64] = raw
         .try_into()
-        .map_err(|_| AttestError::Malformed("an ed25519 signature is 64 bytes".into()))?;
+        .map_err(|_| AttestError::Evidence("an ed25519 signature is 64 bytes".into()))?;
 
     // `verify_strict`, not `verify`. The permissive form implements RFC 8032's verification
     // equation and accepts a small-order public key and a non-canonical encoding, which together
@@ -168,15 +176,15 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod pem_tests {
     use base64::Engine as _;
+    use ed25519_dalek::pkcs8::DecodePublicKey as _;
 
     use super::LocalKey;
 
     #[test]
     fn the_public_pem_is_spki_and_round_trips_through_a_real_parser() {
         // Hand-built DER is exactly the kind of thing that looks right and is off by a byte, so it
-        // is checked against a parser that did not write it: `p256`'s SPKI decoder rejects the key
-        // type, and the error it gives says *which* — which is only possible if the structure
-        // parsed. A malformed prefix fails differently.
+        // is checked against a parser that did not write it: `ed25519-dalek`'s own SPKI decoder,
+        // which has to read the structure, the algorithm and the key back to the same key.
         let key = LocalKey::from_bytes(&[7u8; 32]).unwrap();
         let pem = key.public_pem();
         assert!(pem.starts_with("-----BEGIN PUBLIC KEY-----\n"));
@@ -195,5 +203,9 @@ mod pem_tests {
         // The OID for id-Ed25519, where RFC 8410 §4 puts it.
         assert_eq!(&der[4..9], &[0x06, 0x03, 0x2b, 0x65, 0x70]);
         assert_eq!(&der[12..], key.public_key().as_bytes());
+
+        let parsed = ed25519_dalek::VerifyingKey::from_public_key_pem(&pem)
+            .expect("a PEM decoder that did not write this reads it");
+        assert_eq!(parsed, key.public_key());
     }
 }

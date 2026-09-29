@@ -19,7 +19,7 @@
 //! the plan replaces it behind the same reader. Until then a laptop and a bucket are enough, and
 //! the site exists.
 
-use crate::publication::{Corroboration, Publication, Switches, decide};
+use crate::publication::{Attempt, Corroboration, Publication, Switches, decide, voided};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -57,6 +57,208 @@ pub struct Entry {
     pub publication: Publication,
     /// Digests the detail page will ask for, so the front-end never guesses a URL.
     pub has: Has,
+}
+
+impl Entry {
+    /// Whether an anonymous reader reads this row without its outcome: every row the gate does not
+    /// call `Published`.
+    ///
+    /// A `Void` row is shown — "we looked and could not tell, for this reason" is publishable — but
+    /// never with its outcome. [`Publication::is_public`] is true for it, and the outcome of an
+    /// open-egress divergence is still `divergent`, so a route that filtered on the one and
+    /// serialized the other published exactly the accusation safeguard 2 turns into a void.
+    ///
+    /// A `Withheld` row is not shown at all, but it is still *counted*, per query, so a page's
+    /// denominator is honest — and a count of rows matching `?outcome=divergent` is the outcome,
+    /// one package at a time. So it is matched as it is read: without one.
+    fn hides_outcome(&self, public: bool) -> bool {
+        public && self.publication != Publication::Published
+    }
+
+    /// The key this row is counted under in `Stats::by_fault`, as the reader is shown it, or
+    /// `None` where it is not counted there.
+    ///
+    /// One function for the count and the filter, because a bar a reader can click promises that
+    /// the click lists what the bar counted. The filter compared `fault` alone while the count fell
+    /// back to `terminal` and then to `void`, so `no-strategy` and `void` were bars whose click
+    /// listed nothing.
+    fn fault_bucket(&self, public: bool) -> Option<&str> {
+        let hidden = self.hides_outcome(public);
+        if self.evidence && !hidden {
+            // Counted by outcome, in the other denominator.
+            return None;
+        }
+        match (self.fault.as_deref(), self.terminal.as_deref()) {
+            (Some(f), _) => Some(f),
+            // A `no-strategy` is a scope statement with no fault attached, and filing it as
+            // `unclassified` would say nobody had named the cause when somebody had.
+            (None, Some(t)) => Some(t),
+            // Named, for the same reason: the gate said why, and the reason is `void`.
+            _ if hidden && matches!(self.publication, Publication::Void { .. }) => Some("void"),
+            // A withheld verdict. It is no more a failure nobody classified than it is a match,
+            // and filing it under one would put a verdict the reader was not shown into a count.
+            _ if hidden && self.outcome.is_some() => None,
+            _ => Some("unclassified"),
+        }
+    }
+
+    /// This row as the reader is to be shown it: unchanged for an operator.
+    ///
+    /// For an anonymous reader a `Void` row keeps everything but its outcome. The row stays, with
+    /// `publication` carrying the reason, so the reader is told why there is no verdict rather
+    /// than shown a gap; and it is not counted as evidence, because not being evidence about the
+    /// package is what void means.
+    pub fn shown(mut self, public: bool) -> Entry {
+        if self.hides_outcome(public) {
+            self.outcome = None;
+            self.evidence = false;
+        }
+        self
+    }
+}
+
+/// A run's record as the reader is to be shown it, given the gate's decision about it.
+///
+/// The record-level half of [`Entry::shown`]. `GET /v1/runs/{id}` returns the record beside the
+/// entry, and the record says what the comparison found in more places than `outcome`, so for an
+/// anonymous reader of a void run everything the rebuilt side, the comparison, or anything done
+/// because of what the comparison found produced is removed. `docs/19` §4.3: a void carries "no
+/// comparison outcome and no difference data".
+///
+/// **Every field is named, on purpose.** The first version cleared three fields and left others
+/// saying the same thing: `rebuild`, whose digest equals `upstream`'s exactly when the run was
+/// `exact`, and whose `stored` flag after `attest --prune` is kept on a divergence and dropped on
+/// a match; and the external log's entry for the very statement `attestations` was cleared to
+/// hide, a field since removed with the log (ADR-0014). A list of fields to remove misses the next
+/// one, so the record is taken apart without `..`, and a field added to `RunRecord` does not
+/// compile here until somebody has decided whether an anonymous reader of a void may see it.
+///
+/// **And the host id, from an anonymous reader of any run.** It is a keyed hash under a key that
+/// is in the source, so where it was derived from a hostname anyone can check a guess at the
+/// hostname against it, and a hostname is often a person's name — the leak `host_id` exists to
+/// prevent. The gate reads the index's own records, never these, so a reader loses nothing by it.
+pub fn record_shown(r: RunRecord, publication: Publication, public: bool) -> RunRecord {
+    if !public {
+        return r;
+    }
+    let r = RunRecord { host: None, ..r };
+    if !matches!(publication, Publication::Void { .. }) {
+        return r;
+    }
+    let RunRecord {
+        // Kept: which run, of what, and how far it got.
+        id,
+        target,
+        state,
+        started,
+        finished,
+        attempt,
+        cache_key,
+        // Kept: what the attempt could reuse and when it began, both settled before anything was
+        // built. The machine it ran on is removed above, for every anonymous reader.
+        host: _,
+        cache,
+        // Kept: the facts that establish the void — what tripped, which egress tier, whether a
+        // pass somebody wrote applied — which §4.3 says a void carries.
+        guard_trips,
+        refused_artifact,
+        environment,
+        non_builtin_stabilizer,
+        // Kept: what was built, and from where, and by which Trigon. All of it is decided before
+        // the comparison runs.
+        strategy,
+        strategy_digest,
+        trigon_version,
+        derivation,
+        source,
+        instructions,
+        declines,
+        assumptions,
+        confidence,
+        timings,
+        failure,
+        terminal,
+        // Kept: the published artifact, which is what a reader holding it looks the run up by —
+        // by any of its digests — and what its registry declared about it. All of it is settled
+        // at fetch, before anything is built.
+        upstream,
+        upstream_digests,
+        // Kept: digests of blobs this reader is refused by class. A digest is not a verdict, and
+        // the class table is where the control on the bytes lives.
+        comparison,
+        build_log,
+        network_transcript,
+        // Gone: the verdict itself.
+        outcome: _,
+        // Gone: a digest over the outcome, the published artifact's digest and both sides'
+        // stabilized digests. A reader holding the published artifact can compute its two, and
+        // for every match the rebuilt side's is the same, so four guesses at the outcome would
+        // find the one this hashes.
+        agreement: _,
+        // Gone: the rebuilt artifact. See above: its digest and its retention both say the verdict.
+        rebuild: _,
+        // Gone: named by predicate (`divergence.intoto.json`), pointing at statements
+        // `/v1/runs/{id}/attestation` refuses this reader.
+        attestations: _,
+        // Gone, for the same reason, and because they may name another run's claims besides.
+        per_target_attestations: _,
+        // Gone: a model's reading of the diff, which is only ever asked of a divergence and so
+        // names one by existing.
+        diff_opinion: _,
+        // Gone: the model exchange. It records every question the run asked, the reading of a
+        // divergence and a repair after one among them, so its presence on a run whose recipe
+        // needed no model says what the comparison found.
+        transcript: _,
+        // Gone: what the run cost. It counts the rebuilt artifact's bytes (the difference from
+        // `upstream.bytes` is the rebuild's size), the comparison's, and the tokens spent on the
+        // two questions above — three measurements of the difference.
+        costs: _,
+        // Kept: where the void's record was published. It is the `void/v1` record, which says
+        // why the run is void and nothing of which way its comparison went, and it is already
+        // public, in the evidence repository it names.
+        published,
+    } = r;
+    RunRecord {
+        id,
+        target,
+        state,
+        outcome: None,
+        guard_trips,
+        refused_artifact,
+        started,
+        finished,
+        attempt,
+        cache_key,
+        agreement: None,
+        host: None,
+        cache,
+        environment,
+        strategy,
+        strategy_digest,
+        trigon_version,
+        derivation,
+        source,
+        instructions,
+        upstream,
+        upstream_digests,
+        rebuild: None,
+        comparison,
+        build_log,
+        timings,
+        failure,
+        terminal,
+        declines,
+        assumptions,
+        confidence,
+        transcript: None,
+        network_transcript,
+        costs: None,
+        attestations: Vec::new(),
+        per_target_attestations: Vec::new(),
+        non_builtin_stabilizer,
+        diff_opinion: None,
+        published,
+    }
 }
 
 /// Which evidence this run left behind. Presence, not bytes.
@@ -123,6 +325,9 @@ struct Inner {
     /// The full record, kept so a detail request costs no round trip. Records are small; the large
     /// parts of a run are digests.
     records: BTreeMap<String, RunRecord>,
+    /// Runs whose record says their published artifact is kept and whose store has no blob of it,
+    /// found when the record was read: shown as without artifacts, never as having them.
+    missing: std::collections::BTreeSet<String>,
 }
 
 impl Default for Index {
@@ -196,12 +401,27 @@ impl Index {
             }
         }
         let added = fetched.len();
+        // `stored: true` is the record's word, and a blob can go without the record saying so, so
+        // the store is asked, once per record read.
+        let mut missing = Vec::new();
+        for r in &fetched {
+            if r.upstream.stored && !store.kept(&r.upstream).await.unwrap_or(false) {
+                missing.push(r.id.clone());
+            }
+        }
 
         let mut g = self.write_or_recover();
         for r in fetched {
             g.records.insert(r.id.clone(), r);
         }
+        g.missing.extend(missing);
         g.entries = build(&g.records, switches);
+        let Inner {
+            entries, missing, ..
+        } = &mut *g;
+        for e in entries.iter_mut().filter(|e| missing.contains(&e.id)) {
+            e.has.artifacts = false;
+        }
         Ok(added)
     }
 
@@ -240,6 +460,95 @@ impl Index {
             .cloned()
     }
 
+    /// The newest run for one target that the gate lets an anonymous reader see, with the gate's
+    /// decision about it.
+    ///
+    /// [`Self::newest_for`] with the gate asked first. A `Withheld` run is passed over as though it
+    /// did not exist, so the answer is the newest *older* run the gate releases, or `None`; a
+    /// `Void` run is returned, because a void is shown, and it is the caller's job to show it as
+    /// one. Ties on `started` go to the larger id, which is what `newest_for`'s walk over the
+    /// id-ordered records does, so the two agree whenever the gate withholds nothing.
+    pub fn newest_public_for(&self, target: &str) -> Option<(RunRecord, Publication)> {
+        let g = self.read_or_recover();
+        g.entries
+            .iter()
+            .filter(|e| e.target == target && e.publication.is_public())
+            .max_by(|a, b| a.started.cmp(&b.started).then_with(|| a.id.cmp(&b.id)))
+            .and_then(|e| g.records.get(&e.id).map(|r| (r.clone(), e.publication)))
+    }
+
+    /// Every run of the published artifact whose `algorithm` digest is `hex`, newest first, as a
+    /// reader who is `public` or not is shown each: `sha256` against the artifact's recorded
+    /// digest, and `sha512` and `sha1` against the digests the run computed over the same bytes
+    /// (`RunRecord::upstream_digests`), which are what a subject carries beside it (`docs/19` §5).
+    /// Every run the index holds is asked, not a page of them; a withheld run is not among them for
+    /// a public reader, and a void one is shown without its outcome.
+    pub fn for_artifact(&self, algorithm: &str, hex: &str, public: bool) -> Vec<Entry> {
+        let g = self.read_or_recover();
+        let matches = |r: &RunRecord| match algorithm {
+            "sha256" => r.upstream.sha256.to_hex() == hex,
+            "sha512" => r
+                .upstream_digests
+                .as_ref()
+                .is_some_and(|d| d.sha512.to_hex() == hex),
+            "sha1" => r
+                .upstream_digests
+                .as_ref()
+                .and_then(|d| d.sha1)
+                .is_some_and(|d| d.to_hex() == hex),
+            _ => false,
+        };
+        g.entries
+            .iter()
+            .filter(|e| !public || e.publication.is_public())
+            .filter(|e| g.records.get(&e.id).is_some_and(matches))
+            .map(|e| e.clone().shown(public))
+            .collect()
+    }
+
+    /// Every run of one package, newest first, as a reader who is `public` or not is shown each:
+    /// the runs whose target is `purl`, or `purl` at a version. Every run the index holds is
+    /// asked, as [`Self::for_artifact`] asks: the route used a page of the newest 500 rows whose
+    /// text contained the purl, which another package's name can contain too, so a package with
+    /// runs read as never checked. A withheld run is not among them for a public reader, and a
+    /// void one is shown without its outcome.
+    pub fn for_target(&self, purl: &str, public: bool) -> Vec<Entry> {
+        let at_a_version = format!("{purl}@");
+        self.read_or_recover()
+            .entries
+            .iter()
+            .filter(|e| e.target == purl || e.target.starts_with(&at_a_version))
+            .filter(|e| !public || e.publication.is_public())
+            .map(|e| e.clone().shown(public))
+            .collect()
+    }
+
+    /// The other attempts at `id`'s work that agree with it — the same cache key, outcome and
+    /// agreement digest, none of them void — as the gate counts them.
+    ///
+    /// For `trigon publish`, which publishes one of two agreeing attempts (`docs/19` §3): a run
+    /// whose agreeing attempt is already published is the same finding again, and a second record
+    /// for it would be a second current record for one subject. Empty for a run the index does not
+    /// hold, a void one, or one with no cache key or no outcome, which agrees with nothing but
+    /// itself.
+    pub fn agreeing(&self, id: &str) -> Vec<RunRecord> {
+        let g = self.read_or_recover();
+        // A void run is evidence of nothing, so it confirms nothing and nothing confirms it, as
+        // `attempts_by_key` leaves it out of every count.
+        let Some(r) = g.records.get(id).filter(|r| voided(r).is_none()) else {
+            return Vec::new();
+        };
+        let attempts = attempts_by_key(&g.records);
+        let Some(at_key) = r.cache_key.as_deref().and_then(|k| attempts.get(k)) else {
+            return Vec::new();
+        };
+        at_key
+            .iter()
+            .filter(|other| other.id != r.id && agrees(r, other) == Some(true))
+            .map(|other| (*other).clone())
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.read_or_recover().entries.len()
     }
@@ -253,9 +562,18 @@ impl Index {
     /// The gate runs *after* the filter so `withheld` counts rows that matched what the reader
     /// asked for and were then held back — which is the number they need — rather than every
     /// withheld row in the corpus, which tells them nothing about their query.
+    ///
+    /// The filter reads each row as the reader is shown it, though. A void row reaches an
+    /// anonymous reader without its outcome, and matching `?outcome=divergent` against the outcome
+    /// it was not shown would list it under the word the redaction removed. A withheld row is read
+    /// the same way, and for a sharper reason: it is only ever a count, and a count of withheld rows
+    /// matching `?q=<package>&outcome=divergent` was 1 where `outcome=exact` was 0 — the accusation
+    /// the gate was holding back, named one package at a time. So a withheld row is counted against
+    /// what the reader may know of it (its package, its ecosystem, how it failed if it did) and
+    /// never selected by its verdict.
     pub fn page(&self, q: &Query, public: bool) -> Page {
         let g = self.read_or_recover();
-        let matched: Vec<&Entry> = g.entries.iter().filter(|e| q.matches(e)).collect();
+        let matched: Vec<&Entry> = g.entries.iter().filter(|e| q.matches(e, public)).collect();
         let total = matched.len();
 
         let visible: Vec<&Entry> = if public {
@@ -281,7 +599,7 @@ impl Index {
             .iter()
             .skip(start)
             .take(limit)
-            .map(|e| (*e).clone())
+            .map(|e| (*e).clone().shown(public))
             .collect();
         let next = (start + rows.len() < visible.len())
             .then(|| rows.last().map(|e| e.id.clone()))
@@ -300,32 +618,27 @@ impl Index {
         let mut s = Stats::default();
         for e in &g.entries {
             if public && !e.publication.is_public() {
-                *s.by_withheld
-                    .entry(
-                        e.publication
-                            .because()
-                            .map(|w| w.key().to_string())
-                            .unwrap_or_else(|| "unknown".into()),
-                    )
-                    .or_default() += 1;
+                // One total, never broken down by reason. Three reasons — the kill-switch, an image
+                // derived outside the boundary, and unknown provenance — are only ever given to a
+                // divergence, so a count under any of them is a count of held-back accusations,
+                // and on a small corpus the key alone names one. A total is safe because every
+                // outcome can be awaiting confirmation.
+                *s.by_withheld.entry("withheld".to_string()).or_default() += 1;
                 continue;
             }
             s.runs += 1;
             *s.by_ecosystem.entry(e.ecosystem.clone()).or_default() += 1;
-            if e.evidence {
+            // A void row is counted as the reader is shown it. An anonymous `by_outcome` that
+            // counted it under its outcome would publish, as a number, the divergence the row
+            // itself no longer carries.
+            if e.evidence && !e.hides_outcome(public) {
                 s.evidence += 1;
                 if let Some(o) = &e.outcome {
                     *s.by_outcome.entry(o.clone()).or_default() += 1;
                 }
-            } else if let Some(f) = &e.fault {
+            } else if let Some(k) = e.fault_bucket(public) {
                 // The other denominator. Never added to the one above.
-                *s.by_fault.entry(f.clone()).or_default() += 1;
-            } else if let Some(t) = &e.terminal {
-                // A `no-strategy` is a scope statement with no fault attached, and filing it as
-                // `unclassified` would say nobody had named the cause when somebody had.
-                *s.by_fault.entry(t.clone()).or_default() += 1;
-            } else {
-                *s.by_fault.entry("unclassified".into()).or_default() += 1;
+                *s.by_fault.entry(k.to_string()).or_default() += 1;
             }
             if s.newest.is_none() {
                 s.newest = Some(e.started.clone());
@@ -353,25 +666,30 @@ pub struct Query {
 }
 
 impl Query {
-    fn matches(&self, e: &Entry) -> bool {
+    /// Whether this row matches, read as a reader who is `public` or not is shown it.
+    fn matches(&self, e: &Entry, public: bool) -> bool {
+        let hidden = e.hides_outcome(public);
+        let outcome = if hidden { None } else { e.outcome.as_deref() };
         if let Some(x) = &self.ecosystem
             && &e.ecosystem != x
         {
             return false;
         }
         if let Some(x) = &self.outcome
-            && e.outcome.as_deref() != Some(x.as_str())
+            && outcome != Some(x.as_str())
         {
             return false;
         }
+        // The bucket `Stats::by_fault` counts the row under, so a clicked bar lists what it counted.
         if let Some(x) = &self.fault
-            && e.fault.as_deref() != Some(x.as_str())
+            && e.fault_bucket(public) != Some(x.as_str())
         {
             return false;
         }
+        let evidence = e.evidence && !hidden;
         match self.kind.as_deref() {
-            Some("evidence") if !e.evidence => return false,
-            Some("failed") if e.evidence => return false,
+            Some("evidence") if !evidence => return false,
+            Some("failed") if evidence => return false,
             _ => {}
         }
         if let Some(x) = &self.q {
@@ -379,7 +697,7 @@ impl Query {
                 "{} {} {} {}",
                 e.target,
                 e.failure_code.as_deref().unwrap_or(""),
-                e.outcome.as_deref().unwrap_or(""),
+                outcome.unwrap_or(""),
                 e.terminal.as_deref().unwrap_or("")
             )
             .to_ascii_lowercase();
@@ -393,20 +711,11 @@ impl Query {
 
 /// Turn records into rows, running the publication gate over the whole set at once.
 ///
-/// The gate needs a fact about a *set* — how many other attempts at the same `cache_key` agreed —
-/// so it cannot be computed one record at a time. That is why this is a function over the map
-/// rather than a method on `Entry`.
+/// The gate needs a fact about a *set* — which other attempts at the same `cache_key` agreed, and
+/// where and when they ran — so it cannot be computed one record at a time. That is why this is a
+/// function over the map rather than a method on `Entry`.
 fn build(records: &BTreeMap<String, RunRecord>, switches: Switches) -> Vec<Entry> {
-    // `cache_key -> (outcome -> count)`. A record with no cache key corroborates nothing, including
-    // itself: two runs that cannot be shown to be attempts at the same work are not a confirmation,
-    // and treating a missing key as a match would turn the absence of evidence into evidence.
-    let mut attempts: BTreeMap<&str, BTreeMap<&str, u32>> = BTreeMap::new();
-    for r in records.values() {
-        if let (Some(k), Some(o)) = (r.cache_key.as_deref(), r.outcome.as_deref()) {
-            *attempts.entry(k).or_default().entry(o).or_default() += 1;
-        }
-    }
-
+    let attempts = attempts_by_key(records);
     let mut out: Vec<Entry> = records
         .values()
         .map(|r| {
@@ -431,7 +740,7 @@ fn build(records: &BTreeMap<String, RunRecord>, switches: Switches) -> Vec<Entry
                 attempt: r.attempt,
                 evidence: r.is_evidence(),
                 attested: !r.attestations.is_empty(),
-                publication: decide(r, c, switches),
+                publication: decide(r, &c, switches),
                 has: Has {
                     comparison: r.comparison.is_some(),
                     build_log: r.build_log.is_some(),
@@ -448,25 +757,76 @@ fn build(records: &BTreeMap<String, RunRecord>, switches: Switches) -> Vec<Entry
     out
 }
 
-fn corroboration(r: &RunRecord, attempts: &BTreeMap<&str, BTreeMap<&str, u32>>) -> Corroboration {
-    let (Some(k), Some(o)) = (r.cache_key.as_deref(), r.outcome.as_deref()) else {
-        return Corroboration::default();
-    };
-    let Some(by_outcome) = attempts.get(k) else {
-        return Corroboration::default();
-    };
-    Corroboration {
-        agreeing_attempts: by_outcome.get(o).copied().unwrap_or(0),
-        disagreeing_attempts: by_outcome
-            .iter()
-            .filter(|(other, _)| **other != o)
-            .map(|(_, n)| *n)
-            .sum(),
-        // From the record, where the run path writes it: the fact lives in the comparison blob
-        // and the index does not fetch blobs. `None` on a record written before the field existed
-        // reaches the gate as `None` and is treated as an unevaluated safeguard — which is what
-        // the previous `false` claimed to mean and could not, being a `bool`.
+/// `cache_key -> the attempts at it that reached an outcome`, which [`corroboration`] counts.
+///
+/// A record with no cache key corroborates nothing, including itself: two runs that cannot be
+/// shown to be attempts at the same work are not a confirmation, and treating a missing key as a
+/// match would turn the absence of evidence into evidence. A void attempt is left out too, for the
+/// reason it is void: it is evidence of nothing about the package, so it can neither confirm
+/// another attempt nor contradict one. Egress is not in the key, and `trigon rebuild` defaults to
+/// `open`, so without this an open-egress rebuild would confirm a `mirror-only` one.
+fn attempts_by_key(records: &BTreeMap<String, RunRecord>) -> BTreeMap<&str, Vec<&RunRecord>> {
+    let mut attempts: BTreeMap<&str, Vec<&RunRecord>> = BTreeMap::new();
+    for r in records.values() {
+        if let (Some(k), Some(_)) = (r.cache_key.as_deref(), r.outcome.as_deref())
+            && voided(r).is_none()
+        {
+            attempts.entry(k).or_default().push(r);
+        }
+    }
+    attempts
+}
+
+fn corroboration(r: &RunRecord, attempts: &BTreeMap<&str, Vec<&RunRecord>>) -> Corroboration {
+    // From the record, where the run path writes it: the fact lives in the comparison blob and the
+    // index does not fetch blobs. `None` on a record written before the field existed reaches the
+    // gate as `None` and is treated as an unevaluated safeguard — which is what the previous
+    // `false` claimed to mean and could not, being a `bool`.
+    //
+    // **Whatever the attempts are.** It is a fact about this run, not about the other attempts at
+    // the same work, and it was carried only where there were some to count: a run with no cache
+    // key — every run the CLI records — reached the gate as "not known", so `serve` withheld as
+    // awaiting confirmation a run `trigon attest` signs as void.
+    let own = Corroboration {
         non_builtin_stabilizer: r.non_builtin_stabilizer,
+        ..Corroboration::default()
+    };
+    let (Some(k), Some(_)) = (r.cache_key.as_deref(), r.outcome.as_deref()) else {
+        return own;
+    };
+    let Some(at_key) = attempts.get(k) else {
+        return own;
+    };
+    let mut c = own;
+    for other in at_key {
+        match agrees(r, other) {
+            Some(true) => c.agreeing_attempts.push(Attempt::of(other)),
+            Some(false) => c.disagreeing_attempts += 1,
+            None => {}
+        }
+    }
+    c
+}
+
+/// Whether two attempts at one cache key agree, disagree, or cannot be told apart.
+///
+/// **By agreement digest, never by outcome alone.** Two runs that both landed on `divergent`
+/// agreed on nine letters, whatever each found: a divergence in the nuspec confirmed a divergence
+/// in every DLL. Different outcomes disagree whatever else the records say. The same outcome
+/// agrees only where both records carry the digest over what the comparison found and it is one
+/// digest, and disagrees where they carry two; where either record carries none — every run
+/// recorded before the digest existed — nothing can be said, and nothing is counted either way.
+/// A run always agrees with itself, which is what makes one attempt a count of one.
+fn agrees(r: &RunRecord, other: &RunRecord) -> Option<bool> {
+    if r.id == other.id {
+        return Some(true);
+    }
+    if r.outcome != other.outcome {
+        return Some(false);
+    }
+    match (r.agreement, other.agreement) {
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
     }
 }
 
@@ -513,7 +873,25 @@ mod tests {
         r.state = RunState::Done;
         r.outcome = outcome.map(str::to_string);
         r.cache_key = key.map(str::to_string);
+        // Each run on a machine of its own, and runs with one outcome finding one thing, so two
+        // attempts at a key with one outcome are a confirmation unless a test says otherwise.
+        r.host = Some(format!("machine-id:{id}"));
+        r.cache = Some(trigon_store::CacheState::default());
+        r.agreement = outcome.map(|o| trigon_store::digest_of(o.as_bytes()));
         r
+    }
+
+    /// Every fixture here begins at one instant, so the gate these build asks for no interval
+    /// between attempts; the interval is asserted in `publication.rs`, and through this index in
+    /// `the_index_holds_a_pair_to_the_confirmation_rules`.
+    fn no_interval() -> Switches {
+        Switches {
+            confirmation: crate::publication::Confirmation {
+                interval: std::time::Duration::ZERO,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     fn index_of(rs: Vec<RunRecord>) -> Index {
@@ -523,7 +901,7 @@ mod tests {
             for r in rs {
                 g.records.insert(r.id.clone(), r);
             }
-            g.entries = build(&g.records, Switches::default());
+            g.entries = build(&g.records, no_interval());
         }
         ix
     }
@@ -671,6 +1049,44 @@ mod tests {
     }
 
     #[test]
+    fn an_anonymous_reader_gets_one_withheld_total_and_no_reason_that_only_a_divergence_has() {
+        // A confirmed divergence stopped by the kill-switch, beside an unconfirmed match. Counted
+        // by reason, the public stats would say `kill_switch: 1`, and that reason is only ever
+        // given to a divergence.
+        let ix = Index::new();
+        {
+            let mut g = ix.inner.write().unwrap();
+            for r in [
+                rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), Some("k1")),
+                rec("1700000002-ba", "pkg:npm/b@1", Some("divergent"), Some("k2")),
+                rec("1700000003-bb", "pkg:npm/b@1", Some("divergent"), Some("k2")),
+            ] {
+                g.records.insert(r.id.clone(), r);
+            }
+            g.entries = build(
+                &g.records,
+                Switches {
+                    stop_divergences: true,
+                    ..no_interval()
+                },
+            );
+            let reasons: Vec<_> = g
+                .entries
+                .iter()
+                .filter_map(|e| e.publication.because().map(|w| w.key()))
+                .collect();
+            assert!(reasons.contains(&"kill_switch"), "{reasons:?}");
+        }
+        let s = ix.stats(true);
+        assert_eq!(
+            s.by_withheld,
+            BTreeMap::from([("withheld".to_string(), 3)]),
+            "the public count is a total, never a reason"
+        );
+        assert!(ix.stats(false).by_withheld.is_empty(), "an operator is shown every row");
+    }
+
+    #[test]
     fn two_agreeing_attempts_publish_and_two_disagreeing_do_not() {
         let ix = index_of(vec![
             rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), Some("k1")),
@@ -714,6 +1130,247 @@ mod tests {
             )
             .withheld,
             2
+        );
+    }
+
+    #[test]
+    fn the_index_voids_exactly_the_runs_the_attestor_calls_void() {
+        // `trigon attest` asks `publication::voided` of the record alone; `serve` and `publish`
+        // ask the index. They must agree, and they did not for a run with no cache key: the
+        // index dropped its provenance bit, and withheld as awaiting confirmation a run the
+        // attestor signed as void.
+        let mut rs = Vec::new();
+        let mut n = 0;
+        for key in [None, Some("k1")] {
+            for outcome in [None, Some("exact"), Some("divergent")] {
+                for egress in ["open", "mirror-only"] {
+                    for guard in [false, true] {
+                        for non_builtin in [None, Some(false), Some(true)] {
+                            n += 1;
+                            let mut r = rec(&format!("17000{n:05}-x"), "pkg:npm/a@1", outcome, key);
+                            r.environment.egress = egress.into();
+                            r.non_builtin_stabilizer = non_builtin;
+                            if guard {
+                                r.guard_trips.push("tripped".into());
+                            }
+                            rs.push(r);
+                        }
+                    }
+                }
+            }
+        }
+        let ix = index_of(rs.clone());
+        for r in &rs {
+            let via_index = match ix.entry(&r.id).unwrap().publication {
+                Publication::Void { because } => Some(because),
+                _ => None,
+            };
+            assert_eq!(
+                crate::publication::voided(r),
+                via_index,
+                "key={:?} {:?} {} guard={} {:?}",
+                r.cache_key,
+                r.outcome,
+                r.environment.egress,
+                !r.guard_trips.is_empty(),
+                r.non_builtin_stabilizer
+            );
+        }
+        // The case that disagreed, by name.
+        let mut cli = rec("1800000001-cli", "pkg:npm/b@1", Some("exact"), None);
+        cli.environment.egress = "mirror-only".into();
+        cli.non_builtin_stabilizer = Some(true);
+        let ix = index_of(vec![cli]);
+        assert_eq!(
+            ix.entry("1800000001-cli").unwrap().publication,
+            Publication::Void {
+                because: crate::publication::Withheld::NonBuiltinStabilizer
+            }
+        );
+    }
+
+    /// `Corroboration::agreeing_attempts` says "whose outcome and agreement digest match", and
+    /// this holds `build` to it rather than leaving the two to be read side by side — which is
+    /// how the gate came to count agreement on the outcome string for as long as it did
+    /// (`docs/17-backlog.md` B31).
+    #[test]
+    fn corroboration_is_counted_as_its_doc_says() {
+        let at = |id: &str, outcome: &str, found: &str| {
+            let mut r = rec(id, "pkg:npm/a@1", Some(outcome), Some("k"));
+            r.agreement = Some(trigon_store::digest_of(found.as_bytes()));
+            r
+        };
+        let this = at("1700000001-a", "divergent", "the nuspec differs");
+        let rs = [
+            this.clone(),
+            // Same outcome, same finding: agrees.
+            at("1700000002-b", "divergent", "the nuspec differs"),
+            // Same outcome, another finding: a disagreement, not a confirmation.
+            at("1700000003-c", "divergent", "every DLL differs"),
+            // Another outcome: a disagreement.
+            at("1700000004-d", "exact", "exact"),
+            // Same outcome and no digest: recorded before it existed, and counted neither way.
+            {
+                let mut r = at("1700000005-e", "divergent", "x");
+                r.agreement = None;
+                r
+            },
+            // Same outcome, same finding, and void: evidence of nothing, counted neither way.
+            {
+                let mut r = at("1700000006-f", "divergent", "the nuspec differs");
+                r.environment.egress = "open".into();
+                r
+            },
+            // Same finding at another key: another question.
+            {
+                let mut r = at("1700000007-g", "divergent", "the nuspec differs");
+                r.cache_key = Some("other".into());
+                r
+            },
+        ];
+        let records: BTreeMap<String, RunRecord> =
+            rs.iter().map(|r| (r.id.clone(), r.clone())).collect();
+        // Grouped by the function `build` groups by, not by a copy of it here.
+        let c = corroboration(&this, &attempts_by_key(&records));
+        let agreeing: Vec<&str> = c.agreeing_attempts.iter().map(|a| a.run.as_str()).collect();
+        assert_eq!(agreeing, ["1700000001-a", "1700000002-b"]);
+        assert_eq!(c.disagreeing_attempts, 2, "c and d");
+
+        // And the index, built the same way, reaches the same verdict about the set: the
+        // disagreement withholds, whatever else agreed.
+        let ix = index_of(rs.to_vec());
+        assert_eq!(
+            ix.entry("1700000001-a").unwrap().publication,
+            Publication::Withheld {
+                because: crate::publication::Withheld::AttemptsDisagree
+            }
+        );
+
+        // What `publish` asks, so that of two agreeing attempts one is published: the same set,
+        // the run itself left out.
+        let others: Vec<String> = ix
+            .agreeing("1700000001-a")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(others, ["1700000002-b"]);
+        assert!(
+            ix.agreeing("1700000006-f").is_empty(),
+            "a void agrees with nothing"
+        );
+        assert!(ix.agreeing("no-such-run").is_empty());
+    }
+
+    /// A void attempt at a key neither confirms another attempt there nor contradicts it, through
+    /// `build`, with the gate `trigon serve` builds when there is no configuration.
+    ///
+    /// Egress is not in the key and `trigon rebuild` defaults to `open`, so this one clause is what
+    /// stops a plain rebuild of a target confirming a `mirror-only` one. It had no test that went
+    /// through `build`: the one above grouped the attempts itself, with its own copy of the filter.
+    #[test]
+    fn a_void_attempt_neither_confirms_nor_contradicts_another_at_its_key() {
+        use crate::publication::Withheld;
+        let at = |id: &str, host: &str, started: &str| {
+            let mut r = rec(id, "pkg:npm/a@1", Some("exact"), Some("k"));
+            r.host = Some(host.into());
+            r.started = started.into();
+            r
+        };
+        let clean = at("1700000001-a", "machine-id:one", "2026-09-27T10:00:00Z");
+        let decided = |other: &RunRecord| {
+            let ix = Index::new();
+            {
+                let mut g = ix.inner.write().unwrap();
+                for r in [clean.clone(), other.clone()] {
+                    g.records.insert(r.id.clone(), r);
+                }
+                g.entries = build(&g.records, Switches::default());
+            }
+            ix.entry(&clean.id).unwrap().publication
+        };
+        // Another machine, an hour later, finding the same thing: a confirmation, while clean.
+        let later = at("1700000002-b", "machine-id:two", "2026-09-27T11:00:00Z");
+        assert_eq!(decided(&later), Publication::Published);
+
+        let mut open = later.clone();
+        open.environment.egress = "open".into();
+        let mut tripped = later.clone();
+        tripped
+            .guard_trips
+            .push("package/index.js arrived from registry.npmjs.org".into());
+        for (what, void) in [("at open egress", open), ("whose guard tripped", tripped)] {
+            assert_eq!(
+                decided(&void),
+                Publication::Withheld {
+                    because: Withheld::AwaitingConfirmation
+                },
+                "an attempt {what} confirmed a clean one"
+            );
+            let mut found_otherwise = void;
+            found_otherwise.outcome = Some("divergent".into());
+            found_otherwise.agreement = Some(trigon_store::digest_of(b"divergent"));
+            assert_eq!(
+                decided(&found_otherwise),
+                Publication::Withheld {
+                    because: Withheld::AwaitingConfirmation
+                },
+                "an attempt {what} contradicted a clean one"
+            );
+        }
+    }
+
+    /// An anonymous reader is shown no host id, on a published run or a void one, and an operator
+    /// is shown it.
+    #[test]
+    fn an_anonymous_reader_is_shown_no_host_id() {
+        let r = rec("1700000001-a", "pkg:npm/a@1", Some("exact"), Some("k"));
+        assert!(r.host.is_some());
+        let void = Publication::Void {
+            because: crate::publication::Withheld::OpenEgress,
+        };
+        for publication in [Publication::Published, void] {
+            assert_eq!(record_shown(r.clone(), publication, true).host, None);
+            assert_eq!(record_shown(r.clone(), publication, false).host, r.host);
+        }
+    }
+
+    /// Through the index, with the gate `trigon serve` builds when there is no configuration: a
+    /// second agreeing attempt counts only on another machine and an hour after the first.
+    #[test]
+    fn the_index_holds_a_pair_to_the_confirmation_rules() {
+        use crate::publication::Withheld;
+        let pair = |second_host: &str, second_started: &str| {
+            let mut first = rec("1700000001-a", "pkg:npm/a@1", Some("exact"), Some("k"));
+            first.host = Some("machine-id:one".into());
+            first.started = "2026-09-27T10:00:00Z".into();
+            let mut second = rec("1700000002-b", "pkg:npm/a@1", Some("exact"), Some("k"));
+            second.host = Some(second_host.into());
+            second.started = second_started.into();
+            let ix = Index::new();
+            {
+                let mut g = ix.inner.write().unwrap();
+                for r in [first, second] {
+                    g.records.insert(r.id.clone(), r);
+                }
+                g.entries = build(&g.records, Switches::default());
+            }
+            ix.entry("1700000002-b").unwrap().publication
+        };
+        assert_eq!(
+            pair("machine-id:two", "2026-09-27T11:00:00Z"),
+            Publication::Published
+        );
+        assert_eq!(
+            pair("machine-id:two", "2026-09-27T10:59:59Z"),
+            Publication::Withheld {
+                because: Withheld::AttemptsTooClose
+            }
+        );
+        assert_eq!(
+            pair("machine-id:one", "2026-09-27T12:00:00Z"),
+            Publication::Withheld {
+                because: Withheld::SameHost
+            }
         );
     }
 
@@ -831,5 +1488,122 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), 7, "a row was served twice or skipped");
+    }
+
+    #[test]
+    fn a_new_index_is_empty() {
+        let ix = Index::default();
+        assert!(ix.is_empty());
+        assert_eq!(ix.len(), 0);
+        let one = rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None);
+        assert!(!index_of(vec![one]).is_empty());
+    }
+
+    #[test]
+    fn a_run_that_names_no_cause_is_counted_and_listed_as_unclassified() {
+        // No outcome, no failure signature, no terminal: nobody named why it produced nothing, and
+        // the count says so rather than dropping it from both denominators. The bar a reader can
+        // click lists what it counted.
+        let ix = index_of(vec![
+            rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None),
+            rec("1700000002-ab", "pkg:npm/b@1", None, None),
+        ]);
+        let s = ix.stats(false);
+        assert_eq!(s.by_fault.get("unclassified"), Some(&1));
+        assert_eq!(s.runs, 2);
+        let p = ix.page(
+            &Query {
+                fault: Some("unclassified".into()),
+                limit: 10,
+                ..Default::default()
+            },
+            false,
+        );
+        let ids: Vec<&str> = p.rows.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["1700000002-ab"]);
+    }
+
+    #[test]
+    fn the_ecosystem_filter_lists_that_ecosystem_and_nothing_else() {
+        let ix = index_of(vec![
+            rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None),
+            rec("1700000002-ab", "pkg:pypi/b@1", Some("exact"), None),
+            rec("1700000003-ac", "pkg:npm/c@1", Some("exact"), None),
+        ]);
+        let p = ix.page(
+            &Query {
+                ecosystem: Some("npm".into()),
+                limit: 10,
+                ..Default::default()
+            },
+            false,
+        );
+        let ids: Vec<&str> = p.rows.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["1700000003-ac", "1700000001-aa"]);
+        assert_eq!(p.total, 2);
+    }
+
+    #[test]
+    fn an_algorithm_no_run_computed_matches_nothing() {
+        // The digest is compared with the digest of the algorithm asked for, and with nothing else:
+        // a sha256 given under another name does not match the sha256.
+        let r = rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None);
+        let hex = r.upstream.sha256.to_hex();
+        let ix = index_of(vec![r]);
+        assert_eq!(ix.for_artifact("sha256", &hex, false).len(), 1);
+        assert!(ix.for_artifact("md5", &hex, false).is_empty());
+        assert!(ix.for_artifact("sha512", &hex, false).is_empty());
+    }
+
+    #[test]
+    fn a_run_with_no_key_agrees_with_nothing() {
+        // Two runs of one target with one outcome, neither keyed: nothing says they asked the same
+        // question, so neither is another's confirmation.
+        let ix = index_of(vec![
+            rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None),
+            rec("1700000002-ab", "pkg:npm/a@1", Some("exact"), None),
+        ]);
+        assert!(ix.agreeing("1700000002-ab").is_empty());
+        assert!(ix.agreeing("no-such-run").is_empty());
+
+        // Keyed, the same two agree.
+        let ix = index_of(vec![
+            rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), Some("k1")),
+            rec("1700000002-ab", "pkg:npm/a@1", Some("exact"), Some("k1")),
+        ]);
+        let agreeing: Vec<String> = ix
+            .agreeing("1700000002-ab")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(agreeing, ["1700000001-aa"]);
+    }
+
+    #[tokio::test]
+    async fn a_run_record_that_will_not_read_is_skipped_and_every_other_run_is_served() {
+        // One bad record must not take the corpus down: it is often exactly what somebody came to
+        // look at, and every other run is still worth serving.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::local(dir.path()).unwrap();
+        store
+            .put_run(&rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None))
+            .await
+            .unwrap();
+        store
+            .put_run(&rec("1700000002-ab", "pkg:npm/b@1", Some("exact"), None))
+            .await
+            .unwrap();
+        std::fs::write(
+            dir.path().join("runs/1700000002-ab.json"),
+            b"{\"id\": \"1700000002-a",
+        )
+        .unwrap();
+
+        let ix = Index::new();
+        let added = ix.refresh(&store, no_interval()).await.expect("a refresh");
+        assert_eq!(added, 1);
+        assert!(ix.get("1700000001-aa").is_some());
+        assert!(ix.get("1700000002-ab").is_none());
+        assert_eq!(ix.len(), 1);
     }
 }

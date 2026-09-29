@@ -29,9 +29,10 @@ trigon-attest.workspace = true
 trigon-politeness = { workspace = true, optional = true }
 trigon-sandbox = { workspace = true, optional = true }
 trigon-registry = { workspace = true, optional = true }
-# Publishing to a transparency log, which is the one thing the attestor does over a socket. Optional
-# and behind `build` for the reason everything else here is: the verifier is the
-# `--no-default-features` build and its whole claim is that it links no network client.
+# Release assets (`publish` uploads them, `verify-attestation --lookup` downloads one) and `lookup
+# --remote` (docs/19 §10 phases 5 and 6): the HTTP client the workspace already links, so neither
+# adds a second. Optional and behind `build` for the reason everything else here is: the verifier
+# is the `--no-default-features` build and its whole claim is that it links no network client.
 reqwest = { workspace = true, optional = true }
 trigon-mirror = { workspace = true, optional = true }
 trigon-store = { workspace = true, optional = true }
@@ -43,6 +44,9 @@ axum = { workspace = true, optional = true }
 trigon-stabilize-wasm = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 anyhow.workspace = true
+# The divergence feed names each record by an RFC 6920 `ni:` URI, which is base64url. Already in
+# the tree through trigon-attest.
+base64.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -65,12 +69,14 @@ wasm = ["dep:trigon-stabilize-wasm", "trigon-stabilize-wasm/host"]
 
 [dev-dependencies]
 tar = "0.4"
-# A store with a real run in it, so the `attest --dry-run` test previews an entry built from
-# artifact bytes rather than from a hand-written record.
+# A store with a real run in it, compared from artifact bytes rather than hand-written, for the
+# tests that read what `trigon runs` prints about it.
 trigon-store.workspace = true
 trigon-compare.workspace = true
 trigon-archive.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 zip_crate = { package = "zip", version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
-base64.workspace = true
+# The divergence feed is tested by parsing it as XML, with a parser that knows nothing of how it
+# was written.
+roxmltree = "0.20"

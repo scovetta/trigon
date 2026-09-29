@@ -78,9 +78,12 @@ pub struct Scope {
     pub commit: String,
     /// The subdirectory the strategy built from, when it named one.
     pub subdir: Option<String>,
-    /// Files hashed under that scope. `0` with `searched == false` means the checkout is absent.
+    /// Files hashed under that scope: read and hashed, and not one the walk met and could not
+    /// read. `0` with `searched == false` means the checkout is absent.
     pub files: usize,
     pub searched: bool,
+    /// Whether the walk reached every file, or stopped at [`MAX_FILES`] with the rest unread.
+    pub finished: bool,
 }
 
 impl Scope {
@@ -91,8 +94,13 @@ impl Scope {
             return "the checkout for this commit is not on this machine, so nothing was searched"
                 .to_string();
         }
-        let short = &self.commit[..8.min(self.commit.len())];
-        match &self.subdir {
+        // Eight characters, not eight bytes: a commit is hex until a hand-edited `run.json` says
+        // otherwise, and a byte index inside a character is a panic in a request handler.
+        let short = match self.commit.char_indices().nth(8) {
+            Some((i, _)) => &self.commit[..i],
+            None => &self.commit,
+        };
+        let searched = match &self.subdir {
             // The subtree is context, not a filter: the whole checkout is searched, and saying
             // which part the build ran in is what lets a reader read a hit outside it correctly.
             Some(d) => format!(
@@ -100,6 +108,14 @@ impl Scope {
                 self.files
             ),
             None => format!("{} file(s) at {short}", self.files),
+        };
+        // A walk that stopped says so: the rest of the checkout was not searched, and a count
+        // that reads as the whole of it would be a negative about files nobody looked at.
+        match self.finished {
+            true => searched,
+            false => format!(
+                "the first {searched}, and no further: the search stops after {MAX_FILES} files"
+            ),
         }
     }
 }
@@ -111,11 +127,25 @@ impl Scope {
 /// cache's own constructor makes the directory it is given, and a page is read-only.
 pub fn checkout_dir(root: &Path, repo: &str, commit: &str) -> PathBuf {
     use sha2::Digest as _;
+    // Spelled as the cache spells them before it hashes: the URL trimmed, the commit trimmed and
+    // lower-cased. A record that carries a commit in capitals names the checkout the cache wrote
+    // under the lower-case key, and hashing it as given looked in a directory nobody made.
+    let commit = commit.trim().to_ascii_lowercase();
     let mut h = sha2::Sha256::new();
-    h.update(repo.as_bytes());
+    h.update(repo.trim().as_bytes());
     h.update([0]);
     h.update(commit.as_bytes());
     root.join(&format!("{:x}", h.finalize())[..32])
+}
+
+/// How far a walk of a checkout got.
+#[derive(Clone, Copy, Debug)]
+struct Walk {
+    /// The files read and hashed. A file the walk met and could not read — a mode that stops this
+    /// user, a link to nothing — is not one.
+    hashed: usize,
+    /// Whether it met every file, or stopped at its bound with the rest unread.
+    finished: bool,
 }
 
 /// A checkout's files, by content digest, in two forms kept apart.
@@ -128,7 +158,7 @@ struct Index {
     eol: BTreeMap<String, Vec<String>>,
 }
 
-/// How many files a single walk will hash before it gives up.
+/// How many files a single walk will meet, read or not, before it stops.
 ///
 /// A bound rather than a timeout: the same checkout must produce the same answer twice. The largest
 /// checkout in this machine's cache is 52k files and takes 19 seconds cold, which is already too
@@ -147,11 +177,17 @@ const MAX_FILES: usize = 200_000;
 /// "the build made this". Searching everything cannot overstate — the bytes really are in the
 /// commit — and the member table prints the path it matched, so a reader sees for themselves
 /// whether a hit came from the built subtree or from somewhere else in the repository.
-fn index_checkout(dir: &Path) -> (Index, usize) {
+fn index_checkout(dir: &Path) -> (Index, Walk) {
+    index_checkout_upto(dir, MAX_FILES)
+}
+
+/// [`index_checkout`], meeting at most `bound` files. The bound is on the files met, read or not,
+/// so the same checkout stops at the same place twice; the count is of the files hashed.
+fn index_checkout_upto(dir: &Path, bound: usize) -> (Index, Walk) {
     use sha2::Digest as _;
     let root = dir.to_path_buf();
     let mut out = Index::default();
-    let mut seen = 0usize;
+    let (mut seen, mut hashed) = (0usize, 0usize);
     let mut stack = vec![root.clone()];
     while let Some(d) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&d) else {
@@ -168,13 +204,18 @@ fn index_checkout(dir: &Path) -> (Index, usize) {
                 stack.push(p);
                 continue;
             }
-            if seen >= MAX_FILES {
-                return (out, seen);
+            if seen >= bound {
+                let walk = Walk {
+                    hashed,
+                    finished: false,
+                };
+                return (out, walk);
             }
             seen += 1;
             let Ok(bytes) = std::fs::read(&p) else {
                 continue;
             };
+            hashed += 1;
             let rel = p
                 .strip_prefix(&root)
                 .unwrap_or(&p)
@@ -206,7 +247,11 @@ fn index_checkout(dir: &Path) -> (Index, usize) {
             }
         }
     }
-    (out, seen)
+    let walk = Walk {
+        hashed,
+        finished: true,
+    };
+    (out, walk)
 }
 
 /// `\n` to `\r\n`, or `None` where the bytes are not text or already carry a `\r`.
@@ -242,6 +287,7 @@ pub fn join(
             subdir: subdir.map(str::to_string),
             files: 0,
             searched: false,
+            finished: false,
         };
         let out = members
             .iter()
@@ -255,12 +301,13 @@ pub fn join(
         return (out, scope);
     };
 
-    let (index, files) = memo(dir);
+    let (index, walk) = memo(dir);
     let scope = Scope {
         commit: commit.to_string(),
         subdir: subdir.map(str::to_string),
-        files,
+        files: walk.hashed,
         searched: true,
+        finished: walk.finished,
     };
 
     let out = members
@@ -293,10 +340,10 @@ pub fn join(
 /// cold, and a page that did that per request would be a page nobody opens twice. Keyed on the
 /// directory's mtime as well as its path so a re-fetched checkout is re-read rather than served
 /// from a stale index.
-fn memo(dir: &Path) -> (Index, usize) {
+fn memo(dir: &Path) -> (Index, Walk) {
     use std::sync::Mutex;
     type Key = (PathBuf, u64);
-    static CACHE: Mutex<Option<BTreeMap<Key, (Index, usize)>>> = Mutex::new(None);
+    static CACHE: Mutex<Option<BTreeMap<Key, (Index, Walk)>>> = Mutex::new(None);
 
     let stamp = std::fs::metadata(dir)
         .and_then(|m| m.modified())
@@ -496,6 +543,299 @@ mod tests {
         assert_eq!(t[2].1, 2);
         // Every state is present even at zero, so a reader is never left to infer one.
         assert_eq!(t.len(), 4);
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The directory this reads is the one the rungs' cache wrote, for the commit as a record
+    /// spells it: a page that computed another key would say "not on this machine" about a
+    /// checkout that is.
+    #[test]
+    fn the_checkout_it_looks_for_is_the_one_the_source_cache_wrote() {
+        let origin = tree("origin", &[("LICENSE.md", b"MIT\n")]);
+        git(&origin, &["init", "--quiet", "-b", "main"]);
+        git(&origin, &["add", "-A"]);
+        git(&origin, &["commit", "--quiet", "-m", "one"]);
+        let commit = git(&origin, &["rev-parse", "HEAD"]);
+        let repo = origin.to_string_lossy().into_owned();
+        let root = std::env::temp_dir()
+            .join(format!("trigon-prov-{}", std::process::id()))
+            .join("sources");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let fetched = trigon_registry::SourceCache::new(&root)
+            .trusting_local_paths()
+            .checkout(&repo, &commit.to_ascii_uppercase())
+            .unwrap();
+        // Every spelling the cache accepts for this repository and commit names the checkout it
+        // wrote: the cache trims both and lower-cases the commit before it hashes them.
+        let padded = format!(" {repo}\n");
+        let upper = commit.to_ascii_uppercase();
+        let upper_padded = format!(" {upper}\n");
+        let again = trigon_registry::SourceCache::new(&root)
+            .trusting_local_paths()
+            .checkout(&padded, &upper_padded)
+            .unwrap();
+        assert_eq!(
+            again.path, fetched.path,
+            "the cache's own reading of that spelling"
+        );
+        for (repo, spelled) in [
+            (&repo, &commit),
+            (&repo, &upper),
+            (&repo, &upper_padded),
+            (&padded, &commit),
+            (&padded, &upper_padded),
+        ] {
+            assert_eq!(
+                checkout_dir(&root, repo, spelled),
+                fetched.path,
+                "{repo:?} {spelled:?}"
+            );
+        }
+        // And what is found there is the commit's.
+        let members = vec![("LICENSE.md".to_string(), sha(b"MIT\n"), 4)];
+        let (out, scope) = join(
+            &members,
+            Some(&checkout_dir(&root, &repo, &commit)),
+            None,
+            &commit,
+        );
+        assert!(scope.searched);
+        assert_eq!(out[0].origin, Origin::Verbatim);
+    }
+
+    /// Four states, four sentences and four colours, and the normalized one names its pass.
+    #[test]
+    fn each_origin_says_what_it_is_and_the_normalized_one_names_its_pass() {
+        let all = [
+            Origin::Verbatim,
+            Origin::Normalized("nupkg-text-eol"),
+            Origin::Built,
+            Origin::Unknown,
+        ];
+        assert_eq!(all[0].label(), "carried verbatim");
+        assert_eq!(all[1].label(), "carried after `nupkg-text-eol`");
+        assert_eq!(all[2].label(), "the build made this");
+        assert_eq!(all[3].label(), "unknown — no checkout");
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a.label(), b.label());
+                assert_ne!(a.colour(), b.colour(), "{a:?} and {b:?} look alike");
+            }
+        }
+    }
+
+    /// Normalized members are counted apart from verbatim ones, under the pass that explains them.
+    #[test]
+    fn the_tally_counts_normalized_members_apart_and_names_their_pass() {
+        let dir = tree("tally", &[("a.txt", b"one\n"), ("b.txt", b"two\n")]);
+        let members = vec![
+            ("a.txt".to_string(), sha(b"one\n"), 4),
+            ("b.txt".to_string(), sha(b"two\r\n"), 5),
+            ("c.bin".to_string(), sha(b"\x00built"), 6),
+        ];
+        let (out, _) = join(&members, Some(&dir), None, "d50b912e");
+        let t = tally(&out);
+        assert_eq!(
+            t,
+            vec![
+                (Origin::Verbatim, 1),
+                (Origin::Normalized("nupkg-text-eol"), 1),
+                (Origin::Built, 1),
+                (Origin::Unknown, 0),
+            ]
+        );
+    }
+
+    /// Only text gets a CRLF form: bytes with a NUL are not text, bytes already carrying a `\r` are
+    /// not LF text, and bytes with no line to end have no other form. None of them may match as
+    /// "carried after a pass" on the strength of a rewrite that pass would never make.
+    #[test]
+    fn only_lf_text_is_given_a_line_ending_form() {
+        let dir = tree(
+            "crlf",
+            &[
+                ("binary.dat", b"a\nb\x00\n"),
+                ("mixed.txt", b"a\r\nb\n"),
+                ("oneline.txt", b"no newline"),
+            ],
+        );
+        let members = vec![
+            ("binary.dat".to_string(), sha(b"a\r\nb\x00\r\n"), 7),
+            ("mixed.txt".to_string(), sha(b"a\r\r\nb\r\n"), 8),
+            ("oneline.txt".to_string(), sha(b"no newline"), 10),
+        ];
+        let (out, _) = join(&members, Some(&dir), None, "d50b912e");
+        assert_eq!(out[0].origin, Origin::Built);
+        assert_eq!(out[1].origin, Origin::Built);
+        // Its bytes are the commit's as they stand.
+        assert_eq!(out[2].origin, Origin::Verbatim);
+        assert_eq!(to_crlf(b"no newline"), None);
+        assert_eq!(to_crlf(b"a\nb\n").as_deref(), Some(&b"a\r\nb\r\n"[..]));
+    }
+
+    /// A checkout fetched again is read again: the index is keyed on the directory's mtime as well
+    /// as its path, so a changed tree is not answered from the index of the old one.
+    #[test]
+    fn a_checkout_that_changed_is_read_again() {
+        let dir = tree("refetched", &[("old.txt", b"old\n")]);
+        let members = vec![("new.txt".to_string(), sha(b"new\n"), 4)];
+        let (out, _) = join(&members, Some(&dir), None, "d50b912e");
+        assert_eq!(out[0].origin, Origin::Built);
+
+        std::fs::write(dir.join("new.txt"), b"new\n").unwrap();
+        // A fetch a second later: the directory's time moves on, whatever the clock's resolution.
+        let later = std::fs::metadata(&dir).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(5);
+        std::fs::File::open(&dir).unwrap().set_modified(later).unwrap();
+        let (out, scope) = join(&members, Some(&dir), None, "d50b912e");
+        assert_eq!(out[0].origin, Origin::Verbatim);
+        assert_eq!(scope.files, 2);
+    }
+
+    /// A directory or a file the walk cannot read is passed over, and the rest of the checkout is
+    /// still searched: one unreadable corner does not turn every member into "the build made this".
+    #[test]
+    fn what_cannot_be_read_is_passed_over_and_the_rest_is_still_searched() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tree(
+            "unreadable",
+            &[
+                ("open/a.txt", b"readable\n"),
+                ("sealed/b.txt", b"sealed\n"),
+                ("locked.txt", b"locked\n"),
+            ],
+        );
+        let set = |p: &Path, mode: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        set(&dir.join("sealed"), 0o000);
+        set(&dir.join("locked.txt"), 0o000);
+        // A user the permissions do not stop (root) reads everything, and there is nothing to test.
+        let stopped = std::fs::read_dir(dir.join("sealed")).is_err()
+            && std::fs::read(dir.join("locked.txt")).is_err();
+        let members = vec![
+            ("a.txt".to_string(), sha(b"readable\n"), 9),
+            ("b.txt".to_string(), sha(b"sealed\n"), 7),
+            ("locked.txt".to_string(), sha(b"locked\n"), 7),
+        ];
+        let (out, scope) = join(&members, Some(&dir), None, "d50b912e");
+        set(&dir.join("sealed"), 0o755);
+        set(&dir.join("locked.txt"), 0o644);
+        assert!(scope.searched);
+        assert_eq!(out[0].origin, Origin::Verbatim, "the readable part was not searched");
+        if stopped {
+            assert_eq!(out[1].origin, Origin::Built);
+            assert_eq!(out[2].origin, Origin::Built);
+            // The count is of what was searched: the file that could not be read was not.
+            assert_eq!(scope.files, 1, "{}", scope.where_we_looked());
+        }
+    }
+
+    /// A link to nothing — common in a git checkout — is a file the walk meets and cannot read, and
+    /// it is not counted among the files searched. Unlike a mode, a link stops root too.
+    #[test]
+    fn a_dangling_link_is_not_counted_as_a_file_searched() {
+        let dir = tree("dangling", &[("a.txt", b"readable\n")]);
+        std::os::unix::fs::symlink("missing", dir.join("dangling")).unwrap();
+        assert!(std::fs::read(dir.join("dangling")).is_err(), "the fixture");
+        let (_, scope) = join(&[], Some(&dir), None, "abc");
+        assert_eq!(scope.files, 1);
+        assert_eq!(scope.where_we_looked(), "1 file(s) at abc");
+    }
+
+    /// A walk that reaches its bound stops, and the sentence says it did: the files it hashed, and
+    /// that the rest of the checkout was not looked at, never a count that reads as the whole.
+    #[test]
+    fn a_walk_that_stops_at_its_bound_says_it_did_not_finish() {
+        let dir = tree("bounded", &[("a", b"a"), ("b", b"b"), ("c", b"c")]);
+        let (_, walk) = index_checkout_upto(&dir, 2);
+        assert_eq!((walk.hashed, walk.finished), (2, false));
+        let (_, walk) = index_checkout_upto(&dir, 3);
+        assert_eq!((walk.hashed, walk.finished), (3, true), "exactly the bound is the whole");
+
+        let stopped = Scope {
+            commit: "abc".into(),
+            subdir: None,
+            files: 2,
+            searched: true,
+            finished: false,
+        };
+        assert_eq!(
+            stopped.where_we_looked(),
+            format!(
+                "the first 2 file(s) at abc, and no further: the search stops after {MAX_FILES} \
+                 files"
+            )
+        );
+        let within = Scope {
+            subdir: Some("src".into()),
+            ..stopped
+        };
+        assert!(
+            within
+                .where_we_looked()
+                .starts_with("the first 2 file(s) at abc, of which the build ran in `src`, and no"),
+            "{}",
+            within.where_we_looked()
+        );
+        // A walk that finished says nothing of a bound.
+        let (_, scope) = join(&[], Some(&dir), None, "abc");
+        assert!(scope.finished);
+        assert_eq!(scope.where_we_looked(), "3 file(s) at abc");
+    }
+
+    /// A commit shorter than the eight characters a sentence shows is shown whole.
+    #[test]
+    fn a_short_commit_is_shown_whole() {
+        let dir = tree("short", &[("a", b"a")]);
+        let (_, scope) = join(&[], Some(&dir), None, "abc");
+        assert_eq!(scope.where_we_looked(), "1 file(s) at abc");
+    }
+
+    /// A commit somebody edited by hand is cut at a character and never inside one. `&s[..8]` on it
+    /// was a panic inside the source page's request handler rather than a short string — and one
+    /// that page reaches with a checkout found, because the cache key trims Unicode whitespace.
+    #[test]
+    fn a_hand_edited_commit_is_cut_at_a_character_and_never_inside_one() {
+        let scope = |commit: &str| Scope {
+            commit: commit.into(),
+            subdir: None,
+            files: 1,
+            searched: true,
+            finished: true,
+        };
+        assert_eq!(
+            scope("abcdefgé0123").where_we_looked(),
+            "1 file(s) at abcdefgé"
+        );
+        let real = "0123456789abcdef0123456789abcdef01234567";
+        let padded = format!("\u{3000}\u{3000}\u{3000}{real}");
+        let root = Path::new("/nonexistent-cache");
+        assert_eq!(
+            checkout_dir(root, "https://github.com/o/r", &padded),
+            checkout_dir(root, "https://github.com/o/r", real),
+            "the fixture: the padded commit names the real checkout"
+        );
+        assert_eq!(
+            scope(&padded).where_we_looked(),
+            "1 file(s) at \u{3000}\u{3000}\u{3000}01234"
+        );
     }
 
     #[test]

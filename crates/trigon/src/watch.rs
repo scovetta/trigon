@@ -303,6 +303,11 @@ struct Sweep {
     store: Option<PathBuf>,
     /// Another sweep of the same corpus, to say what changed.
     baseline: Option<PathBuf>,
+    /// The source cache the rungs fetch into, which the source page reads checkouts from.
+    ///
+    /// Decided once, in `serve`, from `SourceCache::default_root` — held here rather than asked
+    /// for per request so a test can point it at a directory it made instead of this host's cache.
+    sources: PathBuf,
 }
 
 /// One run record, and how long it took to find it.
@@ -313,6 +318,9 @@ struct Sweep {
 /// rather than felt.
 struct Found {
     record: trigon_store::RunRecord,
+    /// Whether the store has the blob of a rebuilt artifact the record says is kept: the record's
+    /// word alone would show bytes the store has lost as present.
+    rebuild_kept: bool,
     read: usize,
     millis: u128,
 }
@@ -358,8 +366,13 @@ async fn find_record(store: &Path, purl: &str) -> Lookup {
         if let Ok(r) = opened.get_run(&id).await
             && r.target == purl
         {
+            let rebuild_kept = match &r.rebuild {
+                Some(b) => opened.kept(b).await.unwrap_or(false),
+                None => false,
+            };
             return Lookup::Found(Box::new(Found {
                 record: r,
+                rebuild_kept,
                 read,
                 millis: started.elapsed().as_millis(),
             }));
@@ -605,6 +618,11 @@ impl Sweep {
     /// three identical tabs and the history was a guess. The target where one is known, the work
     /// directory where it is not, and the tool's name on the end, because a tab reading
     /// `once@1.4.0` does not say what is looking at it.
+    ///
+    /// Every page's title comes through here. A page under a run passes its view in with the name —
+    /// `once@1.4.0 · network` — so a run and the three pages under it are four tabs, not one tab
+    /// four times; the two that skipped this carried no tool name, and the source page carried
+    /// nothing but the run's.
     fn tab_title(&self, name: Option<&str>) -> String {
         let what = name.map(str::to_string).unwrap_or_else(|| {
             self.work
@@ -653,6 +671,48 @@ impl Sweep {
             .iter()
             .position(|r| r.purl == purl)
             .map(|i| (i, false))
+    }
+
+    /// The `/run/{i}` number of the row at `position` in `view.rows`.
+    ///
+    /// Under [`Layout::Index`] the row and the directory are one position, and the round trip
+    /// through the purl is ambiguous the moment two directories hold runs of the same target — a
+    /// retry into a second work directory is exactly that, and it sent both members of a cluster
+    /// to the first directory and read its log twice.
+    fn index_of_row(&self, view: &View, position: usize) -> Option<usize> {
+        match view.layout {
+            Layout::Index => (position < view.rows.len()).then_some(position),
+            _ => {
+                let r = view.rows.get(position)?;
+                self.dir_of(view, &r.purl).map(|(i, _)| i)
+            }
+        }
+    }
+
+    /// The row `/run/{index}` shows, where one maps to it.
+    fn row_at<'a>(&self, view: &'a View, index: usize) -> Option<&'a Row> {
+        match view.layout {
+            Layout::Index => view.rows.get(index),
+            _ => view
+                .rows
+                .iter()
+                .find(|r| self.dir_of(view, &r.purl).map(|(i, _)| i) == Some(index)),
+        }
+    }
+
+    /// What `/run/{index}` and the pages under it are called, unescaped.
+    ///
+    /// The target where one is known, the directory's own name where it is not, and the number
+    /// only when neither is true. One function because the run page had this and the pages under
+    /// it did not: a run that left no report titled its network page with an empty string.
+    fn name_at(&self, view: &View, index: usize) -> String {
+        match self.row_at(view, index).filter(|r| !r.purl.is_empty()) {
+            Some(r) => r.purl.strip_prefix("pkg:").unwrap_or(&r.purl).to_string(),
+            None => match view.entries.get(index) {
+                Some(e) => e.name.clone(),
+                None => format!("target {index:03}"),
+            },
+        }
     }
 }
 
@@ -772,6 +832,11 @@ fn state_strip(v: &View, targets_path: Option<&Path>) -> String {
                                  read</span>"
                             .into(),
                     },
+                    // A finish that is there, beside a start that will not parse. Not the arm
+                    // below: that one says the process died, and this one wrote its finish.
+                    (Some(_), None) => " · <span class=\"note\">started at an instant this page \
+                                        cannot read</span>"
+                        .into(),
                     // Written on every terminal outcome, so an absent `finished` means the process
                     // died before it could write one — not that the run is still going.
                     _ => " · <span class=\"note\">no finish recorded: the process did not reach \
@@ -967,31 +1032,10 @@ fn rfc3339_age(s: &str) -> Option<u64> {
 /// The same instant as epoch seconds.
 ///
 /// Split out rather than copied: a single-run page needs the started→finished bracket, and a second
-/// implementation of days-from-civil is a second thing that has to agree with this one.
+/// implementation of days-from-civil is a second thing that has to agree with this one — which is
+/// why the one implementation now lives in `trigon-core`, where the publication gate reads it too.
 fn rfc3339_epoch(s: &str) -> Option<i64> {
-    let (date, rest) = s.split_once('T')?;
-    let time = rest.strip_suffix('Z')?;
-    let mut d = date.split('-');
-    let (y, m, day): (i64, i64, i64) = (
-        d.next()?.parse().ok()?,
-        d.next()?.parse().ok()?,
-        d.next()?.parse().ok()?,
-    );
-    let mut t = time.split(':');
-    let (hh, mm, ss): (i64, i64, i64) = (
-        t.next()?.parse().ok()?,
-        t.next()?.parse().ok()?,
-        t.next()?.parse().ok()?,
-    );
-    // Days from civil, the inverse of the formatter in main.rs.
-    let y2 = if m <= 2 { y - 1 } else { y };
-    let era = y2.div_euclid(400);
-    let yoe = y2 - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
+    trigon_core::time::rfc3339_epoch(s)
 }
 
 fn rates_panel(r: &Rates) -> String {
@@ -1071,10 +1115,39 @@ fn baseline_panel(sweep: &Sweep, v: &View) -> String {
         bind: String::new(),
         store: None,
         baseline: None,
+        sources: sweep.sources.clone(),
     };
     let b = other.read();
 
     let mut out = format!("<h2>Against {}</h2>", esc(&path.display().to_string()));
+    // Before a single flip is counted. A path that is not a work directory reads as a sweep that
+    // attempted nothing, and every target here would then be "in this sweep and not the
+    // baseline", under a "Not a gain" — a mistyped `--baseline`, rendered as a finding about the
+    // change.
+    if b.layout == Layout::Unknown {
+        // Why, asked so that "could not look" never reads as "not there": `exists` is false on a
+        // permission error, and a directory this user may not list or enter reads, to `read`, as
+        // one that holds nothing. The probe of `results.tsv` is the entering half.
+        let why = match path.try_exists() {
+            Err(e) => format!("whether anything is there could not be told: {e}"),
+            Ok(false) => "there is nothing at that path".to_string(),
+            Ok(true) => {
+                match std::fs::read_dir(path).and_then(|_| path.join("results.tsv").try_exists()) {
+                    Err(e) => format!("it could not be read as a directory: {e}"),
+                    Ok(_) => "it holds no sweep, no run and no directory of runs".to_string(),
+                }
+            }
+        };
+        return out
+            + &format!(
+                "<p class=\"void\"><code>{}</code> is not a work directory this page can read — \
+                 {} — so nothing was compared against it</p><p class=\"note\">This is a problem \
+                 with <code>--baseline</code>, not with either sweep. A relative path is resolved \
+                 against the directory <code>trigon watch</code> was started in.</p>",
+                esc(&path.display().to_string()),
+                esc(&why),
+            );
+    }
     match (
         v.sweep.as_ref().and_then(|s| s.targets_sha256.clone()),
         b.sweep.as_ref().and_then(|s| s.targets_sha256.clone()),
@@ -1461,7 +1534,16 @@ fn strip_tags(s: &str) -> String {
             _ => {}
         }
     }
-    out.replace("&quot;", "\"").trim().to_string()
+    // Every entity `esc` writes, undone, `&amp;` last so an escaped `&lt;` comes back as the text
+    // `&lt;` and not as `<`. Undoing only `&quot;` left a maven purl's `&` reaching a JSON reader
+    // as `&amp;` — a sentence that is not the one the page shows.
+    out.replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .trim()
+        .to_string()
 }
 
 async fn board(State(sweep): State<std::sync::Arc<Sweep>>) -> Response {
@@ -1502,10 +1584,13 @@ async fn cluster(
     Query(q): Query<ClusterQuery>,
 ) -> Response {
     let v = sweep.read();
-    let members: Vec<&Row> = v
+    // Each member with the `/run/{i}` it opens, decided once from its position.
+    let members: Vec<(Option<usize>, &Row)> = v
         .rows
         .iter()
-        .filter(|r| r.cluster.as_deref() == Some(q.key.as_str()))
+        .enumerate()
+        .filter(|(_, r)| r.cluster.as_deref() == Some(q.key.as_str()))
+        .map(|(position, r)| (sweep.index_of_row(&v, position), r))
         .collect();
     if members.is_empty() {
         return Redirect::to("/").into_response();
@@ -1516,11 +1601,8 @@ async fn cluster(
     // open to answer — one thing, or three wearing one name.
     let mut lines: BTreeMap<String, usize> = BTreeMap::new();
     let mut unread = 0;
-    for m in &members {
-        match sweep
-            .dir_of(&v, &m.purl)
-            .and_then(|(i, _)| read_log(&sweep.target_dir(&v, i)))
-        {
+    for (index, _) in &members {
+        match index.and_then(|i| read_log(&sweep.target_dir(&v, i))) {
             Some(log) => {
                 let sig = trigon_core::classify(&log);
                 *lines.entry(sig.evidence.trim().to_string()).or_default() += 1;
@@ -1562,10 +1644,10 @@ async fn cluster(
     }
 
     body.push_str("<h2>Members</h2><table><tr><th>target</th><th>outcome</th><th></th></tr>");
-    for m in &members {
+    for (index, m) in &members {
         let name = m.purl.strip_prefix("pkg:").unwrap_or(&m.purl);
-        let link = match sweep.dir_of(&v, &m.purl) {
-            Some((i, _)) => format!("<a href=\"/run/{i}\">open</a>"),
+        let link = match index {
+            Some(i) => format!("<a href=\"/run/{i}\">open</a>"),
             None => "<span class=\"note\">no directory</span>".into(),
         };
         body.push_str(&format!(
@@ -1583,11 +1665,17 @@ async fn cluster(
     body.push_str(&format!(
         "<h2>Reproduce one</h2><pre>trigon rebuild {} --image &lt;the image this sweep used&gt; \\\n    \
          --work ./one --egress mirror-only --timewarp auto -v</pre>",
-        esc(&members[0].purl)
+        esc(&members[0].1.purl)
     ));
     body.push_str("<p><a href=\"/\">← all targets</a></p>");
 
-    page(&q.key, v.live.is_live(), &body, &sweep.bind).into_response()
+    page(
+        &sweep.tab_title(Some(&q.key)),
+        v.live.is_live(),
+        &body,
+        &sweep.bind,
+    )
+    .into_response()
 }
 
 /// What the mirror served into this build, read from the run's own `network.jsonl`.
@@ -1726,15 +1814,12 @@ async fn network(
 ) -> Response {
     let v = sweep.read();
     let dir = sweep.target_dir(&v, index);
-    let title = v
-        .rows
-        .iter()
-        .find(|r| sweep.dir_of(&v, &r.purl).map(|(i, _)| i) == Some(index))
-        .map(|r| esc(r.purl.strip_prefix("pkg:").unwrap_or(&r.purl)))
-        .unwrap_or_else(|| format!("target {index:03}"));
+    // Unescaped: `page` escapes the title, and escaping it here too put `&amp;` in the tab.
+    let title = sweep.name_at(&v, index);
 
     let mut body = format!(
-        "<h1>{title} · network</h1><p><a href=\"/run/{index}\">← the run</a></p>{}",
+        "<h1>{} · network</h1><p><a href=\"/run/{index}\">← the run</a></p>{}",
+        esc(&title),
         not_collected_note()
     );
 
@@ -1786,7 +1871,7 @@ async fn network(
                             Some(w) => w.to_string(),
                             None => "—".into(),
                         },
-                        esc(&e.sha256[..16.min(e.sha256.len())]),
+                        esc(short_hex(&e.sha256, 16)),
                         esc(&e.url),
                     ));
                 }
@@ -1794,7 +1879,8 @@ async fn network(
             }
         }
     }
-    page(&format!("{title} · network"), false, &body, &sweep.bind).into_response()
+    let tab = sweep.tab_title(Some(&format!("{title} · network")));
+    page(&tab, false, &body, &sweep.bind).into_response()
 }
 
 /// How far the guard got, in words rather than in an enum name.
@@ -1823,12 +1909,10 @@ fn compare_panel(dir: &Path, index: usize) -> String {
             esc(&detail)
         ),
         Ok((m, _)) => {
-            let differs = m
-                .iter()
-                .filter(|d| !d.only_one_side() && d.content_differs())
-                .count();
-            let meta_only = m.iter().filter(|d| d.metadata_only()).count();
-            let removed = m.iter().filter(|d| d.removed_by_stabilization()).count();
+            let count = |b: Band| m.iter().filter(|d| d.band() == b).count();
+            let differs = count(Band::Differs);
+            let meta_only = count(Band::Packed);
+            let removed = count(Band::Stabilized);
             format!(
                 "<h2>What differs</h2><p>{} member(s): <strong>{differs}</strong> differ in \
                  content, <strong>{meta_only}</strong> are byte-identical and packed differently, \
@@ -1864,16 +1948,13 @@ async fn compare(
 ) -> Response {
     let v = sweep.read();
     let dir = sweep.target_dir(&v, index);
-    let title = v
-        .rows
-        .iter()
-        .find(|r| sweep.dir_of(&v, &r.purl).map(|(i, _)| i) == Some(index))
-        .map(|r| esc(r.purl.strip_prefix("pkg:").unwrap_or(&r.purl)))
-        .unwrap_or_else(|| format!("target {index:03}"));
+    // Unescaped: `page` escapes the title, and escaping it here too put `&amp;` in the tab.
+    let title = sweep.name_at(&v, index);
 
     let mut body = format!(
-        "<h1>{title} · the stabilizer ledger</h1><p><a href=\"/run/{index}\">← the run, where the \
-         verdict is</a></p>"
+        "<h1>{} · the stabilizer ledger</h1><p><a href=\"/run/{index}\">← the run, where the \
+         verdict is</a></p>",
+        esc(&title)
     );
 
     let Some((upstream, rebuild)) = artifact_pair(&dir) else {
@@ -1884,7 +1965,8 @@ async fn compare(
              directory that has been cleaned, leaves this page with no inputs. The verdict in the \
              run record still stands — it was computed when both were there.</p>",
         );
-        return page(&format!("{title} · compare"), false, &body, &sweep.bind).into_response();
+        let tab = sweep.tab_title(Some(&format!("{title} · compare")));
+        return page(&tab, false, &body, &sweep.bind).into_response();
     };
 
     body.push_str(&format!(
@@ -1910,7 +1992,8 @@ async fn compare(
             body.push_str(&member_table(&members));
         }
     }
-    page(&format!("{title} · stabilizers"), false, &body, &sweep.bind).into_response()
+    let tab = sweep.tab_title(Some(&format!("{title} · stabilizers")));
+    page(&tab, false, &body, &sweep.bind).into_response()
 }
 
 /// The best verdict this set of passes could reach, and what holds it there.
@@ -1981,9 +2064,9 @@ fn ceiling_panel(applied: &[trigon_stabilize::Applied], outcome: Option<&str>) -
 
 /// Which passes did the work, how much, and under whose authority.
 ///
-/// Bar length is `entries_touched`, which `docs/08` calls the triage number: "wheel-record touched
-/// 412 entries" is a diagnosis. Risk is the colour. Provenance is a column, and it is new — the
-/// field has existed as long as `Applied` has and no page had ever rendered it.
+/// Bar length is `entries_touched`, which `docs/02` calls the triage number: "wheel-record-v2
+/// touched 412 entries" is a diagnosis. Risk is the colour. Provenance is a column, and it is new —
+/// the field has existed as long as `Applied` has and no page had ever rendered it.
 fn ledger_table(applied: &[trigon_stabilize::Applied]) -> String {
     if applied.is_empty() {
         return "<h2>The ledger</h2><p class=\"note\">no pass changed anything on either side, so                 the two artifacts were compared exactly as published. The verdict, whatever it is,                 is about the bytes and owes nothing to normalization.</p>"
@@ -2111,14 +2194,13 @@ fn silent_panel(artifact: &Path, applied: &[trigon_stabilize::Applied]) -> Strin
 /// then the ones that were identical all along, then the ones present on one side only.
 fn ladder_svg(m: &[MemberDiff]) -> String {
     let total = m.len().max(1) as f64;
-    let one_side = m.iter().filter(|d| d.only_one_side()).count();
-    let differs = m
-        .iter()
-        .filter(|d| !d.only_one_side() && d.content_differs())
-        .count();
-    let meta_only = m.iter().filter(|d| d.metadata_only()).count();
-    let removed = m.iter().filter(|d| d.removed_by_stabilization()).count();
-    let identical = m.len() - one_side - differs - meta_only - removed;
+    // Each band counted, none of them derived: a remainder hides a member counted twice.
+    let count = |b: Band| m.iter().filter(|d| d.band() == b).count();
+    let one_side = count(Band::OneSide);
+    let differs = count(Band::Differs);
+    let meta_only = count(Band::Packed);
+    let removed = count(Band::Stabilized);
+    let identical = count(Band::Identical);
 
     // `(count, label, fill)`. The colours are the verdict palette the rest of the page uses, so a
     // red band here and a red tag above it mean the same thing.
@@ -2159,7 +2241,8 @@ fn ladder_svg(m: &[MemberDiff]) -> String {
          <p class=\"legend\">{legend}</p>\
          <p class=\"note\">{} member(s) in total. <strong>Stabilized out</strong> is the band the \
          verdict turns on: those members' published and rebuilt bytes are not the same, and every \
-         way in which they differ was removed by one of the passes in the ledger above. \
+         way in which they differ was removed by one of the passes in the ledger above — a member \
+         only one side carried, when a pass took it out whole, among them. \
          <strong>Same bytes, packed differently</strong> is the one worth reading twice — the file \
          is byte-for-byte what was published and its archive entry is not, so the divergence is \
          about how it was packed and not about what anybody wrote.</p>",
@@ -2172,50 +2255,54 @@ fn ladder_svg(m: &[MemberDiff]) -> String {
 fn member_table(m: &[MemberDiff]) -> String {
     // Most interesting first: a hundred identical members must not bury the four that differ.
     let mut rows: Vec<&MemberDiff> = m.iter().collect();
-    rows.sort_by_key(|d| {
-        (
-            !d.content_differs(),
-            !d.only_one_side(),
-            !d.metadata_only(),
-            !d.removed_by_stabilization(),
-            d.path.clone(),
-        )
-    });
+    rows.sort_by_key(|d| (d.band(), d.path.clone()));
     let mut out = String::from(
         "<h2>Every member</h2><table><tr><th>member</th><th>as published</th>\
          <th>stabilized</th><th class=\"n\">upstream</th><th class=\"n\">rebuild</th></tr>",
     );
     for d in rows {
-        let (raw_cell, stab_cell) = if d.only_one_side() {
-            let which = if d.raw.0.is_some() {
-                "upstream"
-            } else {
-                "rebuild"
-            };
-            (
+        let which = if d.raw.0.is_some() {
+            "upstream"
+        } else {
+            "rebuild"
+        };
+        let (raw_cell, stab_cell) = match d.band() {
+            Band::OneSide => (
                 format!("<span class=\"ours\">only in {which}</span>"),
                 "<span class=\"ours\">—</span>".to_string(),
-            )
-        } else if d.content_differs() {
-            (
+            ),
+            Band::Differs => (
                 "<span class=\"fail\">differs</span>".to_string(),
                 "<span class=\"fail\">content still differs</span>".to_string(),
-            )
-        } else if d.metadata_only() {
-            (
+            ),
+            Band::Packed => (
                 "<span class=\"diff\">differs</span>".to_string(),
                 "<span class=\"diff\">same bytes, packed differently</span>".to_string(),
-            )
-        } else if d.removed_by_stabilization() {
-            (
-                "<span class=\"diff\">differs</span>".to_string(),
-                "<span class=\"ok\">equal — stabilized out</span>".to_string(),
-            )
-        } else {
-            (
+            ),
+            // Where a pass took the member out rather than rewriting it, the row says so: "equal"
+            // over two archives that no longer hold it would be a comparison nobody made.
+            Band::Stabilized => (
+                if d.only_one_side() {
+                    format!("<span class=\"diff\">only in {which}</span>")
+                } else {
+                    "<span class=\"diff\">differs</span>".to_string()
+                },
+                if d.stabilized == (None, None) {
+                    "<span class=\"ok\">removed — stabilized out</span>".to_string()
+                } else {
+                    "<span class=\"ok\">equal — stabilized out</span>".to_string()
+                },
+            ),
+            // And the same where the published bytes agreed: identical as published is a fact about
+            // two archives that held it, and neither stabilized one does.
+            Band::Identical => (
                 "<span class=\"ok\">identical</span>".to_string(),
-                "<span class=\"ok\">identical</span>".to_string(),
-            )
+                if d.stabilized == (None, None) {
+                    "<span class=\"ok\">removed by a pass</span>".to_string()
+                } else {
+                    "<span class=\"ok\">identical</span>".to_string()
+                },
+            ),
         };
         let b = |v: Option<u64>| match v {
             Some(n) => human_bytes(n),
@@ -2279,18 +2366,61 @@ fn artifact_pair(dir: &Path) -> Option<(PathBuf, PathBuf)> {
 }
 
 /// One side's members, keyed by `(path, occurrence)`, each as `(raw fingerprint, stabilized
-/// fingerprint, size)`. The occurrence is in the key because a duplicate member path is legal and
-/// would otherwise be unmatchable — the rule `diff.rs` keys on.
+/// fingerprint, size, published name)`. The path is the stabilized name, or the published one for
+/// a member a pass removed. The occurrence is in the key because a duplicate member path is legal
+/// and would otherwise be unmatchable — the rule `diff.rs` keys on.
 type MemberKey = (Vec<u8>, usize);
-/// `(raw content, raw metadata, stabilized content, stabilized metadata, size)`.
-type Fingerprints = (String, String, String, String, u64);
+/// `(raw content, raw metadata, (stabilized content, stabilized metadata), size, published name)`.
+///
+/// The stabilized half is `None` for a member a pass removed: it was published and is not in the
+/// stabilized archive, which is a different fact from never having been on this side at all.
+type Fingerprints = (String, String, Option<(String, String)>, u64, Vec<u8>);
 type SideMembers = std::collections::BTreeMap<MemberKey, Fingerprints>;
+
+/// Which of the census's five bands a member is in. Exactly one, by construction.
+///
+/// **One classifier, for every reader of it.** The ladder, the table, the run page's sentence and
+/// the source page's lower bar each asked five overlapping predicates in their own order, and the
+/// ladder counted `identical` as the total minus the other four — so a member two predicates both
+/// claimed was subtracted twice, and the one that could make that true (a member a pass removed
+/// from the only side it was on) was dropped before any of them saw it.
+///
+/// Declared in the table's order, most interesting first; the ladder draws its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Band {
+    OneSide,
+    Differs,
+    Packed,
+    Stabilized,
+    Identical,
+}
+
+impl Band {
+    /// The word `member_verdicts` hands the source page's lower bar.
+    fn word(self) -> &'static str {
+        match self {
+            Band::OneSide => "one-side",
+            Band::Differs => "differs",
+            Band::Packed => "packed",
+            Band::Stabilized => "stabilized",
+            Band::Identical => "identical",
+        }
+    }
+}
 
 /// One member of the artifact, before and after stabilization, on both sides.
 struct MemberDiff {
+    /// The name after stabilization, which both sides are matched under.
     path: String,
+    /// The name upstream published it under, where upstream has it.
+    ///
+    /// `path` unless a pass renamed it: every nupkg's `<guid>.psmdcp` is `core.psmdcp` in `path`,
+    /// and the source page, which reads the published archive, knows it only by the GUID.
+    published: Option<String>,
     /// `None` where the member is on one side only.
     raw: (Option<String>, Option<String>),
+    /// `None` where the member is not on that side after stabilization: never published there, or
+    /// published and removed by a pass.
     stabilized: (Option<String>, Option<String>),
     /// The member's **content** after stabilization, ignoring every header field.
     ///
@@ -2314,18 +2444,38 @@ impl MemberDiff {
     fn content_differs(&self) -> bool {
         self.content.0 != self.content.1
     }
-    /// Byte-for-byte the same file, in an archive entry that is not. The diagnosis a maintainer
-    /// wants: nothing you wrote changed, and something about how it was packed did.
-    fn metadata_only(&self) -> bool {
-        self.stabilized_differs() && !self.content_differs() && !self.only_one_side()
-    }
-    /// The interesting case, and the one the whole tool exists for: the bytes differ and the
-    /// stabilized forms do not. This member is why the verdict is `normalized` rather than `exact`.
-    fn removed_by_stabilization(&self) -> bool {
-        self.raw_differs() && !self.stabilized_differs()
-    }
     fn only_one_side(&self) -> bool {
         self.raw.0.is_none() || self.raw.1.is_none()
+    }
+    /// The band this member is in, asked in the order one answer retires the others.
+    ///
+    /// - **Stabilized out**, first, for a member that differed as published and that a pass took
+    ///   out of both archives. `.signature.p7s` is on every package nuget.org serves and on none
+    ///   anybody builds: on one side as published, and on neither once `nupkg-signature` has run.
+    ///   The difference is gone because a pass took it, which is what this band means.
+    /// - **On one side only**: in one archive and not the other, as published and still after.
+    /// - **Content differs**: the stabilized bodies disagree, or one side's pass removed it and the
+    ///   other's did not.
+    /// - **Same bytes, packed differently**: byte-for-byte the same file in an archive entry that
+    ///   is not. The diagnosis a maintainer wants: nothing you wrote changed, and something about
+    ///   how it was packed did.
+    /// - **Stabilized out**, again: the bytes differ and the stabilized forms do not. The case the
+    ///   whole tool exists for, and the reason a verdict is `normalized` rather than `exact`.
+    /// - **Identical as published**: everything else.
+    fn band(&self) -> Band {
+        if self.raw_differs() && self.stabilized == (None, None) {
+            Band::Stabilized
+        } else if self.only_one_side() {
+            Band::OneSide
+        } else if self.content_differs() {
+            Band::Differs
+        } else if self.stabilized_differs() {
+            Band::Packed
+        } else if self.raw_differs() {
+            Band::Stabilized
+        } else {
+            Band::Identical
+        }
     }
 }
 
@@ -2363,37 +2513,44 @@ fn member_diffs(
             .map_err(|e| format!("parsing {}: {e}", p.display()))?;
         let mut archive = parsed.archive;
 
-        let mut seen: std::collections::BTreeMap<Vec<u8>, usize> = Default::default();
-        let mut raw: Vec<(MemberKey, (String, String, u64))> = Vec::new();
+        // By ordinal: the position as parsed, which no pass rewrites, and the key
+        // `trigon-stabilize` itself follows an entry across its passes by. Not by name, because
+        // two nupkg passes rename — every package's `<guid>.psmdcp` becomes `core.psmdcp` — and a
+        // raw row looked up under the new name found nothing and stood in the stabilized one for
+        // it.
+        let mut raw: std::collections::BTreeMap<u32, (Vec<u8>, String, String, u64)> =
+            Default::default();
         for e in &archive.entries {
-            let path = e.path.as_bytes().to_vec();
-            let n = seen.entry(path.clone()).or_default();
-            let key = (path, *n);
-            *n += 1;
             let (c, m) = member_fingerprint(e)?;
-            raw.push((key, (c, m, e.meta.size)));
+            raw.insert(e.ordinal, (e.path.as_bytes().to_vec(), c, m, e.meta.size));
         }
 
         let applied = trigon_stabilize::apply(&set, &mut archive);
 
         let mut seen: std::collections::BTreeMap<Vec<u8>, usize> = Default::default();
-        let mut out = std::collections::BTreeMap::new();
-        for (i, e) in archive.entries.iter().enumerate() {
+        let mut out = SideMembers::new();
+        for e in &archive.entries {
             let path = e.path.as_bytes().to_vec();
             let n = seen.entry(path.clone()).or_default();
-            let key = (path, *n);
+            let key = (path.clone(), *n);
             *n += 1;
-            let (after_c, after_m) = member_fingerprint(e)?;
-            // Stabilizers may reorder, so the raw entry for this key is looked up rather than
-            // taken positionally. A member that a pass *removed* has a raw row and no stabilized
-            // one, which the join below renders rather than dropping.
-            let (raw_c, raw_m, size) = raw
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| (after_c.clone(), after_m.clone(), e.meta.size));
-            let _ = i;
-            out.insert(key, (raw_c, raw_m, after_c, after_m, size));
+            let after = member_fingerprint(e)?;
+            // Taken out as it is found, so what is left afterwards is what a pass removed. No pass
+            // adds a member; one that did would have no published form, and its stabilized one is
+            // the only reading there is.
+            let (published, raw_c, raw_m, size) = match raw.remove(&e.ordinal) {
+                Some(row) => row,
+                None => (path, after.0.clone(), after.1.clone(), e.meta.size),
+            };
+            out.insert(key, (raw_c, raw_m, Some(after), size, published));
+        }
+        // A member that a pass *removed* has a raw row and no stabilized one. It keeps its
+        // published name and has nothing after stabilization, so the join below renders it rather
+        // than dropping it — `.signature.p7s` on every package nuget.org serves, for one.
+        for (path, c, m, size) in raw.into_values() {
+            let n = seen.entry(path.clone()).or_default();
+            out.insert((path.clone(), *n), (c, m, None, size, path));
+            *n += 1;
         }
         Ok((out, applied))
     };
@@ -2410,16 +2567,20 @@ fn member_diffs(
         let b = r.get(&k);
         out.push(MemberDiff {
             path: String::from_utf8_lossy(&k.0).into_owned(),
+            published: a.map(|v| String::from_utf8_lossy(&v.4).into_owned()),
             raw: (
                 a.map(|v| format!("{}{}", v.0, v.1)),
                 b.map(|v| format!("{}{}", v.0, v.1)),
             ),
             stabilized: (
-                a.map(|v| format!("{}{}", v.2, v.3)),
-                b.map(|v| format!("{}{}", v.2, v.3)),
+                a.and_then(|v| v.2.as_ref()).map(|(c, m)| format!("{c}{m}")),
+                b.and_then(|v| v.2.as_ref()).map(|(c, m)| format!("{c}{m}")),
             ),
-            content: (a.map(|v| v.2.clone()), b.map(|v| v.2.clone())),
-            bytes: (a.map(|v| v.4), b.map(|v| v.4)),
+            content: (
+                a.and_then(|v| v.2.as_ref()).map(|(c, _)| c.clone()),
+                b.and_then(|v| v.2.as_ref()).map(|(c, _)| c.clone()),
+            ),
+            bytes: (a.map(|v| v.3), b.map(|v| v.3)),
         });
     }
     let mut applied = ua;
@@ -2492,24 +2653,12 @@ async fn run(
     let dir = sweep.target_dir(&v, index);
     // Under `Index` the row and the directory are one position, and the round trip through `purl`
     // would be ambiguous the moment two directories hold runs of the same target.
-    let row = match v.layout {
-        Layout::Index => v.rows.get(index),
-        _ => v
-            .rows
-            .iter()
-            .find(|r| sweep.dir_of(&v, &r.purl).map(|(i, _)| i) == Some(index)),
-    };
+    let row = sweep.row_at(&v, index);
     let report = read_report(&dir);
 
     // The target where one is known, the directory's own name where it is not, and the number only
     // when neither is true.
-    let name = match row.filter(|r| !r.purl.is_empty()) {
-        Some(r) => r.purl.strip_prefix("pkg:").unwrap_or(&r.purl).to_string(),
-        None => match v.entries.get(index) {
-            Some(e) => e.name.clone(),
-            None => format!("target {index:03}"),
-        },
-    };
+    let name = sweep.name_at(&v, index);
 
     let mut body = format!(
         "<h1>{}</h1>{}",
@@ -2523,9 +2672,16 @@ async fn run(
             // A run with no report has no clock either, and its synthetic row carries a `0.0` that
             // is a placeholder rather than a measurement. Printing it would be this page's own
             // first rule broken on the one row that exists because something is missing.
+            //
+            // The same holds for a report whose clock cannot be read — no `finished`, or an
+            // instant that will not parse — because the synthetic row carries the same `0.0` for
+            // it. Only a sweep's row is a measurement: `results.tsv` wrote the seconds down.
             let duration = match (v.layout, &report) {
-                (Layout::Index, None) => {
-                    " · <span class=\"note\">no duration recorded</span>".to_string()
+                (Layout::Index | Layout::Single, rep) => {
+                    match rep.as_ref().and_then(bracket_seconds) {
+                        Some(secs) => format!(" · {secs}s"),
+                        None => " · <span class=\"note\">no duration recorded</span>".to_string(),
+                    }
                 }
                 _ => format!(" · {:.0}s", r.seconds),
             };
@@ -2647,7 +2803,28 @@ async fn run(
     }
 
     body.push_str(&report_panel(report.as_ref()));
-    if let (Some(store), Some(r)) = (&sweep.store, row) {
+    if let (Some(_), Some(r)) = (&sweep.store, row)
+        && r.purl.is_empty()
+    {
+        // Not looked up. A search for no target at all finds none, and `Lookup::Absent` would then
+        // say the store was searched for this one and does not hold it — a claim about a run whose
+        // target is unknown, and one that can be false: a run can be recorded and then die before
+        // it writes its report.
+        // Which of three: a report that is there and will not parse is a torn write, and "it wrote
+        // no report" over one is the absent-run reading `View.report` warns against.
+        body.push_str(&format!(
+            "<h2>Run record</h2><p class=\"note\">nothing on disk says which target this run \
+             was{} — so the store was not searched for it. The directory's name is not a record of \
+             its target.</p>",
+            if report.is_some() {
+                " — its report names none"
+            } else if dir.join("run.json").is_file() {
+                " — its report will not parse"
+            } else {
+                " — it wrote no report"
+            }
+        ));
+    } else if let (Some(store), Some(r)) = (&sweep.store, row) {
         body.push_str(&store_panel(store, &r.purl).await);
     } else if sweep.store.is_none() {
         body.push_str(
@@ -2811,7 +2988,7 @@ fn report_panel(r: Option<&crate::progress::RunReport>) -> String {
     if let Some(d) = &r.strategy_digest {
         row(
             "strategy",
-            format!("<code>{}</code>", esc(&d[..16.min(d.len())])),
+            format!("<code>{}</code>", esc(short_hex(d, 16))),
         );
     }
     // **Always a row, on every run.** A verdict is a claim about a published artifact *and* a
@@ -3149,11 +3326,16 @@ async fn store_panel(store: &Path, purl: &str) -> String {
             format!(
                 "<code>{}</code>{}",
                 esc(&b.sha256.to_hex()[..16]),
-                if b.stored {
-                    ""
-                } else {
-                    " · <span class=\"note\">bytes pruned; a match can be re-derived, and a \
-                       divergence keeps its bytes</span>"
+                match (b.stored, found.rebuild_kept) {
+                    (true, true) => "",
+                    (true, false) => {
+                        " · <span class=\"void\">bytes missing: the record says they are kept, \
+                         and the store has no blob of them</span>"
+                    }
+                    (false, _) => {
+                        " · <span class=\"note\">bytes pruned; a match can be re-derived, and a \
+                         divergence keeps its bytes</span>"
+                    }
                 }
             ),
         ),
@@ -3282,23 +3464,23 @@ pub fn serve(
     if !work.is_dir() {
         anyhow::bail!("{} is not a directory", work.display());
     }
+    // The sweep it is compared against, refused the same way and for the same reason `trigon score
+    // --baseline` refuses a file that is not there. The panel still says so if it goes missing
+    // later, but a typo is better answered before anything listens.
+    if let Some(b) = &baseline
+        && !b.is_dir()
+    {
+        anyhow::bail!("--baseline {} is not a directory", b.display());
+    }
     let sweep = std::sync::Arc::new(Sweep {
         work,
         targets,
         bind: bind.clone(),
         store,
         baseline,
+        sources: trigon_registry::SourceCache::default_root(),
     });
-
-    let app = axum::Router::new()
-        .route("/", axum::routing::get(board))
-        .route("/cluster", axum::routing::get(cluster))
-        .route("/run/{index}", axum::routing::get(run))
-        .route("/run/{index}/network", axum::routing::get(network))
-        .route("/run/{index}/compare", axum::routing::get(compare))
-        .route("/run/{index}/source", axum::routing::get(source_page))
-        .route("/api/state", axum::routing::get(api_state))
-        .with_state(sweep);
+    let app = app(sweep);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -3307,10 +3489,32 @@ pub fn serve(
         let listener = tokio::net::TcpListener::bind(&bind)
             .await
             .with_context(|| format!("binding {bind}"))?;
-        println!("watching on http://{bind}  (read-only; ctrl-c to stop)");
+        println!(
+            "{} {} {}",
+            crate::style::heading("watching on"),
+            crate::style::ident(&format!("http://{bind}")),
+            crate::style::muted("(read-only; ctrl-c to stop)")
+        );
         axum::serve(listener, app).await?;
         Ok(())
     })
+}
+
+/// Every route, over one sweep.
+///
+/// Apart from `serve` so a test can put the same router on a port the OS chose and ask it what a
+/// browser would, extractors included: `/run/{index}` is the only path parameter anywhere, and
+/// what keeps a request string off the filesystem is the extractor refusing anything but a number.
+fn app(sweep: std::sync::Arc<Sweep>) -> axum::Router {
+    axum::Router::new()
+        .route("/", axum::routing::get(board))
+        .route("/cluster", axum::routing::get(cluster))
+        .route("/run/{index}", axum::routing::get(run))
+        .route("/run/{index}/network", axum::routing::get(network))
+        .route("/run/{index}/compare", axum::routing::get(compare))
+        .route("/run/{index}/source", axum::routing::get(source_page))
+        .route("/api/state", axum::routing::get(api_state))
+        .with_state(sweep)
 }
 
 /// Every member of the published artifact, with its **raw** content digest.
@@ -3433,22 +3637,17 @@ fn origin_bars(
 }
 
 /// The verdict each member got, keyed by path, in the vocabulary the lower bar draws.
+///
+/// The path is the one upstream published, where upstream has the member, because the lower bar
+/// reads the published archive and looks each member up by that name. Keyed by the stabilized name
+/// instead, every nupkg's `<guid>.psmdcp` — renamed `core.psmdcp` by a pass — was drawn as never
+/// compared.
 fn member_verdicts(diffs: &[MemberDiff]) -> BTreeMap<String, &'static str> {
     diffs
         .iter()
         .map(|d| {
-            let v = if d.only_one_side() {
-                "one-side"
-            } else if d.removed_by_stabilization() {
-                "stabilized"
-            } else if d.metadata_only() {
-                "packed"
-            } else if d.content_differs() {
-                "differs"
-            } else {
-                "identical"
-            };
-            (d.path.clone(), v)
+            let path = d.published.as_ref().unwrap_or(&d.path);
+            (path.clone(), d.band().word())
         })
         .collect()
 }
@@ -3465,10 +3664,10 @@ async fn source_page(
     let v = sweep.read();
     let dir = sweep.target_dir(&v, index);
     let report = read_report(&dir);
-    let name = match &report {
-        Some(r) => r.purl.strip_prefix("pkg:").unwrap_or(&r.purl).to_string(),
-        None => format!("target {index:03}"),
-    };
+    // What the run page calls this run, because this page is one it links to — and the tab says
+    // which of the two it is, or a run and its source are two identical tabs.
+    let name = sweep.name_at(&v, index);
+    let tab = sweep.tab_title(Some(&format!("{name} · source")));
 
     let mut body = format!(
         "<h1>{}</h1>{}<p><a href=\"/run/{index}\">← the run</a></p>",
@@ -3482,7 +3681,7 @@ async fn source_page(
              source, so there is no commit to compare the artifact against. A verdict without one \
              is a claim about an artifact and nothing else.</p>",
         );
-        return page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response();
+        return page(&tab, false, &body, &sweep.bind).into_response();
     };
 
     let Some((upstream, _)) = artifact_pair(&dir) else {
@@ -3492,7 +3691,7 @@ async fn source_page(
              from the comparison record, deliberately — see the note below — so a pruned work \
              directory takes it with it.</p>",
         );
-        return page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response();
+        return page(&tab, false, &body, &sweep.bind).into_response();
     };
 
     let members = match raw_members(&upstream) {
@@ -3502,7 +3701,7 @@ async fn source_page(
                 "<h2>How the source became the artifact</h2><p class=\"note\">{}</p>",
                 esc(&e)
             ));
-            return page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response();
+            return page(&tab, false, &body, &sweep.bind).into_response();
         }
     };
 
@@ -3510,8 +3709,7 @@ async fn source_page(
     // `checkout_dir` derives a key from it; neither creates anything, which is the property this
     // page needs — `SourceCache::new` makes the directory it is given, and a monitor that created
     // a cache would be a monitor that changed what it observes.
-    let root = trigon_registry::SourceCache::default_root();
-    let checkout = crate::provenance::checkout_dir(&root, &src.repo_url, &src.commit);
+    let checkout = crate::provenance::checkout_dir(&sweep.sources, &src.repo_url, &src.commit);
     let started = std::time::Instant::now();
     let (joined, scope) = crate::provenance::join(
         &members,
@@ -3590,7 +3788,7 @@ async fn source_page(
         took.as_millis(),
     ));
 
-    page(&sweep.tab_title(Some(&name)), false, &body, &sweep.bind).into_response()
+    page(&tab, false, &body, &sweep.bind).into_response()
 }
 
 /// A verdict's whole derivation on one line.
@@ -3617,7 +3815,9 @@ fn chain_ribbon(
             value
         )
     };
-    let short = |h: &str| esc(&h[..8.min(h.len())]).to_string();
+    // `short_hex`, not a byte slice: the commit and the strategy digest are read from a `run.json`,
+    // and eight bytes of a hand-edited one can end inside a character.
+    let short = |h: &str| esc(short_hex(h, 8));
     let arrow = "<span class=\"dim\" style=\"margin:0 .35rem\">→</span>";
 
     let mut parts: Vec<String> = Vec::new();
@@ -4163,6 +4363,8 @@ mod tests {
 
     fn sweep_at(work: PathBuf) -> Sweep {
         Sweep {
+            // Never this host's cache: a directory under the test's own that nobody made.
+            sources: work.join("no-source-cache"),
             work,
             targets: None,
             bind: "127.0.0.1:0".into(),
@@ -4383,5 +4585,3216 @@ mod tests {
         assert_eq!(ago(5), "5s ago");
         assert_eq!(ago(300), "5m ago");
         assert_eq!(ago(7200), "2h ago");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The pages, as a browser gets them. Each handler is called the way the router calls it and
+    // its body read back, because what these pages promise is a sentence on a page: a helper can
+    // hand the right value to a caller that then renders it as the wrong one.
+    // -----------------------------------------------------------------------------------------
+
+    fn shared(s: Sweep) -> State<std::sync::Arc<Sweep>> {
+        State(std::sync::Arc::new(s))
+    }
+
+    async fn text(r: Response) -> String {
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .expect("a page body");
+        String::from_utf8(bytes.to_vec()).expect("a page is UTF-8")
+    }
+
+    async fn board_page(s: Sweep) -> String {
+        text(board(shared(s)).await).await
+    }
+
+    async fn run_page(s: Sweep, index: usize) -> String {
+        text(run(shared(s), UrlPath(index)).await).await
+    }
+
+    async fn network_page(s: Sweep, index: usize) -> String {
+        text(network(shared(s), UrlPath(index)).await).await
+    }
+
+    async fn compare_page(s: Sweep, index: usize) -> String {
+        text(compare(shared(s), UrlPath(index)).await).await
+    }
+
+    async fn source_of(s: Sweep, index: usize) -> String {
+        text(source_page(shared(s), UrlPath(index)).await).await
+    }
+
+    async fn cluster_page(s: Sweep, key: &str) -> Response {
+        cluster(shared(s), Query(ClusterQuery { key: key.into() })).await
+    }
+
+    async fn api(s: Sweep) -> serde_json::Value {
+        serde_json::from_str(&text(api_state(shared(s)).await).await).expect("the API is JSON")
+    }
+
+    /// One GET through the real router, on a loopback port the OS chose: the status, and the whole
+    /// response with its headers.
+    async fn served(s: Sweep, path: &str) -> (u16, String) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = app(std::sync::Arc::new(s));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!("GET {path} HTTP/1.1\r\nHost: watch\r\nConnection: close\r\n\r\n");
+        conn.write_all(request.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        conn.read_to_end(&mut out).await.unwrap();
+        server.abort();
+        let out = String::from_utf8_lossy(&out).into_owned();
+        let status = out
+            .split(' ')
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        (status, out)
+    }
+
+    /// A gzipped tarball, one `(path, body, mtime)` per member, in the order given.
+    fn tgz(members: &[(&str, &[u8], u64)]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut b = ::tar::Builder::new(Vec::new());
+        for (path, body, mtime) in members {
+            let mut h = ::tar::Header::new_ustar();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_mtime(*mtime);
+            h.set_cksum();
+            b.append_data(&mut h, path, *body).unwrap();
+        }
+        let tar = b.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&tar).unwrap();
+        gz.finish().unwrap()
+    }
+
+    /// A stored zip, one `(path, body, unix mode)` per member.
+    fn zip_of(members: &[(&str, &[u8], u32)]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut w = zip_crate::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (path, body, mode) in members {
+            let opts: zip_crate::write::FileOptions<'_, ()> =
+                zip_crate::write::FileOptions::default()
+                    .compression_method(zip_crate::CompressionMethod::Stored)
+                    .last_modified_time(zip_crate::DateTime::default())
+                    .unix_permissions(*mode);
+            w.start_file(*path, opts).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    /// A single rebuild's work directory as a run leaves it: `run.json`, the published artifact at
+    /// the root under the registry's file name, and the rebuilt one under `rebuild/<run id>/`.
+    fn one_run(name: &str, report: &str, file: &str, upstream: &[u8], rebuild: &[u8]) -> PathBuf {
+        let w = work_dir(name);
+        put(w.join("run.json"), report);
+        std::fs::write(w.join(file), upstream).unwrap();
+        let built = w.join("rebuild").join("1789000000-run");
+        std::fs::create_dir_all(&built).unwrap();
+        std::fs::write(built.join(file), rebuild).unwrap();
+        w
+    }
+
+    /// A `run.json` with the fields most tests do not care about filled in.
+    fn run_json(purl: &str, outcome: &str) -> String {
+        serde_json::json!({
+            "purl": purl,
+            "started": "2026-09-17T19:57:42Z",
+            "finished": "2026-09-17T19:58:42Z",
+            "outcome": outcome,
+            "model_calls": 0,
+        })
+        .to_string()
+    }
+
+    fn sweep_json(sha: Option<&str>, count: usize, timeout: u64, finished: Option<&str>) -> String {
+        serde_json::json!({
+            "started": "2026-09-17T19:57:42Z",
+            "pid": 1,
+            "version": "0.0.0",
+            "targets_path": null,
+            "targets_sha256": sha,
+            "targets_count": count,
+            "resumed_from": 0,
+            "image": "docker.io/library/debian@sha256:aa",
+            "egress": "mirror-only",
+            "timewarp": null,
+            "model": null,
+            "store": null,
+            "definitions": null,
+            "timeout_seconds": timeout,
+            "finished": finished,
+        })
+        .to_string()
+    }
+
+    /// The target in flight, as a heartbeat carries it.
+    fn in_flight(
+        purl: &str,
+        elapsed: u64,
+        phase: Option<&str>,
+        in_phase: u64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "index": 1,
+            "purl": purl,
+            "started": "2026-09-17T19:57:42Z",
+            "elapsed_seconds": elapsed,
+            "phase": phase,
+            "phase_elapsed_seconds": in_phase,
+        })
+    }
+
+    fn status_json(
+        state: &str,
+        heartbeat: &str,
+        pid: u32,
+        current: Option<serde_json::Value>,
+    ) -> String {
+        serde_json::json!({
+            "heartbeat": heartbeat,
+            "pid": pid,
+            "state": state,
+            "done": 1,
+            "total": 7,
+            "current": current,
+        })
+        .to_string()
+    }
+
+    /// `results.tsv`, one `(purl, label)` per row.
+    fn results(rows: &[(&str, &str)]) -> String {
+        rows.iter()
+            .map(|(purl, label)| format!("{purl}\t{label}\t1.0\t\t0\n"))
+            .collect()
+    }
+
+    const XSS: &str = "<img src=x onerror=alert(1)>";
+
+    // --- what reaches the filesystem, and what reaches the page ----------------------------------
+
+    #[tokio::test]
+    async fn the_only_path_parameter_reaches_the_filesystem_as_a_number_or_not_at_all() {
+        // `/run/{index}` is the one request string joined to a path, and what keeps it off the
+        // filesystem is the extractor refusing anything that is not an integer. A secret beside
+        // the work directory stands in for what a traversal would be after.
+        let root = work_dir("path-parameter");
+        put(root.join("secret.txt"), "the-secret-contents");
+        let w = root.join("work");
+        put(w.join("run.json"), &run_json("pkg:npm/a@1", "exact"));
+
+        for path in [
+            "/run/..%2Fsecret.txt",
+            "/run/..%2F..%2Fsecret.txt",
+            "/run/../secret.txt",
+            "/run/-1",
+            "/run/1e3",
+            "/run/18446744073709551616",
+            "/run/0/network/..%2F..%2Fsecret.txt",
+        ] {
+            let (status, page) = served(sweep_at(w.clone()), path).await;
+            assert!(
+                (400..500).contains(&status),
+                "`{path}` was answered {status}, not refused:\n{page}"
+            );
+            assert!(!page.contains("the-secret-contents"), "`{path}`:\n{page}");
+        }
+        // And the number itself is served.
+        let (status, page) = served(sweep_at(w), "/run/0").await;
+        assert_eq!(status, 200, "{page}");
+        assert!(page.contains("<h1>npm/a@1</h1>"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_cluster_key_survives_the_round_trip_through_the_board_s_link() {
+        // A real key carries slashes and colons, and its subject is whatever the log said — a
+        // space, an ampersand, a name that is not ASCII. The board writes the link, the router
+        // decodes it, and the page at the end has to be the cluster the link was for.
+        let key = "cc/missing-header:python h&x=é";
+        let w = work_dir("cluster-link");
+        put(
+            w.join("results.tsv"),
+            &format!(
+                "pkg:npm/a@1\tbuild-failed:deps\t1.0\t{key}\t0\npkg:npm/b@1\texact\t1.0\t\t0\n"
+            ),
+        );
+        let board = board_page(sweep_at(w.clone())).await;
+        let href = board
+            .split("href=\"/cluster?key=")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("the board links the cluster")
+            .to_string();
+        assert!(!href.contains('&') && !href.contains(' '), "{href}");
+
+        let (status, page) = served(sweep_at(w.clone()), &format!("/cluster?key={href}")).await;
+        assert_eq!(status, 200, "{page}");
+        assert!(
+            page.contains(&format!("<h1><code>{}</code></h1>", esc(key))),
+            "{page}"
+        );
+        assert!(page.contains("1 target(s) failed this way"), "{page}");
+
+        // A key nothing carries is not an empty cluster page: it goes back to the board.
+        let (status, page) = served(sweep_at(w), "/cluster?key=nobody").await;
+        assert_eq!(status, 303, "{page}");
+        assert!(
+            page.to_ascii_lowercase().contains("\r\nlocation: /\r\n"),
+            "{page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_a_package_wrote_reaches_a_page_as_markup() {
+        // Every string on these pages came from a package or from a build it controlled
+        // (`docs/12-security.md` §4). One payload in every field of `run.json` a page renders, in
+        // the build log, the strategy, the guard manifest, the transcript and a member's name —
+        // and every page that shows any of them is read.
+        let report = serde_json::json!({
+            "purl": format!("pkg:npm/{XSS}@1"),
+            "started": "2026-09-17T19:57:42Z",
+            "finished": "2026-09-17T19:58:42Z",
+            "outcome": "build-failed:deps",
+            "void_reason": XSS,
+            "failure": {"code": "npm/peer-conflict", "subject": XSS, "fault": "build",
+                        "retryable": false, "repairable": true, "evidence": XSS},
+            "source": {"repo_url": XSS, "declared_url": XSS, "commit": XSS, "ref_name": XSS,
+                       "subdir": XSS, "how": "exact_tag"},
+            "assumptions": [XSS],
+            "guard_notes": [XSS],
+            "timings": [[XSS, 1.0]],
+            "hosts": {XSS: {"requests": 1, "throttled": 0, "failed": 0}},
+            "repairs": [XSS],
+            "repair_stopped": XSS,
+            "model": XSS,
+            "model_calls": 1,
+            "derivation": XSS,
+            "confidence": XSS,
+            "egress": XSS,
+            "strategy_digest": XSS,
+            "fetch_cache": {"hits": 1, "fetched": 1, "oldest_index_snapshot": XSS},
+        })
+        .to_string();
+        let member = format!("package/{XSS}.js");
+        let w = one_run(
+            "escape-everything",
+            &report,
+            "a-1.tgz",
+            &tgz(&[(&member, b"published", 1)]),
+            &tgz(&[(&member, b"rebuilt", 1)]),
+        );
+        put(
+            w.join("rebuild").join("build.log"),
+            "<script>alert(1)</script>\n",
+        );
+        put(w.join("strategy.yaml"), XSS);
+        put(w.join("guard.json"), XSS);
+        put(
+            w.join("rebuild").join("network.jsonl"),
+            &format!(
+                "{}\n",
+                serde_json::json!({"route": XSS, "url": XSS, "sha256": XSS, "bytes": 1,
+                                   "checked": "opened"})
+            ),
+        );
+        let key = format!("npm/peer-conflict:{XSS}");
+
+        // The verdict sentence says one thing, in precedence order, so a void hides the two
+        // answers it outranks: an error of ours, and the rungs' declines. Each gets a run of its
+        // own, and the second carries the payload as its outcome, since nothing above it does.
+        let errored = work_dir("escape-error");
+        put(
+            errored.join("run.json"),
+            &serde_json::json!({"purl": "pkg:npm/a@1", "started": XSS, "finished": XSS,
+                                "error": XSS, "model_calls": 0})
+            .to_string(),
+        );
+        let declined = one_run(
+            "escape-declines",
+            &serde_json::json!({"purl": "pkg:npm/a@1", "started": "2026-09-17T19:57:42Z",
+                                "finished": "2026-09-17T19:58:42Z", "outcome": XSS,
+                                "declines": [XSS], "model_calls": 0})
+            .to_string(),
+            "a-1.tgz",
+            &tgz(&[("package/a.js", b"published", 1)]),
+            &tgz(&[("package/a.js", b"rebuilt", 1)]),
+        );
+        // And a directory of runs, whose board is a different renderer: one directory named with
+        // the payload — a directory's name is whatever the caller passed to `--work` — and one
+        // whose record names the payload as its target and its source.
+        let shelf = work_dir("escape-shelf");
+        put(shelf.join(XSS).join("strategy.yaml"), "id: x\n");
+        put(
+            shelf.join("b").join("run.json"),
+            &serde_json::json!({
+                "purl": format!("pkg:npm/{XSS}@1"),
+                "started": "2026-09-17T19:57:42Z",
+                "finished": "2026-09-17T19:58:42Z",
+                "outcome": "build-failed:deps",
+                "failure": {"code": "npm/peer-conflict", "subject": XSS, "fault": "build",
+                            "retryable": false, "repairable": true, "evidence": XSS},
+                "source": {"repo_url": XSS, "commit": XSS, "subdir": XSS, "how": "exact_tag"},
+                "model_calls": 0,
+            })
+            .to_string(),
+        );
+
+        let pages = [
+            ("board", board_page(sweep_at(w.clone())).await),
+            ("run", run_page(sweep_at(w.clone()), 0).await),
+            ("network", network_page(sweep_at(w.clone()), 0).await),
+            ("compare", compare_page(sweep_at(w.clone()), 0).await),
+            ("source", source_of(sweep_at(w.clone()), 0).await),
+            ("cluster", text(cluster_page(sweep_at(w), &key).await).await),
+            ("errored run", run_page(sweep_at(errored), 0).await),
+            ("declined board", board_page(sweep_at(declined.clone())).await),
+            ("declined run", run_page(sweep_at(declined.clone()), 0).await),
+            ("declined compare", compare_page(sweep_at(declined), 0).await),
+            ("shelf board", board_page(sweep_at(shelf.clone())).await),
+            ("shelf run", run_page(sweep_at(shelf.clone()), 0).await),
+            ("shelf network", network_page(sweep_at(shelf.clone()), 0).await),
+            ("shelf compare", compare_page(sweep_at(shelf.clone()), 0).await),
+            ("shelf source", source_of(sweep_at(shelf.clone()), 0).await),
+            ("shelf's other run", run_page(sweep_at(shelf.clone()), 1).await),
+            ("shelf's other source", source_of(sweep_at(shelf.clone()), 1).await),
+            ("shelf cluster", text(cluster_page(sweep_at(shelf), &key).await).await),
+        ];
+        let shown = "&lt;img src=x onerror=alert(1)&gt;";
+        for (name, page) in &pages {
+            assert!(
+                !page.contains("<img") && !page.contains("<script"),
+                "the {name} page rendered a package's string as markup:\n{page}"
+            );
+            assert!(
+                page.contains(shown),
+                "the {name} page should show the string, escaped, rather than drop it:\n{page}"
+            );
+        }
+        // Each field is on its page, and not merely some other field that carries the payload: a
+        // renderer that dropped one would pass the loop above on the strength of its neighbours.
+        let on = |which: &str, what: String| {
+            let page = &pages.iter().find(|(n, _)| *n == which).unwrap().1;
+            assert!(page.contains(&what), "the {which} page is missing `{what}`:\n{page}");
+        };
+        on("errored run", format!("an error of ours.</strong> {shown}<br>"));
+        on("declined run", format!("<li>{shown}</li>"));
+        on("declined board", format!(">{shown}</span>"));
+        on("declined compare", format!("It read <strong>{shown}</strong>"));
+        on("shelf board", format!("<a href=\"/run/0\"><code>{shown}</code></a>"));
+        on("shelf board", format!("<a href=\"/run/1\">npm/{shown}@1</a>"));
+        on("shelf board", format!("<code>{shown}</code>@<code title=\"{shown}\">"));
+        on("shelf board", format!("<span class=\"dim\">{shown}</span>"));
+        on("shelf source", format!("<h1>{shown}</h1>"));
+        on("shelf's other source", format!("<h1>npm/{shown}@1</h1>"));
+    }
+
+    // --- the store: four answers, not one `None` ------------------------------------------------
+
+    fn record(id: &str, target: &str) -> trigon_store::RunRecord {
+        let upstream = b"the published bytes";
+        trigon_store::RunRecord::new(
+            id,
+            target,
+            trigon_store::ArtifactRef {
+                name: "a-1.tgz".into(),
+                sha256: trigon_store::digest_of(upstream),
+                bytes: upstream.len() as u64,
+                stored: false,
+            },
+            trigon_store::Environment {
+                base_image: "docker.io/library/debian@sha256:aa".into(),
+                egress: "mirror-only".into(),
+                isolation: "user_ns".into(),
+                attestable: true,
+                registry_moment: None,
+                pin: None,
+                guard_manifest: None,
+                derived_image: None,
+                guarded_members: None,
+            },
+            "2026-09-17T19:57:42Z",
+        )
+    }
+
+    #[tokio::test]
+    async fn a_store_path_that_is_not_there_is_our_mistake_and_stays_not_there() {
+        // A mistyped `--store` used to render the sentence a run genuinely absent from a store
+        // gets — which explains the absence as the run being evidence of nothing. Our own
+        // configuration error, told to the reader as a finding about their package. And the page
+        // is read-only: it must not make the store it was pointed at.
+        let w = work_dir("store-missing");
+        put(w.join("run.json"), &run_json("pkg:npm/a@1", "exact"));
+        let store = w.join("no-such-store");
+        let page = run_page(
+            Sweep {
+                store: Some(store.clone()),
+                ..sweep_at(w)
+            },
+            0,
+        )
+        .await;
+        assert!(page.contains("could not be opened"), "{page}");
+        assert!(
+            page.contains("a problem with <code>--store</code>, not with the run"),
+            "{page}"
+        );
+        assert!(
+            !page.contains("evidence of nothing"),
+            "a mistyped path must not explain a run away:\n{page}"
+        );
+        assert!(
+            !store.exists(),
+            "a read-only page created the store it was asked to read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_target_is_not_known_is_not_looked_up_under_no_target() {
+        // A run that left no report has an empty purl, because nothing on disk says which target
+        // it was. Looking that up searched the store for `""` and reported the run absent from it —
+        // "none of them is this target" about a target nobody named, with the sentence that
+        // explains an absence as a run that was evidence of nothing.
+        //
+        // A report that is there and will not parse leaves the same empty purl, and it is a torn
+        // write rather than no report: the note says which.
+        let w = work_dir("store-no-target");
+        put(w.join("half-a-run").join("strategy.yaml"), "id: x\n");
+        put(w.join("torn").join("run.json"), "{");
+        let store = w.join("store");
+        trigon_store::Store::local(&store).unwrap();
+        for (index, why) in [(0, "it wrote no report"), (1, "its report will not parse")] {
+            let page = run_page(
+                Sweep {
+                    store: Some(store.clone()),
+                    ..sweep_at(w.clone())
+                },
+                index,
+            )
+            .await;
+            assert!(!page.contains("none of them is this target"), "{page}");
+            assert!(!page.contains("evidence of nothing"), "{page}");
+            assert!(
+                page.contains(&format!(
+                    "<h2>Run record</h2><p class=\"note\">nothing on disk says which target this \
+                     run was — {why} — so the store was not searched for it"
+                )),
+                "{page}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_store_and_a_store_without_this_target_are_different_answers() {
+        let dir = work_dir("store-absent").join("store");
+        let store = trigon_store::Store::local(&dir).unwrap();
+        let empty = store_panel(&dir, "pkg:npm/a@1").await;
+        assert!(
+            empty.contains("holds 0 run(s)") && empty.contains("because it holds none at all"),
+            "{empty}"
+        );
+
+        store
+            .put_run(&record("1789000000-other", "pkg:npm/other@1"))
+            .await
+            .unwrap();
+        let other = store_panel(&dir, "pkg:npm/a@1").await;
+        assert!(
+            other.contains("holds 1 run(s) and none of them is this target (read in"),
+            "{other}"
+        );
+        assert!(!other.contains("none at all"), "{other}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_store_whose_runs_cannot_be_listed_is_unknown_rather_than_empty() {
+        // Opened, and its index could not be read: whether this target is in it is not known, and
+        // "none of them is this target" would be a claim the page never checked.
+        let dir = work_dir("store-unlistable").join("store");
+        std::fs::create_dir_all(&dir).unwrap();
+        // `runs` is a link to itself, so the store opens and listing it cannot finish.
+        std::os::unix::fs::symlink("runs", dir.join("runs")).unwrap();
+        let page = store_panel(&dir, "pkg:npm/a@1").await;
+        assert!(page.contains("could not be listed"), "{page}");
+        assert!(page.contains("unknown rather than no"), "{page}");
+        assert!(!page.contains("none of them is this target"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_record_that_says_its_bytes_are_kept_is_checked_against_the_store() {
+        // The record's word alone would show bytes the store has lost as present.
+        let dir = work_dir("store-kept").join("store");
+        let store = trigon_store::Store::local(&dir).unwrap();
+        let kept = store
+            .blobs()
+            .put(b"rebuilt and kept".to_vec())
+            .await
+            .unwrap();
+        let lost = trigon_store::digest_of(b"named as kept and never put");
+        let rebuild = |sha256, stored| {
+            Some(trigon_store::ArtifactRef {
+                name: "a-1.tgz".into(),
+                sha256,
+                bytes: 16,
+                stored,
+            })
+        };
+        for (id, target, artifact) in [
+            ("1789000001-kept", "pkg:npm/kept@1", rebuild(kept, true)),
+            ("1789000002-lost", "pkg:npm/lost@1", rebuild(lost, true)),
+            (
+                "1789000003-pruned",
+                "pkg:npm/pruned@1",
+                rebuild(kept, false),
+            ),
+            ("1789000004-none", "pkg:npm/none@1", None),
+        ] {
+            let mut r = record(id, target);
+            r.outcome = Some("divergent".into());
+            r.rebuild = artifact;
+            store.put_run(&r).await.unwrap();
+        }
+
+        let panel = store_panel(&dir, "pkg:npm/kept@1").await;
+        assert!(panel.contains(&kept.to_hex()[..16]), "{panel}");
+        assert!(
+            !panel.contains("bytes missing") && !panel.contains("bytes pruned"),
+            "{panel}"
+        );
+        let panel = store_panel(&dir, "pkg:npm/lost@1").await;
+        assert!(
+            panel.contains(
+                "bytes missing: the record says they are kept, and the store has no blob of them"
+            ),
+            "{panel}"
+        );
+        let panel = store_panel(&dir, "pkg:npm/pruned@1").await;
+        assert!(panel.contains("bytes pruned"), "{panel}");
+        assert!(!panel.contains("bytes missing"), "{panel}");
+        let panel = store_panel(&dir, "pkg:npm/none@1").await;
+        assert!(
+            panel.contains("<td class=\"dim\">rebuild</td><td><span class=\"note\">none recorded"),
+            "{panel}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_record_leaves_out_what_it_did_not_measure_rather_than_printing_zero() {
+        // `docs/03` §3: on this record `None` means no data and never zero.
+        let dir = work_dir("store-costs").join("store");
+        let store = trigon_store::Store::local(&dir).unwrap();
+        let mut r = record("1789000001-costs", "pkg:npm/costs@1");
+        r.outcome = Some("normalized".into());
+        r.environment.attestable = false;
+        r.environment.pin = Some(trigon_store::PinEvidence {
+            index_requests: 3,
+            versions_withheld: 1,
+            artifact_requests: 2,
+            toolchain_requests: 0,
+            rejected: 0,
+        });
+        r.costs = Some(trigon_store::Costs {
+            build_seconds: Some(12.34),
+            tokens: vec![
+                trigon_store::Tokens {
+                    input: 100,
+                    cached_input: 0,
+                    output: 20,
+                    model: "m-a".into(),
+                    calls: 1,
+                },
+                trigon_store::Tokens {
+                    input: 7,
+                    cached_input: 0,
+                    output: 8,
+                    model: "m<b>".into(),
+                    calls: 3,
+                },
+            ],
+            egress_bytes: Some(1_048_576),
+            ..Default::default()
+        });
+        r.derivation = Some("heuristic".into());
+        r.guard_trips = vec!["lib/a.js arrived and shipped".into()];
+        r.attestations = vec!["a".into(), "b".into()];
+        store.put_run(&r).await.unwrap();
+
+        let mut bare = record("1789000002-bare", "pkg:npm/bare@1");
+        bare.costs = Some(trigon_store::Costs::default());
+        bare.environment.pin = Some(trigon_store::PinEvidence {
+            index_requests: 0,
+            versions_withheld: 0,
+            artifact_requests: 0,
+            toolchain_requests: 0,
+            rejected: 0,
+        });
+        bare.network_transcript = None;
+        store.put_run(&bare).await.unwrap();
+
+        let p = store_panel(&dir, "pkg:npm/costs@1").await;
+        assert!(p.contains("12.3s building"), "{p}");
+        assert!(
+            !p.contains("inference"),
+            "an unmeasured phase is left out:\n{p}"
+        );
+        assert!(p.contains("100 in / 20 out over 1 call to m-a"), "{p}");
+        assert!(p.contains("7 in / 8 out over 3 calls to m&lt;b&gt;"), "{p}");
+        assert!(
+            p.contains("1.0 MB fetched") && !p.contains("bytes fetched"),
+            "{p}"
+        );
+        assert!(p.contains("mirror-only · no network transcript"), "{p}");
+        assert!(p.contains("the pin bound"), "{p}");
+        assert!(
+            p.contains("<span class=\"void\">lib/a.js arrived and shipped</span>"),
+            "{p}"
+        );
+        assert!(p.contains("2 statement(s)"), "{p}");
+        assert!(
+            p.contains("<td class=\"dim\">derivation</td><td>heuristic"),
+            "{p}"
+        );
+
+        let p = store_panel(&dir, "pkg:npm/bare@1").await;
+        assert!(
+            !p.contains("<td class=\"dim\">cost</td>"),
+            "a cost with nothing measured is no row, not a row of zeroes:\n{p}"
+        );
+        assert!(
+            p.contains("no transcript: this run cannot say what the build fetched"),
+            "{p}"
+        );
+        assert!(p.contains("egress fully accounted for"), "{p}");
+        assert!(
+            p.contains("the pin cannot be confirmed from this run"),
+            "{p}"
+        );
+        assert!(!p.contains("statement(s)"), "{p}");
+
+        // What was measured is printed, in its unit, and a transcript is named by its digest.
+        let transcript = trigon_store::digest_of(b"the transcript");
+        let mut measured = record("1789000003-measured", "pkg:npm/measured@1");
+        measured.costs = Some(trigon_store::Costs {
+            inference_seconds: Some(3.0),
+            ..Default::default()
+        });
+        measured.network_transcript = Some(transcript);
+        store.put_run(&measured).await.unwrap();
+        let p = store_panel(&dir, "pkg:npm/measured@1").await;
+        assert!(
+            p.contains("<td class=\"dim\">cost</td><td>3.0s inference</td>"),
+            "{p}"
+        );
+        assert!(
+            p.contains(&format!(
+                "transcript <code>{}</code>",
+                &transcript.to_hex()[..16]
+            )),
+            "{p}"
+        );
+    }
+
+    // --- a sweep's state, and what the strip says about it ---------------------------------------
+
+    #[tokio::test]
+    async fn every_sweep_state_is_named_and_only_a_live_one_keeps_refreshing() {
+        // Each state is a different instruction to the reader — wait, look, or stop waiting — and
+        // a page that keeps refreshing after the sweep is gone is what a stale page looks like
+        // pretending to be alive.
+        let now = crate::now_rfc3339();
+        let me = std::process::id();
+        let long_ago = "2020-01-01T00:00:00Z";
+        let refresh = "<meta http-equiv=\"refresh\"";
+        let cases = [
+            (
+                "live-finished",
+                Some(status_json("finished", long_ago, me, None)),
+                sweep_json(None, 7, 60, Some("2026-09-17T20:00:00Z")),
+                "finished",
+                "finished at 2026-09-17T20:00:00Z",
+                false,
+            ),
+            (
+                "live-unresponsive",
+                Some(status_json("running", long_ago, me, None)),
+                sweep_json(None, 7, 60, None),
+                "UNRESPONSIVE",
+                "the heartbeat stopped and the process is still there",
+                false,
+            ),
+            (
+                "live-stuck",
+                Some(status_json(
+                    "running",
+                    &now,
+                    me,
+                    Some(in_flight("pkg:npm/a@1", 600, Some("deps"), 65)),
+                )),
+                sweep_json(None, 7, 60, None),
+                "STUCK",
+                "on npm/a@1 for 600s, in <strong>deps</strong> for 65s — past the 60s ceiling",
+                true,
+            ),
+            (
+                "live-running",
+                Some(status_json(
+                    "running",
+                    &now,
+                    me,
+                    Some(in_flight("pkg:npm/a@1", 125, Some("deps"), 65)),
+                )),
+                sweep_json(None, 7, 3600, None),
+                "running",
+                "on npm/a@1 for 2m, in <strong>deps</strong> for 65s",
+                true,
+            ),
+            (
+                "live-between",
+                Some(status_json("running", &now, me, None)),
+                sweep_json(None, 7, 3600, None),
+                "running",
+                "between targets",
+                true,
+            ),
+            (
+                "live-starting",
+                Some(status_json("starting", &now, me, None)),
+                sweep_json(None, 7, 3600, None),
+                "starting",
+                "no target has been attempted yet",
+                true,
+            ),
+            (
+                "live-unreadable",
+                Some("{\"heartbeat\":".to_string()),
+                sweep_json(None, 7, 3600, None),
+                "state unreadable",
+                "status.json is present and did not parse",
+                false,
+            ),
+            (
+                "live-unknown",
+                None,
+                sweep_json(None, 7, 3600, None),
+                "state unknown",
+                "this directory has no status.json",
+                false,
+            ),
+        ];
+        for (name, status, sweep, word, detail, live) in cases {
+            let w = work_dir(name);
+            put(w.join("results.tsv"), &results(&[("pkg:npm/z@1", "exact")]));
+            put(w.join("sweep.json"), &sweep);
+            if let Some(s) = status {
+                put(w.join("status.json"), &s);
+            }
+            let page = board_page(sweep_at(w)).await;
+            assert!(
+                page.contains(&format!("<strong>{word}</strong>")),
+                "{name}:\n{page}"
+            );
+            assert!(page.contains(detail), "{name}:\n{page}");
+            assert_eq!(
+                page.contains(refresh),
+                live,
+                "{name} refreshes wrongly:\n{page}"
+            );
+        }
+
+        // A dead pid needs `/proc` to be seen as dead: without it the page must not guess, and
+        // an unknown pid is read as alive.
+        if Path::new("/proc").is_dir() {
+            let w = work_dir("live-stopped");
+            put(w.join("results.tsv"), &results(&[("pkg:npm/z@1", "exact")]));
+            // Past the kernel's ceiling on pid numbers, so no process has it.
+            put(
+                w.join("status.json"),
+                &status_json("running", long_ago, u32::MAX, None),
+            );
+            let page = board_page(sweep_at(w)).await;
+            assert!(page.contains("<strong>stopped</strong>"), "{page}");
+            assert!(
+                page.contains(
+                    "the target it was on has no outcome, which is not the same as failing"
+                ),
+                "{page}"
+            );
+            assert!(!page.contains(refresh), "{page}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sweep_counts_against_its_corpus_and_links_each_row_to_the_directory_it_numbered() {
+        // The sweep names each evidence directory by the target's line in the targets file, so a
+        // row that landed second may live in `000`. Comments and blank lines are not targets.
+        let w = work_dir("corpus");
+        let targets = w.join("targets.txt");
+        put(
+            targets.clone(),
+            "# the corpus\n\npkg:npm/b@1\n  pkg:npm/a@1  \n\npkg:npm/c@1\n",
+        );
+        put(
+            w.join("results.tsv"),
+            &results(&[("pkg:npm/a@1", "exact"), ("pkg:npm/b@1", "divergent")]),
+        );
+        let s = Sweep {
+            targets: Some(targets.clone()),
+            ..sweep_at(w.clone())
+        };
+        let v = s.read();
+        assert_eq!(
+            v.targets,
+            Some(vec![
+                "pkg:npm/b@1".to_string(),
+                "pkg:npm/a@1".into(),
+                "pkg:npm/c@1".into()
+            ])
+        );
+        let strip = state_strip(&v, s.targets.as_deref());
+        assert!(strip.contains("2 of 3 attempted"), "{strip}");
+        assert!(
+            strip.contains(&format!("targets {}", targets.display())),
+            "{strip}"
+        );
+        let page = board_page(s).await;
+        assert!(page.contains("<a href=\"/run/1\">npm/a@1</a>"), "{page}");
+        assert!(page.contains("<a href=\"/run/0\">npm/b@1</a>"), "{page}");
+
+        // Without a targets file, the count the sweep recorded about itself.
+        put(w.join("sweep.json"), &sweep_json(None, 7, 60, None));
+        let strip = state_strip(&sweep_at(w.clone()).read(), None);
+        assert!(strip.contains("2 of 7 attempted"), "{strip}");
+
+        // And without either, the total is unknown rather than the number attempted.
+        let bare = work_dir("corpus-unknown");
+        put(
+            bare.join("results.tsv"),
+            &results(&[("pkg:npm/a@1", "exact")]),
+        );
+        let strip = state_strip(&sweep_at(bare).read(), None);
+        assert!(
+            strip.contains("1 attempted, of an unknown total"),
+            "{strip}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_row_the_corpus_does_not_name_links_nowhere_and_an_uncounted_column_is_a_dash() {
+        // A resumed sweep can carry a row for a target its current targets file no longer lists.
+        // Its directory number would be a guess, and a guessed link opens somebody else's run.
+        let w = work_dir("corpus-stray-row");
+        let targets = w.join("targets.txt");
+        put(targets.clone(), "pkg:npm/a@1\n");
+        put(
+            w.join("results.tsv"),
+            "pkg:npm/a@1\texact\t1.0\t\t0\npkg:npm/gone@1\tdivergent\t2.0\n",
+        );
+        let page = board_page(Sweep {
+            targets: Some(targets),
+            ..sweep_at(w)
+        })
+        .await;
+        assert!(page.contains("<a href=\"/run/0\">npm/a@1</a>"), "{page}");
+        assert!(page.contains("<tr><td>npm/gone@1</td>"), "{page}");
+        assert!(!page.contains("/run/1"), "{page}");
+        // A row written before the model column existed did not count, and must not read as 0.
+        assert!(
+            page.contains("<td class=\"n\"><span class=\"note\">—</span></td></tr>"),
+            "{page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_that_has_written_nothing_yet_says_so_rather_than_showing_empty_tables() {
+        // `sweep.json` is written before the first target; `results.tsv` only after it.
+        let w = work_dir("sweep-before-results");
+        put(w.join("sweep.json"), &sweep_json(None, 7, 60, None));
+        let s = sweep_at(w);
+        let v = s.read();
+        assert_eq!(v.layout, Layout::Sweep);
+        assert_eq!(board_panel(&s, &v), "", "no rows is no table");
+        let page = board_page(s).await;
+        assert!(
+            page.contains(
+                "no results.tsv here yet — either the sweep has not finished its first \
+                 target, or this is not a sweep work directory"
+            ),
+            "{page}"
+        );
+        assert!(page.contains("0 of 7 attempted"), "{page}");
+        assert!(page.contains("nothing has been attempted"), "{page}");
+
+        // A finished sweep that recorded no finishing time says finished, and no more.
+        let done = work_dir("sweep-finished-untimed");
+        put(
+            done.join("results.tsv"),
+            &results(&[("pkg:npm/a@1", "exact")]),
+        );
+        put(
+            done.join("status.json"),
+            &status_json("finished", "2020-01-01T00:00:00Z", 1, None),
+        );
+        let page = board_page(sweep_at(done)).await;
+        assert!(
+            page.contains("<strong>finished</strong>")
+                && page.contains("<span class=\"note\">finished</span>"),
+            "{page}"
+        );
+
+        // A work directory that does not exist is not a directory of runs.
+        let v = sweep_at(work_dir("sweep-missing").join("nowhere")).read();
+        assert_eq!(v.layout, Layout::Unknown);
+    }
+
+    #[test]
+    fn a_quiet_results_file_and_a_torn_row_are_both_said_out_loud() {
+        let w = work_dir("quiet-results");
+        put(
+            w.join("results.tsv"),
+            "pkg:npm/a@1\texact\t1.0\t\t0\npkg:npm/b@1\texact\tnot-a-number\t\t0\n",
+        );
+        let fresh = state_strip(&sweep_at(w.clone()).read(), None);
+        assert!(!fresh.contains("nothing new for a while"), "{fresh}");
+        assert!(
+            fresh.contains("1 line(s) in results.tsv did not parse and were dropped"),
+            "{fresh}"
+        );
+
+        std::fs::File::options()
+            .write(true)
+            .open(w.join("results.tsv"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200))
+            .unwrap();
+        let quiet = state_strip(&sweep_at(w).read(), None);
+        assert!(
+            quiet.contains("last result 2h ago — nothing new for a while"),
+            "{quiet}"
+        );
+    }
+
+    #[test]
+    fn a_single_run_says_how_long_it_took_or_exactly_why_it_cannot() {
+        let strip = |name: &str, file: &str, body: &str| {
+            let w = work_dir(name);
+            put(w.join(file), body);
+            let v = sweep_at(w).read();
+            assert_eq!(v.layout, Layout::Single, "{name}");
+            state_strip(&v, None)
+        };
+        let report = |started: &str, finished: Option<&str>| {
+            serde_json::json!({"purl": "pkg:npm/a@1", "started": started, "finished": finished,
+                               "model_calls": 0})
+            .to_string()
+        };
+        let t0 = "2026-09-17T19:57:42Z";
+
+        let whole = strip(
+            "single-whole",
+            "run.json",
+            &report(t0, Some("2026-09-17T19:58:42Z")),
+        );
+        assert!(
+            whole.contains("one run · pkg:npm/a@1 · 60s end to end"),
+            "{whole}"
+        );
+        let died = strip("single-died", "run.json", &report(t0, None));
+        assert!(
+            died.contains("no finish recorded: the process did not reach the end of the run"),
+            "{died}"
+        );
+        let odd_finish = strip(
+            "single-odd-finish",
+            "run.json",
+            &report(t0, Some("yesterday")),
+        );
+        assert!(
+            odd_finish.contains("finished at an instant this page cannot read"),
+            "{odd_finish}"
+        );
+        // A start that will not parse is not a process that died: this one wrote its finish.
+        let odd_start = strip(
+            "single-odd-start",
+            "run.json",
+            &report("last tuesday", Some("2026-09-17T19:58:42Z")),
+        );
+        assert!(
+            odd_start.contains("started at an instant this page cannot read"),
+            "{odd_start}"
+        );
+        assert!(
+            !odd_start.contains("did not reach the end of the run"),
+            "a run that wrote its finish is reported as having died:\n{odd_start}"
+        );
+        let torn = strip("single-torn", "run.json", "{\"purl\":");
+        assert!(torn.contains("a torn write, not an absent run"), "{torn}");
+        let no_report = strip("single-no-report", "strategy.yaml", "id: x\n");
+        assert!(
+            no_report.contains("no run.json, so this page is reading the files a rebuild leaves"),
+            "{no_report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_clock_cannot_be_read_shows_no_duration_rather_than_zero_seconds() {
+        // The synthetic row a report makes carries `0.0` where its clock cannot be read, and that
+        // is a placeholder, not a measurement. The run page printed it as `0s` for every run that
+        // died before writing its finish — which is exactly the run a reader opens.
+        let w = work_dir("no-clock");
+        put(
+            w.join("pkg-npm-a@1").join("run.json"),
+            r#"{"purl":"pkg:npm/a@1","started":"2026-09-17T19:57:42Z","outcome":"error:infra",
+                "error":"podman went away","model_calls":0}"#,
+        );
+        put(
+            w.join("pkg-npm-b@1").join("run.json"),
+            r#"{"purl":"pkg:npm/b@1","started":"2026-09-17T19:57:42Z",
+                "finished":"2026-09-17T19:59:12Z","outcome":"exact","model_calls":0}"#,
+        );
+        let died = run_page(sweep_at(w.clone()), 0).await;
+        assert!(
+            died.contains("no duration recorded") && !died.contains("· 0s"),
+            "{died}"
+        );
+        let whole = run_page(sweep_at(w), 1).await;
+        assert!(whole.contains("· 90s"), "{whole}");
+
+        let one = work_dir("no-clock-single");
+        put(
+            one.join("run.json"),
+            r#"{"purl":"pkg:npm/a@1","started":"2026-09-17T19:57:42Z","outcome":"void",
+                "model_calls":0}"#,
+        );
+        let page = run_page(sweep_at(one), 0).await;
+        assert!(
+            page.contains("no duration recorded") && !page.contains("· 0s"),
+            "{page}"
+        );
+
+        // A sweep's row is a measurement: `results.tsv` wrote the seconds down.
+        let sweep = work_dir("no-clock-sweep");
+        put(sweep.join("results.tsv"), "pkg:npm/a@1\texact\t0.0\t\t0\n");
+        let page = run_page(sweep_at(sweep), 0).await;
+        assert!(page.contains("· 0s"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn the_api_names_the_layout_and_hands_a_script_the_sentence_a_reader_sees() {
+        let unknown = work_dir("api-unknown");
+        assert_eq!(api(sweep_at(unknown)).await["layout"], "unknown");
+        let single = work_dir("api-single");
+        put(single.join("run.json"), &run_json("pkg:npm/a@1", "exact"));
+        assert_eq!(api(sweep_at(single)).await["layout"], "single");
+        let index = work_dir("api-index");
+        put(
+            index.join("a").join("run.json"),
+            &run_json("pkg:npm/a@1", "exact"),
+        );
+        assert_eq!(api(sweep_at(index)).await["layout"], "index");
+
+        // A maven purl joins its qualifiers with `&`, and a phase can carry an apostrophe. The page
+        // escapes both; the JSON is text, and a reader of it is owed the characters.
+        let purl = "pkg:maven/org.example/a@1?classifier=x&type=jar";
+        let w = work_dir("api-sweep");
+        put(
+            w.join("results.tsv"),
+            "pkg:npm/a@1\tbuild-failed:deps\t1.0\tk\t0\npkg:npm/b@1\tbuild-failed:deps\t1.0\tk\t0\n\
+             pkg:npm/c@1\texact\t1.0\t\t0\n",
+        );
+        put(w.join("sweep.json"), &sweep_json(None, 7, 3600, None));
+        put(
+            w.join("status.json"),
+            &status_json(
+                "running",
+                &crate::now_rfc3339(),
+                std::process::id(),
+                Some(in_flight(purl, 30, Some("it's-deps"), 5)),
+            ),
+        );
+        let j = api(sweep_at(w)).await;
+        assert_eq!(j["layout"], "sweep");
+        assert_eq!(j["state"], "running");
+        assert_eq!(j["total"], 7);
+        assert_eq!(j["attempted"], 3);
+        assert_eq!(
+            (j["reproduced"].clone(), j["evidence"].clone()),
+            (1.into(), 1.into())
+        );
+        assert_eq!(j["reproduction"], 1.0);
+        assert_eq!(j["clusters"][0]["key"], "k");
+        assert_eq!(j["clusters"][0]["members"], 2);
+        assert_eq!(j["current"]["purl"], purl);
+        assert!(j["results_age_seconds"].is_u64(), "{j}");
+        let detail = j["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("on maven/org.example/a@1?classifier=x&type=jar for 30s"),
+            "{detail}"
+        );
+        assert!(detail.contains("it's-deps"), "{detail}");
+        assert!(
+            !detail.contains("&amp;") && !detail.contains("&#39;") && !detail.contains('<'),
+            "the API handed a script the page's markup instead of its sentence: {detail}"
+        );
+    }
+
+    #[test]
+    fn stripping_the_markup_leaves_the_text_a_reader_saw() {
+        let html = format!(
+            "<br><span class=\"note\">on {} for 3s</span>",
+            esc("g/a@1?c=x&t=jar 'q' \"r\" <s>")
+        );
+        assert_eq!(strip_tags(&html), "on g/a@1?c=x&t=jar 'q' \"r\" <s> for 3s");
+        // An escaped entity in the text is text, and comes back as the entity, not as markup.
+        assert_eq!(strip_tags(&esc("&lt;")), "&lt;");
+    }
+
+    // --- against a baseline ----------------------------------------------------------------------
+
+    #[test]
+    fn a_baseline_of_a_different_corpus_is_refused_rather_than_compared() {
+        let base = work_dir("baseline-other-corpus");
+        put(base.join("results.tsv"), &results(&[("a", "exact")]));
+        put(
+            base.join("sweep.json"),
+            &sweep_json(Some("aaaa"), 1, 60, None),
+        );
+        let w = work_dir("baseline-this-corpus");
+        put(w.join("results.tsv"), &results(&[("a", "divergent")]));
+        put(w.join("sweep.json"), &sweep_json(Some("bbbb"), 1, 60, None));
+        let s = Sweep {
+            baseline: Some(base),
+            ..sweep_at(w)
+        };
+        let p = baseline_panel(&s, &s.read());
+        assert!(p.contains("these are sweeps of different corpora"), "{p}");
+        assert!(
+            !p.contains("NO LONGER REPRODUCES") && !p.contains("net gain"),
+            "a comparison across two lists is a number about the lists:\n{p}"
+        );
+    }
+
+    #[test]
+    fn a_baseline_that_is_not_a_work_directory_is_not_read_as_an_empty_sweep() {
+        // A mistyped `--baseline` read as a sweep that attempted nothing, so every target here was
+        // "in this sweep and not the baseline" and the verdict under them was "Not a gain" — our
+        // configuration error, rendered as a finding about the change.
+        let w = work_dir("baseline-mistyped");
+        put(w.join("results.tsv"), &results(&[("a", "exact")]));
+        let empty = work_dir("baseline-empty-dir");
+        for (base, why) in [
+            (w.join("no-such-sweep"), "there is nothing at that path"),
+            (empty, "it holds no sweep, no run and no directory of runs"),
+        ] {
+            let s = Sweep {
+                baseline: Some(base.clone()),
+                ..sweep_at(w.clone())
+            };
+            let p = baseline_panel(&s, &s.read());
+            assert!(
+                p.contains(&format!(
+                    "<code>{}</code> is not a work directory this page can read — {why} — so \
+                     nothing was compared against it",
+                    esc(&base.display().to_string())
+                )),
+                "{p}"
+            );
+            for claim in [
+                "in this sweep and not the baseline",
+                "Not a gain",
+                "net gain",
+                "nothing changed",
+            ] {
+                assert!(!p.contains(claim), "`{claim}` about no comparison:\n{p}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_baseline_that_cannot_be_read_is_not_said_to_hold_no_sweep() {
+        // A directory this user may not list, or may list and not enter, is one `read` finds
+        // nothing in — so the panel said "it holds no sweep" over a sweep that is there, which is
+        // "could not look" rendered as "not there".
+        use std::os::unix::fs::PermissionsExt as _;
+        let w = work_dir("baseline-sealed");
+        put(w.join("results.tsv"), &results(&[("a", "exact")]));
+        let sealed = w.join("sealed");
+        put(sealed.join("results.tsv"), &results(&[("a", "exact")]));
+        let set = |mode: u32| {
+            std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for mode in [0o000, 0o400] {
+            set(mode);
+            // A user the permissions do not stop (root) reads everything, and there is nothing to
+            // test.
+            let stopped = std::fs::read_to_string(sealed.join("results.tsv")).is_err();
+            let s = Sweep {
+                baseline: Some(sealed.clone()),
+                ..sweep_at(w.clone())
+            };
+            let p = baseline_panel(&s, &s.read());
+            set(0o755);
+            if stopped {
+                assert!(
+                    p.contains("— it could not be read as a directory: "),
+                    "{mode:o}: {p}"
+                );
+                assert!(!p.contains("holds no sweep"), "{mode:o}: {p}");
+                assert!(!p.contains("Not a gain"), "{mode:o}: {p}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_baseline_names_every_flip_and_calls_a_regression_a_regression() {
+        // A change that fixes one package and breaks another leaves the rate where it was. The
+        // panel's job is which targets flipped, and in which direction.
+        let base = work_dir("baseline-flips-before");
+        put(
+            base.join("results.tsv"),
+            &results(&[
+                ("a", "exact"),
+                ("b", "divergent"),
+                ("c", "exact"),
+                ("d", "error:infra"),
+                ("e", "exact"),
+                ("f", "exact"),
+                ("h", "build-failed:deps"),
+            ]),
+        );
+        put(
+            base.join("sweep.json"),
+            &sweep_json(Some("cccc"), 7, 60, None),
+        );
+        let w = work_dir("baseline-flips-after");
+        put(
+            w.join("results.tsv"),
+            &results(&[
+                ("a", "divergent"),
+                ("b", "exact"),
+                ("c", "error:infra"),
+                ("d", "normalized"),
+                ("e", "normalized"),
+                ("g", "exact"),
+                ("h", "build-failed:deps"),
+            ]),
+        );
+        put(w.join("sweep.json"), &sweep_json(Some("cccc"), 7, 60, None));
+        let s = Sweep {
+            baseline: Some(base.clone()),
+            ..sweep_at(w)
+        };
+        let p = baseline_panel(&s, &s.read());
+        assert!(
+            p.contains(&format!("<h2>Against {}</h2>", base.display())),
+            "{p}"
+        );
+        for (heading, who) in [
+            ("1 now reproduces", "b"),
+            ("1 NO LONGER REPRODUCES", "a"),
+            ("1 stopped producing evidence — ours, not the change's", "c"),
+            ("1 now produces evidence", "d"),
+            ("1 in this sweep and not the baseline", "g"),
+            ("1 in the baseline and not this sweep", "f"),
+        ] {
+            assert!(
+                p.contains(&format!(
+                    "<p><strong>{heading}</strong></p><ul><li><code>{who}</code></li></ul>"
+                )),
+                "`{heading}` should name `{who}`:\n{p}"
+            );
+        }
+        assert!(
+            p.contains("<strong>1 reproduce differently</strong>")
+                && p.contains("<li><code>e</code> exact → normalized</li>"),
+            "{p}"
+        );
+        // Unchanged, and not evidence either time: in no list.
+        assert!(!p.contains("<code>h</code>"), "{p}");
+        assert!(p.contains("NOT a net gain"), "{p}");
+        assert!(!p.contains("assumption rather than a check"), "{p}");
+    }
+
+    #[test]
+    fn a_baseline_says_when_nothing_changed_and_a_fix_alone_is_a_net_gain() {
+        let pair = |name: &str, before: &str, after: &str| {
+            let base = work_dir(&format!("{name}-before"));
+            put(base.join("results.tsv"), &results(&[("a", before)]));
+            let w = work_dir(&format!("{name}-after"));
+            put(w.join("results.tsv"), &results(&[("a", after)]));
+            let s = Sweep {
+                baseline: Some(base),
+                ..sweep_at(w)
+            };
+            baseline_panel(&s, &s.read())
+        };
+        let same = pair("baseline-same", "exact", "exact");
+        assert!(
+            same.contains("<p class=\"note\">nothing changed</p>"),
+            "{same}"
+        );
+        assert!(same.contains("Not a gain: nothing was fixed."), "{same}");
+        // Neither sweep wrote `sweep.json`, so that they share a corpus is assumed, and said.
+        assert!(
+            same.contains(
+                "recorded no corpus digest, so that they are the same corpus is an \
+                 assumption rather than a check"
+            ),
+            "{same}"
+        );
+        let fixed = pair("baseline-fixed", "divergent", "exact");
+        assert!(
+            fixed.contains("A net gain: something was fixed and nothing regressed."),
+            "{fixed}"
+        );
+        // No baseline, no panel.
+        let w = work_dir("baseline-none");
+        let s = sweep_at(w);
+        assert_eq!(baseline_panel(&s, &s.read()), "");
+    }
+
+    // --- a directory of runs --------------------------------------------------------------------
+
+    #[test]
+    fn a_shelf_row_says_what_it_was_built_from_or_that_nothing_was() {
+        let w = work_dir("shelf-rows");
+        put(
+            w.join("a").join("run.json"),
+            r#"{"purl":"pkg:nuget/Newtonsoft.Json@11.0.1","started":"2026-01-01T00:00:00Z",
+                "finished":"2026-01-01T00:02:00Z","outcome":"build-failed:deps",
+                "failure":{"code":"dotnet/restore","subject":"x","fault":"build",
+                           "retryable":false,"repairable":true,"evidence":"e"},
+                "source":{"repo_url":"https://gitlab.com/o/r","commit":"abcdefgé0123",
+                          "subdir":"Src/Newtonsoft.Json","how":"fuzzy_tag"},
+                "network_bytes":2048,"model_calls":0}"#,
+        );
+        put(
+            w.join("b").join("run.json"),
+            r#"{"purl":"pkg:npm/b@1","started":"not a time","outcome":"exact","model_calls":0}"#,
+        );
+        put(w.join("c").join("strategy.yaml"), "id: x\n");
+        let v = sweep_at(w).read();
+        let p = index_panel(&v);
+        // A forge that is not GitHub keeps its host: which one a package builds from is part of
+        // what the reader is checking.
+        assert!(p.contains("<code>gitlab.com/o/r</code>"), "{p}");
+        // Eight characters of a hand-edited commit, never eight bytes of it.
+        assert!(
+            p.contains("<code title=\"abcdefgé0123\">abcdefgé</code>"),
+            "{p}"
+        );
+        assert!(
+            p.contains("<span class=\"dim\">Src/Newtonsoft.Json</span>"),
+            "{p}"
+        );
+        assert!(p.contains("fuzzy_tag"), "{p}");
+        assert!(p.contains("/cluster?key=dotnet%2Frestore%3Ax"), "{p}");
+        assert!(p.contains("120s · 2.0 KB"), "{p}");
+        assert!(
+            p.contains("h ago"),
+            "a finish long past reads in hours:\n{p}"
+        );
+        // The run with nothing resolved and no clock says both, rather than a blank and a zero.
+        assert!(p.contains("no source resolved"), "{p}");
+        assert!(p.contains("no finish recorded"), "{p}");
+        assert!(p.contains("no duration"), "{p}");
+        // And the directory with no report is named as a directory.
+        assert!(
+            p.contains("<a href=\"/run/2\"><code>c</code></a>") && p.contains("no run.json"),
+            "{p}"
+        );
+        assert_eq!(family_tally(&[]), "");
+    }
+
+    #[tokio::test]
+    async fn a_directory_of_runs_gets_a_tally_and_its_clusters_but_no_rate_and_no_sweep_board() {
+        // A reproduction rate over a hand-picked shelf is the number this project exists to stop
+        // people quoting; the failures on it still group, and still link to their clusters.
+        let w = work_dir("shelf-board");
+        put(
+            w.join("a").join("run.json"),
+            r#"{"purl":"pkg:npm/a@1","started":"2026-09-17T19:57:42Z",
+                "finished":"2026-09-17T19:58:42Z","outcome":"build-failed:deps",
+                "failure":{"code":"npm/peer-conflict","fault":"build","retryable":false,
+                           "repairable":true,"evidence":"ERESOLVE"},
+                "source":{"repo_url":"https://github.com/o/r","commit":"0123456789abcdef",
+                          "how":"registry_commit"},"model_calls":0}"#,
+        );
+        put(
+            w.join("b").join("run.json"),
+            &run_json("pkg:npm/b@1", "exact"),
+        );
+        let page = board_page(sweep_at(w)).await;
+        assert!(
+            page.contains("<strong>a directory of runs</strong>"),
+            "{page}"
+        );
+        assert!(
+            page.contains("1 reproduced") && page.contains("1 build failed"),
+            "{page}"
+        );
+        assert!(page.contains("<h2>Failure clusters</h2>"), "{page}");
+        assert!(page.contains("/cluster?key=npm%2Fpeer-conflict"), "{page}");
+        assert!(!page.contains("<h2>Rates</h2>"), "{page}");
+        assert!(!page.contains("<h2>Targets</h2>"), "{page}");
+        // A source with no subdirectory is the repository root, and nothing is appended.
+        assert!(
+            page.contains("<code>o/r</code>@<code title=\"0123456789abcdef\">01234567</code><br>"),
+            "{page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retried_target_in_a_directory_of_runs_is_two_members_and_not_one_counted_twice() {
+        // `rebuild-and-attest.sh` names one work directory per invocation, so a failure retried
+        // into a second directory leaves two runs of one target. The cluster page found each
+        // member's directory by its purl, and both found the first: the retry's log was never
+        // read, and the first run's was counted twice.
+        let w = work_dir("retried-target");
+        let report = serde_json::json!({
+            "purl": "pkg:npm/a@1", "started": "2026-09-17T19:57:42Z",
+            "finished": "2026-09-17T19:58:42Z", "outcome": "build-failed:deps",
+            "failure": {"code": "npm/peer-conflict", "fault": "build", "retryable": false,
+                        "repairable": true, "evidence": "ERESOLVE"},
+            "model_calls": 0,
+        })
+        .to_string();
+        let (first, second) = (
+            "npm ERR! the first attempt ended here\n",
+            "npm ERR! the retry ended somewhere else\n",
+        );
+        put(w.join("a-first").join("run.json"), &report);
+        put(w.join("a-first").join("rebuild").join("build.log"), first);
+        put(w.join("a-retry").join("run.json"), &report);
+        put(w.join("a-retry").join("rebuild").join("build.log"), second);
+        let (first, second) = (
+            trigon_core::classify(first).evidence,
+            trigon_core::classify(second).evidence,
+        );
+        assert_ne!(first, second, "the fixture needs two different sentences");
+
+        let page = text(cluster_page(sweep_at(w), "npm/peer-conflict").await).await;
+        assert!(
+            page.contains("<a href=\"/run/0\">open</a>")
+                && page.contains("<a href=\"/run/1\">open</a>"),
+            "each run opens its own directory:\n{page}"
+        );
+        for line in [&first, &second] {
+            assert!(
+                page.contains(&format!(
+                    "<td class=\"n\">1</td><td><code>{}</code>",
+                    esc(line.trim())
+                )),
+                "each log is read once:\n{page}"
+            );
+        }
+        assert!(!page.contains("<td class=\"n\">2</td>"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_cluster_page_says_whether_it_is_one_failure_or_several_wearing_one_name() {
+        let w = work_dir("cluster-evidence");
+        let key = "cc/missing-header:python.h";
+        let row = |p: &str| format!("{p}\tbuild-failed:deps\t1.0\t{key}\t0\n");
+        put(
+            w.join("results.tsv"),
+            &format!(
+                "{}{}{}{}pkg:npm/e@1\texact\t1.0\t\t0\n",
+                row("pkg:npm/a@1"),
+                row("pkg:npm/b@1"),
+                row("pkg:npm/c@1"),
+                row("pkg:npm/d@1")
+            ),
+        );
+        let same = "compiling\ngcc: fatal error: Python.h: No such file or directory\n";
+        let other = "compiling\nx.c:1:10: fatal error: Python.h: No such file or directory <b>\n";
+        put(w.join("000").join("rebuild").join("build.log"), same);
+        put(w.join("001").join("rebuild").join("build.log"), same);
+        put(w.join("002").join("rebuild").join("build.log"), other);
+        // `003` has no log: resumed from a sweep whose work directory is gone.
+        let (twice, once) = (
+            trigon_core::classify(same).evidence,
+            trigon_core::classify(other).evidence,
+        );
+        assert_ne!(twice, once, "the fixture needs two different sentences");
+
+        let page = text(cluster_page(sweep_at(w.clone()), key).await).await;
+        assert!(page.contains("4 target(s) failed this way"), "{page}");
+        let twice = format!(
+            "<td class=\"n\">2</td><td><code>{}</code>",
+            esc(twice.trim())
+        );
+        let once = format!(
+            "<td class=\"n\">1</td><td><code>{}</code>",
+            esc(once.trim())
+        );
+        assert!(page.contains(&twice) && page.contains(&once), "{page}");
+        assert!(
+            page.find(&twice) < page.find(&once),
+            "most-carried first:\n{page}"
+        );
+        assert!(page.contains("1 member(s) have no log on disk"), "{page}");
+        for i in 0..4 {
+            assert!(
+                page.contains(&format!("<a href=\"/run/{i}\">open</a>")),
+                "{page}"
+            );
+        }
+        assert!(!page.contains("npm/e@1"), "not a member:\n{page}");
+        assert!(
+            page.contains("trigon rebuild pkg:npm/a@1 --image"),
+            "{page}"
+        );
+        assert!(
+            !page.contains("<b>"),
+            "a log line is text, not markup:\n{page}"
+        );
+
+        // A cluster none of whose logs survive says so, rather than rendering an empty table.
+        let gone = work_dir("cluster-no-logs");
+        put(gone.join("results.tsv"), &row("pkg:npm/a@1"));
+        let page = text(cluster_page(sweep_at(gone), key).await).await;
+        assert!(page.contains("no log for any member is on disk"), "{page}");
+        assert!(!page.contains("<th>evidence</th>"), "{page}");
+
+        // And a member the targets file does not name has no directory to open.
+        let t = w.join("targets.txt");
+        put(t.clone(), "pkg:npm/a@1\n");
+        let page = text(
+            cluster_page(
+                Sweep {
+                    targets: Some(t),
+                    ..sweep_at(w)
+                },
+                key,
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            page.contains("<span class=\"note\">no directory</span>"),
+            "{page}"
+        );
+    }
+
+    // --- the run record, as `run.json` has it ----------------------------------------------------
+
+    #[test]
+    fn the_run_record_says_what_the_source_was_and_how_it_was_found() {
+        let r = report(
+            r##"{"purl":"p","started":"s","model_calls":0,
+                "source":{"repo_url":"https://github.com/o/r",
+                          "declared_url":"git+https://github.com/o/r.git#main",
+                          "commit":"0123456789abcdef","ref_name":"v1.0.0","subdir":"packages/a",
+                          "how":"exact_tag"}}"##,
+        );
+        let p = report_panel(Some(&r));
+        assert!(
+            p.contains(
+                "<code>https://github.com/o/r</code> at <code>0123456789abcdef</code> · \
+                 <code>packages/a</code>"
+            ),
+            "{p}"
+        );
+        assert!(
+            p.contains("found by exact_tag, from <code>v1.0.0</code>"),
+            "{p}"
+        );
+        assert!(
+            p.contains("the registry declared git+https://github.com/o/r.git#main"),
+            "{p}"
+        );
+        let none = report_panel(Some(&report(
+            r#"{"purl":"p","started":"s","model_calls":0}"#,
+        )));
+        assert!(
+            none.contains("no source resolved — this run was never compared against a commit"),
+            "{none}"
+        );
+        assert!(
+            report_panel(None).contains("no run.json — this target ran before the record existed"),
+            "no report is said, not rendered as an empty table"
+        );
+
+        // A commit the registry recorded, at the repository root: nothing is appended to it.
+        let bare = report_panel(Some(&report(
+            r#"{"purl":"p","started":"s","model_calls":0,"derivation":"heuristic",
+                "failure":{"code":"env/missing-tool","fault":"infra","retryable":false,
+                           "repairable":true,"evidence":"npx: not found"},
+                "source":{"repo_url":"https://github.com/o/r","commit":"0123456789abcdef",
+                          "how":"registry_commit"}}"#,
+        )));
+        assert!(
+            bare.contains(
+                "<code>https://github.com/o/r</code> at <code>0123456789abcdef</code><br>\
+                 <span class=\"dim\">found by registry_commit</span></td>"
+            ),
+            "{bare}"
+        );
+        assert!(!bare.contains("the registry declared"), "{bare}");
+        assert!(
+            bare.contains("<td class=\"dim\">derivation</td><td>heuristic</td>"),
+            "{bare}"
+        );
+        assert!(
+            bare.contains("<code>env/missing-tool</code> · <span class=\"dim\">Infra"),
+            "{bare}"
+        );
+    }
+
+    #[test]
+    fn a_build_that_never_finished_has_not_said_whether_it_is_attestable() {
+        // Three states, and the third is the point: rendering "never finished" as "not attestable"
+        // sends the reader after an egress tier when the problem is a build that died.
+        let egress = |attestable: &str| {
+            report_panel(Some(&report(&format!(
+                r#"{{"purl":"p","started":"s","model_calls":0,"egress":"mirror-only"{attestable}}}"#
+            ))))
+        };
+        let yes = egress(r#","attestable":true"#);
+        assert!(yes.contains("mirror-only · transcript recorded"), "{yes}");
+        let no = egress(r#","attestable":false"#);
+        assert!(
+            no.contains("no network transcript: this run cannot say what the build fetched"),
+            "{no}"
+        );
+        let unknown = egress("");
+        assert!(
+            unknown.contains("<td class=\"dim\">egress</td><td>mirror-only</td>"),
+            "{unknown}"
+        );
+    }
+
+    #[test]
+    fn a_registry_pin_is_proven_ambiguous_or_unknown_and_never_five_zeroes() {
+        let pin = |json: &str| {
+            report_panel(Some(&report(&format!(
+                r#"{{"purl":"p","started":"s","model_calls":0{json}}}"#
+            ))))
+        };
+        let counters = |index: u64, artifact: u64| {
+            format!(
+                r#","pin":{{"index_requests":{index},"versions_withheld":2,
+                          "artifact_requests":{artifact},"toolchain_requests":0,"rejected":0}}"#
+            )
+        };
+        let absent = pin("");
+        assert!(
+            absent.contains("no counters, which is not five zeroes"),
+            "{absent}"
+        );
+        assert!(!absent.contains("index requests"), "{absent}");
+        let bound = pin(&counters(3, 5));
+        assert!(
+            bound.contains("proof the pin reached the client"),
+            "{bound}"
+        );
+        assert!(
+            bound.contains("<td class=\"dim\">versions withheld</td><td>2</td>"),
+            "{bound}"
+        );
+        let unbound = pin(&counters(0, 4));
+        assert!(
+            unbound.contains(
+                "served no index document. Either this build needed no \
+                 dependencies, or the pin did not reach the client"
+            ),
+            "{unbound}"
+        );
+        let silent = pin(&counters(0, 0));
+        assert!(
+            silent.contains("the mirror was never contacted"),
+            "{silent}"
+        );
+    }
+
+    #[test]
+    fn a_throttled_host_is_read_as_our_request_rate_before_it_is_read_as_the_package() {
+        let r = report(
+            r#"{"purl":"p","started":"s","model_calls":3,"model":"m-1",
+                "hosts":{"registry.npmjs.org":{"requests":40,"throttled":2,"failed":1},
+                         "github.com":{"requests":3,"throttled":0,"failed":0}},
+                "timings":[["deps",12.34],["build",null]],
+                "fetch_cache":{"hits":4,"fetched":1,"oldest_index_snapshot":"2026-09-01T00:00:00Z"},
+                "failure":{"code":"npm/peer-conflict","subject":"react","fault":"build",
+                           "retryable":true,"repairable":false,"evidence":"npm ERR! ERESOLVE"},
+                "repairs":["pinned react@17"],"repair_stopped":"budget spent",
+                "guard_notes":["x.js arrived and did not ship"],"refused_artifact":["a","b"],
+                "derivation":"heuristic","confidence":"high",
+                "strategy_digest":"0123456789abcdef0123"}"#,
+        );
+        let p = report_panel(Some(&r));
+        assert!(
+            p.contains("<span class=\"fail\">2</span>")
+                && p.contains("<span class=\"ours\">1</span>"),
+            "{p}"
+        );
+        assert!(
+            p.contains(
+                "<tr><td><code>github.com</code></td><td class=\"n\">3</td><td class=\"n\">0</td>\
+                 <td class=\"n\">0</td></tr>"
+            ),
+            "{p}"
+        );
+        assert!(
+            p.contains("a host told us to slow down during this run"),
+            "{p}"
+        );
+        assert!(p.contains("<td>deps</td><td class=\"n\">12.3</td>"), "{p}");
+        assert!(
+            p.contains("<td>build</td><td class=\"n\"><span class=\"note\">no data</span>"),
+            "a timing nobody took is not a fast phase:\n{p}"
+        );
+        assert!(
+            p.contains("4 body/bodies from disk, 1 from a registry"),
+            "{p}"
+        );
+        assert!(
+            p.contains("fetched at <code>2026-09-01T00:00:00Z</code>"),
+            "{p}"
+        );
+        assert!(
+            p.contains(
+                "<code>npm/peer-conflict</code> <code>react</code> · <span class=\"dim\">\
+                 Build, retryable, nothing to repair</span>"
+            ),
+            "{p}"
+        );
+        assert!(p.contains("<pre>npm ERR! ERESOLVE</pre>"), "{p}");
+        assert!(
+            p.contains("<li>pinned react@17</li><li class=\"note\">stopped: budget spent</li>"),
+            "{p}"
+        );
+        assert!(p.contains("x.js arrived and did not ship"), "{p}");
+        assert!(p.contains("its own published artifact 2 time(s)"), "{p}");
+        assert!(p.contains("m-1 · 3 call(s)"), "{p}");
+        assert!(p.contains("heuristic · confidence high"), "{p}");
+        assert!(p.contains("<code>0123456789abcdef</code>"), "{p}");
+
+        // The quiet version: no hosts is not a run that asked for nothing, and a cache with no
+        // index read went to the network for every resolution.
+        let quiet = report_panel(Some(&report(
+            r#"{"purl":"p","started":"s","model_calls":0,"fetch_cache":{"hits":0,"fetched":3}}"#,
+        )));
+        assert!(quiet.contains("no per-host counts"), "{quiet}");
+        assert!(quiet.contains("no cached index was read"), "{quiet}");
+        assert!(!quiet.contains("slow down"), "{quiet}");
+        assert!(!quiet.contains("<h2>Timeline</h2>"), "{quiet}");
+    }
+
+    #[test]
+    fn every_outcome_gets_its_own_sentence_and_ours_is_never_the_package_s() {
+        let say = |outcome: Option<&str>| {
+            verdict_sentence(&report(
+                &serde_json::json!({"purl": "p", "started": "s", "outcome": outcome,
+                                    "model_calls": 0})
+                .to_string(),
+            ))
+        };
+        for (outcome, words) in [
+            (
+                Some("normalized"),
+                "every pass that fired was a built-in one",
+            ),
+            (
+                Some("divergent"),
+                "The rebuilt artifact is not the published one",
+            ),
+            (
+                Some("build-failed:deps"),
+                "a finding about the package or about the recipe",
+            ),
+            (Some("no-strategy"), "no rung recorded why"),
+            (Some("void"), "did not record why it was voided"),
+            (
+                Some("error:infra"),
+                "Our own infrastructure stopped this run",
+            ),
+            // A label nobody has seen before is ours until shown otherwise.
+            (
+                Some("something-new"),
+                "Our own infrastructure stopped this run",
+            ),
+            (None, "The run recorded no outcome"),
+        ] {
+            let s = say(outcome);
+            assert!(s.contains(words), "{outcome:?}: {s}");
+        }
+    }
+
+    // --- the verdict, re-derived from the bytes on disk ------------------------------------------
+
+    const T: u64 = 1_600_000_000;
+
+    /// A divergence with one of everything: a member that is identical, one only a timestamp
+    /// separates, a native library whose code changed, and one the rebuild never produced.
+    fn divergent_pair() -> (Vec<u8>, Vec<u8>) {
+        let up = tgz(&[
+            ("package/gone.js", b"only upstream\n", T),
+            ("package/lib/native.so", b"\x7fELF as published", T),
+            ("package/same.js", b"identical\n", T),
+            ("package/time.js", b"same bytes\n", T),
+        ]);
+        let rb = tgz(&[
+            ("package/lib/native.so", b"\x7fELF as rebuilt!!", T),
+            ("package/same.js", b"identical\n", T),
+            ("package/time.js", b"same bytes\n", T + 100_000_000),
+        ]);
+        (up, rb)
+    }
+
+    #[tokio::test]
+    async fn a_divergence_is_taken_apart_member_by_member_and_the_executable_is_called_out() {
+        let (up, rb) = divergent_pair();
+        let w = one_run(
+            "divergence",
+            &run_json("pkg:npm/a@1", "divergent"),
+            "a-1.tgz",
+            &up,
+            &rb,
+        );
+
+        let (m, _) = member_diffs(
+            &w.join("a-1.tgz"),
+            &w.join("rebuild").join("1789000000-run").join("a-1.tgz"),
+        )
+        .unwrap();
+        let verdicts = member_verdicts(&m);
+        assert_eq!(
+            verdicts,
+            BTreeMap::from([
+                ("package/gone.js".to_string(), "one-side"),
+                ("package/lib/native.so".to_string(), "differs"),
+                ("package/same.js".to_string(), "identical"),
+                ("package/time.js".to_string(), "stabilized"),
+            ])
+        );
+
+        let run = run_page(sweep_at(w.clone()), 0).await;
+        assert!(
+            run.contains(
+                "4 member(s): <strong>1</strong> differ in content, <strong>0</strong> are \
+                 byte-identical and packed differently, <strong>1</strong> were stabilized out"
+            ),
+            "{run}"
+        );
+        // Both digests disagree, so the ladder reaches its last rung and says there is no other.
+        assert!(run.contains("▸ member by member"), "{run}");
+        assert!(
+            run.contains(
+                "decided <code>divergent</code>. Every question was asked, and this is \
+                 the last one there is."
+            ),
+            "{run}"
+        );
+        // A native library that came back different is never benign, and is said in those words.
+        assert!(
+            run.contains("<code>ExecutableContentDiffers</code>"),
+            "{run}"
+        );
+        assert!(
+            run.contains("reaches a human even on a clean match"),
+            "{run}"
+        );
+        assert!(
+            run.contains("An executable whose content differs is never benign"),
+            "{run}"
+        );
+        assert!(run.contains("package/lib/native.so"), "{run}");
+        assert!(run.contains("<code>MemberOnlyInUpstream</code>"), "{run}");
+        // The ribbon names the set the verdict was reached under.
+        assert!(run.contains("under tar-gzip"), "{run}");
+
+        let cmp = compare_page(sweep_at(w), 0).await;
+        assert!(
+            cmp.contains("<title>npm/a@1 · stabilizers · trigon watch</title>"),
+            "{cmp}"
+        );
+        // Every pass in the tarball set is a builtin at metadata risk or below, so nothing caps it.
+        assert!(
+            cmp.contains("nothing in this set holds the verdict down"),
+            "{cmp}"
+        );
+        assert!(cmp.contains("It read <strong>divergent</strong>"), "{cmp}");
+        // Both sides fire, and the ledger sums them: four members and three.
+        assert!(
+            cmp.contains("<code>tar-time</code></td><td class=\"n\">7</td>"),
+            "{cmp}"
+        );
+        // The set's passes that found nothing to do are listed, because silence is evidence.
+        let silent = cmp
+            .split("What stayed silent")
+            .nth(1)
+            .expect("a silent section");
+        assert!(silent.contains("<code>tar-device</code>"), "{silent}");
+        assert!(!silent.contains("<code>tar-time</code>"), "{silent}");
+        // The census: each non-empty band keyed, and the empty one left out of the key.
+        for key in [
+            "1 content differs",
+            "1 stabilized out",
+            "1 identical as published",
+            "1 on one side only",
+        ] {
+            assert!(cmp.contains(&format!("</i>{key}</span>")), "{key}:\n{cmp}");
+        }
+        assert!(
+            !cmp.contains("#8a6d1f\"></i>"),
+            "an empty band has no key:\n{cmp}"
+        );
+        // Most interesting first: a hundred identical members must not bury the few that differ.
+        let table = cmp.split("<h2>Every member</h2>").nth(1).unwrap();
+        let at = |p: &str| {
+            table
+                .find(&format!("<code>{p}</code>"))
+                .unwrap_or_else(|| panic!("{p} is not in the table:\n{table}"))
+        };
+        assert!(
+            at("package/gone.js") < at("package/lib/native.so"),
+            "{table}"
+        );
+        assert!(
+            at("package/lib/native.so") < at("package/time.js"),
+            "{table}"
+        );
+        assert!(at("package/time.js") < at("package/same.js"), "{table}");
+        assert!(table.contains("only in upstream"), "{table}");
+        assert!(table.contains("equal — stabilized out"), "{table}");
+    }
+
+    #[tokio::test]
+    async fn the_ladder_marks_the_one_question_that_decided_the_verdict() {
+        let up = tgz(&[("package/a.js", b"a\n", T)]);
+        let exact = one_run(
+            "ladder-exact",
+            &run_json("pkg:npm/a@1", "exact"),
+            "a-1.tgz",
+            &up,
+            &up,
+        );
+        let page = run_page(sweep_at(exact.clone()), 0).await;
+        assert!(
+            page.contains("▸ the published bytes and the rebuilt bytes"),
+            "{page}"
+        );
+        assert!(
+            !page.contains("after the stabilizers"),
+            "a question never asked is not drawn:\n{page}"
+        );
+        assert!(
+            page.contains("decided <code>exact</code>. The rows below it were never asked."),
+            "{page}"
+        );
+        assert!(page.contains("nothing beyond the verdict"), "{page}");
+        let cmp = compare_page(sweep_at(exact), 0).await;
+        assert!(
+            cmp.contains("matched on the published bytes themselves"),
+            "no ledger can put a ceiling on raw bytes:\n{cmp}"
+        );
+
+        let later = tgz(&[("package/a.js", b"a\n", T + 100_000_000)]);
+        let normalized = one_run(
+            "ladder-normalized",
+            &run_json("pkg:npm/a@1", "normalized"),
+            "a-1.tgz",
+            &up,
+            &later,
+        );
+        let page = run_page(sweep_at(normalized), 0).await;
+        assert!(page.contains("▸ after the stabilizers"), "{page}");
+        // The rung above it is drawn, greyed, and the one below it is not drawn at all.
+        assert!(
+            page.contains("<tr style=\"opacity:.45\"><td>&nbsp;&nbsp;the published bytes"),
+            "{page}"
+        );
+        assert!(!page.contains("member by member"), "{page}");
+        assert!(
+            page.contains("The rows below it were never asked."),
+            "{page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_packed_differently_is_counted_apart_from_one_whose_content_changed() {
+        // `py-cpuinfo`: byte-identical files in zip entries with different modes. The archive
+        // digests differ and the verdict is `divergent`, correctly — but "the code changed" is
+        // not what identical bytes mean, and overstating a divergence is the expensive direction.
+        let up = zip_of(&[("f.txt", b"same bytes on both sides\n", 0o644)]);
+        let rb = zip_of(&[("f.txt", b"same bytes on both sides\n", 0o755)]);
+        let w = one_run(
+            "packed-differently",
+            &run_json("pkg:pypi/a@1", "divergent"),
+            "a-1.zip",
+            &up,
+            &rb,
+        );
+        let (m, _) = member_diffs(
+            &w.join("a-1.zip"),
+            &w.join("rebuild").join("1789000000-run").join("a-1.zip"),
+        )
+        .unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].band(), Band::Packed, "same bytes, different entry");
+        assert!(!m[0].content_differs());
+        assert_eq!(member_verdicts(&m).get("f.txt").copied(), Some("packed"));
+        let panel = compare_panel(&w, 0);
+        assert!(
+            panel.contains(
+                "<strong>0</strong> differ in content, <strong>1</strong> are byte-identical \
+                 and packed differently"
+            ),
+            "{panel}"
+        );
+        assert!(panel.contains("<a href=\"/run/0/compare\">"), "{panel}");
+    }
+
+    #[tokio::test]
+    async fn a_member_a_pass_removed_is_counted_as_stabilized_out_rather_than_dropped() {
+        // nuget.org countersigns every package it serves and nothing anybody builds, so the
+        // published `.nupkg` carries a `.signature.p7s` the rebuild never has, and
+        // `nupkg-signature` takes it out. That is a difference a pass accounted for — the band the
+        // census note describes — and the page dropped the member instead: gone from the total,
+        // from the table, and drawn on the source page as never compared.
+        //
+        // And a member a pass *renamed* is one member, not a removal and an arrival: `dotnet pack`
+        // names the core-properties part after a fresh GUID, so the two sides publish it under two
+        // names that `nupkg-packaging-names` makes one.
+        let props = "package/services/metadata/core-properties/";
+        let (up_props, rb_props) = (format!("{props}aaaa.psmdcp"), format!("{props}bbbb.psmdcp"));
+        let up = zip_of(&[
+            (".signature.p7s", b"the gallery's countersignature", 0o644),
+            ("_rels/.rels", b"<Relationships/>", 0o644),
+            ("lib/a.dll", b"MZ the assembly", 0o644),
+            (&up_props, b"<coreProperties/>", 0o644),
+        ]);
+        let rb = zip_of(&[
+            ("_rels/.rels", b"<Relationships/>", 0o644),
+            ("lib/a.dll", b"MZ the assembly", 0o644),
+            (&rb_props, b"<coreProperties/>", 0o644),
+        ]);
+        let w = one_run(
+            "removed-by-a-pass",
+            &run_json("pkg:nuget/a@1", "normalized"),
+            "a.1.nupkg",
+            &up,
+            &rb,
+        );
+        let (m, _) = member_diffs(
+            &w.join("a.1.nupkg"),
+            &w.join("rebuild").join("1789000000-run").join("a.1.nupkg"),
+        )
+        .unwrap();
+        // Under the names upstream published, because the source page's lower bar reads the
+        // published archive: under `core.psmdcp`, the GUID-named part was drawn as never compared.
+        let verdicts = member_verdicts(&m);
+        assert_eq!(
+            verdicts,
+            BTreeMap::from([
+                (".signature.p7s".to_string(), "stabilized"),
+                ("_rels/.rels".to_string(), "identical"),
+                ("lib/a.dll".to_string(), "identical"),
+                (up_props.clone(), "stabilized"),
+            ])
+        );
+        let (joined, _) = crate::provenance::join(
+            &raw_members(&w.join("a.1.nupkg")).unwrap(),
+            None,
+            None,
+            "d50b912e",
+        );
+        let bars = origin_bars(&joined, &verdicts);
+        assert!(
+            bars.contains(&format!("{up_props} — stabilized out")),
+            "{bars}"
+        );
+        assert!(!bars.contains("not compared"), "{bars}");
+        // The total is the four members upstream published, each in one band: the count of
+        // identical members was the total minus the rest, and a member in two bands underflowed it.
+        let bar = ladder_svg(&m);
+        assert!(
+            bar.contains(
+                "4 members: 0 differ in content, 0 same bytes packed differently, 2 stabilized \
+                 out, 2 identical, 0 on one side only"
+            ),
+            "{bar}"
+        );
+        assert!(bar.contains("</i>2 stabilized out</span>"), "{bar}");
+        assert!(bar.contains("4 member(s) in total"), "{bar}");
+        let t = member_table(&m);
+        assert!(
+            t.contains(
+                "<code>.signature.p7s</code></td><td><span class=\"diff\">only in upstream</span>\
+                 </td><td><span class=\"ok\">removed — stabilized out</span>"
+            ),
+            "{t}"
+        );
+        assert!(
+            t.contains(&format!(
+                "<code>{props}core.psmdcp</code></td><td><span class=\"diff\">differs</span>\
+                 </td><td><span class=\"ok\">equal — stabilized out</span>"
+            )),
+            "{t}"
+        );
+        assert!(
+            !t.contains("aaaa.psmdcp") && !t.contains("bbbb.psmdcp"),
+            "{t}"
+        );
+        let panel = compare_panel(&w, 0);
+        assert!(
+            panel.contains(
+                "4 member(s): <strong>0</strong> differ in content, <strong>0</strong> are \
+                 byte-identical and packed differently, <strong>2</strong> were stabilized out"
+            ),
+            "{panel}"
+        );
+
+        // The same rule by hand, for the shapes a pair of real archives is slow to reach: removed
+        // from both sides after differing is stabilized out, removed from both after agreeing is
+        // identical, and removed from one side of two is a difference that is still there.
+        let m = [
+            member(
+                "gone-both-differed",
+                (Some("x"), Some("y")),
+                (None, None),
+                (None, None),
+            ),
+            member(
+                "gone-both-agreed",
+                (Some("x"), Some("x")),
+                (None, None),
+                (None, None),
+            ),
+            member(
+                "gone-one-side",
+                (Some("x"), Some("x")),
+                (Some("x"), None),
+                (Some("c"), None),
+            ),
+            member(
+                "only-rebuilt-and-gone",
+                (None, Some("y")),
+                (None, None),
+                (None, None),
+            ),
+        ];
+        assert_eq!(
+            member_verdicts(&m),
+            BTreeMap::from([
+                ("gone-both-differed".to_string(), "stabilized"),
+                ("gone-both-agreed".to_string(), "identical"),
+                ("gone-one-side".to_string(), "differs"),
+                ("only-rebuilt-and-gone".to_string(), "stabilized"),
+            ])
+        );
+        let bar = ladder_svg(&m);
+        assert!(
+            bar.contains(
+                "4 members: 1 differ in content, 0 same bytes packed differently, 2 stabilized \
+                 out, 1 identical, 0 on one side only"
+            ),
+            "{bar}"
+        );
+        // Identical as published, and in neither stabilized archive: the stabilized cell says a
+        // pass took it, not "identical" over a comparison nobody made.
+        let t = member_table(&m);
+        assert!(
+            t.contains(
+                "<code>gone-both-agreed</code></td><td><span class=\"ok\">identical</span></td>\
+                 <td><span class=\"ok\">removed by a pass</span>"
+            ),
+            "{t}"
+        );
+    }
+
+    #[tokio::test]
+    async fn artifacts_that_will_not_parse_are_said_to_be_unreadable_rather_than_equal() {
+        let w = one_run(
+            "unparseable-pair",
+            &run_json("pkg:npm/a@1", "divergent"),
+            "a-1.tgz",
+            b"not a gzip at all",
+            b"nor this",
+        );
+        let panel = compare_panel(&w, 0);
+        assert!(
+            panel.contains("the artifacts could not both be re-derived"),
+            "{panel}"
+        );
+        let cmp = compare_page(sweep_at(w.clone()), 0).await;
+        assert!(
+            cmp.contains(
+                "could not both be re-derived, so this page has nothing to show rather \
+                 than nothing to report"
+            ),
+            "{cmp}"
+        );
+        assert!(!cmp.contains("<h2>The ledger</h2>"), "{cmp}");
+        let run = run_page(sweep_at(w), 0).await;
+        assert!(
+            !run.contains("Why this is the verdict"),
+            "a ladder drawn from a comparison that did not happen:\n{run}"
+        );
+    }
+
+    fn applied(
+        id: &str,
+        risk: trigon_core::RiskTier,
+        provenance: trigon_core::Provenance,
+        touched: u32,
+    ) -> trigon_stabilize::Applied {
+        trigon_stabilize::Applied {
+            id: trigon_core::StabilizerId::new(id),
+            risk,
+            provenance,
+            entries_touched: touched,
+            bytes_changed: 2048,
+        }
+    }
+
+    fn a_set_with_every_kind_of_pass() -> [trigon_stabilize::Applied; 4] {
+        use trigon_core::{Provenance, RiskTier};
+        [
+            applied("tar-time", RiskTier::Metadata, Provenance::Builtin, 3),
+            applied("cargo-vcs-hash", RiskTier::Content, Provenance::Builtin, 1),
+            applied(
+                "model-pass",
+                RiskTier::Metadata,
+                Provenance::Model {
+                    model_id: "claude-x".into(),
+                    run_id: "r1".into(),
+                },
+                2,
+            ),
+            applied(
+                "reviewed-pass",
+                RiskTier::Lossy,
+                Provenance::Human {
+                    reviewer: "alice".into(),
+                },
+                5,
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_ceiling_names_each_pass_that_holds_the_verdict_down_and_the_half_of_the_rule_it_trips() {
+        // Both halves of the cap rule weigh the same: a metadata pass a model wrote caps the
+        // verdict as firmly as a content pass compiled in. A ledger showing risk alone was showing
+        // half a reason and reading as a whole one.
+        let set = a_set_with_every_kind_of_pass();
+        let p = ceiling_panel(&set, Some("divergent"));
+        assert!(
+            p.contains(&format!(
+                "can reach <strong>{}</strong> and no higher",
+                trigon_compare::ceiling(&set)
+            )),
+            "{p}"
+        );
+        assert!(p.contains("It read <strong>divergent</strong>"), "{p}");
+        assert!(
+            p.contains("<code>cargo-vcs-hash</code></td><td>Content risk is above Metadata</td>"),
+            "{p}"
+        );
+        let row = |id: &str| {
+            p.split(&format!("<code>{id}</code></td><td>"))
+                .nth(1)
+                .and_then(|s| s.split("</td>").next())
+                .unwrap_or_else(|| panic!("no row for {id}:\n{p}"))
+                .to_string()
+        };
+        assert!(
+            row("model-pass").ends_with("provenance — not Builtin"),
+            "{p}"
+        );
+        assert!(row("model-pass").contains("claude-x"), "{p}");
+        assert!(
+            row("reviewed-pass").ends_with("provenance, and Lossy risk is above Metadata"),
+            "{p}"
+        );
+        assert!(
+            !p.contains("<code>tar-time</code>"),
+            "a builtin metadata pass holds nothing down:\n{p}"
+        );
+
+        let clean = ceiling_panel(&set[..1], None);
+        assert!(
+            clean.contains("nothing in this set holds the verdict down"),
+            "{clean}"
+        );
+        assert!(
+            clean.contains("It read <strong>unknown</strong>"),
+            "{clean}"
+        );
+    }
+
+    #[test]
+    fn the_ledger_sums_both_sides_and_says_who_stands_behind_each_pass() {
+        let one = a_set_with_every_kind_of_pass();
+        let both: Vec<_> = one.iter().chain(one.iter()).cloned().collect();
+        let p = ledger_table(&both);
+        assert!(
+            p.contains("<code>tar-time</code></td><td class=\"n\">6</td>"),
+            "{p}"
+        );
+        assert!(
+            p.contains(
+                "<code>reviewed-pass</code> <span class=\"diff\">caps</span></td>\
+                 <td class=\"n\">10</td>"
+            ),
+            "{p}"
+        );
+        assert!(
+            p.contains("<code>cargo-vcs-hash</code> <span class=\"diff\">caps</span>"),
+            "{p}"
+        );
+        assert!(
+            p.contains("<span class=\"diff\">proposed by claude-x</span>"),
+            "{p}"
+        );
+        assert!(
+            p.contains("<span class=\"diff\">reviewed by alice</span>"),
+            "{p}"
+        );
+        assert!(p.contains("<span class=\"dim\">builtin</span>"), "{p}");
+        // The bar is `entries_touched`, relative to the pass that touched most.
+        assert!(
+            p.contains(
+                "width=\"420\" height=\"12\" preserveAspectRatio=\"none\" role=\"img\" \
+                 aria-label=\"10 entries\""
+            ),
+            "{p}"
+        );
+        assert!(
+            p.contains(
+                "width=\"84\" height=\"12\" preserveAspectRatio=\"none\" role=\"img\" \
+                 aria-label=\"2 entries\""
+            ),
+            "{p}"
+        );
+        assert!(p.contains("4.0 KB"), "{p}");
+        assert!(
+            ledger_table(&[]).contains("no pass changed anything on either side"),
+            "an empty ledger is a statement about the bytes"
+        );
+        // Risk is the colour: grey for a structural pass, the verdict palette for the rest.
+        let structural = ledger_table(&[applied(
+            "tar-entry-order",
+            trigon_core::RiskTier::Structural,
+            trigon_core::Provenance::Builtin,
+            4,
+        )]);
+        assert!(structural.contains("fill=\"#6b6b66\""), "{structural}");
+        assert!(p.contains("fill=\"#b3261e\""), "Lossy is red:\n{p}");
+    }
+
+    /// One member, as `member_diffs` would describe it: `(upstream, rebuild)` for each reading.
+    fn member(
+        path: &str,
+        raw: (Option<&str>, Option<&str>),
+        stabilized: (Option<&str>, Option<&str>),
+        content: (Option<&str>, Option<&str>),
+    ) -> MemberDiff {
+        let own =
+            |(a, b): (Option<&str>, Option<&str>)| (a.map(str::to_string), b.map(str::to_string));
+        MemberDiff {
+            path: path.into(),
+            published: raw.0.map(|_| path.into()),
+            raw: own(raw),
+            stabilized: own(stabilized),
+            content: own(content),
+            bytes: (raw.0.map(|_| 10), raw.1.map(|_| 2048)),
+        }
+    }
+
+    #[test]
+    fn every_member_is_in_exactly_one_band_and_the_table_opens_on_what_differs() {
+        let m = [
+            member(
+                "a-identical",
+                (Some("x"), Some("x")),
+                (Some("x"), Some("x")),
+                (Some("c"), Some("c")),
+            ),
+            member(
+                "b-packed",
+                (Some("x"), Some("y")),
+                (Some("x"), Some("y")),
+                (Some("c"), Some("c")),
+            ),
+            member(
+                "c-new",
+                (None, Some("y")),
+                (None, Some("y")),
+                (None, Some("c")),
+            ),
+            member(
+                "d-stabilized",
+                (Some("x"), Some("y")),
+                (Some("z"), Some("z")),
+                (Some("c"), Some("c")),
+            ),
+            member(
+                "e-changed",
+                (Some("x"), Some("y")),
+                (Some("x"), Some("y")),
+                (Some("c"), Some("d")),
+            ),
+        ];
+        assert_eq!(
+            member_verdicts(&m),
+            BTreeMap::from([
+                ("a-identical".to_string(), "identical"),
+                ("b-packed".to_string(), "packed"),
+                ("c-new".to_string(), "one-side"),
+                ("d-stabilized".to_string(), "stabilized"),
+                ("e-changed".to_string(), "differs"),
+            ])
+        );
+        let bar = ladder_svg(&m);
+        assert!(
+            bar.contains(
+                "5 members: 1 differ in content, 1 same bytes packed differently, 1 stabilized \
+                 out, 1 identical, 1 on one side only"
+            ),
+            "{bar}"
+        );
+
+        let t = member_table(&m);
+        let at = |p: &str| t.find(&format!("<code>{p}</code>")).unwrap();
+        let order = [
+            "c-new",
+            "e-changed",
+            "b-packed",
+            "d-stabilized",
+            "a-identical",
+        ];
+        for w in order.windows(2) {
+            assert!(
+                at(w[0]) < at(w[1]),
+                "{} should come before {}:\n{t}",
+                w[0],
+                w[1]
+            );
+        }
+        assert!(
+            t.contains("<span class=\"ours\">only in rebuild</span>"),
+            "a lone member says which side it is on:\n{t}"
+        );
+        // Absent from a side is not zero bytes on it.
+        assert!(
+            t.contains("<td class=\"n dim\">—</td><td class=\"n dim\">2.0 KB</td>"),
+            "{t}"
+        );
+        assert!(
+            t.contains("<span class=\"diff\">same bytes, packed differently</span>"),
+            "{t}"
+        );
+        assert!(
+            member_diffs(Path::new("a-1.bin"), Path::new("b-1.bin"))
+                .err()
+                .is_some_and(|e| e.contains("names no format")),
+            "a file whose name names no format is refused, not guessed at"
+        );
+    }
+
+    #[test]
+    fn a_pass_that_found_nothing_to_do_is_listed_apart_from_one_never_configured() {
+        let set = trigon_stabilize::profile("tar-gzip").unwrap();
+        let ids: Vec<String> = set.members.iter().map(|m| m.id().to_string()).collect();
+        let fired = |ids: &[String]| -> Vec<trigon_stabilize::Applied> {
+            ids.iter()
+                .map(|id| {
+                    applied(
+                        id,
+                        trigon_core::RiskTier::Metadata,
+                        trigon_core::Provenance::Builtin,
+                        1,
+                    )
+                })
+                .collect()
+        };
+        let artifact = Path::new("a-1.tgz");
+        let none = silent_panel(artifact, &[]);
+        assert!(
+            none.contains(&format!(
+                "{} of the <code>tar-gzip</code> set's {} passes ran and found nothing to change",
+                ids.len(),
+                ids.len()
+            )),
+            "{none}"
+        );
+        let all = silent_panel(artifact, &fired(&ids));
+        assert!(
+            all.contains(&format!(
+                "nothing. Every one of the <code>tar-gzip</code> set's {} passes found something",
+                ids.len()
+            )),
+            "{all}"
+        );
+        let most = silent_panel(artifact, &fired(&ids[1..]));
+        assert!(
+            most.contains(&format!("<code>{}</code>", ids[0])) && most.contains("1 of the"),
+            "{most}"
+        );
+        // A file whose name names no format has no set to be silent in.
+        assert_eq!(silent_panel(Path::new("a-1.bin"), &[]), "");
+    }
+
+    // --- the network transcript ------------------------------------------------------------------
+
+    fn exchange(
+        route: &str,
+        url: &str,
+        sha256: &str,
+        bytes: u64,
+        checked: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({"route": route, "url": url, "sha256": sha256, "bytes": bytes,
+                           "checked": checked})
+    }
+
+    #[tokio::test]
+    async fn a_transcript_is_counted_against_its_own_length_and_every_row_is_listed() {
+        // "12 opened" on its own reads as a total rather than a share, so every figure carries
+        // its denominator. And the digest column is cut at a character: this file is read from
+        // disk, and sixteen bytes of an edited one can end inside one.
+        let odd = format!("a{}", "é".repeat(20));
+        let mut index = exchange(
+            "index",
+            "http://mirror/npm/a",
+            &"a".repeat(64),
+            2048,
+            "generated",
+        );
+        index["withheld"] = 3.into();
+        let rows = [
+            index,
+            exchange(
+                "artifact",
+                "http://mirror/a.tgz",
+                &"b".repeat(64),
+                1_048_576,
+                "opened",
+            ),
+            exchange("artifact", "http://mirror/b.tgz", &odd, 10, "unarmed"),
+            exchange(
+                "passthrough",
+                "http://mirror/c.tgz",
+                &"c".repeat(64),
+                5,
+                "partial",
+            ),
+        ];
+        let w = work_dir("transcript-rows");
+        put(w.join("run.json"), &run_json("pkg:npm/a@1", "exact"));
+        put(
+            w.join("rebuild").join("network.jsonl"),
+            &rows.iter().map(|r| format!("{r}\n")).collect::<String>(),
+        );
+
+        let panel = network_panel(&w, 0);
+        assert!(
+            panel.contains(
+                "<strong>4 response(s)</strong> crossed into this build, carrying 1.0 MB"
+            ),
+            "{panel}"
+        );
+        assert!(
+            panel.contains("1 of 4 opened and member-checked"),
+            "{panel}"
+        );
+        assert!(
+            panel.contains("1 of 4 arrived with no guard manifest loaded"),
+            "{panel}"
+        );
+        assert!(panel.contains("1 of 4 were abandoned part-way"), "{panel}");
+        assert!(
+            panel.contains("<a href=\"/run/0/network\">Every row →</a>"),
+            "{panel}"
+        );
+
+        let page = network_page(sweep_at(w), 0).await;
+        assert!(page.contains("<h1>npm/a@1 · network</h1>"), "{page}");
+        assert!(page.contains("4 row(s) · "), "{page}");
+        assert!(
+            page.contains(
+                "<strong>1</strong> index request(s), <strong>3</strong> version(s) withheld \
+                 across them, 3 artifact, 0 toolchain"
+            ),
+            "{page}"
+        );
+        for cell in [
+            "<span class=\"dim\">mirror-composed</span>",
+            "<td>opened</td>",
+            "<span class=\"note\">unarmed</span>",
+            "<span class=\"void\">partial</span>",
+        ] {
+            assert!(page.contains(cell), "{cell}:\n{page}");
+        }
+        assert!(
+            page.contains(&format!("<code>{}</code>", "a".repeat(16))),
+            "a digest is shown as its first sixteen characters:\n{page}"
+        );
+        assert!(!page.contains(&"a".repeat(17)), "{page}");
+        assert!(
+            page.contains(&format!("<code>a{}</code>", "é".repeat(15))),
+            "{page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transcript_that_will_not_parse_is_not_a_transcript_of_nothing() {
+        // No file, an empty file and a torn file are three answers, and only the empty one says
+        // nothing crossed. The torn line is quoted back, and it is whatever the build asked for.
+        let w = work_dir("transcript-states");
+        put(w.join("run.json"), &run_json("pkg:npm/a@1", "exact"));
+        let transcript = w.join("rebuild").join("network.jsonl");
+        put(transcript.clone(), &format!("{{\"route\":\"{XSS}\n"));
+        let torn = network_panel(&w, 0);
+        assert!(
+            torn.contains("will not parse, so what crossed is unknown rather than nothing"),
+            "{torn}"
+        );
+        assert!(!torn.contains("<img") && torn.contains("&lt;img"), "{torn}");
+        assert!(!torn.contains("response(s)"), "{torn}");
+
+        put(transcript.clone(), "");
+        let empty = network_panel(&w, 0);
+        assert!(
+            empty.contains("nothing crossed the network into this build"),
+            "{empty}"
+        );
+        assert!(
+            empty.contains("source: <code>rebuild/network.jsonl</code>, 0 B"),
+            "{empty}"
+        );
+        let page = network_page(sweep_at(w.clone()), 0).await;
+        assert!(page.contains("0 row(s) · 0 B on disk"), "{page}");
+        assert!(page.contains("nothing crossed the network"), "{page}");
+        assert!(!page.contains("<th>route</th>"), "{page}");
+
+        // A body past what the guard opens is hashed and no more, and the row says so.
+        put(
+            transcript,
+            &format!(
+                "{}\n",
+                exchange("artifact", "http://mirror/big.tgz", "d", 9, "hashed")
+            ),
+        );
+        let page = network_page(sweep_at(w), 0).await;
+        assert!(
+            page.contains("<span class=\"dim\">hashed only</span>"),
+            "{page}"
+        );
+    }
+
+    // --- what the pages under a run are called ---------------------------------------------------
+
+    #[tokio::test]
+    async fn the_pages_under_a_run_are_named_the_way_the_run_page_is() {
+        // A maven purl joins its qualifiers with `&`. The network and ledger pages escaped the
+        // title and then handed it to `page`, which escapes it again — the tab read `&amp;` — and
+        // a run that left no report titled them with an empty string.
+        let w = work_dir("titles");
+        put(
+            w.join("a").join("run.json"),
+            &run_json("pkg:maven/org.example/a@1?classifier=x&type=jar", "exact"),
+        );
+        put(w.join("zz-half-a-run").join("strategy.yaml"), "id: x\n");
+        let tab = "<title>maven/org.example/a@1?classifier=x&amp;type=jar · ";
+        for (what, page) in [
+            ("network", network_page(sweep_at(w.clone()), 0).await),
+            ("compare", compare_page(sweep_at(w.clone()), 0).await),
+            ("source", source_of(sweep_at(w.clone()), 0).await),
+            ("run", run_page(sweep_at(w.clone()), 0).await),
+        ] {
+            assert!(page.contains(tab), "{what}:\n{page}");
+            assert!(
+                !page.contains("&amp;amp;"),
+                "the {what} page escaped its title twice:\n{page}"
+            );
+        }
+        for (what, page) in [
+            ("network", network_page(sweep_at(w.clone()), 1).await),
+            ("compare", compare_page(sweep_at(w.clone()), 1).await),
+        ] {
+            assert!(
+                page.contains("<h1>zz-half-a-run · "),
+                "the {what} page of a run with no report names its directory:\n{page}"
+            );
+        }
+        // The source page is the fourth under a run, and it built its own name from the report:
+        // `target 001` under a run page that says `zz-half-a-run`.
+        for (what, page) in [
+            ("run", run_page(sweep_at(w.clone()), 1).await),
+            ("source", source_of(sweep_at(w), 1).await),
+        ] {
+            assert!(
+                page.contains("<h1>zz-half-a-run</h1>"),
+                "the {what} page of a run with no report names its directory:\n{page}"
+            );
+        }
+        // A sweep row whose directory holds no `run.json` — a resumed row, say — is named by the
+        // row on both pages, not by its number on one of them.
+        let w = work_dir("titles-sweep");
+        put(w.join("results.tsv"), &results(&[("pkg:npm/a@1", "exact")]));
+        for (what, page) in [
+            ("run", run_page(sweep_at(w.clone()), 0).await),
+            ("source", source_of(sweep_at(w), 0).await),
+        ] {
+            assert!(
+                page.contains("<h1>npm/a@1</h1>"),
+                "the {what} page names the row's target:\n{page}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_tab_says_which_page_it_is_and_what_is_looking_at_it() {
+        // The network and ledger tabs carried no tool name, the cluster tab was the bare key, and
+        // the source tab was the run's own — two windows on one run, indistinguishable in the tab
+        // bar and in the history.
+        let w = work_dir("tabs");
+        put(
+            w.join("results.tsv"),
+            "pkg:npm/a@1\tbuild-failed\t1.0\tcc/missing-header\t0\n",
+        );
+        let mut seen = BTreeMap::new();
+        for path in [
+            "/run/0",
+            "/run/0/network",
+            "/run/0/compare",
+            "/run/0/source",
+            "/cluster?key=cc%2Fmissing-header",
+        ] {
+            let (status, out) = served(sweep_at(w.clone()), path).await;
+            assert_eq!(status, 200, "{path}:\n{out}");
+            let tab = out
+                .split("<title>")
+                .nth(1)
+                .and_then(|t| t.split("</title>").next())
+                .unwrap_or_else(|| panic!("{path} has no title:\n{out}"))
+                .to_string();
+            assert!(tab.ends_with(" · trigon watch"), "{path}: {tab}");
+            if let Some(other) = seen.insert(tab.clone(), path) {
+                panic!("{path} and {other} are both `{tab}`");
+            }
+        }
+        assert_eq!(
+            seen.keys().cloned().collect::<Vec<_>>(),
+            [
+                "cc/missing-header · trigon watch",
+                "npm/a@1 · compare · trigon watch",
+                "npm/a@1 · network · trigon watch",
+                "npm/a@1 · source · trigon watch",
+                "npm/a@1 · trigon watch",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_page_names_every_absent_fact_and_what_would_have_made_it_exist() {
+        let w = work_dir("run-absences");
+        put(w.join("results.tsv"), &results(&[("pkg:npm/a@1", "exact")]));
+        let p = run_page(sweep_at(w.clone()), 3).await;
+        assert!(p.contains("<h1>target 003</h1>"), "{p}");
+        for absent in [
+            "no row in results.tsv maps to this directory — it may be the target in flight, \
+             whose outcome is unknown rather than failed",
+            "no strategy.yaml",
+            "no guard.json",
+            "no build.log on disk",
+            "no run.json — this target ran before the record existed",
+            "no store was configured for this watch",
+            "no <code>network.jsonl</code>",
+            "both artifacts are not on disk here",
+            "What ran inside the sandbox is not recorded",
+        ] {
+            assert!(p.contains(absent), "`{absent}` is not said:\n{p}");
+        }
+        assert!(!p.contains("Why this is the verdict"), "{p}");
+
+        // What is there is shown: the strategy clipped, the guard escaped, the log classified.
+        put(w.join("000").join("strategy.yaml"), &"x".repeat(9000));
+        put(w.join("000").join("guard.json"), "{\"artifact\":\"a\"}");
+        put(
+            w.join("000").join("rebuild").join("build.log"),
+            "step 1\ngcc: fatal error: Python.h: No such file or directory\n",
+        );
+        let p = run_page(sweep_at(w), 0).await;
+        assert!(p.contains("<h1>npm/a@1</h1>"), "{p}");
+        assert!(p.contains("… clipped</pre>"), "{p}");
+        assert!(
+            p.contains("<pre>{&quot;artifact&quot;:&quot;a&quot;}</pre>"),
+            "{p}"
+        );
+        assert!(
+            p.contains("classified now as <code>cc/missing-header</code>"),
+            "{p}"
+        );
+        assert!(p.contains("not recorded at the time"), "{p}");
+
+        // A number past the end of a directory of runs says how many there are.
+        let idx = work_dir("run-out-of-range");
+        put(
+            idx.join("a").join("run.json"),
+            &run_json("pkg:npm/a@1", "exact"),
+        );
+        put(
+            idx.join("b").join("run.json"),
+            &run_json("pkg:npm/b@1", "exact"),
+        );
+        let p = run_page(sweep_at(idx), 5).await;
+        assert!(
+            p.contains("this directory holds 2 run(s), numbered 0 to 1, and no run 5"),
+            "{p}"
+        );
+        assert!(
+            p.contains("<title>target 005 · trigon watch</title>"),
+            "{p}"
+        );
+    }
+
+    // --- how the source became the artifact ------------------------------------------------------
+
+    fn sourced(repo: &str, commit: &str) -> String {
+        serde_json::json!({
+            "purl": "pkg:npm/a@1",
+            "started": "2026-09-17T19:57:42Z",
+            "finished": "2026-09-17T19:58:42Z",
+            "outcome": "divergent",
+            "source": {"repo_url": repo, "commit": commit, "how": "registry_commit"},
+            "model_calls": 0,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn the_source_page_says_why_it_has_nothing_to_join() {
+        let w = work_dir("source-none");
+        put(w.join("run.json"), &run_json("pkg:npm/a@1", "exact"));
+        let p = source_of(sweep_at(w), 0).await;
+        assert!(p.contains("this run recorded no source"), "{p}");
+        let w = work_dir("source-no-report");
+        put(w.join("strategy.yaml"), "id: x\n");
+        let p = source_of(sweep_at(w), 0).await;
+        assert!(
+            p.contains("<h1>target 000</h1>") && p.contains("this run recorded no source"),
+            "{p}"
+        );
+
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let w = work_dir("source-no-artifact");
+        put(
+            w.join("run.json"),
+            &sourced("https://github.com/o/r", commit),
+        );
+        let p = source_of(sweep_at(w), 0).await;
+        assert!(p.contains("the published artifact is not on disk"), "{p}");
+
+        let w = one_run(
+            "source-garbage",
+            &sourced("https://github.com/o/r", commit),
+            "a-1.tgz",
+            b"not a gzip",
+            b"not a gzip",
+        );
+        let p = source_of(sweep_at(w), 0).await;
+        assert!(p.contains("parsing the artifact"), "{p}");
+
+        // No checkout on this machine: every member is unknown, and nothing was searched.
+        let (up, rb) = divergent_pair();
+        let w = one_run(
+            "source-no-checkout",
+            &sourced("https://github.com/o/r", commit),
+            "a-1.tgz",
+            &up,
+            &rb,
+        );
+        let p = source_of(sweep_at(w), 0).await;
+        assert!(
+            p.contains(
+                "<strong>4 member(s).</strong> Where they came from is unknown: the checkout for \
+                 this commit is not on this machine, so nothing was searched."
+            ),
+            "{p}"
+        );
+        assert!(
+            p.contains("Nothing the commit explains came back different."),
+            "{p}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_the_commit_explains_that_came_back_different_is_the_case_worth_opening() {
+        // Red in the verdict bar under green in the origin bar: a file somebody wrote, rebuilt
+        // into something else. Counted rather than left for the eye.
+        let up = tgz(&[
+            ("package/README.md", b"line one\r\nline two\r\n", T),
+            ("package/generated.js", b"made by the build\n", T),
+            ("package/lib/native.so", b"\x7fELF as written", T),
+            ("package/same.js", b"the maintainer's bytes\n", T),
+        ]);
+        let rb = tgz(&[
+            ("package/README.md", b"line one\r\nline two\r\n", T),
+            ("package/generated.js", b"made by the build\n", T),
+            ("package/lib/native.so", b"\x7fELF as rebuilt", T),
+            ("package/same.js", b"the maintainer's bytes\n", T),
+        ]);
+        let (repo, commit) = (
+            "https://github.com/o/r",
+            "0123456789abcdef0123456789abcdef01234567",
+        );
+        let w = one_run("source-join", &sourced(repo, commit), "a-1.tgz", &up, &rb);
+        let s = sweep_at(w);
+        let checkout = crate::provenance::checkout_dir(&s.sources, repo, commit);
+        // LF in the commit and CRLF in the artifact: the commit's bytes after a rewrite, which is
+        // not the commit's bytes.
+        put(checkout.join("README.md"), "line one\nline two\n");
+        put(checkout.join("lib").join("native.so"), "\x7fELF as written");
+        put(checkout.join("same.js"), "the maintainer's bytes\n");
+
+        let p = source_of(s, 0).await;
+        assert!(
+            p.contains(
+                "<strong>4 member(s).</strong> 2 are the commit's bytes unchanged. 1 are the \
+                 commit's bytes after a line-ending rewrite. 1 the build made — meaning 3 \
+                 file(s) at 01234567."
+            ),
+            "tiers are reported apart and never summed:\n{p}"
+        );
+        assert!(
+            p.contains("<strong>1 member(s) the commit explains came back different</strong>"),
+            "{p}"
+        );
+        assert!(
+            p.contains("<code class=\"dim\">lib/native.so</code>"),
+            "{p}"
+        );
+        // The table puts what the commit does not explain first.
+        let table = p.split("<h2>Member by member</h2>").nth(1).unwrap();
+        let at = |m: &str| table.find(&format!("<code>{m}</code>")).unwrap();
+        assert!(
+            at("package/generated.js") < at("package/README.md"),
+            "{table}"
+        );
+        assert!(
+            at("package/README.md") < at("package/lib/native.so"),
+            "{table}"
+        );
+        assert_eq!(origin_bars(&[], &BTreeMap::new()), "");
+        // A member the comparison never reached is drawn as not compared, never as identical.
+        let lone = [crate::provenance::Member {
+            path: "package/x.js".into(),
+            bytes: 1,
+            origin: crate::provenance::Origin::Verbatim,
+            source_path: Some("x.js".into()),
+        }];
+        let bars = origin_bars(&lone, &BTreeMap::new());
+        assert!(bars.contains("package/x.js — not compared"), "{bars}");
+        assert!(
+            bars.contains("Nothing the commit explains came back different."),
+            "{bars}"
+        );
+    }
+
+    // --- the ribbon, and the small things every page leans on ------------------------------------
+
+    #[test]
+    fn the_ribbon_names_a_missing_link_rather_than_leaving_it_out() {
+        let bare = chain_ribbon(
+            &report(r#"{"purl":"p","started":"s","model_calls":0}"#),
+            None,
+        );
+        assert!(
+            bare.contains("commit</span> <span class=\"note\">none</span>"),
+            "{bare}"
+        );
+        assert!(
+            bare.contains("<span class=\"note\">no outcome</span>"),
+            "{bare}"
+        );
+        for link in [">strategy</span>", ">build</span>", ">artifact</span>"] {
+            assert!(
+                !bare.contains(link),
+                "{link} with nothing behind it:\n{bare}"
+            );
+        }
+
+        let full = chain_ribbon(
+            &report(
+                r#"{"purl":"p","started":"s","model_calls":0,"outcome":"divergent",
+                    "source":{"repo_url":"https://github.com/o/r","commit":"0123456789abcdef",
+                              "how":"registry_commit"},
+                    "strategy_digest":"fedcba9876543210","derivation":"heuristic",
+                    "timings":[["deps",10.4],["build",null],["pack",20.0]]}"#,
+            ),
+            None,
+        );
+        assert!(
+            full.contains("title=\"https://github.com/o/r — found by registry_commit\""),
+            "{full}"
+        );
+        assert!(full.contains("<code>01234567</code>"), "{full}");
+        assert!(
+            full.contains("title=\"fedcba9876543210 — heuristic\"")
+                && full.contains("<code>fedcba98</code>"),
+            "{full}"
+        );
+        // The phases it timed, and a phase with no timing is not a phase of zero seconds.
+        assert!(full.contains(">build</span> 30s"), "{full}");
+        assert!(
+            full.contains("<span class=\"tag diff\">divergent</span>"),
+            "{full}"
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_record_is_cut_at_a_character_and_never_inside_one() {
+        // `&s[..8]` on a string somebody edited by hand is a panic inside a request handler rather
+        // than a short string. Each value below puts a two-byte character across the cut.
+        assert_eq!(short_hex("abcdefgé0123", 8), "abcdefgé");
+        assert_eq!(short_hex("abc", 8), "abc");
+        assert_eq!(clip("ééé", 2), "éé\n… clipped");
+        assert_eq!(clip("éé", 2), "éé");
+        let t = tail(&"é".repeat(10), 5);
+        assert!(t.starts_with("… earlier output clipped\n"), "{t}");
+        assert!(t.ends_with('é'), "{t}");
+
+        let ribbon = chain_ribbon(
+            &report(
+                r#"{"purl":"p","started":"s","model_calls":0,"strategy_digest":"0123456é89",
+                    "source":{"repo_url":"https://github.com/o/r","commit":"abcdefgé0123",
+                              "how":"registry_commit"}}"#,
+            ),
+            None,
+        );
+        assert!(ribbon.contains("<code>abcdefgé</code>"), "{ribbon}");
+        assert!(ribbon.contains("<code>0123456é</code>"), "{ribbon}");
+        let record = report_panel(Some(&report(
+            r#"{"purl":"p","started":"s","model_calls":0,"strategy_digest":"0123456789abcdeé0"}"#,
+        )));
+        assert!(record.contains("<code>0123456789abcdeé</code>"), "{record}");
+    }
+
+    #[test]
+    fn a_blank_line_is_not_a_row_and_a_row_without_a_duration_is_not_one_either() {
+        let (rows, dropped) = parse_results(
+            "\n  \npkg:npm/a@1\texact\t1.5\t\t2\n\
+             pkg:npm/b@1\texact\tnever\t\t0\npkg:npm/c@1\tvoid\n",
+        );
+        assert_eq!(
+            dropped, 2,
+            "a row whose seconds will not parse, and one with none"
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].seconds, 1.5);
+        assert_eq!(
+            rows[0].cluster, None,
+            "an empty cluster column is no cluster"
+        );
+        assert_eq!(rows[0].model_calls, Some(2));
+    }
+
+    #[test]
+    fn bytes_ages_and_forges_read_at_the_precision_a_page_needs() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(1_048_576), "1.0 MB");
+        assert_eq!(human_bytes(1_073_741_824), "1.00 GB");
+        assert_eq!(ago(90), "90s ago");
+        assert_eq!(ago(91), "1m ago");
+        assert_eq!(ago(5400), "90m ago");
+        assert_eq!(ago(5401), "1h ago");
+        assert_eq!(short_repo("https://github.com/o/r"), "o/r");
+        assert_eq!(short_repo("https://gitlab.com/o/r"), "gitlab.com/o/r");
+        assert_eq!(short_repo("git@example.org:o/r"), "git@example.org:o/r");
+    }
+
+    #[test]
+    fn the_rates_panel_says_which_rate_it_cannot_give_and_why() {
+        assert!(
+            rates_panel(&Rates::of(&[])).contains("nothing has been attempted"),
+            "no rows is no rate, not two zeroes"
+        );
+        let uncompared = rates_panel(&Rates::of(&rows("a\terror:infra\t1.0\t\t0\n")));
+        assert!(
+            uncompared.contains("no target reached a comparison"),
+            "{uncompared}"
+        );
+        assert!(!uncompared.contains("rate ok"), "{uncompared}");
+        assert!(
+            uncompared.contains("0 of 1 attempted targets reached a comparison at all"),
+            "{uncompared}"
+        );
+        let some = rates_panel(&Rates::of(&rows(
+            "a\texact\t1.0\t\t0\nb\tdivergent\t1.0\t\t0\n\
+             c\tnormalized\t1.0\t\t0\nd\tvoid\t1.0\t\t0\n",
+        )));
+        assert!(
+            some.contains("<div class=\"rate ok\">67%</div>")
+                && some.contains("2 of 3 compared targets reproduced"),
+            "{some}"
+        );
+        assert!(
+            some.contains("<div class=\"rate\">75%</div>")
+                && some.contains("3 of 4 attempted targets reached a comparison"),
+            "{some}"
+        );
+        let quiet = clusters_panel(&rows("a\texact\t1.0\t\t0\nb\texact\t1.0\t\t0\n"));
+        assert!(
+            quiet.contains("nothing failed in the 2 target(s) recorded so far"),
+            "a statement about what was recorded, never about the corpus:\n{quiet}"
+        );
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_directory_is_refused_before_anything_listens() {
+        let w = work_dir("serve-refuses");
+        put(w.join("results.tsv"), "");
+        let err = serve(
+            w.join("results.tsv"),
+            None,
+            "127.0.0.1:0".into(),
+            None,
+            None,
+        )
+        .expect_err("a file is not a work directory");
+        assert!(err.to_string().contains("is not a directory"), "{err}");
+    }
+
+    #[test]
+    fn a_baseline_that_is_not_a_directory_is_refused_before_anything_listens() {
+        // The address is held by this test, so a watch that let the baseline through fails on the
+        // bind rather than serving forever: the error says which of the two stopped it.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap().to_string();
+        let w = work_dir("serve-refuses-baseline");
+        let err = serve(w.clone(), None, addr, None, Some(w.join("no-such-sweep")))
+            .expect_err("a baseline that is not there");
+        assert!(
+            format!("{err:#}").contains("--baseline ")
+                && format!("{err:#}").contains("no-such-sweep is not a directory"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn an_address_that_is_already_taken_is_named_rather_than_served_on() {
+        // A port this test holds, so the watch cannot have it: the error names the address it
+        // tried, which is the thing the operator has to change.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap().to_string();
+        let err = serve(work_dir("serve-taken"), None, addr.clone(), None, None)
+            .expect_err("the address is held by this test");
+        assert!(
+            format!("{err:#}").contains(&format!("binding {addr}")),
+            "{err:#}"
+        );
     }
 }

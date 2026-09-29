@@ -352,8 +352,44 @@ mod tests {
 
     #[test]
     fn knowing_nothing_is_a_guess_and_says_so() {
-        let (_, why) = choose(None, None, None);
+        let (major, why) = choose(None, None, None);
         assert!(why.contains("a guess"), "{why}");
+        // The guess is the newest SDK the table knows, and the sentence names it.
+        assert_eq!(major, RELEASES.last().unwrap().0);
+        assert!(why.contains(&format!(".NET {major}")), "{why}");
+    }
+
+    #[test]
+    fn with_no_publish_instant_the_declared_target_is_built_with() {
+        // A run whose strategy records no moment: the declared target is the only floor there is,
+        // and nothing says a newer SDK was around to build it.
+        let (major, why) = choose(
+            Some("<TargetFramework>net6.0</TargetFramework>"),
+            None,
+            None,
+        );
+        assert_eq!(major, 6);
+        assert!(why.contains("records no publish instant"), "{why}");
+        // A global.json that pins nothing leaves the choice to the rest of the evidence.
+        let (major, _) = choose(
+            Some("<TargetFramework>net6.0</TargetFramework>"),
+            Some(r#"{ "msbuild-sdks": {} }"#),
+            None,
+        );
+        assert_eq!(major, 6);
+    }
+
+    #[test]
+    fn a_target_framework_element_that_never_closes_is_no_floor() {
+        assert_eq!(floor_from_project("<TargetFramework>net8.0"), None);
+        // One that does, after one that does not parse as a moniker, still counts.
+        assert_eq!(
+            floor_from_project(concat!(
+                "<TargetFrameworks>net;net8</TargetFrameworks>",
+                "<TargetFramework>net7.0</TargetFramework>"
+            )),
+            Some(7)
+        );
     }
 
     #[test]

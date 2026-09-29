@@ -67,6 +67,17 @@ impl Ecosystem {
         })
     }
 
+    /// Whether this ecosystem's registry publishes a sha1 of each artifact, which is then a digest
+    /// a consumer may hold the artifact by.
+    ///
+    /// npm alone: `dist.shasum` on every version, and a `sha1-` integrity string in lockfiles
+    /// written before npm moved to sha512. A statement about an npm artifact carries its sha1 so a
+    /// consumer holding only that can find it; nowhere else does anybody look an artifact up by
+    /// sha1, so nowhere else is one carried.
+    pub const fn publishes_sha1(self) -> bool {
+        matches!(self, Ecosystem::Npm)
+    }
+
     pub const fn all() -> &'static [Ecosystem] {
         &[
             Ecosystem::Npm,

@@ -49,6 +49,11 @@ trigon-stabilize-wasm = { path = "crates/trigon-stabilize-wasm", version = "0.0.
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 sha2 = "0.10"
+# sha1 is collision-broken and is never an identity here: it is computed only because npm publishes
+# one (`dist.shasum`) and a consumer may hold an artifact by it. md5 likewise, for PyPI's
+# declarations. Both are RustCrypto crates on the same `digest` traits as `sha2`.
+sha1 = "0.10"
+md-5 = "0.10"
 crc32fast = "1"
 bytes = "1"
 memmap2 = "0.9"
@@ -101,7 +106,13 @@ serde_json = "1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "ansi", "std"] }
 proptest = "1"
 toml = "0.8"
+# Editing `evidence.toml` in place, keeping its comments and order (`trigon evidence add` and
+# `remove`). Already in the tree: `toml` parses with it.
+toml_edit = "0.22"
 regex = "1"
+# `flock` without unsafe code, for the store's blob lock (`trigon-store`, which forbids unsafe).
+# Already in the tree, with `fs`: `tar` reaches it through `xattr`.
+rustix = { version = "1", features = ["fs"] }
 
 [profile.release]
 debug = 1

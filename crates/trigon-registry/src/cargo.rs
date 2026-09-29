@@ -18,14 +18,14 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use trigon_core::{
-    ArtifactId, Claim, Confidence, Digest, Ecosystem, Evidence, Intrinsics, RegistryMoment,
+    ArtifactId, Claim, Confidence, Ecosystem, Evidence, Intrinsics, RegistryMoment,
     SourceDiscovery, SourceProvenance, TargetRef,
 };
 
 use crate::client::Client;
-use crate::error::RegistryError;
-use crate::model::{ArtifactMeta, BlobSink, ResolvedTarget};
-use crate::npm::fetch_verified;
+use crate::declared::fetch_verified;
+use crate::error::{RegistryError, sort_versions};
+use crate::model::{ArtifactMeta, BlobSink, Fetched, ResolvedTarget};
 use crate::registry::Registry;
 
 const ECO: &str = "cargo";
@@ -48,11 +48,12 @@ impl CratesIoRegistry {
         self
     }
 
-    /// The versions this crate has, for an error that names them.
+    /// The versions this crate has, oldest first, for an error that names them.
     ///
     /// Best effort: a listing we could not read gives an error with an empty list rather than a
     /// different error about the listing, because the caller asked about a version and that is
-    /// still the answer.
+    /// still the answer. Sorted, because crates.io lists newest first and the error calls the end
+    /// of its list the recent ones.
     async fn available(&self, name: &str) -> Vec<String> {
         let url = format!("{}/api/v1/crates/{name}", self.base);
         let Ok(resp) = self.client.get(&url, ECO).await else {
@@ -61,7 +62,8 @@ impl CratesIoRegistry {
         let Ok(doc) = resp.json::<Value>().await else {
             return Vec::new();
         };
-        doc.get("versions")
+        let mut available: Vec<String> = doc
+            .get("versions")
             .and_then(Value::as_array)
             .map(|vs| {
                 vs.iter()
@@ -69,7 +71,9 @@ impl CratesIoRegistry {
                     .map(str::to_owned)
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        sort_versions(&mut available);
+        available
     }
 }
 
@@ -119,12 +123,21 @@ impl Registry for CratesIoRegistry {
                 )
             });
 
-        // crates.io publishes sha256 for every version, so unlike npm there is always something to
-        // check the bytes against.
-        let declared_sha256 = version
-            .get("checksum")
-            .and_then(Value::as_str)
-            .and_then(|h| Digest::from_hex(h).ok());
+        // crates.io publishes sha256 for every version, so there is always something to check the
+        // bytes against. A checksum that is not a sha256 is refused rather than dropped: dropping
+        // it, as this did, made a malformed declaration read as no declaration.
+        let checksum = match version.get("checksum").and_then(Value::as_str) {
+            Some(h) => vec![
+                crate::declared::from_hex("sha256", h, "cargo:checksum").map_err(|detail| {
+                    RegistryError::Malformed {
+                        ecosystem: ECO.into(),
+                        what: format!("{name} {}", target.version),
+                        detail,
+                    }
+                })?,
+            ],
+            None => Vec::new(),
+        };
 
         let publish_time = version
             .get("created_at")
@@ -186,7 +199,8 @@ impl Registry for CratesIoRegistry {
             artifacts: vec![ArtifactMeta {
                 id: ArtifactId::new(file),
                 url: dl,
-                declared_sha256,
+                declared: checksum,
+                declared_note: None,
                 size: version.get("crate_size").and_then(Value::as_u64),
             }],
             intrinsics: Intrinsics {
@@ -213,7 +227,7 @@ impl Registry for CratesIoRegistry {
         &self,
         meta: &ArtifactMeta,
         sink: &mut (dyn BlobSink + Send),
-    ) -> Result<Digest, RegistryError> {
+    ) -> Result<Fetched, RegistryError> {
         fetch_verified(&self.client, ECO, meta, sink).await
     }
 }

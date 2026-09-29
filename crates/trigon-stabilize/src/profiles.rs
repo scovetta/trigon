@@ -89,6 +89,11 @@ pub fn profile(id: &str) -> Option<StabilizerSet> {
                 Arc::new(NupkgTextEol) as Arc<dyn Stabilizer>,
                 Arc::new(NupkgDocMemberOrder) as Arc<dyn Stabilizer>,
                 Arc::new(DotnetAssemblyIdentity) as Arc<dyn Stabilizer>,
+                // Last, and lossy: reduce a managed assembly to its functional
+                // code when the identity pass left a layout residual it cannot align.
+                Arc::new(DotnetIlCanonical) as Arc<dyn Stabilizer>,
+                Arc::new(NupkgRepositoryBranch) as Arc<dyn Stabilizer>,
+                Arc::new(NupkgReadmeMarkers) as Arc<dyn Stabilizer>,
             ],
         ]
         .concat(),

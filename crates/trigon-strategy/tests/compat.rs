@@ -325,3 +325,36 @@ fn a_document_with_no_custom_stabilizers_carries_none() {
     let imported = import("rebuild_location_hint:\n  location:\n    repo: r\n").expect("lowers");
     assert!(imported.custom_stabilizers.is_empty());
 }
+
+#[test]
+fn a_registry_moment_the_definition_states_reaches_the_deps_phase_in_every_shape() {
+    // Dropping a stated moment lowers a pinned definition into one that resolves against today's
+    // index: a different build, reported under the definition's name.
+    const T: &str = "2023-05-01T04:11:28Z";
+    let wheel = flow(&format!(
+        "pypi_pure_wheel_build:\n  location:\n    repo: r\n  registry_time: \"{T}\"\n"
+    ));
+    let custom = flow(&format!(
+        "npm_custom_build:\n  location:\n    repo: r\n  node_version: \"18.17.0\"\n  \
+         npm_version: \"9.6.7\"\n  registry_time: \"{T}\"\n  command: build\n"
+    ));
+    let pack = flow(&format!(
+        "npm_pack_build:\n  location:\n    repo: r\n  node_version: \"18.17.0\"\n  \
+         npm_version: \"9.6.7\"\n  registry_time: \"{T}\"\n  version_override: 1.2.3-fixed\n"
+    ));
+    for (name, f) in [("wheel", &wheel), ("custom", &custom), ("pack", &pack)] {
+        assert_eq!(
+            with_of(&f.deps, 0).get("registry_time").map(String::as_str),
+            Some(T),
+            "{name}"
+        );
+    }
+    // The version the definition overrides to is the one the pack step writes.
+    assert_eq!(tool_of(&pack.build, 0), "npm/build/pack");
+    assert_eq!(
+        with_of(&pack.build, 0)
+            .get("version_override")
+            .map(String::as_str),
+        Some("1.2.3-fixed")
+    );
+}

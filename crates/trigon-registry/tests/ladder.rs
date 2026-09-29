@@ -16,8 +16,8 @@ use trigon_core::{
     ArtifactId, Classify, Confidence, Ecosystem, Fault, Intrinsics, SourceDiscovery, TargetRef,
 };
 use trigon_registry::{
-    ArtifactMeta, Candidate, DefinitionsInferrer, Derivation, RegistryError, ResolvedTarget,
-    StrategyInferrer, climb,
+    ArtifactMeta, Candidate, DefinitionsInferrer, Derivation, DigestMismatch, RegistryError,
+    ResolvedTarget, StrategyInferrer, climb,
 };
 use trigon_strategy::{Strategy, from_yaml};
 
@@ -142,7 +142,8 @@ fn target(artifacts: &[&str]) -> ResolvedTarget {
             .map(|id| ArtifactMeta {
                 id: ArtifactId::new(*id),
                 url: format!("https://files.pythonhosted.org/{id}"),
-                declared_sha256: None,
+                declared: Vec::new(),
+                declared_note: None,
                 size: None,
             })
             .collect(),
@@ -244,6 +245,46 @@ async fn a_rung_that_breaks_is_written_down_and_the_next_one_still_runs() {
         out.declines[0]
     );
     assert!(out.declines[0].1.contains("packument"), "{:?}", out.declines[0]);
+}
+
+/// A rung that keeps the trait's default `why_not`, as a rung for another ecosystem does.
+struct Mute;
+
+#[async_trait]
+impl StrategyInferrer for Mute {
+    fn name(&self) -> &'static str {
+        "mute"
+    }
+
+    async fn infer(&self, _t: &ResolvedTarget) -> Result<Vec<Candidate>, RegistryError> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn a_rung_that_never_explains_itself_adds_no_line_and_infer_takes_the_first_answer() {
+    // `why_not` defaults to nothing to add, which is the honest answer for a rung with no reason
+    // of its own. And `infer` is the climb with the record dropped: the first candidate, or none.
+    let t = target(&["widget-1.2.3.tar.gz"]);
+    let (answering, counts) = ladder(vec![
+        Rung::new("second", Answer::Candidate),
+        Rung::new("third", Answer::Candidate),
+    ]);
+    let mut rungs: Vec<Box<dyn StrategyInferrer>> = vec![Box::new(Mute)];
+    rungs.extend(answering);
+    let got = trigon_registry::infer(&rungs, &t).await.unwrap();
+    assert_eq!(
+        got.map(|c| c.discovery),
+        Some(SourceDiscovery::ExactTag),
+        "the second rung's candidate"
+    );
+    assert_eq!(counts[1].infers(), 0, "the third rung was not asked");
+
+    let silent: Vec<Box<dyn StrategyInferrer>> = vec![Box::new(Mute)];
+    assert!(trigon_registry::infer(&silent, &t).await.unwrap().is_none());
+    let out = climb(&silent, &t).await;
+    assert!(out.candidate.is_none());
+    assert!(out.declines.is_empty(), "{:?}", out.declines);
 }
 
 // ---------------------------------------------------------------------------
@@ -348,12 +389,14 @@ fn a_registry_failure_is_upstreams_and_a_refusal_is_ours() {
         ),
         (http(404), Fault::Upstream),
         (
-            RegistryError::DigestMismatch {
-                name: "widget".into(),
+            RegistryError::DigestMismatch(Box::new(DigestMismatch {
+                ecosystem: "pypi".into(),
                 artifact: "widget-1.2.3.tar.gz".into(),
-                expected: "aa".into(),
-                actual: "bb".into(),
-            },
+                algorithm: "sha256".into(),
+                field: "pypi:digests.sha256".into(),
+                declared: "aa".into(),
+                computed: "bb".into(),
+            })),
             Fault::Upstream,
         ),
         (
@@ -415,12 +458,14 @@ fn only_a_failure_that_could_go_differently_is_retried() {
             ecosystem: "npm".into(),
             name: "widget".into(),
         },
-        RegistryError::DigestMismatch {
-            name: "widget".into(),
+        RegistryError::DigestMismatch(Box::new(DigestMismatch {
+            ecosystem: "pypi".into(),
             artifact: "widget-1.2.3.tar.gz".into(),
-            expected: "aa".into(),
-            actual: "bb".into(),
-        },
+            algorithm: "sha256".into(),
+            field: "pypi:digests.sha256".into(),
+            declared: "aa".into(),
+            computed: "bb".into(),
+        })),
         RegistryError::Malformed {
             ecosystem: "npm".into(),
             what: "the packument".into(),

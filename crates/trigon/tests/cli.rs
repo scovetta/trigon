@@ -136,7 +136,7 @@ fn stabilizers_lists_a_profile_with_its_set_digest() {
         .unwrap();
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("wheel-record"), "{text}");
+    assert!(text.contains("wheel-record-v2"), "{text}");
     assert!(
         text.contains("finalize"),
         "RECORD regeneration must show as a finalize pass: {text}"
@@ -177,7 +177,7 @@ fn listing_the_profiles_names_the_one_nothing_selects() {
     );
     // And the cap is described as conditional, because `compare` reads it off the passes that
     // fired rather than off the profile.
-    assert!(text.contains("wheel-record (content)"), "{text}");
+    assert!(text.contains("wheel-record-v2 (content)"), "{text}");
     assert!(
         text.contains("caps nothing on a run where it found nothing to do"),
         "{text}"
@@ -476,7 +476,7 @@ fn a_wheel_gets_the_wheel_profile_not_the_zip_one() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("stabilizer set wheel"), "{text}");
+    assert_eq!(stabilizer_set(&text).as_deref(), Some("wheel"), "{text}");
 
     // .tgz stays generic on purpose: an npm tarball is a .tgz and so is a great deal else, and
     // nothing in the name says which.
@@ -489,7 +489,17 @@ fn a_wheel_gets_the_wheel_profile_not_the_zip_one() {
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("tar+gzip"), "{text}");
-    assert!(!text.contains("stabilizer set npm"), "{text}");
+    // Positively, not "not npm": a check for the absence of one label passes just as well when
+    // the label is renamed, which is how this one went vacuous once already.
+    assert_eq!(stabilizer_set(&text).as_deref(), Some("tar-gzip"), "{text}");
+}
+
+/// The set `trigon verify` says it compared under: the first word after the `stabilizers` label.
+fn stabilizer_set(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.trim_start().strip_prefix("stabilizers "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
 }
 
 fn write_zip(path: &Path, members: &[(&str, &[u8])]) {
@@ -712,6 +722,62 @@ fn attest_writes_a_bundle_that_verify_attestation_re_derives() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(text.contains("the claim holds"), "{text}");
+}
+
+#[test]
+fn verify_attestation_json_carries_exactly_the_keys_its_help_names() {
+    // Scripts read this with `jq`, so its keys are an interface. It lost one when ADR-0014 removed
+    // the external log, and the help says so; this pins what is left, so that a key going or
+    // coming is a decision somebody made rather than a diff nobody read.
+    let a = write_tgz("json-a.tgz", b"hello", 1_700_000_000);
+    let b = write_tgz("json-b.tgz", b"hello", 1_800_000_000);
+    let bundle = tmp().join("json.json");
+    let out = Command::new(bin())
+        .args(["verify"])
+        .arg(&a)
+        .arg(&b)
+        .arg("--attest")
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = Command::new(bin())
+        .args(["verify-attestation"])
+        .arg(&bundle)
+        .arg("--rerun-comparison")
+        .arg("--upstream")
+        .arg(&a)
+        .arg("--rebuild")
+        .arg(&b)
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("the output is JSON");
+    let mut keys: Vec<&str> = doc
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "outcome",
+            "predicateType",
+            "rederived",
+            "signature",
+            "subject"
+        ],
+        "{doc}"
+    );
+    assert_eq!(doc["rederived"]["holds"], true, "{doc}");
 }
 
 #[test]

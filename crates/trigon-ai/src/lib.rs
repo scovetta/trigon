@@ -20,13 +20,17 @@ mod provider;
 mod repair;
 mod transcript;
 
+#[cfg(test)]
+mod test_log;
+
 pub use builder::{Candidate, Task, candidate_schema, parse_candidate, prompt, propose};
 pub use copilot::Copilot;
 pub use eval::{Capability, Change, Flips, Labelled, Observation, Rate, Scorecard, flips, score};
 pub use http::{Anthropic, Flavor, OpenAiCompatible};
 pub use opinion::on_diff as opinion_on_diff;
 pub use provider::{
-    LlmError, ModelCaps, Part, Prompt, Provider, Reasoning, Replay, Request, Response, Usage,
+    Effort, LlmError, ModelCaps, Part, Prompt, Provider, Reasoning, Replay, Request, Response,
+    Usage,
 };
 pub use repair::{Attempt, Budget, Decision, NoPrior, Prior, RepairLoop, StopReason, Trigger};
 pub use transcript::{Recorder, Replaying, Transcript, Turn, is_snapshot};

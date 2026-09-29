@@ -1,8 +1,11 @@
-//! Making a signing key, and previewing what would go on an append-only log.
+//! Making a signing key, and what other code and people depend on the binary to say.
 //!
-//! Both are about the same thing from opposite ends: a key is the one file here that cannot be
-//! regenerated, and a transparency log entry is the one write that cannot be taken back. The tests
-//! that matter are therefore the refusals, not the happy paths.
+//! A key is the one file here that cannot be regenerated, so the tests that matter for it are the
+//! refusals, not the happy paths. The rest pin what is read back: the columns of `trigon runs`, the
+//! fix commands a failing build prints, and a repair that must not cost a run its answer.
+//!
+//! The file's name is older than its contents. It held the preview of an external log entry until
+//! ADR-0014 removed the log; the preview returns with `trigon publish` (docs/19 §10 phase 5).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -52,7 +55,7 @@ fn a_generated_key_is_usable_and_only_by_its_owner() {
     // the moment to say so is the moment the key is made.
     let hex = text
         .lines()
-        .find_map(|l| l.strip_prefix("public key  "))
+        .find_map(|l| l.trim_start().strip_prefix("public key "))
         .expect("keygen prints the public key")
         .trim()
         .to_string();
@@ -147,31 +150,59 @@ fn the_public_pem_is_written_where_asked() {
     let text = std::fs::read_to_string(&pem).unwrap();
     assert!(
         text.starts_with("-----BEGIN PUBLIC KEY-----"),
-        "the log entry carries SPKI PEM, so that is what this writes: {text:?}"
+        "an evidence repository publishes its key as SPKI PEM, so that is what this writes: \
+         {text:?}"
     );
 }
 
 #[test]
-fn dry_run_without_a_log_to_dry_run_against_is_rejected() {
-    // `--dry-run` previews one thing: the POST. On its own it would read as "attest without
-    // writing", which it is not, so clap refuses it rather than let the name mislead.
-    let out = Command::new(bin())
-        .args(["attest", "--dry-run"])
+fn keygen_says_its_key_is_the_one_records_are_published_under_until_a_root_exists() {
+    // ADR-0014 Decision 8 publishes under a single pinned ed25519 key until a root exists, and
+    // docs/19 D6 decides whether a root is built at all. A keygen that still told the operator
+    // making that key it was for development only, and that a trusted-root key was needed
+    // instead, would send them looking for B21 steps 4-5, which may never exist.
+    let d = dir("public-use");
+    let out = keygen(&d.join("signing.key"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = Command::new(bin())
+        .args(["keygen", "--help"])
         .output()
         .unwrap();
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("rekor"),
-        "the error should name what is missing:\n{err}"
-    );
+    assert!(help.status.success());
+
+    // Both are free to wrap, so compare with the whitespace folded.
+    let fold = |b: &[u8]| {
+        String::from_utf8_lossy(b)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for (what, text) in [
+        ("what keygen prints", fold(&out.stdout)),
+        ("keygen --help", fold(&help.stdout)),
+    ] {
+        assert!(
+            text.contains("until a root exists") && text.contains("ADR-0014 Decision 8"),
+            "{what} has to say this key is what records are published under until a root \
+             exists:\n{text}"
+        );
+        assert!(
+            !text.contains("wants a key under a trusted root instead")
+                && !text.contains("what a public instance should use"),
+            "{what} still calls a bare key development-only, against ADR-0014:\n{text}"
+        );
+    }
 }
 
-// --- The preview itself ------------------------------------------------------------------------
+// --- A store with a run in it ------------------------------------------------------------------
 
 /// A store holding one real run: two identical tarballs, compared for real, with the comparison
-/// and both artifacts in the blob store. Hand-writing a record would test the printer; this tests
-/// the thing that would actually be posted.
+/// and both artifacts in the blob store, so what is read back is what a rebuild would have
+/// written rather than a record written to suit the test.
 async fn store_with_a_run(root: &Path) -> String {
     use trigon_store::{ArtifactRef, Environment, RunRecord, RunState, Store};
 
@@ -249,145 +280,6 @@ async fn store_with_a_run(root: &Path) -> String {
     });
     store.put_run(&record).await.unwrap();
     record.id
-}
-
-#[test]
-fn a_dry_run_prints_the_entry_and_writes_nothing() {
-    let d = dir("preview");
-    let store = d.join("store");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    rt.block_on(store_with_a_run(&store));
-
-    let key = d.join("signing.key");
-    assert!(keygen(&key).status.success());
-
-    // What the store looks like before, so "wrote nothing" is checked rather than asserted.
-    let before = tree(&store);
-
-    let out = Command::new(bin())
-        .args(["attest", "--store"])
-        .arg(&store)
-        .arg("--key")
-        .arg(&key)
-        .args(["--rekor", "https://rekor.sigstage.dev", "--dry-run"])
-        .output()
-        .unwrap();
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{text}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    assert!(
-        text.contains("https://rekor.sigstage.dev/api/v1/log/entries"),
-        "the preview has to name where it would go:\n{text}"
-    );
-
-    // The printed entry is a real one: parse it and check the shape the log is given, because that
-    // exact shape is the reason to look before posting to something append-only.
-    let json = text
-        .split_once("log/entries:\n")
-        .expect("the entry follows the URL")
-        .1
-        // Bounded at the readable section rather than run to the end of the output: the two are
-        // both JSON, and a parser that swallowed both would be checking the wrong document.
-        .split("\nwhat that says, decoded")
-        .next()
-        .unwrap();
-    let end = json.rfind('}').expect("the entry is JSON") + 1;
-    let entry: serde_json::Value = serde_json::from_str(&json[..end]).expect("the preview parses");
-
-    assert_eq!(entry["kind"], "intoto");
-    assert_eq!(
-        entry["apiVersion"], "0.0.1",
-        "v0.0.2 takes the envelope as an object; this must stay the string form"
-    );
-    let spec = &entry["spec"];
-    assert!(
-        spec["content"]["envelope"].is_string(),
-        "v0.0.1 carries the envelope as a serialized JSON string, not an object: {spec}"
-    );
-    assert!(
-        spec["publicKey"].is_string(),
-        "the certificate is a sibling of `content`, not inside it: {spec}"
-    );
-
-    // The envelope really is ours, signed with the key we just made.
-    let envelope: serde_json::Value =
-        serde_json::from_str(spec["content"]["envelope"].as_str().unwrap()).unwrap();
-    assert_eq!(envelope["payloadType"], "application/vnd.in-toto+json");
-    assert!(
-        !envelope["signatures"][0]["sig"]
-            .as_str()
-            .unwrap()
-            .is_empty(),
-        "a dry run signs for real; only the POST is skipped"
-    );
-
-    // The claim is shown in readable form as well, because an entry nobody can read is not a
-    // preview — and it has to be the *same* claim, not a second rendering that could drift.
-    let decoded = text
-        .split_once("decoded — the statement inside the envelope, not part of the entry:\n")
-        .expect("the preview decodes the payload")
-        .1;
-    let shown: serde_json::Value =
-        serde_json::from_str(&decoded[..decoded.rfind('}').unwrap() + 1]).unwrap();
-    let actual: serde_json::Value = serde_json::from_slice(
-        &base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            envelope["payload"].as_str().unwrap(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        shown, actual,
-        "the readable section is not the payload that would be posted"
-    );
-    assert_eq!(shown["predicateType"], "https://trigon.dev/equivalence/v1");
-
-    assert!(
-        text.contains("Nothing was posted") && text.contains("this command wrote nothing"),
-        "the preview has to say it did not publish:\n{text}"
-    );
-    // And it must not overclaim: the rebuild that produced this run really did write to the store,
-    // and a flat "nothing was written" would be read as covering that too.
-    assert!(
-        text.contains("wrote its record and blobs earlier"),
-        "the message should scope its claim to this command:\n{text}"
-    );
-    assert_eq!(
-        tree(&store),
-        before,
-        "a dry run wrote to the store; `--dry-run` has to mean nothing was written, without \
-         qualification"
-    );
-}
-
-/// Every path under a directory, sorted, with file sizes — enough to catch a write.
-fn tree(root: &Path) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(p) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&p) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let path = e.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                let len = e.metadata().map(|m| m.len()).unwrap_or(0);
-                found.push(format!("{} {len}", path.display()));
-            }
-        }
-    }
-    found.sort();
-    found
 }
 
 // --- Commands we tell people to run ------------------------------------------------------------
@@ -477,6 +369,19 @@ fn runs_prints_the_id_first_and_the_target_second() {
         Some("pkg:npm/demo@1.0.0"),
         "column 2 is the target: {line}"
     );
+    // Then the outcome and whether it was signed, and nothing after them: the fifth column, which
+    // showed an external log's entry for the run, went with the log (ADR-0014).
+    assert_eq!(
+        fields.next(),
+        Some("exact"),
+        "column 3 is the outcome: {line}"
+    );
+    assert_eq!(
+        fields.next(),
+        Some("unattested"),
+        "column 4 says whether it was signed: {line}"
+    );
+    assert_eq!(fields.next(), None, "a fifth column: {line}");
 }
 
 // --- a repair must never cost the run the answer it already has ---------------------------------

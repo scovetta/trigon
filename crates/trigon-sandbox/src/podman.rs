@@ -303,26 +303,42 @@ impl PodmanBuild {
                 }
             }
         }
-        // Drain whatever the other pipe still holds after the first one closed.
-        while let Some(l) = err.next_line().await? {
-            push_to(
-                self.opts.on_event.as_ref(),
-                &self.events,
-                BuildEvent::Stderr(l.clone()),
-            );
-            append(log, &l, &self.named);
+        // Drain whatever the other pipe still holds after the first one closed, and wait for the
+        // process — **under the same deadline.** Neither used to have one, so a process that closed
+        // a stream, or both, and went on running was waited on for ever: the limit held only while
+        // both pipes were open, which made it something a build could opt out of.
+        let finished = tokio::time::timeout_at(deadline, async {
+            while let Some(l) = err.next_line().await? {
+                push_to(
+                    self.opts.on_event.as_ref(),
+                    &self.events,
+                    BuildEvent::Stderr(l.clone()),
+                );
+                append(log, &l, &self.named);
+            }
+            while let Some(l) = out.next_line().await? {
+                push_to(
+                    self.opts.on_event.as_ref(),
+                    &self.events,
+                    BuildEvent::Stdout(l.clone()),
+                );
+                append(log, &l, &self.named);
+            }
+            child.wait().await
+        })
+        .await;
+        match finished {
+            Ok(status) => Ok(status?.code().unwrap_or(-1)),
+            Err(_) => {
+                tracing::warn!(
+                    phase = ?phase,
+                    timeout_s = self.opts.limits.wall_clock.as_secs(),
+                    "wall-clock limit reached after the output closed, killing the build"
+                );
+                let _ = child.start_kill();
+                Err(SandboxError::Timeout(self.opts.limits.wall_clock))
+            }
         }
-        while let Some(l) = out.next_line().await? {
-            push_to(
-                self.opts.on_event.as_ref(),
-                &self.events,
-                BuildEvent::Stdout(l.clone()),
-            );
-            append(log, &l, &self.named);
-        }
-
-        let status = child.wait().await?;
-        Ok(status.code().unwrap_or(-1))
     }
 }
 
@@ -891,11 +907,197 @@ pub fn resolvable(image: &str, exists_locally: bool) -> Result<(), String> {
 /// whatever `--image` the run used, which for a locally built base is exactly that form. Trigon
 /// printed a command Trigon then rejected. One definition, so they cannot drift again.
 pub fn is_pinned(image: &str) -> bool {
-    if image.contains('@') {
-        return true;
-    }
+    image.contains('@') || is_content_id(image)
+}
+
+/// Whether this reference is an image's full content id: the sha256 of its configuration, as
+/// `sha256:<64 hex>` or the 64 hex alone, which is how podman names an image in its store and how
+/// `--image auto` and `trigon base-image` name the images they build.
+///
+/// It names exact bytes in this machine's store, and says nothing of where they came from: no
+/// registry digest is part of it, and a registry's image is named by its id as readily as one built
+/// here. Whether a registry digest names it is [`repo_digests`]'s to say (`docs/19` D8). A short id
+/// is not one; twelve hex digits name whichever image in the store they happen to prefix.
+pub fn is_content_id(image: &str) -> bool {
     let id = image.strip_prefix("sha256:").unwrap_or(image);
     id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Whether `image` is a registry's image pinned by digest, which is what can be pulled again.
+///
+/// A bare id, anything under `localhost/`, and a name with no registry path name bytes that exist
+/// only in this machine's store; a tag names nothing in particular.
+pub fn repullable(image: &str) -> Result<(), String> {
+    let Some((name, digest)) = image.split_once("@sha256:") else {
+        return Err(format!(
+            "`{image}` is not pinned by a registry digest, so there is nothing to pull again by"
+        ));
+    };
+    if name.is_empty()
+        || name.starts_with("localhost/")
+        || !name.contains('/')
+        || digest.len() != 64
+        || !digest.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(format!(
+            "`{image}` exists only in this machine's image store, so it has no registry to be \
+             pulled again from"
+        ));
+    }
+    Ok(())
+}
+
+/// Take a base image out of the local store and pull it again from its registry, by digest.
+///
+/// What a confirming attempt on the machine that made the first attempt asks of its image
+/// (`docs/19` D8): that it came from the registry for this attempt, and not from whatever the store
+/// has held since the first. **Only claimed where it happened**: the image is removed, observed to
+/// be gone, and pulled, and anything short of that is an `Err` saying why, which the caller records
+/// as an image that was not re-pulled.
+///
+/// The removal takes the store's lock exclusively, as every removal does, so it cannot take a
+/// layer from under a build reading it; it waits a little for one to finish rather than giving up
+/// at once. It is never forced: an image in use by a container, or the parent of another image,
+/// stays, and the attempt says it was not re-pulled.
+pub fn repull(binary: &str, image: &str) -> Result<(), String> {
+    repullable(image)?;
+    take_out_and_pull(binary, image, image)
+}
+
+/// The registry digests podman records for an image in the local store (`RepoDigests`): each
+/// `<name>@sha256:<64 hex>`, a registry's where the image came from one, and a `localhost/` one
+/// for an image built here, which no registry serves.
+///
+/// What a confirmation asks of an image named by its content id before it takes it for a local
+/// one ([`is_content_id`]): the id says nothing of where the bytes came from, and a registry's
+/// image is named by one as readily as a build of this machine's — `TRIGON_BASE_PARENT=<an image
+/// id>`, or the parent a trigon base image's label names, which `--image auto` builds on. `Err`
+/// where podman could not say, which is not an answer of "none".
+pub fn repo_digests(binary: &str, image: &str) -> Result<Vec<String>, String> {
+    let out = std::process::Command::new(binary)
+        .args([
+            "image",
+            "inspect",
+            image,
+            "--format",
+            "{{range .RepoDigests}}{{println .}}{{end}}",
+        ])
+        .output()
+        .map_err(|e| format!("podman could not be run to inspect it: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "podman could not inspect it: {}",
+            runtime_complaint(&String::from_utf8_lossy(&out.stderr))
+        ));
+    }
+    // One to a line, and nothing but blank lines for an image with none. Anything that is not a
+    // digest reference is not an answer, and is not read as "none".
+    let mut names = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines().map(str::trim) {
+        match line {
+            "" => {}
+            name if name.contains("@sha256:") => names.push(name.to_string()),
+            other => {
+                return Err(format!(
+                    "podman's `RepoDigests` for it are not digest references: `{other}`"
+                ));
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// Take an image a run named by its full content id out of the local store, pull it again by
+/// `by`, a registry digest that names it ([`repo_digests`]), and check the pull brought back the
+/// image that id names.
+///
+/// For a registry's image named by its id: the build runs on the id, so the pull repeats what the
+/// build runs on only if the registry served the bytes the id names, and anything else is an
+/// `Err`, as is anything [`repull`] would not claim. Removed by the id, so it is those bytes that
+/// leave the store, and never forced: an image with more than one name stays, as one in use or
+/// the parent of another does, and it was not pulled again.
+pub fn repull_by(binary: &str, id: &str, by: &str) -> Result<(), String> {
+    if !is_content_id(id) {
+        return Err(format!("`{id}` is not an image's full content id"));
+    }
+    repullable(by)?;
+    take_out_and_pull(binary, id, by)?;
+    let bare = |s: &str| {
+        s.trim()
+            .strip_prefix("sha256:")
+            .unwrap_or(s.trim())
+            .to_ascii_lowercase()
+    };
+    let out = std::process::Command::new(binary)
+        .args(["image", "inspect", by, "--format", "{{.Id}}"])
+        .output()
+        .map_err(|e| format!("podman could not be run to inspect what it pulled: {e}"))?;
+    let got = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() || bare(&got) != bare(id) {
+        return Err(format!(
+            "the registry served another image by that digest ({}), not the one the run names",
+            match got.trim() {
+                "" => "podman could not say which",
+                g => g,
+            }
+        ));
+    }
+    Ok(())
+}
+
+/// [`repull`]'s steps: take `image` out of the store, where it is there, and pull `by`.
+fn take_out_and_pull(binary: &str, image: &str, by: &str) -> Result<(), String> {
+    let exists = || {
+        std::process::Command::new(binary)
+            .args(["image", "exists", image])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if exists() {
+        let mut lock = None;
+        for _ in 0..40 {
+            lock = crate::store_lock::StoreLock::try_exclusive();
+            if lock.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        if lock.is_none() {
+            return Err(
+                "another build held the image store for ten seconds, so the image could not be \
+                 taken out of it"
+                    .into(),
+            );
+        }
+        let out = std::process::Command::new(binary)
+            .args(["image", "rm", image])
+            .output()
+            .map_err(|e| format!("podman could not be run to remove it: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "podman would not remove it ({}), and it is never forced: an image in use by a \
+                 container, the parent of another image, or, removed by its id, one with more than \
+                 one name stays",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        if exists() {
+            return Err(
+                "it was still in the image store after it was removed, under another name".into(),
+            );
+        }
+    }
+    let out = std::process::Command::new(binary)
+        .args(["pull", "--quiet", by])
+        .output()
+        .map_err(|e| format!("podman could not be run to pull it: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "pulling it again failed: {}",
+            runtime_complaint(&String::from_utf8_lossy(&out.stderr))
+        ));
+    }
+    Ok(())
 }
 
 /// Which phase script the image build died in.

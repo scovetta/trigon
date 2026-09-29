@@ -232,4 +232,20 @@ mod tests {
         assert_eq!(promised(&many).len(), 2);
         assert!(shortfall(&many, &tracked(&["bin/a.js"])).contains("bin/b.js"));
     }
+
+    #[test]
+    fn a_value_that_is_not_a_path_promises_nothing() {
+        // A publisher can write anything in these fields. A number, a boolean or a null names no
+        // file, and reading one as a promise would send a build after a file nobody declared.
+        let manifest = serde_json::json!({
+            "main": 7,
+            "browser": false,
+            "types": null,
+            "exports": { ".": [1, true, "./index.js"] },
+        });
+        assert_eq!(
+            promised(&manifest).into_iter().collect::<Vec<_>>(),
+            ["index.js"]
+        );
+    }
 }

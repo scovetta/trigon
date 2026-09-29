@@ -45,6 +45,7 @@ pub async fn health(State(api): S) -> Response {
             Principal::Operator => "operator",
         },
         "divergence_publication": if api.switches.stop_divergences { "stopped" } else { "running" },
+        "kill_switches": api.kill_switches(),
     }))
 }
 
@@ -81,27 +82,88 @@ pub async fn runs(State(api): S, UrlQuery(q): UrlQuery<RunsQuery>) -> Response {
 
 /// One run, in as much detail as the principal may see.
 ///
-/// The record is returned as it is stored, minus nothing — it holds digests, not bytes, and a
-/// digest is not a secret. What the digests *point at* is class-gated, which is where the control
-/// lives. The entry beside it carries the publication decision, so the front-end never has to
-/// re-derive one.
+/// The record is returned as it is stored — it holds digests, not bytes, and a digest is not a
+/// secret. What the digests *point at* is class-gated, which is where the control lives. The entry
+/// beside it carries the publication decision, so the front-end never has to re-derive one.
+///
+/// **Minus a void run's outcome, for an anonymous reader, and everything else that says it.**
+/// Safeguard 2 shows such a run as a void and never as a divergence, and both halves of this answer
+/// carry the outcome — the record in several other words too — so both are passed through
+/// [`crate::index::Entry::shown`] and [`crate::index::record_shown`]. The row stays, with its
+/// reason, so the reader is told why there is no verdict rather than shown a gap.
 pub async fn run(State(api): S, Path(id): Path<String>) -> Response {
-    let Some(record) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((record, entry)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
-    let Some(entry) = api.index.entry(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let public = api.principal() == Principal::Anonymous;
+    let published = published_view(&record);
+    let record = crate::index::record_shown(record, entry.publication, public);
+    json(serde_json::json!({
+        "entry": entry.shown(public),
+        "record": record,
+        "published": published,
+    }))
+}
+
+/// Where a run's record was published (`docs/19` §10 phase 6), from `RunRecord.published`, or
+/// `None` where it has not been: the repository, the commit that logged it, the record's digest
+/// and the path of its file there, and its leaf. The run page shows it as a panel of its own, and
+/// the record says the same in its own field; this is it in a form a reader can go and fetch.
+///
+/// Nothing here is withheld from an anonymous reader of a run they may see: the record is
+/// already public, in the repository it names, and a run the gate withholds is refused before
+/// this is asked.
+pub(crate) fn published_view(r: &trigon_store::RunRecord) -> Option<serde_json::Value> {
+    let p = r.published.as_ref()?;
+    Some(serde_json::json!({
+        "repository": p.repository,
+        "commit": p.commit,
+        "record": format!("sha256:{}", p.record.to_hex()),
+        "path": trigon_attest::evidence::record_path(&p.record),
+        "leaf": p.leaf,
+        "log": p.log.as_deref().unwrap_or("log"),
+    }))
+}
+
+/// The run by that id and its row, if this reader may know there is one. Every per-run route asks
+/// this first, and answers [`no_such_run`] where it says `None`.
+///
+/// **For an anonymous reader a withheld run is absent, and is refused in the same bytes.** 404, not
+/// 403, because a 403 confirms the run exists, which for a withheld divergence is most of the
+/// accusation the gate is holding back. The routes each had their own version of that, and they
+/// disagreed with it: `/v1/runs/{id}` and its diff said "no run by that id" to an absent id and "no
+/// run by that id is published" to a withheld one, and the class-gated routes answered a withheld
+/// run with their class's 403 and an absent one with a 404. Run ids are a timestamp and eight hex
+/// digits of the published artifact's digest, which anyone holding the artifact has, so each
+/// difference was a test for whether a given package had a run held back.
+///
+/// A void is published, so it is returned, and each route shows it as one.
+fn run_for(api: &Api, id: &str) -> Option<(trigon_store::RunRecord, crate::index::Entry)> {
+    let public = api.principal() == Principal::Anonymous;
+    let (r, e) = (api.index.get(id)?, api.index.entry(id)?);
+    (!public || e.publication.is_public()).then_some((r, e))
+}
+
+/// The one refusal of a run [`run_for`] did not return, whether it is absent or withheld.
+fn no_such_run(api: &Api) -> Response {
+    let sentence = match api.principal() {
+        Principal::Anonymous => "no run by that id is published",
+        Principal::Operator => "no run by that id",
     };
-    if api.principal() == Principal::Anonymous && !entry.publication.is_public() {
-        // 404, not 403. A 403 confirms the run exists, which for a withheld divergence is most of
-        // the accusation the gate is holding back.
-        return refuse(
-            StatusCode::NOT_FOUND,
-            "no_such_run",
-            "no run by that id is published",
-        );
-    }
-    json(serde_json::json!({ "entry": entry, "record": record }))
+    refuse(StatusCode::NOT_FOUND, "no_such_run", sentence)
+}
+
+/// The refusal of anything that would show a void run to an anonymous reader as more than a void.
+fn published_as_void(because: crate::Withheld) -> Response {
+    refuse(
+        StatusCode::NOT_FOUND,
+        "published_as_void",
+        &format!(
+            "this run is published as void, not as a verdict: {} A void carries no comparison \
+             outcome and no difference data, because it is evidence of nothing about the package.",
+            because.sentence()
+        ),
+    )
 }
 
 /// The digest a named field of a run points at, with its class.
@@ -123,8 +185,8 @@ fn digest_of(r: &trigon_store::RunRecord, what: &str) -> Option<(Digest, Class)>
 /// record is a class the caller cannot choose. A route that took `?class=definition` and a digest
 /// would let anyone relabel a build log as a definition and read it.
 async fn blob_of(api: &Api, id: &str, what: &str) -> Response {
-    let Some(r) = api.index.get(id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, _)) = run_for(api, id) else {
+        return no_such_run(api);
     };
     let Some((digest, class)) = digest_of(&r, what) else {
         return refuse(
@@ -194,7 +256,7 @@ pub(crate) async fn artifact_bytes(
     r: &trigon_store::RunRecord,
     side: &str,
 ) -> Result<(Vec<u8>, String), Response> {
-    let Some((digest, name)) = crate::member::side_digest(r, side) else {
+    let Some((_, name)) = crate::member::side_digest(r, side) else {
         return Err(refuse(
             StatusCode::NOT_FOUND,
             "no_such_side",
@@ -224,21 +286,30 @@ pub(crate) async fn artifact_bytes(
             ),
         ));
     }
-    let stored = match side {
-        "upstream" => r.upstream.stored,
-        _ => r.rebuild.as_ref().is_some_and(|a| a.stored),
+    let artifact = match side {
+        "upstream" => Some((&r.upstream, "published artifact")),
+        _ => r.rebuild.as_ref().map(|a| (a, "rebuilt artifact")),
     };
-    if !stored {
-        return Err(refuse(
+    let not_kept = || {
+        refuse(
             StatusCode::NOT_FOUND,
             "not_kept",
             "that artifact's bytes were not kept. Retention drops them on a match and keeps them \
              on a divergence, so the copies that could answer this question are the ones where \
              somebody would ask it.",
-        ));
-    }
-    match api.store.blobs().get(&digest).await {
-        Ok(b) => Ok((b.to_vec(), name)),
+        )
+    };
+    let Some((a, what)) = artifact else {
+        return Err(not_kept());
+    };
+    // Read by the record's word only where the store bears it out: bytes it says are kept and
+    // the store has lost are missing, and said so, never served as absent by policy.
+    match api.store.artifact(&r.id, what, a).await {
+        Ok(Some(b)) => Ok((b.to_vec(), name)),
+        Ok(None) => Err(not_kept()),
+        Err(e @ trigon_store::StoreError::Missing { .. }) => {
+            Err(refuse(StatusCode::NOT_FOUND, "missing", &e.to_string()))
+        }
         Err(e) => Err(refuse(
             StatusCode::NOT_FOUND,
             "no_such_blob",
@@ -367,8 +438,8 @@ pub async fn member(
     Path(id): Path<String>,
     UrlQuery(q): UrlQuery<MemberQuery>,
 ) -> Response {
-    let Some(r) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, _)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
     // Held for the whole read. See `Api::member_reads`: one of these costs twice an artifact, and
     // the number in flight is what decides whether that is a lot of memory or a fatal amount.
@@ -478,8 +549,8 @@ pub async fn member_raw(
     Path(id): Path<String>,
     UrlQuery(q): UrlQuery<MemberQuery>,
 ) -> Response {
-    let Some(r) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, _)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
     let _permit = api.member_reads.clone().acquire_owned().await;
     if !admits(api.principal(), Class::Artifact) {
@@ -554,23 +625,19 @@ pub async fn member_raw(
 /// Anonymous, unlike the blob. See [`Class::Diff`]: the control on a difference summary is its
 /// bound, not its secrecy, and the same member paths already reach a signed statement served to
 /// anybody.
+///
+/// **Not for a void run**, whose view is its outcome and a census of what differed: the divergence
+/// in more detail than the verdict the run page no longer shows. `docs/19` §4.3 says a void
+/// carries no comparison outcome and no difference data, and the refusal says why in those terms.
 pub async fn diff(State(api): S, Path(id): Path<String>) -> Response {
-    let Some(r) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, entry)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
+    // `run_for` has already refused a withheld run, as it refuses an absent one.
     if api.principal() == Principal::Anonymous
-        && !api
-            .index
-            .entry(&id)
-            .is_some_and(|e| e.publication.is_public())
+        && let Publication::Void { because } = entry.publication
     {
-        // 404, matching `/v1/runs/{id}`: a 403 confirms the run exists, which for a withheld
-        // divergence is most of the accusation the gate is holding back.
-        return refuse(
-            StatusCode::NOT_FOUND,
-            "no_such_run",
-            "no run by that id is published",
-        );
+        return published_as_void(because);
     }
     let Some(digest) = r.comparison else {
         return refuse(
@@ -580,7 +647,9 @@ pub async fn diff(State(api): S, Path(id): Path<String>) -> Response {
              verdict says why on its own page.",
         );
     };
-    let bytes = match api.store.blobs().get(&digest).await {
+    // Rendered from the re-derivation where `trigon rederive` wrote one that agrees with the
+    // recorded comparison; `comparison` (the raw evidence route) always serves the recorded one.
+    let bytes = match crate::comparison::bytes_for_view(&api.store, &digest).await {
         Ok(b) => b,
         Err(e) => {
             return refuse(
@@ -611,6 +680,37 @@ pub async fn network(State(api): S, Path(id): Path<String>) -> Response {
     blob_of(&api, &id, "network").await
 }
 
+/// The network transcript, summarized: totals, routes, what the guard could check, the hosts, and
+/// the largest exchanges.
+///
+/// Gated exactly as the raw transcript is, because it carries the same unredacted URLs: the class
+/// is read off the record, never asserted by the caller, and a principal refused the transcript is
+/// refused its summary with the same sentence.
+pub async fn network_summary(State(api): S, Path(id): Path<String>) -> Response {
+    let Some((r, _)) = run_for(&api, &id) else {
+        return no_such_run(&api);
+    };
+    let Some((digest, class)) = digest_of(&r, "network") else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "not_recorded",
+            "this run recorded no network transcript. Absent is not empty: no transcript was \
+             written, which is a different fact from one that was written and held nothing.",
+        );
+    };
+    if !admits(api.principal(), class) {
+        return refuse(StatusCode::FORBIDDEN, "class_gated", class.refusal());
+    }
+    match api.store.blobs().get(&digest).await {
+        Ok(bytes) => json(crate::network::summarize(&bytes)),
+        Err(e) => refuse(
+            StatusCode::NOT_FOUND,
+            "no_such_blob",
+            &format!("the record names a transcript the store cannot return: {e}"),
+        ),
+    }
+}
+
 /// The signed statement, anonymous, permalinked.
 ///
 /// `11-interfaces.md` wants exactly this: the statement, not the log. It is the product — the thing
@@ -623,28 +723,23 @@ pub async fn network(State(api): S, Path(id): Path<String>) -> Response {
 /// and this one served 13 KB of signed statement asserting the divergence. Observed against a real
 /// run in a real store, not reasoned about: see `seam_public_surface.rs`.
 ///
-/// `Void` is refused too, and that is not over-caution. Safeguard 2 says such a run is shown *as a
-/// void and never as a divergence*; a signed statement asserting one is that divergence in its most
-/// quotable form, and it would contradict the page it sits behind.
+/// **A void run serves its `void/v1` and nothing else.** Safeguard 2 says such a run is shown *as a
+/// void and never as a divergence*, and a verdict envelope signed for it — which `trigon attest`
+/// signed for an open-egress run until `docs/19` §10 phase 2 — is that divergence in its most
+/// quotable form, contradicting the page it sits behind. So an anonymous reader of a void run is
+/// served only statements whose predicate is `void/v1`, which carry no outcome and no difference
+/// data, and one with no such statement is refused.
 pub async fn attestation(State(api): S, Path(id): Path<String>) -> Response {
-    let Some(r) = api.index.get(&id) else {
-        return refuse(StatusCode::NOT_FOUND, "no_such_run", "no run by that id");
+    let Some((r, entry)) = run_for(&api, &id) else {
+        return no_such_run(&api);
     };
-    if api.principal() == Principal::Anonymous {
-        let published = api
-            .index
-            .entry(&id)
-            .is_some_and(|e| e.publication == Publication::Published);
-        if !published {
-            // 404 rather than 403, for the reason `run` gives: confirming the run exists is most
-            // of the accusation the gate is holding back.
-            return refuse(
-                StatusCode::NOT_FOUND,
-                "no_such_run",
-                "no run by that id has a published statement",
-            );
-        }
-    }
+    // A withheld run was refused above, as an absent one is, so what reaches here unpublished is a
+    // void; the arm for a withheld one is there so this cannot come to serve one if that changes.
+    let void = match (api.principal(), entry.publication) {
+        (Principal::Anonymous, Publication::Void { because }) => Some(because),
+        (Principal::Anonymous, Publication::Withheld { .. }) => return no_such_run(&api),
+        _ => None,
+    };
     if r.attestations.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,
@@ -656,11 +751,29 @@ pub async fn attestation(State(api): S, Path(id): Path<String>) -> Response {
     let mut envelopes = Vec::new();
     for path in &r.attestations {
         match api.store.get_attestation(path).await {
-            Ok(e) => envelopes.push(e),
+            Ok(e) if void.is_none() || is_void(&e) => envelopes.push(e),
+            // A void run's other statements, which for a run attested before voids were signed
+            // are its verdicts. Chosen by the predicate the envelope carries, never by the name it
+            // is filed under: the name is the store's, and the statement is what a reader is
+            // handed.
+            Ok(_) => {}
             Err(e) => {
                 tracing::warn!(run = %id, path = %path, error = %e, "unreadable attestation");
             }
         }
+    }
+    if let Some(because) = void
+        && envelopes.is_empty()
+    {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "no_void_statement",
+            &format!(
+                "this run is published as void, and no void statement has been signed for it: {} \
+                 `trigon attest` signs one, and signs nothing else for a void run.",
+                because.sentence()
+            ),
+        );
     }
     if envelopes.is_empty() {
         return refuse(
@@ -672,33 +785,67 @@ pub async fn attestation(State(api): S, Path(id): Path<String>) -> Response {
     json(envelopes)
 }
 
+/// Whether an envelope's statement is a `void/v1`. One that does not decode is not.
+fn is_void(e: &trigon_attest::Envelope) -> bool {
+    let Ok(payload) = e.decoded_payload() else {
+        return false;
+    };
+    serde_json::from_slice::<trigon_attest::Statement>(&payload)
+        .is_ok_and(|st| st.predicate_type == trigon_attest::VOID)
+}
+
 /// Lookup by the digest of the **published** artifact.
 ///
 /// `19-distribution-and-lookup.md`: the only query that works without a naming authority. Somebody
 /// holding a tarball can ask about it without knowing what we call it, which is the query a
 /// consumer actually has.
+///
+/// **The algorithm is the one asked for**: `sha256:<hex>`, `sha512:<hex>` or `sha1:<hex>` — npm's
+/// lockfile holds a sha512 and nothing else — each matched against the digest of that algorithm
+/// the run computed over the published bytes, as a subject carries them (`docs/19` §5). A bare
+/// digest is read by its length. It used to discard the algorithm and compare whatever hex it was
+/// given with the sha256, so a sha512 or a sha1 matched nothing; and it searched the newest 500
+/// rows, so an older run of the artifact read as never checked. Every run is searched now.
+///
+/// Its rows are [`crate::index::Index::for_artifact`]'s, which hands an anonymous reader a void
+/// row without its outcome, as it does for `/v1/runs` and `/v1/targets/{purl}`, and no withheld
+/// row at all.
 pub async fn artifact(State(api): S, Path(digest): Path<String>) -> Response {
-    // `sha256:abcd…` or bare hex; both are what a caller has to hand.
-    let hex = digest
-        .rsplit_once(':')
-        .map(|(_, h)| h)
-        .unwrap_or(&digest)
-        .to_ascii_lowercase();
-    let page = api.index.page(
-        &Query {
-            limit: 500,
-            ..Default::default()
-        },
-        api.principal() == Principal::Anonymous,
-    );
-    let mut hits = Vec::new();
-    for e in &page.rows {
-        if let Some(r) = api.index.get(&e.id)
-            && r.upstream.sha256.to_hex() == hex
-        {
-            hits.push(e.clone());
+    let (algorithm, hex) = match digest.split_once(':') {
+        Some((a, h)) => (a.to_ascii_lowercase(), h.to_ascii_lowercase()),
+        None => {
+            let hex = digest.to_ascii_lowercase();
+            let algorithm = match hex.len() {
+                128 => "sha512",
+                40 => "sha1",
+                _ => "sha256",
+            };
+            (algorithm.to_string(), hex)
         }
+    };
+    let len = match algorithm.as_str() {
+        "sha256" => 64,
+        "sha512" => 128,
+        "sha1" => 40,
+        _ => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "unknown_algorithm",
+                "a published artifact is looked up by `sha256:<hex>`, `sha512:<hex>` or \
+                 `sha1:<hex>`: the digests a run computes over it",
+            );
+        }
+    };
+    if hex.len() != len || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "malformed_digest",
+            &format!("a {algorithm} digest is {len} hex digits"),
+        );
     }
+    let hits = api
+        .index
+        .for_artifact(&algorithm, &hex, api.principal() == Principal::Anonymous);
     if hits.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,
@@ -710,21 +857,12 @@ pub async fn artifact(State(api): S, Path(digest): Path<String>) -> Response {
     json(hits)
 }
 
-/// Every run against one package, newest first: the version ladder.
+/// Every run against one package, newest first: the version ladder. Every run, not a page of them:
+/// see [`crate::index::Index::for_target`].
 pub async fn target(State(api): S, Path(purl): Path<String>) -> Response {
-    let page = api.index.page(
-        &Query {
-            q: Some(purl.clone()),
-            limit: 500,
-            ..Default::default()
-        },
-        api.principal() == Principal::Anonymous,
-    );
-    let rows: Vec<_> = page
-        .rows
-        .into_iter()
-        .filter(|e| e.target == purl || e.target.starts_with(&format!("{purl}@")))
-        .collect();
+    let rows = api
+        .index
+        .for_target(&purl, api.principal() == Principal::Anonymous);
     if rows.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,
@@ -777,15 +915,16 @@ pub async fn evidence_blob(State(api): S, Path(digest): Path<String>) -> Respons
 /// and hand-rolled: pulling in a generator to describe twelve GET routes would be more dependency
 /// than document.
 pub async fn openapi(State(api): S) -> Response {
-    let mut paths = BTreeMap::new();
+    // Gathered per path, because a path can carry more than one verb: `/v1/runs` is browsed with
+    // `GET` and asked of with `POST`. One operation per path is what let the table list it once,
+    // as the verb it is not browsed with.
+    let mut paths: BTreeMap<&str, serde_json::Map<String, serde_json::Value>> = BTreeMap::new();
     for (path, verb, summary) in ROUTES {
-        paths.insert(
-            path.to_string(),
+        paths.entry(path).or_default().insert(
+            verb.to_string(),
             serde_json::json!({
-                (*verb): {
-                    "summary": summary,
-                    "responses": { "200": { "description": "ok" } }
-                }
+                "summary": summary,
+                "responses": { "200": { "description": "ok" } }
             }),
         );
     }
@@ -815,11 +954,18 @@ pub async fn openapi(State(api): S) -> Response {
 /// document as a `get` — so the first route that was not one made the contract describe something
 /// the router does not have. A contract that has to be true of the router is not the place to
 /// assume a shape.
+///
+/// **And every route is in the table**, which `the_table_lists_every_route_the_router_mounts`
+/// holds against `lib.rs`. `/v1/me`, `/v1/queue` and `/v1/jobs/{id}/events` were mounted and
+/// missing, and `/v1/runs` was listed once, as `post`, with the description of its `get`. A sweep
+/// over "every anonymous route" is built from this table, so a route missing here is a route no
+/// sweep visits — and the job events route was publishing withheld divergences past one.
 pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/health",
         "get",
-        "Liveness, corpus size, and which gate the site is behind",
+        "Liveness, corpus size, which gate the site is behind, and both kill-switches: this \
+         server's, and the evidence repository's",
     ),
     (
         "/v1/stats",
@@ -828,13 +974,18 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     ),
     (
         "/v1/runs",
-        "post",
+        "get",
         "Browse and search. Filter by ecosystem, outcome, fault or text",
+    ),
+    (
+        "/v1/runs",
+        "post",
+        "Ask for a rebuild of a package URL. Needs a principal with a quota, and names nothing else",
     ),
     (
         "/v1/runs/{id}",
         "get",
-        "One run: the stored record and the publication decision",
+        "One run: the stored record, the publication decision, and where its record was published",
     ),
     (
         "/v1/runs/{id}/diff",
@@ -859,7 +1010,7 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/runs/{id}/attestation",
         "get",
-        "The signed statement. Anonymous",
+        "The signed statements. Anonymous; a void run's `void/v1` alone",
     ),
     (
         "/v1/runs/{id}/log",
@@ -870,6 +1021,11 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
         "/v1/runs/{id}/network",
         "get",
         "What crossed into the build. Class-gated: unredacted",
+    ),
+    (
+        "/v1/runs/{id}/network/summary",
+        "get",
+        "The network transcript summarized: routes, hosts, guard coverage, largest exchanges. Class-gated like the transcript",
     ),
     (
         "/v1/check",
@@ -884,12 +1040,12 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "/v1/fleet",
         "get",
-        "Queue depth, who holds a lease, and the corpus's two denominators",
+        "Queue depth, how many hold a lease and how soon each lapses (worker names to an operator only), and the corpus's two denominators",
     ),
     (
         "/v1/artifacts/{digest}",
         "get",
-        "Lookup by published artifact digest, needing no naming authority",
+        "Lookup by published artifact digest — sha256, sha512 or sha1 — needing no naming authority",
     ),
     (
         "/v1/targets/{purl}",
@@ -900,6 +1056,21 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
         "/v1/evidence/{digest}",
         "get",
         "A blob by digest, for a principal who may read its class",
+    ),
+    (
+        "/v1/me",
+        "get",
+        "What the presented credential may do, or that there is none",
+    ),
+    (
+        "/v1/queue",
+        "get",
+        "What is waiting and what is running. Names targets, never outcomes",
+    ),
+    (
+        "/v1/jobs/{id}/events",
+        "get",
+        "Where one job has got to. Its notes are for an operator",
     ),
     ("/v1/openapi.json", "get", "This contract"),
 ];
@@ -947,6 +1118,48 @@ mod tests {
                 "{p} is outside the versioned surface"
             );
         }
+    }
+
+    /// The table and the router are the same set of routes, verb for verb.
+    ///
+    /// Read off `lib.rs`, because axum will not list a router's routes. The two routes that serve
+    /// the page are outside the versioned surface and are left out on purpose; everything under
+    /// `/v1/` the router mounts has to be in the contract, or a sweep built from the contract does
+    /// not visit it.
+    #[test]
+    fn the_table_lists_every_route_the_router_mounts() {
+        use std::collections::BTreeSet;
+        let src = include_str!("lib.rs");
+        let mounted: BTreeSet<(String, String)> = src
+            .split(".route(")
+            .skip(1)
+            .filter_map(|call| {
+                // `"/v1/queue", get(request::queue_state))`: the path, then the handler's verb,
+                // which is the last segment of whatever comes before its first parenthesis.
+                let mut parts = call.splitn(3, '"');
+                let path = parts.nth(1)?;
+                let rest = parts.next()?.trim_start_matches([',', ' ', '\n']);
+                let verb = rest.split('(').next()?.rsplit("::").next()?;
+                Some((path.to_string(), verb.to_string()))
+            })
+            .filter(|(path, _)| path.starts_with("/v1/"))
+            .collect();
+        assert!(
+            mounted.len() > 20,
+            "the scan found {} routes in lib.rs, so it is reading the wrong thing",
+            mounted.len()
+        );
+        let table: BTreeSet<(String, String)> = ROUTES
+            .iter()
+            .map(|(p, v, _)| (p.to_string(), v.to_string()))
+            .collect();
+        let unlisted: Vec<_> = mounted.difference(&table).collect();
+        let unmounted: Vec<_> = table.difference(&mounted).collect();
+        assert!(
+            unlisted.is_empty() && unmounted.is_empty(),
+            "the router mounts {unlisted:?}, which the contract does not list, and the contract \
+             lists {unmounted:?}, which the router does not mount"
+        );
     }
 
     #[test]
@@ -1029,5 +1242,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A class is read off the field of the record that names the blob, and each field names the
+    /// class the evidence table was written for. The per-run routes rest on this: a mapping that
+    /// filed a build log or a model exchange under an anonymous class would serve it to anybody.
+    #[test]
+    fn each_field_a_route_names_is_read_with_its_own_class() {
+        let d = |n: u8| Digest::from_bytes([n; 32]);
+        let mut r = trigon_store::RunRecord::new(
+            "1700000001-aa",
+            "pkg:npm/a@1",
+            trigon_store::ArtifactRef {
+                name: "a.tgz".into(),
+                sha256: d(0),
+                bytes: 1,
+                stored: true,
+            },
+            trigon_store::Environment {
+                base_image: "x@sha256:0".into(),
+                derived_image: None,
+                egress: "mirror".into(),
+                isolation: "podman".into(),
+                attestable: true,
+                registry_moment: None,
+                pin: None,
+                guard_manifest: None,
+                guarded_members: None,
+            },
+            "2026-01-01T00:00:00Z",
+        );
+        for what in [
+            "comparison",
+            "log",
+            "network",
+            "transcript",
+            "strategy",
+            "instructions",
+        ] {
+            assert_eq!(digest_of(&r, what), None, "`{what}` was never recorded");
+        }
+        r.comparison = Some(d(1));
+        r.build_log = Some(d(2));
+        r.network_transcript = Some(d(3));
+        r.transcript = Some(d(4));
+        r.strategy = Some(d(5));
+        r.instructions = Some(d(6));
+        assert_eq!(digest_of(&r, "comparison"), Some((d(1), Class::Comparison)));
+        assert_eq!(digest_of(&r, "log"), Some((d(2), Class::BuildLog)));
+        assert_eq!(digest_of(&r, "network"), Some((d(3), Class::Transcript)));
+        assert_eq!(
+            digest_of(&r, "transcript"),
+            Some((d(4), Class::ModelTranscript))
+        );
+        assert_eq!(digest_of(&r, "strategy"), Some((d(5), Class::Definition)));
+        assert_eq!(
+            digest_of(&r, "instructions"),
+            Some((d(6), Class::Definition))
+        );
+        // A field the caller names that the record does not have is nothing, never a guess.
+        assert_eq!(digest_of(&r, "upstream"), None);
+    }
+
+    /// Every class is served as data. Bytes from an artifact or a log that a browser rendered as a
+    /// page would run somebody else's content on this origin.
+    #[test]
+    fn no_class_is_served_as_something_a_browser_renders_as_a_page() {
+        for c in Class::ALL {
+            let t = content_type(c);
+            assert!(
+                !t.contains("html") && !t.contains("javascript") && !t.contains("svg"),
+                "{c:?} is served as {t}"
+            );
+        }
+        assert_eq!(content_type(Class::Artifact), "application/octet-stream");
+        assert_eq!(content_type(Class::BuildLog), "text/plain; charset=utf-8");
+        assert_eq!(
+            content_type(Class::ModelTranscript),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(content_type(Class::Transcript), "application/x-ndjson");
     }
 }

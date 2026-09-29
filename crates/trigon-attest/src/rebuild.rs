@@ -46,7 +46,17 @@ pub struct RunFacts<'a> {
     /// invites a reader to assume the stronger thing, which is the mistake this whole field exists
     /// to prevent.
     pub pin_observed: Option<(u64, u64)>,
+    /// `strategyDigest`: a domain-separated hash over the canonical strategy **and the tools it
+    /// reaches**. What a cache key is built from. Not the digest of any file.
     pub strategy_digest: Option<&'a str>,
+    /// The digest of the strategy's canonical JSON as the run stored it, which is a file: the blob
+    /// `RunRecord.strategy` names.
+    ///
+    /// Kept apart from `strategy_digest` because the two answer different questions and were
+    /// conflated: the `strategy.json` byproduct named `strategyDigest`, so a reader who fetched
+    /// the file the byproduct describes found bytes that hash to something else (`docs/19` §4.2
+    /// item 7). `None` on a run recorded before the strategy was stored.
+    pub strategy_blob: Option<&'a str>,
     /// The source the artifact was rebuilt from: repository, commit, subdirectory, and which rung
     /// found the commit.
     ///
@@ -57,12 +67,25 @@ pub struct RunFacts<'a> {
     /// is whether the published tarball corresponds to the *claimed source*, and a reader holding
     /// this statement could not tell which source was claimed.
     pub source: Option<SourceFacts<'a>>,
-    /// `definition`, `heuristic`, `ci_derived`, `model_assisted`.
+    /// `definition`, `heuristic`, `ci_derived`, `model_assisted`. `None` leaves the method out
+    /// of the statement rather than naming one nobody recorded.
     pub derivation: Option<&'a str>,
+    /// Hex SHA-256 of the model exchange the strategy came out of (`RunRecord.transcript`), where
+    /// the run kept one.
+    ///
+    /// Signed as `derivation.transcript`, which was `null` on every statement whatever the run
+    /// held: 24 of 75 attested runs in one store had kept a transcript, and not one statement
+    /// named it. The bytes are not published (`docs/19` §4.1, they are unredacted); the digest
+    /// binds the derivation to the exchange a holder of it can check. `None` only where the run
+    /// recorded none, which is most runs, since most ask no model.
+    pub transcript: Option<&'a str>,
     /// Digest of the rendered instructions, which is what actually ran.
     pub instructions: Option<&'a str>,
     pub build_log: Option<&'a str>,
+    /// The Trigon signing the statement, which is what `builder.version.trigon` has always named.
+    /// The one that ran the build is signed in the verdict (`trigonVersion.builder`).
     pub trigon_version: &'a str,
+    /// The set the rebuilt artifact was judged under: `(id, digest)`.
     pub stabilizer_set: Option<(&'a str, &'a str)>,
     /// What the artifact guard refused or caught.
     pub guard_trips: &'a [String],
@@ -117,11 +140,10 @@ impl Statement {
     /// The subject is the **rebuild**, not the published artifact — the opposite of `equivalence/v1`
     /// and deliberately so. This statement is about a thing we made; the equivalence statement is
     /// about a thing somebody else published, and is keyed on the digest a consumer already has.
-    pub fn rebuild(
-        artifact_name: &str,
-        rebuild_sha256: &trigon_core::Digest,
-        f: &RunFacts,
-    ) -> Self {
+    ///
+    /// The caller builds the subject from the rebuilt bytes: sha256 and sha512 where it holds
+    /// them, sha256 alone where it does not.
+    pub fn rebuild(subject: Subject, f: &RunFacts) -> Self {
         let mut byproducts = Vec::new();
         if let Some(d) = f.build_log {
             byproducts.push(json!({ "name": "build.log", "digest": { "sha256": d } }));
@@ -131,7 +153,13 @@ impl Statement {
         }
         // The strategy itself, not only its digest in `internalParameters`. A hash of a blob the
         // statement does not offer is not something a reader can check.
-        if let Some(d) = f.strategy_digest {
+        //
+        // **Named by the file's own digest.** This entry named `strategyDigest`, which hashes the
+        // strategy together with the tools it reaches and is the digest of no file, so the one
+        // reader this entry exists for — somebody holding `strategy.json` — could never match it.
+        // A run that stored no strategy lists none, rather than a digest nothing hashes to;
+        // `strategyDigest` stays in `internalParameters`, where it is described for what it is.
+        if let Some(d) = f.strategy_blob {
             byproducts.push(json!({ "name": "strategy.json", "digest": { "sha256": d } }));
         }
         if let Some(t) = f.network_transcript {
@@ -197,8 +225,7 @@ impl Statement {
             // Provenance, beside the claim rather than inside it. A consumer who wants to filter on
             // "no model touched this" can; offering that costs one field (`docs/09` §4).
             "derivation": {
-                "method": f.derivation.unwrap_or("heuristic"),
-                "transcript": Value::Null,
+                "transcript": f.transcript.map_or(Value::Null, |d| json!({ "sha256": d })),
                 "reviewedBy": Value::Null,
             },
             // Not a footnote. A pass at open egress is a weaker claim than a pass under an enforced
@@ -206,15 +233,25 @@ impl Statement {
             // stronger one.
             "attestable": f.attestable,
         });
+        // The method only where the run recorded one. This was `unwrap_or("heuristic")`, so a run
+        // with no recorded derivation was signed as heuristic: absence rendered as a value, and a
+        // consumer filtering on the method could not tell the two apart (`docs/19` §4.2 item 5).
+        if let Some(m) = f.derivation {
+            predicate["derivation"]["method"] = json!(m);
+        }
+        // The set the rebuilt artifact was judged under, in the shape the verdict names it. The
+        // field existed and the attestor passed no set, so no `rebuild` statement carried one
+        // (`docs/19` §4.2 item 2). Additive: `rebuild` stays v1, and a verifier that does not know
+        // the field reads past it.
         if let Some((id, digest)) = f.stabilizer_set {
             predicate["runDetails"]["builder"]["version"]["stabilizers"] =
                 json!(format!("sha256:{digest}"));
-            predicate["buildDefinition"]["internalParameters"]["stabilizerSet"] = json!(id);
+            predicate["stabilizerSet"] = json!({ "id": id, "digest": { "sha256": digest } });
         }
 
         Statement {
             type_: STATEMENT_TYPE.into(),
-            subject: vec![Subject::new(artifact_name, rebuild_sha256)],
+            subject: vec![subject],
             predicate_type: REBUILD.into(),
             predicate,
         }
@@ -227,11 +264,10 @@ impl Statement {
     /// not a failure, because a build that downloads its own published output reproduces it
     /// perfectly and proves nothing (`docs/12-security.md` §2). Recording that the check *ran* is as
     /// important as its result: a statement with no such block is one where nobody looked.
-    pub fn build_observation(
-        artifact_name: &str,
-        subject_sha256: &trigon_core::Digest,
-        f: &RunFacts,
-    ) -> Self {
+    ///
+    /// Its subject is the upstream artifact, so the caller builds it the way an equivalence
+    /// statement's is built: every digest a consumer might hold ([`Subject::with_digests`]).
+    pub fn build_observation(subject: Subject, f: &RunFacts) -> Self {
         let tripped = !f.guard_trips.is_empty();
         let predicate = json!({
             // Tier 1 is the network transcript, which is what the mirror gives us and about eighty
@@ -273,7 +309,7 @@ impl Statement {
 
         Statement {
             type_: STATEMENT_TYPE.into(),
-            subject: vec![Subject::new(artifact_name, subject_sha256)],
+            subject: vec![subject],
             predicate_type: BUILD_OBSERVATION.into(),
             predicate,
         }
@@ -302,6 +338,7 @@ mod tests {
             registry_moment: Some("2018-04-09T01:10:45Z"),
             pin_observed: Some((153, 903)),
             strategy_digest: Some("be7ffd47303e29ca"),
+            strategy_blob: Some("0bdc9f36d3b4e3b1"),
             source: Some(SourceFacts {
                 repo: "https://github.com/stevemao/left-pad",
                 commit: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
@@ -311,6 +348,7 @@ mod tests {
                 how: "registry_commit",
             }),
             derivation: Some("heuristic"),
+            transcript: None,
             instructions: None,
             build_log: Some("aa".repeat(32).leak()),
             trigon_version: "0.0.0",
@@ -327,7 +365,7 @@ mod tests {
         // The opposite subject to `equivalence/v1`, on purpose: that one is keyed on the digest a
         // consumer already has, this one on the thing we produced.
         let d = Digest::from_bytes([7; 32]);
-        let s = Statement::rebuild("left-pad-1.3.0.tgz", &d, &facts());
+        let s = Statement::rebuild(Subject::new("left-pad-1.3.0.tgz", &d), &facts());
         assert_eq!(s.predicate_type, REBUILD);
         assert_eq!(s.subject[0].digest["sha256"], d.to_hex());
         assert_eq!(
@@ -336,6 +374,80 @@ mod tests {
         );
         assert_eq!(s.predicate["derivation"]["method"], "heuristic");
         assert!(s.canonical().is_ok(), "it has to be signable");
+    }
+
+    #[test]
+    fn a_run_with_no_recorded_derivation_is_not_signed_as_heuristic() {
+        // Absence rendered as a value was the bug: `unwrap_or("heuristic")` signed a method nobody
+        // recorded, and a consumer filtering out model-assisted runs could not tell "we do not
+        // know" from "no model".
+        let d = Digest::from_bytes([6; 32]);
+        let s = Statement::rebuild(
+            Subject::new("a.tgz", &d),
+            &RunFacts {
+                derivation: None,
+                ..facts()
+            },
+        );
+        assert!(
+            s.predicate["derivation"].get("method").is_none(),
+            "{}",
+            s.predicate["derivation"]
+        );
+        // The rest of the block is still there, so a reader sees the method is what is missing.
+        assert!(s.predicate["derivation"]["transcript"].is_null());
+    }
+
+    /// The model exchange a run kept is named, by digest, and one it did not keep is not.
+    ///
+    /// `derivation.transcript` was `Value::Null` whatever the run held, so 24 of 75 attested runs
+    /// in one store had a transcript digest no statement signed: a `model_assisted` derivation with
+    /// nothing binding it to the exchange it came out of is an assertion, not a record.
+    #[test]
+    fn the_transcript_the_run_kept_is_signed_and_one_it_did_not_is_absent() {
+        let d = Digest::from_bytes([6; 32]);
+        let kept = "3f".repeat(32);
+        let with = Statement::rebuild(
+            Subject::new("a.tgz", &d),
+            &RunFacts {
+                derivation: Some("model_assisted"),
+                transcript: Some(&kept),
+                ..facts()
+            },
+        );
+        assert_eq!(
+            with.predicate["derivation"]["transcript"],
+            serde_json::json!({ "sha256": kept })
+        );
+
+        let without = Statement::rebuild(Subject::new("a.tgz", &d), &facts());
+        assert!(
+            without.predicate["derivation"]["transcript"].is_null(),
+            "a run that kept no transcript is signed as having none, not as having an empty one: \
+             {}",
+            without.predicate["derivation"]
+        );
+    }
+
+    #[test]
+    fn a_rebuild_statement_names_the_set_it_was_judged_under() {
+        // `docs/19` §4.2 item 2: the attestor passed no set, so no `rebuild` statement had one.
+        let d = Digest::from_bytes([5; 32]);
+        let s = Statement::rebuild(Subject::new("a.tgz", &d), &facts());
+        assert_eq!(s.predicate["stabilizerSet"]["id"], "npm-tarball");
+        assert_eq!(s.predicate["stabilizerSet"]["digest"]["sha256"], "2b7c4f");
+        assert_eq!(
+            s.predicate["runDetails"]["builder"]["version"]["stabilizers"],
+            "sha256:2b7c4f"
+        );
+        let none = Statement::rebuild(
+            Subject::new("a.tgz", &d),
+            &RunFacts {
+                stabilizer_set: None,
+                ..facts()
+            },
+        );
+        assert!(none.predicate.get("stabilizerSet").is_none());
     }
 
     #[test]
@@ -348,7 +460,7 @@ mod tests {
             attestable: false,
             ..facts()
         };
-        let s = Statement::rebuild("a.tgz", &d, &weak);
+        let s = Statement::rebuild(Subject::new("a.tgz", &d), &weak);
         assert_eq!(
             s.predicate["buildDefinition"]["externalParameters"]["egressTier"],
             "open"
@@ -362,7 +474,7 @@ mod tests {
         // assume it applied, and for weeks it did not: pip ignores an untrusted plain-HTTP index
         // after one warning and resolves against the live one.
         let d = Digest::from_bytes([9; 32]);
-        let s = Statement::rebuild("a.tgz", &d, &facts());
+        let s = Statement::rebuild(Subject::new("a.tgz", &d), &facts());
         assert_eq!(
             s.predicate["buildDefinition"]["internalParameters"]["registryPinBound"],
             true
@@ -372,7 +484,7 @@ mod tests {
             pin_observed: Some((0, 0)),
             ..facts()
         };
-        let s = Statement::build_observation("a.tgz", &d, &unproven);
+        let s = Statement::build_observation(Subject::new("a.tgz", &d), &unproven);
         assert_eq!(s.predicate["registryPin"]["bound"], false);
         assert_eq!(s.predicate["registryPin"]["indexRequests"], 0);
         // The moment is still recorded. An unproven pin is not an absent one.
@@ -384,8 +496,7 @@ mod tests {
         // A third state, and not a failure: nothing was configured, so there is nothing to prove.
         let d = Digest::from_bytes([8; 32]);
         let s = Statement::build_observation(
-            "a.tgz",
-            &d,
+            Subject::new("a.tgz", &d),
             &RunFacts {
                 registry_moment: None,
                 pin_observed: None,
@@ -403,11 +514,11 @@ mod tests {
             guarded_members: None,
             ..facts()
         };
-        let s = Statement::build_observation("a.tgz", &d, &unguarded);
+        let s = Statement::build_observation(Subject::new("a.tgz", &d), &unguarded);
         assert_eq!(s.predicate["artifactHashCheck"]["performed"], false);
         assert_eq!(s.predicate["artifactHashCheck"]["matched"], false);
 
-        let s = Statement::build_observation("a.tgz", &d, &facts());
+        let s = Statement::build_observation(Subject::new("a.tgz", &d), &facts());
         assert_eq!(s.predicate["artifactHashCheck"]["performed"], true);
         assert_eq!(s.predicate["artifactHashCheck"]["guardedMembers"], 34);
     }
@@ -420,7 +531,7 @@ mod tests {
             guard_trips: &trips,
             ..facts()
         };
-        let s = Statement::build_observation("a.tgz", &d, &tripped);
+        let s = Statement::build_observation(Subject::new("a.tgz", &d), &tripped);
         assert_eq!(s.predicate["artifactHashCheck"]["matched"], true);
         assert_eq!(s.predicate["violations"].as_array().unwrap().len(), 1);
     }
@@ -429,8 +540,7 @@ mod tests {
     fn an_unenforced_run_claims_no_observability_tier() {
         let d = Digest::from_bytes([4; 32]);
         let s = Statement::build_observation(
-            "a.tgz",
-            &d,
+            Subject::new("a.tgz", &d),
             &RunFacts {
                 attestable: false,
                 network_transcript: None,
@@ -452,7 +562,7 @@ mod tests {
         // actually ran, nor what the build fetched — all three of which were sitting in the record.
         // A statement that omits the bytes it is about is one nobody can check.
         let d = Digest::from_bytes([2; 32]);
-        let s = Statement::rebuild("a.tgz", &d, &facts());
+        let s = Statement::rebuild(Subject::new("a.tgz", &d), &facts());
         let names: Vec<&str> = s.predicate["runDetails"]["byproducts"]
             .as_array()
             .unwrap()
@@ -461,6 +571,30 @@ mod tests {
             .collect();
         assert!(names.contains(&"build.log"), "{names:?}");
         assert!(names.contains(&"network.jsonl"), "{names:?}");
+    }
+
+    /// The scripts that ran are named by their digest where the run kept them, and not at all
+    /// where it did not.
+    #[test]
+    fn the_instructions_a_run_kept_are_named_and_none_are_invented() {
+        let d = Digest::from_bytes([2; 32]);
+        let kept = "1c".repeat(32);
+        let s = Statement::rebuild(
+            Subject::new("a.tgz", &d),
+            &RunFacts {
+                instructions: Some(&kept),
+                ..facts()
+            },
+        );
+        let byproducts = s.predicate["runDetails"]["byproducts"].as_array().unwrap();
+        let instructions = byproducts
+            .iter()
+            .find(|b| b["name"] == "instructions")
+            .expect("the instructions are named");
+        assert_eq!(instructions["digest"]["sha256"], kept);
+        let s = Statement::rebuild(Subject::new("a.tgz", &d), &facts());
+        let byproducts = s.predicate["runDetails"]["byproducts"].as_array().unwrap();
+        assert!(byproducts.iter().all(|b| b["name"] != "instructions"));
     }
 
     #[test]
@@ -475,7 +609,7 @@ mod tests {
             network_transcript: None,
             ..facts()
         };
-        let s = Statement::build_observation("a.tgz", &d, &lying);
+        let s = Statement::build_observation(Subject::new("a.tgz", &d), &lying);
         assert_eq!(
             s.predicate["tier"], 0,
             "tier 1 was claimed with nothing to back it"
@@ -483,7 +617,7 @@ mod tests {
 
         // And the other way: a transcript is named, by hash, so a reader fetches those bytes and
         // reads them rather than taking our word that we looked.
-        let s = Statement::build_observation("a.tgz", &d, &facts());
+        let s = Statement::build_observation(Subject::new("a.tgz", &d), &facts());
         assert_eq!(s.predicate["tier"], 1);
         assert_eq!(
             s.predicate["networkTranscript"]["sha256"],
@@ -503,6 +637,10 @@ mod source_facts_tests {
     use crate::statement::Statement;
     use trigon_core::Digest;
 
+    fn subject() -> Subject {
+        Subject::new("x.whl", &Digest::from_bytes([1; 32]))
+    }
+
     fn facts_with_source() -> RunFacts<'static> {
         RunFacts {
             run_id: "r1",
@@ -512,6 +650,7 @@ mod source_facts_tests {
             isolation: "podman",
             attestable: true,
             strategy_digest: Some("deadbeef"),
+            strategy_blob: Some("5a17"),
             source: Some(SourceFacts {
                 repo: "https://github.com/tlsfuzzer/python-ecdsa",
                 commit: "bd66899550d7185939bf27b75713a2ac9325a9d3",
@@ -530,7 +669,7 @@ mod source_facts_tests {
         // artifact A" has to be deterministic and readable by someone who has never heard of us.
         // The recipe was named only by a digest of a blob the statement did not offer, and the
         // source — the other half of every verdict this project makes — was not in it at all.
-        let s = Statement::rebuild("x.whl", &Digest::from_bytes([1; 32]), &facts_with_source());
+        let s = Statement::rebuild(subject(), &facts_with_source());
         let dep = &s.predicate["buildDefinition"]["resolvedDependencies"][0];
         assert_eq!(dep["uri"], "https://github.com/tlsfuzzer/python-ecdsa");
         // `gitCommit` is SLSA's own key, so a consumer that knows nothing about Trigon still reads
@@ -546,7 +685,7 @@ mod source_facts_tests {
         // A commit the registry recorded and a commit found by stripping a prefix off a tag name
         // support very different verdicts. A consumer who cannot tell them apart reads every
         // verdict as the stronger one.
-        let s = Statement::rebuild("x.whl", &Digest::from_bytes([1; 32]), &facts_with_source());
+        let s = Statement::rebuild(subject(), &facts_with_source());
         let a = &s.predicate["buildDefinition"]["resolvedDependencies"][0]["annotations"];
         assert_eq!(a["discovery"], "fuzzy_tag");
         assert_eq!(a["ref"], "python-ecdsa-0.19.2");
@@ -561,7 +700,7 @@ mod source_facts_tests {
     #[test]
     fn the_strategy_is_offered_and_not_merely_hashed() {
         // A digest of a blob the statement does not list is not something a reader can check.
-        let s = Statement::rebuild("x.whl", &Digest::from_bytes([1; 32]), &facts_with_source());
+        let s = Statement::rebuild(subject(), &facts_with_source());
         let names: Vec<&str> = s.predicate["runDetails"]["byproducts"]
             .as_array()
             .unwrap()
@@ -572,12 +711,51 @@ mod source_facts_tests {
     }
 
     #[test]
+    fn the_strategy_file_is_named_by_its_own_digest_and_the_cache_digest_stays_apart() {
+        // `docs/19` §4.2 item 7. `strategyDigest` hashes the strategy with the tools it reaches, so
+        // it is the digest of no file, and the `strategy.json` byproduct used to carry it: the one
+        // reader that entry is for, somebody holding the file, could never match it. The file is
+        // named by the digest of the blob the run stored, and `strategyDigest` keeps its own place.
+        let s = Statement::rebuild(subject(), &facts_with_source());
+        let byproduct = s.predicate["runDetails"]["byproducts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["name"] == "strategy.json")
+            .expect("the strategy is offered");
+        assert_eq!(byproduct["digest"]["sha256"], "5a17");
+        assert_eq!(
+            s.predicate["buildDefinition"]["internalParameters"]["strategyDigest"],
+            "deadbeef"
+        );
+
+        // A run recorded before the strategy was stored lists no file, rather than a digest
+        // nothing hashes to.
+        let old = RunFacts {
+            strategy_blob: None,
+            ..facts_with_source()
+        };
+        let s = Statement::rebuild(subject(), &old);
+        let names: Vec<&str> = s.predicate["runDetails"]["byproducts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap())
+            .collect();
+        assert!(!names.contains(&"strategy.json"), "{names:?}");
+        assert_eq!(
+            s.predicate["buildDefinition"]["internalParameters"]["strategyDigest"], "deadbeef",
+            "the cache digest is still stated, for what it is"
+        );
+    }
+
+    #[test]
     fn a_run_with_no_source_says_so_rather_than_inventing_one() {
         let bare = RunFacts {
             source: None,
             ..facts_with_source()
         };
-        let s = Statement::rebuild("x.whl", &Digest::from_bytes([1; 32]), &bare);
+        let s = Statement::rebuild(subject(), &bare);
         assert_eq!(
             s.predicate["buildDefinition"]["resolvedDependencies"]
                 .as_array()

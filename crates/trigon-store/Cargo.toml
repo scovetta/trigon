@@ -29,6 +29,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+rustix.workspace = true
 sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -39,3 +40,5 @@ tempfile.workspace = true
 # reaching the object store directly.
 object_store.workspace = true
 serde_json.workspace = true
+# The archived run file in `tests/fixtures` is gzipped; `tests/old_run_files.rs` says why.
+flate2.workspace = true

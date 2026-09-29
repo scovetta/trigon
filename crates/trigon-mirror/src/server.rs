@@ -1001,6 +1001,11 @@ async fn fetch_index(
         req
     })
     .await?;
+    // The client follows redirects itself, and hands back only the ones it could not: no
+    // `Location`, or one it cannot resolve. Answered as `proxy` answers them, and for its reason.
+    if resp.status().is_redirection() {
+        return Err(unfollowed(&resp));
+    }
     if !resp.status().is_success() {
         return Err(MirrorError::Upstream {
             platform: filter.platform.as_str().into(),
@@ -1093,16 +1098,24 @@ async fn nuget_route(
     path: &str,
     via: &str,
 ) -> Result<Response, MirrorError> {
-    let (moment, tail) = rest.split_once('/').ok_or(MirrorError::NoFilter)?;
-    if moment.is_empty() {
+    let (raw, tail) = rest.split_once('/').ok_or(MirrorError::NoFilter)?;
+    if raw.is_empty() {
         return Err(MirrorError::NoFilter);
     }
+    // **Normalized, for the reason the Cargo route gives.** A moment in the path has been through
+    // nothing, and `published_by` normalizes the timestamp it compares and not the moment — so
+    // `yesterday` was a moment every registry timestamp sorts before, and the registration came
+    // back with every version in it under a URL claiming a filter. Refused instead, as
+    // `normalize` refuses on every other route.
+    let moment = &crate::moment::normalize(raw)?;
     let filter = Filter {
         platform: Platform::NuGet,
-        moment: moment.to_string(),
+        moment: moment.clone(),
     };
-    // The authority this mirror is reachable at, so the documents it serves point back at it.
-    let base = format!("http://{via}/-nuget/{moment}");
+    // The authority this mirror is reachable at, so the documents it serves point back at it —
+    // with the moment spelled as the client spelled it, so a URL it composes onto one of these
+    // is a URL it already recognises.
+    let base = format!("http://{via}/-nuget/{raw}");
 
     if tail == "index.json" {
         mirror.seen.note_moment(moment);
@@ -1619,6 +1632,14 @@ async fn proxy(
         // that host rather than against the one that redirected us.
         resp = outbound(next.as_str(), kind, || mirror.passthrough.get(next.clone())).await?;
     }
+    // **A redirect the loop did not follow is not an answer.** It ends holding one when upstream
+    // names nowhere to go, or is still redirecting after the last hop, and this used to hand that
+    // on as a bare 3xx. The build cannot follow it any more than it could the others, and pip and
+    // npm do not take a 3xx for a failure: they read the refusal text as the document or the
+    // tarball and fail further on, over something else — where a 502 is a failure they retry.
+    if resp.status().is_redirection() {
+        return Err(unfollowed(&resp));
+    }
     if !resp.status().is_success() {
         return Err(MirrorError::Upstream {
             platform: filter.platform.as_str().into(),
@@ -1679,6 +1700,18 @@ async fn proxy(
         out.headers_mut().insert(header::CONTENT_ENCODING, v);
     }
     Ok(out)
+}
+
+/// A redirect upstream answered that this mirror did not follow, named by its `Location` or by
+/// the want of one.
+fn unfollowed(resp: &reqwest::Response) -> MirrorError {
+    MirrorError::BadRedirect {
+        found: resp
+            .headers()
+            .get(header::LOCATION)
+            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+            .unwrap_or_else(|| "no Location header".into()),
+    }
 }
 
 /// Fill a cache entry from a body as it passes, completing it only where the body completes.
@@ -2153,5 +2186,799 @@ mod outbound_politeness {
                 .unwrap()
                 .is_empty()
         );
+    }
+}
+
+/// `proxy` against an upstream on loopback: every hop, every status, every way a body can end.
+///
+/// The routes that build a URL all name a real registry, so the served tests cannot reach these
+/// paths without the network. `proxy` itself takes the URL it is given — the route has already
+/// checked the first hop — so a loopback upstream exercises exactly the code a registry would, and
+/// the allowlist on every *later* hop is the thing under test.
+#[cfg(test)]
+mod proxy_tests {
+    use std::io::{Read as _, Write as _};
+    use std::sync::Arc;
+
+    use sha2::Digest as _;
+
+    use super::{Filter, Mirror, MirrorError, Platform, proxy};
+
+    /// An upstream that answers one connection per canned response, then stops listening, and
+    /// hands back the request line of each connection it answered.
+    ///
+    /// Every response closes its connection, so a second request cannot quietly ride a pooled one:
+    /// once the answers run out, asking again is a refused connection rather than a stale answer.
+    fn upstream(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for response in responses {
+                let Ok((mut s, _)) = listener.accept() else {
+                    break;
+                };
+                let mut head = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&head);
+                asked.push(line.lines().next().unwrap_or_default().to_string());
+                let _ = s.write_all(&response);
+                let _ = s.flush();
+            }
+            asked
+        });
+        (base, handle)
+    }
+
+    fn answer(status: &str, headers: &[&str], body: &[u8]) -> Vec<u8> {
+        let mut out = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
+        for h in headers {
+            out.push_str(h);
+            out.push_str("\r\n");
+        }
+        if !headers.iter().any(|h| h.starts_with("Content-Length")) {
+            out.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        out.push_str("\r\n");
+        let mut out = out.into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn npm() -> Filter {
+        Filter {
+            platform: Platform::Npm,
+            moment: String::new(),
+        }
+    }
+
+    /// A mirror with a cache, built directly rather than through `with_cache` so this binary's
+    /// rate limiter is not pointed at a directory the test is about to delete.
+    fn caching(name: &str) -> (Mirror, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("trigon-proxy-cache-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cache = crate::cache::Cache::open(root.clone(), "scope".into()).unwrap();
+        let m = Mirror {
+            cache: Some(Arc::new(cache)),
+            ..Mirror::new().unwrap()
+        };
+        (m, root)
+    }
+
+    async fn body(r: axum::response::Response) -> Result<Vec<u8>, axum::Error> {
+        axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .map(|b| b.to_vec())
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        format!("{:x}", sha2::Sha256::digest(bytes))
+    }
+
+    #[tokio::test]
+    async fn a_redirect_off_the_routes_own_allowlist_is_refused_and_never_followed() {
+        // The allowlist is the entire content of `mirror-only` on these routes, and it used to be
+        // checked on the URL a build asked for and on nothing after it: reqwest followed up to five
+        // hops on its own. An allowlisted host that answers `302 cdn.evil.example` then put
+        // arbitrary bytes into a build that is supposed to have no route out.
+        for (route, location, host) in [
+            (
+                "artifact",
+                "https://cdn.evil.example/payload.tgz",
+                "cdn.evil.example",
+            ),
+            // The lists do not bleed into each other, on a later hop any more than on the first.
+            (
+                "toolchain",
+                "https://registry.npmjs.org/x/-/x-1.0.0.tgz",
+                "registry.npmjs.org",
+            ),
+            (
+                "passthrough",
+                "https://nodejs.org/dist/v20.0.0/node.tar.gz",
+                "nodejs.org",
+            ),
+            // A relative `Location` is resolved against the URL that sent it and checked again, so
+            // staying on the same host is no way round the list.
+            ("artifact", "/elsewhere/payload.tgz", "127.0.0.1"),
+        ] {
+            let (base, asked) = upstream(vec![answer(
+                "302 Found",
+                &[&format!("Location: {location}")],
+                b"",
+            )]);
+            let m = Mirror::new().unwrap();
+            let e = proxy(&m, &format!("{base}/start"), &npm(), route)
+                .await
+                .expect_err("a redirect off the allowlist must not be followed");
+            match &e {
+                MirrorError::HostNotAllowed { host: h, route: r } => {
+                    assert_eq!((h.as_str(), *r), (host, route), "{e}")
+                }
+                other => panic!("{route} -> {location}: {other:?}"),
+            }
+            assert_eq!(e.status(), 403);
+            assert_eq!(asked.join().unwrap(), ["GET /start HTTP/1.1"], "{route}");
+            assert!(
+                m.seen.exchanges().is_empty(),
+                "nothing crossed, so nothing is transcribed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_somewhere_that_cannot_be_named_is_refused() {
+        // A destination we cannot name is a destination we cannot put on an allowlist.
+        let (base, asked) = upstream(vec![answer("301 Moved", &["Location: http://["], b"")]);
+        let m = Mirror::new().unwrap();
+        let e = proxy(&m, &format!("{base}/start"), &npm(), "artifact")
+            .await
+            .expect_err("an unresolvable Location");
+        assert!(
+            matches!(&e, MirrorError::BadRedirect { found } if found == "http://["),
+            "{e:?}"
+        );
+        assert_eq!(e.status(), 502);
+        assert_eq!(asked.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_that_names_nowhere_is_upstreams_failure_and_never_handed_on() {
+        // The build cannot follow a redirect itself — at `mirror-only` the destination is a host it
+        // has no route to — and a bare 3xx handed on is no failure to pip or npm: they read the
+        // refusal text as the document or the tarball, and fail further on over something else.
+        let (base, asked) = upstream(vec![answer("302 Found", &[], b"")]);
+        let m = Mirror::new().unwrap();
+        let e = proxy(&m, &format!("{base}/start"), &npm(), "artifact")
+            .await
+            .expect_err("a redirect with nowhere to go");
+        assert!(
+            matches!(&e, MirrorError::BadRedirect { found } if found == "no Location header"),
+            "{e:?}"
+        );
+        assert_eq!(e.status(), 502);
+        assert_eq!(
+            trigon_core::Classify::fault(&e),
+            trigon_core::Fault::Upstream
+        );
+        assert_eq!(asked.join().unwrap(), ["GET /start HTTP/1.1"]);
+        assert!(m.seen.exchanges().is_empty(), "nothing crossed");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_still_going_after_the_last_hop_is_upstreams_failure() {
+        // Every hop on an allowlisted host, so it is the hop limit that stops it and not the list.
+        // The name is resolved here rather than by DNS, so nothing leaves this machine.
+        let hops: Vec<Vec<u8>> = (1..=super::MAX_REDIRECTS + 1)
+            .map(|n| answer("302 Found", &[&format!("Location: /hop{n}")], b""))
+            .collect();
+        let (base, asked) = upstream(hops);
+        let port = base.rsplit(':').next().unwrap();
+        let m = Mirror {
+            passthrough: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve("static.crates.io", ([127, 0, 0, 1], 0).into())
+                .no_proxy()
+                .build()
+                .unwrap(),
+            ..Mirror::new().unwrap()
+        };
+        let url = format!("http://static.crates.io:{port}/start");
+        let e = proxy(&m, &url, &npm(), "artifact")
+            .await
+            .expect_err("a redirect that never arrives");
+        let last = format!("/hop{}", super::MAX_REDIRECTS + 1);
+        assert!(
+            matches!(&e, MirrorError::BadRedirect { found } if *found == last),
+            "{e:?}"
+        );
+        assert_eq!(e.status(), 502);
+        let asked = asked.join().unwrap();
+        assert_eq!(
+            asked.len(),
+            super::MAX_REDIRECTS + 1,
+            "the first request and one per hop, and no hop past the last: {asked:?}"
+        );
+        assert!(m.seen.exchanges().is_empty(), "nothing crossed");
+    }
+
+    #[tokio::test]
+    async fn an_index_redirect_the_client_could_not_follow_is_upstreams_failure() {
+        // The index client follows redirects itself and hands back the ones it cannot: no
+        // `Location`, or one it cannot resolve. Either is the same failure `proxy` answers.
+        for (location, found) in [(None, "no Location header"), (Some("http://["), "http://[")] {
+            let headers: Vec<String> = location
+                .map(|l| format!("Location: {l}"))
+                .into_iter()
+                .collect();
+            let headers: Vec<&str> = headers.iter().map(String::as_str).collect();
+            let (base, asked) = upstream(vec![answer("302 Found", &headers, b"")]);
+            let url = format!("{base}/demo-pkg");
+            let (m, root) = caching("index-redirect");
+            let e = super::fetch_index(&m, &url, &npm(), &[])
+                .await
+                .expect_err("a redirect is not a document");
+            assert!(
+                matches!(&e, MirrorError::BadRedirect { found: f } if f == found),
+                "{location:?}: {e:?}"
+            );
+            assert_eq!(e.status(), 502);
+            assert_eq!(asked.join().unwrap().len(), 1);
+            assert!(
+                m.cache
+                    .as_ref()
+                    .unwrap()
+                    .get(crate::Tier::Index, &url)
+                    .is_none()
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_upstream_error_status_is_reported_as_upstreams_and_carries_its_status() {
+        let (base, _) = upstream(vec![answer("404 Not Found", &[], b"no such tarball")]);
+        let m = Mirror::new().unwrap();
+        let e = proxy(&m, &format!("{base}/x.tgz"), &npm(), "artifact")
+            .await
+            .expect_err("a 404 is not a body to serve");
+        assert!(
+            matches!(&e, MirrorError::Upstream { platform, status: 404 } if platform == "npm"),
+            "{e:?}"
+        );
+        assert_eq!(e.status(), 404);
+        assert_eq!(
+            trigon_core::Classify::fault(&e),
+            trigon_core::Fault::Upstream,
+            "the registry's answer, never the package's record"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_that_cannot_be_reached_is_a_transport_failure_charged_upstream() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let url = format!("http://127.0.0.1:{port}/x.tgz");
+        let m = Mirror::new().unwrap();
+        let e = proxy(&m, &url, &npm(), "artifact")
+            .await
+            .expect_err("nothing is listening");
+        assert!(matches!(e, MirrorError::Transport(_)), "{e:?}");
+        assert_eq!(e.status(), 502);
+        assert_eq!(
+            trigon_core::Classify::fault(&e),
+            trigon_core::Fault::Upstream
+        );
+        let t = trigon_politeness::traffic()
+            .remove(&trigon_politeness::host_of(&url))
+            .expect("the attempt is counted against the host");
+        assert_eq!((t.requests, t.failed), (1, 1), "{t:?}");
+    }
+
+    #[tokio::test]
+    async fn a_host_that_keeps_throttling_is_given_up_on_and_the_refusal_is_upstreams() {
+        // Waited out twice, then reported: the build is blocked on this request, and a mirror that
+        // waits for ever is indistinguishable from a hang.
+        let throttle = answer("429 Too Many Requests", &["Retry-After: 0"], b"slow down");
+        let (base, asked) = upstream(vec![throttle.clone(), throttle.clone(), throttle]);
+        let url = format!("{base}/x.tgz");
+        let m = Mirror::new().unwrap();
+        let e = proxy(&m, &url, &npm(), "artifact")
+            .await
+            .expect_err("still throttled after every retry");
+        assert!(
+            matches!(e, MirrorError::Upstream { status: 429, .. }),
+            "{e:?}"
+        );
+        assert_eq!(
+            asked.join().unwrap().len(),
+            3,
+            "one request and two retries"
+        );
+        let t = trigon_politeness::traffic()
+            .remove(&trigon_politeness::host_of(&url))
+            .expect("counted");
+        assert_eq!((t.requests, t.throttled, t.failed), (3, 3, 1), "{t:?}");
+    }
+
+    #[tokio::test]
+    async fn a_body_is_streamed_through_hashed_and_transcribed_as_it_was_served() {
+        let (base, _) = upstream(vec![answer(
+            "200 OK",
+            &["Content-Type: text/plain"],
+            b"hello",
+        )]);
+        let url = format!("{base}/greeting.txt");
+        let m = Mirror::new().unwrap();
+        let r = proxy(&m, &url, &npm(), "toolchain").await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()[axum::http::header::CONTENT_TYPE], "text/plain");
+        assert_eq!(body(r).await.unwrap(), b"hello");
+
+        let rows = m.seen.exchanges();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(
+            (row.route.as_str(), row.url.as_str()),
+            ("toolchain", url.as_str())
+        );
+        assert_eq!(
+            (row.sha256.as_str(), row.bytes),
+            (hex(b"hello").as_str(), 5)
+        );
+        // No manifest on this mirror, and the row says so rather than claiming a check.
+        assert_eq!(row.checked, crate::Checked::Unarmed);
+    }
+
+    #[tokio::test]
+    async fn an_artifact_fetched_once_is_cached_and_the_second_request_asks_nobody() {
+        // The offline twin of `a_second_request_for_one_artifact_asks_nobody`: the body streamed to
+        // the client is also written, and the second request serves the same bytes from disk —
+        // through the same hashing stream, so it is a transcript row either way.
+        let (base, asked) = upstream(vec![answer(
+            "200 OK",
+            &["Content-Type: application/gzip"],
+            b"tarball bytes",
+        )]);
+        let url = format!("{base}/pkg/-/pkg-1.0.0.tgz");
+        let (m, root) = caching("second-asks-nobody");
+
+        let first = proxy(&m, &url, &npm(), "artifact").await.unwrap();
+        assert_eq!(body(first).await.unwrap(), b"tarball bytes");
+        let second = proxy(&m, &url, &npm(), "artifact").await.unwrap();
+        assert_eq!(
+            second.headers()[axum::http::header::CONTENT_TYPE],
+            "application/gzip",
+            "the cached entry replays its content type"
+        );
+        assert_eq!(body(second).await.unwrap(), b"tarball bytes");
+
+        assert_eq!(
+            asked.join().unwrap().len(),
+            1,
+            "the second request went upstream"
+        );
+        let stats = m.cache_stats().unwrap();
+        assert_eq!(
+            (stats.hits, stats.misses, stats.written, stats.rejected),
+            (1, 1, 1, 0),
+            "{stats:?}"
+        );
+        let rows = m.seen.exchanges();
+        assert_eq!(
+            rows.len(),
+            2,
+            "a served body is a row whether or not we fetched it"
+        );
+        assert_eq!(rows[0].sha256, rows[1].sha256);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_content_encoded_body_is_forwarded_undecoded_with_its_encoding_and_never_cached() {
+        // Decoded bytes are not the artifact: the guard would hash a transformed body, and a client
+        // handed gzip without the header has no way to know. And an entry would have to carry the
+        // encoding to be replayable, so none is written.
+        let gz = b"\x1f\x8b\x08\x00 not really deflate".to_vec();
+        let (base, _) = upstream(vec![answer(
+            "200 OK",
+            &[
+                "Content-Type: application/octet-stream",
+                "Content-Encoding: gzip",
+            ],
+            &gz,
+        )]);
+        let url = format!("{base}/pkg.tgz");
+        let (m, root) = caching("encoded");
+
+        let r = proxy(&m, &url, &npm(), "artifact").await.unwrap();
+        assert_eq!(r.headers()[axum::http::header::CONTENT_ENCODING], "gzip");
+        assert_eq!(
+            body(r).await.unwrap(),
+            gz,
+            "the body was decoded on the way through"
+        );
+        assert_eq!(m.seen.exchanges()[0].sha256, hex(&gz));
+
+        let cache = m.cache.as_ref().unwrap();
+        assert_eq!(cache.stats().written, 0);
+        assert!(cache.get(crate::Tier::Bytes, &url).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_passthrough_body_is_served_but_never_kept_as_permanent() {
+        // `passthrough` is whatever an index host served that no filter applied to, which is not
+        // something to keep and call immutable.
+        let (base, _) = upstream(vec![answer("200 OK", &[], b"an index host's page")]);
+        let url = format!("{base}/stats/");
+        let (m, root) = caching("passthrough");
+
+        let r = proxy(&m, &url, &npm(), "passthrough").await.unwrap();
+        assert_eq!(body(r).await.unwrap(), b"an index host's page");
+        let cache = m.cache.as_ref().unwrap();
+        assert_eq!(
+            cache.stats(),
+            crate::CacheStats::default(),
+            "the cache was touched"
+        );
+        assert!(cache.get(crate::Tier::Bytes, &url).is_none());
+        assert_eq!(m.seen.exchanges()[0].route, "passthrough");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn an_index_fetched_from_upstream_is_cached_with_when_it_was_fetched() {
+        // The bytes are cached and the decision never is, so what goes on disk is the document as
+        // the registry sent it, with the instant it was fetched — and the next read asks nobody.
+        let doc = br#"{"name":"demo","files":[]}"#;
+        let (base, asked) = upstream(vec![answer(
+            "200 OK",
+            &["Content-Type: application/vnd.pypi.simple.v1+json"],
+            doc,
+        )]);
+        let url = format!("{base}/simple/demo/");
+        let (m, root) = caching("index");
+        let pypi = Filter {
+            platform: Platform::PyPI,
+            moment: "2020-01-01T00:00:00".into(),
+        };
+        let accept = [(
+            axum::http::header::ACCEPT,
+            "application/vnd.pypi.simple.v1+json",
+        )];
+        let before = crate::now_unix();
+
+        let (body, cached) = super::fetch_index(&m, &url, &pypi, &accept).await.unwrap();
+        assert_eq!((body.as_slice(), cached), (&doc[..], false));
+        let (again, cached) = super::fetch_index(&m, &url, &pypi, &accept).await.unwrap();
+        assert_eq!((again.as_slice(), cached), (&doc[..], true));
+
+        let asked = asked.join().unwrap();
+        assert_eq!(
+            asked,
+            ["GET /simple/demo/ HTTP/1.1"],
+            "the second read went upstream"
+        );
+        let cache = m.cache.as_ref().unwrap();
+        let entry = cache.get(crate::Tier::Index, &url).expect("an index entry");
+        assert_eq!(entry.content_type, "application/vnd.pypi.simple.v1+json");
+        assert!(
+            entry.fetched_at >= before,
+            "{} < {before}",
+            entry.fetched_at
+        );
+        let stats = cache.stats();
+        assert_eq!((stats.misses, stats.written), (1, 1), "{stats:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn the_headers_an_index_request_needs_go_upstream_with_it() {
+        // What this holds is `fetch_index`'s half: the headers its caller hands it reach upstream,
+        // with our User-Agent beside them. That `pypi_request` hands it JSON's `Accept` whatever
+        // the client asked for — the HTML form carries no upload times, so a mirror that fetched it
+        // would pass every file through and quietly do nothing — is *not* held here or anywhere
+        // offline: the route's upstream is compiled in, and the cache it could be served from is
+        // keyed by URL alone, so no test without a network sees which `Accept` went out.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/simple/demo/", listener.local_addr().unwrap());
+        let head = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = s.read(&mut chunk).unwrap();
+                head.extend_from_slice(&chunk[..n]);
+            }
+            let _ = s.write_all(&answer("200 OK", &[], b"{}"));
+            String::from_utf8_lossy(&head).to_ascii_lowercase()
+        });
+        let m = Mirror::new().unwrap();
+        let accept = [(
+            axum::http::header::ACCEPT,
+            "application/vnd.pypi.simple.v1+json",
+        )];
+        super::fetch_index(&m, &url, &npm(), &accept).await.unwrap();
+        let head = head.join().unwrap();
+        assert!(
+            head.contains("accept: application/vnd.pypi.simple.v1+json"),
+            "{head}"
+        );
+        assert!(
+            head.contains("user-agent: trigon/"),
+            "an anonymous crawler: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_index_is_served_even_when_the_cache_cannot_keep_it() {
+        // Best effort, by design: a cache that cannot be written is a slower sweep, never a wrong
+        // one, and never a reason to refuse the build the document it asked for.
+        let (base, _) = upstream(vec![answer("200 OK", &[], br#"{"name":"demo"}"#)]);
+        let url = format!("{base}/demo");
+        let (m, root) = caching("index-unwritable");
+        std::fs::write(root.join("index"), b"a file where the tier directory goes").unwrap();
+
+        let (body, cached) = super::fetch_index(&m, &url, &npm(), &[]).await.unwrap();
+        assert_eq!(
+            (body.as_slice(), cached),
+            (&br#"{"name":"demo"}"#[..], false)
+        );
+        let stats = m.cache.as_ref().unwrap().stats();
+        assert_eq!((stats.misses, stats.written), (1, 0), "{stats:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn an_index_upstream_will_not_serve_is_its_failure_and_is_not_cached() {
+        let (base, _) = upstream(vec![answer("503 Service Unavailable", &[], b"down")]);
+        let url = format!("{base}/demo-pkg");
+        let (m, root) = caching("index-refused");
+        let e = super::fetch_index(&m, &url, &npm(), &[])
+            .await
+            .expect_err("a 503 is not a document");
+        assert!(
+            matches!(&e, MirrorError::Upstream { platform, status: 503 } if platform == "npm"),
+            "{e:?}"
+        );
+        assert!(
+            m.cache
+                .as_ref()
+                .unwrap()
+                .get(crate::Tier::Index, &url)
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_body_too_large_to_open_is_still_hashed_whole_and_says_it_was_not_opened() {
+        // The member check is what catches the target's files inside something else, and the size
+        // that suppresses it is chosen by the thing under test. So the skip is recorded, and the
+        // whole-body hash — which never needed the bytes kept — still catches the artifact itself.
+        const CHUNK: usize = 1 << 20;
+        let chunks = crate::guard::MAX_DECOMPOSE_BYTES / CHUNK + 1;
+        let block = vec![0x5a_u8; CHUNK];
+        let whole = {
+            let mut h = sha2::Sha256::new();
+            for _ in 0..chunks {
+                h.update(&block);
+            }
+            trigon_core::Digest::from_bytes(h.finalize().into())
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/huge.tgz", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut chunk = [0u8; 1024];
+            let _ = s.read(&mut chunk);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                chunks * CHUNK
+            );
+            s.write_all(head.as_bytes()).unwrap();
+            for _ in 0..chunks {
+                s.write_all(&block).unwrap();
+            }
+        });
+        // Members to look for, so the stream starts out collecting the body.
+        let m = Mirror {
+            guard: Arc::new(crate::Guard::new(crate::GuardManifest {
+                artifact: Some(whole),
+                members: [trigon_core::Digest::from_bytes([3; 32])]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            })),
+            ..Mirror::new().unwrap()
+        };
+
+        let r = proxy(&m, &url, &npm(), "artifact").await.unwrap();
+        let mut stream = r.into_body().into_data_stream();
+        let mut total = 0;
+        while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+            total += chunk.unwrap().len();
+        }
+        served.join().unwrap();
+        assert_eq!(total, chunks * CHUNK);
+
+        assert_eq!(m.guard.undecomposed(), std::slice::from_ref(&url));
+        let trips = m.guard.trips();
+        assert_eq!(trips.len(), 1, "{trips:?}");
+        assert_eq!(trips[0].matched, crate::GuardMatch::WholeArtifact);
+        let row = &m.seen.exchanges()[0];
+        assert_eq!(row.checked, crate::Checked::Hashed, "{row:?}");
+        assert_eq!(row.sha256, whole.to_hex());
+    }
+
+    #[tokio::test]
+    async fn a_body_cut_short_is_transcribed_as_partial_and_never_cached_as_whole() {
+        // Half an artifact under a whole artifact's URL and digest is the one line a reader must
+        // never be handed — and the one entry a cache must never keep.
+        let (base, _) = upstream(vec![answer(
+            "200 OK",
+            &["Content-Length: 100"],
+            b"0123456789",
+        )]);
+        let url = format!("{base}/big.tgz");
+        let (m, root) = caching("partial");
+
+        let r = proxy(&m, &url, &npm(), "artifact").await.unwrap();
+        assert!(body(r).await.is_err(), "the client must see the body fail");
+
+        let rows = m.seen.exchanges();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].checked, crate::Checked::Partial, "{rows:?}");
+        assert!(rows[0].bytes < 100, "recorded as whole: {rows:?}");
+        assert_eq!(
+            rows[0].sha256,
+            hex(&b"0123456789"[..rows[0].bytes as usize]),
+            "the digest is of the prefix that crossed"
+        );
+
+        let cache = m.cache.as_ref().unwrap();
+        assert!(cache.get(crate::Tier::Bytes, &url).is_none());
+        assert_eq!(cache.stats().written, 0);
+        let leftovers: Vec<_> = std::fs::read_dir(root.join("tmp")).unwrap().collect();
+        assert!(
+            leftovers.is_empty(),
+            "an abandoned write left {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// What the mirror keeps in memory beside its counters, and where it stops keeping it.
+#[cfg(test)]
+mod seen_tests {
+    use super::{MAX_RETAINED, Seen};
+
+    #[test]
+    fn past_the_cap_rows_are_counted_as_dropped_rather_than_silently_lost() {
+        // A long-running `trigon mirror` would otherwise grow without limit. Passing the cap drops
+        // rows, and it has to be visible as `truncated`, never as a smaller count — a transcript
+        // that is a sample and says nothing reads as a build that fetched less.
+        let seen = Seen::default();
+        let row = || {
+            crate::Exchange::new(
+                "artifact",
+                "https://x/y",
+                String::new(),
+                1,
+                crate::Checked::Hashed,
+            )
+        };
+        for _ in 0..MAX_RETAINED {
+            seen.exchange(row());
+        }
+        assert_eq!(seen.truncated(), 0, "nothing is dropped up to the cap");
+        seen.exchange(row());
+        let refusal = || crate::Refusal {
+            path: "/x".into(),
+            status: 400,
+            reason: "no filter".into(),
+        };
+        seen.refusal(refusal());
+        assert_eq!(seen.exchanges().len(), MAX_RETAINED);
+        assert_eq!(seen.refusals().len(), 1, "each list has its own cap");
+        assert_eq!(seen.truncated(), 1);
+
+        for _ in 1..MAX_RETAINED {
+            seen.refusal(refusal());
+        }
+        assert_eq!(seen.truncated(), 1);
+        seen.refusal(refusal());
+        assert_eq!(seen.refusals().len(), MAX_RETAINED);
+        assert_eq!(
+            seen.truncated(),
+            2,
+            "a dropped refusal is counted like a dropped row"
+        );
+    }
+
+    #[test]
+    fn the_first_moment_a_run_pins_is_the_one_a_credential_less_request_uses() {
+        // One mirror serves one build against one moment. A second moment is a bug worth seeing,
+        // and quietly taking the latest would move the pin under a build halfway through it.
+        let seen = Seen::default();
+        seen.note_moment("");
+        assert_eq!(seen.moment(), None, "an empty moment pins nothing");
+        seen.note_moment("2020-01-01T00:00:00");
+        seen.note_moment("2020-01-01T00:00:00");
+        seen.note_moment("2024-06-01T00:00:00");
+        assert_eq!(seen.moment().as_deref(), Some("2020-01-01T00:00:00"));
+    }
+
+    #[test]
+    fn a_document_that_says_nothing_about_where_it_was_reached_keeps_its_upstream_urls() {
+        // The authority is taken from how the client addressed us. With none, there is nothing to
+        // rewrite onto, and a guessed one is a packument full of URLs that resolve to nothing — so
+        // the document is left alone and nothing is recorded as offered.
+        let seen = Seen::default();
+        let npm = || {
+            serde_json::json!({ "versions": { "1.0.0": { "dist": {
+                "tarball": "https://registry.npmjs.org/a/-/a-1.0.0.tgz" } } } })
+        };
+        let mut doc = npm();
+        super::rewrite_npm_tarballs(&mut doc, "", &seen);
+        assert_eq!(doc, npm());
+        assert!(!seen.was_offered("/a/-/a-1.0.0.tgz"));
+
+        let pypi = || {
+            serde_json::json!({
+                "files": [{ "url": "https://files.pythonhosted.org/p/a.whl" }],
+            })
+        };
+        let mut doc = pypi();
+        super::rewrite_pypi_files(&mut doc, "");
+        assert_eq!(doc, pypi());
+    }
+
+    #[test]
+    fn only_absolute_artifact_urls_are_pointed_back_and_offered() {
+        // A version with no tarball, or one that is not an absolute URL, has nothing to proxy to.
+        // Offering it anyway would open the bare-tarball route to a path nobody filtered.
+        let seen = Seen::default();
+        let mut doc = serde_json::json!({ "versions": {
+            "1.0.0": { "dist": { "tarball": "https://registry.npmjs.org/a/-/a-1.0.0.tgz" } },
+            "1.1.0": { "dist": {} },
+            "1.2.0": { "dist": { "tarball": "a-1.2.0.tgz" } },
+            "1.3.0": {},
+        } });
+        super::rewrite_npm_tarballs(&mut doc, "mirror:8129/-artifact/npm/m", &seen);
+        assert_eq!(
+            doc["versions"]["1.0.0"]["dist"]["tarball"],
+            "http://mirror:8129/-artifact/npm/m/registry.npmjs.org/a/-/a-1.0.0.tgz"
+        );
+        assert_eq!(doc["versions"]["1.2.0"]["dist"]["tarball"], "a-1.2.0.tgz");
+        assert!(seen.was_offered("/a/-/a-1.0.0.tgz"));
+        assert!(!seen.was_offered("a-1.2.0.tgz") && !seen.was_offered("/a-1.2.0.tgz"));
+
+        let mut doc = serde_json::json!({ "files": [
+            { "url": "https://files.pythonhosted.org/p/a-1.0.whl" },
+            { "filename": "no-url.whl" },
+            { "url": "relative/a-1.1.whl" },
+        ] });
+        super::rewrite_pypi_files(&mut doc, "mirror:8129/-artifact/pypi/m");
+        assert_eq!(
+            doc["files"][0]["url"],
+            "http://mirror:8129/-artifact/pypi/m/files.pythonhosted.org/p/a-1.0.whl"
+        );
+        assert_eq!(doc["files"][2]["url"], "relative/a-1.1.whl");
+        // And a document with no list at all is not given one.
+        let mut empty = serde_json::json!({ "name": "a" });
+        super::rewrite_pypi_files(&mut empty, "mirror:8129/-artifact/pypi/m");
+        super::rewrite_npm_tarballs(&mut empty, "mirror:8129/-artifact/npm/m", &seen);
+        assert_eq!(empty, serde_json::json!({ "name": "a" }));
     }
 }

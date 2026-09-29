@@ -230,10 +230,12 @@ function paintMode() {
     pill.textContent = stopped
       ? 'divergence publication stopped'
       : HEALTH.principal === 'anonymous' ? 'public view' : 'operator view';
-    pill.title = HEALTH.principal === 'anonymous'
+    pill.title = (HEALTH.principal === 'anonymous'
       ? 'You are seeing only what the publication gate released: two agreeing attempts, a restricted egress tier, and no stabilizer a person or a model wrote.'
-      : 'You are reading a store directly. Everything is shown, including runs the publication gate would hold back from a public reader.';
+      : 'You are reading a store directly. Everything is shown, including runs the publication gate would hold back from a public reader.')
+      + `\n\nThis server's kill-switch is ${stopped ? 'set' : 'clear'}. It stops ${HEALTH.kill_switches?.serve?.stops ?? 'what this server shows'}.`;
   }
+  paintRepositorySwitch();
   const nav = document.getElementById?.('nav');
   if (nav) {
     nav.replaceChildren(
@@ -244,6 +246,35 @@ function paintMode() {
       el('a', { href: '/account', text: ME?.principal ? ME.principal : 'sign in' }),
     );
   }
+}
+
+// The evidence repository's kill-switch, beside this server's own and never in its place: each
+// stops only what it says (docs/19 §3). Where no publish repository is configured there is none to
+// show; where it could not be read it is shown as unknown, never as clear.
+const repositorySwitchText = {
+  set: 'repository kill-switch set',
+  clear: 'repository kill-switch clear',
+  unknown: 'repository kill-switch unknown',
+};
+
+function paintRepositorySwitch() {
+  const pill = document.getElementById?.('repo-switch');
+  const r = HEALTH?.kill_switches?.repository;
+  if (!pill) return;
+  if (!r) { pill.hidden = true; return; }
+  const state = repositorySwitchText[r.state] ? r.state : 'unknown';
+  pill.hidden = false;
+  pill.className = `mode${state === 'set' ? ' stopped' : state === 'unknown' ? ' unknown' : ''}`;
+  pill.textContent = repositorySwitchText[state];
+  const when = r.as_of ? `, as of ${r.as_of}` : '';
+  const what = {
+    set: `The evidence repository's kill-switch is set${when}: it stops ${r.stops}.`,
+    clear: `The evidence repository's kill-switch is clear${when}. When set, it stops ${r.stops}.`,
+    unknown: `The evidence repository's kill-switch could not be read, so it is not known whether it is set. When set, it stops ${r.stops}.`,
+  }[state];
+  const where = [r.repository && `Repository: ${r.repository}.`, r.detail && `${r.detail}.`]
+    .filter(Boolean).join(' ');
+  pill.title = `${what} It is not this server's switch, which stops ${HEALTH.kill_switches?.serve?.stops ?? 'what this server shows'}.${where ? `\n\n${where}` : ''}`;
 }
 
 /* ---- the credential, and what it can do --------------------------------- */
@@ -449,7 +480,8 @@ async function browse(params) {
   document.title = 'Trigon — the rebuild corpus';
   const ask = el('div', {});
   whenIdentified(ask, () => requestPanel(params.get('q')));
-  view.replaceChildren(denominators, filters, table, withheldNote, more, ask);
+  // Filtered: `replaceChildren` renders a null argument as the text "null".
+  view.replaceChildren(...[denominators, filters, table, withheldNote, more, ask].filter(Boolean));
 }
 
 /* ---- ask for a rebuild -------------------------------------------------- */
@@ -565,6 +597,9 @@ async function jobView(id) {
 
   const list = el('ul', { class: 'assumptions' });
   const head = el('p', { class: 'sentence', text: 'Waiting for a worker to pick this up.' });
+  // Why an anonymous reader sees phases and no notes. The server says so rather than leaving a
+  // bare "outcome" to be read as a job with nothing to report.
+  const withheld = el('p', { class: 'note empty' });
 
   const draw = async () => {
     let data;
@@ -578,6 +613,7 @@ async function jobView(id) {
       el('strong', { text: e.phase.replace(/-/g, ' ') }),
       e.detail ? el('span', { text: ` — ${e.detail}` }) : null,
       el('span', { class: 'empty', text: `  ${ago(new Date(e.at).toISOString())}` }))));
+    withheld.textContent = data.detail ? data.detail[0].toUpperCase() + data.detail.slice(1) : '';
     const last = events[events.length - 1];
     head.textContent = !last
       ? 'Waiting for a worker to pick this up.'
@@ -596,7 +632,7 @@ async function jobView(id) {
     el('p', {}, el('a', { href: '/queue', text: '← the queue' })),
     el('div', { class: 'verdict-head' }, el('h1', { text: `Job ${id}` })),
     head,
-    el('section', { class: 'panel' }, el('h2', { text: 'What it has done' }), list),
+    el('section', { class: 'panel' }, el('h2', { text: 'What it has done' }), list, withheld),
   );
   await draw();
   JOB_POLL = setInterval(draw, 3000);
@@ -744,6 +780,10 @@ function runTable(rows) {
       el('td', { class: 'opt', text: e.ecosystem }),
       el('td', {}, e.outcome
         ? verdictTag(e.outcome)
+        // A void row reaches an anonymous reader with no outcome, and says why in its place. "No
+        // verdict" would read as a run that never finished, which is not what happened.
+        : e.publication?.state === 'void'
+        ? el('span', { class: 'tag void', title: withheldTitle(e.publication), text: 'void' })
         // How it ended, not the word "failed". `no-strategy` means we have no recipe for this
         // package, which is a statement about us; a reader who sees "failed" reads it as one about
         // the package.
@@ -784,8 +824,73 @@ const DIFFERENCE_RULE = {
   'entry:uid': 'The archive entry records a different owner id.',
   'entry:gid': 'The archive entry records a different group id.',
   'entry:zip.crc32': 'The zip entry’s checksum differs, which follows from any of the above.',
+  'entry:zip.method': 'The zip entry’s compression method differs.',
+  'entry:zip.external_attrs': 'The zip entry’s external attributes differ — where a unix mode is carried.',
+  'entry:zip.creator_version': 'The zip entry names a different creating tool/OS.',
+  'entry:zip.reader_version': 'The zip entry names a different minimum reader version.',
+  'entry:zip.dos_datetime': 'The zip entry’s MS-DOS timestamp differs.',
+  'entry:mtime': 'The archive entry’s timestamp differs — usually a build clock nobody pinned.',
   entry: 'Something about the archive entry differs, rather than the file it holds.',
 };
+
+// The gloss for a difference code, falling back through `entry:zip.x → entry → the raw name`.
+function glossField(rule) {
+  return DIFFERENCE_RULE[rule]
+    || DIFFERENCE_RULE[rule.replace(/\.[^.]+$/, '')]
+    || DIFFERENCE_RULE[rule.split(':')[0]]
+    || 'a field of the archive entry';
+}
+
+// One field of a member and the passes that acted on it, as a list item: the code, its gloss, and
+// an arrow to the pass ids that changed it. `resolved` styles the two cases — a field a pass put
+// right, versus one that still differs (where an empty pass list means nothing in the set touches
+// it, which is itself the finding).
+function memberFieldRow(fw, resolved) {
+  const passes = fw.passes || [];
+  const kids = [
+    el('code', { text: fw.field }),
+    el('span', { class: 'note', text: ` — ${glossField(fw.field)}` }),
+  ];
+  if (passes.length) {
+    kids.push(el('span', { class: 'by' },
+      el('span', { class: 'by-arrow', text: resolved ? ' ✓ ' : ' ↳ ' }),
+      ...passes.flatMap((id, i) => [
+        i ? el('span', { class: 'note', text: ', ' }) : null,
+        el('code', { class: 'pass', title: (STABILIZER_DOCS[id] || {}).sum || '', text: id }),
+      ].filter(Boolean))));
+  } else {
+    kids.push(el('span', { class: 'by empty', text: ' ↳ nothing in the set addresses it' }));
+  }
+  return el('li', { class: resolved ? 'fw-ok' : 'fw-residual' }, ...kids);
+}
+
+// The opened member's transform, from the comparison's field-level record: reconciled on the left,
+// still-differing on the right, an arrow between only when something remains. A member with only a
+// left column was made byte-identical by the passes named there — including a `.dll` reconciled by
+// `dotnet-il-canonical`, whose transform leaves no residual code and so was invisible before.
+function memberTransform({ reconciled, residual }) {
+  const rec = reconciled || [];
+  const res = residual || [];
+  const differs = res.length > 0;
+  return el('div', { class: `reconciled-note${differs ? ' has-residual' : ''}` },
+    el('p', { class: 'sentence' },
+      el('strong', { text: differs ? 'Partly reconciled. ' : 'Reconciled. ' }),
+      differs
+        ? 'The passes normalized the fields on the left; those on the right still differ. Each field is joined to the pass that acted on it — measured, not guessed.'
+        : 'Every field that differed was normalized by a pass, and the member is now byte-identical. Each field is joined to the pass that did it.'),
+    el('div', { class: 'reconciled-flow' },
+      el('div', { class: 'reconciled-col' },
+        el('p', { class: 'reconciled-head', text: 'reconciled' }),
+        rec.length
+          ? el('ul', { class: 'reconciled-diffs' }, rec.map((fw) => memberFieldRow(fw, true)))
+          : el('p', { class: 'note empty', text: 'nothing needed changing' })),
+      differs ? el('div', { class: 'reconciled-arrow', text: '→' }) : null,
+      differs
+        ? el('div', { class: 'reconciled-col' },
+            el('p', { class: 'reconciled-head', text: 'still differs' }),
+            el('ul', { class: 'reconciled-diffs residual' }, res.map((fw) => memberFieldRow(fw, false))))
+        : null));
+}
 
 const KIND_COLOUR = {
   executable: 'var(--fail)', binary: 'var(--one-side)',
@@ -873,25 +978,233 @@ function contentsPanel(d) {
 
 // The ledger: which passes fired, at what risk, under whose authority, and which of them hold the
 // verdict below `normalized` however well the bytes agree.
+// A pass's name as a button that unfolds its plain-language description in a row beneath — the
+// ledger's rows and the progression's use the same one, so a pass reads the same wherever it is
+// named. Returns the name to put in a cell and the hidden row to put after the row holding it.
+function passUnfold(id, colspan) {
+  const doc = STABILIZER_DOCS[id];
+  const detail = el('tr', { class: 'pass-doc', hidden: true },
+    el('td', { colspan }, doc
+      ? el('div', { class: 'pass-doc-body' },
+          el('p', { class: 'sentence', text: doc.sum }),
+          el('p', { class: 'note', text: doc.why }))
+      : el('p', { class: 'note empty', text: 'No description on file for this pass.' })));
+  const name = doc
+    ? el('button', {
+        class: 'pass-name', type: 'button', 'aria-expanded': 'false', title: doc.sum,
+        onclick: (e) => {
+          const nowOpen = detail.hidden;
+          detail.hidden = !nowOpen;
+          e.currentTarget.setAttribute('aria-expanded', String(nowOpen));
+          e.currentTarget.classList.toggle('open', nowOpen);
+        },
+      }, el('code', { text: id }), el('span', { class: 'info', text: 'ⓘ' }))
+    : el('code', { text: id });
+  return { name, detail };
+}
+
+// How the gap closed, pass by pass: the differences left after each pass of the set, from the two
+// artifacts as published to the last pass. The comparison records it (or `trigon rederive` fills
+// it in for a run judged before it did); the page only draws it. Explanation, never verdict — the
+// recorder checks its last step against the signature the verdict was taken on, and says so here
+// when it did not match.
+function progressionPanel(d) {
+  const title = 'How the gap closed, pass by pass';
+  const p = d.progression;
+  if (!p) {
+    return panel(title, el('p', { class: 'note empty' },
+      'This run was judged before the comparison recorded its progression. ',
+      el('code', { text: 'trigon rederive' }),
+      ' fills it in from the stored artifacts, for any run judged under a stabilizer set this binary still has.'));
+  }
+  if (p.omitted) {
+    return panel(title, el('p', { class: 'note empty', text: `Not recorded for this run: ${p.omitted}.` }));
+  }
+  const steps = p.steps || [];
+  if (steps.length <= 1) {
+    return panel(title, el('p', { class: 'note' }, steps.length && steps[0].differences === 0
+      ? 'Nothing to close: the two artifacts were identical as published, so no pass had a difference to remove.'
+      : 'No steps were recorded.'));
+  }
+
+  const start = steps[0];
+  const end = steps[steps.length - 1];
+  const max = Math.max(start.differences, 1);
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const rows = steps.flatMap((s, i) => {
+    const prev = i ? steps[i - 1] : null;
+    const removed = prev ? prev.differences - s.differences : 0;
+    const idle = prev && removed === 0 && !s.closed_total && !s.opened_total;
+    const unfold = s.pass ? passUnfold(s.pass, 6) : null;
+    const closedRow = el('tr', { class: 'pass-doc', hidden: true },
+      el('td', { colspan: 6 }, el('div', { class: 'pass-doc-body' },
+        s.closed_total ? el('p', { class: 'note' }, el('strong', { text: 'Closed here: ' }),
+          s.closed.map((m, j) => [j ? ', ' : '', el('code', { text: m })]),
+          s.closed_total > s.closed.length ? ` and ${s.closed_total - s.closed.length} more` : '') : null,
+        s.opened_total ? el('p', { class: 'note diff' }, el('strong', { text: 'Opened here, which a pass should never do: ' }),
+          s.opened.map((m, j) => [j ? ', ' : '', el('code', { text: m })]),
+          s.opened_total > s.opened.length ? ` and ${s.opened_total - s.opened.length} more` : '') : null)));
+    const members = s.closed_total || s.opened_total
+      ? el('button', {
+          class: 'chip', type: 'button',
+          onclick: () => { closedRow.hidden = !closedRow.hidden; },
+          text: [s.closed_total ? `closed ${s.closed_total}` : null, s.opened_total ? `opened ${s.opened_total}` : null].filter(Boolean).join(' · '),
+        })
+      : el('span', { class: 'dim', text: '—' });
+    const passCell = s.pass
+      ? el('td', {}, unfold.name,
+          s.fired ? null : el('span', { class: 'tag fault', title: 'This pass changed nothing on either side of this run.', text: 'did not fire' }),
+          s.fired && idle ? el('span', { class: 'dim idle-why', text: ' changed only fields that already agreed' }) : null)
+      : el('td', {}, el('strong', { text: 'as published' }));
+    const main = el('tr', { class: idle ? 'step-idle' : '' },
+      el('td', { class: 'n dim', text: i }),
+      passCell,
+      // Differences can rise across a step: a pass that renames members changes the paths the
+      // comparator names, so a difference may be counted under a new name before a later pass
+      // closes it. Shown as a rise, never folded into "0".
+      el('td', { class: 'n' }, removed > 0
+        ? el('span', { class: 'delta', text: `−${removed}` })
+        : removed < 0
+          ? el('span', { class: 'delta grew', title: 'more differences are counted after this pass than before it', text: `+${-removed}` })
+          : el('span', { class: 'dim', text: prev ? '0' : '' })),
+      el('td', { class: 'bar-cell' },
+        el('div', { class: 'bar-track', title: `${s.differences} difference(s) left` },
+          el('div', { class: 'bar-fill', style: [['width', `${(s.differences / max) * 100}%`], ['background', s.differences ? (s.bodies ? 'var(--fail)' : 'var(--caveat)') : 'var(--ok)']] }))),
+      el('td', { class: 'n', text: `${s.differences} · ${s.members}` }),
+      el('td', {}, members));
+    return [main, unfold ? unfold.detail : null, closedRow].filter(Boolean);
+  });
+
+  const summary = end.differences === 0
+    ? `As published, the two artifacts differed in ${plural(start.differences, 'way', 'ways')} across ${plural(start.members, 'member', 'members')}. Each step below is one more pass of the set; after the last, nothing is left.`
+    : `As published, the two artifacts differed in ${plural(start.differences, 'way', 'ways')} across ${plural(start.members, 'member', 'members')}. After the last pass, ${plural(end.differences, 'difference remains', 'differences remain')} in ${plural(end.members, 'member', 'members')}${end.bodies ? ` — ${end.bodies} of them in a member's own bytes, which no pass in this set removed` : ''}.`;
+
+  return panel(title, el('div', {},
+    el('p', { class: 'sentence', text: summary }),
+    p.consistent ? null : el('p', { class: 'withheld-note' },
+      el('strong', { text: 'Not a trustworthy explanation for this run. ' }),
+      'Re-applying the set one pass at a time did not end on the difference signature the verdict was taken on. The verdict is unaffected; this panel is what cannot be relied on.'),
+    el('div', { class: 'table-scroll' }, el('table', { class: 'runs ledger progression' },
+      el('thead', {}, el('tr', {},
+        el('th', { class: 'n', text: 'step' }),
+        el('th', { text: 'pass' }),
+        el('th', { class: 'n', text: 'removed' }),
+        el('th', { text: 'left' }),
+        el('th', { class: 'n', text: 'left · members' }),
+        el('th', { text: 'members' }))),
+      el('tbody', {}, rows))),
+    el('p', { class: 'note' },
+      'Counted as the comparator names a difference: a member\'s bytes, each field of its archive entry, a member present on one side only, and the archive as a whole. An entry\'s size and checksum, and a zip member\'s mode, are left out, because serialization recomputes them from what is counted (B47). The bar is red while a member\'s own bytes still differ, amber while only packaging does.')));
+}
+
+// What crossed the network into the build, summarized from its transcript. Fetched rather than
+// booted, and gated exactly as the raw transcript is: its URLs are unredacted, so a reader refused
+// the transcript is refused this with the same sentence.
+function networkPanel(id, entry) {
+  const title = 'What crossed the network';
+  if (!entry.has.network_transcript) {
+    return panel(title, el('p', { class: 'note empty', text: 'This run recorded no network transcript. Absent is not empty: it means none was written, not that nothing crossed.' }));
+  }
+  const slot = el('div', {}, el('p', { class: 'empty', text: 'reading the transcript…' }));
+  api(`/v1/runs/${encodeURIComponent(id)}/network/summary`)
+    .then((s) => slot.replaceChildren(drawNetwork(s, id)))
+    .catch((e) => slot.replaceChildren(e.status === 403
+      ? el('p', { class: 'withheld-note' }, el('strong', { text: 'Not shown here. ' }), el('span', { text: e.message }))
+      : el('p', { class: 'note empty', text: `The transcript could not be summarized: ${e.message}` })));
+  return panel(title, slot);
+}
+
+// What each guard outcome means, for the legend. The mirror's own words, shortened.
+const CHECKED = {
+  opened: 'every member hashed and compared against the manifest',
+  hashed: 'the whole body\'s digest compared, and nothing inside it',
+  generated: 'composed by the mirror itself — a filtered index — so there was nothing to catch',
+  unarmed: 'no guard manifest was loaded, so nothing was compared',
+  partial: 'the response never finished; the bytes are what actually crossed',
+};
+
+function drawNetwork(s, id) {
+  if (!s.exchanges) {
+    return el('p', { class: 'note' }, s.unreadable
+      ? `The transcript holds ${s.unreadable} line(s) that are not exchanges and none that are.`
+      : 'The transcript was written and is empty: the build\'s egress was accounted for, and nothing crossed.');
+  }
+  const hostMax = Math.max(...s.hosts.map((h) => h.bytes), 1);
+  const exchangeRow = (x) => el('tr', {},
+    el('td', { class: 'dim', text: x.route }),
+    el('td', { class: 'url-cell' }, el('code', { text: x.url })),
+    el('td', { class: 'n', text: bytes(x.bytes) }),
+    el('td', { class: 'dim', title: CHECKED[x.checked] || '', text: x.checked || '—' }),
+    el('td', { class: 'dim mono', title: x.sha256 || '', text: x.sha256 ? x.sha256.slice(0, 12) : '—' }));
+  const exchangeTable = (list) => el('div', { class: 'table-scroll' }, el('table', { class: 'runs' },
+    el('thead', {}, el('tr', {},
+      el('th', { text: 'route' }), el('th', { text: 'url' }), el('th', { class: 'n', text: 'bytes' }),
+      el('th', { text: 'guard' }), el('th', { text: 'sha256' }))),
+    el('tbody', {}, list.map(exchangeRow))));
+
+  return el('div', {},
+    el('p', { class: 'sentence' },
+      `${s.exchanges} exchange(s) crossed into the build, ${bytes(s.bytes)} in all, from ${s.hosts_total} host(s).`,
+      s.withheld ? ` The mirror withheld ${s.withheld} version(s) from ${s.indexes_withholding} index document(s) because they were published after the pinned moment, so the build resolved against the registry as it stood then.` : ''),
+    el('div', { class: 'net-grid' },
+      el('div', {},
+        el('p', { class: 'reconciled-head', text: 'by route' }),
+        el('ul', { class: 'assumptions' }, s.routes.map((b) =>
+          el('li', {}, el('code', { text: b.name }), ` ${b.count} · ${bytes(b.bytes)}`)))),
+      el('div', {},
+        el('p', { class: 'reconciled-head', text: 'what the guard could do' }),
+        el('ul', { class: 'assumptions' }, s.checked.map((b) =>
+          el('li', {}, el('code', { text: b.name }), ` ${b.count}`,
+            CHECKED[b.name] ? el('span', { class: 'note', text: ` — ${CHECKED[b.name]}` }) : null))))),
+    s.unreadable ? el('p', { class: 'withheld-note', text: `${s.unreadable} line(s) of the transcript are not exchanges and are counted here rather than dropped.` }) : null,
+    el('p', { class: 'reconciled-head', text: `hosts${s.hosts_total > s.hosts.length ? ` (the ${s.hosts.length} largest of ${s.hosts_total})` : ''}` }),
+    el('div', { class: 'table-scroll' }, el('table', { class: 'runs ledger' },
+      el('thead', {}, el('tr', {},
+        el('th', { text: 'host' }), el('th', { class: 'n', text: 'exchanges' }), el('th', { text: '' }),
+        el('th', { class: 'n', text: 'bytes' }), el('th', { text: 'routes' }))),
+      el('tbody', {}, s.hosts.map((h) => el('tr', {},
+        el('td', {}, el('code', { text: h.host })),
+        el('td', { class: 'n', text: h.count }),
+        el('td', { class: 'bar-cell' }, el('div', { class: 'bar-track' },
+          el('div', { class: 'bar-fill', style: [['width', `${(h.bytes / hostMax) * 100}%`], ['background', 'var(--accent)']] }))),
+        el('td', { class: 'n', text: bytes(h.bytes) }),
+        el('td', { class: 'dim', text: h.routes.join(', ') })))))),
+    s.toolchain_total ? [
+      el('p', { class: 'reconciled-head', text: `toolchain${s.toolchain_total > s.toolchain.length ? ` (${s.toolchain.length} of ${s.toolchain_total})` : ''}` }),
+      exchangeTable(s.toolchain),
+    ] : null,
+    el('p', { class: 'reconciled-head', text: 'the largest exchanges' }),
+    exchangeTable(s.largest),
+    el('p', { class: 'note' },
+      'Every exchange is in ',
+      el('a', { href: `/v1/runs/${encodeURIComponent(id)}/network`, text: 'the full transcript' }),
+      ', one JSON line each.'));
+}
+
 function ledgerPanel(d) {
   if (!d.applied.length) {
     return panel('The stabilizers', el('p', { class: 'note' },
       'No pass changed anything on either side, so the two artifacts were compared exactly as published. The verdict owes nothing to normalization.'));
   }
   const max = Math.max(...d.applied.map((p) => p.entries), 1);
-  const rows = d.applied.map((p) => el('tr', {},
-    el('td', {},
-      el('code', { text: p.id }),
-      p.caps ? el('span', { class: 'tag normalized_with_caveats', text: 'caps' }) : null),
-    el('td', { class: 'n', text: p.entries }),
-    el('td', { class: 'bar-cell' },
-      el('div', { class: 'bar-track' },
-        el('div', { class: 'bar-fill', style: [['width', `${(p.entries / max) * 100}%`], ['background', RISK_COLOUR[p.risk] || 'var(--dim)']] }))),
-    el('td', { class: 'dim', text: p.risk }),
-    el('td', {}, p.provenance === 'builtin'
-      ? el('span', { class: 'dim', text: 'builtin' })
-      : el('span', { class: 'diff', text: p.who })),
-    el('td', { class: 'n dim', text: p.bytes ? bytes(p.bytes) : '—' })));
+  // Each pass is a button that unfolds a plain-language description of what it did — so a reader
+  // can tell what `dotnet-il-canonical` or `zip-time` actually changed without leaving the page.
+  const rows = d.applied.flatMap((p) => {
+    const { name, detail } = passUnfold(p.id, 6);
+    const main = el('tr', {},
+      el('td', {}, name,
+        p.caps ? el('span', { class: 'tag normalized_with_caveats', text: 'caps' }) : null),
+      el('td', { class: 'n', text: p.entries }),
+      el('td', { class: 'bar-cell' },
+        el('div', { class: 'bar-track' },
+          el('div', { class: 'bar-fill', style: [['width', `${(p.entries / max) * 100}%`], ['background', RISK_COLOUR[p.risk] || 'var(--dim)']] }))),
+      el('td', { class: 'dim', text: p.risk }),
+      el('td', {}, p.provenance === 'builtin'
+        ? el('span', { class: 'dim', text: 'builtin' })
+        : el('span', { class: 'diff', text: p.who })),
+      el('td', { class: 'n dim', text: p.bytes ? bytes(p.bytes) : '—' }));
+    return [main, detail];
+  });
 
   return panel('The stabilizers', el('div', {},
     el('p', { class: 'sentence' },
@@ -925,19 +1238,71 @@ const RISK_COLOUR = {
   content: 'var(--caveat)', lossy: 'var(--fail)',
 };
 
+// What each pass actually does, in the words a reader needs. `sum` is the one line; `why` says what
+// it normalizes and why doing so is safe — never code, always something a build wrote around the
+// code. Keyed by the id the ledger prints, so a pass with no entry simply shows none.
+const STABILIZER_DOCS = {
+  'tar-entry-order': { sum: 'Sorts the archive entries into a canonical order.', why: 'Two builds can lay the same files down in a different order; the order is not part of what the package means, so both are sorted the same way before comparing.' },
+  'tar-time': { sum: 'Zeroes each entry’s modification time.', why: 'A build stamps every file with when it ran. That instant is not reproducible and is not content, so it is fixed to the same value on both sides.' },
+  'tar-mode': { sum: 'Normalizes Unix permission bits.', why: 'The umask and tooling of the building machine leak into the mode bits; the executable bit that matters is kept, the rest normalized.' },
+  'tar-owners': { sum: 'Zeroes the owning uid and gid.', why: 'Which numeric user built the package is not part of it.' },
+  'tar-xattrs': { sum: 'Drops extended attributes a build tool may attach.', why: 'Filesystem xattrs (SELinux labels, provenance) travel with a build machine, not with the package.' },
+  'tar-device': { sum: 'Zeroes device major/minor numbers on special entries.', why: 'A device number is a property of the machine, not the archive.' },
+  'zip-entry-order': { sum: 'Sorts zip entries into a canonical order.', why: 'The order a zip lists its files in is the writer’s choice, not content; both sides are sorted the same way.' },
+  'zip-time': { sum: 'Zeroes each zip entry’s timestamp.', why: 'The DOS date/time a zip records is when the build ran, which is not reproducible and not content.' },
+  'zip-versions': { sum: 'Normalizes the “version made by / needed to extract” fields.', why: 'These name which tool and OS wrote the zip, not what is inside it.' },
+  'zip-misc': { sum: 'Normalizes assorted zip header fields that vary by writer.', why: 'External attributes and general-purpose flags differ between zip libraries without changing a byte of the files.' },
+  'zip-compression': { sum: 'Re-expresses every entry at one canonical compression.', why: 'Deflate level is a choice of the writer; the uncompressed bytes are what matter, so two zips of identical files match whatever level each used.' },
+  'gzip-meta': { sum: 'Zeroes the gzip header’s timestamp, name and OS byte.', why: 'The gzip wrapper records when and where it ran; the compressed content underneath is unchanged.' },
+  'cargo-vcs-hash': { sum: 'Normalizes the git commit in a crate’s .cargo_vcs_info.json.', why: 'The recorded commit says where the source lives, not what it is — and a rebuild from a tag resolves it differently. Content risk: it edits a file the package ships.' },
+  'npm-install-fields': { sum: 'Drops npm’s install-time bookkeeping fields.', why: 'A tarball’s recorded integrity/resolved/from fields say where npm fetched it, not what is in it.' },
+  'nupkg-portable-folder-name': { sum: 'Renames a portable-framework lib folder to a canonical spelling.', why: 'Tooling writes `portable-net45+win8` and its permutations inconsistently; the folder’s meaning is the same however the monikers are ordered.' },
+  'nupkg-signature': { sum: 'Removes a NuGet package’s author signature (.signature.p7s).', why: 'A signature is made with a private key the rebuild does not have, over the very bytes being rebuilt. Structural: a whole member is dropped.' },
+  'nupkg-packaging-names': { sum: 'Normalizes the random GUID names OPC packaging invents.', why: 'The `.psmdcp` file and its relationship entry are named after a fresh GUID on every pack; nothing depends on the name.' },
+  'nupkg-packager-version': { sum: 'Zeroes the packaging-tool version in the .nuspec’s psmdcp.', why: 'Which NuGet version wrote the package is provenance, not content.' },
+  'nupkg-text-eol': { sum: 'Normalizes line endings in the package’s text files.', why: 'CRLF vs LF is a checkout and platform artifact; the text is the same either way. Content risk: it rewrites shipped bytes.' },
+  'nupkg-doc-member-order': { sum: 'Sorted the members of an XML documentation file. Superseded by nupkg-doc-member-order-v2.', why: 'The compiler may emit `<member>` entries in any order; sorting them makes two docs of the same API match. It reported no bytes changed for the file it rewrote. Structural.' },
+  'nupkg-doc-member-order-v2': { sum: 'Sorts the members of an XML documentation file.', why: 'The compiler may emit `<member>` entries in any order; sorting them makes two docs of the same API match. Structural.' },
+  'dotnet-assembly-identity': { sum: 'Zeroes a .NET assembly’s build and signing identity.', why: 'The strong-name signature (a key we do not have), the module MVID (a per-compilation GUID), the PE timestamp and checksum, and the debug-directory data — none is code, all are stamps a build writes around it.' },
+  'dotnet-il-canonical': { sum: 'Compared a managed assembly by its methods’ IL, not its byte layout. Superseded by dotnet-il-canonical-v2.', why: 'It kept every method’s name, signature and IL, resolved through the heaps to values, and nothing the IL’s tokens named — so a changed string literal, a call retargeted under the same token, a method’s flags, a catch clause’s type or a P/Invoke’s entry point compared equal. Records made under it are re-derived under the set they were signed with. Lossy: a match it made is caveated.' },
+  'dotnet-il-canonical-v2': { sum: 'Compares a managed assembly by its code, not its byte layout.', why: 'It reads the assembly’s own tables and keeps every method’s name, signature, flags and whole body, every row and string literal the code’s tokens can name, and the declarations that decide how it runs — P/Invoke entry points, overrides, implemented interfaces, parameters, layout — resolved through the heaps to values, so two assemblies built from the same source match even when SourceLink, a source-generator’s document order or a shifted heap laid their metadata and embedded PDB out differently. Lossy, so a match it makes is caveated: a change to a method, to anything its tokens name or to how it is declared still shows; a change only to resources, custom attributes or the data a field is initialized from does not.' },
+  'nupkg-repository-branch': { sum: 'Drops the <repository branch=…> git ref from the .nuspec.', why: 'That names the tag or branch the publisher built from, which a detached-commit checkout cannot reproduce. The commit — the identity — is kept.' },
+  'nupkg-readme-markers': { sum: 'Strips NuGetizer’s <!-- include … --> readme markers.', why: 'These are assembly directives NuGetizer leaves in the readme, spelled a hair differently once a remote include is neutralized for an offline build; the text a reader sees is unchanged. Content risk.' },
+  'pyc-header': { sum: 'Zeroes the source mtime in a .pyc header.', why: 'A compiled Python file stamps when its .py was last modified, for cache invalidation — not part of the bytecode.' },
+  'wheel-direct-url': { sum: 'Drops direct_url.json from a wheel.', why: 'It records the URL or path pip installed from, which is about the install, not the package.' },
+  'wheel-metadata-eol': { sum: 'Normalizes line endings in a wheel’s METADATA and RECORD.', why: 'CRLF vs LF in the metadata is a platform artifact. Content risk.' },
+  'wheel-record': { sum: 'Rebuilt the wheel’s RECORD manifest after the other passes. Superseded by wheel-record-v2.', why: 'RECORD lists every file and its hash; the passes above change some, so it is regenerated last so it still describes the package. The manifest it wrote is the same as v2’s; what changed is that v2’s rewrite of RECORD is recorded as an edit to that member, so records made under it are re-derived under the set they were signed with.' },
+  'wheel-record-v2': { sum: 'Rebuilds the wheel’s RECORD manifest after the other passes.', why: 'RECORD lists every file and its hash; the passes above change some, so it is regenerated last so it still describes the package.' },
+  'wheel-direct-url-drop': { sum: 'Drops direct_url.json from a wheel.', why: 'Records where pip installed from, not what is in the package.' },
+  'gem-exclude-checksums': { sum: 'Drops a gem’s checksums.yaml.gz.', why: 'It is a hash of the gem’s other members and is re-derivable from them, so it carries nothing new.' },
+  'gem-exclude-signatures': { sum: 'Drops a gem’s signature files.', why: 'Made with a private key the rebuild does not have.' },
+  'gem-metadata-cert-chain': { sum: 'Zeroes the signing certificate chain in a gem’s metadata.', why: 'The signer’s certificate is identity, not content.' },
+  'gem-metadata-date': { sum: 'Zeroes the build date in a gem’s metadata.', why: 'When the gem was built is not part of it.' },
+  'gem-metadata-rubygems-version': { sum: 'Normalizes the RubyGems tool version in a gem’s metadata.', why: 'Which packaging version wrote the gem is provenance.' },
+};
+
+// Field-level attribution is no longer inferred here: the comparison records which pass changed
+// which field of which member (`member.reconciled` / `member.residual`), so the transform is read
+// off ground truth in `memberTransform` rather than guessed from the file's name.
+
 // Every member, most interesting first. A hundred identical members must not bury the ten that
 // differ, and a list capped at five hundred that sorted by path would cap away exactly the rows
 // somebody came to read.
 function membersPanel(d, runId) {
   const rows = d.members.flatMap((m) => {
     const [label, colour, why] = MEMBER_STATE[m.status] || [m.status, 'var(--dim)', ''];
-    // Only a member with something to look at is openable: two identical copies have no diff and
-    // offering one would be offering an empty panel.
-    const worth = m.status !== 'identical';
+    // Ground truth from the comparison: `reconciled` is the fields a pass changed that no longer
+    // differ, each with the pass that did it; `residual` is what still differs, each with the pass
+    // that tried (or nothing). Either makes the member worth opening — a member a pass touched has
+    // a story even when it ended identical (Moq's DLLs, reconciled by `dotnet-il-canonical`).
+    const reconciled = (m.reconciled && m.reconciled.length) || (m.residual && m.residual.length)
+      ? { reconciled: m.reconciled || [], residual: m.residual || [] }
+      : null;
+    const worth = m.status !== 'identical' || !!reconciled;
     const slot = el('td', { colspan: 6, class: 'member-slot' });
     const open = () => {
       rememberOpen(m.path);
-      openMember(runId, m.path, slot, {});
+      openMember(runId, m.path, slot, { reconciled });
     };
     // Entered on a link to this member. The server has usually already put the panel in the
     // document, in which case it is drawn here with no request at all — see `BOOT.member`. Where it
@@ -952,16 +1317,23 @@ function membersPanel(d, runId) {
         queueMicrotask(() => openMember(runId, m.path, slot, { view: want.view }));
       }
     }
-    return [el('tr', { class: worth ? 'openable' : '' },
+    // A member a pass fully reconciled (touched, nothing left differing) gets the check marker;
+    // one that still differs does not, even where a pass acted on it.
+    const fullyReconciled = reconciled && !(m.residual && m.residual.length);
+    const memberTitle = !reconciled
+      ? 'open this member'
+      : fullyReconciled
+        ? 'a pass changed this and reconciled it — open to see what it did'
+        : 'a pass acted on this and it still differs — open to see the split';
+    return [el('tr', { class: [worth ? 'openable' : '', fullyReconciled ? 'reconciled' : ''].filter(Boolean).join(' ') },
       el('td', { class: 'url' }, worth
-        ? el('button', { class: 'member-link', onclick: open, title: 'open this member', text: m.path })
+        ? el('button', { class: 'member-link', onclick: open, title: memberTitle, text: m.path })
         : el('code', { text: m.path })),
       el('td', {}, el('span', { class: 'member-state', title: why },
         el('i', { style: [['background', colour]] }), label)),
-      // What differed about it before any pass ran. The row that matters is an *identical* member
-      // with `entry:mode` here: the file is byte for byte what was published, its archive entry was
-      // not, and a pass removed the difference — so the divergence was about how it was packed
-      // rather than about what anybody wrote.
+      // The residual codes — what still differs after stabilization. An identical member with an
+      // `entry:` rule here has bytes that match and a frame field the passes left; open it to see
+      // that split, and which pass, if any, acted on each field.
       el('td', { class: 'opt' }, m.differences.length
         ? m.differences.map((r) => el('span', {
             class: 'rule',
@@ -1230,6 +1602,13 @@ function drawMember(runId, path, slot, state, d) {
         text: 'close',
       })),
 
+    // How this member was transformed, from the comparison's own record: on the left the fields a
+    // pass changed and reconciled, on the right the fields that still differ — each joined to the
+    // pass that acted on it. Ground truth, not inference: the stabilizer measured what it changed.
+    state.reconciled
+      ? memberTransform(state.reconciled)
+      : null,
+
     !d.in_upstream || !d.in_rebuild
       ? el('p', { class: 'withheld-note' },
           el('strong', { text: d.in_upstream ? 'Only the published artifact has this. ' : 'Only the rebuild has this. ' }),
@@ -1263,7 +1642,7 @@ async function detail(id) {
   // `/runs/...` reached by clicking is a fetch, because the island describes the entry point.
   const booted = BOOT?.run && !DETAIL_BOOT_SPENT && BOOT.run.entry?.id === id;
   DETAIL_BOOT_SPENT = true;
-  const { entry, record } = booted
+  const { entry, record, published } = booted
     ? BOOT.run
     : await api(`/v1/runs/${encodeURIComponent(id)}`);
   document.title = `${entry.name} — Trigon`;
@@ -1279,20 +1658,27 @@ async function detail(id) {
   );
 
   const [, sentence] = VERDICT[entry.outcome] || [];
+  // A void run reaches an anonymous reader with no outcome and no comparison: shown, and never as
+  // a verdict. An operator's copy of the same run still has both, and is drawn as before.
+  const voided = !entry.outcome && entry.publication.state === 'void';
   const verdict = el('div', {},
     el('div', { class: 'verdict-line' },
       entry.outcome
         ? verdictTag(entry.outcome)
-        : el('span', {
-            class: `tag ${record.terminal === 'void' ? 'void' : 'none'}`,
-            text: (record.terminal || 'no verdict').replace(/-/g, ' '),
-          }),
+        // The "published as void" tag beside it says it once; a second tag would say it twice.
+        : voided
+          ? null
+          : el('span', {
+              class: `tag ${record.terminal === 'void' ? 'void' : 'none'}`,
+              text: (record.terminal || 'no verdict').replace(/-/g, ' '),
+            }),
       seal(entry.attested),
       entry.publication.state !== 'published'
         ? el('span', { class: 'tag void', title: withheldTitle(entry.publication), text: entry.publication.state === 'void' ? 'published as void' : 'not published' })
         : null),
     el('p', { class: 'sentence' },
       sentence
+        || (voided && 'We looked, and could not tell. A void is evidence of nothing about the package, in either direction, so no verdict is shown for it.')
         || TERMINAL[record.terminal]
         || 'This run finished without producing a verdict. What stopped it is below.'),
     entry.publication.state !== 'published'
@@ -1316,7 +1702,12 @@ async function detail(id) {
 
   // The comparison goes in a slot rather than in front of the paint. See `fillLater`.
   const comparison = el('div', {});
-  if (entry.has.comparison) {
+  if (entry.has.comparison && voided) {
+    // Not fetched: `/v1/runs/{id}/diff` refuses a void to this reader, and the fallback below
+    // would blame the rendering for a refusal that is the point.
+    comparison.replaceChildren(panel('What differs', el('p', { class: 'note empty' },
+      'Not published. A void carries no comparison outcome and no difference data: the comparison was made, and it is not evidence about the package.')));
+  } else if (entry.has.comparison) {
     comparison.replaceChildren(
       panel('What differs', el('p', { class: 'empty', text: 'reading the comparison…' })),
     );
@@ -1335,6 +1726,7 @@ async function detail(id) {
         censusPanel(d),
         contentsPanel(d),
         ledgerPanel(d),
+        progressionPanel(d),
         membersPanel(d, id),
         notesPanel(d),
       ],
@@ -1345,6 +1737,8 @@ async function detail(id) {
 
   const panels = [
     comparison,
+
+    publishedPanel(published, record),
 
     panel('What ran', el('dl', { class: 'kv' },
       kv('base image', el('span', { class: 'mono', text: record.environment.base_image })),
@@ -1400,7 +1794,14 @@ async function detail(id) {
       el('p', { class: 'note empty' },
         'The artifact under test reached the build over the network. Whatever came out may be perfectly honest and we cannot tell, which is exactly what void means.'))) : null,
 
-    panel('What it cost', costs(record)),
+    panel('What it cost', voided
+      // Not "no costs were recorded", which is a different fact. The server leaves a void's costs
+      // out for this reader because they measure the rebuilt artifact, the comparison and any
+      // model asked about the difference.
+      ? el('p', { class: 'empty', text: 'Not published for a void. What a run cost counts the rebuilt artifact, the comparison and any model asked about the difference, and each of those says something about what the comparison found.' })
+      : costs(record)),
+
+    networkPanel(id, entry),
 
     panel('The evidence, as stored', el('div', {},
       el('p', { class: 'note' },
@@ -1430,12 +1831,42 @@ async function detail(id) {
   );
 }
 
+// Where the run's record was published, from `RunRecord.published`: absent until `trigon publish`
+// logged it, and then the record anyone can fetch and check without this server. Nothing at all is
+// drawn for a run with none, since "not published" is already said by the tag above when it is so.
+function publishedPanel(published, record) {
+  if (!published) return null;
+  // A GitHub HTTPS repository links to the file at the commit that logged it; anything else is
+  // shown as it was configured, since a local path or an SSH location is nothing a browser opens.
+  const gh = /^https:\/\/github\.com\/([^/]+\/[^/]+?)(\.git)?\/?$/.exec(published.repository || '');
+  const file = gh
+    ? el('a', { href: `https://github.com/${gh[1]}/blob/${published.commit}/${published.path}`, rel: 'noreferrer noopener', class: 'mono', text: published.path })
+    : el('span', { class: 'mono', text: published.path });
+  const subject = record.upstream?.sha256;
+  return panel('Where its record was published', el('div', {},
+    el('dl', { class: 'kv' },
+      kv('repository', el('span', { class: 'mono', text: published.repository })),
+      kv('commit', el('span', { class: 'mono', text: published.commit })),
+      kv('record', el('span', { class: 'mono', text: published.record })),
+      kv('file', file),
+      kv('leaf', `${published.leaf} of ${published.log}/`),
+    ),
+    el('p', { class: 'note' },
+      'Logged in the evidence repository, where anyone can check it without this server: ',
+      el('code', { text: subject ? `trigon lookup sha256:${subject}` : 'trigon lookup' }),
+      ' answers from a verified clone of it.')));
+}
+
 const withheldTitle = (pub) => ({
   awaiting_confirmation: 'held back until a second, independent attempt agrees. One attempt cannot tell a deterministic recipe from a lucky one.',
   attempts_disagree: 'two attempts at this disagreed, so the honest answer is that we do not know. That is a finding about our repeatability, not about the package.',
+  confirmation_unrecorded: 'the attempts that agree do not all record which machine ran them and when they began, so whether the second is independent of the first cannot be checked.',
+  attempts_too_close: 'the attempts that agree began closer together than the confirmation interval allows, so the second cannot catch a floating dependency or a fetch that happened to succeed.',
+  same_host: 'the attempts that agree ran on one machine, or on machines their records cannot tell apart, and this operator does not accept a confirmation from the machine that made the first attempt.',
+  confirmation_not_cold: 'the attempts that agree ran on one machine, or on machines their records cannot tell apart, and the second is not shown to be cold: a cache could have supplied it, or its base image was not pulled again by digest, or it was a local image this operator does not accept (same_host_local_images), so it may have replayed the first attempt rather than repeated it.',
   open_egress: 'the build ran with unrestricted network access, so nothing it produced is evidence about the package.',
   guard_tripped: 'the build reached the published artifact over the network, so a match would prove only that it downloaded it.',
-  non_builtin_stabilizer: 'a stabilizer a person or a model wrote was applied, so this publishes as void rather than as a divergence.',
+  non_builtin_stabilizer: 'a stabilizer a person or a model wrote was applied, so the normalization is itself a judgement call, and the run is evidence of nothing about the package in either direction.',
   kill_switch: 'divergence publication is stopped while the false-mismatch rate is reviewed.',
   provenance_unknown: 'this record does not say whether a hand-written or model-written stabilizer was applied, so one of the five safeguards cannot be checked. An accusation is not published on a safeguard nobody evaluated.',
   image_derived_outside_boundary: 'this run built its own base image, which spends network outside the boundary the rest of the run accounts for. The build ran at the tier it claims; the environment it ran in was assembled without that account.',
@@ -1680,8 +2111,11 @@ async function fleetView() {
                 el('th', { text: 'worker' }),
                 el('th', { class: 'n', text: 'holding' }),
                 el('th', { text: 'lease' }))),
+              // An anonymous reader is sent no names, and the server says why in `q.detail`.
               el('tbody', {}, workers.map((w) => el('tr', {},
-                el('td', { class: 'pkg', text: w.worker }),
+                w.worker === undefined
+                  ? el('td', { class: 'empty', text: 'not shown' })
+                  : el('td', { class: 'pkg', text: w.worker }),
                 el('td', { class: 'n', text: String(w.jobs_held) }),
                 el('td', {}, el('span', {
                   class: `tag ${w.lease_expires_in_seconds < 0 ? 'divergent' : 'normalized'}`,
@@ -1689,7 +2123,10 @@ async function fleetView() {
                     ? `lapsed ${-w.lease_expires_in_seconds}s ago`
                     : `${w.lease_expires_in_seconds}s left`,
                 }))))))
-          : el('p', { class: 'empty', text: 'No worker is holding a lease.' }));
+          : el('p', { class: 'empty', text: 'No worker is holding a lease.' }),
+        workers.length && q.detail
+          ? el('p', { class: 'note', text: q.detail[0].toUpperCase() + q.detail.slice(1) })
+          : null);
 
   view.replaceChildren(
     el('p', {}, el('a', { href: '/', text: '← the corpus' })),

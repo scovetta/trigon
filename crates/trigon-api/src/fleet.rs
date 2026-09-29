@@ -16,6 +16,7 @@ use axum::response::Response;
 use trigon_core::Status;
 
 use crate::evidence::{Class, admits};
+use crate::publication::Publication;
 use crate::routes::{json, refuse};
 use crate::{Api, Principal};
 
@@ -35,13 +36,28 @@ pub(crate) const MAX_LOCKFILE: usize = 8 << 20;
 
 /// `POST /v1/check` — a lockfile in, a verdict table out.
 ///
-/// The same five rows as `trigon check`, from the same parser and the same mapping: the lockfile
-/// reading is `trigon_core::lockfile` and the record-to-status rule is `RunRecord::status`, so the
-/// command line and the web page cannot drift into two answers.
+/// The same five rows as `trigon check`, from the same parser: the lockfile reading is
+/// `trigon_core::lockfile`, and a verdict the reader may see is mapped by `RunRecord::status`.
 ///
-/// **Anonymous.** It reports verdicts that are already public and adds nothing about any run the
-/// gate withholds — a withheld run simply is not in the index, so its packages land in
-/// `never checked`, which is the truth from where the reader stands.
+/// **What each principal is answered from.** The route is open to both, and the two answers
+/// differ on purpose.
+///
+/// - **An anonymous reader is answered only from what the publication gate releases.** A run
+///   `decide` calls `Published` reports its verdict. A run it calls `Void` reports `unsupported`
+///   with the gate's reason, never its outcome: `Publication::is_public` is true for a void, and
+///   `RunRecord::status` calls an open-egress divergence `divergent`, so filtering on "public"
+///   alone would still publish the accusation safeguard 2 turns into a void. A `Withheld` run is
+///   treated as absent, so the answer is the newest older run the gate does release, or `never
+///   checked` — the truth from where the reader stands, and nothing about a run they may not see.
+/// - **An operator is answered from the whole store**, newest run first and ungated, exactly as
+///   `trigon check` answers from a local one. It is the same person reading the same runs, so the
+///   command line and the page cannot drift into two answers; the gate decides what is published,
+///   and an operator reading their own corpus is not publication.
+///
+/// This comment used to promise the anonymous half while the code did the operator's for
+/// everybody: it said a withheld run "simply is not in the index", and it was in the index, and
+/// `Index::newest_for` does not ask the gate. So a withheld divergence reached anyone as
+/// `divergent`. See `docs/16-findings.md` §3.92 and §3.93.
 pub async fn check(State(api): State<Arc<Api>>, body: String) -> Response {
     if body.len() > MAX_LOCKFILE {
         return refuse(
@@ -86,13 +102,35 @@ pub async fn check(State(api): State<Arc<Api>>, body: String) -> Response {
         tally.insert(s.label(), 0);
     }
 
+    let public = api.principal() == Principal::Anonymous;
     for p in packages {
-        let (status, detail, run) = match api.index.newest_for(&p.purl) {
-            Some(r) => {
-                let (s, d) = r.status();
-                (s, d, Some(r.id.clone()))
+        let (status, detail, run) = if public {
+            match api.index.newest_public_for(&p.purl) {
+                Some((r, Publication::Published)) => {
+                    let (s, d) = r.status();
+                    (s, d, Some(r.id))
+                }
+                // The run is named, because a void is published and its page says the same thing
+                // at more length. The outcome is not, because a void has none to publish.
+                Some((r, Publication::Void { because })) => (
+                    Status::Unsupported,
+                    Some(format!("published as void: {}", because.sentence())),
+                    Some(r.id),
+                ),
+                // `newest_public_for` passes over a withheld run; were one to reach here, absent is
+                // still what it is to this reader.
+                Some((_, Publication::Withheld { .. })) | None => {
+                    (Status::NeverChecked, None, None)
+                }
             }
-            None => (Status::NeverChecked, None, None),
+        } else {
+            match api.index.newest_for(&p.purl) {
+                Some(r) => {
+                    let (s, d) = r.status();
+                    (s, d, Some(r.id))
+                }
+                None => (Status::NeverChecked, None, None),
+            }
         };
         *tally.entry(status.label()).or_default() += 1;
         rows.push(serde_json::json!({
@@ -208,6 +246,13 @@ pub async fn clusters(State(api): State<Arc<Api>>) -> Response {
 /// Queue depth by state, who holds a lease and how close it is to expiring, and what the corpus
 /// has reached. A worker whose lease is nearly up is either very slow or dead, and from here the
 /// two are indistinguishable until it renews — so the number is reported rather than interpreted.
+///
+/// **An anonymous reader is told how many hold work, and not who.** A worker is named
+/// `$HOSTNAME-<pid>` unless it is given a name, and a hostname is often a person's name — the
+/// reason no anonymous reader is shown a run's host id, which is only a keyed hash of one
+/// ([`crate::index::record_shown`]). This page printed the name itself. Each holder keeps its row,
+/// its count and its expiry, so the question the page exists for is still answered; an operator
+/// is shown the names.
 pub async fn fleet(State(api): State<Arc<Api>>) -> Response {
     // `public` matches the principal, so an operator's fleet page counts the whole corpus and an
     // anonymous one counts what the gate released. Two different true answers to one question.
@@ -224,19 +269,31 @@ pub async fn fleet(State(api): State<Arc<Api>>) -> Response {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as i64)
                         .unwrap_or(0);
-                    serde_json::json!({
+                    let mut queue = serde_json::json!({
                         "depth": depth.into_iter().collect::<BTreeMap<_, _>>(),
                         "workers": workers.into_iter().map(|(name, held, soonest)| {
-                            serde_json::json!({
-                                "worker": name,
+                            let mut w = serde_json::json!({
                                 "jobs_held": held,
                                 // Negative means the lease has already lapsed and the job is
                                 // redeliverable. Reported as a number rather than as "dead",
                                 // because this cannot tell a dead worker from a slow one.
                                 "lease_expires_in_seconds": (soonest - now) / 1000,
-                            })
+                            });
+                            if !public {
+                                w["worker"] = serde_json::Value::String(name);
+                            }
+                            w
                         }).collect::<Vec<_>>(),
-                    })
+                    });
+                    if public {
+                        // Said, so a row with no name is not read as a worker that has none.
+                        queue["detail"] = serde_json::json!(
+                            "worker names are not shown to an anonymous reader: a worker is named \
+                             after the machine it runs on unless it is given a name, and a \
+                             hostname is often a person's name."
+                        );
+                    }
+                    queue
                 }
                 (Err(e), _) | (_, Err(e)) => serde_json::json!({ "error": e.to_string() }),
             }

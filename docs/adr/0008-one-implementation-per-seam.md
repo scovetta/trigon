@@ -1,6 +1,8 @@
 # ADR-0008. Keep the traits, build one implementation of each
 
-**Status:** accepted
+**Status:** accepted. The table was amended on 2026-09-27 for
+[ADR-0014](0014-git-evidence-store-without-rekor.md): an evidence store row, and the Signer row
+corrected to what exists.
 
 ## Decision
 
@@ -13,7 +15,8 @@ implementation of each** in v1:
 | Blob store | `object_store`, which already covers S3, GCS, Azure, local and memory |
 | Metadata store | Postgres, with SQLite for single-binary mode |
 | Sandbox | Podman locally, Kubernetes Jobs in the fleet |
-| Signer | sigstore keyless, plus a local file key |
+| Signer | A local ed25519 file key. Sigstore keyless was dropped by ADR-0011, and every other Sigstore dependency by ADR-0014 |
+| Evidence store | git (ADR-0014) |
 | LLM provider | **Two**: Anthropic native, and one OpenAI-compatible client |
 
 ## Reasoning

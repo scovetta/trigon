@@ -133,8 +133,23 @@ impl StoreLock {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Taken for writing by a test that asserts a lock is free once it is dropped, and for reading
+    /// by every test in this crate that starts a process.
+    ///
+    /// `flock` belongs to the open file description, and a forked child holds a copy of every
+    /// descriptor until it execs and the close-on-exec ones go. So a test on another thread that
+    /// starts a process just as this one drops a lock keeps that lock held for the child's
+    /// fork-to-exec window, and a removal asked for in that window is refused with both readers
+    /// gone — `readers_share_and_a_removal_waits_for_all_of_them` failed that way in most runs of
+    /// the whole suite once `network.rs` gained tests that start a stand-in runtime, and never on
+    /// its own. The lock files are already per test; what they share is the process.
+    ///
+    /// Tokio's lock rather than the standard one, because the tests that start processes hold it
+    /// across the awaits that start them.
+    pub(crate) static SPAWNING: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
     /// A lock file of this test's own.
     ///
@@ -151,6 +166,7 @@ mod tests {
 
     #[test]
     fn readers_share_and_a_removal_waits_for_all_of_them() {
+        let _alone = SPAWNING.blocking_write();
         let at = mine("share");
         // Two readers coexist — concurrent builds must — and a removal cannot proceed while either
         // holds it, which is the property that stops `podman rmi` taking layers out from under

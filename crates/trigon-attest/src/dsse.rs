@@ -87,7 +87,7 @@ impl Envelope {
     pub fn decoded_payload(&self) -> Result<Vec<u8>, crate::AttestError> {
         base64::engine::general_purpose::STANDARD
             .decode(&self.payload)
-            .map_err(|e| crate::AttestError::Malformed(format!("payload is not base64: {e}")))
+            .map_err(|e| crate::AttestError::Evidence(format!("payload is not base64: {e}")))
     }
 
     /// What a signature over this envelope covers.
@@ -140,5 +140,24 @@ mod tests {
             }],
         );
         assert!(!e.is_signed());
+    }
+
+    /// A signature carrying a chain is told apart from one to be checked against a pinned key, and
+    /// its leaf is the chain's first certificate; one with no chain has no leaf.
+    #[test]
+    fn a_chained_signature_is_told_apart_and_names_its_leaf() {
+        let pinned = Signature {
+            sig: "s".into(),
+            keyid: "k".into(),
+            ..Default::default()
+        };
+        assert!(!pinned.is_chained());
+        assert_eq!(pinned.leaf(), None);
+        let chained = Signature {
+            chain: vec!["leaf".into(), "intermediate".into()],
+            ..pinned
+        };
+        assert!(chained.is_chained());
+        assert_eq!(chained.leaf(), Some("leaf"));
     }
 }

@@ -32,7 +32,7 @@ records where building it proved the design wrong.
 |---|---|---|
 | **M0** the judgement half | done | differential against the reference implementation: 34 match, 24 deviate by a declared entry, **0 unexplained** |
 | **M1** first rebuilds | done | npm and PyPI rebuild end to end, under an enforced egress tier, against a time-filtered index |
-| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`; published to a Rekor transparency log and verified offline against it |
+| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`. Publishing them is [`docs/19`](docs/19-distribution-and-lookup.md): an evidence repository with a log of our own, which replaced a Rekor client that was built, measured and removed ([ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md)) — written by `trigon publish`, synced by `trigon evidence`, and asked by `trigon lookup` and `trigon check` |
 | **M3** the search half | begun | the deterministic parts first — failure signatures, log compression, the repair-loop policy, the Builder |
 
 Tier-1 observability landed early, out of milestone order: every run at an enforced egress tier now
@@ -185,7 +185,7 @@ flowchart TB
     subgraph done["Done — a separate process, and the only one holding the signing key"]
         direction TB
         attest["Attest<br/>in-toto statement, DSSE"]
-        publish["Publish<br/>store, optional transparency log"]
+        publish["Publish<br/>store; an evidence repository"]
         attest --> publish
     end
 
@@ -283,7 +283,7 @@ $ trigon rebuild pkg:pypi/chardet@7.6.0 \
 ✔ exact
 
   format         zip
-  stabilizer set wheel (58632c3c627d…)
+  stabilizer set wheel (738725964c4a…)
 
                upstream           rebuild
   raw          4076d795897c…      4076d795897c…      =
@@ -310,11 +310,11 @@ $ trigon runs --store ./store
 
 $ trigon attest --store ./store --key key.bin
 target    pkg:pypi/chardet@7.6.0
-rederived exact under wheel@58632c3c627d — signing
+rederived exact under wheel@738725964c4a — signing
 
-  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/equivalence.intoto.json
-  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/rebuild.intoto.json
-  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/buildobservation.intoto.json
+  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/equivalence.intoto.json
+  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/rebuild.intoto.json
+  attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/buildobservation.intoto.json
 
 signed with key 8238c7031caabae5
 ```
@@ -322,13 +322,24 @@ signed with key 8238c7031caabae5
 `rederived exact … — signing` is the load-bearing line. The attestor did not take the run record's
 word for the outcome: it fetched both artifacts from the store **by hash**, checked each against the
 hash it asked for, recomputed the comparison, and would have refused to sign had the answer differed.
+The statements are filed under the run's id, so signing another run of the same package, or this
+run again, adds statements beside these and never replaces them.
+
+**That transcript is from before 2026-09-27, and this run is signed differently today.** It ran at
+`--egress open`, where nothing the build produced is evidence about the package, and the
+publication gate calls such a run void. `trigon attest` now signs a void run as `void/v1` — the
+reason, the facts that establish it, and no verdict — and nothing else, so attesting this run today
+prints `void      open_egress: …` and files `void.intoto.json`. A run at `--egress mirror-only` or
+`deny-all` is signed as `equivalence/v2` or `divergence/v2`, which carry everything a published
+record needs ([`docs/09`](docs/09-attestations.md) §2.5). The `equivalence/v1` statement written
+then still verifies exactly as below.
 
 Anyone holding the two artifacts can now check that claim without trusting us, and without a
 network:
 
 ```
 $ trigon verify-attestation \
-      ./store/attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/equivalence.intoto.json \
+      ./store/attestations/pypi/chardet/7.6.0/chardet-7.6.0-py3-none-any.whl/1789215251-4076d795/equivalence.intoto.json \
       --rerun-comparison \
       --upstream ./work-py/chardet-7.6.0-py3-none-any.whl \
       --rebuild ./work-py/rebuild/*/chardet-7.6.0-py3-none-any.whl \
@@ -338,7 +349,7 @@ subject   chardet-7.6.0-py3-none-any.whl (4076d795897ce45239825956a1334e134322ec
 predicate https://trigon.dev/equivalence/v1
 claims    exact
 signature verified
-rederived exact under wheel@58632c3c627d — the claim holds
+rederived exact under wheel@738725964c4a — the claim holds
 ```
 
 Drop `--public-key` and it still re-derives; it says only that the signature was present and unchecked,
@@ -346,45 +357,41 @@ because "unsigned" and "signed by someone you do not trust" are different answer
 and the signature fails. Edit the claimed outcome and **the bytes refute it even with no key at
 all** — which is the property that makes an attestation from a rebuilder worth anything.
 
-### Putting it in a transparency log
+### Publishing it
 
-A signature says *who*. It does not say *when*, and with a long-lived key that is the gap that
-matters: a stolen key can sign anything, including something backdated. Add `--rekor` and the log
-answers the question the key cannot.
+Signing is local: `trigon attest` writes into the store and opens no socket. Publishing is its own
+step, `trigon publish`, which asks the publication gate about each run and writes what it allows to
+a git repository holding the signed records, the evidence to re-derive each one, and an append-only
+log we sign — one commit per publication, pushed without force, its checkpoint signed by `trigon log
+sign`, the only thing that holds the log's key ([`docs/using-trigon.md`](docs/using-trigon.md)).
+Rotating either key is a leaf of that log too, which every client follows (`trigon log
+key-change`, `trigon log succeed`). [`docs/19`](docs/19-distribution-and-lookup.md) is the design
+and its build plan, and [ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md) records why
+it replaced the Rekor client that used to be described here.
 
-```
-$ trigon attest --store ./store --key key.bin --rekor https://rekor.sigstage.dev
-rederived exact under wheel@58632c3c627d — signing
-logged at https://rekor.sigstage.dev index 56042318 (71d46696179fcd5d…)
+### Checking a lockfile against it
 
-$ trigon runs --store ./store
-1789572025-1173b740  pkg:pypi/chardet@7.4.3   exact   attested   rekor.sigstage.dev index 56042318 on 2026-09-16
-```
-
-Use `rekor.sigstage.dev` (staging) while you are working things out. A transparency log is
-append-only: an entry published to production is there permanently, for everyone. `--dry-run` prints
-the exact entry and posts nothing, which is worth doing at least once — the signature is
-deterministic, so what you read is byte for byte what a real run would publish.
-
-Checking it needs no network and no faith in the log:
+The consumer's front door. Trust a repository once, and every lockfile after that is answered from
+a clone you verified yourself — one sync, then no request per package, and nothing told which
+packages you asked about:
 
 ```
-$ # scripts/rebuild-and-attest.sh prints this line with every path already filled in.
-$ trigon verify-attestation ./store/attestations/.../equivalence.intoto.json \
-      --transparency <(jq .transparency ./store/runs/1789572025-1173b740.json)
-
-logged    rekor.sigstage.dev index 56042318 at 2026-09-16T15:20:26Z (71d46696179fcd5d)
-          the log's timestamp verifies, and the entry is about this bundle
+$ trigon evidence add trigon https://github.com/owner/trigon-evidence.git \
+      --log-key 'github.com/owner/trigon-evidence+1a2b3c4d+AR…' --attestation-key <64 hex>
+$ trigon check package-lock.json          # every package, by the integrity digest it pins
+$ trigon lookup ./left-pad-1.3.0.tgz      # one artifact: every record, and how to falsify it
 ```
 
-Two things, and the second is the one that is easy to omit. The log's signed timestamp verifies —
-against a key compiled in and selected by the `logID` the entry names, which *is* the SHA-256 of
-that key. And the entry is about **this** bundle: a verifying timestamp on an unrelated entry proves
-some statement existed at some instant, which is not a claim anyone wants to make.
+Each source you trust answers for itself, sources that disagree are said to, and a package no
+source holds a record for reads *never checked*, never as a pass. The exit codes are for CI: `1`
+for a divergence, `2` never checked, `4` anything that failed verification.
+[`docs/using-trigon.md`](docs/using-trigon.md) has the rest, `--remote` and the falsifying command
+among it; `trigon check --store <path>` is the old check against a store of your own runs.
 
-What this does not yet do is check that timestamp against a signing certificate's validity window,
-because the certificates arrive with [B21](docs/17-backlog.md) steps 4-5. Today the entry is an
-auditable public record of when we said what; it is not yet what bounds a key compromise.
+A signature says *who*, never *when*. A statement carries no third-party time, so nothing bounds
+what a stolen key can sign ([threat model](docs/threat-model.md) D24), and publishing will not change
+that until docs/19 D6 is decided. Keep the key where [`docs/12`](docs/12-security.md) §9 puts it:
+never in a worker that has executed a build.
 
 ### Comparing two files you already have
 

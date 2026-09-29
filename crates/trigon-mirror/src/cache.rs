@@ -573,4 +573,147 @@ mod tests {
         // Under the bound, pruning does nothing at all.
         assert_eq!(c.prune(1_000_000).unwrap(), 0);
     }
+
+    #[test]
+    fn a_streamed_write_becomes_an_entry_only_once_it_finishes() {
+        // An artifact can be gigabytes, so the proxy fills the entry as the bytes stream past. The
+        // rule that has to survive that is the one `put` keeps: a reader never sees a body that is
+        // not whole, so there is no entry at all until `finish`.
+        let (c, root) = cache("stream", "sweep-1");
+        let mut w = c
+            .writer(Tier::Bytes, "https://r/big.tgz")
+            .expect("a writer");
+        w.write(b"first half, ");
+        assert!(
+            c.get(Tier::Bytes, "https://r/big.tgz").is_none(),
+            "a half-written body was readable"
+        );
+        w.write(b"second half");
+        assert!(w.finish("application/gzip", 42));
+        c.note_write();
+
+        let e = c
+            .get(Tier::Bytes, "https://r/big.tgz")
+            .expect("a whole entry");
+        assert_eq!(e.body, b"first half, second half");
+        assert_eq!(
+            (e.content_type.as_str(), e.fetched_at),
+            ("application/gzip", 42)
+        );
+        assert_eq!(c.stats().written, 1);
+        assert_eq!(
+            std::fs::read_dir(root.join("tmp")).unwrap().count(),
+            0,
+            "the temporary file was renamed, not copied"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_abandoned_streamed_write_leaves_nothing_behind() {
+        // A build that hangs up mid-download is ordinary. A `tmp` directory that grows by one file
+        // per abandoned fetch is a disk leak nobody would look for, and a partial body renamed into
+        // place is `trigon/client-corrupted-download` again.
+        let (c, root) = cache("abandoned", "sweep-1");
+        let mut w = c
+            .writer(Tier::Bytes, "https://r/cut.tgz")
+            .expect("a writer");
+        w.write(b"the first megabyte of many");
+        drop(w);
+        assert!(c.get(Tier::Bytes, "https://r/cut.tgz").is_none());
+        assert_eq!(std::fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+        assert_eq!(c.stats().written, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_write_that_cannot_be_placed_says_so_and_leaves_nothing_behind() {
+        // `finish` answers whether an entry now exists, and the caller counts a write only on
+        // `true`. A tier directory that cannot be created is a failure to place it, and must not
+        // strand the temporary body or its meta.
+        let (c, root) = cache("unplaceable", "sweep-1");
+        std::fs::write(root.join("bytes"), b"a file where the tier directory goes").unwrap();
+        let mut w = c.writer(Tier::Bytes, "https://r/x.tgz").expect("a writer");
+        w.write(b"bytes");
+        assert!(!w.finish("application/gzip", 1), "reported placed");
+        assert_eq!(std::fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_body_that_cannot_be_stored_is_an_error_and_not_a_counted_write() {
+        // `put` says when it failed, so the caller can log it and serve the body anyway — a cache
+        // that cannot be written is a slower sweep, never a wrong one. It must not count a write it
+        // did not make.
+        let (c, root) = cache("unwritable", "sweep-1");
+        std::fs::write(root.join("index"), b"a file where the tier directory goes").unwrap();
+        assert!(
+            c.put(Tier::Index, "https://r/pkg", b"{}", "application/json", 1)
+                .is_err()
+        );
+        assert_eq!(c.stats().written, 0);
+        assert!(c.get(Tier::Index, "https://r/pkg").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_intact_entry_filed_under_another_url_is_refused() {
+        // The digest proves the bytes are the bytes that were written; the URL in the meta proves
+        // they were written *for this request*. An entry that passes the first and not the second
+        // is somebody else's body, and serving it would hand one artifact out under another's name.
+        let (c, root) = cache("misfiled", "sweep-1");
+        c.put(
+            Tier::Bytes,
+            "https://r/a.tgz",
+            b"a's bytes",
+            "application/gzip",
+            1,
+        )
+        .unwrap();
+        let (from, to) = (
+            c.key(Tier::Bytes, "https://r/a.tgz"),
+            c.key(Tier::Bytes, "https://r/b.tgz"),
+        );
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(&from, &to).unwrap();
+        std::fs::copy(from.with_extension("meta"), to.with_extension("meta")).unwrap();
+
+        assert!(
+            c.get(Tier::Bytes, "https://r/b.tgz").is_none(),
+            "served a.tgz as b.tgz"
+        );
+        let s = c.stats();
+        assert_eq!((s.rejected, s.misses, s.hits), (1, 1, 0), "{s:?}");
+        assert!(!to.exists(), "a refused entry is removed");
+        assert!(
+            c.get(Tier::Bytes, "https://r/a.tgz").is_some(),
+            "the real one is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_miss_nothing_was_consulted_for_is_still_counted() {
+        // The proxy records a miss where there was no entry to consult. A hit rate computed without
+        // them would be a cache reporting itself better than it is.
+        let (c, root) = cache("misses", "sweep-1");
+        c.note_miss();
+        c.note_miss();
+        assert_eq!(c.stats().misses, 2);
+        assert_eq!(c.stats().hits, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_clock_this_crate_stamps_entries_with_is_the_wall_clock() {
+        // `fetched_at` is compared against a moment a person reads, so it has to be unix seconds
+        // now — not zero, and not a monotonic instant from some other epoch.
+        let now = now_unix();
+        assert!(now > 1_700_000_000, "{now}");
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(wall.abs_diff(now) <= 1, "{now} vs {wall}");
+    }
 }

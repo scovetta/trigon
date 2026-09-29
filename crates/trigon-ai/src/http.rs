@@ -138,6 +138,15 @@ impl OpenAiCompatible {
         self
     }
 
+    /// Talk to the endpoint directly, whatever the environment's proxy settings say.
+    ///
+    /// A test seam, for the loopback tests; `unproxied` below says why they need one.
+    #[doc(hidden)]
+    pub fn without_proxy(mut self) -> Result<Self, LlmError> {
+        self.client = unproxied()?;
+        Ok(self)
+    }
+
     /// How long to wait for one answer, overriding [`Flavor::request_timeout`].
     ///
     /// For an endpoint whose speed the flavour does not predict: a `compatible:` URL pointing at
@@ -281,6 +290,19 @@ impl Provider for OpenAiCompatible {
         )?;
 
         let choice = &doc["choices"][0];
+        // **Before the text is looked for**, as the Anthropic client does and for its reason: the
+        // cap explains the text being empty or cut short. Unchecked, a reasoning model that spent
+        // the whole budget thinking came back as an empty answer the parser called malformed, and
+        // one cut mid-answer came back as a success — and `propose` never saw the `Truncated` that
+        // is its only cue to walk the depth down.
+        if choice["finish_reason"] == "length" {
+            return Err(LlmError::Truncated {
+                limit: req.max_output_tokens,
+                thinking: doc["usage"]["completion_tokens_details"]["reasoning_tokens"]
+                    .as_u64()
+                    .unwrap_or(0),
+            });
+        }
         let text = choice["message"]["content"]
             .as_str()
             .ok_or_else(|| LlmError::Malformed(format!("no message content in {doc}")))?;
@@ -357,6 +379,15 @@ impl Anthropic {
                 .to_string(),
             api_key: api_key.into(),
         })
+    }
+
+    /// Talk to the endpoint directly, whatever the environment's proxy settings say.
+    ///
+    /// A test seam, for the loopback tests; `unproxied` below says why they need one.
+    #[doc(hidden)]
+    pub fn without_proxy(mut self) -> Result<Self, LlmError> {
+        self.client = unproxied()?;
+        Ok(self)
     }
 
     fn body(&self, req: &Request) -> Value {
@@ -550,7 +581,23 @@ enum Auth {
 
 /// One client, with the provider's own retries switched off.
 fn client() -> Result<reqwest::blocking::Client, LlmError> {
-    reqwest::blocking::Client::builder()
+    client_from(reqwest::blocking::Client::builder())
+}
+
+/// The environment's proxy settings ignored, which only a test against loopback asks for.
+///
+/// The default client honours `HTTP_PROXY` and `ALL_PROXY` and exempts nothing, loopback included,
+/// so on a host with a proxy configured and `127.0.0.1` absent from `NO_PROXY` a test's request to
+/// a server in its own process goes to the proxy instead. Whether a run should ever send a loopback
+/// endpoint through a proxy is a separate question, and this leaves the answer to it unchanged.
+fn unproxied() -> Result<reqwest::blocking::Client, LlmError> {
+    client_from(reqwest::blocking::Client::builder().no_proxy())
+}
+
+fn client_from(
+    builder: reqwest::blocking::ClientBuilder,
+) -> Result<reqwest::blocking::Client, LlmError> {
+    builder
         // The same string every other route declares. A model endpoint is upstream too, and a
         // provider noticing our traffic should reach a person rather than guess.
         .user_agent(trigon_politeness::user_agent())
@@ -840,5 +887,73 @@ mod tests {
         let body = Anthropic::new("k", None).unwrap().body(&probe("rules"));
         assert!(body.get("temperature").is_none(), "{body}");
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn a_temperature_something_asked_for_is_sent_to_anthropic() {
+        // Only zero is left out, because zero is what those models do anyway. Anything else is a
+        // choice somebody made, and dropping it would answer a different question.
+        let mut req = probe("rules");
+        req.temperature = 0.5;
+        let body = Anthropic::new("k", None).unwrap().body(&req);
+        assert_eq!(body["temperature"], 0.5);
+    }
+
+    #[test]
+    fn the_depth_a_request_names_is_the_depth_sent() {
+        // The retry that walks the depth down after a truncated answer only works if the lower
+        // depth reaches the wire. It was a constant in the Anthropic client once, which made the
+        // one setting that fixes a truncated answer unreachable.
+        let mut req = probe("rules");
+        req.effort = Some(Effort::Low);
+        let anthropic = Anthropic::new("k", None).unwrap().body(&req);
+        assert_eq!(anthropic["output_config"]["effort"], "low");
+        // Beside the schema, not instead of it.
+        assert_eq!(anthropic["output_config"]["format"]["type"], "json_schema");
+
+        // Ollama only. `body()` sends the field to every OpenAI-shaped flavour, while
+        // `with_reasoning` says to send `reasoning_effort` only where it has been seen to work;
+        // which of the two is meant for OpenAI, OpenRouter and the rest is the owner's to say, so
+        // neither answer is held here.
+        let ollama = OpenAiCompatible::new("http://x/v1", None, Flavor::Ollama)
+            .unwrap()
+            .body(&req);
+        assert_eq!(ollama["reasoning_effort"], "low", "{ollama}");
+    }
+
+    #[test]
+    fn a_prompt_with_no_stable_part_sends_no_empty_message_and_no_breakpoint() {
+        // The split is where the cache ends, not a slot to fill. An empty user message is noise on
+        // the wire at best, and a breakpoint after the volatile part caches nothing and costs a
+        // write.
+        let mut req = probe("s");
+        req.prompt = crate::provider::Prompt::new("s").volatile("only this target");
+        let body = OpenAiCompatible::new("http://x/v1", None, Flavor::Other)
+            .unwrap()
+            .body(&req);
+        let m = body["messages"].as_array().unwrap();
+        assert_eq!(m.len(), 2, "{body}");
+        assert_eq!(m[1]["content"], "only this target");
+
+        let body = Anthropic::new("k", None).unwrap().body(&req);
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert!(content[0].get("cache_control").is_none(), "{body}");
+        // The system prompt is still the cached prefix: it is the operator's, and stable.
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn reasoning_off_outranks_a_depth_on_ollama() {
+        // The opinion's retry asks for the floor depth *and* no reasoning. A depth is a way of
+        // thinking less; `none` is not thinking, and the stronger request is the one that was
+        // meant.
+        let mut req = probe("s");
+        req.effort = Some(Effort::Low);
+        req.reasoning = Reasoning::Off;
+        let body = OpenAiCompatible::new("http://x/v1", None, Flavor::Ollama)
+            .unwrap()
+            .body(&req);
+        assert_eq!(body["reasoning_effort"], "none", "{body}");
     }
 }

@@ -83,6 +83,26 @@ steps:
       }
       export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
       export NUGET_PACKAGES=/trigon/nuget/packages
+      # **A readme's remote `<!-- include URL -->` is fetched at pack time, and that is network.**
+      # NuGetizer (devlooped) resolves `<!-- include <path-or-url> -->` directives in the package
+      # readme by inlining the target. A local path resolves from the checkout; an `http(s)://` URL
+      # is fetched over the wire — `moq@4.20.72`'s readme pulls
+      # `raw.githubusercontent.com/devlooped/sponsors/main/footer.md` — and under `mirror-only` the
+      # build's network island has no route there, so `dotnet pack` dies `Network is unreachable` in
+      # NuGetizer's `CreatePackage` before it writes a package (`docs/16-findings.md` §3.86).
+      #
+      # The remote target is a moving branch (`…/main/…`) whose content — a sponsor list refreshed at
+      # release time and absent from the checkout — is not reproducible even for the publisher, and is
+      # not the package's own source. Neutralise only the *remote* include directives so the pack
+      # stays offline and produces an artifact; local includes resolve from the checkout untouched.
+      # The readme then differs from the published one in exactly that refreshed region, which is a
+      # divergence the run can show and explain rather than a build that never ran.
+      for md in $(find . -type f -name '*.md' -not -path './.git/*' 2>/dev/null); do
+        if grep -qiE '<!--[[:space:]]*include[[:space:]]+https?://' "$md" 2>/dev/null; then
+          sed -i -E '/<!--[[:space:]]*include[[:space:]]+https?:\/\//d' "$md"
+          echo "trigon: neutralised a remote readme include in $md so pack stays offline"
+        fi
+      done
       # `--no-restore`: the deps phase already did it, and a restore here would open the network in
       # the phase that is supposed to be observable.
       # **`LanguageTargets`, and it is the whole fix for a large stratum.** A project may override
@@ -201,12 +221,12 @@ steps:
       set -- "$@" -p:IncludeSymbols=false
       [ -n "$CSHARP_TARGETS" ] && set -- "$@" -p:LanguageTargets="$CSHARP_TARGETS"
       {%- if with.version %}
-      set -- "$@" -p:Version={{ with.version }}
+      set -- "$@" '-p:Version={{ with.version | msbuild_escape | shell_single_quote }}'
       {#- `PackageVersion` too: it defaults to `Version`, so this is a no-op for a normal project,
           but one that sets it explicitly from a CI property (`castle.core`'s
           `<PackageVersion>$(BuildVersion)</PackageVersion>`) ignores `Version` and would name the
           package `0.0.0` without it. A global property overrides the project's. #}
-      set -- "$@" -p:PackageVersion={{ with.version }}
+      set -- "$@" '-p:PackageVersion={{ with.version | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {#- **The assembly's own version stamps, read back from what the feed served.** A project
           that derives its version from a CI-only property — `castle.core` reads
@@ -215,18 +235,24 @@ steps:
           standard MSBuild properties, and a value passed on the command line is a global property
           that overrides whatever the project set it to, whatever it named the intermediate. The
           values are the published assembly's own, so this reproduces the stamps rather than
-          inventing them; quoted, because a copyright carries spaces. #}
+          inventing them. **Single-quoted**, so each reaches `dotnet` as one argument: a copyright
+          carries spaces, and may carry a quote, a backslash, a `$` or a backtick, each of which a
+          double-quoted word would read as the shell's. **MSBuild-escaped** inside the quotes, so
+          the property MSBuild sets is the value the assembly spells: its command line splits on
+          `;` and `,` and drops `"`, and it decodes `%XX` and expands `@(…)` where the value is
+          used. The version above, which the rung sets from the informational one, is quoted and
+          escaped for the same reasons. #}
       {%- if with.assembly_version %}
-      set -- "$@" "-p:AssemblyVersion={{ with.assembly_version }}"
+      set -- "$@" '-p:AssemblyVersion={{ with.assembly_version | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {%- if with.file_version %}
-      set -- "$@" "-p:FileVersion={{ with.file_version }}"
+      set -- "$@" '-p:FileVersion={{ with.file_version | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {%- if with.informational_version %}
-      set -- "$@" "-p:InformationalVersion={{ with.informational_version }}"
+      set -- "$@" '-p:InformationalVersion={{ with.informational_version | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {%- if with.copyright %}
-      set -- "$@" "-p:Copyright={{ with.copyright }}"
+      set -- "$@" '-p:Copyright={{ with.copyright | msbuild_escape | shell_single_quote }}'
       {%- endif %}
       {%- if project and project != '.' %}
       set -- "$@" {{ project }}

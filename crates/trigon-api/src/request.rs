@@ -54,7 +54,11 @@ async fn who(api: &Api, headers: &HeaderMap) -> Result<Option<trigon_store::Prin
     let Some(raw) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        // The scheme is case-insensitive (RFC 9110 §11.1). Matched as `Bearer ` alone, `bearer`
+        // presented a credential and was read as none — its holder treated as the public.
+        .and_then(|v| v.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, token)| token)
     else {
         return Ok(None);
     };
@@ -203,6 +207,16 @@ pub async fn queue_state(State(api): State<Arc<Api>>) -> Response {
 /// Read from the events table, **never proxied to the worker**. The reader has to survive the
 /// producer's death — the property that makes `trigon watch` correct when a sweep crashes — and
 /// with several workers the API has no filesystem in common with the build anyway.
+///
+/// **An anonymous reader is told where the job has got to, and none of the notes.** A note is free
+/// text the worker writes as it goes, before `decide` has run and with no link from the job to the
+/// run it recorded, so the gate cannot be asked about one. The worker's `outcome` note is the
+/// comparison's label, written for every attempt: a first divergence awaiting confirmation and an
+/// open-egress one the gate turns into a void both reached anybody here as `divergent`, and
+/// `/v1/queue` hands out the job ids. A failure's note can carry the label too (`divergent
+/// produced no record`), and the rest is error text from the build, which is a build log's
+/// problem. So the phases and their times are the page, and the run it recorded is read through
+/// the routes that ask the gate. An operator keeps every note.
 pub async fn job_events(
     State(api): State<Arc<Api>>,
     axum::extract::Path(id): axum::extract::Path<i64>,
@@ -214,7 +228,21 @@ pub async fn job_events(
             "this instance has no queue",
         );
     };
+    let public = api.principal() == Principal::Anonymous;
     match queue.events(id).await {
+        Ok(events) if public => axum::Json(serde_json::json!({
+            "job": id,
+            "events": events
+                .into_iter()
+                .map(|(at, phase, _)| serde_json::json!({ "at": at, "phase": phase }))
+                .collect::<Vec<_>>(),
+            // Said, so an absent note is not read as a job that had nothing to say.
+            "detail": "the worker's notes are not shown to an anonymous reader: they are written \
+                       before the publication gate has decided anything, and one of them is the \
+                       comparison's outcome. What this run found is published on its own page \
+                       once the gate releases it.",
+        }))
+        .into_response(),
         Ok(events) => axum::Json(serde_json::json!({
             "job": id,
             "events": events

@@ -598,50 +598,37 @@ Not a route the build can reach, and not in front of the guard: `guard.refuses(u
 fetch and `guarded_stream` writes the transcript row, and both must keep running exactly as they do
 now. The cache answers "where did the mirror get this", never "what did the build receive".
 
-## B21. Keyed signing under a trusted root, and the Rekor client
+## B21. Keyed signing under a trusted root
 
-[ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) settles the design and staging has
-confirmed the part that could not be settled on paper: **Rekor accepts an ed25519 key under a
-self-issued certificate**, so "their log, our CA" works.
+[ADR-0011](adr/0011-keyed-signing-under-a-trusted-root.md) settles the design: a key we hold,
+carrying a certificate that chains to a root we publish, so that the signing key can rotate without
+every consumer changing a pin. [ADR-0014](adr/0014-git-evidence-store-without-rekor.md) removed the
+external log ADR-0011 paired it with, so what is left here is the chain alone. Whether it is built
+at all is [docs/19](19-distribution-and-lookup.md) D6: the alternative is key epochs sealed in our
+evidence log by an offline root, which bound a stolen key without a certificate or a clock. Until
+D6 is decided, records are published under a single pinned ed25519 key (ADR-0014 Decision 8).
 
-Five pieces, in the order they unblock each other. **1-3 are built**; 4 and 5 are not.
+Five pieces, numbered as they were first planned, because docs/19 and ADR-0014 cite steps 4 and 5 by
+number. **1 is built; 2 and 3 were removed; 4 and 5 are not built.**
 
 1. ~~**`dsse::Signature` gains a certificate chain.**~~ Built. `Signature.chain` is a `Vec<String>`
    of PEM, leaf first, and `is_chained()`/`leaf()` read it. The envelope is versioned by
    `payloadType`, so old bundles keep verifying against a pinned key.
-2. ~~**A `Rekor` client**~~ Built, as `mod rekor` in the binary — above the judgement line, behind
-   `#[cfg(feature = "build")]`, reached by `trigon attest --rekor <URL>`. One POST to
-   `/api/v1/log/entries` with an `intoto` **v0.0.1** entry (not v0.0.2: the envelope goes in as a
-   serialized JSON *string*, with the certificate as a sibling `spec.publicKey`), storing the
-   returned `logIndex`, UUID, `logID` and `signedEntryTimestamp` on the run as
-   `RunRecord.transparency`. A duplicate returns `409` carrying the existing UUID, which we fetch
-   and store, so a retry after a timeout is safe.
-3. ~~**SET verification**~~ Built, in `trigon-attest::transparency` — **below** the judgement line,
-   so the `--no-default-features` verifier can check a SET without linking a network client. The
-   canonicalization is the part that is not guessable: the signature covers RFC 8785 JCS of exactly
-   `{body, integratedTime, logID, logIndex}`, with `body` verbatim as the log returned it.
-
-   Proven against live staging rather than a hand-built fixture.
-   `crates/trigon-attest/tests/transparency_live_entry.rs` checks two real `rekor.sigstage.dev`
-   entries offline, against the log's pinned key: index **56040866**, posted by hand to settle
-   whether Rekor accepts our envelope shape at all, and index **56041854**, which
-   `trigon attest --rekor` produced end to end. The negatives are there too — production's key
-   against a staging entry, and a re-encoded `body` — and the unit tests in `transparency.rs` cover
-   a well-formed-but-wrong signature separately from bytes that are not a signature, because those
-   fail differently and only one of them is interesting.
-
-   What this still does not do is the thing it exists for: nothing yet checks the returned time
-   against a certificate's validity window, because there are no certificates until 4 and 5. The
-   time is verified and stored; it is not yet load-bearing.
+2. ~~**An external log client.**~~ Built, and removed with the log by ADR-0014 (docs/19 §10 phase
+   1). [`16-findings.md`](16-findings.md) §3.92 has why.
+3. ~~**Checking the log's signed timestamps.**~~ Built, and removed with it. It was never
+   load-bearing: nothing checked the time against a certificate's validity window, because there
+   are no certificates until 4 and 5.
 4. **Chain validation to a pinned root** in `verify-attestation`, replacing `--public-key <hex>`
    with `--root <pem>` defaulting to the root compiled into the verifier.
 5. **The CA itself** — an offline root, an intermediate in a KMS, short-lived leaves. Operational
    work rather than code, and the piece keyless would have avoided entirely.
 
 **Done when:** a statement signed under a real chain verifies in the `--no-default-features`
-verifier, with the Rekor SET checked against the leaf's validity window, and the corresponding
-negative tests fail — a signature outside the window, a chain to the wrong root, a SET that does not
-verify.
+verifier, and the negatives fail — a chain to the wrong root, and a signature the leaf's key did not
+make. The time check, a signature made outside the leaf's validity window, is deferred to docs/19
+§10 phase 7a, where it is checked against a witness cosignature's time or an RFC 3161 token, and is
+dropped if D6 chooses key epochs instead.
 
 ## B19. ~~Cargo needs an index commit, not a timestamp~~ — mostly closed, one part outlived it
 
@@ -842,6 +829,11 @@ caching is worth having — the deps layer is shared across sibling versions of 
 artifacts with different raw digests and the same stabilized one. Until then, nothing in this system
 performs a clean re-run at all, so the requirement is unmet for a reason older than this entry.
 
+**The first half is done.** The re-run path exists since [`19`](19-distribution-and-lookup.md) §10
+phase 3 — `trigon rebuild --confirm`, and a worker's confirming attempt — and it builds with
+`--no-cache` whatever the environment says, and records that it did (`RunRecord::cache`). The test
+of two real re-runs needs podman and a registry, and is still to write.
+
 ## B16. System libraries are the one input a rebuild does not pin
 
 A rebuild pins the registry index to the package's publish moment, pins the toolchain by version,
@@ -966,20 +958,24 @@ rate — and the engine diff for the second and third is empty.
 
 ## B10. Publish verdicts somewhere a consumer can find them, and give them a command to ask
 
-[`19`](19-distribution-and-lookup.md) is the design. Two things have to be decided before anything is
-signed for publication, because both are baked into a signed statement and expensive to retrofit:
+[`19`](19-distribution-and-lookup.md) is the design, and
+[ADR-0014](adr/0014-git-evidence-store-without-rekor.md) records its decisions: one public git
+repository holding the signed records, the evidence to re-derive each, and an append-only evidence
+log we sign; publication by an explicit `trigon publish`, behind ADR-0010's gate, as one commit;
+correction by supersession; and consumers who clone the repository, verify the whole log, and answer
+a lockfile from their own copy with no request per dependency. The order is docs/19 §10, and the
+decisions each phase waits on are its §11.
 
-- **`Subject.digest` must carry every digest the ecosystem publishes**, not sha256 alone. npm gives
-  sha1 and usually sha512 and never sha256, so a consumer holding an npm lockfile cannot look up our
-  records without downloading each tarball. Fixing it after the corpus is signed means re-signing it.
-- **Divergences go to the record store and only their digests to the transparency log.** An
-  append-only accusation cannot be retracted, and the false-mismatch rate is a tracked, non-zero
-  number with a publication kill-switch ([`09`](09-attestations.md) §5). The log keeps us honest
-  about having claimed something; the store lets us supersede it.
+Phases 0 (the anonymous `POST /v1/check` no longer bypasses the gate), 0b (the decisions), 1
+(Rekor and Sigstore removed), 2 (the statements a published record needs) and 3 (a run can reach
+`Published` through a confirming attempt, B31) are done.
 
-**Done when:** the subject carries the ecosystem's own digests, a record schema exists with the six
-fields [`19`](19-distribution-and-lookup.md) §4 requires, and a lookup client that is not Trigon can
-answer a lockfile from a downloadable index without a network call per dependency.
+**Done when:** each remaining phase of docs/19 §10 meets its own done-when list: 2, the statements
+carry every field a published record needs (after D3); 3, a run can reach `Published` through a
+confirming attempt; 4, the record, the log and the index as pure code the network-free verifier
+checks; 5, `trigon publish` (after D4 and D5); 6, consuming — `evidence`, `lookup` and `check`
+against clones; 7a and 7b, as D6 and D1 decide; and 9, the standalone client (after D3). Phase 8
+runs beside every phase and has no done-when of its own.
 
 ## B11. Wire the CI-derived rung into the ladder, once it declines correctly
 
@@ -1126,18 +1122,13 @@ deleted without a reason comes back as a rediscovery.
   `trigon/src/main.rs:5271`
 - **medium** — `sweep::one` labels every orchestration error `Fault::Policy`, including the sweep's own infrastructure failures  
   `trigon/src/main.rs:6711`
-- **medium** — member_diffs joins the two member lists with a linear scan per member (O(n²))  
+- ~~**medium** — member_diffs joins the two member lists with a linear scan per member (O(n²))~~
+  Fixed with the item below: each side's raw rows are a map keyed by ordinal, taken out as found  
   `trigon/src/watch.rs:2390`
 - **medium** — chain_ribbon byte-slices source.commit at index 8, panicking in the request handler  
   `trigon/src/watch.rs:3620`
 - **medium** — worker.rs re-derives retryability from the fault class, discarding Classify::is_retryable  
   `trigon/src/worker.rs:162`
-- **low** — The attestor stores a log entry without checking it is about our statement  
-  `trigon/src/main.rs:8244`
-- **low** — `check_log_entry` byte-slices a `uuid` the SET does not cover  
-  `trigon/src/main.rs:7591`
-- **low** — "the entry is about this bundle" is asserted from the payload hash alone  
-  `trigon/src/main.rs:7573`
 - **low** — Every production `rebuild/v1` statement omits the stabilizer set  
   `trigon/src/main.rs:8426`
 - **low** — `sweep::completed` accepts a row whose seconds field does not parse, unlike the file's other two readers  
@@ -1146,14 +1137,25 @@ deleted without a reason comes back as a rediscovery.
   `trigon/src/main.rs:2683`
 - **low** — checkout_dir hashes the raw repo/commit while SourceCache keys on the normalized form  
   `trigon/src/provenance.rs:112`
-- **low** — index_checkout gives up at MAX_FILES but reports the truncated walk as a completed search  
+- ~~**low** — index_checkout gives up at MAX_FILES but reports the truncated walk as a completed search~~
+  Fixed: a walk that stops at its bound says so, and counts only what it hashed
+  (`a_walk_that_stops_at_its_bound_says_it_did_not_finish`)  
   `trigon/src/provenance.rs:171`
 - **low** — The checkout index memo is an unbounded, never-evicted static cache in a long-lived server  
   `trigon/src/provenance.rs:296`
 - **low** — join() attributes every line-ending match to nupkg-text-eol regardless of format or stabilizer set  
   `trigon/src/provenance.rs:275`
-- **low** — The stabilizer ledger drops every member a pass removed, contradicting the comment above the join  
+- ~~**low** — The stabilizer ledger drops every member a pass removed, contradicting the comment above the join~~
+  Fixed: a removed member keeps its raw row and is counted as stabilized out, raw and stabilized
+  are joined by ordinal so a renamed one stays one member, one `Band` classifier serves every
+  reader, and the source page looks each verdict up under the name upstream published
+  (`a_member_a_pass_removed_is_counted_as_stabilized_out_rather_than_dropped`)  
   `trigon/src/watch.rs:2381`
+
+Written off, with the code they were about: three low items on the external log client — the
+attestor storing a log entry without checking it was about our statement, `check_log_entry` slicing
+an uncovered `uuid`, and the entry's binding to a bundle resting on the payload hash alone. ADR-0014
+removed the client, `check_log_entry` and the stored entry (docs/19 §10 phase 1).
 
 ### `trigon-mirror`
 
@@ -1313,14 +1315,19 @@ deleted without a reason comes back as a rediscovery.
   `trigon-core/src/failure.rs:1434`
 - **low** — `normalize_subject` strips only `==`, so `env/needs-the-package-under-test` keys one cluster per version specifier  
   `trigon-core/src/failure.rs:1435`
-- **low** — The JCS canonicalizer emits integers outside ±2^53 verbatim instead of in RFC 8785 ES6 `Number::toString` form  
+- ~~**low** — The JCS canonicalizer emits integers outside ±2^53 verbatim instead of in RFC 8785 ES6 `Number::toString` form~~
+  Fixed by refusing them, as floats are: an integer beyond ±(2^53 − 1) is `UnsafeInteger`
+  (`an_integer_a_double_cannot_hold_is_refused_rather_than_written_exactly`)  
   `trigon-core/src/jcs.rs:57`
 
 ### `trigon-archive`
 
 - **high** — Tar long names, link targets and PAX values are written through String::from_utf8_lossy, so two archives with different non-UTF-8 long member names serialize to byte-identical stabilized output  
   `trigon-archive/src/tar.rs:252`
-- **medium** — A legal multi-member gzip stream is rejected as "malformed gzip: crc32 mismatch", accusing a well-formed artifact of corruption  
+- ~~**medium** — A legal multi-member gzip stream is rejected as "malformed gzip: crc32 mismatch", accusing a well-formed artifact of corruption~~
+  Fixed: every member is read as gunzip reads it, each held to its own CRC-32 and ISIZE, and
+  bytes after the last are kept and compared
+  (`a_file_of_several_members_reads_as_their_contents_in_order`)  
   `trigon-archive/src/gzip.rs:110`
 - **medium** — flatten copies every member body into a fresh heap Vec, so serialize peaks at roughly 4x the payload and 2x the stated expansion ceiling  
   `trigon-archive/src/parse.rs:336`
@@ -1378,7 +1385,29 @@ narrower question inside this one, and it is worth answering carefully: making t
 what was signed is the point of that command, and a subcommand that rewrites a record mid-attestation
 is not obviously safe.
 
-## B31. "Two agreeing attempts" is agreement on a four-letter string
+## B31. ~~"Two agreeing attempts" is agreement on a four-letter string~~ — closed
+
+Closed by [`19`](19-distribution-and-lookup.md) §10 phase 3, and recorded in [`16`](16-findings.md)
+§3.97. Every cache key, worker and CLI alike, is built by one function, `trigon_store::cache_key`,
+over the target (canonical purl and artifact), the strategy digest and the stabilizer-set digest, by
+the run that knows them; a job's own key names the request and is never copied onto a record, and a
+run whose key cannot be computed gets none. Two attempts agree on `RunRecord::agreement` —
+`Comparison::agreement`, a digest over the outcome, the set, the published artifact's raw digest and
+both sides' stabilized digests, which the six Newtonsoft.Json builds below share per set — and
+`corroboration_is_counted_as_its_doc_says` holds `index::build` to `Corroboration`'s doc. A
+deliberate pair is declared by `trigon rebuild --confirm <run>`, which repeats the run's stored
+strategy under its set with every cache emptied and its image re-pulled, rather than by a
+`--cache-key` a person types: a key asserted by hand is the invented key the old comment warned
+about. Each attempt records its host, its cache state and when it began, and the gate refuses a pair
+on one machine unless `same_host_confirmation` allows it, and then only a cold, re-pulled
+confirmation, and a pair begun less than `confirmation_interval` apart; two machines are two host
+ids derived from machine ids, since a hostname names a container as readily. A worker's confirmation
+is queued to avoid the machine that made the first attempt unless `same_host_confirmation` is set,
+and a void verdict is not asked again.
+
+The runs measured below keep what they had: `cache_key: None`, and no agreement digest, so they
+confirm nothing. `rebuild --confirm` refuses them, because an attempt keyed on what it ran would
+never be counted beside them; rebuilding the target and confirming that run is the way to a pair.
 
 ADR-0010's first safeguard is that nothing publishes until two attempts at the same work agree.
 Three things have to be true for that to mean anything: the two runs must be attempts at the same
@@ -1831,6 +1860,23 @@ Two follow-ons past the major-level fix, both smaller than it was:
 
 ## B46. A .NET assembly's debug layout is structural, and closes only with a matching build environment
 
+**Resolved for the code-identical case by [3.89](16-findings.md): `dotnet-il-canonical-v2`
+compares a managed assembly by its code — its methods, every row and literal their tokens and
+signatures name, and the declarations that decide how they run — rather than its layout, so the
+structural residual below no longer holds a divergence when the code is the same — it lands
+`normalized_with_caveats`. What remains open is only the reverse: distinguishing a layout-only
+difference from a real one without the lossy step, which is what a matching build environment
+would give for free.**
+
+**A known limit of that form.** It keeps the declarations that decide how the code runs —
+parameters, defaults and marshalling, implemented interfaces, explicit overrides, P/Invoke entry
+points, layout, nesting, generic constraints, properties and events — and drops resources, custom
+attributes and security declarations, and the data a field is initialized from (FieldRVA: a static
+array's initial bytes, say). A difference only there reads as a caveated match, which is what the
+Lossy tier says. Keeping custom attributes would need a corpus to show code-identical builds agree
+on them, and SourceLink and build metadata ride in attributes; FieldRVA data would need each
+field's size read from its type, since the RVA itself moves with the layout.
+
 [3.81](16-findings.md)'s `dotnet-assembly-identity` normalizes the fixed-location build/signing
 identity of a managed assembly (strong-name signature, MVID, PE timestamp/checksum, debug
 timestamps and the debug data it can locate), taking castle.core's net6.0 DLL from 485 to 217
@@ -1855,3 +1901,32 @@ structural rewrite rather than an in-place zero. It would make the debug layout 
 comparison at the cost of a real edit to the PE — a bigger, `Structural`-tier change than
 `dotnet-assembly-identity`'s in-place zeroing, and one to weigh against just reconstructing the
 path.
+
+## B47. `signature` reports differences in fields the writer recomputes
+
+`signature` compares the stabilized archive in memory, but three of the fields it compares are stale
+shadows of what serialization will actually emit:
+
+- **`entry:size`** — the entry's uncompressed size, which the zip and tar writers recompute from the
+  body on every write. It is a function of the body: equal when the body is, and when it is not,
+  `body@` already names the difference. It never carries information of its own.
+- **`entry:zip.crc32`** — the checksum of the body, likewise recomputed from the body at write time.
+  Same story as `size`.
+- **`entry:mode`** — for a zip, `meta.mode` is derived from `external_attrs` at parse and never
+  written back; the writer emits `external_attrs`. Once a pass normalizes `external_attrs` the
+  serialized mode is equal, but the parse-time `meta.mode` shadow still differs. (For a tar,
+  `meta.mode` is real, so this applies to zips only.)
+
+The effect: a member the passes made byte-identical can still carry `entry:size`, `entry:zip.crc32`
+and `entry:mode` codes that cannot survive into the output. It is harmless to the verdict — the
+stabilized digest is taken from the serialized bytes, where these are already equal — but it means
+the divergence signature over-reports, and any consumer joining against it (the serve UI's per-member
+transform, [3.91](16-findings.md#391)) has to filter them back out.
+
+`comparison.rs` filters them from the *projection* today, which is correct for the UI but leaves the
+stored, signed signature carrying the spurious codes. The real fix is in `signature`: do not emit a
+difference for a field the writer derives from another it already compares — drop `zip.crc32` and
+`size` outright (subsumed by `body@`), and compare a zip's mode via `external_attrs` rather than the
+`meta.mode` shadow. Deferred here rather than done inline because it changes the published divergence
+signature for every divergent zip/tar run, so it wants versioning of the signature format alongside,
+not a silent change under existing attestations.

@@ -5,7 +5,7 @@
 //! else. These are the cases where an implementation drifts.
 
 use serde_json::json;
-use trigon_core::jcs::{CanonError, canonicalize};
+use trigon_core::jcs::{CanonError, MAX_SAFE_INTEGER, canonicalize};
 
 #[test]
 fn object_keys_are_sorted_however_they_arrived() {
@@ -82,10 +82,55 @@ fn integers_keep_their_exact_form() {
 }
 
 #[test]
+fn an_integer_a_double_cannot_hold_is_refused_rather_than_written_exactly() {
+    // RFC 8785 writes a number as ECMAScript does, through the nearest double, so another
+    // implementation writes `u64::MAX` as `18446744073709552000` and this one would have written
+    // its own digits: two digests of one document. 2^53 is the first integer a double cannot tell
+    // from its neighbour, on either side of zero.
+    for n in [
+        json!(9007199254740992u64),
+        json!(-9007199254740992i64),
+        json!(u64::MAX),
+        json!(i64::MIN),
+    ] {
+        let e = canonicalize(&json!({ "n": n })).unwrap_err();
+        assert!(matches!(e, CanonError::UnsafeInteger(_)), "{n}: {e:?}");
+        assert!(e.to_string().contains("signed"), "{e}");
+    }
+    // And the last ones it can are still written, exactly.
+    assert_eq!(
+        canonicalize(&json!(MAX_SAFE_INTEGER)).unwrap(),
+        "9007199254740991"
+    );
+    assert_eq!(
+        canonicalize(&json!(-9007199254740991i64)).unwrap(),
+        "-9007199254740991"
+    );
+}
+
+#[test]
 fn canonicalizing_is_idempotent() {
     // Because the output is parsed and re-canonicalized by anyone verifying it.
     let v = json!({"z": [1, {"y": "x"}], "a": "b"});
     let once = canonicalize(&v).unwrap();
     let twice = canonicalize(&serde_json::from_str(&once).unwrap()).unwrap();
     assert_eq!(once, twice);
+}
+
+#[test]
+fn every_control_character_with_a_short_form_uses_it_and_only_those_do() {
+    // RFC 8785 §3.2.2.2 via ECMAScript: `\b \t \n \f \r` have two-character forms and every other
+    // character below 0x20 is `\u00xx`, lower-case hex. DEL is above the range and passes through.
+    let v = json!({"s": "\u{8}\u{9}\u{a}\u{c}\u{d}|\u{0}\u{b}\u{1f}|\u{7f}"});
+    let bs = '\\';
+    let expected = format!(
+        "{{\"s\":\"{bs}b{bs}t{bs}n{bs}f{bs}r|{bs}u0000{bs}u000b{bs}u001f|\u{7f}\"}}"
+    );
+    assert_eq!(canonicalize(&v).unwrap(), expected);
+}
+
+#[test]
+fn a_key_is_escaped_as_a_value_is() {
+    let v = json!({"a\rb": 1});
+    assert_eq!(canonicalize(&v).unwrap(), "{\"a\\rb\":1}");
 }

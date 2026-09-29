@@ -18,13 +18,21 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
+# A subject carries sha1 where the ecosystem publishes one (npm). See `Subject::of_bytes`.
+sha1.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
 base64.workspace = true
-# Rekor signs its entry timestamps with ECDSA P-256, so verifying one needs a curve
-# `ed25519-dalek` does not have. Pure crypto and no runtime, which is what keeps it on this side of
-# the judgement line — the verifier must link no network client, not no mathematics.
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "std"] }
+# `evidence.toml` (`config`), which the network-free verifier reads too. A parser, no I/O of its
+# own, and nothing below the judgement line.
+toml.workspace = true
+# Writing it: `trigon evidence add` and `remove` change the user's file in place, keeping its
+# comments and order. Already in the tree, through `toml`.
+toml_edit.workspace = true
 
 [dev-dependencies]
 tar = "0.4"
+# Writing wheels for `tests/renamed_pass.rs`. A dev-dependency, so nothing the verifier links.
+zip.workspace = true
+proptest.workspace = true
+tempfile.workspace = true

@@ -128,6 +128,10 @@ nav#nav a:hover { color: var(--accent); text-decoration: underline; }
   padding: .1rem .55rem;
 }
 .mode.stopped { color: var(--fail); border-color: var(--fail); }
+/* The evidence repository's switch, read as of a fetch: set is as loud as this server's own, and
+   unknown is marked as not known rather than drawn like clear. */
+.mode.unknown { border-style: dashed; }
+.mode + .mode { margin-left: .4rem; }
 
 /* ---- the two denominators --------------------------------------------- */
 
@@ -401,6 +405,102 @@ table.ledger .bar-track { margin: 0; }
 @media (max-width: 880px) {
   /* The bar is the least load-bearing column: the number beside it says the same thing. */
   table.ledger .bar-cell { display: none; }
+}
+
+/* A pass id that unfolds its description. A button, not a link: it goes nowhere, it discloses. */
+button.pass-name {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0;
+  cursor: pointer; display: inline-flex; align-items: baseline; gap: .35rem;
+}
+button.pass-name .info { color: var(--dim); font-size: .82em; transition: color .12s; }
+button.pass-name:hover .info,
+button.pass-name:focus-visible .info { color: var(--accent, var(--structural)); }
+button.pass-name.open .info { color: var(--structural); }
+button.pass-name:focus-visible { outline: 2px solid var(--structural); outline-offset: 2px; border-radius: 3px; }
+
+/* The unfolded row: full-width, indented under the pass, quiet ground so it reads as an aside. */
+tr.pass-doc > td {
+  background: var(--panel-2, rgba(127, 127, 127, .06));
+  border-top: 0;
+}
+.pass-doc-body { padding: .2rem 0 .5rem 1.2rem; border-left: 2px solid var(--line, rgba(127,127,127,.25)); max-width: 62ch; }
+.pass-doc-body .sentence { margin: 0 0 .3rem; font-weight: 600; }
+.pass-doc-body .note { margin: 0; }
+
+/* A table that may be wider than the page scrolls inside its own box; the page never does. */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+
+/* How the gap closed, pass by pass. A step where nothing that differed changed is kept, because a
+   pass that fired and closed nothing is itself something a reader wants to see, but it recedes. */
+table.progression tr.step-idle td { opacity: .55; }
+table.progression tr.step-idle:hover td { opacity: 1; }
+table.progression .delta { color: var(--ok); font-weight: 700; font-variant-numeric: tabular-nums; }
+table.progression .delta.grew { color: var(--caveat); }
+table.progression td.n { font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.progression .idle-why { font-size: .8em; }
+table.progression .tag.fault { margin-left: .4rem; }
+table.progression .chip { font-size: .78rem; padding: .05rem .45rem; }
+
+/* What crossed the network. Two short lists side by side, stacking on a narrow screen. */
+.net-grid { display: flex; flex-wrap: wrap; gap: .4rem 2rem; margin: .2rem 0 .6rem; }
+.net-grid > div { flex: 1 1 22ch; min-width: 0; }
+td.url-cell { overflow-wrap: anywhere; word-break: break-all; }
+td.url-cell code { font-size: .8em; }
+
+/* A member that differed and was reconciled by a pass: a quiet marker in the list, and a banner in
+   the opened panel naming what erased the difference shown below it. */
+table.runs tr.reconciled td.url .member-link::after {
+  content: '\2713'; /* check: it matched, after work */
+  color: var(--ok); margin-left: .45rem; font-size: .82em;
+}
+.reconciled-note {
+  border: 1px solid var(--line, rgba(127,127,127,.25)); border-left: 3px solid var(--ok);
+  border-radius: 6px; padding: .6rem .8rem; margin: 0 0 .8rem; max-width: 74ch;
+  background: var(--panel-2, rgba(80, 200, 120, .05));
+}
+.reconciled-note .sentence { margin: 0; }
+/* differed  →  reconciled by: the transform as a chain, two columns and an arrow. Stacks on a
+   narrow screen, where the arrow turns to point down. */
+.reconciled-flow {
+  display: flex; align-items: flex-start; gap: .8rem; margin: .55rem 0 0; flex-wrap: wrap;
+}
+.reconciled-col { flex: 1 1 20ch; min-width: 18ch; }
+.reconciled-head {
+  margin: 0 0 .25rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--dim); font-weight: 700;
+}
+.reconciled-arrow {
+  align-self: center; color: var(--ok); font-size: 1.1rem; font-weight: 700; flex: 0 0 auto;
+}
+.reconciled-note ul.reconciled-diffs,
+.reconciled-note .reconciled-passes { margin: 0; padding-left: 1.1rem; }
+.reconciled-note .reconciled-diffs li,
+.reconciled-note .reconciled-passes li { margin: .28rem 0; line-height: 1.4; }
+.reconciled-note .reconciled-diffs code,
+.reconciled-note .reconciled-passes code { font-size: .84em; }
+.reconciled-note .reconciled-diffs .note,
+.reconciled-note .reconciled-passes .note { display: inline; }
+/* A field row's marker dot: which side it belongs to reads at a glance. */
+.reconciled-diffs li.fw-ok::marker { color: var(--ok); }
+.reconciled-diffs li.fw-residual::marker { color: var(--caveat); }
+/* field  ↳ / ✓  the passes that acted on it. The passes sit on their own indented line so a long
+   gloss and a long pass list never collide. */
+.reconciled-note .by { display: block; margin-left: .1rem; font-size: .82em; }
+.reconciled-note .by-arrow { color: var(--dim); font-weight: 700; }
+.reconciled-note li.fw-ok .by-arrow { color: var(--ok); }
+.reconciled-note .by.empty { color: var(--faint); font-style: italic; }
+.reconciled-note code.pass {
+  font-size: .82em; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border-radius: 3px; padding: 0 .25rem;
+}
+/* When something still differs the note is a caveat, not a clean win. */
+.reconciled-note.has-residual { border-left-color: var(--caveat); background: var(--caveat-wash, rgba(200,150,40,.06)); }
+.reconciled-note.has-residual .reconciled-arrow { color: var(--caveat); }
+.reconciled-diffs.residual li code:first-child { color: var(--caveat); }
+@media (max-width: 560px) {
+  .reconciled-flow { flex-direction: column; gap: .3rem; }
+  .reconciled-arrow { align-self: flex-start; transform: rotate(90deg); }
 }
 
 /* A difference rule id. Shown verbatim because it is a stable name that appears in cache keys and

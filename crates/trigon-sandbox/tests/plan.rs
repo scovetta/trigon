@@ -543,3 +543,129 @@ fn a_localhost_digest_reference_names_something_podman_cannot_fetch() {
         .is_ok()
     );
 }
+
+/// A confirming attempt pulls its base image again only where a registry can serve it by digest,
+/// and says why not everywhere else, so "re-pulled" is never written about an image that was not.
+#[test]
+fn only_a_registry_image_pinned_by_digest_can_be_pulled_again() {
+    let hex = "a".repeat(64);
+    assert!(trigon_sandbox::repullable(&format!("docker.io/library/debian@sha256:{hex}")).is_ok());
+    for (image, why) in [
+        ("docker.io/library/debian:bookworm", "digest"),
+        (
+            &*format!("localhost/trigon-base@sha256:{hex}"),
+            "only in this machine",
+        ),
+        (&*format!("sha256:{hex}"), "digest"),
+        (&*format!("debian@sha256:{hex}"), "only in this machine"),
+        (
+            "docker.io/library/debian@sha256:abc",
+            "only in this machine",
+        ),
+    ] {
+        let e = trigon_sandbox::repullable(image).unwrap_err();
+        assert!(e.contains(why), "{image}: {e}");
+    }
+}
+
+/// A full content id names one local image's exact bytes and carries no registry digest; nothing
+/// else is one, a digest reference included, whose digest names a manifest a registry serves.
+#[test]
+fn a_content_id_is_the_whole_id_and_nothing_else() {
+    let hex = "7c".repeat(32);
+    for id in [hex.clone(), format!("sha256:{hex}")] {
+        assert!(trigon_sandbox::is_content_id(&id), "{id}");
+        assert!(trigon_sandbox::is_pinned(&id), "{id}");
+        assert!(trigon_sandbox::repullable(&id).is_err(), "{id}");
+    }
+    for other in [
+        &*hex[..12].to_string(),
+        "docker.io/library/debian:bookworm",
+        "localhost/trigon-base:auto-0123456789abcdef",
+        &*format!("docker.io/library/debian@sha256:{hex}"),
+        &*format!("localhost/trigon-base@sha256:{hex}"),
+        &*format!("sha256:{}", &hex[..63]),
+        &*format!("{}g", &hex[..63]),
+    ] {
+        assert!(!trigon_sandbox::is_content_id(other), "{other}");
+    }
+}
+
+/// And a pull that could not happen is an error, never a quiet success: with no podman to run,
+/// the answer is that it was not pulled.
+#[test]
+fn a_pull_that_could_not_run_is_not_reported_as_one() {
+    let image = format!("docker.io/library/debian@sha256:{}", "b".repeat(64));
+    let e = trigon_sandbox::repull("/nonexistent/podman", &image).unwrap_err();
+    assert!(e.contains("could not be run"), "{e}");
+    let e = trigon_sandbox::repull("/nonexistent/podman", "localhost/x@sha256:00").unwrap_err();
+    assert!(e.contains("only in this machine"), "{e}");
+}
+
+/// A plan nothing will run says privilege was part of what it asked for.
+///
+/// Egress alone would read as the whole of the ask, and the operator would go looking for a runner
+/// with the right tier when the tier was never the problem.
+#[test]
+fn routing_a_privileged_plan_says_privilege_was_part_of_the_ask() {
+    let runners: Vec<Box<dyn BuildRunner>> =
+        vec![Box::new(PodmanRunner::new(std::env::temp_dir()))];
+    let BuildPlan::Oci(mut p) = plan(EgressTier::DenyAll);
+    p.privileged = true;
+    let e = match route(&runners, &BuildPlan::Oci(p)) {
+        Err(e) => e,
+        Ok(_) => panic!("nothing here offers privileged execution"),
+    };
+    assert!(
+        e.to_string()
+            .contains("plan wants deny-all egress and privileged execution"),
+        "{e}"
+    );
+    assert_eq!(e.fault(), Fault::Policy);
+}
+
+/// Run options print without the event sink they carry — only whether there is one.
+#[test]
+fn run_options_print_whether_something_is_watching_rather_than_the_watcher() {
+    let mut opts = RunOpts {
+        run_id: "demo-1".into(),
+        ..Default::default()
+    };
+    assert!(format!("{opts:?}").contains("on_event: false"), "{opts:?}");
+    opts.on_event = Some(std::sync::Arc::new(|_: &trigon_sandbox::BuildEvent| {}));
+    let printed = format!("{opts:?}");
+    assert!(printed.contains("on_event: true"), "{printed}");
+    assert!(printed.contains("run_id: \"demo-1\""), "{printed}");
+}
+
+/// A `localhost/` reference whose digest is not an id gets the command that finds the id, rather
+/// than a suggestion to use something that is not one.
+#[test]
+fn a_localhost_reference_that_carries_no_usable_id_is_told_how_to_find_one() {
+    let e = trigon_sandbox::resolvable("localhost/trigon-base@sha256:7cddd", false)
+        .expect_err("not in the store and not fetchable");
+    assert!(e.contains("registry hostname"), "{e}");
+    assert!(
+        e.contains("`podman images --no-trunc` prints the id to use"),
+        "{e}"
+    );
+    assert!(!e.contains("Use the id on its own"), "{e}");
+}
+
+/// A script of ours that is not one of the image-build phases does not move the phase a failure
+/// is charged to.
+///
+/// The build context copies `build.sh` in beside the phase scripts, so its path appears in the
+/// image build's own log. Reading it as a phase would move a setup failure somewhere it did not
+/// happen.
+#[test]
+fn a_script_that_is_not_an_image_build_phase_does_not_move_the_failure() {
+    let log = "STEP 2/9: COPY setup.sh /trigon/setup.sh\n\
+               STEP 3/9: RUN /bin/sh /trigon/setup.sh\n\
+               E: Unable to locate package libfoo-dev\n\
+               STEP 4/9: COPY build.sh /trigon/build.sh\n";
+    assert_eq!(
+        trigon_sandbox::failing_phase_for_test(log),
+        Some(trigon_sandbox::Phase::Setup)
+    );
+}

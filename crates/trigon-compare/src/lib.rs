@@ -11,16 +11,18 @@
 #![warn(missing_debug_implementations)]
 
 mod diff;
+pub mod progression;
 mod signature;
 
 pub use diff::{ContentKind, DiffReport, FileDiff, FileStatus};
+pub use progression::{Progression, Step};
 pub use signature::{matches, signature};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256, Sha512 as Sha512Hasher};
 use trigon_archive::{ArchiveError, Limits, parse, serialize};
 use trigon_core::{Digest, Format, Match, MultiDigest, Note, NoteCode, ProfileId, Sha512};
-use trigon_stabilize::{Applied, StabilizerSet, apply};
+use trigon_stabilize::{Applied, FieldEdit, StabilizerSet, apply_traced};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompareError {
@@ -63,6 +65,11 @@ pub struct Summary {
     pub applied: Vec<Applied>,
     pub notes: Vec<Note>,
     pub set: (ProfileId, Digest),
+    /// Which pass changed which field of which member, on this side. Ground truth for attribution;
+    /// consumed by [`compare`] to annotate the diff and never stored on its own — the merged,
+    /// deduplicated result lives on the [`diff::DiffReport`] instead, so the blob carries it once.
+    #[serde(skip)]
+    pub edits: Vec<FieldEdit>,
 }
 
 /// Parse, stabilize and digest one artifact.
@@ -79,7 +86,7 @@ pub fn summarize(
     let mut parsed = parse(bytes, format, limits, &mut notes)?;
     let container = parsed.container_bytes().map(|c| multi_digest(c, false));
 
-    let applied = apply(set, &mut parsed.archive);
+    let (applied, edits) = apply_traced(set, &mut parsed.archive);
     // `store_only`: the stabilized stream never passes through a deflate encoder, so no encoder's
     // behaviour can reach a signed digest.
     let stabilized_bytes = serialize(&parsed.archive, true)?;
@@ -95,6 +102,7 @@ pub fn summarize(
             applied,
             notes,
             set: (set.id.clone(), set.digest()),
+            edits,
         },
         parsed.archive,
     ))
@@ -131,6 +139,42 @@ pub struct Comparison {
 }
 
 impl Comparison {
+    /// What two attempts at the same work must share to agree: the outcome, the stabilizer set,
+    /// the published artifact's raw digest, and both sides' stabilized digests, hashed under a
+    /// domain tag.
+    ///
+    /// **The rebuild stabilized, never raw.** Two honest builds of one package are rarely
+    /// byte-identical — six builds of `Newtonsoft.Json@11.0.1` produced six raw artifacts and one
+    /// stabilized digest (`docs/17-backlog.md` B31) — so a digest over the stored report, which
+    /// names the rebuilt artifact's raw bytes, would never let a `normalized` run be confirmed.
+    /// And **not the outcome alone**, which let a divergence in the nuspec confirm a divergence in
+    /// every DLL: two stabilized rebuilds with one digest differ from the published artifact in
+    /// exactly the same members and the same ways, because the difference is a function of the two
+    /// stabilized archives under the set.
+    ///
+    /// **The published artifact raw as well**, because it is the question, and the cache key does
+    /// not name it. A registry that serves other bytes under one file name — a republished
+    /// artifact that differs only in what the set strips, timestamps or a gzip header — gives two
+    /// attempts one stabilized upstream digest, and they confirmed each other while each was
+    /// about different bytes, and a signed statement names only one of them. Two honest attempts
+    /// fetch the same bytes, so this costs a confirmation nothing.
+    pub fn agreement(&self) -> Digest {
+        let mut h = Sha256::new();
+        h.update(b"trigon.agreement.v1\n");
+        for part in [
+            self.outcome.to_string(),
+            self.upstream.set.0.0.clone(),
+            self.upstream.set.1.to_hex(),
+            self.upstream.raw.sha256.to_hex(),
+            self.upstream.stabilized.sha256.to_hex(),
+            self.rebuild.stabilized.sha256.to_hex(),
+        ] {
+            h.update(part.as_bytes());
+            h.update(b"\n");
+        }
+        Digest::from_bytes(h.finalize().into())
+    }
+
     /// "Same tar, different gzip framing". `None` when the format has no outer codec.
     pub fn container_bit_identical(&self) -> Option<bool> {
         Some(self.upstream.container.as_ref()?.sha256 == self.rebuild.container.as_ref()?.sha256)
@@ -231,6 +275,13 @@ pub fn compare(
         d.codes = signature::signature(u, r);
     }
 
+    // What each pass changed, merged from both sides. Recorded on every outcome that ran a pass:
+    // on a divergence it says which pass owns each residual code, and on a match it is the only
+    // record of what the passes did — the difference codes are empty because nothing survived.
+    if let Some(d) = diff.as_mut() {
+        d.field_edits = diff::merge_edits([&upstream.edits, &rebuild.edits]);
+    }
+
     // Membership notes, from the report the walker already built. One per differing member rather
     // than a count, because "four members differ" is an accusation and a named path is a thing to
     // go and look at — the same reason `codes` exists.
@@ -288,7 +339,35 @@ pub fn compare_bytes(
     set: &StabilizerSet,
     limits: &Limits,
 ) -> Result<Comparison, CompareError> {
+    // Kept for the pass-by-pass explanation, which re-parses both from the published bytes. A copy
+    // of each, bounded, because `summarize` consumes its input and the archive it returns has been
+    // stabilized in place.
+    let total = upstream.len() + rebuild.len();
+    let explain = (total <= progression::MAX_BYTES).then(|| (upstream.clone(), rebuild.clone()));
     let (us, ua) = summarize(upstream, format, set, limits)?;
     let (rs, ra) = summarize(rebuild, format, set, limits)?;
-    compare(us, rs, Some(&ua), Some(&ra))
+    let mut c = compare(us, rs, Some(&ua), Some(&ra))?;
+
+    let explained = match explain {
+        _ if c.outcome == Match::Exact => Progression::nothing_to_close(),
+        Some((u, r)) => {
+            // The signature the verdict rests on, which the last step must reproduce. A divergence
+            // already carries it; any other outcome skipped computing it.
+            let full = match &c.diff {
+                Some(d) if c.outcome == Match::Divergent => d.codes.clone(),
+                _ => signature(&ua, &ra),
+            };
+            progression::compute(u, r, format, set, limits, &full)
+        }
+        None => Progression::omitted(format!(
+            "the two artifacts total {} MiB, over the {} MiB bound for re-applying the set one pass \
+             at a time",
+            total >> 20,
+            progression::MAX_BYTES >> 20
+        )),
+    };
+    if let Some(d) = c.diff.as_mut() {
+        d.progression = Some(explained);
+    }
+    Ok(c)
 }

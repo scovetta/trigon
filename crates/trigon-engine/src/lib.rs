@@ -20,7 +20,8 @@
 //!
 //! **A worker never records under an expired lease.** [`trigon_store::Queue::finish`] enforces it
 //! in SQL; the loop here notices the refusal and treats it as a lost race rather than an error,
-//! because losing a race is not a fault.
+//! because losing a race is not a fault. The same goes for a failure: a worker whose job was taken
+//! while it ran neither gives the job back nor says it ended.
 //!
 //! **A run under a non-`Builtin` transform may not come back `normalized`.** The provenance cap
 //! lives in `trigon-compare` and nowhere else, and this does not re-implement it: it asserts that it
@@ -148,8 +149,9 @@ pub struct Progress {
 impl Progress {
     /// Say what is happening, and renew the lease.
     ///
-    /// `false` means the lease is gone and somebody else is doing this work. A worker that keeps
-    /// building after that is spending compute on an answer nothing will accept.
+    /// `false` means the lease is gone and somebody else is doing this work, and the phase was not
+    /// recorded: the job's stream is the holder's. A worker that keeps building after that is
+    /// spending compute on an answer nothing will accept.
     pub async fn phase(&self, name: &str) -> bool {
         self.queue
             .heartbeat(self.job, &self.worker, self.lease, Some(name))
@@ -181,6 +183,18 @@ pub trait Work: Send + Sync {
 
     /// Do one job.
     async fn run(&self, job: &Job, progress: &Progress) -> Result<Done, Failed>;
+
+    /// Why a verdict this worker recorded is not worth a second attempt, or `None` where it is.
+    ///
+    /// **A void above all**: a run the publication gate calls void makes no claim a second attempt
+    /// could confirm, and the attempt that repeats it refuses one — so a confirmation queued for
+    /// it was leased, refused and retried until it died, one dead job per void verdict, and a dead
+    /// job is how this queue says something is wrong. Asked of the worker rather than decided
+    /// here, because the gate lives above this crate and a second copy of its clauses here would
+    /// be a second opinion about what is void.
+    ///
+    /// Required, with no default: a `Work` that forgot it would queue exactly those jobs.
+    fn unconfirmable(&self, record: &RunRecord) -> Option<String>;
 }
 
 /// How the loop behaves.
@@ -215,6 +229,29 @@ pub struct Config {
     ///
     /// [ADR-0010]: ../../../docs/adr/0010-publish-divergences.md
     pub confirm: bool,
+    /// How long after a verdict its confirmation becomes visible to a worker.
+    ///
+    /// At least `[publish] confirmation_interval`, which `trigon worker` reads from the
+    /// configuration and sets here: the publication gate withholds a pair whose second attempt
+    /// began sooner than that after the first (`docs/19` §10 phase 3), so a confirmation enqueued
+    /// to run earlier is a build spent on an answer the gate will not count. It was five minutes,
+    /// against an interval of an hour.
+    pub confirm_after: Duration,
+    /// The machine this worker runs on, as a run records it (`trigon_store::host_id`), which
+    /// leases no job queued to avoid it. `None` where it has no id, and then it is avoided by
+    /// nothing and its runs record no host.
+    pub host: Option<String>,
+    /// `[publish] same_host_confirmation` (`docs/19` D8), which `trigon worker` reads from the
+    /// configuration and sets here.
+    ///
+    /// Off, the gate does not count a confirmation made on the machine that made the first
+    /// attempt, so the confirmation is queued to avoid that machine: nothing asks a third time,
+    /// and a confirmation leased by the first attempt's machine because it happened to be idle
+    /// first was a build spent on a pair withheld as `same_host` for good. On, any machine may take
+    /// it, since the attempt that repeats a run is cold and re-pulls its image. **A fleet of one
+    /// machine confirms nothing with this off**: its confirmations wait for a machine that is not
+    /// there, which is what the gate would make of their answers.
+    pub same_host_confirmation: bool,
 }
 
 impl Default for Config {
@@ -229,6 +266,13 @@ impl Default for Config {
             backoff_cap: Duration::from_secs(1800),
             max_failures: 3,
             confirm: true,
+            // The configuration's default interval. A default of its own here would be a second
+            // number that has to agree with that one.
+            confirm_after: trigon_attest::config::PublishConfig::default().confirmation_interval,
+            host: None,
+            // And its default for D8, for the same reason.
+            same_host_confirmation: trigon_attest::config::PublishConfig::default()
+                .same_host_confirmation,
         }
     }
 }
@@ -271,7 +315,13 @@ impl Engine {
         let refs: Vec<&str> = kinds.iter().map(String::as_str).collect();
         let jobs = self
             .queue
-            .lease(&self.cfg.worker, &refs, self.cfg.batch, self.cfg.lease)
+            .lease_on(
+                &self.cfg.worker,
+                self.cfg.host.as_deref(),
+                &refs,
+                self.cfg.batch,
+                self.cfg.lease,
+            )
             .await?;
         let n = jobs.len();
         for job in jobs {
@@ -304,17 +354,7 @@ impl Engine {
         let run = work.run(job, progress);
         tokio::pin!(run);
 
-        // A third of the lease, so two consecutive missed renewals still leave margin.
-        //
-        // **The floor must stay well under the lease.** This was first written with a one-second
-        // floor, on the reasoning that an absurdly short lease should not become a busy loop —
-        // which against a 300 ms lease renews for the first time at one second, 700 ms after the
-        // job has already been taken by somebody else. A floor that can exceed the thing it is
-        // renewing disables the renewal entirely, and silently, since everything still compiles
-        // and the common configuration still works. Ten milliseconds only exists because
-        // `interval` panics on a zero duration.
-        let every = (self.cfg.lease / 3).max(Duration::from_millis(10));
-        let mut tick = tokio::time::interval(every);
+        let mut tick = tokio::time::interval(renew_every(self.cfg.lease));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await; // fires immediately; the lease was just taken
 
@@ -382,10 +422,13 @@ impl Engine {
                     );
                     return Ok(());
                 }
-                progress.phase("recorded").await;
+                // An event, not a phase: `finish` has taken the job out of `leased`, so there is
+                // no lease left to renew, and a heartbeat records nothing for a worker that does
+                // not hold one.
+                let _ = self.queue.event(job.id, "recorded", None).await;
 
                 if self.cfg.confirm {
-                    self.confirm(&job, &done.record).await?;
+                    self.confirm(work, &job, &done.record).await?;
                 }
                 Ok(())
             }
@@ -396,9 +439,23 @@ impl Engine {
                 // arithmetic that decides how much a broken thing is allowed to cost.
                 let again = failed.retryable && job.failures + 1 < self.cfg.max_failures;
                 let retry = again.then(|| self.wait_before_retry(job.failures));
-                self.queue
+                let released = self
+                    .queue
                     .fail(job.id, &self.cfg.worker, &failed.why, retry)
                     .await?;
+                if !released {
+                    // The lease expired while this ran and somebody else holds the job, so there
+                    // was nothing to give back — and nothing to say, as with `finish` above:
+                    // "dead" or "retrying" in the stream of a job another worker is still on
+                    // would tell a reader it had ended when it had not.
+                    tracing::warn!(
+                        job = job.id,
+                        worker = %self.cfg.worker,
+                        why = %failed.why,
+                        "lease expired before this failed; another worker now holds this job"
+                    );
+                    return Ok(());
+                }
                 progress
                     .note(
                         if retry.is_some() { "retrying" } else { "dead" },
@@ -418,23 +475,79 @@ impl Engine {
     ///
     /// Enqueued only for a run that reached a verdict: a `no-strategy` confirmed twice is still a
     /// no-strategy, and spending a second build on one is spending it to learn nothing.
-    async fn confirm(&self, job: &Job, record: &RunRecord) -> Result<(), EngineError> {
+    ///
+    /// **The same question, not the same request.** The job is keyed on the first attempt's
+    /// `RunRecord::cache_key` — the target, the strategy it ran and the set it was judged under —
+    /// and its payload names that run as `confirm`, so the worker repeats that strategy cold
+    /// rather than inferring one again. A first attempt's own job key names what was asked for,
+    /// which is the target and nothing the run had yet decided. A verdict with no key cannot be
+    /// confirmed at all, since no second attempt could be counted beside it, and is not asked
+    /// again; nor is one the worker says is not worth it ([`Work::unconfirmable`]), a void above
+    /// all.
+    ///
+    /// **On another machine**, unless the operator accepts one machine confirming itself
+    /// ([`Config::same_host_confirmation`]): the job is queued to avoid the machine the first
+    /// attempt recorded, so it waits for a worker elsewhere rather than being taken by whichever is
+    /// idle first. The job's events say so, since on a fleet of one machine it waits for good.
+    async fn confirm(
+        &self,
+        work: &dyn Work,
+        job: &Job,
+        record: &RunRecord,
+    ) -> Result<(), EngineError> {
         if record.outcome.is_none() || job.attempt > 1 {
             return Ok(());
+        }
+        let Some(key) = record.cache_key.clone() else {
+            tracing::warn!(
+                run = %record.id,
+                "this verdict has no cache key, so no second attempt could be counted beside it; \
+                 not asking again"
+            );
+            return Ok(());
+        };
+        if let Some(why) = work.unconfirmable(record) {
+            self.queue
+                .event(
+                    job.id,
+                    "unconfirmed",
+                    Some(&format!("no second attempt is asked for: {why}")),
+                )
+                .await?;
+            return Ok(());
+        }
+        let avoid_host = if self.cfg.same_host_confirmation {
+            None
+        } else {
+            record.host.clone()
+        };
+        if let Some(host) = &avoid_host {
+            self.queue
+                .event(
+                    job.id,
+                    "confirmation",
+                    Some(&format!(
+                        "queued for a machine other than {host}, which made this attempt: \
+                         same_host_confirmation is off, so the gate would not count a \
+                         confirmation made there"
+                    )),
+                )
+                .await?;
         }
         self.queue
             .enqueue(&NewJob {
                 kind: job.kind.clone(),
                 target: job.target.clone(),
-                cache_key: job.cache_key.clone(),
+                cache_key: key,
                 attempt: job.attempt + 1,
                 tier: Tier::Regression,
-                payload: job.payload.clone(),
+                payload: Some(confirming(job.payload.as_deref(), &record.id)),
                 payload_ref: job.payload_ref.clone(),
                 // Not immediately. The risk safeguard 1 exists against is ambient nondeterminism —
                 // a floating range, a mutable tag, a fetch that happened to succeed — and two runs
                 // back to back on a warm cache sample the same moment twice.
-                delay: Duration::from_secs(300),
+                delay: self.cfg.confirm_after,
+                avoid_host,
             })
             .await?;
         Ok(())
@@ -484,6 +597,38 @@ fn backoff_after(cfg: &Config, failures: i32) -> Duration {
     doubled.min(cfg.backoff_cap)
 }
 
+/// How often the loop renews a lease while a job is in flight.
+///
+/// A third of the lease, so two consecutive missed renewals still leave margin.
+///
+/// **The floor must stay well under the lease.** This was first written with a one-second floor,
+/// on the reasoning that an absurdly short lease should not become a busy loop — which against a
+/// 300 ms lease renews for the first time at one second, 700 ms after the job has already been
+/// taken by somebody else. A floor that can exceed the thing it is renewing disables the renewal
+/// entirely, and silently, since everything still compiles and the common configuration still
+/// works. Ten milliseconds only exists because `interval` panics on a zero duration.
+///
+/// A free function, like [`backoff_after`], because the seam test that a long job keeps its lease
+/// waits for each renewal however long it takes to come round, so only this can say how long that
+/// is.
+fn renew_every(lease: Duration) -> Duration {
+    (lease / 3).max(Duration::from_millis(10))
+}
+
+/// A job's payload with `confirm` naming the run it is the confirmation of.
+///
+/// Merged into what the first attempt was asked with, so an artifact choice or an overlay carries
+/// over, and the worker, which owns the payload's shape, reads the rest. A payload that is not a
+/// JSON object is replaced rather than guessed at.
+fn confirming(payload: Option<&str>, run: &str) -> String {
+    let mut v = payload
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    v["confirm"] = serde_json::Value::String(run.to_string());
+    v.to_string()
+}
+
 /// Whether a job asks for a transform somebody wrote.
 ///
 /// Read from the payload rather than inferred from the record, because the question is what the job
@@ -519,6 +664,40 @@ mod tests {
         // already failing.
         assert_eq!(backoff_after(&cfg, 60), Duration::from_secs(60));
         assert_eq!(backoff_after(&cfg, -1), Duration::from_secs(10));
+    }
+
+    /// The shipped lease, the one the seam tests use, and the shortest the floor lets through:
+    /// each renewed at least three times a lease. Below thirty milliseconds the floor binds, and
+    /// nothing leases for that little but a test that wants its lease to lapse.
+    #[test]
+    fn a_lease_is_renewed_well_inside_itself() {
+        for lease in [
+            Duration::from_secs(300),
+            Duration::from_millis(300),
+            Duration::from_millis(30),
+        ] {
+            let every = renew_every(lease);
+            assert!(
+                every <= lease / 3,
+                "a {lease:?} lease renewed every {every:?}: a job longer than one lease goes back \
+                 on the queue while it is still being built"
+            );
+        }
+        // Never zero, which `interval` panics on.
+        assert!(renew_every(Duration::ZERO) > Duration::ZERO);
+        assert!(renew_every(Duration::from_millis(1)) > Duration::ZERO);
+    }
+
+    #[test]
+    fn a_confirmation_names_its_run_and_keeps_what_the_first_attempt_was_asked() {
+        assert_eq!(confirming(None, "r1"), r#"{"confirm":"r1"}"#);
+        let v: serde_json::Value =
+            serde_json::from_str(&confirming(Some(r#"{"artifact":"a.whl"}"#), "r1")).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "artifact": "a.whl", "confirm": "r1" })
+        );
+        assert_eq!(confirming(Some("not json"), "r1"), r#"{"confirm":"r1"}"#);
     }
 
     #[test]

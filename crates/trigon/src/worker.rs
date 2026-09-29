@@ -35,6 +35,19 @@ pub struct Payload {
     /// to record a `normalized` verdict from a job carrying this — see its module documentation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay: Option<String>,
+    /// The run this job is the confirmation of, which the engine names when it enqueues one.
+    ///
+    /// The worker repeats that run exactly as `trigon rebuild --confirm` does — its strategy, its
+    /// set, its image and tier, with every cache emptied — rather than inferring a strategy that
+    /// may differ, which would make the second attempt a different question.
+    ///
+    /// **A run id, and nothing a requester chooses.** The tier comes from the record of a run this
+    /// fleet ran, in its own store, and only the engine writes this field, from the job it has
+    /// just finished; a visitor's request carries no payload at all. So the rule above — the
+    /// worker decides the tier, never whoever enqueued — holds: the tier a confirmation repeats is
+    /// one a worker already chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
 }
 
 /// How this worker is configured to build.
@@ -106,11 +119,12 @@ impl Work for Builder {
             source_cache: self.source_cache.clone(),
             fetch_cache: None,
             phases: None,
-            // The job's own identity, so the two attempts this run is half of can recognise each
-            // other. Without it every record corroborates nothing and the publication gate holds
-            // the whole corpus back for ever.
-            cache_key: Some(job.cache_key.clone()),
+            // **Not the job's key.** The run keys its record on what it ran — the target, the
+            // strategy and the set — which is what lets the two attempts this run may be half of
+            // recognise each other. The job's key names the request: the purl alone, for a first
+            // attempt, which put two attempts straddling a change of strategy or set under one key.
             attempt: job.attempt.max(1) as u32,
+            confirm: payload.confirm.clone(),
         };
 
         // `run_one` is synchronous and builds containers, so it goes to a blocking thread rather
@@ -131,9 +145,12 @@ impl Work for Builder {
                 return Err(Failed {
                     why: format!("{e:#}"),
                     // Our error, the registry's, or a policy's — `run_one` returns `Err` only for
-                    // those, never for a package that failed to build. All three can answer
-                    // differently on another worker or an hour later.
-                    retryable: true,
+                    // those, never for a package that failed to build — and each can answer
+                    // differently on another worker or an hour later. Except a confirmation's
+                    // refusal to repeat its run: that is a fact about the stored record or this
+                    // binary, and every worker running this Trigon gives it again, so it goes dead
+                    // at once for somebody to read rather than after three leases.
+                    retryable: e.downcast_ref::<crate::rebuild::Unrepeatable>().is_none(),
                 });
             }
         };
@@ -182,6 +199,23 @@ impl Work for Builder {
             }),
         }
     }
+
+    /// A void, by the gate's own clauses (`trigon_api::publication::voided`), which the attempt
+    /// that would repeat it refuses: a void makes no claim a second attempt could confirm.
+    fn unconfirmable(&self, record: &trigon_store::RunRecord) -> Option<String> {
+        unconfirmable(record)
+    }
+}
+
+/// [`Builder`]'s answer to [`Work::unconfirmable`], free of a builder so it can be tested.
+fn unconfirmable(record: &trigon_store::RunRecord) -> Option<String> {
+    trigon_api::publication::voided(record).map(|because| {
+        format!(
+            "run `{}` is void ({}), which a second attempt could not confirm",
+            record.id,
+            because.key()
+        )
+    })
 }
 
 /// Read the record back and put its canonical bytes in the blob store.
@@ -218,13 +252,41 @@ pub fn serve(
             queue.migrate().await.map_err(anyhow::Error::from)?;
         }
         println!(
-            "worker {} on {queue_url}, building with {} at egress {}",
-            cfg.worker, builder.image, builder.egress
+            "{} {} {} {}",
+            crate::style::heading("worker"),
+            crate::style::ident(&cfg.worker),
+            crate::style::muted("on"),
+            crate::style::ident(queue_url),
+        );
+        crate::field(
+            "building",
+            format!(
+                "{} {} {}",
+                crate::style::ident(&crate::short_ref(&builder.image)),
+                crate::style::muted("at egress"),
+                crate::style::ident(&builder.egress.to_string()),
+            ),
+        );
+        // Said at start, because on a fleet of one machine the default means no confirmation is
+        // ever made, and the queue shows only jobs that wait.
+        crate::field(
+            "confirming",
+            crate::style::muted(if !cfg.confirm {
+                "no second attempts (--no-confirm), so nothing this worker does can publish"
+            } else if cfg.same_host_confirmation {
+                "each verdict, on any machine, cold (same_host_confirmation is on)"
+            } else {
+                "each verdict, on a machine other than the one that reached it"
+            }),
         );
         let engine = Engine::new(queue, cfg);
         if once {
             let n = engine.tick(&builder).await?;
-            println!("handled {n} job(s)");
+            println!(
+                "{} {} job(s)",
+                crate::style::heading("handled"),
+                crate::style::good(&n.to_string())
+            );
             return anyhow::Ok(());
         }
 
@@ -234,11 +296,182 @@ pub fn serve(
             // Between jobs, never during one. A build killed halfway leaves a leased job, a
             // half-written work directory and no record; waiting costs one build's latency.
             if tokio::signal::ctrl_c().await.is_ok() {
-                println!("\nfinishing the current job, then stopping");
+                println!(
+                    "\n{}",
+                    crate::style::warn("finishing the current job, then stopping")
+                );
                 signal.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         });
         engine.run(Arc::new(builder), stop).await;
         anyhow::Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trigon_store::{ArtifactRef, Environment, RunRecord, RunState};
+
+    /// A verdict as a worker records one, at `egress`.
+    fn verdict(id: &str, egress: &str) -> RunRecord {
+        let mut r = RunRecord::new(
+            id,
+            "pkg:npm/left-pad@1.3.0",
+            ArtifactRef {
+                name: "left-pad-1.3.0.tgz".into(),
+                sha256: trigon_core::Digest::from_bytes([3u8; 32]),
+                bytes: 1,
+                stored: true,
+            },
+            Environment {
+                base_image: "docker.io/library/node@sha256:00".into(),
+                derived_image: None,
+                egress: egress.into(),
+                isolation: "user_ns".into(),
+                attestable: true,
+                registry_moment: None,
+                pin: None,
+                guard_manifest: None,
+                guarded_members: None,
+            },
+            "2026-09-28T10:00:00Z",
+        );
+        r.state = RunState::Done;
+        r.outcome = Some("divergent".into());
+        r.cache_key = Some("ck1:the-work".into());
+        r.non_builtin_stabilizer = Some(false);
+        r
+    }
+
+    #[test]
+    fn a_void_verdict_is_not_worth_a_second_attempt_and_a_clean_one_is() {
+        let void = verdict("1790000000-aaaaaaaa", "open");
+        let why = unconfirmable(&void).expect("a void is not worth confirming");
+        assert!(why.contains("open_egress"), "{why}");
+        let mut hand_written = verdict("1790000001-aaaaaaaa", "mirror-only");
+        hand_written.non_builtin_stabilizer = Some(true);
+        assert!(unconfirmable(&hand_written).is_some());
+        assert_eq!(
+            unconfirmable(&verdict("1790000002-aaaaaaaa", "mirror-only")),
+            None
+        );
+    }
+
+    fn builder(root: &std::path::Path) -> Builder {
+        Builder {
+            image: "docker.io/library/node@sha256:00".into(),
+            egress: "mirror-only".into(),
+            work: root.join("work"),
+            store: root.join("store"),
+            timeout: 1,
+            definitions: None,
+            mirror_image: "localhost/trigon-mirror".into(),
+            model: None,
+            source_cache: None,
+            verbose: false,
+        }
+    }
+
+    /// The engine asks the builder, and the builder answers as the gate does.
+    #[test]
+    fn the_builder_refuses_to_confirm_what_the_gate_calls_void() {
+        let b = builder(std::path::Path::new("/nonexistent"));
+        let void = verdict("1790000000-aaaaaaaa", "open");
+        assert_eq!(Work::unconfirmable(&b, &void), unconfirmable(&void));
+        assert!(Work::unconfirmable(&b, &void).is_some());
+        let clean = verdict("1790000002-aaaaaaaa", "mirror-only");
+        assert_eq!(Work::unconfirmable(&b, &clean), None);
+        assert_eq!(b.kinds(), vec!["rebuild".to_string()]);
+        // What a log line shows of it: the image it builds in and the tier it builds at.
+        let shown = format!("{b:?}");
+        assert!(shown.contains("mirror-only") && shown.contains("node@sha256:00"), "{shown}");
+    }
+
+    /// The record the job hands the outbox is the one the run wrote, and the reference it hands
+    /// with it names that record's canonical bytes in the blob store.
+    #[tokio::test]
+    async fn a_run_is_read_back_and_kept_as_the_blob_its_reference_names() {
+        let dir = std::env::temp_dir().join(format!("trigon-worker-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = dir.join("store");
+        let r = verdict("1790000003-aaaaaaaa", "mirror-only");
+        Store::local(&store).unwrap().put_run(&r).await.unwrap();
+
+        let (record, record_ref) = read_back(&store, &r.id).await.unwrap();
+        assert_eq!(record.id, r.id);
+        assert_eq!(record.outcome.as_deref(), Some("divergent"));
+        let bytes = serde_json::to_vec(&record).unwrap();
+        assert_eq!(record_ref, trigon_store::digest_of(&bytes).to_hex());
+        let kept = Store::local(&store)
+            .unwrap()
+            .blobs()
+            .get(&trigon_store::digest_of(&bytes))
+            .await
+            .unwrap();
+        assert_eq!(&kept[..], &bytes[..]);
+
+        // A run the store does not hold is an error, said as the reading of it.
+        let e = read_back(&store, "1790000009-ffffffff").await.unwrap_err();
+        assert!(format!("{e:#}").starts_with("reading the run back"), "{e:#}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A confirmation whose run cannot be repeated goes dead at once, rather than being leased,
+    /// refused and backed off until it has failed three times: the refusal is a fact about the
+    /// stored record, and every worker running this Trigon gives it again.
+    ///
+    /// Through the engine and the real builder, on a run the gate calls void. No podman: the
+    /// refusal comes before anything is fetched or built.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_a_confirmation_cannot_repeat_goes_dead_at_once() {
+        let dir = std::env::temp_dir().join(format!("trigon-worker-dead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = dir.join("store");
+        let void = verdict("1790000000-aaaaaaaa", "open");
+        Store::local(&store).unwrap().put_run(&void).await.unwrap();
+
+        let q = Queue::open(&format!("sqlite://{}?mode=rwc", dir.join("q.db").display()))
+            .await
+            .unwrap();
+        q.migrate().await.unwrap();
+        q.enqueue(&trigon_store::NewJob {
+            attempt: 2,
+            payload: Some(format!(r#"{{"confirm":"{}"}}"#, void.id)),
+            ..trigon_store::NewJob::rebuild(
+                void.target.clone(),
+                "ck1:the-work",
+                trigon_store::Tier::Regression,
+            )
+        })
+        .await
+        .unwrap();
+
+        let builder = Builder {
+            image: "docker.io/library/node@sha256:00".into(),
+            egress: "mirror-only".into(),
+            work: dir.join("work"),
+            store,
+            timeout: 1,
+            definitions: None,
+            mirror_image: "localhost/trigon-mirror".into(),
+            model: None,
+            source_cache: None,
+            verbose: false,
+        };
+        let engine = Engine::new(
+            q.clone(),
+            Config {
+                worker: "w".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(engine.tick(&builder).await.unwrap(), 1);
+        assert_eq!(
+            q.depth().await.unwrap(),
+            vec![("dead".to_string(), 1)],
+            "a refusal every worker gives again was retried"
+        );
+    }
 }

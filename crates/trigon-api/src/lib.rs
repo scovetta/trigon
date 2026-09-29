@@ -19,6 +19,7 @@ pub mod evidence;
 pub mod fleet;
 pub mod index;
 pub mod member;
+pub mod network;
 pub mod publication;
 pub mod recover;
 pub mod request;
@@ -27,7 +28,7 @@ pub mod serve;
 pub mod ui;
 
 pub use index::Index;
-pub use publication::{Publication, Switches, Withheld};
+pub use publication::{Attempt, Confirmation, NotCold, Publication, Switches, Withheld};
 pub use serve::{Config, run};
 
 use std::sync::Arc;
@@ -56,6 +57,101 @@ pub enum Principal {
 /// member route treats a `None` here as "no C# available", never as "the sources match".
 pub type Decompiler =
     Arc<dyn Fn(&str, &[u8], &[u8]) -> Option<(String, String)> + Send + Sync>;
+
+/// The evidence repository's kill-switch, as `trigon serve` reads it (`docs/19` §3).
+///
+/// **Beside `--stop-divergences`, never in place of it, and each stops only what it says.** The
+/// repository's `kill-switch` file stops what `trigon publish` publishes; `serve`'s own switch
+/// stops what this server shows. Neither is read as the other: a site whose repository switch is
+/// set still shows what its own gate releases, and one whose own switch is set says so whatever
+/// the repository's is.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RepositorySwitch {
+    pub state: SwitchState,
+    /// The repository `trigon publish` writes to, as configured. Shown to an operator only: a
+    /// local path names a directory of the host's.
+    pub repository: String,
+    /// When what was read was fetched, RFC 3339; `None` where that is not known.
+    pub as_of: Option<String>,
+    /// How it was read, or why it could not be: shown to an operator only, for the same reason.
+    pub detail: String,
+}
+
+/// What the evidence repository's kill-switch was found to be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchState {
+    /// The file is there: `trigon publish` publishes no divergence.
+    Set,
+    /// It is not.
+    Clear,
+    /// Nothing could be read — no working clone, or none that has fetched — which is never
+    /// reported as clear.
+    Unknown,
+}
+
+/// Reads the evidence repository's kill-switch.
+///
+/// **Injected, as the decompiler is**: the repository and the publisher's working clone are the
+/// binary's to find, with `git`, and this crate only reports what it is handed. `Api` asks the
+/// one it holds on every `/v1/health` and every page, so that one must answer at once: `serve`
+/// wraps the binary's in [`cached_switch`], which reads it only off the request path.
+pub type RepositorySwitchReader = Arc<dyn Fn() -> RepositorySwitch + Send + Sync>;
+
+/// How often `serve` reads the evidence repository's kill-switch again. It changes only when
+/// `trigon publish` fetches, hours or days apart, so a page this far behind it misses nothing.
+pub const SWITCH_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `read`, asked off the request path: once now and then every `every`, each time on a blocking
+/// thread, one read at a time. The reader returned hands every caller the last answer and asks
+/// nothing itself, and the timer stops once it is dropped. Call it inside a tokio runtime.
+///
+/// **The binary's reader runs `git`**, several processes a read. Asked by each request, as
+/// `/v1/health` and every page's first frame ask, a reader polling a `--public` server could fork
+/// `git` at will and hold a runtime worker through each; and a spawn that failed under that load
+/// is one more read that finds nothing.
+pub async fn cached_switch(
+    read: RepositorySwitchReader,
+    every: std::time::Duration,
+) -> RepositorySwitchReader {
+    let last = Arc::new(std::sync::RwLock::new(ask(&read, None).await));
+    let held = Arc::downgrade(&last);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(every).await;
+            let Some(last) = held.upgrade() else {
+                return;
+            };
+            let before = last
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let now = ask(&read, Some(&before)).await;
+            *last
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = now;
+        }
+    });
+    Arc::new(move || {
+        last.read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    })
+}
+
+/// One read of the switch, on a blocking thread. A reader that panicked has read nothing, which is
+/// `unknown`, never the answer before it.
+async fn ask(read: &RepositorySwitchReader, before: Option<&RepositorySwitch>) -> RepositorySwitch {
+    let r = read.clone();
+    tokio::task::spawn_blocking(move || r())
+        .await
+        .unwrap_or_else(|e| RepositorySwitch {
+            state: SwitchState::Unknown,
+            repository: before.map(|b| b.repository.clone()).unwrap_or_default(),
+            as_of: None,
+            detail: format!("reading it failed: {e}"),
+        })
+}
 
 /// Everything a handler can reach.
 pub struct Api {
@@ -89,6 +185,9 @@ pub struct Api {
     /// gate are written for. `Operator` is the default, because the default bind is loopback and a
     /// person reading their own store should not have to authenticate to themselves.
     pub unauthenticated: Principal,
+    /// The evidence repository's kill-switch, where a publish repository is configured; `None`
+    /// where none is.
+    pub repository_switch: Option<RepositorySwitchReader>,
 }
 
 /// How many member reads may be in flight at once, by default.
@@ -103,6 +202,36 @@ pub fn default_member_permits() -> Arc<tokio::sync::Semaphore> {
 impl Api {
     pub fn principal(&self) -> Principal {
         self.unauthenticated
+    }
+
+    /// Both kill-switches, for `/v1/health` and the page it feeds: this server's own, and the
+    /// evidence repository's, each with what it stops (`docs/19` §3). The repository's is `null`
+    /// where no publish repository is configured, and `unknown`, never `clear`, where it could not
+    /// be read; where it is and what was read are for an operator only.
+    pub fn kill_switches(&self) -> serde_json::Value {
+        let operator = self.principal() == Principal::Operator;
+        let repository = self.repository_switch.as_ref().map(|read| {
+            let r = read();
+            let mut o = serde_json::json!({
+                "state": r.state,
+                "as_of": r.as_of,
+                "stops": "what `trigon publish` publishes: while the evidence repository holds \
+                          its `kill-switch` file, no divergence is published to it",
+            });
+            if operator {
+                o["repository"] = r.repository.into();
+                o["detail"] = r.detail.into();
+            }
+            o
+        });
+        serde_json::json!({
+            "serve": {
+                "set": self.switches.stop_divergences,
+                "stops": "what this server shows: while it is set, no divergence is shown to an \
+                          anonymous reader (`trigon serve --stop-divergences`)",
+            },
+            "repository": repository,
+        })
     }
 }
 
@@ -141,6 +270,7 @@ pub fn router(api: Arc<Api>) -> axum::Router {
         .route("/v1/runs/{id}/attestation", get(routes::attestation))
         .route("/v1/runs/{id}/log", get(routes::build_log))
         .route("/v1/runs/{id}/network", get(routes::network))
+        .route("/v1/runs/{id}/network/summary", get(routes::network_summary))
         .route("/v1/artifacts/{digest}", get(routes::artifact))
         .route("/v1/targets/{purl}", get(routes::target))
         .route("/v1/evidence/{digest}", get(routes::evidence_blob))

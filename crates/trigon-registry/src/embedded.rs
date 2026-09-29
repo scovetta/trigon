@@ -83,10 +83,12 @@ fn parse_nuspec_repository(xml: &str) -> Option<SourceProvenance> {
 
 /// The commit a `.crate` records in `.cargo_vcs_info.json`.
 ///
-/// `cargo package` writes it when the package directory is a clean git checkout, and omits it
-/// otherwise — so its absence means "packaged from a dirty tree or no tree", which is worth
-/// knowing and is not an error. The file gives no repository URL, only the commit, so this returns
-/// the commit for a caller that already has a repository from the API.
+/// `cargo package` writes it when the package is inside a git checkout and leaves it out when it is
+/// not, so its absence means "packaged from no tree", which is worth knowing and is not an error.
+/// A checkout with uncommitted changes still gets the file, with `"dirty": true` beside the commit
+/// (older Cargo left the file out instead). What that flag should mean here is not settled, and
+/// until it is this reads `sha1` without looking at it. The file gives no repository URL, only the
+/// commit, so this returns the commit for a caller that already has a repository from the API.
 pub fn crate_commit(bytes: &[u8]) -> Option<String> {
     let mut notes = Vec::new();
     let parsed = trigon_archive::parse(
@@ -97,12 +99,12 @@ pub fn crate_commit(bytes: &[u8]) -> Option<String> {
     )
     .ok()?;
     // `<name>-<version>/.cargo_vcs_info.json`: one directory down, and the directory is the
-    // package rather than something inside it.
-    let entry = parsed
-        .archive
-        .entries
-        .iter()
-        .find(|e| e.path.to_string().ends_with("/.cargo_vcs_info.json"))?;
+    // package rather than something inside it. A crate that vendors another carries that crate's
+    // file deeper in the tree, and its commit is somebody else's.
+    let entry = parsed.archive.entries.iter().find(|e| {
+        let p = e.path.to_string();
+        p.ends_with("/.cargo_vcs_info.json") && p.matches('/').count() == 1
+    })?;
     let body = entry.body_bytes().ok()?;
     let doc: serde_json::Value = serde_json::from_slice(&body).ok()?;
     let sha = doc.get("git")?.get("sha1")?.as_str()?;

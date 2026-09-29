@@ -361,6 +361,12 @@ impl Provider for Counting {
         self.inner.reasoning()
     }
 
+    /// The wrapped provider's, not the trait's: `propose` starts its depth walk here, and every
+    /// provider a run builds sits inside one of these.
+    fn default_effort(&self) -> trigon_ai::Effort {
+        self.inner.default_effort()
+    }
+
     fn complete(
         &self,
         req: &trigon_ai::Request,
@@ -825,7 +831,8 @@ mod tests {
             artifacts: vec![ArtifactMeta {
                 id: ArtifactId::new("left-pad-1.3.0.tgz"),
                 url: "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz".into(),
-                declared_sha256: None,
+                declared: Vec::new(),
+                declared_note: None,
                 size: None,
             }],
             intrinsics: Intrinsics {
@@ -928,6 +935,36 @@ mod tests {
         );
     }
 
+    /// A provider that states its own depth, where the trait's default would say `medium`.
+    struct Deep;
+
+    impl Provider for Deep {
+        fn id(&self) -> &str {
+            "deep"
+        }
+        fn caps(&self) -> trigon_ai::ModelCaps {
+            Replay::once("").caps()
+        }
+        fn complete(
+            &self,
+            _: &trigon_ai::Request,
+        ) -> Result<trigon_ai::Response, trigon_ai::LlmError> {
+            Err(trigon_ai::LlmError::NoModel("deep".into()))
+        }
+        fn default_effort(&self) -> trigon_ai::Effort {
+            trigon_ai::Effort::High
+        }
+    }
+
+    #[test]
+    fn the_provider_a_run_uses_starts_at_the_depth_its_provider_states() {
+        // `propose` starts its depth walk at `default_effort`, read through everything
+        // `Configured` wraps a provider in. `Counting` forwarded `reasoning` and not this, so the
+        // walk would start at the trait's `medium` whatever the provider had said.
+        let cfg = Configured::live(Box::new(Deep), "m".into());
+        assert_eq!(cfg.provider.default_effort(), trigon_ai::Effort::High);
+    }
+
     #[tokio::test]
     async fn a_recorded_run_replays_with_no_provider_behind_it() {
         // M3's exit criterion, end to end through the rung rather than at the provider: record one
@@ -1009,5 +1046,478 @@ mod tests {
         // And an unknown provider says what this build does know rather than failing later.
         let e = Configured::parse("gpt-4o").unwrap_err().to_string();
         assert!(e.contains("replay:"), "{e}");
+    }
+
+    /// The recipe [`ANSWER`] proposes, on its own.
+    const RECIPE: &str = "kind: flow\nlocation:\n  repo: https://github.com/stevemao/left-pad\n  \
+                          ref: ff8e7ba8b4122829cf66125ca8445cac7f073bce\nsrc:\n  - uses: \
+                          git-checkout\nbuild:\n  - runs: npm pack\noutput_path: '*.tgz'\n";
+
+    /// A recipe the parser refuses: a flow with no repository.
+    const UNPARSEABLE: &str = "kind: flow\nlocation: {}\n";
+
+    /// A proposal, as a model answers one.
+    fn proposal(diagnosis: &str, strategy: &str) -> String {
+        serde_json::json!({"diagnosis": diagnosis, "strategy": strategy}).to_string()
+    }
+
+    /// A canned answer that reports what it cost, as a provider that bills does.
+    fn billed(text: &str, input: u64, cached_input: u64, output: u64) -> trigon_ai::Response {
+        trigon_ai::Response {
+            text: text.into(),
+            reasoning: None,
+            usage: trigon_ai::Usage {
+                input,
+                cached_input,
+                output,
+            },
+            model: "claude-haiku-4-5-20251001".into(),
+            stop_reason: "end_turn".into(),
+        }
+    }
+
+    fn free(text: &str) -> trigon_ai::Response {
+        billed(text, 0, 0, 0)
+    }
+
+    /// A `Configured` answering from `answers`, and the provider behind it, to read what it was
+    /// asked.
+    fn configured(answers: Vec<trigon_ai::Response>) -> (Configured, Arc<Replay>) {
+        let replay = Arc::new(Replay::new(answers));
+        let cfg = Configured::live(
+            Box::new(replay.clone()),
+            "claude-haiku-4-5-20251001".into(),
+        );
+        (cfg, replay)
+    }
+
+    /// What the `n`th request put last, which is the part about this target.
+    fn asked(replay: &Replay, n: usize) -> String {
+        replay.asked()[n].prompt.parts.last().unwrap().text.clone()
+    }
+
+    fn inputs() -> Inputs {
+        Inputs {
+            purl: "pkg:npm/left-pad@1.3.0".into(),
+            ecosystem: Ecosystem::Npm,
+            files: vec!["index.js".into(), "package.json".into()],
+            manifests: vec![("package.json".into(), "{\"name\":\"left-pad\"}".into())],
+            evidence: Vec::new(),
+        }
+    }
+
+    fn failure() -> trigon_core::FailureSignature {
+        trigon_core::FailureSignature {
+            code: "npm/script-missing".into(),
+            subject: None,
+            fault: trigon_core::Fault::Build,
+            retryable: false,
+            repairable: true,
+            evidence: "npm ERR! missing script: build".into(),
+        }
+    }
+
+    fn recipe() -> trigon_strategy::Strategy {
+        trigon_strategy::from_yaml(RECIPE).unwrap()
+    }
+
+    #[test]
+    fn a_repair_that_parses_is_taken_from_the_first_answer() {
+        let (cfg, replay) = configured(vec![free(&proposal("add the pack step", RECIPE))]);
+        let got = cfg
+            .repair(&inputs(), UNPARSEABLE, &failure(), "npm ERR! missing script: build")
+            .unwrap();
+        assert_eq!(got, recipe());
+        assert_eq!(replay.asked().len(), 1, "a parsed answer is not asked again");
+        // The question carried the failure and the log it was given.
+        let q = asked(&replay, 0);
+        assert!(q.contains("npm/script-missing"), "{q}");
+        assert!(q.contains("npm ERR! missing script: build"), "{q}");
+    }
+
+    /// A model that stops answering and keeps generating: the recipe is the longest prefix that
+    /// parses, taken without spending a second call on the prose after it.
+    #[test]
+    fn prose_after_a_recipe_is_dropped_rather_than_the_recipe() {
+        let chatty = format!("{RECIPE}That should reproduce the tarball.\n");
+        assert!(trigon_strategy::from_yaml(&chatty).is_err(), "the fixture");
+        let (cfg, replay) = configured(vec![free(&proposal("pack it", &chatty))]);
+        let got = cfg
+            .repair_divergence(&inputs(), UNPARSEABLE, "member-only-in-reference@dist/index.js")
+            .unwrap();
+        assert_eq!(got, recipe());
+        assert_eq!(replay.asked().len(), 1);
+        // Asked about as a divergence: the recipe built, and built something else.
+        let q = asked(&replay, 0);
+        assert!(q.contains("member-only-in-reference@dist/index.js"), "{q}");
+        assert!(q.contains("built successfully"), "{q}");
+    }
+
+    /// An answer that does not parse is asked about once more, with the parser's own words, and
+    /// the second answer is the one used.
+    #[test]
+    fn an_answer_that_does_not_parse_is_asked_about_once_with_the_parsers_words() {
+        let why = trigon_strategy::from_yaml(UNPARSEABLE)
+            .unwrap_err()
+            .to_string();
+        let (cfg, replay) = configured(vec![
+            free(&proposal("first try", UNPARSEABLE)),
+            free(&proposal("second try", RECIPE)),
+        ]);
+        let got = cfg
+            .repair(&inputs(), UNPARSEABLE, &failure(), "log")
+            .unwrap();
+        assert_eq!(got, recipe());
+        assert_eq!(replay.asked().len(), 2);
+        assert!(!asked(&replay, 0).contains("rejected by the parser"));
+        let again = asked(&replay, 1);
+        assert!(again.contains("rejected by the parser"), "{again}");
+        assert!(again.contains(&why), "the parser's words are not in it: {again}");
+    }
+
+    /// Twice unparseable ends the attempt — a model that cannot fix a named field with the error in
+    /// hand will not on a third try — and the error quotes what the model said, one line of it.
+    #[test]
+    fn twice_unparseable_ends_the_attempt_and_quotes_the_model() {
+        let (cfg, replay) = configured(vec![
+            free(&proposal("first try", UNPARSEABLE)),
+            free(&proposal(
+                "I could not find a build step.\nThe rest of a long explanation.",
+                UNPARSEABLE,
+            )),
+            free(&proposal("a third answer nobody asks for", RECIPE)),
+        ]);
+        let e = cfg
+            .repair_divergence(&inputs(), UNPARSEABLE, "differs")
+            .unwrap_err();
+        let said = format!("{e:#}");
+        assert!(
+            said.contains(
+                "did not parse as a strategy, twice. The model said: I could not find a build \
+                 step."
+            ),
+            "{said}"
+        );
+        assert!(!said.contains("The rest of a long explanation"), "{said}");
+        assert_eq!(replay.asked().len(), 2, "asked a third time");
+    }
+
+    /// A provider that fails is an error of the asking, and says which question it was.
+    #[test]
+    fn a_provider_that_fails_says_which_question_it_was_asked() {
+        let (cfg, _) = configured(Vec::new());
+        let e = cfg
+            .repair(&inputs(), UNPARSEABLE, &failure(), "log")
+            .unwrap_err();
+        assert!(format!("{e:#}").starts_with("asking for a repair"), "{e:#}");
+        let e = cfg
+            .repair_divergence(&inputs(), UNPARSEABLE, "differs")
+            .unwrap_err();
+        assert!(format!("{e:#}").starts_with("asking about a divergence"), "{e:#}");
+        let e = cfg.opinion_on_diff("-a\n+b\n", 1, 1).unwrap_err();
+        assert!(format!("{e:#}").starts_with("asking for a reading of the diff"), "{e:#}");
+    }
+
+    /// Every call is counted and timed whether or not it answered — a call that failed still
+    /// happened and still cost the wait — and billed by what the answers say they used.
+    #[test]
+    fn a_call_is_counted_and_timed_whether_or_not_it_answered_and_billed_by_its_answer() {
+        let opinion = r#"{"verdict": "equivalent", "reason": "only timestamps differ"}"#;
+        let (cfg, _) = configured(vec![billed(opinion, 100, 40, 20), billed(opinion, 50, 0, 5)]);
+        // Never asked is not asked for no time.
+        assert_eq!(cfg.calls(), 0);
+        assert_eq!(cfg.inference_seconds(), None);
+        assert_eq!(cfg.spent(), trigon_ai::Usage::default());
+        assert_eq!(cfg.model_id(), "claude-haiku-4-5-20251001");
+        assert_eq!(cfg.describe(), "claude-haiku-4-5-20251001 (replay)");
+
+        let o = cfg.opinion_on_diff("-a\n+b\n", 1, 3).unwrap();
+        assert_eq!(o.verdict, trigon_core::DiffVerdict::Equivalent);
+        assert_eq!(o.reason, "only timestamps differ");
+        // An opinion with its author named, and the condition it was formed under.
+        assert_eq!(o.model, "claude-haiku-4-5-20251001");
+        assert_eq!((o.members_shown, o.members_differing), (1, 3));
+        cfg.opinion_on_diff("-a\n+b\n", 1, 1).unwrap();
+        assert_eq!(cfg.calls(), 2);
+        assert!(cfg.inference_seconds().is_some_and(|s| s > 0.0));
+        // Cached tokens are a subset of the input, and stay one when summed.
+        assert_eq!(
+            cfg.spent(),
+            trigon_ai::Usage {
+                input: 150,
+                cached_input: 40,
+                output: 25
+            }
+        );
+
+        // The recording runs out: the call fails, and is counted, and costs nothing it reported.
+        assert!(cfg.opinion_on_diff("-a\n+b\n", 1, 1).is_err());
+        assert_eq!(cfg.calls(), 3);
+        assert_eq!(cfg.spent().input, 150);
+    }
+
+    /// A repair reads the repository at the commit it was built from, and only a repository it may
+    /// fetch: never one without a commit, and never a local path a package named (P10).
+    #[test]
+    fn a_repair_needs_a_commit_and_never_fetches_a_path_a_package_named() {
+        let d = tmpdir("repair-inputs");
+        let (repo, commit) = fixture(&d);
+        let cache = d.join("cache");
+        let cfg = Configured::live(Box::new(Replay::once(ANSWER)), "m".into())
+            .with_cache_root(Some(cache.clone()))
+            // No root is no change of root.
+            .with_cache_root(None);
+
+        let mut no_commit = target(&repo, "");
+        let e = cfg.inputs(&no_commit).err().unwrap().to_string();
+        assert!(e.contains("no source commit"), "{e}");
+        no_commit.source = None;
+        let e = cfg.inputs(&no_commit).err().unwrap().to_string();
+        assert!(e.contains("no source commit"), "{e}");
+
+        let e = format!("{:#}", cfg.inputs(&target(&repo, &commit)).err().unwrap());
+        assert!(e.starts_with("fetching the source for a repair"), "{e}");
+        assert!(e.contains("not an https URL"), "{e}");
+        assert!(
+            std::fs::read_dir(&cache).map_or(true, |mut e| e.next().is_none()),
+            "a refused repository was fetched into the cache"
+        );
+        assert_eq!(cfg.calls(), 0, "a model was asked about a tree nobody read");
+    }
+
+    /// A repair reads the repository from the checkout already in the cache, and what it reads is
+    /// the commit's files and manifests — gathered, and no model asked for them.
+    ///
+    /// The checkout is put where the cache keeps an https repository's by fetching the fixture as a
+    /// path the operator named and moving it under the https URL's key: a complete checkout is
+    /// reused without a fetch. Its commit is tagged, so the tags are there too and nothing asks the
+    /// remote for them; had anything asked, the remote it would ask is a local path, which a
+    /// repository a package named may not reach.
+    #[test]
+    fn a_repair_reads_the_checkout_already_in_the_cache() {
+        const URL: &str = "https://example.invalid/left-pad";
+        let d = tmpdir("repair-cached");
+        let (repo, commit) = fixture(&d);
+        git(&repo, &["tag", "v1.3.0"]);
+        let cache = d.join("cache");
+        let seeded = SourceCache::new(&cache)
+            .trusting_local_paths()
+            .checkout(&repo.to_string_lossy(), &commit)
+            .unwrap();
+        assert_eq!(seeded.tags, ["v1.3.0"], "the fixture");
+        let under_url = crate::provenance::checkout_dir(&cache, URL, &commit);
+        std::fs::rename(&seeded.path, &under_url).unwrap();
+
+        let cfg = Configured::live(Box::new(Replay::once(ANSWER)), "m".into())
+            .with_cache_root(Some(cache.clone()));
+        let mut t = target(&repo, &commit);
+        t.source.as_mut().unwrap().repo_url = URL.into();
+        let got = cfg.inputs(&t).unwrap();
+
+        assert_eq!(got.purl, "pkg:npm/left-pad@1.3.0");
+        assert_eq!(got.ecosystem, Ecosystem::Npm);
+        assert_eq!(got.files, ["index.js", "package.json"]);
+        assert_eq!(
+            got.manifests,
+            [("package.json".to_string(), "{\"name\":\"left-pad\"}\n".to_string())]
+        );
+        assert_eq!(got.evidence.len(), 1, "{:?}", got.evidence);
+        assert!(
+            got.evidence[0].contains("npm:_nodeVersion"),
+            "{:?}",
+            got.evidence
+        );
+        // The one checkout, reused: nothing was fetched beside it.
+        let entries: Vec<_> = std::fs::read_dir(&cache).unwrap().flatten().collect();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(cfg.calls(), 0, "reading a repository asked a model");
+    }
+
+    /// The rung a run builds from its `Configured` is held to the same rule: a local path a
+    /// package named is refused, and no model is asked.
+    #[tokio::test]
+    async fn the_rung_a_run_builds_refuses_a_path_a_package_named() {
+        let d = tmpdir("rung-local");
+        let (repo, commit) = fixture(&d);
+        let cfg = Configured::live(Box::new(Replay::once(ANSWER)), "m".into())
+            .with_cache_root(Some(d.join("cache")));
+        let r = cfg.rung();
+        assert_eq!(r.name(), "model");
+        let e = r.infer(&target(&repo, &commit)).await.unwrap_err();
+        assert!(e.to_string().contains("not an https URL"), "{e}");
+        assert_eq!(cfg.calls(), 0);
+    }
+
+    /// No registry commit and no tag that resolves one: the rung declines without asking, and says
+    /// why in a sentence about the repository rather than about the package.
+    #[tokio::test]
+    async fn with_no_commit_and_no_tag_the_rung_declines_and_says_why() {
+        let d = tmpdir("no-commit");
+        let (repo, commit) = fixture(&d);
+        let replay = Arc::new(Replay::once(ANSWER));
+        let r = rung(replay.clone(), &d.join("cache"));
+        let untagged = target(&repo, "");
+
+        assert!(r.infer(&untagged).await.unwrap().is_empty());
+        assert!(replay.asked().is_empty(), "a model was asked to guess a tree");
+        let why = r.why_not(&untagged).await.expect("a described decline");
+        assert!(why.contains("recorded no commit for this version"), "{why}");
+        assert!(why.contains(&repo.to_string_lossy().into_owned()), "{why}");
+        assert!(why.contains("1.3.0"), "{why}");
+
+        // With a commit there is nothing to explain, and with no source it is another rung's job.
+        assert_eq!(r.why_not(&target(&repo, &commit)).await, None);
+        let mut sourceless = target(&repo, &commit);
+        sourceless.source = None;
+        assert_eq!(r.why_not(&sourceless).await, None);
+    }
+
+    /// The diagnosis is carried as one line, bounded, and the model's view of its own confidence
+    /// only where it gave one.
+    #[test]
+    fn what_the_model_said_about_itself_is_one_bounded_line() {
+        let c = trigon_ai::Candidate {
+            diagnosis: "  the first line\nand a second  ".into(),
+            strategy: RECIPE.into(),
+            confidence: None,
+        };
+        assert_eq!(
+            assumptions(&c),
+            vec!["a model proposed this recipe: the first line".to_string()]
+        );
+        // Counted in characters, so a multi-byte diagnosis is cut on a boundary rather than
+        // panicking in the middle of one.
+        let long = first_line(&"é".repeat(400));
+        assert_eq!(long.chars().count(), 301, "{long}");
+        assert!(long.ends_with('…'));
+        assert_eq!(first_line(&"x".repeat(300)), "x".repeat(300));
+        assert_eq!(first_line(""), "");
+    }
+
+    #[test]
+    fn the_rung_speaks_only_where_there_are_tools_for_its_recipes() {
+        assert!(supported(Ecosystem::Npm));
+        assert!(supported(Ecosystem::PyPI));
+        for e in [
+            Ecosystem::CratesIo,
+            Ecosystem::RubyGems,
+            Ecosystem::NuGet,
+            Ecosystem::Maven,
+            Ecosystem::GitHub,
+        ] {
+            assert!(!supported(e), "{e:?}");
+        }
+    }
+
+    /// A recording names the model that answered it; one with no turns names none, and replays as
+    /// `replay`. What cannot be read as a recording says which of the two steps failed.
+    #[test]
+    fn a_recording_names_the_model_that_answered_it() {
+        let d = tmpdir("recording");
+        let mut t = Transcript::new("pkg:npm/a@1");
+        t.turns.push(trigon_ai::Turn {
+            model: "claude-haiku-4-5-20251001".into(),
+            temperature: 0.0,
+            prompt_sha256: "0".repeat(64),
+            system_sha256: "1".repeat(64),
+            schema_sha256: None,
+            answer: ANSWER.into(),
+            reasoning: None,
+            reasoning_asked: Default::default(),
+            usage: Default::default(),
+            stop_reason: "end_turn".into(),
+        });
+        let p = d.join("t.json");
+        std::fs::write(&p, serde_json::to_vec(&t).unwrap()).unwrap();
+        let cfg = Configured::parse(&format!("replay:{}", p.display())).unwrap();
+        assert_eq!(cfg.model_id(), "claude-haiku-4-5-20251001");
+        assert_eq!(cfg.describe(), "claude-haiku-4-5-20251001 (replaying)");
+
+        let empty = d.join("empty.json");
+        std::fs::write(&empty, serde_json::to_vec(&Transcript::new("x")).unwrap()).unwrap();
+        let cfg = Configured::parse(&format!("replay:{}", empty.display())).unwrap();
+        assert_eq!(cfg.model_id(), "replay");
+
+        let e = Configured::parse("replay:").unwrap_err().to_string();
+        assert!(e.contains("needs a recording to replay"), "{e}");
+        let missing = d.join("absent.json");
+        let e = Configured::parse(&format!("replay:{}", missing.display()))
+            .unwrap_err()
+            .to_string();
+        assert!(e.starts_with("reading the transcript at"), "{e}");
+        let garbled = d.join("garbled.json");
+        std::fs::write(&garbled, "{\"turns\": [").unwrap();
+        let e = Configured::parse(&format!("replay:{}", garbled.display()))
+            .unwrap_err()
+            .to_string();
+        assert!(e.starts_with("parsing the transcript at"), "{e}");
+    }
+
+    /// A provider that panics.
+    struct Panicking;
+
+    impl Provider for Panicking {
+        fn id(&self) -> &str {
+            "panicking"
+        }
+        fn caps(&self) -> trigon_ai::ModelCaps {
+            Replay::once("").caps()
+        }
+        fn complete(
+            &self,
+            _: &trigon_ai::Request,
+        ) -> Result<trigon_ai::Response, trigon_ai::LlmError> {
+            panic!("a provider bug")
+        }
+    }
+
+    /// A provider that panics is an error of this run, said as one, and never takes the sweep that
+    /// asked with it: the question runs on a task of its own.
+    #[tokio::test]
+    async fn a_provider_that_panics_is_an_error_of_the_run_not_of_the_process() {
+        let d = tmpdir("panicking");
+        let (repo, commit) = fixture(&d);
+        let r = rung(Arc::new(Panicking), &d.join("cache"));
+        let e = r.infer(&target(&repo, &commit)).await.unwrap_err();
+        assert!(
+            e.to_string().contains("the inference task did not finish"),
+            "{e}"
+        );
+    }
+
+    /// `ollama:` names a tag on this machine, and a spec with none — with or without the reasoning
+    /// switch — is refused before anything asks the server for it.
+    #[test]
+    fn an_ollama_spec_needs_a_tag() {
+        for spec in ["ollama:", "ollama:+no-reasoning"] {
+            let e = Configured::parse(spec).unwrap_err().to_string();
+            assert!(e.contains("`--model ollama:<model>` needs a model"), "{spec}: {e}");
+        }
+    }
+
+    /// `copilot:` with no model lets Copilot choose, and the transcript records what answered.
+    #[test]
+    fn copilot_chooses_its_own_model_unless_one_is_named() {
+        assert_eq!(Configured::parse("copilot:").unwrap().model_id(), "auto");
+        assert_eq!(Configured::parse("copilot:gpt-5").unwrap().model_id(), "gpt-5");
+    }
+
+    /// `compatible:` has nothing to guess its URL or its model from, so it needs both, and says so.
+    #[test]
+    fn a_compatible_endpoint_needs_its_url_and_its_model() {
+        let e = Configured::parse("compatible:http://127.0.0.1:9/v1")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("needs both"), "{e}");
+        let e = Configured::parse("compatible:http://127.0.0.1:9/v1#")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("`--model compatible:<model>` needs a model"),
+            "{e}"
+        );
+        let cfg = Configured::parse("compatible:http://127.0.0.1:9/v1#my-model").unwrap();
+        assert_eq!(cfg.model_id(), "my-model");
+        assert_eq!(cfg.calls(), 0, "parsing a spec asks nothing");
     }
 }

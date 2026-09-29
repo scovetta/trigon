@@ -11,14 +11,14 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use trigon_core::{
-    ArtifactId, Claim, Confidence, Digest, Ecosystem, Evidence, Intrinsics, RegistryMoment,
+    ArtifactId, Claim, Confidence, DeclaredDigest, Ecosystem, Evidence, Intrinsics, RegistryMoment,
     SourceDiscovery, SourceProvenance, TargetRef,
 };
 
 use crate::client::Client;
-use crate::error::RegistryError;
-use crate::model::{ArtifactMeta, BlobSink, ResolvedTarget};
-use crate::npm::fetch_verified;
+use crate::declared::fetch_verified;
+use crate::error::{RegistryError, sort_versions};
+use crate::model::{ArtifactMeta, BlobSink, Fetched, ResolvedTarget};
 use crate::registry::Registry;
 
 const ECO: &str = "pypi";
@@ -77,17 +77,20 @@ impl Registry for PyPiRegistry {
             let Some(url) = f.get("url").and_then(Value::as_str) else {
                 continue;
             };
-            // PyPI publishes sha256 for every file, so unlike npm there is always something to
-            // check the bytes against.
-            let declared_sha256 = f
-                .get("digests")
-                .and_then(|d| d.get("sha256"))
-                .and_then(Value::as_str)
-                .and_then(|h| Digest::from_hex(h).ok());
+            // PyPI publishes sha256 for every file, and md5 and blake2b_256 beside it. Every one is
+            // a declaration and every one is kept: sha256 and md5 are checked, and blake2b_256,
+            // which this build cannot compute, is recorded as declared and unchecked rather than
+            // read as though it had not been declared.
+            let declared = declared_digests(f).map_err(|detail| RegistryError::Malformed {
+                ecosystem: ECO.into(),
+                what: format!("{name} {} ({filename})", target.version),
+                detail,
+            })?;
             artifacts.push(ArtifactMeta {
                 id: ArtifactId::new(filename),
                 url: url.to_string(),
-                declared_sha256,
+                declared,
+                declared_note: None,
                 size: f.get("size").and_then(Value::as_u64),
             });
             // The earliest upload of this release. A release's files can be uploaded minutes or
@@ -179,9 +182,30 @@ impl Registry for PyPiRegistry {
         &self,
         meta: &ArtifactMeta,
         sink: &mut (dyn BlobSink + Send),
-    ) -> Result<Digest, RegistryError> {
+    ) -> Result<Fetched, RegistryError> {
         fetch_verified(&self.client, ECO, meta, sink).await
     }
+}
+
+/// Every digest the JSON API declares for one file, from its `digests` object.
+///
+/// Sorted by algorithm name, because the object is a map and the record should read the same way
+/// twice.
+fn declared_digests(file: &Value) -> Result<Vec<DeclaredDigest>, String> {
+    let Some(digests) = file.get("digests").and_then(Value::as_object) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    let mut keys: Vec<&String> = digests.keys().collect();
+    keys.sort();
+    for algorithm in keys {
+        let source = format!("pypi:digests.{algorithm}");
+        let value = digests[algorithm]
+            .as_str()
+            .ok_or_else(|| format!("`{source}` is not a string"))?;
+        out.push(crate::declared::from_hex(algorithm, value, &source)?);
+    }
+    Ok(out)
 }
 
 impl PyPiRegistry {
@@ -222,7 +246,7 @@ impl PyPiRegistry {
             .and_then(Value::as_object)
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
-        available.sort();
+        sort_versions(&mut available);
         RegistryError::NoSuchVersion {
             ecosystem: ECO.into(),
             name,

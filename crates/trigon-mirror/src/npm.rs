@@ -292,4 +292,27 @@ mod tests {
         filter_packument(&mut d, "2025-01-01T00:00:00");
         assert!(!d["versions"].as_object().unwrap().contains_key("9.9.9"));
     }
+
+    #[test]
+    fn a_document_that_is_not_a_packument_is_left_as_it_arrived() {
+        // Registry-shaped input from somebody else. Something that is not an object has no versions
+        // to filter, and inventing a `dist-tags` on it would serve a document upstream never sent.
+        let mut d = serde_json::json!(["not", "a", "packument"]);
+        assert_eq!(filter_packument(&mut d, "2020-01-01T00:00:00"), 0);
+        assert_eq!(withhold_version(&mut d, &withheld("1.0.0")), 0);
+        assert_eq!(d, serde_json::json!(["not", "a", "packument"]));
+    }
+
+    #[test]
+    fn a_packument_with_no_versions_still_has_its_tags_repointed_at_what_survives() {
+        // No `versions` map means nothing to remove, but `latest` is read off the `time` map and
+        // must still name a version the filter kept rather than the one it dropped.
+        let mut d = packument();
+        d.as_object_mut().unwrap().remove("versions");
+        assert_eq!(filter_packument(&mut d, "2019-01-01T00:00:00"), 0);
+        // 1.0.0 is the one version dated before the moment, so it is the only honest `latest`.
+        assert_eq!(d["dist-tags"]["latest"], "1.0.0", "{d}");
+        assert!(d["time"].get("2.0.0").is_none(), "{d}");
+        assert_eq!(withhold_version(&mut d, &withheld("1.0.0")), 0);
+    }
 }
