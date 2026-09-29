@@ -4,27 +4,26 @@
 
 Trigon takes a published package artifact, finds the source it claims to come from, rebuilds it in a
 controlled environment, and decides whether the rebuild and the published artifact are the same
-thing. It signs a statement either way, and that statement is checkable by someone who does not
-trust us.
+thing. It signs a statement either way, and someone who does not trust us can check that statement.
 
-Registries distribute artifacts. People audit source. Almost nothing checks that the two correspond,
-and that gap is where build-time supply-chain attacks live.
+Registries distribute artifacts and people audit source, but almost nothing checks that the two
+correspond, and build-time supply-chain attacks live in that gap.
 
 **Today it rebuilds npm, PyPI, crates.io and NuGet packages.** RubyGems and GitHub releases are
-designed for and sequenced next; a target in one of those is refused by name rather than attempted.
-Comparing two artifacts you already have — the judgement half, below — needs no network and has no
-prerequisites at all. Wheels, gems, crates and `.nupkg` files each get their own normalization. An npm
-tarball does not — nothing inside a `.tgz` says whose it is — so it takes the generic tar+gzip set
-unless `verify` or `stabilize` is given `--profile npm-tarball`, which is why the left-pad run below
+designed for and sequenced next; Trigon refuses a target in either by name and does not attempt it.
+Comparing two artifacts you already have (the judgement half, below) needs no network and has no
+prerequisites. Wheels, gems, crates and `.nupkg` files each get their own normalization. An npm
+tarball does not, because nothing inside a `.tgz` says whose it is. It takes the generic tar+gzip
+set unless you run `verify` or `stabilize` with `--profile npm-tarball`, so the left-pad run below
 reports `tar-gzip`.
 
-**New here?** [`docs/introduction.md`](docs/introduction.md) explains what Trigon is, how it
-works and how to use it, in ten minutes. `scripts/evidence-e2e.sh` runs the whole loop on one
-machine: rebuild a package, publish the verdict, and check it as a consumer would.
+**If you are new,** start with [`docs/introduction.md`](docs/introduction.md), which explains what
+Trigon is, how it works and how to use it, in ten minutes. `scripts/evidence-e2e.sh` runs the whole
+loop on one machine: rebuild a package, publish the verdict, and check it as a consumer would.
 
-**Using it?** [`docs/using-trigon.md`](docs/using-trigon.md) is the task-oriented guide: install,
-compare two artifacts, rebuild a package, read a verdict, and — the section worth reading first —
-what a verdict does *not* tell you.
+**If you are using it,** [`docs/using-trigon.md`](docs/using-trigon.md) is the task-oriented guide:
+install, compare two artifacts, rebuild a package, read a verdict, and what a verdict does *not*
+tell you, the section worth reading first.
 
 ## What it does
 
@@ -52,19 +51,19 @@ $ trigon verify left-pad-1.3.0.tgz rebuilt/left-pad-1.3.0.tgz
 ```
 
 npm published that tarball in 2018; the rebuild is from this morning. They differ in gzip framing,
-in member order, and in file modes — and the `applied` list is exactly which stabilizer removed
-which, with how many entries it touched. In nothing else do they differ, which is what the shared
-`stabilized` digest says. Change one byte of `index.js` and the verdict is `divergent`, the member
-is named, and the exit code is 1.
+member order and file modes, and the `applied` list names the stabilizer that removed each
+difference and how many entries it touched. The shared `stabilized` digest says they differ in
+nothing else. Change one byte of `index.js` and the verdict is `divergent`, the output names the
+member, and the exit code is 1.
 
-Three digests per side, not one, because "the same tar in different gzip framing" and "a different
-tar" are different findings and a single digest cannot tell you which you have.
+Each side gets three digests because "the same tar in different gzip framing" and "a different tar"
+are different findings, and a single digest cannot tell you which you have.
 
 ## How it works
 
-One rebuild, end to end. The boxes are four of the five persisted states — `Queued` is the sweep
-planner's and a single `trigon rebuild` never sits in it — and the labels on the arrows between them
-are the only things that cross.
+The diagram follows one rebuild, end to end. The boxes are four of the five persisted states (the
+fifth, `Queued`, belongs to the sweep planner, and a single `trigon rebuild` never sits in it), and
+the labels on the arrows between them are the only things that cross.
 
 ```mermaid
 flowchart TB
@@ -111,55 +110,56 @@ flowchart TB
     decompose -. "never: a build must not reach the artifact<br/>it is going to be compared against" .-> run
 ```
 
-Two edges in that picture are load-bearing, and both are easy to lose in implementation.
+Two edges in that picture are easy to lose in implementation.
 
-**The dashed one never happens.** Judging reads both sides, so a build must be unable to reach the
-published artifact at all — including through our own content-addressed store, whose digest travels
-with every target and whose reads would never cross the egress proxy. Today that is enforced by
-`Decompose` handing forward a set of hashes rather than bytes: the guard manifest names what the
-build must not produce, and carries none of it. The fleet shape adds a second rule, a write-only
-blob credential scoped to the one run, which [`01-architecture.md`](docs/01-architecture.md) §1
-specifies and no code enforces yet.
+**The dashed one never happens.** Judging reads both sides, so a build must have no route to the
+published artifact, including through our own content-addressed store, whose digest travels with
+every target and whose reads would never cross the egress proxy. Today `Decompose` enforces that by
+handing forward a set of hashes rather than bytes: the guard manifest names what the build must not
+produce and carries none of it. The fleet shape adds a second rule, a write-only blob credential
+scoped to the one run, which [`01-architecture.md`](docs/01-architecture.md) §1 specifies and no
+code enforces yet.
 
 **The mirror is the build's only route out.** At `--egress mirror-only` the container sits in a
 network island whose one reachable host serves the registry index *as it stood at the publish
-instant* — so a dependency resolved during the rebuild is the one the publisher would have got, not
-today's. Everything it serves is hashed on the way past and written to a transcript the run keeps.
+instant*, so a dependency resolved during the rebuild is the one the publisher would have got, not
+today's. The mirror hashes everything it serves on the way past and writes it to a transcript the
+run keeps.
 
-The design puts a fifth step, `Explain`, inside Judging, to describe a difference in words.
-It is not built: `Phase` has no such variant, and the `--explain` flag that exists only raises a
-print limit — it opens no socket and calls no model. When it arrives it will be advisory and unable
-to change a verdict, because the verdict is the digest comparison, and that half links nothing.
+The design puts a fifth step, `Explain`, inside Judging, to describe a difference in words. It is
+not built: `Phase` has no such variant, and the existing `--explain` flag only raises a print limit;
+it opens no socket and calls no model. `Explain` will be advisory when it arrives and unable to
+change a verdict, because the verdict is the digest comparison and that half links nothing.
 
-**The four boxes are states, not processes.** On a fleet they are separate workers with different
-credentials, which is the point of drawing them apart. On a laptop `trigon rebuild` runs the first
-three in one process and `trigon attest` is the second command in
-[`scripts/rebuild-and-attest.sh`](scripts/rebuild-and-attest.sh) — deliberately not one, so the
-thing holding the key re-derives the verdict from stored bytes rather than being told it by the
-process that just executed a package's build script.
+**The four boxes are states, and the deployment decides which process runs each.** On a fleet they
+run as separate workers with different credentials, which is why the diagram draws them apart. On a
+laptop `trigon rebuild` runs the first three in one process and `trigon attest` is the second
+command in [`scripts/rebuild-and-attest.sh`](scripts/rebuild-and-attest.sh). They are separate
+commands on purpose, so the process holding the key re-derives the verdict from stored bytes instead
+of taking it from the process that executed a package's build script.
 
 ## Status
 
-M0, M1 and M2 are complete, and M3 has begun. The design lives in
-[`docs/`](docs/) and was written before any code; [`docs/16-findings.md`](docs/16-findings.md)
-records where building it proved the design wrong.
+M0, M1 and M2 are complete, and M3 has begun. The design in [`docs/`](docs/) predates the code;
+[`docs/16-findings.md`](docs/16-findings.md) records where building it proved the design wrong.
 
 | Milestone | | |
 |---|---|---|
 | **M0** the judgement half | done | differential against the reference implementation: 34 match, 24 deviate by a declared entry, **0 unexplained** |
 | **M1** first rebuilds | done | npm and PyPI rebuild end to end, under an enforced egress tier, against a time-filtered index |
-| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`. Publishing them is [`docs/19`](docs/19-distribution-and-lookup.md): an evidence repository with a log of our own, which replaced a Rekor client that was built, measured and removed ([ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md)) — written by `trigon publish`, synced by `trigon evidence`, and asked by `trigon lookup` and `trigon check` |
-| **M3** the search half | begun | the deterministic parts first — failure signatures, log compression, the repair-loop policy, the Builder |
+| **M2** attestations | done | signed statements, re-derivable cross-machine and through an archived stabilizer set run under `wasmtime`. Publishing them is [`docs/19`](docs/19-distribution-and-lookup.md): an evidence repository with a log of our own, written by `trigon publish`, synced by `trigon evidence`, and queried by `trigon lookup` and `trigon check`. It replaced a Rekor client we built, measured and removed ([ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md)) |
+| **M3** the search half | begun | the deterministic parts first: failure signatures, log compression, the repair-loop policy, the Builder |
 
 Tier-1 observability landed early, out of milestone order: every run at an enforced egress tier now
-records a **network transcript** of everything that crossed into the build, and `attestable` is
-derived from whether that account is complete rather than being a constant. The mirror had been
-computing all of it — it hashes every body as it streams past, which is how the artifact guard works
-— and throwing it away unless the hash matched.
+records a **network transcript** of everything that crossed into the build, and Trigon derives
+`attestable` from whether that account is complete; it used to be a constant. The mirror had been
+computing all of it (it hashes every body as it streams past, which is how the artifact guard works)
+and discarding it unless the hash matched.
 
-Measured on the **M1 common-path corpus** — 197 npm and 200 PyPI targets, stratified by build
-system rather than by popularity — at `--egress mirror-only`, the tier this README recommends, where
-the build's only route out is a time-filtered mirror that writes down everything it serves:
+The figures below come from the **M1 common-path corpus** (197 npm and 200 PyPI targets, stratified
+by build system rather than by popularity) at `--egress mirror-only`, the tier this README
+recommends, where the build's only route out is a time-filtered mirror that writes down everything
+it serves:
 
 | | reproduce | reach a comparison |
 |---|---|---|
@@ -168,18 +168,18 @@ the build's only route out is a time-filtered mirror that writes down everything
 
 **crates.io and NuGet have no rate here, because they have no corpus yet.** Both rebuild end to end
 at `mirror-only`, but neither has a stratified corpus, and a number quoted over targets picked by
-hand is not a rate. What is known: of twelve crates tried, six reproduce — `hashbrown@0.17.1` and
-`serde@1.0.219` among them, lockfile included — and every remaining divergence is the `Cargo.toml`
+hand is not a rate. Of the twelve crates we have tried, six reproduce (`hashbrown@0.17.1` and
+`serde@1.0.219` among them, lockfile included), and each remaining divergence is the `Cargo.toml`
 manifest rewrite that [`17-backlog.md`](docs/17-backlog.md) B20 is about.
 
 The npm row folds in a six-target re-run rather than a second full sweep. npm 7.0 through 8.2
-corrupts the tarballs it fetches concurrently — it presented as a broken mirror for months, and was
-not — and it failed exactly the six targets pinning an npm in that window. Those six were re-run
-after the fix; no other target in the corpus pins one, so nothing else could have moved.
+corrupts the tarballs it fetches concurrently; for months that looked like a broken mirror, which it
+was not. It failed the six targets that pin an npm in that window and no others. We re-ran those six
+after the fix, and no other target in the corpus pins one, so nothing else could have moved.
 [`16-findings.md`](docs/16-findings.md) §3.26 has the evidence.
 
-**Quote the strata, not the aggregate.** Both totals above conceal a range wide enough to make them
-useless on their own, which is the whole argument of [`15-corpora.md`](docs/15-corpora.md) §3:
+**Quote the strata.** Both totals above hide a range wide enough to make them useless on their own,
+which is the argument of [`15-corpora.md`](docs/15-corpora.md) §3:
 
 | npm | compared | reproduced | | PyPI | compared | reproduced | |
 |---|---:|---:|---|---|---:|---:|---|
@@ -190,48 +190,48 @@ useless on their own, which is the whole argument of [`15-corpora.md`](docs/15-c
 | | | | | maturin / C extension | 11 of 20 | 6 | **54%** |
 
 npm's aggregate 76% spans 88% down to 33%; PyPI's 83% spans 100% down to 54%. **The reach is still
-the worse number**: only 3 of 17 monorepo members get as far as a comparison at all, so the 33%
-beside them is one of the three we could measure.
+the worse number**: only 3 of 17 monorepo members get as far as a comparison, so the 33% beside them
+is one of the three we could measure.
 
-**Why this corpus and not an easier one.** Every figure before it came from the 37-target smoke
-corpora, which are almost entirely one stratum — small utility packages with no build step — where
-npm reproduces at 89% and PyPI at 88%. The common-path corpus adds TypeScript builds, monorepo
-members, poetry projects and native extensions, and it exists to make the table above possible.
+Every earlier figure came from the 37-target smoke corpora, which are almost all one stratum (small
+utility packages with no build step), where npm reproduces at 89% and PyPI at 88%. The common-path
+corpus is harder: it adds TypeScript builds, monorepo members, poetry projects and native
+extensions, and exists to make the table above possible.
 
-**Both ecosystems moved since the previous figures, and PyPI's rate fell for a good reason.** npm
-was 84 of 115 (73%) reaching 115 of 197; PyPI was 119 of 136 (88%) reaching 136 of 200. npm improved
-on both axes — the mirror now serves a lockfile-resolved tarball the index never offered, which
-admitted a cluster that could not build at all, most of it TypeScript: that stratum went from 1 of 8
-to 10 of 23. PyPI's *reach* rose from 68% to 81% and its *rate* fell from 88% to 83%, and the second
-is a consequence of the first: twenty-seven more targets now reach a comparison and they are the
-hard ones. A rate over a larger and harder denominator is lower and means more.
+**Both ecosystems moved since the previous figures, and PyPI's rate fell because its reach rose.**
+npm was 84 of 115 (73%) reaching 115 of 197; PyPI was 119 of 136 (88%) reaching 136 of 200. npm
+improved on both axes: the mirror now serves a lockfile-resolved tarball the index never offered,
+which admitted a cluster that could not build before. Most of that cluster is TypeScript, and the
+TypeScript stratum went from 1 of 8 to 10 of 23. PyPI's *reach* rose from 68% to 81% and its *rate*
+fell from 88% to 83% as a consequence: the twenty-seven more targets that now reach a comparison are
+the hard ones, and adding them to the denominator lowered the rate and made it a better measure.
 
-**Sixteen of npm's 65 non-compared targets are ours, not the packages'** — ten a missing tool
-(3 × npx, 3 × pnpm, 3 × yarn, 1 × just), five a `workspace:` protocol npm does not speak, and one a
-workspace sibling the recipe did not build first. A further fifteen are `Fault::Policy`: the
-enforced tier doing what it was asked, mostly a host the build may not reach. Nineteen are the
-package's own build, eleven produced no strategy at all, and four are upstream's.
+**Sixteen of npm's 65 non-compared targets are our fault:** ten a missing tool (3 × npx, 3 × pnpm,
+3 × yarn, 1 × just), five a `workspace:` protocol npm does not speak, and one a workspace sibling
+the recipe did not build first. A further fifteen are `Fault::Policy`: the enforced tier doing what
+it was asked, most of them a host the build may not reach. Nineteen are the package's own build,
+eleven produced no strategy, and four are upstream's.
 
-Those first sixteen stay out of the reproduction rate by design — only `Fault::Build` says anything
-about the package ([`02-domain-model.md`](docs/02-domain-model.md) §4) — but they are inside the
-*reach* figure, which should therefore be read as a floor.
+The reproduction rate leaves those first sixteen out by design, since only `Fault::Build` says
+anything about the package ([`02-domain-model.md`](docs/02-domain-model.md) §4). They are inside the
+*reach* figure, so read that figure as a floor.
 
-The six that were a mirror handing the build a body it could not read are gone from this list: that
-was npm corrupting its own concurrent fetches, and those targets now reach a comparison. The three
-npx failures have been fixed since the sweep and are still counted above, because they have not been
-re-run.
+The six that showed up as a mirror handing the build a body it could not read are gone from this
+list: npm was corrupting its own concurrent fetches, and those targets now reach a comparison. We
+have fixed the three npx failures since the sweep, but they still count above because we have not
+re-run them.
 
-What stops a target reaching a comparison is mostly named rather than mysterious — a base image
-missing a tool, a package whose install fetches from a forge, a monorepo member we build outside its
-workspace. [`16-findings.md`](docs/16-findings.md) §3.25 has the breakdown and what each one costs.
+Most targets that fail to reach a comparison fail for a known reason: a base image missing a tool, a
+package whose install fetches from a forge, a monorepo member we build outside its workspace.
+[`16-findings.md`](docs/16-findings.md) §3.25 has the breakdown and the cost of each.
 
-PyPI was 5 of 15 that morning. The lift came from three deterministic fixes and no model at all;
+PyPI was 5 of 15 that morning. Three deterministic fixes produced the lift, with no model involved;
 [`docs/16-findings.md`](docs/16-findings.md) §2 has the arithmetic.
 
 ## Verify a package end to end
 
-Two real targets, start to finish. Both need `podman` and take a few minutes each, most of it
-pulling the base image the first time.
+Both examples below rebuild a real target, start to finish; both need `podman` and take a few
+minutes each, most of it spent pulling the base image the first time.
 
 ### An npm package
 
@@ -261,19 +261,19 @@ $ trigon rebuild pkg:npm/left-pad@1.3.0 \
   members  10 identical, 0 differ, 0 upstream-only, 0 rebuild-only
 ```
 
-`normalized` rather than `exact`: the two tarballs differ in mtimes, file modes and member order,
-all of which the stabilizers remove, and in nothing else.
+The verdict is `normalized` rather than `exact` because the two tarballs differ in mtimes, file
+modes and member order, all of which the stabilizers remove, and in nothing else.
 
-Note the `rebuild` raw digest is not the one in the first example. That was a different run at a
+The `rebuild` raw digest differs from the one in the first example. That was a different run at a
 different egress tier, and a fresh `npm pack` does not produce the same bytes twice. The
-**stabilized** digest is `f0a01941419d…` in both, which is the entire point: the verdict is a
-property of the package, not of the afternoon it was rebuilt on.
+**stabilized** digest is `f0a01941419d…` in both, so the verdict does not depend on which run
+rebuilt the package.
 
-The `mirror` line is the evidence that the dependency index was pinned to the publish date.
-The count is across all 69 packuments the build fetched, not left-pad's own — left-pad has published
-nothing since 2018, so none of its fifteen versions were withheld. The thousand-odd come from its
-devDependency tree, where `fast-check` alone accounts for 198 versions that did not exist in April
-2018, `core-js` for 180 and `glob` for 73.
+The `mirror` line is the evidence that the build saw the dependency index as it stood on the publish
+date. The count covers all 69 packuments the build fetched, not only left-pad's: left-pad has
+published nothing since 2018, so the mirror withheld none of its fifteen versions. The thousand-odd
+come from its devDependency tree, where `fast-check` accounts for 198 versions that did not exist in
+April 2018, `core-js` for 180 and `glob` for 73.
 
 ### A PyPI package
 
@@ -296,14 +296,14 @@ $ trigon rebuild pkg:pypi/chardet@7.6.0 \
   members  41 identical, 0 differ, 0 upstream-only, 0 rebuild-only
 ```
 
-`exact` is the strongest outcome there is: the rebuilt wheel is byte-for-byte the published one,
-before any stabilizer ran.
+`exact` is the strongest outcome: the rebuilt wheel is byte-for-byte the published one, before any
+stabilizer ran.
 
 ### Signing it, and checking the signature
 
-`--store` records the run so a **separate process** can sign it. That separation is the point: the
-process that ran the build could record any outcome it liked, so the attestor re-derives the claim
-from the artifact bytes before it signs anything.
+`--store` records the run so a **separate process** can sign it. The process that ran the build
+could record any outcome it liked, so the attestor re-derives the claim from the artifact bytes
+before it signs anything.
 
 ```
 $ trigon keygen --out key.bin                # 0600, and refuses to overwrite an existing key
@@ -323,23 +323,22 @@ rederived exact under wheel@738725964c4a — signing
 signed with key 8238c7031caabae5
 ```
 
-`rederived exact … — signing` is the load-bearing line. The attestor did not take the run record's
-word for the outcome: it fetched both artifacts from the store **by hash**, checked each against the
-hash it asked for, recomputed the comparison, and would have refused to sign had the answer differed.
-The statements are filed under the run's id, so signing another run of the same package, or this
-run again, adds statements beside these and never replaces them.
+`rederived exact … — signing` means the attestor did not take the run record's word for the outcome:
+it fetched both artifacts from the store **by hash**, checked each against the hash it asked for,
+recomputed the comparison, and would have refused to sign had the answer differed. `trigon attest`
+files the statements under the run's id, so signing another run of the same package, or this run
+again, adds statements beside these and never replaces them.
 
-**That transcript is from before 2026-09-27, and this run is signed differently today.** It ran at
-`--egress open`, where nothing the build produced is evidence about the package, and the
-publication gate calls such a run void. `trigon attest` now signs a void run as `void/v1` — the
-reason, the facts that establish it, and no verdict — and nothing else, so attesting this run today
-prints `void      open_egress: …` and files `void.intoto.json`. A run at `--egress mirror-only` or
-`deny-all` is signed as `equivalence/v2` or `divergence/v2`, which carry everything a published
-record needs ([`docs/09`](docs/09-attestations.md) §2.5). The `equivalence/v1` statement written
-then still verifies exactly as below.
+**That transcript is from before 2026-09-27, and `trigon attest` signs this run differently today.**
+It ran at `--egress open`, where nothing the build produced is evidence about the package, and the
+publication gate calls such a run void. `trigon attest` now signs a void run only as `void/v1` (the
+reason, the facts that establish it, and no verdict), so attesting this run today prints
+`void      open_egress: …` and files `void.intoto.json`. It signs a run at `--egress mirror-only` or
+`deny-all` as `equivalence/v2` or `divergence/v2`, which carry everything a published record needs
+([`docs/09`](docs/09-attestations.md) §2.5). The `equivalence/v1` statement written then still
+verifies as shown below.
 
-Anyone holding the two artifacts can now check that claim without trusting us, and without a
-network:
+Anyone holding the two artifacts can now check that claim without trusting us and without a network:
 
 ```
 $ trigon verify-attestation \
@@ -356,28 +355,29 @@ signature verified
 rederived exact under wheel@738725964c4a — the claim holds
 ```
 
-Drop `--public-key` and it still re-derives; it says only that the signature was present and unchecked,
-because "unsigned" and "signed by someone you do not trust" are different answers. Edit the payload
-and the signature fails. Edit the claimed outcome and **the bytes refute it even with no key at
-all** — which is the property that makes an attestation from a rebuilder worth anything.
+Drop `--public-key` and it still re-derives, reporting only that the signature was present and
+unchecked, because "unsigned" and "signed by someone you do not trust" are different answers. Edit
+the payload and the signature fails. Edit the claimed outcome and **the bytes refute it even with no
+key**; an attestation from a rebuilder is worth something only because of that property.
 
 ### Publishing it
 
-Signing is local: `trigon attest` writes into the store and opens no socket. Publishing is its own
-step, `trigon publish`, which asks the publication gate about each run and writes what it allows to
-a git repository holding the signed records, the evidence to re-derive each one, and an append-only
-log we sign — one commit per publication, pushed without force, its checkpoint signed by `trigon log
-sign`, the only thing that holds the log's key ([`docs/using-trigon.md`](docs/using-trigon.md)).
-Rotating either key is a leaf of that log too, which every client follows (`trigon log
-key-change`, `trigon log succeed`). [`docs/19`](docs/19-distribution-and-lookup.md) is the design
-and its build plan, and [ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md) records why
-it replaced the Rekor client that used to be described here.
+Signing is local: `trigon attest` writes into the store and opens no socket. Publishing is a
+separate step, `trigon publish`, which asks the publication gate about each run and writes what it
+allows to a git repository holding the signed records, the evidence to re-derive each one, and an
+append-only log we sign. Each publication is one commit, pushed without force, with its checkpoint
+signed by `trigon log sign`, the only thing that holds the log's key
+([`docs/using-trigon.md`](docs/using-trigon.md)). Rotating either key is also a leaf of that log,
+which every client follows (`trigon log key-change`, `trigon log succeed`).
+[`docs/19`](docs/19-distribution-and-lookup.md) is the design and its build plan, and
+[ADR-0014](docs/adr/0014-git-evidence-store-without-rekor.md) records why it replaced the Rekor
+client this README used to describe.
 
 ### Checking a lockfile against it
 
-The consumer's front door. Trust a repository once, and every lockfile after that is answered from
-a clone you verified yourself — one sync, then no request per package, and nothing told which
-packages you asked about:
+As a consumer, you trust a repository once, and Trigon answers every lockfile after that from a
+clone you verified yourself. That takes one sync, then no request per package, and nothing learns
+which packages you asked about:
 
 ```
 $ trigon evidence add trigon https://github.com/owner/trigon-evidence.git \
@@ -386,33 +386,34 @@ $ trigon check package-lock.json          # every package, by the integrity dige
 $ trigon lookup ./left-pad-1.3.0.tgz      # one artifact: every record, and how to falsify it
 ```
 
-Each source you trust answers for itself, sources that disagree are said to, and a package no
-source holds a record for reads *never checked*, never as a pass. The exit codes are for CI: `1`
-for a divergence, `2` never checked, `4` anything that failed verification.
+Each source you trust answers for itself, the output says when sources disagree, and a package no
+source holds a record for reads *never checked*, never as a pass. The exit codes are for CI: `1` for
+a divergence, `2` never checked, `4` anything that failed verification.
 [`docs/using-trigon.md`](docs/using-trigon.md) has the rest, `--remote` and the falsifying command
 among it; `trigon check --store <path>` is the old check against a store of your own runs.
 
-A signature says *who*, never *when*. A statement carries no third-party time, so nothing bounds
-what a stolen key can sign ([threat model](docs/threat-model.md) D24), and publishing will not change
-that until docs/19 D6 is decided. Keep the key where [`docs/12`](docs/12-security.md) §9 puts it:
-never in a worker that has executed a build.
+A signature says *who* signed but not *when*. A statement carries no third-party time, so nothing
+bounds what a stolen key can sign ([threat model](docs/threat-model.md) D24), and publishing will
+not change that until docs/19 D6 is decided. Keep the key where [`docs/12`](docs/12-security.md) §9
+puts it: never in a worker that has executed a build.
 
 ### Comparing two files you already have
 
-No registry, no container, no network:
+You need no registry, container or network:
 
 ```
 $ trigon verify upstream.tgz rebuild.tgz
 ```
 
-This is the whole judgement half, and it is the part with no prerequisites at all.
+That comparison is the whole judgement half.
 
 ### A note on `--egress open`
 
 `open` lets the build reach the internet, which is the quick way to try this. It is also the weaker
-claim, and the attestation says so: `attestable: false`, because a run with no enforced mirror
+claim, and the attestation says so with `attestable: false`, because a run with no enforced mirror
 cannot show the build fetched nothing it should not have. `--egress mirror-only` puts the build on a
-network whose only route out is the time-filtered mirror, and needs that mirror's image built first:
+network whose only route out is the time-filtered mirror, and you need to build that mirror's image
+first:
 
 ```
 $ trigon mirror-image          # compiles trigon in a container; several minutes
@@ -431,12 +432,12 @@ $ trigon rebuild pkg:npm/left-pad@1.3.0 --image <the base image's id> --work ./w
   cost       21.2s building, 21.4 MB fetched, 66.1 KB stored
 ```
 
-**That `network` line is what `attestable: true` means, and it is the whole of the difference.** The
-mirror is the build's only route out, and it writes down every response body it serves: the route,
-the URL, the SHA-256 of the bytes as served, the byte count, and how far the artifact guard got with
-each one. `network.jsonl` is that list, one JSON object per line, and the signed
-`buildobservation/v1` names it by hash — so a reader fetches those bytes, checks them against the
-hash, and reads what the build downloaded, rather than taking our word that we looked.
+**That `network` line is what `attestable: true` means, and it is the only difference from
+`attestable: false`.** The mirror is the build's only route out, and it writes down every response
+body it serves: the route, the URL, the SHA-256 of the bytes as served, the byte count, and how far
+the artifact guard got with each one. `network.jsonl` is that list, one JSON object per line, and
+the signed `buildobservation/v1` names it by hash, so a reader fetches those bytes, checks them
+against the hash, and reads what the build downloaded without taking our word that we looked.
 
 ```json
 {"route":"toolchain","url":"https://nodejs.org/dist/v9.2.1/node-v9.2.1-linux-x64.tar.gz",
@@ -445,48 +446,49 @@ hash, and reads what the build downloaded, rather than taking our word that we l
  "sha256":"6d08de7ac3190fb9…","bytes":46606,"checked":"generated","withheld":0}
 ```
 
-`checked` is the field that keeps the guard honest: `opened` means every member was compared against
-the run's manifest, `hashed` means only the whole body was, `partial` means the build hung up before
-the body finished. Without it, "opened and clean" and "never opened" read identically — and they are
-the difference between a check and the appearance of one.
+The `checked` field records how far the guard got: `opened` means the guard compared every member
+against the run's manifest, `hashed` means it compared only the whole body, and `partial` means the
+build hung up before the body finished. Without the field, "opened and clean" and "never opened"
+would read the same, and a reader could not tell whether the guard had checked anything.
 
 `deny-all` is attestable too, and its account is complete and *empty*: with `--network none` on both
-the image build and the run there is no interface, so "nothing crossed" is enforced by the kernel
-rather than observed by a proxy. Present-and-empty and absent are kept apart the whole way down — an
-empty blob, no blob, and `attestable` derived from which — because collapsing them would turn "we
-never looked" into "we looked and it was clean".
+the image build and the run there is no interface, so the kernel enforces "nothing crossed" rather
+than a proxy observing it. Trigon keeps present-and-empty and absent apart at every layer (an empty
+blob, no blob, and `attestable` derived from which), because collapsing them would turn "we never
+looked" into "we looked and it was clean".
 
-What it does *not* assert: that the sandbox class, the base image or the strategy are good enough to
-sign. Those are separate claims. Reading `attestable` as "full trust" is how a control starts
-reporting success it has not earned.
+`attestable` does *not* assert that the sandbox class, the base image or the strategy are good
+enough to sign; those are separate claims. Reading `attestable` as "full trust" credits it with a
+success it has not earned.
 
 Both images are built from this workspace, so the mirror goes stale when the mirror code changes.
 `rebuild` compares the two and says so before the build starts rather than after it fails inside the
 island.
 
-At this tier **no phase reaches the network.** The image build runs with `--network none`, so the
-source cannot be cloned there — it is fetched on the host at the pinned commit and copied in, and
+At this tier **no phase reaches the network.** The image build runs with `--network none`, so it
+cannot clone the source; Trigon fetches it on the host at the pinned commit and copies it in, and
 the checkout step becomes the check that the copy landed on the right commit. The deps phase runs
 inside the island and reaches the mirror; the toolchain comes through the mirror's `/-toolchain/`
-route, and dependencies through `/-artifact/`. Both routes are compiled-in exact-match allowlists
-and refuse everything else.
+route and dependencies through `/-artifact/`. Both routes are compiled-in exact-match allowlists
+that refuse everything else.
 
 With no network there is also no `apt-get`, so the setup phase stops installing and starts checking:
 it reads the package manager's own database, names anything the base image is missing, and prints
 the `trigon base-image` line that fixes it.
 
-What the tier does **not** claim: the allowlists bound which hosts the mirror will fetch from, never
-what those hosts serve — `registry.npmjs.org` serves whatever anybody published. The artifact guard
-is the control for that. And the source is fetched on the host, outside the boundary, bounded only
-by the checkout's own rules: https only, a full commit id only, no ambient git configuration, no
-credential helper, and a tree that is read and copied but never executed.
+The tier does **not** bound what the allowed hosts serve: the allowlists bound which hosts the
+mirror will fetch from, and `registry.npmjs.org` serves whatever anybody published. The artifact
+guard is the control for that. Nor does the tier cover the source, which Trigon fetches on the host,
+outside the boundary, where only the checkout's own rules bound it: https only, a full commit id
+only, no ambient git configuration, no credential helper, and a tree that is read and copied but
+never executed.
 
 ### Asking a model
 
-Off unless you name a provider. The ladder tries a checked-in definition, then the ecosystem
-heuristic, and only then — if `--model` says so — asks a model for a strategy. The model rung answers
-for npm and PyPI only: on a crates.io or NuGet target `--model` adds no rung at all, though it still
-drives the repair loop below.
+Model use is off unless you name a provider. The ladder tries a checked-in definition, then the
+ecosystem heuristic, and last, if `--model` says so, asks a model for a strategy. The model rung
+answers for npm and PyPI only: on a crates.io or NuGet target `--model` adds no rung, though it
+still drives the repair loop below.
 
 ```
 $ trigon rebuild pkg:npm/some-package@1.0.0 --model ollama:qwen2.5:0.5b …
@@ -498,31 +500,32 @@ $ trigon rebuild …  --model compatible:http://host/v1#m  # vLLM, llama.cpp, a 
 $ trigon rebuild …  --model replay:run.transcript.json   # a recording; opens no socket
 ```
 
-Keys are read from the environment, never the command line. A model rung needs the repository, so
-it fetches the pinned commit to a local cache first; it declines where there is no source, no
+Trigon reads keys from the environment, never the command line. A model rung needs the repository,
+so it fetches the pinned commit to a local cache first; it declines where there is no source, no
 commit, or an answer that will not parse, and the ladder moves on.
 
-When a build fails — or succeeds and produces something that is not the published artifact — the
-recipe, the failure and the compressed log go back to the model for another attempt, bounded: six
-iterations, a token budget, a wall clock, and a stop as soon as two attempts fail the same way.
+If a build fails, or succeeds and produces something that is not the published artifact, Trigon
+sends the recipe, the failure and the compressed log back to the model for another attempt. The loop
+is bounded: six iterations, a token budget, a wall clock, and a stop as soon as two attempts fail
+the same way.
 
-A model-derived recipe is recorded as `derivation: model_assisted` **beside** the claim, never
+Trigon records a model-derived recipe as `derivation: model_assisted` **beside** the claim, never
 inside it, so a consumer can filter on "no model touched this". It does not change the match
-outcome: the provenance cap is about *stabilizers*, and a model-authored one can only ever reach
-`normalized_with_caveats`. What keeps a model-written recipe honest is the artifact guard — a build
-that downloads its own published output is `Void` however it was derived.
+outcome: the provenance cap is about *stabilizers*, and a model-authored stabilizer can reach
+`normalized_with_caveats` at best. The artifact guard still applies to a model-written recipe: a
+build that downloads its own published output is `Void` however it was derived.
 
-`copilot` is an agent with a shell on your machine, and it is configured here so the model sees no
-tools at all. Read the module documentation in `trigon-ai/src/copilot.rs` before using it.
+`copilot` is an agent with a shell on your machine; Trigon configures it so the model sees no tools.
+Read the module documentation in `trigon-ai/src/copilot.rs` before using it.
 
-The artifact guard runs either way. If the package's own published bytes — or any of its member
-files — arrive over the network, the run is `Void`: not a pass and not a failure, because a build
-that downloads its own output reproduces it perfectly and proves nothing.
+The artifact guard runs either way. If the package's own published bytes, or any of its member
+files, arrive over the network, the run is `Void`, which is neither a pass nor a failure: a build
+that downloads its own output reproduces it without proving anything.
 
 ## Watching a sweep, or reading the runs you already have
 
-`trigon sweep` prints its summary once, at the end, into the terminal that launched it. `trigon
-watch` reads the same work directory from somewhere else, while the sweep is still running:
+`trigon sweep` prints its summary once, at the end, into the terminal that launched it.
+`trigon watch` reads the same work directory from somewhere else, while the sweep is still running:
 
 ```
 $ trigon sweep corpora/m1-npm-smoke.txt --image <digest> --work ./sweeps/npm …
@@ -530,17 +533,17 @@ $ trigon watch ./sweeps/npm --targets corpora/m1-npm-smoke.txt     # in another 
 watching on http://127.0.0.1:8099  (read-only; ctrl-c to stop)
 ```
 
-The board, the two rates with their denominators printed, and the failure clusters ranked by size —
-then a cluster page that says whether forty red rows are one problem or three, and a run page with
-the log and what the ladder decided.
+It serves the board (the two rates with their denominators printed, and the failure clusters ranked
+by size), a cluster page that says whether forty red rows are one problem or three, and a run page
+with the log and what the ladder decided.
 
-It never talks to the sweep. It reads the files the sweep already writes, so it survives the sweep's
-death: every completed result stays on the page, the silence is labelled with its age, and the
-target that was in flight is reported as unknown rather than converted into a failure. Read-only —
-there is no write path, and a cluster hands you the `trigon rebuild` line to paste.
+`trigon watch` never talks to the sweep. It reads the files the sweep already writes, so it survives
+the sweep's death: every completed result stays on the page, the page labels the silence with its
+age, and it reports the target that was in flight as unknown rather than converting it into a
+failure. It has no write path, and a cluster hands you the `trigon rebuild` line to paste.
 
-Point it at a directory of runs and it reads that instead — one row per rebuild, with the verdict,
-the commit it was built from, when and what it cost:
+Point it at a directory of runs and it reads that instead, one row per rebuild, with the verdict,
+the commit it was built from, when, and what it cost:
 
 ```
 $ trigon watch ./work                                              # no sweep anywhere
@@ -564,17 +567,18 @@ fraction of, no progress, and no sweep to be alive or dead
  18 reproduced  1 divergent  0 build failed  1 no strategy  4 ours  0 void
 ```
 
-Counts, not a rate: a directory you filled by hand has no corpus for a percentage to be of. The run
-page opens with one sentence saying what happened — the error, the void, or *why each rung declined*
-— before any panel.
+This view shows counts and no rate, because a directory you filled by hand has no corpus for a
+percentage to be of. The run page opens with one sentence saying what happened (the error, the
+void, or *why each rung declined*) before any panel.
 
-Loopback by default, because a work directory holds artifacts fetched from registries and build logs
-that may carry credentials. [`docs/18`](docs/18-management-ui.md) has the plan it is being built to.
+It binds to loopback by default, because a work directory holds artifacts fetched from registries
+and build logs that may carry credentials. [`docs/18`](docs/18-management-ui.md) has the plan it is
+being built to.
 
 ## The two halves
 
-The system is one idea: **rebuild verification is a search problem wrapped in an equivalence
-problem.** Search is where a model helps. Equivalence is where it must never be trusted.
+The system rests on one idea: **rebuild verification is a search problem wrapped in an equivalence
+problem.** A model helps with search, and Trigon never trusts one with equivalence.
 
 ```
                          trigon-core
@@ -595,12 +599,12 @@ problem.** Search is where a model helps. Equivalence is where it must never be 
 ```
 
 Everything above the line is synchronous, declares no cargo features, and cannot reach `tokio`,
-`reqwest` or `trigon-ai`. Everything below it is budgeted and replayable. `trigon-ai` is forbidden
-from naming `trigon-compare`, `trigon-stabilize` or `trigon-archive` — the invariant read from the
-other side, because a crate that cannot name a function cannot call it.
+`reqwest` or `trigon-ai`. Everything below it is budgeted and replayable. The policy forbids
+`trigon-ai` from naming `trigon-compare`, `trigon-stabilize` or `trigon-archive`, which is the
+invariant read from the other side, because a crate that cannot name a function cannot call it.
 
-`cargo run -p xtask -- policy` enforces all of it and fails the build on a violation. The claim a
-sceptic can check without reading any of this is `cargo tree` on the verifier build.
+`cargo run -p xtask -- policy` enforces all of it and fails the build on a violation. A sceptic can
+check the claim without reading any of this by running `cargo tree` on the verifier build.
 
 ## Layout
 
@@ -647,26 +651,26 @@ cargo build -p trigon-stabilize-wasm --target wasm32-unknown-unknown --release
 cargo test  -p trigon-stabilize-wasm --features host
 ```
 
-The judgement half — `core`, `archive`, `stabilize`, `compare`, `attest` — is at **88.4% of lines**;
+The judgement half (`core`, `archive`, `stabilize`, `compare`, `attest`) is at **88.4% of lines**;
 the workspace is at 69.0%, or 71.4% with `TRIGON_LIVE=1` set so the tests that need a network run.
-That split is deliberate: the judgement half is what the verifier binary contains, what a third party
+The split is on purpose: the judgement half is what the verifier binary contains, what a third party
 re-derives a verdict with, and the only part whose bugs are silent. A divergence is self-consistent,
 so both sides get the same wrong treatment and the failure surfaces as a wrong verdict rather than a
 crash.
 
 **The judgement half is the one number that does not move between those two runs.** It is 88.4%
-either way, which is the architecture's central claim measured rather than asserted: every line of
-that half which is covered at all is covered by a test that opens no socket.
+either way: every covered line in that half is covered by a test that opens no socket, which is the
+architecture's central claim, measured.
 
-Rust 1.85 or later, edition 2024. Rebuilds additionally need `podman`; nothing else has
-prerequisites, and `trigon verify` has none at all.
+Building Trigon needs Rust 1.85 or later, edition 2024. Rebuilds also need `podman`. Nothing else
+has prerequisites, `trigon verify` included.
 
 ## Reading the design
 
 Start with [`docs/00-overview.md`](docs/00-overview.md) for the thesis, then
-[`docs/05-archive-and-normalization.md`](docs/05-archive-and-normalization.md) for the part that is
-hard, then [`docs/12-security.md`](docs/12-security.md) for the attack that shapes everything else.
-[`docs/16-findings.md`](docs/16-findings.md) is what the design got wrong, measured.
+[`docs/05-archive-and-normalization.md`](docs/05-archive-and-normalization.md) for the hard part,
+then [`docs/12-security.md`](docs/12-security.md) for the attack that shapes the rest of the design.
+[`docs/16-findings.md`](docs/16-findings.md) measures what the design got wrong.
 
 ## License
 
@@ -676,8 +680,8 @@ Apache-2.0.
 
 ## Running a fleet
 
-Four commands, and they compose. The queue is SQLite on a laptop and Postgres in a cloud; the same
-statements serve both, and which one you get comes from the URL.
+A fleet runs on four commands that compose. The queue is SQLite on a laptop and Postgres in a cloud;
+the same statements serve both, and the URL decides which one you get.
 
 ```console
 $ trigon enqueue sqlite://queue.db pkg:npm/left-pad@1.3.0 --migrate
@@ -688,14 +692,14 @@ $ trigon worker sqlite://queue.db --image auto --work ./work --store ./store
 worker host-4821 on sqlite://queue.db, building with auto at egress mirror-only
 ```
 
-A job goes to exactly one worker. A worker that dies releases its job without anybody noticing —
-the lease is a timestamp, not a lock, so nothing has to observe the death. The run and the
-acknowledgement land in one transaction, so nothing is built twice.
+A job goes to exactly one worker. A worker that dies releases its job by itself: the lease is a
+timestamp, not a lock, so nothing has to observe the death. The run and the acknowledgement land in
+one transaction, so nothing is built twice.
 
-**A verdict enqueues a second, independent attempt**, and that is what makes anything publishable:
-[`ADR-0010`](docs/adr/0010-publish-divergences.md)'s first safeguard is two agreeing attempts,
-divergences and matches alike, because one attempt cannot tell a deterministic recipe from a lucky
-one.
+**A verdict enqueues a second, independent attempt**, and publication depends on it:
+[`ADR-0010`](docs/adr/0010-publish-divergences.md)'s first safeguard is two agreeing attempts, for
+divergences and matches alike, because a single attempt cannot show that its recipe is
+deterministic.
 
 Then serve it:
 
@@ -705,30 +709,30 @@ serving 2 run(s) on http://127.0.0.1:8100  (public: an unauthenticated reader se
 publication gate released, and no unredacted bytes)
 ```
 
-A run's page is the comparison, rendered: why this is the verdict (the three questions, with the
-one that answered marked), what differs, what the package holds, the stabilizer ledger with each
-pass's risk and provenance, and every member with what differed about it — the file's own bytes, or
-only its archive entry. The raw blobs are still there underneath, because a page is what a reader
-wants and the bytes are what a third party re-derives a verdict from.
+A run's page renders the comparison: the reason for the verdict (the three questions, with the one
+that answered marked), what differs, what the package holds, the stabilizer ledger with each pass's
+risk and provenance, and every member with what differed about it (the file's own bytes, or only its
+archive entry). The raw blobs are still there underneath, because a reader wants a page and a third
+party re-derives a verdict from the bytes.
 
 Click a member that differs and it opens: a line diff where the bytes are text, a hex diff centred
-on the differing runs where they are not, and a download for each copy. Binaries open as hex, which
-is decided from the bytes rather than from the filename. On `Newtonsoft.Json@11.0.1` that is how
-you find out the rebuild drops `<owners>` from the `.nuspec` and that the DLLs differ at offset
-0x88 — the PE timestamp.
+on the differing runs where they are not, and a download for each copy. Binaries open as hex, and
+the page tells a binary from its bytes rather than its filename. On `Newtonsoft.Json@11.0.1` that is
+how you find out the rebuild drops `<owners>` from the `.nuspec` and that the DLLs differ at offset
+0x88, the PE timestamp.
 
-`--public` turns on two controls at once, and there is no way to ask for half: the publication
-gate, so nothing reaches an anonymous reader until two attempts agree and the run was not built at
-an open egress tier; and the evidence class table, so no build log or network transcript leaves the
-process. Build logs are stored unredacted, and until this existed the only thing protecting them
-was that `trigon watch` binds to loopback.
+`--public` turns on two controls together, and you cannot ask for one without the other: the
+publication gate, so nothing reaches an anonymous reader until two attempts agree and the run was
+not built at an open egress tier; and the evidence class table, so no build log or network
+transcript leaves the process. Trigon stores build logs unredacted, and before this existed the only
+thing protecting them was that `trigon watch` binds to loopback.
 
-Reading is anonymous. Asking costs a credential and a quota:
+Reading is anonymous, and asking costs a credential and a quota:
 
 ```console
 $ trigon grant sqlite://queue.db alice --scopes request --daily-quota 20
 token      27807464512f…                    # shown once; only its digest is stored
 ```
 
-See [`docs/22-management-layer.md`](docs/22-management-layer.md) for what is built, what is
-planned, and which of the two each stage is.
+[`docs/22-management-layer.md`](docs/22-management-layer.md) lists each stage and whether it is
+built or planned.

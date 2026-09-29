@@ -7,33 +7,32 @@ controlled environment, and decides whether the rebuild and the published artifa
 thing. It signs an attestation either way.
 
 It is designed for npm, PyPI, crates.io, RubyGems, NuGet, and arbitrary GitHub projects behind a
-single extension seam. It runs as one binary on a laptop or as a fleet on any cloud. It uses LLMs
-hard for the parts that are a search problem, and not at all for the parts that are a correctness
-problem.
+single extension seam, and runs as one binary on a laptop or as a fleet on any cloud. It makes heavy
+use of LLMs for the parts that are a search problem and no use of them for the parts that are a
+correctness problem.
 
-**These documents are the design, written before the code.** Where the two disagree the code wins,
-and [`16-findings.md`](16-findings.md) records which. Two things to carry into every chapter here:
-**npm, PyPI, crates.io and NuGet are the ecosystems with a registry client** — RubyGems and GitHub
-releases are refused by name, and [`03-ecosystems.md`](03-ecosystems.md) §7.2 has the honest count
-of what adding one costs — and several types these documents describe were never written, each
-now marked where it is named.
+**These documents are the design, written before the code.** The code wins where the two disagree,
+and [`16-findings.md`](16-findings.md) records which. First, **npm, PyPI, crates.io and NuGet are
+the ecosystems with a registry client**: Trigon refuses RubyGems and GitHub releases by name, and
+[`03-ecosystems.md`](03-ecosystems.md) §7.2 counts what adding one costs. Second, several types
+these documents describe were never written; we have marked each where the documents name it.
 
 ---
 
 ## The thesis
 
 Rebuild verification is a search problem wrapped in an equivalence problem. Finding the source,
-guessing the build, and repairing a failure are search. Deciding whether two artifacts are the same
-thing is equivalence. Models handle search well. They have no place in the equivalence.
+guessing the build, and repairing a failure are search; deciding whether two artifacts are the same
+thing is equivalence. Models handle search well and have no place in the equivalence.
 
-Everything in this design follows from that split. See [`00-overview.md`](00-overview.md).
+The rest of the design follows from that split; see [`00-overview.md`](00-overview.md).
 
 ---
 
 ## Document set
 
-**New here?** Start with [`introduction.md`](introduction.md): what Trigon is, how it works and how
-to use it, in ten minutes.
+**New readers:** start with [`introduction.md`](introduction.md), a ten-minute read on what Trigon
+is, how it works and how to use it.
 
 | Doc | Read it for |
 |---|---|
@@ -58,39 +57,41 @@ to use it, in ten minutes.
 | [`16-findings.md`](16-findings.md) | **What building it changed.** Corrections to these documents, the measured rates, and what is still open |
 | [`17-backlog.md`](17-backlog.md) | Agreed work not yet done, each with what "done" means |
 | [`18-management-ui.md`](18-management-ui.md) | The plan for `trigon watch`: monitoring a sweep from outside the process running it |
-| [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) | Where a verdict is published and how it is looked up: a public git repository holding the records and an append-only log we sign, consumed by cloning it and querying locally, and the phased build plan. Partly built, mostly planned; ADR-0014 (accepted) |
+| [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md) | Publishing a verdict and looking it up: a public git repository holding the records and an append-only log we sign, which consumers clone and query locally, and the phased build plan. Partly built, mostly planned; ADR-0014 (accepted) |
 | [`20-m4-plan.md`](20-m4-plan.md) | What M4 needs before it starts: the six exit criteria against the code, the measured cost of a 5,000-target sweep, and the order |
-| [`21-base-image-automation.md`](21-base-image-automation.md) | Deriving a base image automatically when a build needs a tool the image lacks, and what `--image auto` may and may not decide — design only |
+| [`21-base-image-automation.md`](21-base-image-automation.md) | Having Trigon derive a base image when a build needs a tool the image lacks, and what `--image auto` may and may not decide. Design only |
 | [`22-management-layer.md`](22-management-layer.md) | The decoupled front-end, the database, and multiple workers. Stages 0, 1, 2 and most of 3 and 4 are built: `trigon serve`, `trigon worker`, `trigon enqueue`, `trigon grant`, the ADR-0010 publication gate, the evidence classes and the queue. Each stage says what is built and what is still plan |
 | [`threat-model.md`](threat-model.md) | The contract with a consumer of a verdict: what is assumed, guaranteed, disclaimed, and out of scope |
-| [`threat-model.yaml`](threat-model.yaml) | The same, as a machine-readable index for triage. Generated from the prose by `scripts/threat-model-sidecar.py` |
+| [`threat-model.yaml`](threat-model.yaml) | The same, as a machine-readable index for triage. `scripts/threat-model-sidecar.py` generates it from the prose |
 | [`adr/`](adr/) | Short records for the load-bearing decisions |
 
 ## Suggested reading order
 
-- **New to Trigon?** [`introduction.md`](introduction.md), then [`using-trigon.md`](using-trigon.md).
-- **Evaluating the design?** `00`, `01`, `05`, `12`.
-- **Implementing?** `13` for what to build first, then `05` for the hard part, then `15` for the corpus it needs, then `02` and `04`.
-- **Operating it?** `10`, `08`, `11`.
-- **Consuming its output?** `09`, then run `trigon verify-attestation --rerun-comparison`.
-  `scripts/cross-machine-verify.sh` runs the whole thing end to end — it builds the verifier from a
-  fresh clone, hands it a bundle and two files with the network taken away, and requires three
-  different lies to be caught for three different reasons.
-- **Sceptical?** `14`, where two of the four examples come out with caveats, and `16`, which is the
-  list of things these documents got wrong.
+- **New to Trigon:** [`introduction.md`](introduction.md), then
+  [`using-trigon.md`](using-trigon.md).
+- **Evaluating the design:** `00`, `01`, `05`, `12`.
+- **Implementing:** `13` for what to build first, then `05` for the hard part, then `15` for the
+  corpus it needs, then `02` and `04`.
+- **Operating it:** `10`, `08`, `11`.
+- **Consuming its output:** `09`, then run `trigon verify-attestation --rerun-comparison`.
+  `scripts/cross-machine-verify.sh` runs the whole thing end to end: it builds the verifier from a
+  fresh clone, hands it a bundle and two files with the network taken away, and requires it to
+  catch three different lies for three different reasons.
+- **Sceptical:** `14`, where two of the four examples come out with caveats, and `16`, which lists
+  what these documents got wrong.
 
 ## Status
 
-**These documents were written before any code, and describe the system as intended rather than as
-built.** Where the two disagree, [`16-findings.md`](16-findings.md) records which is right and why;
-individual documents carry a note where a decision has been revised. Keeping the record separate is
-deliberate — amending each document in place would erase which beliefs were wrong and how they were
-found out, and that history is most of what a later reader needs.
+**We wrote these documents before any code, and they describe the system as intended rather than
+as built.** [`16-findings.md`](16-findings.md) records each place the two disagree, which one is
+right, and why; individual documents carry a note where we revised a decision. We keep that record
+separate on purpose: amending each document in place would erase which beliefs were wrong and how
+we found out, and that history is most of what a later reader needs.
 
-M0, M1 and M2 are complete, and M3 has begun. The top-level
-[`README`](../README.md) carries the current rates.
+M0, M1 and M2 are complete, and M3 has begun. The top-level [`README`](../README.md) carries the
+current rates.
 
-Every claim in these documents about the prior art was checked against the source of
+We checked every claim these documents make about the prior art against the source of
 [google/oss-rebuild](https://github.com/google/oss-rebuild) and
-[microsoft/OSSGadget](https://github.com/microsoft/OSSGadget), and every claim about ecosystem
-reproducibility rates is cited in [`03-ecosystems.md`](03-ecosystems.md).
+[microsoft/OSSGadget](https://github.com/microsoft/OSSGadget), and every claim these documents make
+about ecosystem reproducibility rates has its citation in [`03-ecosystems.md`](03-ecosystems.md).

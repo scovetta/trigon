@@ -1,52 +1,49 @@
 # Trigon in ten minutes
 
-**Trigon checks that a published package was really built from its source.** It downloads the
-package, finds the source it claims to come from, rebuilds it in a sealed container, and compares
-the two. Then it tells you, in one word, how far they agree — and signs that answer so anyone can
-check it without trusting us.
+**Trigon checks that a published package was built from its source.** It downloads the package,
+finds the source it claims to come from, rebuilds it in a sealed container, and compares the two.
+It reports in one word how far they agree, and signs that answer so anyone can check it without
+trusting us.
 
-This page is the short version: what it is, how it works, and how to use it. Everything here links
-to the detailed chapter behind it.
+The links on this page lead to the chapters with the detail.
 
 ---
 
 ## The question it answers
 
 Package registries ship **artifacts**: a `.tgz` on npm, a wheel on PyPI, a `.crate`, a `.nupkg`.
-People review **source**: the repository on GitHub. Almost nothing checks that the two correspond,
-and that gap is where build-time supply-chain attacks live — a compromised build machine or a
-malicious publisher can ship something the source never contained.
+Reviewers read **source**: the repository on GitHub. Almost nothing checks that the two
+correspond, and attackers use that gap at build time. A compromised build machine or a malicious
+publisher can ship something the source never contained.
 
-Trigon closes that gap for one package at a time, by asking exactly one question:
+Trigon closes the gap one package at a time. It asks one question:
 
 > **Does this published artifact correspond to that source?**
 
-It does **not** ask whether the package is safe. A package that faithfully builds a backdoor from
-its own source *reproduces*, and that is a correct answer. Trigon tells you the artifact is what the
-source makes; whether the source is any good is still yours to judge.
+It does **not** ask whether the package is safe. A package that builds a backdoor from its own
+source *reproduces*, and that is the correct answer. Trigon tells you the artifact is what the
+source makes; you still judge whether the source is any good.
 
 ---
 
 ## Five ideas
 
-Everything else in Trigon is detail around these five.
-
 **1. Rebuild it in a box.** Trigon finds the source at the right commit, works out a **recipe** (a
 *strategy*: install these dependencies, run this build), and runs it in a `podman` container. The
-recipe is data, not a script, so it can be stored, compared and replayed.
+recipe is data, not a script, so Trigon can store, compare and replay it.
 
 **2. The mirror is the only way out.** During the build, the container can reach one thing: a
-**mirror** of the package registry *as it stood when the package was published*. So a dependency
-resolves to the version the publisher got, not today's. Everything the mirror serves is hashed and
-written down, and if the build ever tries to download the very artifact it is being compared
-against, the run is thrown out as **void** — it would prove nothing. This is the `mirror-only`
-egress tier, and it is what makes a verdict worth signing.
+**mirror** of the package registry *as it stood when the package was published*. A dependency
+therefore resolves to the version the publisher got, not today's. The mirror hashes and records
+everything it serves. If the build tries to download the artifact it is being compared against,
+Trigon marks the run **void**, since such a run proves nothing. This setup, the `mirror-only`
+egress tier, makes a verdict worth signing.
 
 **3. Stabilizers remove harmless noise.** Two honest builds of the same source rarely match byte for
 byte: timestamps differ, files come out in a different order, compression settings vary.
-**Stabilizers** each remove one known kind of harmless difference, from both sides equally, and
-report exactly what they changed and how risky that change is. If you do not accept a particular
-stabilizer, you can see that it fired.
+Each **stabilizer** removes one known kind of harmless difference, the same way on both sides, and
+reports what it changed and how risky that change is. If you do not accept a particular stabilizer,
+you can see that it fired.
 
 **4. One word for the answer.** The comparison ends in one of four outcomes, strongest first:
 
@@ -54,17 +51,18 @@ stabilizer, you can see that it fired.
 |---|---|
 | `exact` | byte-for-byte identical, no stabilizer needed |
 | `normalized` | identical after low-risk, built-in stabilizers (timestamps, ordering, file modes) |
-| `normalized_with_caveats` | identical, but only after a stabilizer that changes content or that a person or a model wrote — read what fired |
+| `normalized_with_caveats` | identical, but only after a stabilizer that changes content or that a person or a model wrote; read what fired |
 | `divergent` | different, and Trigon names which files |
 
-…and one answer outside them: **`void`**, "we looked, and could not tell" — for example because the
-build could reach the open internet, or reached the artifact it was being compared against.
+One answer sits outside the four: **`void`**, meaning "we looked, and could not tell". A run is
+void when, for example, the build could reach the open internet or reached the artifact it was
+being compared against.
 
 **5. Evidence anyone can check.** Trigon signs its answer as a standard in-toto statement. Anyone
-holding the two artifacts can re-run the comparison themselves with a small verifier build that has
-no network access at all. Published answers go into an **evidence repository** — an ordinary git
-repository with an append-only, signed log — which a consumer clones and queries locally, so
-checking a thousand-package lockfile costs one download and tells nobody which packages you use.
+holding the two artifacts can re-run the comparison with a small verifier build that has no
+network access. Trigon publishes answers to an **evidence repository** (an ordinary git repository
+with an append-only, signed log), which a consumer clones and queries locally. Checking a
+thousand-package lockfile then costs one download and tells nobody which packages you use.
 
 ---
 
@@ -103,27 +101,27 @@ flowchart LR
     cmp --> sign
 ```
 
-**The design rests on one split.** Finding the source, guessing the recipe and repairing a failed
-build are a *search*: it can be messy, it may use the network, and a language model can help.
-Deciding whether two artifacts are the same is a *judgement*: it must be exact and repeatable. So
-Trigon keeps them apart, and enforces it:
+**The design splits search from judgement.** Finding the source, guessing the recipe and repairing
+a failed build are a *search*, which can be messy and may use the network or a language model.
+Deciding whether two artifacts are the same is a *judgement*, which must be exact and repeatable.
+Trigon keeps the two apart and enforces the split:
 
-- The **search half** — registry clients, source discovery, recipe inference, the sandbox, the
-  mirror, the optional model — lives in its own crates and may be as clever as it likes.
-- The **judgement half** — archive readers, stabilizers, the comparison, signing and verification —
+- The **search half** (registry clients, source discovery, recipe inference, the sandbox, the
+  mirror, the optional model) lives in its own crates and may be as clever as it likes.
+- The **judgement half** (archive readers, stabilizers, the comparison, signing and verification)
   links no network client, no async runtime and no model code. `cargo run -p xtask -- policy` fails
-  the build if that ever changes. The **verifier build** contains only this half, built with
-  `cargo build -p trigon --no-default-features`: it is what you hand to someone who wants to check a
-  claim without trusting our build machinery.
+  the build if that changes. The **verifier build**, made with
+  `cargo build -p trigon --no-default-features`, contains only this half. You hand it to someone who
+  wants to check a claim without trusting our build machinery.
 
-**Signing is a separate step on purpose.** `trigon rebuild` ran a stranger's build scripts, so it is
-not trusted to hold the key. `trigon attest` reads the stored bytes back, re-derives the verdict
-itself, and only then signs.
+**Signing is a separate step on purpose.** `trigon rebuild` ran a stranger's build scripts, so
+Trigon does not give it the key. `trigon attest` reads the stored bytes back and re-derives the
+verdict before it signs.
 
-**A verdict never publishes on one build.** It is published only after a second, independent attempt
-agrees — on another machine, or on the same machine starting cold (no build cache, fresh checkout).
-Divergences carry the command that would disprove them and a place to dispute them, because
-publishing one is a public claim about somebody else's package.
+**Trigon never publishes a verdict on one build.** It publishes only after a second, independent
+attempt agrees, either on another machine or on the same machine starting cold (no build cache,
+fresh checkout). A published divergence is a public claim about somebody else's package, so it
+carries the command that would disprove it and a place to dispute it.
 
 ### Where things live
 
@@ -134,9 +132,8 @@ publishing one is a public claim about somebody else's package.
 | an **evidence repository** | published records, their evidence, and the signed log | `trigon log init`, `trigon publish` |
 | `evidence.toml` | where you publish, and which evidence repositories you trust | you, or `trigon evidence add` |
 
-The crate map, the pipeline in full and the trust boundaries are in
-[`01-architecture.md`](01-architecture.md); the reasoning behind the split is
-[`00-overview.md`](00-overview.md).
+[`01-architecture.md`](01-architecture.md) has the crate map, the full pipeline and the trust
+boundaries; [`00-overview.md`](00-overview.md) has the reasoning behind the split.
 
 ---
 
@@ -148,12 +145,12 @@ Build it once:
 cargo build --release -p trigon          # the full tool: target/release/trigon
 ```
 
-Rust (the version in `rust-toolchain.toml`) is all you need to compare artifacts. Rebuilding a
-package also needs `podman`.
+Comparing artifacts needs only Rust (the version in `rust-toolchain.toml`). Rebuilding a package
+also needs `podman`.
 
 ### 1. Compare two files you already have
 
-No network, no containers, no setup.
+This needs no network, containers or setup.
 
 ```
 $ trigon verify wrappy-1.0.2.tgz rebuilt-wrappy-1.0.2.tgz
@@ -177,15 +174,15 @@ $ trigon verify wrappy-1.0.2.tgz rebuilt-wrappy-1.0.2.tgz
   members  4 identical, 0 differ, 0 upstream-only, 0 rebuild-only
 ```
 
-How to read it: the raw files differ (`≠`); after stabilizing, they are identical (`=`). The
-`applied` list says why: the gzip header, the order of files in the tarball, their modes, owners and
-timestamps — nothing inside any file. That list is the real content of the answer, so read it: it
-names every stabilizer that fired, how risky it is, and how many files it touched. The exit code is
-1 for `divergent` and 0 otherwise, so it drops into a script.
+In this output the raw files differ (`≠`), and after stabilizing they are identical (`=`). The
+`applied` list shows why: the stabilizers changed the gzip header, the order of files in the
+tarball, and their modes, owners and timestamps, but nothing inside any file. Read that list for
+the detail behind the verdict: each stabilizer that fired, how risky it is, and how many files it
+touched. The exit code is 1 for `divergent` and 0 otherwise, so it drops into a script.
 
 ### 2. Rebuild a package from its source
 
-Once, build the two helper images — one to build in, one to run the mirror:
+Build the two helper images once, one to build in and one to run the mirror:
 
 ```
 trigon base-image --from docker.io/library/debian:bookworm-slim
@@ -199,7 +196,7 @@ trigon rebuild pkg:npm/wrappy@1.0.2 --image auto --egress mirror-only --timewarp
     --work ./work --store ./store
 ```
 
-It prints each step — where the source is, which recipe it chose, what the mirror served — and ends
+It prints each step (where the source is, which recipe it chose, what the mirror served) and ends
 with the same verdict as `trigon verify`. `--store` keeps the run so you can sign it:
 
 ```
@@ -210,8 +207,8 @@ trigon attest <run-id> --store ./store --key signing.key
 
 ### 3. Check your dependencies against published evidence
 
-Point Trigon at an evidence repository you trust — its location can be an HTTPS or SSH git URL or a
-local path — with the two public keys its README lists:
+Point Trigon at an evidence repository you trust (an HTTPS or SSH git URL, or a local path), with
+the two public keys its README lists:
 
 ```
 trigon evidence add example https://github.com/<owner>/trigon-evidence.git \
@@ -221,17 +218,17 @@ trigon check package-lock.json            # or requirements.txt, or an SPDX SBOM
 trigon lookup pkg:npm/wrappy@1.0.2        # one package, with every detail of its record
 ```
 
-`check` lists every package with its answer, and a package nobody has checked says **never checked**
-— never a pass. Its exit code is made for CI: `0` everything passed, `1` a divergence, `2` something
-never checked or withdrawn, `3` a void or a result below your `--min`, `4` a record that failed
-verification or a source that could not answer, `5` Trigon itself failed.
+`check` lists every package with its answer. A package nobody has checked shows **never checked**,
+which does not count as a pass. The exit code is designed for CI: `0` everything passed, `1` a
+divergence, `2` something never checked or withdrawn, `3` a void or a result below your `--min`,
+`4` a record that failed verification or a source that could not answer, `5` Trigon itself failed.
 
 ### Try the whole loop
 
-`scripts/evidence-e2e.sh` does all of it on one machine in a few minutes: creates keys and a local
-evidence repository, rebuilds a package behind the mirror, confirms it with a second cold build,
-publishes the verdict, then checks it the way a consumer would — including two checks that must
-fail. Everything it makes is kept in `work/evidence-e2e/` for you to look through.
+`scripts/evidence-e2e.sh` runs the whole loop on one machine in a few minutes. It creates keys and a
+local evidence repository, rebuilds a package behind the mirror, confirms it with a second cold
+build, publishes the verdict, then checks it the way a consumer would, including two checks that
+must fail. It keeps everything it makes in `work/evidence-e2e/` for you to look through.
 
 ```
 cargo build -p trigon && scripts/evidence-e2e.sh
@@ -260,9 +257,9 @@ The full glossary is in [`00-overview.md`](00-overview.md) §6.
 
 ## What to read next
 
-- **To use it day to day:** [`using-trigon.md`](using-trigon.md) — every task, with real output, and
-  the section *What a verdict does not tell you*.
-- **To trust (or doubt) a verdict:** [`threat-model.md`](threat-model.md) — what Trigon assumes,
+- **To use it day to day:** [`using-trigon.md`](using-trigon.md), which covers every task with
+  real output and has the section *What a verdict does not tell you*.
+- **To trust (or doubt) a verdict:** [`threat-model.md`](threat-model.md), on what Trigon assumes,
   guarantees and disclaims.
 - **To publish verdicts or consume them:**
   [`19-distribution-and-lookup.md`](19-distribution-and-lookup.md).
