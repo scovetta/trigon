@@ -1,0 +1,997 @@
+/* Trigon: a static page. No build step, no fonts or scripts from any other host. */
+
+/* ---------------------------------------------------------------------------------------------
+   Tokens. Neutrals are a cool slate (hue near 215). Blue is the structural colour, as it is for
+   the CLI's labels; cyan marks data; green, yellow and red belong to the outcomes and to nothing
+   else, as in crates/trigon/src/style.rs.
+   --------------------------------------------------------------------------------------------- */
+:root {
+  color-scheme: light dark;
+
+  --bg: #f4f6f9;
+  --panel: #e8ecf1;
+  --panel-bar: #dde3ea;
+  --ink: #111923;
+  --ink-2: #36414e;
+  --muted: #55616e;
+  --rule: #cfd6df;
+  --rule-strong: #77838f;
+  --accent: #1c4ea3;
+  --accent-hover: #163f86;
+  --accent-ink: #ffffff;
+  --ident: #0a6273;
+  --ok: #17703a;
+  --warn: #7f5200;
+  --bad: #b3261e;
+  --focus: #1c4ea3;
+
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans",
+    "Liberation Sans", Arial, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", "SF Mono", "Cascadia Mono", "Segoe UI Mono",
+    "DejaVu Sans Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* One scale, ratio 1.25 from a 17px body. Nothing sets a size outside it. */
+  --fs-xs: 0.8125rem;
+  --fs-sm: 0.875rem;
+  --fs-0: 1.0625rem;
+  --fs-1: 1.3125rem;
+  --fs-2: 1.625rem;
+  --fs-3: 2.0625rem;
+  --fs-4: clamp(2.5625rem, 2rem + 2.4vw, 3.25rem);
+
+  --measure: 65ch;
+  --gutter: clamp(16px, 4vw, 40px);
+  --radius: 6px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1319;
+    --panel: #151c25;
+    --panel-bar: #1b2430;
+    --ink: #e4e9ef;
+    --ink-2: #bdc6d1;
+    --muted: #919daa;
+    --rule: #334155;
+    --rule-strong: #5c6c80;
+    --accent: #8cb2fb;
+    --accent-hover: #b0cafd;
+    --accent-ink: #0b1320;
+    --ident: #6ad0e0;
+    --ok: #5fcd88;
+    --warn: #e2b54a;
+    --bad: #f5857b;
+    --focus: #8cb2fb;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Base
+   --------------------------------------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--fs-0);
+  line-height: 1.6;
+  overflow-wrap: break-word;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.2;
+  text-wrap: balance;
+  margin: 0;
+}
+
+h2 {
+  font-size: var(--fs-2);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+h3 {
+  font-size: var(--fs-1);
+  font-weight: 650;
+  letter-spacing: -0.005em;
+}
+
+p {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  color: var(--accent-hover);
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--mono);
+}
+
+/* Inline code in prose: the monospace carries it, with no chip behind it. */
+p code,
+li code,
+td code,
+th code,
+dd code,
+figcaption code {
+  font-size: 0.92em;
+  color: var(--ink);
+}
+
+ul {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.skip {
+  position: absolute;
+  left: var(--gutter);
+  top: -3rem;
+  padding: 0.5rem 0.8rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: var(--radius);
+  z-index: 10;
+}
+
+.skip:focus {
+  top: 0.75rem;
+}
+
+.wrap {
+  max-width: 76rem;
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Header
+   --------------------------------------------------------------------------------------------- */
+.site-head {
+  border-bottom: 1px solid var(--rule);
+}
+
+.site-head .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 2rem;
+  padding-block: 0.9rem;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--ink);
+  font-weight: 700;
+  font-size: var(--fs-1);
+  letter-spacing: -0.01em;
+  text-decoration: none;
+}
+
+.brand:hover {
+  color: var(--ink);
+}
+
+.brand svg {
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  color: var(--accent);
+}
+
+.site-nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  list-style: none;
+  padding: 0;
+  font-size: var(--fs-sm);
+}
+
+.site-nav a {
+  display: inline-block;
+  padding-block: 0.25rem;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.site-nav a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Hero: sized to what it holds.
+   --------------------------------------------------------------------------------------------- */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  align-items: center;
+  gap: 2rem 4rem;
+  padding-block: 3.5rem 3rem;
+}
+
+.hero h1 {
+  font-size: var(--fs-4);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.question {
+  font-size: var(--fs-3);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  margin-top: 0.75rem;
+  max-width: 20ch;
+  text-wrap: balance;
+}
+
+.hero-text > p:not(.question) {
+  max-width: 52ch;
+  margin-top: 1.25rem;
+  color: var(--ink-2);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.75rem;
+}
+
+.btn {
+  display: inline-block;
+  padding: 0.65rem 1.1rem;
+  border-radius: var(--radius);
+  font-weight: 650;
+  font-size: var(--fs-0);
+  text-decoration: none;
+  line-height: 1.3;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 1px solid var(--accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: var(--accent-ink);
+}
+
+.btn-secondary {
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+}
+
+.btn-secondary:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.hero-figure {
+  margin: 0;
+}
+
+.hero-figure figcaption {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-top: 0.5rem;
+  max-width: 44ch;
+}
+
+/* The trigon. Lines are currentColor; the page's tokens decide which colour that is. */
+.tri {
+  display: block;
+  width: 100%;
+  height: auto;
+  color: var(--ink);
+  font-family: var(--sans);
+}
+
+.tri .claim {
+  color: var(--muted);
+}
+
+.tri .vertex {
+  fill: var(--bg);
+  stroke: currentColor;
+  stroke-width: 2.5;
+}
+
+.tri .name {
+  fill: var(--ink);
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.tri .sub {
+  fill: var(--muted);
+  font-size: 18px;
+}
+
+.tri .edge-label {
+  fill: var(--ink-2);
+  font-size: 19px;
+}
+
+.tri .claim-label {
+  fill: var(--muted);
+  font-style: italic;
+}
+
+.tri .meet-label {
+  fill: var(--ink);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.tri .eq-bg {
+  fill: var(--bg);
+}
+
+.tri .eq {
+  fill: var(--ink);
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 700;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Sections: the heading holds a narrow left column, and the content the rest.
+   --------------------------------------------------------------------------------------------- */
+.sec {
+  display: grid;
+  grid-template-columns: minmax(0, 14rem) minmax(0, 1fr);
+  gap: 1.25rem 3.5rem;
+  padding-block: 3.75rem;
+  border-top: 1px solid var(--rule);
+}
+
+.sec-head {
+  align-self: start;
+  position: sticky;
+  top: 1.5rem;
+}
+
+.sec-head p {
+  margin-top: 0.6rem;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.sec-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2.25rem;
+  min-width: 0;
+}
+
+.prose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  max-width: var(--measure);
+}
+
+.prose h3:not(:first-child) {
+  margin-top: 1rem;
+}
+
+.lede {
+  font-size: var(--fs-1);
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* A plain statement set apart by a rule, for the things a reader must not miss. */
+.aside {
+  border-left: 3px solid var(--ink);
+  padding: 0.1rem 0 0.1rem 1.1rem;
+  max-width: var(--measure);
+  display: grid;
+  gap: 0.75rem;
+}
+
+.aside h3 {
+  font-size: var(--fs-0);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   The five ideas
+   --------------------------------------------------------------------------------------------- */
+.ideas {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2rem;
+}
+
+.idea {
+  min-width: 0;
+  border-top: 2px solid var(--ink);
+  padding-top: 0.9rem;
+  display: grid;
+  gap: 0.6rem;
+  align-content: start;
+}
+
+.idea > p {
+  max-width: var(--measure);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Outcomes, in the CLI's glyphs and colours
+   --------------------------------------------------------------------------------------------- */
+.ok {
+  color: var(--ok);
+}
+
+.warn {
+  color: var(--warn);
+}
+
+.bad {
+  color: var(--bad);
+}
+
+.outcomes {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-0);
+}
+
+.outcomes th,
+.outcomes td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.7rem 1rem 0.7rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.outcomes thead th {
+  font-size: var(--fs-xs);
+  font-family: var(--mono);
+  font-weight: 400;
+  color: var(--muted);
+  padding-top: 0;
+}
+
+.outcomes tbody th {
+  padding-top: 0.85rem;
+}
+
+.outcomes .oc {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: var(--fs-sm);
+}
+
+.outcomes .glyph {
+  flex: none;
+  width: 1.2em;
+  font-size: var(--fs-1);
+  line-height: 1;
+  text-align: center;
+}
+
+.outcomes tr.void th,
+.outcomes tr.void td {
+  border-top: 2px solid var(--rule-strong);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   The two halves
+   --------------------------------------------------------------------------------------------- */
+.halves {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+
+.half {
+  padding: 1.25rem 1.4rem 1.4rem;
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+}
+
+.half + .half {
+  border-left: 1px solid var(--rule);
+}
+
+.half-judgement {
+  box-shadow: inset 3px 0 0 var(--ink);
+}
+
+.half-label {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.half h4 {
+  margin: 0;
+  font-size: var(--fs-1);
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+.half ul:not(.crates) {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.crates {
+  list-style: none;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--ident);
+  line-height: 1.7;
+}
+
+/* Each crate name stays whole; the line breaks only between names, after the separator. */
+.crates li {
+  display: inline;
+  white-space: nowrap;
+}
+
+.crates li:not(:last-child)::after {
+  content: " ·";
+  content: " ·" / "";
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Terminal panels: real output, scrolled inside their own box.
+   --------------------------------------------------------------------------------------------- */
+.term {
+  margin: 0;
+  min-width: 0;
+}
+
+.term-box {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+
+.term-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+  padding: 0.45rem 1rem;
+  background: var(--panel-bar);
+  border-bottom: 1px solid var(--rule);
+  border-radius: var(--radius) var(--radius) 0 0;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.term pre {
+  margin: 0;
+  scrollbar-color: var(--rule-strong) var(--panel);
+  padding: 0.9rem 1rem 1rem;
+  overflow-x: auto;
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+  color: var(--ink);
+  tab-size: 4;
+}
+
+.term pre:focus-visible {
+  outline-offset: -3px;
+}
+
+.term figcaption {
+  margin-top: 0.6rem;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  max-width: var(--measure);
+}
+
+/* The CLI's palette (style.rs), mapped to the page tokens. */
+.t-b {
+  font-weight: 700;
+}
+
+.t-hd {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.t-lbl {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.t-id {
+  color: var(--ident);
+}
+
+.t-mut,
+.t-prompt {
+  color: var(--muted);
+}
+
+.t-ok {
+  color: var(--ok);
+}
+
+.t-warn {
+  color: var(--warn);
+}
+
+.t-bad {
+  color: var(--bad);
+}
+
+.t-cmd {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.t-note {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* A panel beside its notes on wide screens. */
+.annotated {
+  display: grid;
+  grid-template-columns: minmax(0, 37rem) minmax(0, 1fr);
+  gap: 1.5rem 2.25rem;
+  align-items: start;
+}
+
+.notes {
+  margin: 0;
+  display: grid;
+  gap: 0.9rem;
+  font-size: var(--fs-sm);
+}
+
+.notes dt {
+  font-family: var(--mono);
+  font-weight: 700;
+}
+
+.notes dd {
+  margin: 0.15rem 0 0;
+  color: var(--ink-2);
+}
+
+/* Exit codes: the number in the monospace column, its meaning beside it. */
+.codes {
+  margin: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.codes > div {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.codes dt {
+  font-family: var(--mono);
+  font-weight: 700;
+}
+
+.codes dd {
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Plain data tables
+   --------------------------------------------------------------------------------------------- */
+.table-scroll {
+  overflow-x: auto;
+  min-width: 0;
+  scrollbar-color: var(--rule-strong) var(--bg);
+}
+
+.data {
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+  width: 100%;
+}
+
+.data-compact {
+  width: auto;
+  min-width: min(100%, 30rem);
+}
+
+.data caption {
+  text-align: left;
+  font-weight: 650;
+  font-size: var(--fs-0);
+  padding-bottom: 0.5rem;
+}
+
+.data th,
+.data td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.5rem 1rem 0.5rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.data thead th {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.data tbody th {
+  font-weight: 600;
+}
+
+.data .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.data .strong {
+  font-weight: 700;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: 1.5rem 2.5rem;
+}
+
+.state {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Not built yet
+   --------------------------------------------------------------------------------------------- */
+.planned {
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: 1.25rem 1.4rem 1.4rem;
+  display: grid;
+  gap: 0.9rem;
+  max-width: var(--measure);
+}
+
+.planned ul {
+  display: grid;
+  gap: 0.7rem;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Get started
+   --------------------------------------------------------------------------------------------- */
+.steps {
+  display: grid;
+  gap: 2rem;
+}
+
+.step {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.step > p {
+  max-width: var(--measure);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Footer
+   --------------------------------------------------------------------------------------------- */
+.site-foot {
+  border-top: 1px solid var(--rule);
+  padding-block: 2.5rem 3rem;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
+.foot-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 14rem) repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: 1.75rem 3.5rem;
+}
+
+.site-foot h2 {
+  font-size: var(--fs-sm);
+  font-family: var(--mono);
+  font-weight: 400;
+  color: var(--muted);
+  margin-bottom: 0.6rem;
+}
+
+.site-foot ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.1rem;
+}
+
+.site-foot li a {
+  display: inline-block;
+  padding-block: 0.25rem;
+}
+
+.site-foot .brand {
+  font-size: var(--fs-0);
+}
+
+.site-foot .brand svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.foot-line {
+  margin-top: 0.75rem;
+  color: var(--muted);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Narrow screens
+   --------------------------------------------------------------------------------------------- */
+@media (max-width: 960px) {
+  .annotated {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 860px) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    padding-block: 2.5rem 2rem;
+  }
+
+  .hero-figure {
+    max-width: 30rem;
+  }
+
+  .sec {
+    grid-template-columns: minmax(0, 1fr);
+    padding-block: 2.75rem;
+  }
+
+  .sec-head {
+    position: static;
+  }
+
+  .halves {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .half + .half {
+    border-left: 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  .foot-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 520px) {
+  /* The diagram scales to about 0.6 here; larger labels keep it readable. */
+  .tri .name {
+    font-size: 28px;
+  }
+
+  .tri .sub,
+  .tri .meet-label,
+  .tri .edge-label {
+    font-size: 23px;
+  }
+
+  .data th,
+  .data td {
+    padding-right: 0.6rem;
+  }
+
+  .outcomes th,
+  .outcomes td {
+    padding-right: 0.6rem;
+  }
+}
+
+/* An identifier never breaks at its hyphens. Below 360px a long one may wrap rather than overflow. */
+@media (min-width: 360px) {
+  :is(p, li, dd, td, th, figcaption) code {
+    white-space: nowrap;
+  }
+}
+
+/* A long command that may break only where the markup allows it, between .nw runs. */
+code.breakable {
+  white-space: normal;
+}
+
+.nw {
+  white-space: nowrap;
+}
+
+@media (forced-colors: active) {
+  .tri text {
+    fill: CanvasText;
+  }
+
+  .tri .vertex,
+  .tri .eq-bg {
+    fill: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  a,
+  .btn {
+    transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
+  }
+}

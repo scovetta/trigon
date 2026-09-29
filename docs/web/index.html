@@ -1,0 +1,882 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Trigon: rebuild verification for open-source packages</title>
+<meta name="description" content="Trigon rebuilds a published package from the source it claims to come from, compares the two, and signs a verdict that anyone can check.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-head" id="top">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="Trigon, top of the page">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 4 L3.5 19.5 H20.5 Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+        <circle cx="12" cy="4" r="2.3" fill="currentColor"/>
+        <circle cx="3.5" cy="19.5" r="2.3" fill="currentColor"/>
+        <circle cx="20.5" cy="19.5" r="2.3" fill="currentColor"/>
+      </svg>
+      Trigon
+    </a>
+    <nav class="site-nav" aria-label="Sections">
+      <ul>
+        <li><a href="#how">How it works</a></li>
+        <li><a href="#result">One run</a></li>
+        <li><a href="#evidence">Evidence</a></li>
+        <li><a href="#status">Status</a></li>
+        <li><a href="#start">Get started</a></li>
+        <li><a href="https://github.com/scovetta/trigon">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<div class="wrap">
+
+  <!-- Hero -------------------------------------------------------------------------------- -->
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="hero-text">
+      <h1 id="hero-title">Trigon</h1>
+      <p class="question">Does this published artifact correspond to that source?</p>
+      <p>Trigon downloads a published package, finds the source it claims to come from, rebuilds it
+        in a sealed container and compares the two. It reports in one word how far they agree, and
+        signs that answer so anyone can check it without trusting us.</p>
+      <p>It rebuilds npm, PyPI, crates.io and NuGet packages today. Comparing two artifacts you
+        already hold needs no network.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="../introduction.md">Read the introduction</a>
+        <a class="btn btn-secondary" href="#start">Try it</a>
+      </div>
+    </div>
+
+    <figure class="hero-figure">
+      <svg class="tri" viewBox="0 0 600 440" role="img" aria-labelledby="tri-title" aria-describedby="tri-desc">
+        <title id="tri-title">The trigon: source, published artifact and rebuild</title>
+        <desc id="tri-desc">A triangle with three labelled corners. The top corner is the source,
+          what reviewers read. The lower left corner is the published artifact, what users install;
+          the edge from it to the source is dashed and reads "claims to come from". The lower right
+          corner is the rebuild, Trigon's own build; the edge from the source to it reads "rebuilt
+          in a sealed container". The base joins the rebuild to the published artifact, marked with
+          an equals sign, and reads "must meet the published bytes".</desc>
+        <g fill="none" stroke-linecap="round" stroke-width="2.5">
+          <line class="claim" x1="300" y1="84" x2="130" y2="356" stroke="currentColor" stroke-dasharray="7 8"/>
+          <line x1="300" y1="84" x2="470" y2="356" stroke="currentColor"/>
+          <line x1="130" y1="356" x2="470" y2="356" stroke="currentColor" stroke-width="4"/>
+        </g>
+        <rect class="eq-bg" x="282" y="339" width="36" height="34"/>
+        <text class="eq" x="300" y="366" text-anchor="middle">=</text>
+        <circle class="vertex" cx="300" cy="84" r="9"/>
+        <circle class="vertex" cx="130" cy="356" r="9"/>
+        <circle class="vertex" cx="470" cy="356" r="9"/>
+        <text class="name" x="300" y="32" text-anchor="middle">source</text>
+        <text class="sub" x="300" y="60" text-anchor="middle">what reviewers read</text>
+        <text class="name" x="136" y="398" text-anchor="middle">published artifact</text>
+        <text class="sub" x="136" y="428" text-anchor="middle">what users install</text>
+        <text class="name" x="470" y="398" text-anchor="middle">rebuild</text>
+        <text class="sub" x="470" y="428" text-anchor="middle">Trigon’s own build</text>
+        <text class="edge-label claim-label" x="198" y="198" text-anchor="end">claims to</text>
+        <text class="edge-label claim-label" x="198" y="226" text-anchor="end">come from</text>
+        <text class="edge-label" x="402" y="198">rebuilt in a</text>
+        <text class="edge-label" x="402" y="226">sealed container</text>
+        <text class="meet-label" x="300" y="292" text-anchor="middle">must meet</text>
+        <text class="meet-label" x="300" y="320" text-anchor="middle">the published bytes</text>
+      </svg>
+      <figcaption>The package names its source, and the registry does not check that claim. Trigon
+        builds the source again and holds the result to the published bytes.</figcaption>
+    </figure>
+  </section>
+
+  <!-- Source and artifact ----------------------------------------------------------------- -->
+  <section class="sec" id="gap" aria-labelledby="gap-title">
+    <div class="sec-head">
+      <h2 id="gap-title">Source and artifact</h2>
+    </div>
+    <div class="sec-body">
+      <div class="prose">
+        <p class="lede">Package registries ship artifacts: a <code>.tgz</code> on npm, a wheel on PyPI,
+          a <code>.crate</code>, a <code>.nupkg</code>. Reviewers read source: the repository on
+          GitHub. The registry does not check one against the other.</p>
+        <p>Attackers use that gap at build time. A malicious publisher, or an attacker on the build
+          machine, can ship something the source never contained. In event-stream, ua-parser-js and
+          the xz backdoor, the malicious code sat in the published artifact, outside the repository
+          anyone was reading.</p>
+        <p>Trusted publishing and SLSA provenance record which workflow, in which repository, at
+          which commit, produced an artifact. They do not show that the artifact corresponds to the
+          source at that commit: a compromised workflow or a malicious build script still produces
+          valid provenance. To find the source, Trigon reads the commit a package records about
+          itself where it has one: npm’s <code>gitHead</code>, the <code>&lt;repository&gt;</code>
+          commit in a <code>.nupkg</code>, a crate’s <code>.cargo_vcs_info.json</code>. Then it
+          rebuilds to check the correspondence. Reading trusted-publishing and SLSA provenance is
+          designed (<a href="../06-ci-awareness.md">docs/06</a> §5) and not built.</p>
+      </div>
+      <div class="aside">
+        <h3>The limits of a verdict</h3>
+        <p>Trigon does not ask whether a package is safe. A package that builds a backdoor from its
+          own source reproduces, and that is the correct answer. A verdict tells you the artifact is
+          what the source makes; you still judge whether the source is any good.</p>
+        <p>On npm, tarballs come close to full reproducibility with no link to their source, so a
+          wall of green on an npm lockfile is true and close to worthless. The npm question worth
+          asking is source attribution: whether the tarball corresponds to the repository it
+          claims.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- How it works ------------------------------------------------------------------------ -->
+  <section class="sec" id="how" aria-labelledby="how-title">
+    <div class="sec-head">
+      <h2 id="how-title">How it works</h2>
+    </div>
+    <div class="sec-body">
+      <div class="ideas">
+        <div class="idea">
+          <h3>Rebuild it in a box</h3>
+          <p>Trigon finds the source at the right commit, works out a recipe (a strategy: install
+            these dependencies, run this build) and runs it in a <code>podman</code> container. The
+            recipe is data, so Trigon can store, compare and replay it.</p>
+        </div>
+        <div class="idea">
+          <h3>The mirror is the only way out</h3>
+          <p>During the build the container can reach one thing: a mirror of the registry as it
+            stood when the publisher released the package, so each dependency resolves to the
+            version the publisher got. The mirror hashes and records everything it serves. If the
+            build downloads the artifact Trigon compares it against, Trigon marks the run void.
+            This is the <code>mirror-only</code> egress tier. At the default, <code>open</code>, the
+            build can reach the internet, and the run publishes only as void.</p>
+        </div>
+        <div class="idea">
+          <h3>Stabilizers remove harmless noise</h3>
+          <p>Two honest builds of one source rarely match byte for byte. Each stabilizer removes one
+            known kind of harmless difference, such as a timestamp or the order of files, the same way
+            on both sides, and reports what it changed and how risky the change is. The report names
+            every stabilizer that fired, so you can see when one you reject was used.</p>
+        </div>
+
+        <div class="idea">
+          <h3>One word for the answer</h3>
+          <p>The comparison ends in one of four outcomes, strongest first. On the wire each outcome
+            is its string name.</p>
+          <div class="table-scroll">
+            <table class="outcomes">
+              <thead>
+                <tr><th scope="col">outcome</th><th scope="col">means</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><span class="oc ok"><span class="glyph" aria-hidden="true">✔&#xFE0E;</span><span>exact</span></span></th>
+                  <td>The raw bytes are identical, before any stabilizer ran.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><span class="oc ok"><span class="glyph" aria-hidden="true">✔&#xFE0E;</span><span>normalized</span></span></th>
+                  <td>The stabilized forms are identical, and every stabilizer that fired ships with
+                    Trigon and is no riskier than metadata: timestamps, ordering, file modes.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><span class="oc warn"><span class="glyph" aria-hidden="true">◐</span><span>normalized_<wbr>with_<wbr>caveats</span></span></th>
+                  <td>The stabilized forms are identical, but a stabilizer that fired changes content,
+                    or a person or a model wrote it. Read what fired.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><span class="oc bad"><span class="glyph" aria-hidden="true">✖&#xFE0E;</span><span>divergent</span></span></th>
+                  <td>The stabilized forms differ, and Trigon names which files.</td>
+                </tr>
+                <tr class="void">
+                  <th scope="row"><span class="oc warn"><span class="glyph" aria-hidden="true">⊘</span><span>void</span></span></th>
+                  <td>Outside the four. The run proves nothing, and Trigon records why: the build could
+                    reach the open internet, it reached the artifact Trigon was comparing it against,
+                    or a stabilizer that a person or a model wrote fired.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="muted"><code>trigon verify</code> prints the four outcomes in these glyphs and
+            colours. <code>trigon check</code> adds ⊘ for void, and colours
+            <code>normalized_with_caveats</code> green with the other passes. The word and the glyph
+            carry every distinction the colour does, so output without colour keeps them all.</p>
+        </div>
+
+        <div class="idea">
+          <h3>Signed and published</h3>
+          <p>Trigon signs its answer as an in-toto statement in a DSSE envelope. Anyone holding the
+            two artifacts can re-run the comparison with a verifier build that has no network client.
+            <code>trigon publish</code> writes the answers the publication gate allows to an evidence
+            repository, an ordinary git repository with an append-only signed log. A consumer clones
+            it and queries it locally, so a thousand-package lockfile costs no request per package,
+            and no server learns which packages you use.</p>
+        </div>
+
+        <div class="idea">
+          <h3>Search and judgement, kept apart</h3>
+          <p>When Trigon finds the source, guesses the recipe or repairs a failed build, it is
+            searching, which can be messy and may use the network or a language model. When it
+            decides whether two artifacts are the same, it is judging, which must be exact and
+            repeatable. A language model can help the search when you name a provider; the crates
+            that judge link no model code.</p>
+        </div>
+      </div>
+
+      <div class="halves">
+        <div class="half">
+          <p class="half-label">may use the network, and a model if you name one</p>
+          <h4>The search half</h4>
+          <ul>
+            <li>Registry clients and source discovery</li>
+            <li>Recipe inference from checked-in definitions, ecosystem rules and the project’s own
+              CI</li>
+            <li>The sandbox, and the time-filtered mirror</li>
+            <li>The optional model, off unless you name a provider</li>
+          </ul>
+          <ul class="crates" aria-label="Crates">
+            <li>trigon-registry</li>
+            <li>trigon-sandbox</li>
+            <li>trigon-mirror</li>
+            <li>trigon-ai</li>
+          </ul>
+        </div>
+        <div class="half half-judgement">
+          <p class="half-label">no network client, no model code</p>
+          <h4>The judgement half</h4>
+          <ul>
+            <li>Archive readers, and hand-written tar, zip and gzip writers</li>
+            <li>The stabilizers and their risk tiers</li>
+            <li>The comparison: one pass, six digests</li>
+            <li>Signing and verification</li>
+          </ul>
+          <ul class="crates" aria-label="Crates">
+            <li>trigon-core</li>
+            <li>trigon-archive</li>
+            <li>trigon-stabilize</li>
+            <li>trigon-compare</li>
+            <li>trigon-attest</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="prose">
+        <p>The judgement half links no network client, no async runtime and no model code.
+          <code>cargo run -p xtask -- policy</code> fails the build if that changes, and the verifier
+          build, <code class="breakable"><span class="nw">cargo build -p trigon</span> <span class="nw">--no-default-features</span></code>,
+          contains only this half. Its line coverage is 88.4% whether or not the tests that need a
+          network run, so tests that open no socket reach every line the suite covers there.</p>
+        <p>Trigon signs in a separate step, on purpose: <code>trigon rebuild</code> runs a stranger’s
+          build scripts, so the key belongs to another process. <code>trigon attest</code> reads the
+          stored bytes back by hash and re-derives the verdict before it signs. Trigon publishes a
+          verdict only after a second, independent attempt agrees: on another machine, or on the
+          same machine starting cold where the repository sets
+          <code>same_host_confirmation = true</code>, as the end-to-end script does.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- One run ----------------------------------------------------------------------------- -->
+  <section class="sec" id="result" aria-labelledby="result-title">
+    <div class="sec-head">
+      <h2 id="result-title">One run, start to finish</h2>
+      <p>Output from one run of <code>scripts/evidence-e2e.sh</code> on wrappy 1.0.2.</p>
+    </div>
+    <div class="sec-body">
+      <div class="prose">
+        <p>The script rebuilt <code>pkg:npm/wrappy@1.0.2</code> at
+          <code>--egress mirror-only</code>, confirmed it with a second, cold build, signed the
+          verdict and published it to a local evidence repository. We ran the commands below against
+          what it left in <code>work/evidence-e2e/</code>.</p>
+      </div>
+
+      <div class="annotated">
+        <figure class="term">
+          <div class="term-box">
+            <div class="term-bar"><span>trigon verify</span><span>exit 0</span></div>
+<pre tabindex="0" role="region" aria-label="trigon verify output"><code><span class="t-prompt">$</span> <span class="t-cmd">trigon verify wrappy-1.0.2.tgz rebuilt-wrappy-1.0.2.tgz</span>
+<span class="t-ok t-b">✔ normalized</span>
+
+  <span class="t-lbl">format      </span> tar+gzip
+  <span class="t-lbl">stabilizers </span> tar-gzip <span class="t-mut">(4598411b636d…)</span>
+
+  <span class="t-lbl">            </span> <span class="t-hd">upstream          </span> <span class="t-hd">rebuild</span>
+  <span class="t-lbl">raw         </span> <span class="t-id">aff3730d91b7…     </span> <span class="t-id">c38236deb36f…     </span> <span class="t-bad">≠</span>
+  <span class="t-lbl">container   </span> <span class="t-id">fa8a7ca19526…     </span> <span class="t-id">ad6fa9a8d33f…     </span> <span class="t-bad">≠</span>
+  <span class="t-lbl">stabilized  </span> <span class="t-id">441b279b8b59…     </span> <span class="t-id">441b279b8b59…     </span> <span class="t-ok">=</span>
+
+  <span class="t-mut">containers differ as well as the framing</span>
+
+  <span class="t-hd">applied</span>
+    gzip-meta                <span class="t-mut">metadata  </span> <span class="t-mut">     1 entries</span>
+    tar-entry-order          <span class="t-id">structural</span> <span class="t-mut">     4 entries</span>
+    tar-mode                 <span class="t-mut">metadata  </span> <span class="t-mut">     4 entries</span>
+    tar-owners               <span class="t-mut">metadata  </span> <span class="t-mut">     4 entries</span>
+    tar-time                 <span class="t-mut">metadata  </span> <span class="t-mut">     4 entries</span>
+
+  <span class="t-hd">members</span>  <span class="t-ok">4</span> identical, 0 differ, 0 upstream-only, 0 rebuild-only</code></pre>
+          </div>
+          <figcaption>The published tarball against the rebuilt one. The script copied both out of
+            the run’s store.</figcaption>
+        </figure>
+
+        <dl class="notes">
+          <div>
+            <dt>raw <span class="bad">≠</span></dt>
+            <dd>The published tarball and the rebuild differ as files.</dd>
+          </div>
+          <div>
+            <dt>container <span class="bad">≠</span></dt>
+            <dd>They still differ after decompression, so the difference goes deeper than gzip
+              framing.</dd>
+          </div>
+          <div>
+            <dt>stabilized <span class="ok">=</span></dt>
+            <dd>After the <code>tar-gzip</code> set ran on both sides, they are identical. Trigon
+              takes three digests of each side because “the same tar in different gzip framing” and
+              “a different tar” are different findings.</dd>
+          </div>
+          <div>
+            <dt>applied</dt>
+            <dd>Five stabilizers fired: the gzip header, the order of members, and the modes, owners
+              and timestamps of four files. Each ships with Trigon and is no riskier than metadata,
+              so the outcome is <code>normalized</code>. Structural, the tier of
+              <code>tar-entry-order</code>, ranks below metadata: it reorders or reframes without
+              changing any file’s content.</dd>
+          </div>
+          <div>
+            <dt>members</dt>
+            <dd>All four members are identical. On a divergence, Trigon names the member that differs
+              and exits 1.</dd>
+          </div>
+        </dl>
+      </div>
+
+      <div class="prose">
+        <p>The build behind that verdict could reach the mirror and nothing else. Its network
+          transcript lists the 403 responses that crossed into the build, each with its URL and
+          SHA-256: 178 index requests, 224 package tarballs from registry.npmjs.org and one Node.js
+          toolchain download. The mirror withheld 3,694 versions that did not yet exist when the
+          publisher released wrappy 1.0.2. The source was <code>github.com/npm/wrappy</code> at
+          commit <code>71d91b6d</code>, the commit npm’s own <code>gitHead</code> names.</p>
+        <p>A consumer who trusts the evidence repository looks the package up in a verified local
+          clone:</p>
+      </div>
+
+      <figure class="term">
+        <div class="term-box">
+          <div class="term-bar"><span>trigon lookup</span><span>exit 0</span></div>
+<pre tabindex="0" role="region" aria-label="trigon lookup output"><code><span class="t-prompt">$</span> <span class="t-cmd">trigon lookup pkg:npm/wrappy@1.0.2</span>
+key       pkg:npm/wrappy@1.0.2
+
+source    `e2e`, from
+          …/evidence-e2e/evidence.toml;
+          as of 1 leaves of `example.org/trigon-e2e-evidence`
+answer    <span class="t-ok">normalized</span> — from 1 record(s) its log holds for it
+record    sha256:19877ff0a72cf34615663a969b2b8bd28ffd7dd694b04e87bcb23409b09fb806 at leaf 0 of `example.org/trigon-e2e-evidence`, current
+subject   wrappy-1.0.2.tgz (aff3730d91b7b1e143822956d14608f563163cf11b9d0ae602df1fe1e430fdfb)
+purl      pkg:npm/wrappy@1.0.2
+predicate https://trigon.dev/equivalence/v2
+claims    normalized
+set       tar-gzip,
+          sha256:4598411b636d2d2cc62832312d37a1f2677681951a2ce19a3b8327e416b8abb3
+run       1790716493-aff3730d, 2026-09-29T21:14:06Z to 2026-09-29T21:14:53Z
+trigon    built by 0.0.0+git.28a4d27c10424b3dc279f5866d5f8fef78fce416.dirty, signed by
+          0.0.0+git.28a4d27c10424b3dc279f5866d5f8fef78fce416.dirty
+egress    mirror-only, attestable
+derived   heuristic
+falsify   trigon verify-attestation --lookup
+          sha256:aff3730d91b7b1e143822956d14608f563163cf11b9d0ae602df1fe1e430fdfb
+          --predicate https://trigon.dev/equivalence/v2 --origin
+          example.org/trigon-e2e-evidence --rerun-comparison --upstream &lt;file&gt;
+dispute   https://example.org/trigon-e2e-evidence/issues
+evidence  not checked here: comparison, guardManifest, rebuiltArtifact,
+          stabilizerSetManifest, strategy. A clone keeps `evidence/` out, and
+          `verify-attestation --lookup` fetches what it re-derives the claim from
+
+exit      0: every answer at or above the threshold</code></pre>
+        </div>
+        <figcaption>The published record, read from a clone after <code>trigon evidence
+          sync</code>; we shortened the configuration path. The signature covers the stabilizer set,
+          the egress tier, how Trigon derived the recipe, the command that would falsify it and
+          where to dispute it. <code>example.org</code> is the placeholder origin the script gives
+          its local repository.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- Evidence ---------------------------------------------------------------------------- -->
+  <section class="sec" id="evidence" aria-labelledby="evidence-title">
+    <div class="sec-head">
+      <h2 id="evidence-title">Evidence anyone can check</h2>
+    </div>
+    <div class="sec-body">
+      <div class="prose">
+        <h3>Signed statements</h3>
+        <p><code>trigon attest</code> signs in-toto statements in DSSE envelopes, in a process that
+          runs no build and opens no socket. It fetches both artifacts from the store by hash,
+          recomputes the comparison, and refuses to sign if the answer differs from the run’s record.
+          For a run the publication gate calls void (its guard tripped, it ran at open egress, or a
+          stabilizer somebody wrote fired), it signs <code>void/v1</code> and nothing else, which
+          says why and never which way the comparison went. For any other run it signs
+          <code>equivalence/v2</code> or <code>divergence/v2</code>, beside <code>rebuild/v1</code>
+          and <code>buildobservation/v1</code>.</p>
+
+        <h3>A repository with an append-only log</h3>
+        <p><code>trigon publish</code> asks the publication gate about each run and writes what it
+          allows to a git repository: the signed records, the evidence needed to re-derive each one,
+          an index, and an append-only log whose checkpoint <code>trigon log sign</code> signs. It
+          makes one commit per publication and never force-pushes. Nobody edits a published record:
+          to correct one, you publish a new record that supersedes it, and both stay in the log.</p>
+      </div>
+
+      <figure class="term">
+        <div class="term-box">
+          <div class="term-bar"><span>work/evidence-e2e/evidence-checkout</span><span>the published repository</span></div>
+<pre tabindex="0" role="region" aria-label="The published evidence repository"><code><span class="t-prompt">$</span> <span class="t-cmd">git log --oneline</span>
+29fba13 publish: 1 record, tree 0 → 1
+c248d4b log init: example.org/trigon-e2e-evidence, tree 0
+
+<span class="t-prompt">$</span> <span class="t-cmd">cat log/checkpoint</span>
+example.org/trigon-e2e-evidence
+1
+P4ZbvY2+0eoBnuxrtJhglvvMkaeJZ2BTPvOnbuNMBKY=
+
+— example.org/trigon-e2e-evidence HSlPvB9XLCsCUW/PZmICMrd1kfjUbZ+J4fhpgLJnrpZXU0avlYUF6re415ENlWczeIyOmSBdKEliGvZa2ZaPeXWdVwQ=
+
+<span class="t-prompt">$</span> <span class="t-cmd">find . -path ./.git -prune -o -type f -print | sort</span>
+./evidence/sha256/a3/20/a3202e95bd1ad16c3477e69b294ecb9c42c129028e8a79a7a6fc8f8d7d247ca5
+./evidence/sha256/bb/38/bb38ac05fa79395fd48451407c0a60fcc300b78c77af4574610377fb65e2b64e
+./evidence/sha256/bd/46/bd4688433cbcae27bf0f2f1c8527b1d9448ed9320127ddaceb23d6c2ba29d42a
+./evidence/sha256/cf/f9/cff9f1849d1c3da174fab70e2fd071ce939e9672bd6b5f6f7b8a60673d9584c2
+./index/pkg1/df/52/df5243a83ef7ccf4493e4d70a55ba3c17bf9588a03cfae9bd39fbbb9c6486bb9.json
+./index/purl1/66/d7/66d7067b6b146e9c4c8a3f8c1fdc6b4bc7ab152181eea1de0371dd98851db07a.json
+./index/sha1/b5/24/b5243d8f3ec1aa35f1364605bc0d1036e30ab69f.json
+./index/sha256/af/f3/aff3730d91b7b1e143822956d14608f563163cf11b9d0ae602df1fe1e430fdfb.json
+./index/sha512/97/84/9784a9fc346c7a8afdc0be84bd5dbe4ee427eb774c90f8d9feca7d5e48214c46d5f4a94f4b5c54b19deeeff2103b8c31b5c141e1b82940f45c477402bdeccf71.json
+./keys/attestation.pub
+./keys/log.vkey
+./log/checkpoint
+./log/tile/0/000.p/1
+./log/tile/entries/000.p/1
+./README.md
+./records/19/87/19877ff0a72cf34615663a969b2b8bd28ffd7dd694b04e87bcb23409b09fb806.json</code></pre>
+        </div>
+        <figcaption>The local evidence repository the end-to-end script published into: the log’s
+          first commit, one publication, and a signed checkpoint over a tree of one leaf. A consumer
+          can find the record by sha1, sha256, sha512 or purl, the keys a lockfile might hold it by,
+          and under the package name alone, which lists every version.</figcaption>
+      </figure>
+
+      <div class="prose">
+        <h3>Checking a lockfile</h3>
+        <p>A consumer trusts a repository once, by pinning its log key and its attestation key.
+          <code>trigon evidence sync</code> verifies each clone whole, and refuses a checkpoint that
+          does not extend the one it accepted before. After that, <code>trigon check</code> answers
+          every package in a lockfile from the clone, with no request per package, so no server
+          learns which packages you asked about. It reads <code>package-lock.json</code>,
+          <code>npm-shrinkwrap.json</code>, <code>requirements.txt</code> and SPDX JSON.</p>
+      </div>
+
+      <figure class="term">
+        <div class="term-box">
+          <div class="term-bar"><span>trigon check</span><span>exit 0</span></div>
+<pre tabindex="0" role="region" aria-label="trigon check output"><code><span class="t-prompt">$</span> <span class="t-cmd">trigon check package-lock.json</span>
+<span class="t-hd">package-lock.json</span> <span class="t-mut">· 1 package(s) · 1 source(s) · threshold at least normalized_with_caveats</span>
+source    `e2e`, from
+          …/evidence-e2e/evidence.toml;
+          as of 1 leaves of `example.org/trigon-e2e-evidence`
+
+  <span class="t-ok">✔</span> <span class="t-ok">normalized              </span> <span class="t-ok">    1</span>   <span class="t-ok">▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓</span>
+  <span class="t-bad">✖</span> <span class="t-bad">divergent               </span> <span class="t-bad">    0</span>   <span class="t-mut">░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░</span>
+  <span class="t-mut">?</span> <span class="t-mut">never checked           </span> <span class="t-mut">    0</span>   <span class="t-mut">░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░</span>
+
+  <span class="t-mut">`never checked` is a package no source that answered holds a record for, and `unknown`
+  one no source could answer for at all. Neither is a statement about the package, and
+  neither is summed with the verdicts.</span>
+
+exit      0: every answer at or above the threshold</code></pre>
+        </div>
+        <figcaption>The script’s lockfile, which names wrappy 1.0.2 by the sha512
+          <code>integrity</code> npm records for it.</figcaption>
+      </figure>
+
+      <div class="prose">
+        <p>A package no source holds a record for reads <em>never checked</em>, and never counts as a
+          pass. The exit codes are for CI:</p>
+        <dl class="codes">
+          <div><dt>0</dt><dd>every package is at or above the threshold</dd></div>
+          <div><dt>1</dt><dd>a divergence</dd></div>
+          <div><dt>2</dt><dd>a package never checked, or withdrawn</dd></div>
+          <div><dt>3</dt><dd>a void, or a result below the threshold you set with <code>--min</code>
+            or <code>--max-risk</code></dd></div>
+          <div><dt>4</dt><dd>a deleted record, a record or source that failed verification, a
+            required source that is unknown, or a package no source could answer</dd></div>
+          <div><dt>5</dt><dd>Trigon could not run the check</dd></div>
+        </dl>
+
+        <h3>Checking a verdict yourself</h3>
+        <p>Each published verdict carries the command that would falsify it. Run that command with
+          the two artifacts and it re-derives the verdict from the bytes, then checks the published
+          comparison report against it, member by member. If someone changes one byte of a record,
+          verification fails, because no leaf of the log names it.</p>
+      </div>
+
+      <figure class="term">
+        <div class="term-box">
+          <div class="term-bar"><span>trigon verify-attestation</span><span>exit 0, then exit 4</span></div>
+<pre tabindex="0" role="region" aria-label="trigon verify-attestation output"><code><span class="t-prompt">$</span> <span class="t-cmd">trigon verify-attestation --lookup sha256:aff3730d91b7b1e143822956d14608f563163cf11b9d0ae602df1fe1e430fdfb \
+    --predicate https://trigon.dev/equivalence/v2 --origin example.org/trigon-e2e-evidence \
+    --rerun-comparison --upstream wrappy-1.0.2.tgz --rebuild rebuilt-wrappy-1.0.2.tgz</span>
+<span class="t-note">…</span>
+signature verified under b7e1b9f51c664297, the source's attestation key at its leaf
+claims    normalized
+<span class="t-note">…</span>
+current   yes: nothing the log holds supersedes it
+answer    normalized — what this source says of the artifact now, from 1 record(s) the log holds for it
+rederived normalized under tar-gzip@4598411b636d — the claim holds
+report    the published comparison report agrees with the re-derivation on all it was held to: its outcome, set, digests, differences, passes, member counts, every member, and its field edits
+          not held to it, so unchecked: `diff.progression`, `notes`, `the members' raw paths`
+
+<span class="t-prompt">$</span> <span class="t-cmd">trigon verify-attestation --record record-tampered.json --source e2e</span>
+<span class="t-note">…</span>
+record    sha256:84609541eb4f67b057879545abb767e7c009b00a4a02b9791cfd4a4bb5031969
+verified  NO — the record failed verification: no leaf of the log names the record sha256:84609541eb4f67b057879545abb767e7c009b00a4a02b9791cfd4a4bb5031969: it is unlogged, and a record the log does not hold is never shown as a verdict (docs/19 §8)
+<span class="t-prompt">$</span> <span class="t-cmd">echo $?</span>
+4</code></pre>
+        </div>
+        <figcaption>The record’s own falsifying command, then the copy of the record the script
+          changed by one byte. We omitted the lines marked with an ellipsis.</figcaption>
+      </figure>
+
+      <div class="prose">
+        <p><code>--lookup</code> reads a synced clone and fetches the evidence it re-derives from, so
+          it belongs to the full build. The network-free verifier build carries eight commands, and
+          checks a record with <code>--record &lt;file&gt;</code> and
+          <code>--evidence &lt;dir&gt;</code> instead. Its dependency tree holds no tokio, reqwest or
+          hyper:</p>
+      </div>
+
+      <figure class="term">
+        <div class="term-box">
+          <div class="term-bar"><span>shell</span><span>from docs/using-trigon.md</span></div>
+<pre tabindex="0" role="region" aria-label="The verifier's dependency tree"><code><span class="t-prompt">$</span> <span class="t-cmd">cargo tree -p trigon --no-default-features --edges normal --prefix none | grep -Ei '^(tokio|reqwest|hyper) '</span>
+<span class="t-prompt">$</span> <span class="t-cmd">echo $?</span>
+1</code></pre>
+        </div>
+        <figcaption><code>grep</code> matched nothing. <code>scripts/cross-machine-verify.sh</code>
+          tests the same claim end to end. It clones fresh, builds into a target directory of its
+          own, takes the network away where the kernel allows it, and requires the verifier to catch
+          an overstated outcome, an edited payload and a substituted artifact.</figcaption>
+      </figure>
+
+      <div class="planned">
+        <h3 id="planned-title">Not built or not settled yet</h3>
+        <ul>
+          <li>No public evidence repository exists yet, and the client ships no default source. Both
+            wait on one decision, the repository’s owner and namespace
+            (<a href="../19-distribution-and-lookup.md">docs/19</a> D3). Until then you configure a
+            source yourself, such as the local repository the end-to-end script creates.</li>
+          <li>By default <code>trigon publish</code> refuses every divergence. A divergence is a
+            public accusation, and notifying the maintainer has no channel until docs/19 D7 decides
+            one. A repository that sets <code>divergences = "feed"</code> publishes each divergence
+            with an entry in <code>feed/divergences.atom</code>.</li>
+          <li>Trigon has no witnessing yet (docs/19 phase 7b). Until witnesses cosign checkpoints,
+            the log’s owner can rewrite the log, and only a client that kept an older checkpoint, or
+            one comparing mirrors, will notice.</li>
+          <li>A statement carries no third-party time, so a verifier cannot tell when the signer
+            signed it, and nothing limits what a stolen key can sign until the maintainers settle
+            docs/19 D6 (<a href="../threat-model.md">threat model</a> D24).</li>
+          <li>Trigon has no standalone <code>npx trigon-check</code> or <code>uvx trigon-check</code>
+            client yet (docs/19 phase 9), and no published release. To check a lockfile today, you
+            build Trigon from source.</li>
+          <li><code>scripts/evidence-spike.sh</code> publishes against a scratch GitHub repository.
+            Nobody has run it yet: it needs a repository the owner has yet to name.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- Status ------------------------------------------------------------------------------ -->
+  <section class="sec" id="status" aria-labelledby="status-title">
+    <div class="sec-head">
+      <h2 id="status-title">Ecosystems and status</h2>
+      <p>Trigon rebuilds four ecosystems today. Each rate below names the corpus it came from.</p>
+    </div>
+    <div class="sec-body">
+      <div class="table-scroll">
+        <table class="data data-compact">
+          <caption>Ecosystems</caption>
+          <thead>
+            <tr>
+              <th scope="col">ecosystem</th>
+              <th scope="col">artifact</th>
+              <th scope="col">rebuilds</th>
+              <th scope="col">stabilizer set</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">npm</th><td><code>.tgz</code></td><td>yes</td><td><code>tar-gzip</code></td></tr>
+            <tr><th scope="row">PyPI</th><td><code>.whl</code></td><td>yes</td><td><code>wheel</code></td></tr>
+            <tr><th scope="row">crates.io</th><td><code>.crate</code></td><td>yes</td><td><code>crate</code></td></tr>
+            <tr><th scope="row">NuGet</th><td><code>.nupkg</code></td><td>yes</td><td><code>nupkg</code></td></tr>
+            <tr><th scope="row">RubyGems</th><td><code>.gem</code></td><td class="muted">not yet</td><td><code>gem</code></td></tr>
+            <tr><th scope="row">GitHub releases</th><td>any</td><td class="muted">not yet</td><td>by format</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="prose">
+        <p>npm, PyPI, crates.io and NuGet have registry clients, so Trigon resolves, fetches and
+          rebuilds their packages. The design covers RubyGems and GitHub releases, and they come
+          next; until then Trigon refuses a target in either by name. <code>trigon verify</code>
+          compares two files from any of them and chooses the stabilizer set from the file name.
+          With the <code>gem</code> set it compares two <code>.gem</code> files, but Trigon cannot
+          yet resolve or rebuild a gem. An npm tarball takes the generic <code>tar-gzip</code> set,
+          because nothing inside a <code>.tgz</code> says whose it is; pass
+          <code>--profile npm-tarball</code> to select the npm set.</p>
+      </div>
+
+      <div class="table-scroll">
+        <table class="data">
+          <caption>Milestones</caption>
+          <thead>
+            <tr><th scope="col">milestone</th><th scope="col">state</th><th scope="col">what it covers</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">M0 the judgement half</th>
+              <td class="state">done</td>
+              <td>Differential against the reference implementation: 34 match, 24 deviate by a
+                declared entry, 0 unexplained.</td>
+            </tr>
+            <tr>
+              <th scope="row">M1 first rebuilds</th>
+              <td class="state">done</td>
+              <td>npm and PyPI rebuild end to end, under an enforced egress tier, against a
+                time-filtered index.</td>
+            </tr>
+            <tr>
+              <th scope="row">M2 attestations</th>
+              <td class="state">done</td>
+              <td>Signed statements, re-derivable on another machine and through an archived
+                stabilizer set run under <code>wasmtime</code>. Publishing them: the evidence
+                repository, <code>trigon publish</code>, <code>evidence</code>, <code>lookup</code>
+                and <code>check</code>.</td>
+            </tr>
+            <tr>
+              <th scope="row">M3 the search half</th>
+              <td class="state muted">begun</td>
+              <td>The deterministic parts first: failure signatures, log compression, the
+                repair-loop policy, the Builder.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="prose">
+        <h3>Rates, with their corpus</h3>
+        <p>The figures come from the M1 common-path corpus: 197 npm and 200 PyPI targets, which we
+          stratified by build system rather than popularity and ran at
+          <code>--egress mirror-only</code>. <em>Reproduce</em> counts the targets whose rebuild
+          matched, out of those that reached a comparison. <em>Reach</em> counts the targets that got
+          that far.</p>
+      </div>
+
+      <div class="table-scroll">
+        <table class="data data-compact">
+          <caption class="visually-hidden">Reproduction and reach on the M1 common-path corpus</caption>
+          <thead>
+            <tr><th scope="col">ecosystem</th><th scope="col" class="num">reproduce</th><th scope="col" class="num">reach a comparison</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">npm</th><td class="num strong">100 of 132 (76%)</td><td class="num">132 of 197 (67%)</td></tr>
+            <tr><th scope="row">PyPI</th><td class="num strong">136 of 163 (83%)</td><td class="num">163 of 200 (81%)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="prose">
+        <p>npm’s 76% spans 88% for packages with no lifecycle script down to 33% for monorepo
+          members, and 3 of the 17 monorepo members reach a comparison. PyPI’s 83% spans 100% for
+          flit and hatchling down to 54% for maturin and C extensions.</p>
+      </div>
+
+      <div class="pair">
+        <div class="table-scroll">
+          <table class="data">
+            <caption>npm, by stratum</caption>
+            <thead>
+              <tr><th scope="col">stratum</th><th scope="col" class="num">compared</th><th scope="col" class="num">reproduced</th><th scope="col" class="num">rate</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">no lifecycle script</th><td class="num">74 of 90</td><td class="num">65</td><td class="num strong">88%</td></tr>
+              <tr><th scope="row"><code>prepare</code>/<code>prepack</code></th><td class="num">32 of 60</td><td class="num">24</td><td class="num">75%</td></tr>
+              <tr><th scope="row">TypeScript build</th><td class="num">23 of 30</td><td class="num">10</td><td class="num">43%</td></tr>
+              <tr><th scope="row">monorepo member</th><td class="num">3 of 17</td><td class="num">1</td><td class="num strong">33%</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-scroll">
+          <table class="data">
+            <caption>PyPI, by stratum</caption>
+            <thead>
+              <tr><th scope="col">stratum</th><th scope="col" class="num">compared</th><th scope="col" class="num">reproduced</th><th scope="col" class="num">rate</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">flit / hatchling</th><td class="num">47 of 50</td><td class="num">47</td><td class="num strong">100%</td></tr>
+              <tr><th scope="row">setuptools + pyproject</th><td class="num">49 of 60</td><td class="num">40</td><td class="num">81%</td></tr>
+              <tr><th scope="row">setuptools + <code>setup.py</code></th><td class="num">30 of 40</td><td class="num">18</td><td class="num">60%</td></tr>
+              <tr><th scope="row">poetry-core</th><td class="num">26 of 30</td><td class="num">25</td><td class="num">96%</td></tr>
+              <tr><th scope="row">maturin / C extension</th><td class="num">11 of 20</td><td class="num">6</td><td class="num strong">54%</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="prose">
+        <p>Sixteen of npm’s 65 targets that reached no comparison were our fault: a missing tool, a
+          <code>workspace:</code> protocol npm does not speak, a workspace sibling the recipe did not
+          build first. The reproduction rate leaves them out by design and the reach figure counts
+          them, so read reach as a floor.</p>
+        <p>crates.io and NuGet have no rate, because neither has a stratified corpus yet. Both
+          rebuild end to end at <code>mirror-only</code>. Of the twelve crates we have tried by hand,
+          six reproduce, <code>hashbrown@0.17.1</code> and <code>serde@1.0.219</code> among them; each
+          remaining divergence is the <code>Cargo.toml</code> manifest rewrite that backlog item B20
+          is about.</p>
+        <p class="muted">A rate describes the pipeline on one corpus. The strata are weighted by build
+          system, not by how common each build system is, so neither total says how much of an
+          ecosystem reproduces. <a href="../15-corpora.md">docs/15-corpora.md</a> argues why the
+          strata matter more than the totals.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Get started ------------------------------------------------------------------------- -->
+  <section class="sec" id="start" aria-labelledby="start-title">
+    <div class="sec-head">
+      <h2 id="start-title">Get started</h2>
+      <p>Rust 1.85 or later, edition 2024. Rebuilds also need <code>podman</code>.</p>
+    </div>
+    <div class="sec-body">
+      <div class="steps">
+        <div class="step">
+          <h3>Build it</h3>
+          <figure class="term">
+            <div class="term-box">
+<pre tabindex="0" role="region" aria-label="Build command"><code><span class="t-mut"># the full tool: target/release/trigon</span>
+<span class="t-cmd">cargo build --release -p trigon</span></code></pre>
+            </div>
+          </figure>
+        </div>
+
+        <div class="step">
+          <h3>Compare two files you already have</h3>
+          <p>This runs offline, with no container. The exit code is 1 for <code>divergent</code> and
+            0 otherwise, so it drops into a script.</p>
+          <figure class="term">
+            <div class="term-box">
+<pre tabindex="0" role="region" aria-label="Compare command"><code><span class="t-cmd">trigon verify upstream.tgz rebuild.tgz</span></code></pre>
+            </div>
+          </figure>
+        </div>
+
+        <div class="step">
+          <h3>Rebuild a package behind the mirror</h3>
+          <p>Build the two helper images once: a base image to build in, from a parent pinned by
+            digest, and the image the mirror runs from. At <code>--egress mirror-only</code>,
+            <code>--image auto</code> uses a base image already on the machine and refuses to build
+            one. <code>--timewarp auto</code> pins the mirror to the moment the publisher released
+            the package, and <code>--store</code> keeps the run so a separate process can sign
+            it.</p>
+          <figure class="term">
+            <div class="term-box">
+<pre tabindex="0" role="region" aria-label="Rebuild commands"><code><span class="t-cmd">trigon base-image --from docker.io/library/debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171</span>
+<span class="t-cmd">trigon mirror-image</span>
+<span class="t-cmd">trigon rebuild pkg:npm/wrappy@1.0.2 --image auto --egress mirror-only --timewarp auto \
+    --work ./work --store ./store</span></code></pre>
+            </div>
+          </figure>
+        </div>
+
+        <div class="step">
+          <h3>Run the whole loop</h3>
+          <p><code>scripts/evidence-e2e.sh</code> creates keys and a local evidence repository,
+            rebuilds a package behind the mirror, confirms it with a second cold build, publishes the
+            verdict, then checks it the way a consumer would, including two checks that must fail. It
+            needs the base image from the step above, and builds the mirror image itself if it is
+            missing. It takes a few minutes, needs <code>podman</code> and the network the mirror
+            fetches through, and keeps everything it makes in <code>work/evidence-e2e/</code>.</p>
+          <figure class="term">
+            <div class="term-box">
+<pre tabindex="0" role="region" aria-label="End-to-end command"><code><span class="t-cmd">cargo build -p trigon &amp;&amp; scripts/evidence-e2e.sh</span></code></pre>
+            </div>
+          </figure>
+        </div>
+
+        <div class="step">
+          <h3>Build the verifier</h3>
+          <p>For checking somebody else’s claim. It writes the same <code>target/release/trigon</code>
+            as the full build, so give it a target directory of its own, as
+            <code>scripts/cross-machine-verify.sh</code> does.</p>
+          <figure class="term">
+            <div class="term-box">
+<pre tabindex="0" role="region" aria-label="Verifier build command"><code><span class="t-cmd">CARGO_TARGET_DIR=target/verifier cargo build --release -p trigon --no-default-features</span></code></pre>
+            </div>
+          </figure>
+        </div>
+      </div>
+
+      <div class="prose">
+        <p>Then read <a href="../using-trigon.md">Using Trigon</a>, the task-oriented guide, starting
+          with its section on what a verdict does not tell you.</p>
+      </div>
+    </div>
+  </section>
+
+</div>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap foot-grid">
+    <div>
+      <a class="brand" href="#top" aria-label="Trigon, top of the page">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 4 L3.5 19.5 H20.5 Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+          <circle cx="12" cy="4" r="2.3" fill="currentColor"/>
+          <circle cx="3.5" cy="19.5" r="2.3" fill="currentColor"/>
+          <circle cx="20.5" cy="19.5" r="2.3" fill="currentColor"/>
+        </svg>
+        Trigon
+      </a>
+      <p class="foot-line">Semantic rebuild verification for open-source packages.</p>
+    </div>
+    <nav aria-labelledby="foot-docs">
+      <h2 id="foot-docs">Read</h2>
+      <ul>
+        <li><a href="../introduction.md">Trigon in ten minutes</a></li>
+        <li><a href="../using-trigon.md">Using Trigon</a></li>
+        <li><a href="../../README.md">README</a></li>
+        <li><a href="../README.md">The design documents</a></li>
+        <li><a href="../05-archive-and-normalization.md">Archive and normalization</a></li>
+        <li><a href="../09-attestations.md">Attestations</a></li>
+        <li><a href="../19-distribution-and-lookup.md">Publishing and lookup</a></li>
+        <li><a href="../threat-model.md">Threat model</a></li>
+        <li><a href="../16-findings.md">Findings</a></li>
+      </ul>
+    </nav>
+    <nav aria-labelledby="foot-code">
+      <h2 id="foot-code">Code</h2>
+      <ul>
+        <li><a href="https://github.com/scovetta/trigon">github.com/scovetta/trigon</a></li>
+        <li><a href="../../scripts/evidence-e2e.sh">scripts/evidence-e2e.sh</a></li>
+        <li><a href="../../scripts/cross-machine-verify.sh">scripts/cross-machine-verify.sh</a></li>
+      </ul>
+    </nav>
+    <div>
+      <h2>Licence</h2>
+      <p>Apache License, Version 2.0. <a href="../../LICENSE">Read the licence</a>.</p>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

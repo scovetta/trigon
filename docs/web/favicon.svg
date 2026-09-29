@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>Trigon</title>
+  <style>
+    .t { stroke: #1c4ea3; }
+    .v { fill: #1c4ea3; }
+    @media (prefers-color-scheme: dark) {
+      .t { stroke: #8cb2fb; }
+      .v { fill: #8cb2fb; }
+    }
+  </style>
+  <path class="t" d="M16 5 L4.5 26 H27.5 Z" fill="none" stroke-width="2.6" stroke-linejoin="round"/>
+  <circle class="v" cx="16" cy="5" r="3.4"/>
+  <circle class="v" cx="4.5" cy="26" r="3.4"/>
+  <circle class="v" cx="27.5" cy="26" r="3.4"/>
+</svg>
