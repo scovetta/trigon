@@ -1224,4 +1224,155 @@ mod tests {
         );
         assert!(blob_id("sha3", b"").is_err());
     }
+
+    /// A commit writes and removes only paths inside the repository: an empty path, one that
+    /// climbs out, an absolute one, one that begins at `.`, and one that would end a line or a
+    /// path in what git is fed are refused before git is run, and nothing is committed.
+    #[test]
+    fn a_commit_writes_nothing_outside_the_repository() {
+        let d = Dir::new("outside");
+        d.git(".", &["init", "--quiet", "-b", "main", "w"]);
+        let w = d.0.join("w");
+        for path in ["", "../escape", "/etc/passwd", "./a", "a/../../b", "a\nb", "a\0b"] {
+            for change in [
+                Change {
+                    writes: vec![(path, b"x")],
+                    removes: Vec::new(),
+                },
+                Change {
+                    writes: Vec::new(),
+                    removes: vec![path],
+                },
+            ] {
+                let e = commit(&w, None, &change, "publish: test").unwrap_err();
+                assert!(
+                    e.to_string().contains("is not a path inside the repository"),
+                    "{path:?}: {e:#}"
+                );
+            }
+        }
+        assert!(!succeeds(Some(&w), &["rev-parse", "--verify", "--quiet", "HEAD"]));
+        assert!(!d.0.join("escape").exists());
+    }
+
+    /// A file written with the bytes the branch already holds changes nothing in the commit, and
+    /// is checked as it was written all the same; a path removed is gone from it.
+    #[test]
+    fn a_file_written_unchanged_is_held_to_its_bytes_all_the_same() {
+        let d = Dir::new("unchanged");
+        d.git(".", &["init", "--quiet", "-b", "main", "w"]);
+        let w = d.0.join("w");
+        std::fs::create_dir_all(w.join("keys")).unwrap();
+        std::fs::write(w.join("keys/log.vkey"), b"vkey\n").unwrap();
+        std::fs::write(w.join("old"), b"old").unwrap();
+        let base = commit(
+            &w,
+            None,
+            &Change {
+                writes: vec![("keys/log.vkey", b"vkey\n"), ("old", b"old")],
+                removes: Vec::new(),
+            },
+            "publish: base",
+        )
+        .unwrap();
+        std::fs::remove_file(w.join("old")).unwrap();
+        std::fs::write(w.join("new"), b"new").unwrap();
+        let head = commit(
+            &w,
+            Some(&base),
+            &Change {
+                writes: vec![("keys/log.vkey", b"vkey\n"), ("new", b"new")],
+                removes: vec!["old"],
+            },
+            "publish: again",
+        )
+        .unwrap();
+        let files = d.git("w", &["ls-tree", "-r", "--name-only", &head]);
+        assert_eq!(files, "keys/log.vkey\nnew", "{files}");
+        // The bytes on disk of a file the commit leaves as it was must still be the bytes given.
+        std::fs::write(w.join("keys/log.vkey"), b"other\n").unwrap();
+        std::fs::write(w.join("newer"), b"newer").unwrap();
+        let e = commit(
+            &w,
+            Some(&head),
+            &Change {
+                writes: vec![("keys/log.vkey", b"vkey\n"), ("newer", b"newer")],
+                removes: Vec::new(),
+            },
+            "publish: test",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("is not what was written there"), "{e:#}");
+        assert_eq!(d.git("w", &["rev-parse", "HEAD"]), head);
+    }
+
+    /// A repository whose git directory has `info/attributes` is refused whatever its branch
+    /// holds, since an attribute there rewrites the bytes of every file checked out; one with
+    /// none, and a branch with no `.gitattributes`, is not.
+    #[test]
+    fn attributes_in_the_git_directory_are_refused_as_the_branchs_are() {
+        let d = Dir::new("info-attributes");
+        d.git(".", &["init", "--quiet", "-b", "main", "w"]);
+        let w = d.0.join("w");
+        std::fs::write(w.join("a"), b"a").unwrap();
+        d.git("w", &["add", "a"]);
+        d.git("w", &["commit", "--quiet", "-m", "a"]);
+        assert_eq!(attributes(&w, None).unwrap(), None);
+        assert_eq!(attributes(&w, Some("HEAD")).unwrap(), None);
+        std::fs::create_dir_all(w.join(".git/info")).unwrap();
+        std::fs::write(w.join(".git/info/attributes"), b"* filter=x\n").unwrap();
+        for treeish in [None, Some("HEAD")] {
+            let why = attributes(&w, treeish).unwrap().expect("refused");
+            assert!(why.contains("info/attributes is there"), "{why}");
+        }
+        std::fs::remove_file(w.join(".git/info/attributes")).unwrap();
+        // A tree git cannot read is an error, never a tree with no attributes.
+        assert!(attributes(&w, Some("no-such-branch")).is_err());
+    }
+
+    /// Only a revision is handed to git: one that begins like an option, or holds a line end that
+    /// would make a second request of `cat-file --batch`, is refused before git runs.
+    #[test]
+    fn nothing_but_a_revision_is_handed_to_git() {
+        let d = Dir::new("revisions");
+        d.git(".", &["init", "--quiet", "-b", "main", "w"]);
+        let w = d.0.join("w");
+        for bad in ["--output=/tmp/x", "-p", "HEAD:a\nHEAD:b"] {
+            let e = blobs_held(&w, &[bad.to_string()]).unwrap_err();
+            assert!(e.to_string().contains("is not a revision"), "{bad:?}: {e}");
+        }
+        let e = blobs(&w, &["HEAD:a\nHEAD:b".to_string()]).unwrap_err();
+        assert!(e.to_string().contains("is not a revision"), "{e}");
+    }
+
+    /// `git cat-file --batch`'s answer, read blob by blob: a blob's bytes, whatever they hold;
+    /// nothing for a revision git says is missing or ambiguous, and nothing for an object that is
+    /// not a blob; and anything else — a header of another shape, an answer cut short — refused
+    /// rather than read as bytes.
+    #[test]
+    fn a_batch_is_read_blob_by_blob_and_nothing_else_is_taken_for_one() {
+        let revs = |n: usize| (0..n).map(|i| format!("HEAD:{i}")).collect::<Vec<_>>();
+        let id = "a".repeat(40);
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("{id} blob 5\nab\ncd\n").as_bytes());
+        out.extend_from_slice(b"HEAD:1 missing\n");
+        out.extend_from_slice(format!("{id} tree 3\nxyz\n").as_bytes());
+        out.extend_from_slice(b"HEAD:3 ambiguous\n");
+        out.extend_from_slice(format!("{id} blob 0\n\n").as_bytes());
+        assert_eq!(
+            read_batch(&out, &revs(5)).unwrap(),
+            vec![Some(b"ab\ncd".to_vec()), None, None, None, Some(Vec::new())]
+        );
+        for (bad, n) in [
+            // Fewer answers than were asked for.
+            (format!("{id} blob 1\nx\n"), 2),
+            // A body shorter than its header says.
+            (format!("{id} blob 10\nshort\n"), 1),
+            // A header of no shape git prints.
+            ("what is this\n".to_string(), 1),
+            (format!("{id} blob many\nx\n"), 1),
+        ] {
+            assert!(read_batch(bad.as_bytes(), &revs(n)).is_err(), "{bad:?}");
+        }
+    }
 }

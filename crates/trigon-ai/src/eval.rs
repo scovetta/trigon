@@ -507,4 +507,75 @@ mod tests {
             "needs-repair-toolchain"
         );
     }
+
+    #[test]
+    fn a_scorecard_names_each_label_in_the_words_the_corpus_uses() {
+        // The corpus is a file somebody writes by hand, and the scorecard's rates are keyed by
+        // `as_str`. A word that drifted from the serde name would file a label's targets under a
+        // row nobody looks up.
+        let all = [
+            Capability::TrivialDeterministic,
+            Capability::NeedsSourceDiscovery,
+            Capability::NeedsBuildInference,
+            Capability::NeedsRepairTimestamp,
+            Capability::NeedsRepairPath,
+            Capability::NeedsRepairToolchain,
+            Capability::NeedsRepairDeps,
+            Capability::KnownUnreproducible,
+        ];
+        for c in all {
+            assert_eq!(serde_json::to_value(c).unwrap(), c.as_str(), "{c:?}");
+            let corpus = vec![labelled("pkg:npm/a@1", c)];
+            let card = score(&corpus, &[observed("pkg:npm/a@1", Some("exact"), 0)]);
+            assert_eq!(card.by_capability[c.as_str()].total, 1, "{c:?}");
+        }
+        // Only the cheapest label forbids a model; every other one is allowed to need one.
+        assert_eq!(
+            all.iter().filter(|c| c.forbids_model()).collect::<Vec<_>>(),
+            [&Capability::TrivialDeterministic]
+        );
+    }
+
+    #[test]
+    fn a_target_that_started_producing_evidence_is_named_and_is_not_a_fix() {
+        // Whatever it says now, it said nothing before: there is no baseline to have fixed.
+        let mut before = observed("pkg:npm/a@1", None, 0);
+        before.is_evidence = false;
+        let f = flips(&[before], &[observed("pkg:npm/a@1", Some("exact"), 0)]);
+        assert_eq!(f.gained_evidence, ["pkg:npm/a@1"]);
+        assert!(f.fixed.is_empty());
+        assert!(!f.is_net_gain());
+    }
+
+    #[test]
+    fn losing_evidence_on_a_target_that_never_reproduced_changes_nothing() {
+        // Lost evidence is shown because a rule that broke a working build could hide behind an
+        // infrastructure fault. A target that was not reproducing had nothing to lose.
+        let mut lost = observed("pkg:npm/a@1", None, 0);
+        lost.is_evidence = false;
+        let f = flips(
+            &[observed("pkg:npm/a@1", Some("divergent"), 0)],
+            &[lost.clone()],
+        );
+        assert_eq!(f, Flips::default());
+
+        // And no evidence either time is no comparison at all.
+        let f = flips(&[lost.clone()], &[lost]);
+        assert_eq!(f, Flips::default());
+    }
+
+    #[test]
+    fn an_unrecorded_model_count_is_neither_a_regression_nor_a_pass() {
+        // `None` is not zero: a sweep resumed across the column's introduction has rows that never
+        // counted, and reading them as zero reports a check nobody made as one that passed.
+        let corpus = vec![labelled("pkg:npm/a@1", Capability::TrivialDeterministic)];
+        let mut o = observed("pkg:npm/a@1", Some("exact"), 0);
+        o.model_calls = None;
+        let card = score(&corpus, &[o]);
+        assert_eq!(card.unknown_model_calls, ["pkg:npm/a@1"]);
+        assert!(card.forbidden_model_calls.is_empty());
+        assert_eq!(card.model_calls, 0);
+        // Not a failure — the caller is told separately, so the vacuous pass is visible.
+        assert!(card.acceptable());
+    }
 }

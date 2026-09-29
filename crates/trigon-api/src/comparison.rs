@@ -797,5 +797,242 @@ mod tests {
         assert!(cap_reason(&p("metadata", "human", "reviewed by ada")).contains("reviewed by ada"));
         let both = cap_reason(&p("lossy", "model", "proposed by m"));
         assert!(both.contains("proposed by m") && both.contains("above metadata"));
+        // A row core says caps, spelt so that neither half reads as fired here: the reason says it
+        // cannot tell, rather than being empty or blaming a half that did not fire.
+        let neither = cap_reason(&p("metadata", "builtin", "builtin"));
+        assert!(neither.contains("cannot say which half"), "{neither}");
+        assert!(
+            !neither.contains("above metadata") && !neither.contains("not compiled in"),
+            "{neither}"
+        );
+    }
+
+    /// A member path as a stored comparison spells it: bytes, since a name need not be UTF-8.
+    fn bytes(s: &str) -> serde_json::Value {
+        serde_json::json!(s.as_bytes())
+    }
+
+    /// A divergent comparison with one differing member, `path`, and the codes, edits and passes
+    /// a test gives it. Hand-built, because these tests are about the projection's own rules; that
+    /// it reads what the comparator writes is `the_projection_reads_a_real_comparison`'s job.
+    fn stored(
+        path: &str,
+        codes: &[&str],
+        edits: serde_json::Value,
+        applied: (serde_json::Value, serde_json::Value),
+    ) -> Vec<u8> {
+        let side = |raw: &str, applied: serde_json::Value| {
+            serde_json::json!({
+                "format": "zip",
+                "bytes": 100,
+                "raw": { "sha256": raw },
+                "stabilized": { "sha256": format!("{raw}-stabilized") },
+                "applied": applied,
+                "set": ["zip", "sha256:set"],
+            })
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "outcome": "divergent",
+            "upstream": side("aa", applied.0),
+            "rebuild": side("bb", applied.1),
+            "diff": {
+                "codes": codes,
+                "identical": 0,
+                "differs": 1,
+                "only_upstream": 0,
+                "only_rebuild": 0,
+                "executable_differs": 0,
+                "files": [{
+                    "path": bytes(path),
+                    "status": "differs",
+                    "kind": "binary",
+                    "upstream_digest": "11",
+                    "rebuild_digest": "22",
+                }],
+                "field_edits": edits,
+            },
+        }))
+        .unwrap()
+    }
+
+    fn fields(work: &[FieldWork]) -> Vec<(&str, Vec<&str>)> {
+        work.iter()
+            .map(|w| {
+                (
+                    w.field.as_str(),
+                    w.passes.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn none() -> (serde_json::Value, serde_json::Value) {
+        (serde_json::json!([]), serde_json::json!([]))
+    }
+
+    #[test]
+    fn a_member_whose_name_holds_an_at_sign_keeps_what_still_differs_about_it() {
+        // A code is `rule@path`, and a rule id never holds an `@` while a member's path may. A code
+        // with no `@` at all names no member and is attributed to none.
+        let view = render(
+            &stored(
+                "lib/a@b.dll",
+                &["body@lib/a@b.dll", "unattributed"],
+                serde_json::json!([]),
+                none(),
+            ),
+            None,
+        )
+        .expect("renders");
+        let m = &view.members[0];
+        assert_eq!(m.path, "lib/a@b.dll");
+        assert_eq!(fields(&m.residual), [("body", vec![])]);
+        assert_eq!(m.differences, ["body"]);
+        assert!(m.digests_differ);
+    }
+
+    #[test]
+    fn a_zip_mode_still_differs_only_while_the_attributes_it_shadows_do() {
+        // `entry:mode` on a zip is a parse-time shadow of `external_attrs`, which is what the
+        // writer emits. Once a pass reconciled the attributes, the mode cannot reach the output, so
+        // it is not shown as still differing; while the attributes still differ, it is.
+        let attrs = serde_json::json!([
+            { "path": "bin/x.sh", "field": "zip.external_attrs", "passes": ["zip-attrs"] }
+        ]);
+        let view = render(
+            &stored("bin/x.sh", &["entry:mode@bin/x.sh"], attrs.clone(), none()),
+            None,
+        )
+        .expect("renders");
+        let m = &view.members[0];
+        assert!(m.residual.is_empty(), "{:?}", fields(&m.residual));
+        assert!(m.differences.is_empty());
+        assert_eq!(
+            fields(&m.reconciled),
+            [("entry:zip.external_attrs", vec!["zip-attrs"])]
+        );
+
+        let view = render(
+            &stored(
+                "bin/x.sh",
+                &["entry:mode@bin/x.sh", "entry:zip.external_attrs@bin/x.sh"],
+                attrs,
+                none(),
+            ),
+            None,
+        )
+        .expect("renders");
+        let m = &view.members[0];
+        assert_eq!(
+            fields(&m.residual),
+            [
+                ("entry:mode", vec![]),
+                ("entry:zip.external_attrs", vec!["zip-attrs"]),
+            ],
+            "a pass that touched a field and left it differing is named beside it"
+        );
+        assert!(m.reconciled.is_empty());
+    }
+
+    #[test]
+    fn a_body_a_pass_reconciled_is_named_as_the_body_and_its_echoes_are_not() {
+        // The size and the checksum follow the body. Listing them as reconciled beside it shows
+        // the shadow of the work as though it were more work.
+        let edits = serde_json::json!([
+            { "path": "lib/x.dll", "field": "body", "passes": ["dotnet-il-canonical"] },
+            { "path": "lib/x.dll", "field": "size", "passes": ["dotnet-il-canonical"] },
+            { "path": "lib/x.dll", "field": "zip.crc32", "passes": ["dotnet-il-canonical"] },
+        ]);
+        let view = render(&stored("lib/x.dll", &[], edits, none()), None).expect("renders");
+        let m = &view.members[0];
+        assert_eq!(
+            fields(&m.reconciled),
+            [("body", vec!["dotnet-il-canonical"])]
+        );
+        assert!(m.residual.is_empty());
+    }
+
+    #[test]
+    fn a_pass_somebody_wrote_says_who_and_holds_the_ceiling_below_normalized() {
+        // `docs/00-overview.md` §3.1: a pass a person reviewed or a model proposed caps a verdict
+        // as firmly as a content-risk builtin, and the reader is told whose pass it was rather
+        // than only that it was not built in.
+        let applied = (
+            serde_json::json!([{
+                "id": "reviewed-pass",
+                "risk": "metadata",
+                "provenance": { "kind": "human", "reviewer": "ada" },
+                "entries_touched": 2,
+                "bytes_changed": 30,
+            }]),
+            serde_json::json!([{
+                "id": "proposed-pass",
+                "risk": "structural",
+                "provenance": { "kind": "model", "model_id": "m-1", "run_id": "r-9" },
+                "entries_touched": 1,
+                "bytes_changed": 4,
+            }]),
+        );
+        let view =
+            render(&stored("x", &[], serde_json::json!([]), applied), None).expect("renders");
+        assert_eq!(view.ceiling, "normalized_with_caveats");
+
+        let rows: Vec<(&str, &str, &str, bool)> = view
+            .applied
+            .iter()
+            .map(|p| (p.id.as_str(), p.provenance.as_str(), p.who.as_str(), p.caps))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("proposed-pass", "model", "proposed by m-1", true),
+                ("reviewed-pass", "human", "reviewed by ada", true),
+            ]
+        );
+        let caps: Vec<(&str, &str)> = view
+            .caps
+            .iter()
+            .map(|c| (c.id.as_str(), c.why.as_str()))
+            .collect();
+        assert_eq!(
+            caps,
+            [
+                ("proposed-pass", "proposed by m-1 — not compiled in"),
+                ("reviewed-pass", "reviewed by ada — not compiled in"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_passes_that_stayed_silent_are_the_members_of_the_set_that_fired_on_neither_side() {
+        // Known only where the caller holds the set's membership. A pass that found nothing to
+        // change is evidence — no signature to strip says the package was not signed.
+        let applied = (
+            serde_json::json!([{
+                "id": "zip-time",
+                "risk": "metadata",
+                "provenance": { "kind": "builtin" },
+                "entries_touched": 3,
+                "bytes_changed": 12,
+            }]),
+            serde_json::json!([]),
+        );
+        let members = [
+            "zip-time".to_string(),
+            "nupkg-signature".to_string(),
+            "zip-order".into(),
+        ];
+        let view = render(
+            &stored("x", &[], serde_json::json!([]), applied),
+            Some(&members),
+        )
+        .expect("renders");
+        assert_eq!(
+            view.silent.as_deref(),
+            Some(&["nupkg-signature".to_string(), "zip-order".to_string()][..])
+        );
+        // A builtin metadata pass costs the verdict nothing.
+        assert_eq!(view.ceiling, "normalized");
+        assert!(view.caps.is_empty());
     }
 }

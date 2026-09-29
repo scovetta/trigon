@@ -296,6 +296,7 @@ mod tests {
             ),
             ("sum.golang.org+033de0a+Ac4zct", "eight hex"),
             ("sum.golang.org+033de0ae+!!!", "base64"),
+            ("sum.golang.org+033de0ae+", "its key is empty"),
             // Type 0x02, and the ed25519 bytes after it: the right length, the wrong kind.
             (
                 "sum.golang.org+033de0ae+As4zctda0e5eza+HJyk9SxEdh+s3Ux18htTTAD8OuAn8",
@@ -319,6 +320,7 @@ mod tests {
         let from_pem = AttestationKey::from_pem(&local.public_pem()).unwrap();
         assert_eq!(from_hex, from_pem);
         assert_eq!(from_hex.to_hex(), local.public_hex());
+        assert_eq!(from_hex.verifying_key(), &local.public_key());
         // The key id a signature carries, so a check can say which key it expected.
         use crate::Signer as _;
         assert_eq!(from_hex.key_id(), local.key_id());

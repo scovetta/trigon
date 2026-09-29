@@ -518,4 +518,100 @@ mod tests {
         broken.attestation_keys[0].until = None;
         assert!(broken.history().is_err());
     }
+
+    fn keys_file() -> KeysFile {
+        KeysFile {
+            schema: KEYS_SCHEMA.into(),
+            log_key: "example.com/log+00000000+AQ".into(),
+            attestation_key: "a".repeat(64),
+            first_use: None,
+            logs: Vec::new(),
+            attestation_keys: Vec::new(),
+        }
+    }
+
+    /// A key history that starts at another key than the chain is verified from says so, whichever
+    /// key it is: the log wins, and the difference is what is reported.
+    #[test]
+    fn a_history_that_starts_at_other_keys_says_which() {
+        let was = keys_file();
+        let mut now = keys_file();
+        now.log_key = "example.com/log+11111111+AQ".into();
+        now.attestation_key = "b".repeat(64);
+        let d = was.differences(&now);
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert!(
+            d[0].contains("starts at the log key example.com/log+00000000+AQ")
+                && d[0].contains("verified from example.com/log+11111111+AQ"),
+            "{d:?}"
+        );
+        assert!(d[1].contains("starts at the attestation key aaaa"), "{d:?}");
+        assert!(was.differences(&keys_file()).is_empty());
+    }
+
+    /// A state file that is there and is not one this build reads is refused with the file, never
+    /// read as absent: it is what a rollback is caught against, and what a source is pinned by.
+    #[test]
+    fn a_state_file_this_build_does_not_read_is_refused_with_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        assert!(KeysFile::read(dir).unwrap().is_none());
+        assert!(SyncRecord::read(dir).unwrap().is_none());
+        assert!(read_checkpoint(dir).unwrap().is_none());
+
+        std::fs::write(dir.join(KEYS), b"not json").unwrap();
+        let e = KeysFile::read(dir).unwrap_err();
+        assert_eq!(e.path, dir.join(KEYS));
+        assert!(e.why.contains("not a key history this build reads"), "{e}");
+
+        let mut later = keys_file();
+        later.schema = "trigon.evidence-keys/v2".into();
+        later.write(dir).unwrap();
+        let e = KeysFile::read(dir).unwrap_err();
+        assert!(
+            e.why
+                .contains("its schema is `trigon.evidence-keys/v2`, and this build reads"),
+            "{e}"
+        );
+        keys_file().write(dir).unwrap();
+        assert_eq!(KeysFile::read(dir).unwrap(), Some(keys_file()));
+
+        let r = serde_json::json!({ "schema": "trigon.evidence-sync/v0", "logs": [], "urls": [] });
+        std::fs::write(dir.join(SYNC), r.to_string()).unwrap();
+        let e = SyncRecord::read(dir).unwrap_err();
+        assert_eq!(e.path, dir.join(SYNC));
+        assert!(
+            e.why.contains("its schema is `trigon.evidence-sync/v0`"),
+            "{e}"
+        );
+        SyncRecord::default().write(dir).unwrap();
+        assert!(SyncRecord::read(dir).unwrap().is_some());
+    }
+
+    /// A state file is a small regular file: a directory in its place, one past the limit, or a
+    /// state directory that is itself a file is refused, never read as no file at all.
+    #[test]
+    fn a_state_file_that_is_not_a_small_regular_file_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir(dir.join(CHECKPOINT)).unwrap();
+        let e = read_checkpoint(dir).unwrap_err();
+        assert!(e.why.contains("not a regular file"), "{e}");
+        std::fs::remove_dir(dir.join(CHECKPOINT)).unwrap();
+
+        write_checkpoint(dir, &vec![b'x'; STATE_FILE_LIMIT as usize + 1]).unwrap();
+        let e = read_checkpoint(dir).unwrap_err();
+        assert!(e.why.contains("larger than"), "{e}");
+        write_checkpoint(dir, &vec![b'x'; STATE_FILE_LIMIT as usize]).unwrap();
+        assert_eq!(
+            read_checkpoint(dir).unwrap().map(|b| b.len()),
+            Some(STATE_FILE_LIMIT as usize)
+        );
+
+        let file = dir.join("a-file");
+        std::fs::write(&file, b"").unwrap();
+        let e = read_checkpoint(&file).unwrap_err();
+        assert_eq!(e.path, file.join(CHECKPOINT));
+        assert!(e.why.contains("cannot be read"), "{e}");
+    }
 }

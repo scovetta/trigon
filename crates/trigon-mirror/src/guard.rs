@@ -1504,6 +1504,222 @@ mod tests {
         let text = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<GuardManifest>(&text).unwrap(), m);
     }
+
+    fn digest(bytes: &[u8]) -> Digest {
+        Digest::from_bytes(Sha256::digest(bytes).into())
+    }
+
+    #[test]
+    fn the_rebuilt_artifact_on_disk_is_read_by_its_name_or_not_at_all() {
+        // What the void decision compares a member trip against. A file it cannot read, or whose
+        // name does not say what format it is, is "we could not look inside" — `None` — which voids
+        // no member trip. Guessing a format would answer a security question with a coincidence.
+        let dir = std::env::temp_dir().join(format!("trigon-guard-at-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = tgz(&[("pkg/index.js", b"module.exports = 1;\n")]);
+        std::fs::write(dir.join("demo-1.0.0.tgz"), &bytes).unwrap();
+        std::fs::write(dir.join("demo-1.0.0.mystery"), &bytes).unwrap();
+
+        assert_eq!(
+            member_digests_at(&dir.join("demo-1.0.0.tgz")),
+            Some(member_digests(&bytes, Format::TarGz))
+        );
+        assert!(!member_digests(&bytes, Format::TarGz).is_empty());
+        assert_eq!(member_digests_at(&dir.join("demo-1.0.0.mystery")), None);
+        assert_eq!(member_digests_at(&dir.join("not-there.tgz")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_trip_names_the_member_that_matched_and_only_a_member_trip_names_one() {
+        let member = "ab".repeat(32);
+        let whole = trip_at("https://cdn.evil.example/a.tgz", GuardMatch::WholeArtifact);
+        let part = trip_at(
+            "https://registry.npmjs.org/b/-/b-1.0.0.tgz",
+            GuardMatch::Member {
+                digest: member.clone(),
+            },
+        );
+        let asked = trip_at(
+            "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+            GuardMatch::RefusedUrl,
+        );
+
+        assert_eq!(part.member(), Some(member.as_str()));
+        assert_eq!((whole.member(), asked.member()), (None, None));
+
+        // One line a person can read, and the three say three different things: arrived whole,
+        // arrived inside something else, and asked for without arriving.
+        assert_eq!(
+            whole.describe(),
+            "the artifact under test arrived from https://cdn.evil.example/a.tgz"
+        );
+        assert_eq!(
+            part.describe(),
+            format!(
+                "a member of the artifact under test (sha256 {}) arrived from \
+                 https://registry.npmjs.org/b/-/b-1.0.0.tgz",
+                &member[..16]
+            )
+        );
+        assert!(
+            asked
+                .describe()
+                .starts_with("the build asked for its own artifact at")
+        );
+    }
+
+    fn trip_at(url: &str, matched: GuardMatch) -> Trip {
+        Trip {
+            url: url.into(),
+            matched,
+        }
+    }
+
+    #[test]
+    fn the_body_is_kept_only_when_there_is_a_member_to_look_for() {
+        // The whole-artifact hash is computed as the bytes stream past. Buffering every dependency
+        // a build downloads when there is no member to compare against is pure cost.
+        let whole_only = Guard::new(GuardManifest {
+            artifact: Some(digest(b"the artifact")),
+            ..Default::default()
+        });
+        assert!(whole_only.is_armed());
+        assert!(!whole_only.wants_body());
+
+        let with_members = Guard::new(GuardManifest {
+            members: [digest(b"a member")].into_iter().collect(),
+            ..Default::default()
+        });
+        assert!(with_members.wants_body());
+    }
+
+    #[test]
+    fn an_archive_is_hashed_but_not_opened_when_there_is_no_member_to_look_for() {
+        // `opened` claims the members were compared. With nothing to compare them against that
+        // claim would describe a check that does not exist on this run.
+        let g = Guard::new(GuardManifest {
+            artifact: Some(digest(b"the artifact")),
+            ..Default::default()
+        });
+        let body = tgz(&[("pkg/index.js", b"module.exports = 1;\n")]);
+        assert_eq!(
+            g.observe("https://x/dep.tgz", digest(&body), Some(&body)),
+            Checked::Hashed
+        );
+        assert!(g.trips().is_empty());
+    }
+
+    #[test]
+    fn a_body_that_looks_like_an_archive_and_will_not_open_is_hashed_not_opened() {
+        // It sniffed as gzip and did not parse, so the member check did not run — and saying it
+        // did is the exact lie the return value exists to prevent.
+        let g = Guard::new(GuardManifest {
+            members: [digest(b"a member")].into_iter().collect(),
+            ..Default::default()
+        });
+        for torn in [
+            &b"\x1f\x8b\x08\x00 not a gzip stream"[..],
+            b"PK\x03\x04 not a zip",
+        ] {
+            assert_eq!(
+                g.observe("https://x/torn", digest(torn), Some(torn)),
+                Checked::Hashed,
+                "{torn:?}"
+            );
+        }
+        assert!(g.trips().is_empty());
+    }
+
+    #[test]
+    fn a_file_of_nothing_but_whitespace_is_not_guarded_whatever_it_is_called() {
+        // It is byte-identical to the same file in every package that has one. Guarding it voids
+        // any build that downloads another package carrying the same blank file.
+        let blank = vec![b' '; 8192];
+        let real = vec![b'x'; 8192];
+        let artifact = tgz(&[("pkg/src/blank.js", &blank), ("pkg/src/real.js", &real)]);
+        let m = GuardManifest::for_artifact(&artifact, Format::TarGz, None);
+        assert!(!m.members.contains(&digest(&blank)));
+        assert!(m.members.contains(&digest(&real)));
+        assert_eq!(m.filtered_out, 1);
+    }
+
+    #[test]
+    fn the_source_walk_does_not_count_git_objects_as_source() {
+        // `.git` holds packed objects, not files the artifact was packed from. A member whose bytes
+        // happen to sit in there is not "also in the source", and must stay guarded.
+        let dir = std::env::temp_dir().join(format!("trigon-guard-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git/objects")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let in_source = vec![b's'; 8192];
+        let in_git = vec![b'g'; 8192];
+        std::fs::write(dir.join("src/lib.js"), &in_source).unwrap();
+        std::fs::write(dir.join(".git/objects/blob"), &in_git).unwrap();
+
+        let artifact = tgz(&[("pkg/lib.js", &in_source), ("pkg/prebuilt.js", &in_git)]);
+        let m = GuardManifest::for_artifact_with_source(&artifact, Format::TarGz, None, &dir);
+        assert!(
+            !m.members.contains(&digest(&in_source)),
+            "the source file is guarded"
+        );
+        assert!(
+            m.members.contains(&digest(&in_git)),
+            "a git object narrowed the guard"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_member_is_exempt_only_where_the_url_can_be_read_as_a_toolchain_or_a_neighbour() {
+        // Both exemptions narrow a void, so both have to fail closed on anything they cannot read:
+        // a URL with no scheme is not a toolchain download, and a project with no last segment
+        // is no package's neighbour.
+        let d = digest(b"compiled output");
+        let rebuilt: BTreeSet<Digest> = [d].into_iter().collect();
+        let under = |project: &str| Withheld {
+            project: project.into(),
+            version: "2.0.0".into(),
+        };
+        let trip = |url: &str| trip_at(url, GuardMatch::Member { digest: d.to_hex() });
+        for (url, project) in [
+            ("nodejs.org/dist/v20.0.0/node.tar.gz", "demo"),
+            // A filename an empty last segment *would* read as a release: `""` prefixes
+            // everything, and what is left is a separator and a digit.
+            (
+                "https://registry.npmjs.org/@scope/x/-/-1.0.0.tgz",
+                "@scope/",
+            ),
+            ("https://files.pythonhosted.org/p/_1.0.tar.gz", "@scope/"),
+            ("https://registry.npmjs.org/other/-/other-1.0.0.tgz", "demo"),
+        ] {
+            let voids = voiding(&[trip(url)], Some(&rebuilt), Some(&under(project)));
+            assert_eq!(voids.len(), 1, "{url} under {project} was exempted");
+        }
+    }
+
+    #[test]
+    fn redaction_leaves_a_url_with_no_authority_alone_and_strips_one_with_no_path() {
+        let e = |url: &str| Exchange::new("index", url, String::new(), 0, Checked::Generated).url;
+        assert_eq!(e("not a url at all"), "not a url at all");
+        assert_eq!(
+            e("http://npm:2018-04-09T01:10:45Z@timewarp:8129"),
+            "http://timewarp:8129"
+        );
+    }
+
+    #[test]
+    fn a_stored_transcript_with_blank_lines_between_rows_reads_every_row() {
+        let row = |url: &str| Exchange::new("artifact", url, "cc".repeat(32), 1, Checked::Hashed);
+        let (a, b) = (row("https://x/a.tgz"), row("https://x/b.tgz"));
+        let blob = format!(
+            "{}\n\n   \n{}\n",
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap()
+        );
+        assert_eq!(Exchange::parse_jsonl(&blob).unwrap(), vec![a, b]);
+    }
 }
 
 #[cfg(test)]

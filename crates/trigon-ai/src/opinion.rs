@@ -283,4 +283,83 @@ mod tests {
         assert!(!flat.contains('\u{0}'), "a NUL reached the prompt");
         assert!(flat.contains("line one red"), "{flat}");
     }
+
+    /// A provider whose answer does not fit unless reasoning is off, or never fits at all.
+    struct Tight {
+        fits_without_reasoning: bool,
+        seen: std::sync::Mutex<Vec<(Option<Effort>, Reasoning)>>,
+    }
+
+    impl Provider for Tight {
+        fn id(&self) -> &str {
+            "tight"
+        }
+        fn caps(&self) -> crate::ModelCaps {
+            Replay::once("").caps()
+        }
+        fn complete(&self, req: &Request) -> Result<crate::Response, LlmError> {
+            self.seen.lock().unwrap().push((req.effort, req.reasoning));
+            if self.fits_without_reasoning && req.reasoning == Reasoning::Off {
+                return Replay::once(r#"{"verdict": "equivalent", "reason": "a timestamp"}"#)
+                    .complete(req);
+            }
+            Err(LlmError::Truncated {
+                limit: req.max_output_tokens,
+                thinking: 16_380,
+            })
+        }
+    }
+
+    fn tight(fits_without_reasoning: bool) -> Tight {
+        Tight {
+            fits_without_reasoning,
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_reading_that_did_not_fit_is_asked_again_at_the_floor_with_reasoning_off() {
+        // This is a classification, so it starts at the lowest depth, and the one step left is to
+        // stop reasoning altogether. The retry stays at the floor: no depth at all would mean the
+        // provider's *default*, which on a provider that ignores `Off` thinks harder than the call
+        // that was already too big.
+        let p = tight(true);
+        let o = on_diff(&p, "m", "-a\n+b\n", 1, 1).expect("the no-reasoning call answers");
+        assert_eq!(o.verdict, DiffVerdict::Equivalent);
+        assert_eq!(
+            *p.seen.lock().unwrap(),
+            [
+                (Some(Effort::Low), Reasoning::Default),
+                (Some(Effort::Low), Reasoning::Off)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reading_that_does_not_fit_even_without_reasoning_is_reported_after_one_retry() {
+        // Nothing lower is left to try, and the same budget truncates the same way.
+        let p = tight(false);
+        let e = on_diff(&p, "m", "-a\n+b\n", 1, 1).unwrap_err();
+        assert!(matches!(e, LlmError::Truncated { .. }), "{e:?}");
+        assert_eq!(p.seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_reading_asked_again_logs_what_the_first_call_ran_into() {
+        // The second call is paid for, and the log is where an operator sees why there were two.
+        let p = tight(true);
+        let (o, logged) = crate::test_log::capture(|| on_diff(&p, "m", "-a\n+b\n", 1, 1));
+        o.expect("the no-reasoning call answers");
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert_eq!(logged[0].level, tracing::Level::WARN);
+        assert_eq!(
+            (logged[0].field("limit"), logged[0].field("thinking")),
+            (Some("16384"), Some("16380"))
+        );
+        assert!(
+            logged[0].message().contains("reasoning off"),
+            "{:?}",
+            logged[0]
+        );
+    }
 }

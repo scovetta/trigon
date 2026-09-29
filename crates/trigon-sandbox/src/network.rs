@@ -243,7 +243,9 @@ impl Island {
                     return Err(SandboxError::Failed {
                         phase: "setup".into(),
                         detail: format!(
-                            "the mirror container {container} disappeared before it started                              listening. If `{}` is older than this build it will not understand                              the flags we pass it; rebuild it with `trigon mirror-image`.",
+                            "the mirror container {container} disappeared before it started \
+                             listening. If `{}` is older than this build it will not understand \
+                             the flags we pass it; rebuild it with `trigon mirror-image`.",
                             self.mirror_image_hint()
                         ),
                     });
@@ -309,7 +311,8 @@ impl Island {
                 SandboxError::Failed {
                     phase: "build".into(),
                     detail: format!(
-                        "the mirror wrote a transcript line this build cannot read, so what the                          build downloaded is unknown rather than empty: {detail}"
+                        "the mirror wrote a transcript line this build cannot read, so what the \
+                         build downloaded is unknown rather than empty: {detail}"
                     ),
                 }
             })?,
@@ -529,5 +532,112 @@ async fn prune_orphans(binary: &str) {
         {
             tracing::debug!(network = name, "removed an orphaned egress island");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A runtime whose mirror container is up and says nothing, for ever.
+    fn silent_runtime(name: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("trigon-island-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("podman");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncase \"$1\" in inspect) cat \"$(dirname \"$0\")/state\" ;; esac\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Executed once before use: a sibling test forking while the script was open for writing
+        // would otherwise make the first real execution fail with "text file busy".
+        for _ in 0..10_000 {
+            match std::process::Command::new(&bin).output() {
+                Ok(_) => break,
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => std::thread::yield_now(),
+                Err(e) => panic!("{e}"),
+            }
+        }
+        bin
+    }
+
+    #[tokio::test]
+    async fn a_mirror_that_is_up_and_never_listens_is_given_up_on_at_the_deadline() {
+        let _spawning = crate::store_lock::tests::SPAWNING.read().await;
+        // Running and created are both states a mirror passes through on its way to listening, so
+        // neither ends the wait early — and neither may extend it past the deadline, or a mirror
+        // wedged before binding holds the run for ever.
+        for state in ["running", "created"] {
+            let bin = silent_runtime(state);
+            std::fs::write(bin.with_file_name("state"), state).unwrap();
+            let island = Island {
+                binary: bin.display().to_string(),
+                name: "trigon-test".into(),
+                mirror: Some("trigon-test-mirror".into()),
+                mirror_host: None,
+            };
+            // Bounded from outside, because the regression this guards against is a wait that
+            // never ends — and a test that hangs on it reports nothing.
+            let e = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                island.wait_ready(std::time::Duration::ZERO),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{state}: waited past the deadline"))
+            .expect_err("it never listened");
+            assert!(
+                e.to_string().contains("did not start listening within"),
+                "{state}: {e}"
+            );
+            let _ = std::fs::remove_dir_all(bin.parent().unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_cannot_be_run_at_all_is_reported_as_the_mirror_gone() {
+        let _spawning = crate::store_lock::tests::SPAWNING.read().await;
+        // `logs` that cannot be run answer nothing, and an `inspect` that cannot be run is a
+        // container we cannot find. Polling on is how a crash at startup came to read as a
+        // thirty-second timeout; this says what happened on the first look.
+        let island = Island {
+            binary: "/nonexistent/podman".into(),
+            name: "trigon-test".into(),
+            mirror: Some("trigon-test-mirror".into()),
+            mirror_host: None,
+        };
+        let e = island
+            .wait_ready(std::time::Duration::from_secs(3600))
+            .await
+            .expect_err("nothing to ask");
+        assert!(
+            e.to_string()
+                .contains("disappeared before it started listening"),
+            "{e}"
+        );
+        let e = island.observations().await.expect_err("nothing to read");
+        assert!(matches!(e, SandboxError::Io(_)), "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn an_island_with_no_mirror_has_nothing_to_wait_for_or_read() {
+        // Nothing was started, so there is nothing to probe — and "no mirror ran" is an empty log,
+        // not a failed read, because there was nothing to fail to read.
+        let island = Island {
+            binary: "/nonexistent/podman".into(),
+            name: "trigon-test".into(),
+            mirror: None,
+            mirror_host: None,
+        };
+        assert!(island.wait_ready(std::time::Duration::ZERO).await.is_ok());
+        assert!(island.mirror_ip().await.is_none());
+        let log = island
+            .observations()
+            .await
+            .expect("nothing to read is not a failure");
+        assert!(log.trips.is_empty() && log.transcript.is_empty() && log.refusals.is_empty());
+        assert_eq!(log.observed(), trigon_mirror::Observed::default());
     }
 }

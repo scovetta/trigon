@@ -450,3 +450,91 @@ fn a_subject_digest_the_verifier_cannot_compute_is_not_passed_over() {
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+
+/// A key or a signature that is not one is refused as what it is, and never verifies: a key of an
+/// odd number of hex digits, or not hex, or not 32 bytes; a signature not base64, or not 64 bytes.
+#[test]
+fn a_key_or_a_signature_that_is_not_one_never_verifies() {
+    let key = LocalKey::from_bytes(&[7u8; 32]).unwrap();
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let st = Statement::equivalence("pkg-1.0.0.tar", &comparison(&u, &r));
+    let env = sign_statement(&st, &key).unwrap();
+    let pae = env.pae().unwrap();
+    let hex = key.public_hex();
+    for bad in [&hex[1..], &format!("zz{}", &hex[2..]), &hex[..62]] {
+        let e = verify_signature(&pae, &env.signatures[0], bad).unwrap_err();
+        assert!(
+            matches!(e, trigon_attest::AttestError::Key(_)),
+            "{bad}: {e}"
+        );
+    }
+    let mut sig = env.signatures[0].clone();
+    sig.sig = "not base64!".into();
+    let e = verify_signature(&pae, &sig, &hex).unwrap_err();
+    assert!(matches!(e, trigon_attest::AttestError::Evidence(_)), "{e}");
+    sig.sig = "AAAA".into();
+    let e = verify_signature(&pae, &sig, &hex).unwrap_err();
+    assert!(e.to_string().contains("64 bytes"), "{e}");
+    verify_signature(&pae, &env.signatures[0], &hex).unwrap();
+}
+
+/// An equivalence subject names the upstream sha256 the comparison is keyed on, or it is refused;
+/// one naming sha256 alone, as every subject signed before sha512 did, is accepted.
+#[test]
+fn an_equivalence_subject_without_the_upstream_sha256_is_refused() {
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let c = comparison(&u, &r);
+    let mut no_sha256 = Subject::of_bytes("pkg-1.0.0.tar", &u, true);
+    no_sha256.digest.remove("sha256");
+    let e = Statement::equivalence_for(no_sha256, &c).unwrap_err();
+    assert!(matches!(e, trigon_attest::AttestError::Malformed(_)), "{e}");
+    assert!(e.to_string().contains("sha256"), "{e}");
+    let st = Statement::equivalence_for(Subject::new("pkg-1.0.0.tar", &c.upstream.raw.sha256), &c)
+        .unwrap();
+    assert_eq!(st.subject[0].digest.len(), 1);
+}
+
+/// A member whose name is not UTF-8 is held to a published report by its bytes, which no text
+/// equals: the report of the same comparison agrees, member by member.
+#[cfg(unix)]
+#[test]
+fn a_member_whose_name_is_not_utf8_is_held_to_the_report_by_its_bytes() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let archive = |mtime: u64, body: &[u8]| {
+        let mut b = ::tar::Builder::new(Vec::new());
+        let mut h = ::tar::Header::new_ustar();
+        h.set_path(std::ffi::OsStr::from_bytes(b"pkg/\xff.txt"))
+            .unwrap();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_mtime(mtime);
+        h.set_cksum();
+        b.append(&h, body).unwrap();
+        b.into_inner().unwrap()
+    };
+    let (u, r) = (archive(1, b"hello"), archive(2, b"world"));
+    let c = comparison(&u, &r);
+    let member = &c.diff.as_ref().unwrap().files[0].path;
+    assert!(
+        std::str::from_utf8(member.as_bytes()).is_err(),
+        "{member:?}"
+    );
+    let st = Statement::equivalence("pkg-1.0.0.tar", &c);
+    let d = rederive(&st, u, r).unwrap();
+    assert!(d.holds(), "{d:?}");
+    let checked = d
+        .check_report(&serde_json::to_vec(&c).unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(checked.agrees(), "{:?}", checked.disagreements);
+}
+
+/// An archive format this build does not know is refused as damaged evidence, never guessed at.
+#[test]
+fn an_archive_format_this_build_does_not_know_is_refused() {
+    let (u, r) = (tar(1, 0), tar(2, 0));
+    let mut st = Statement::equivalence("pkg-1.0.0.tar", &comparison(&u, &r));
+    st.predicate["archiveFormat"] = "rar".into();
+    let e = rederive(&st, u, r).unwrap_err();
+    assert!(matches!(e, trigon_attest::AttestError::Evidence(_)), "{e}");
+}

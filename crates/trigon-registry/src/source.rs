@@ -495,3 +495,119 @@ fn git_output(
     }
     Ok(out.stdout)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A repository with two commits, the first tagged lightweight and the second annotated. The
+    /// repository is removed when the directory handed back is dropped.
+    fn tagged_repo(name: &str) -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("trigon-source-unit-{name}-"))
+            .tempdir()
+            .unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join("a"), "one\n").unwrap();
+        git_in(repo, &["init", "--quiet", "-b", "main"]);
+        git_in(repo, &["add", "-A"]);
+        git_in(repo, &["commit", "--quiet", "-m", "one"]);
+        let first = git_in(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("b"), "two\n").unwrap();
+        git_in(repo, &["add", "-A"]);
+        git_in(repo, &["commit", "--quiet", "-m", "two"]);
+        let second = git_in(repo, &["rev-parse", "HEAD"]);
+        git_in(repo, &["tag", "v1.0.0", &first]);
+        git_in(repo, &["tag", "-a", "v2.0.0", "-m", "release", &second]);
+        (dir, first, second)
+    }
+
+    #[test]
+    fn every_advertised_tag_names_the_commit_and_never_the_tag_object() {
+        // An annotated tag lists twice in `ls-remote`: the tag object under its own name and the
+        // commit under `^{}`. A checkout needs the commit, so the peeled line is the one kept —
+        // the tag object's id would send `git checkout` after something that is not a commit.
+        let (dir, first, second) = tagged_repo("peeled");
+        let repo = dir.path();
+        let tags = remote_tags(repo.to_str().unwrap(), true).unwrap();
+        assert_eq!(tags.len(), 2, "{tags:?}");
+        assert_eq!(tags["v1.0.0"], first, "a lightweight tag is the commit");
+        assert_eq!(
+            tags["v2.0.0"], second,
+            "the peeled commit, not the tag object"
+        );
+        let object = git_in(repo, &["rev-parse", "v2.0.0"]);
+        assert_ne!(
+            object, second,
+            "the fixture's annotated tag is an object of its own"
+        );
+    }
+
+    #[test]
+    fn a_repository_a_package_named_is_refused_before_git_sees_it() {
+        // `file://` chosen by the thing under test reaches the local filesystem; a leading dash is
+        // an option to git wherever it appears. Neither is handed to a command line.
+        let (dir, _, _) = tagged_repo("refused");
+        let repo = dir.path();
+        for bad in [
+            repo.to_string_lossy().into_owned(),
+            format!("file://{}", repo.display()),
+            "--upload-pack=touch /tmp/owned".to_string(),
+            "ssh://git@github.com/o/r".to_string(),
+            "https://github.com/o/r with space".to_string(),
+        ] {
+            let e = remote_tags(&bad, false).unwrap_err();
+            assert!(
+                matches!(e, RegistryError::SourceRefused { .. }),
+                "{bad}: {e}"
+            );
+        }
+        // Not even for the operator's own path does a leading dash get through.
+        let e = remote_tags("-C/tmp", true).unwrap_err();
+        assert!(matches!(e, RegistryError::SourceRefused { .. }), "{e}");
+    }
+
+    #[test]
+    fn a_remote_that_cannot_be_listed_is_a_failure_that_may_pass() {
+        // A repository that is not there is `Source`, which the queue retries, and not a refusal,
+        // which it would not.
+        let missing =
+            std::env::temp_dir().join(format!("trigon-source-unit-missing-{}", std::process::id()));
+        let e = remote_tags(missing.to_str().unwrap(), true).unwrap_err();
+        assert!(matches!(e, RegistryError::Source { .. }), "{e}");
+        assert!(trigon_core::Classify::is_retryable(&e));
+    }
+
+    #[test]
+    fn a_checkout_whose_directory_has_gone_reads_nothing_rather_than_the_host() {
+        let c = Checkout {
+            repo: "https://github.com/o/r".into(),
+            commit: "0".repeat(40),
+            path: std::env::temp_dir()
+                .join(format!("trigon-source-unit-gone-{}", std::process::id())),
+            tags: Vec::new(),
+        };
+        assert!(c.read(&["package.json"], 1 << 20).is_empty());
+        assert!(c.files(10).is_err());
+    }
+}

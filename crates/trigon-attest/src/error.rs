@@ -140,3 +140,121 @@ impl Classify for AttestError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::LogError;
+
+    /// Evidence that fails verification — a signature, a re-derivation, a subject refuted, a log
+    /// that does not hold — is said as such, and is the evidence's fault class that is never
+    /// retried; what could not be read, a policy, or a file handed in wrongly is not.
+    #[test]
+    fn only_evidence_that_fails_verification_is_said_to() {
+        let s = || "why".to_string();
+        let io = || std::io::Error::other("disk");
+        let json = || serde_json::from_str::<u8>("x").unwrap_err();
+        for (e, fails, fault) in [
+            (AttestError::BadSignature, true, Fault::Bug),
+            (
+                AttestError::ClaimRefuted {
+                    side: "upstream",
+                    claimed: s(),
+                    actual: s(),
+                },
+                true,
+                Fault::Bug,
+            ),
+            (
+                AttestError::SubjectRefuted {
+                    algorithm: s(),
+                    claimed: s(),
+                    actual: s(),
+                },
+                true,
+                Fault::Bug,
+            ),
+            (AttestError::Canonicalize(s()), false, Fault::Bug),
+            (AttestError::Malformed(s()), false, Fault::Upstream),
+            (AttestError::Evidence(s()), false, Fault::Upstream),
+            (AttestError::Key(s()), false, Fault::Upstream),
+            (AttestError::Json(json()), false, Fault::Upstream),
+            (
+                AttestError::WrongArtifact {
+                    side: "upstream",
+                    algorithm: s(),
+                    expected: s(),
+                    got: s(),
+                },
+                false,
+                Fault::Upstream,
+            ),
+            (AttestError::Unsigned, false, Fault::Policy),
+            (
+                AttestError::SetMismatch {
+                    claimed: s(),
+                    current: s(),
+                },
+                false,
+                Fault::Policy,
+            ),
+            (AttestError::Io(io()), false, Fault::Infra),
+            (AttestError::Log(LogError::Mismatch(s())), true, Fault::Bug),
+            (
+                AttestError::Log(LogError::Missing { path: s() }),
+                false,
+                Fault::Upstream,
+            ),
+        ] {
+            assert_eq!(e.fails_verification(), fails, "{e:?}");
+            assert_eq!(e.fault(), fault, "{e:?}");
+        }
+    }
+
+    /// A log that may be lying fails verification and is never retried; one that could not be
+    /// read is the source's or the disk's, and does not.
+    #[test]
+    fn a_log_that_may_be_lying_fails_verification_and_one_unread_does_not() {
+        let s = || "why".to_string();
+        for (e, fails, fault) in [
+            (LogError::Unverified(s()), true, Fault::Bug),
+            (LogError::BadSignature(s()), true, Fault::Bug),
+            (LogError::Mismatch(s()), true, Fault::Bug),
+            (
+                LogError::Inconsistent {
+                    why: s(),
+                    accepted: s(),
+                    offered: s(),
+                },
+                true,
+                Fault::Bug,
+            ),
+            (
+                LogError::Equivocation {
+                    why: s(),
+                    first_dir: s(),
+                    first: s(),
+                    second_dir: s(),
+                    second: s(),
+                },
+                true,
+                Fault::Bug,
+            ),
+            (LogError::Rule(s()), true, Fault::Bug),
+            (LogError::Rotation(s()), true, Fault::Bug),
+            (LogError::Malformed(s()), false, Fault::Upstream),
+            (LogError::Missing { path: s() }, false, Fault::Upstream),
+            (
+                LogError::Io {
+                    path: s(),
+                    source: std::io::Error::other("disk"),
+                },
+                false,
+                Fault::Infra,
+            ),
+        ] {
+            assert_eq!(e.fails_verification(), fails, "{e:?}");
+            assert_eq!(e.fault(), fault, "{e:?}");
+        }
+    }
+}

@@ -247,6 +247,46 @@ async fn a_rung_that_breaks_is_written_down_and_the_next_one_still_runs() {
     assert!(out.declines[0].1.contains("packument"), "{:?}", out.declines[0]);
 }
 
+/// A rung that keeps the trait's default `why_not`, as a rung for another ecosystem does.
+struct Mute;
+
+#[async_trait]
+impl StrategyInferrer for Mute {
+    fn name(&self) -> &'static str {
+        "mute"
+    }
+
+    async fn infer(&self, _t: &ResolvedTarget) -> Result<Vec<Candidate>, RegistryError> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn a_rung_that_never_explains_itself_adds_no_line_and_infer_takes_the_first_answer() {
+    // `why_not` defaults to nothing to add, which is the honest answer for a rung with no reason
+    // of its own. And `infer` is the climb with the record dropped: the first candidate, or none.
+    let t = target(&["widget-1.2.3.tar.gz"]);
+    let (answering, counts) = ladder(vec![
+        Rung::new("second", Answer::Candidate),
+        Rung::new("third", Answer::Candidate),
+    ]);
+    let mut rungs: Vec<Box<dyn StrategyInferrer>> = vec![Box::new(Mute)];
+    rungs.extend(answering);
+    let got = trigon_registry::infer(&rungs, &t).await.unwrap();
+    assert_eq!(
+        got.map(|c| c.discovery),
+        Some(SourceDiscovery::ExactTag),
+        "the second rung's candidate"
+    );
+    assert_eq!(counts[1].infers(), 0, "the third rung was not asked");
+
+    let silent: Vec<Box<dyn StrategyInferrer>> = vec![Box::new(Mute)];
+    assert!(trigon_registry::infer(&silent, &t).await.unwrap().is_none());
+    let out = climb(&silent, &t).await;
+    assert!(out.candidate.is_none());
+    assert!(out.declines.is_empty(), "{:?}", out.declines);
+}
+
 // ---------------------------------------------------------------------------
 // Which file the run is about
 // ---------------------------------------------------------------------------

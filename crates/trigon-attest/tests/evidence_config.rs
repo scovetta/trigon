@@ -1223,3 +1223,520 @@ fn a_key_history_says_where_it_disagrees_with_the_log_and_not_where_the_log_went
     let other = file(vec![epoch("a", None), epoch("c", Some(4))], vec![ORIGIN]);
     assert_eq!(grown.differences(&other).len(), 2);
 }
+
+// ---------------------------------------------------------------------------------------------
+// What else is refused, and what a source trusting on first use is pinned by when it pins one key
+// ---------------------------------------------------------------------------------------------
+
+/// Every pin the environment gives that cannot be read is refused, naming its variable, and so is a
+/// source variable that names no location at all.
+#[test]
+fn every_environment_pin_that_cannot_be_read_names_its_variable() {
+    let r = root("env-bad-pins");
+    let pinned = || Env {
+        evidence_repo: Some("https://github.com/o/r.git".into()),
+        evidence_log_key: Some(vkey(ORIGIN)),
+        evidence_attestation_key: Some(key().public_hex()),
+        ..env(&r)
+    };
+    assert_eq!(loads(&pinned()).sources().len(), 1);
+    for (set, says) in [
+        (
+            (|e: &mut Env| e.evidence_attestation_key = Some("no-such.pem".into())) as fn(&mut Env),
+            "TRIGON_EVIDENCE_ATTESTATION_KEY is refused: `no-such.pem` is neither 64 hex digits",
+        ),
+        (
+            |e| e.evidence_checkpoint = Some("~other/checkpoint".into()),
+            "TRIGON_EVIDENCE_CHECKPOINT is refused: `~other/checkpoint`: only `~/` is expanded",
+        ),
+        (
+            |e| e.evidence_repo = Some(" \t ".into()),
+            "TRIGON_EVIDENCE_REPO names no location",
+        ),
+    ] {
+        let mut e = pinned();
+        set(&mut e);
+        let m = load(&e).unwrap_err();
+        assert!(m.starts_with(says), "{m}");
+    }
+}
+
+/// An origin names a log for good and is its key's name: one that is empty or holds whitespace is
+/// refused, in the file and wherever a command is given one; and so is a path that is empty.
+#[test]
+fn an_origin_that_could_name_no_log_and_an_empty_path_are_refused() {
+    use trigon_attest::config::check_origin;
+    let r = root("origins");
+    for (origin, says) in [
+        ("", "is empty"),
+        ("github.com/owner /r", "contains whitespace"),
+        ("github.com/owner\t/r", "contains whitespace"),
+        ("github.com/owner/r\u{7}", "contains whitespace"),
+    ] {
+        let e = check_origin(origin).unwrap_err();
+        assert!(e.contains(says), "{origin:?}: {e}");
+        write(
+            &user_file(&r),
+            &format!("[publish]\norigin = {}\n", toml_string(origin)),
+        );
+        let m = load(&env(&r)).unwrap_err();
+        assert!(m.contains(says), "{origin:?}: {m}");
+    }
+    check_origin(ORIGIN).unwrap();
+
+    write(&user_file(&r), "[publish]\nlog_key = \"\"\n");
+    let m = load(&env(&r)).unwrap_err();
+    assert!(m.contains("log_key: the path is empty"), "{m}");
+}
+
+/// `s` as a TOML basic string.
+fn toml_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A file named that is not a file is an error reading it, never a file with nothing in it.
+#[test]
+fn a_configuration_file_that_cannot_be_read_is_an_error_not_an_empty_file() {
+    use trigon_attest::config::{NewSource, add_source};
+    let r = root("unreadable");
+    let e = Env {
+        evidence_config: Some(r.join("home")),
+        ..env(&r)
+    };
+    let m = load(&e).unwrap_err();
+    assert!(
+        m.starts_with(&format!("reading {}", r.join("home").display())),
+        "{m}"
+    );
+    let new = NewSource {
+        name: "theirs".into(),
+        urls: vec!["https://example.org/theirs.git".into()],
+        log_key: Some(vkey(ORIGIN)),
+        attestation_key: Some(key().public_hex()),
+        ..Default::default()
+    };
+    let m = add_source(&e, &new).unwrap_err().to_string();
+    assert!(
+        m.starts_with(&format!("reading {}", r.join("home").display())),
+        "{m}"
+    );
+}
+
+/// `trigon evidence add` holds a source to every rule the file does before writing it: not under
+/// `TRIGON_EVIDENCE_REPO`'s name, and with at least one location. A PEM attestation key and an
+/// initial checkpoint, given from the working directory, are written absolute and load as given.
+#[test]
+fn a_source_added_keeps_the_files_rules_and_its_files_are_written_absolute() {
+    use trigon_attest::config::{NewSource, add_source};
+    let r = root("add-rules");
+    let e = env(&r);
+    let new = NewSource {
+        name: "theirs".into(),
+        urls: vec!["https://example.org/theirs.git".into()],
+        log_key: Some(vkey(ORIGIN)),
+        attestation_key: Some(key().public_hex()),
+        ..Default::default()
+    };
+    for (changed, says) in [
+        (
+            NewSource {
+                name: "ENV".into(),
+                ..new.clone()
+            },
+            "that name is TRIGON_EVIDENCE_REPO's",
+        ),
+        (
+            NewSource {
+                urls: Vec::new(),
+                ..new.clone()
+            },
+            "it needs at least one location",
+        ),
+        (
+            NewSource {
+                attestation_key: Some("keys/missing.pem".into()),
+                ..new.clone()
+            },
+            "--attestation-key",
+        ),
+    ] {
+        let m = add_source(&e, &changed).unwrap_err().to_string();
+        assert!(m.contains(says), "{m}");
+    }
+    assert!(!user_file(&r).exists(), "nothing is written for a refusal");
+
+    // A PEM key and a checkpoint the log key opens, both relative to the working directory.
+    write(&r.join("project/keys/attestation.pub"), &key().public_pem());
+    let signer = trigon_attest::log::LogSigner::from_seed(ORIGIN, [9; 32]).unwrap();
+    let checkpoint = trigon_attest::log::SignedCheckpoint::sign(
+        &trigon_attest::log::Checkpoint::empty(ORIGIN),
+        &signer,
+    )
+    .unwrap();
+    write(
+        &r.join("project/keys/initial.checkpoint"),
+        &checkpoint.to_string(),
+    );
+    let (path, source) = add_source(
+        &e,
+        &NewSource {
+            attestation_key: Some("keys/attestation.pub".into()),
+            checkpoint: Some("keys/initial.checkpoint".into()),
+            required: true,
+            ..new.clone()
+        },
+    )
+    .unwrap();
+    assert_eq!(path, user_file(&r));
+    let text = std::fs::read_to_string(&path).unwrap();
+    for file in ["attestation.pub", "initial.checkpoint"] {
+        let absolute = r.join("project/keys").join(file);
+        assert!(
+            text.contains(&format!("\"{}\"", absolute.display())),
+            "{text}"
+        );
+    }
+    assert!(text.contains("required = true"), "{text}");
+    assert_eq!(
+        source.attestation_key,
+        Some(trigon_attest::AttestationKey::from(key().public_key()))
+    );
+    assert_eq!(
+        source.checkpoint,
+        Some(r.join("project/keys/initial.checkpoint"))
+    );
+    assert!(source.required);
+    let pins = loads(&e).pins("theirs").unwrap();
+    assert_eq!(
+        pins.accepted.map(|(_, note)| note),
+        Some(checkpoint.to_string().into_bytes())
+    );
+}
+
+/// A file whose sources are written other than as `[[source]]` tables is read like any other, and
+/// is neither added to nor removed from by rewriting it: the user is told to do it by hand.
+#[test]
+fn sources_written_inline_are_read_and_left_to_the_user_to_change() {
+    use trigon_attest::config::{NewSource, add_source, remove_source};
+    let r = root("inline");
+    let inline = format!(
+        "source = [{{ name = \"mine\", urls = [\"https://example.org/mine.git\"], \
+         log_key = \"{}\", attestation_key = \"{}\" }}]\n",
+        vkey(ORIGIN),
+        key().public_hex()
+    );
+    write(&user_file(&r), &inline);
+    let e = env(&r);
+    assert_eq!(loads(&e).sources().len(), 1);
+    let new = NewSource {
+        name: "theirs".into(),
+        urls: vec!["https://example.org/theirs.git".into()],
+        log_key: Some(vkey(ORIGIN)),
+        attestation_key: Some(key().public_hex()),
+        ..Default::default()
+    };
+    let m = add_source(&e, &new).unwrap_err().to_string();
+    assert!(m.contains("add it by hand"), "{m}");
+    let m = remove_source(&e, "mine").unwrap_err().to_string();
+    assert!(m.contains("remove it by hand"), "{m}");
+    assert_eq!(std::fs::read_to_string(user_file(&r)).unwrap(), inline);
+}
+
+/// A source trusting on first use that pins one key is pinned by that key, whatever its first sync
+/// recorded, and by the recorded one only for the key it does not pin.
+#[test]
+fn a_key_a_source_pins_wins_over_the_one_its_first_sync_recorded() {
+    use trigon_attest::state::{FirstUse, KeysFile};
+    let r = root("tofu-one-key");
+    let pinned_log = trigon_attest::LogVkey::parse(&vkey(ORIGIN)).unwrap();
+    let pinned_attestation = trigon_attest::AttestationKey::from(key().public_key());
+    let other = LocalKey::from_bytes(&[8u8; 32]).unwrap();
+    let recorded_log = trigon_attest::log::LogSigner::from_seed(ORIGIN, [8; 32])
+        .unwrap()
+        .vkey();
+    let recorded_attestation = trigon_attest::AttestationKey::from(other.public_key());
+    let source = |pin: &str| {
+        format!(
+            "[[source]]\nname = \"s\"\nurls = [\"https://example.org/r.git\"]\n{pin}\n\
+             trust_on_first_use = true\n"
+        )
+    };
+    let record = |c: &EvidenceConfig| {
+        let state = c.source_state_dir("s").unwrap();
+        KeysFile {
+            schema: "trigon.evidence-keys/v1".into(),
+            log_key: recorded_log.to_string(),
+            attestation_key: recorded_attestation.to_hex(),
+            first_use: Some(FirstUse {
+                read_from: "https://example.org/r.git".into(),
+                at: 1_790_000_000,
+            }),
+            logs: Vec::new(),
+            attestation_keys: Vec::new(),
+        }
+        .write(&state)
+        .unwrap();
+        write(&state.join("checkpoint"), "a note\n");
+    };
+
+    write(
+        &user_file(&r),
+        &source(&format!("log_key = \"{}\"", vkey(ORIGIN))),
+    );
+    let c = loads(&env(&r));
+    record(&c);
+    let p = c.pins("s").unwrap();
+    assert_eq!(p.log_key, pinned_log);
+    assert_eq!(p.attestation_key, recorded_attestation);
+    assert!(p.first_use.is_some());
+
+    write(
+        &user_file(&r),
+        &source(&format!("attestation_key = \"{}\"", key().public_hex())),
+    );
+    let c = loads(&env(&r));
+    let p = c.pins("s").unwrap();
+    assert_eq!(p.log_key, recorded_log);
+    assert_eq!(p.attestation_key, pinned_attestation);
+
+    // A recorded key that cannot be read is refused, saying which file, never passed over.
+    let state = c.source_state_dir("s").unwrap();
+    let mut keys = KeysFile::read(&state).unwrap().unwrap();
+    keys.log_key = "not a key".into();
+    keys.write(&state).unwrap();
+    let m = c.pins("s").unwrap_err().to_string();
+    assert!(
+        m.starts_with(&state.join("keys").display().to_string()) && m.contains("its `logKey`"),
+        "{m}"
+    );
+}
+
+/// The checkpoint a log is held to is refused where it is there and cannot be read — the one last
+/// accepted, or the initial one configured — rather than passed over: it is what a rollback is
+/// caught against.
+#[test]
+fn a_checkpoint_that_cannot_be_read_is_refused_not_passed_over() {
+    let r = root("pins-unreadable");
+    write(
+        &user_file(&r),
+        &format!(
+            "[[source]]\nname = \"s\"\nurls = [\"https://example.org/r.git\"]\nlog_key = \"{}\"\n\
+             attestation_key = \"{}\"\ncheckpoint = \"initial.checkpoint\"\n",
+            vkey(ORIGIN),
+            key().public_hex()
+        ),
+    );
+    let c = loads(&env(&r));
+    let initial = r.join("home/.config/trigon/initial.checkpoint");
+    let m = c.pins("s").unwrap_err().to_string();
+    assert!(
+        m.starts_with(&initial.display().to_string())
+            && m.contains("the checkpoint cannot be read"),
+        "{m}"
+    );
+    write(&initial, "a note\n");
+    assert_eq!(
+        c.pins("s").unwrap().accepted,
+        Some((initial.clone(), b"a note\n".to_vec()))
+    );
+
+    let last = c.source_state_dir("s").unwrap().join("checkpoint");
+    std::fs::create_dir_all(&last).unwrap();
+    let m = c.pins("s").unwrap_err().to_string();
+    assert!(
+        m.starts_with(&last.display().to_string())
+            && m.contains("the checkpoint is not a regular file"),
+        "{m}"
+    );
+}
+
+/// A user file kept at the end of as many links as the system follows — forty, on Linux — is
+/// written where they lead, as it was read from there.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_user_file_at_the_end_of_forty_links_is_written_where_they_lead() {
+    use trigon_attest::config::{NewSource, add_source};
+    // Canonical, so that the chain is the only links on the way: the system counts a link in the
+    // temporary directory's own path again at every hop.
+    let r = std::fs::canonicalize(root("forty-links")).unwrap();
+    let kept = r.join("links/evidence.toml");
+    let original = "# mine\n[freshness]\nstale_after = \"12h\"\n";
+    write(&kept, original);
+    let mut to = kept.clone();
+    for n in 0..40 {
+        let link = r.join(format!("links/{n}"));
+        std::os::unix::fs::symlink(&to, &link).unwrap();
+        to = link;
+    }
+    std::fs::read_to_string(&to).expect("the system follows forty links");
+    let e = Env {
+        evidence_config: Some(to.clone()),
+        ..env(&r)
+    };
+    let new = NewSource {
+        name: "theirs".into(),
+        urls: vec!["https://example.org/theirs.git".into()],
+        log_key: Some(vkey(ORIGIN)),
+        attestation_key: Some(key().public_hex()),
+        ..Default::default()
+    };
+    add_source(&e, &new).unwrap();
+    let text = std::fs::read_to_string(&kept).unwrap();
+    assert!(
+        text.starts_with(original) && text.contains("name = \"theirs\""),
+        "{text}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&to)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+/// The user's file is written whole or not at all: where the write cannot be made — here, the
+/// temporary file it is written to first cannot be created — the change is refused as a write,
+/// said with the file, and the file is as it was.
+#[test]
+fn a_change_that_cannot_be_written_leaves_the_users_file_as_it_was() {
+    use trigon_attest::config::{NewSource, add_source, remove_source};
+    let r = root("unwritable");
+    let original = format!(
+        "# mine\n[[source]]\nname = \"mine\"\nurls = [\"https://example.org/mine.git\"]\n\
+         log_key = \"{}\"\nattestation_key = \"{}\"\n",
+        vkey(ORIGIN),
+        key().public_hex()
+    );
+    write(&user_file(&r), &original);
+    // What the write goes through first, blocked by a directory of its name.
+    let blocked =
+        user_file(&r).with_file_name(format!(".evidence.toml.{}.tmp", std::process::id()));
+    std::fs::create_dir_all(blocked.join("in-the-way")).unwrap();
+    let e = env(&r);
+    let new = NewSource {
+        name: "theirs".into(),
+        urls: vec!["https://example.org/theirs.git".into()],
+        log_key: Some(vkey(ORIGIN)),
+        attestation_key: Some(key().public_hex()),
+        ..Default::default()
+    };
+    let refused = |what: &str, err: ConfigError| {
+        let m = err.to_string();
+        assert!(
+            matches!(&err, ConfigError::Write { path, .. } if *path == user_file(&r)),
+            "{what}: {err:?}"
+        );
+        assert!(
+            m.starts_with(&format!("writing {}", user_file(&r).display())),
+            "{what}: {m}"
+        );
+        assert!(!m.contains("reading"), "{what}: a write is not a read: {m}");
+        assert_eq!(err.exit_code(), 5, "{what}");
+        assert_eq!(
+            std::fs::read_to_string(user_file(&r)).unwrap(),
+            original,
+            "{what}"
+        );
+    };
+    refused("add", add_source(&e, &new).unwrap_err());
+    refused("remove", remove_source(&e, "mine").unwrap_err());
+    assert!(blocked.join("in-the-way").is_dir());
+}
+
+/// The process's own environment is read once, into an `Env`: an empty variable counts as unset,
+/// as a shell's `FOO=` usually means, and one that is not Unicode is refused, naming it, as is a
+/// working directory that cannot be read. Each case runs in a child process of this test binary
+/// given the environment it means, so that this process's own environment and working directory
+/// are neither read nor changed.
+#[cfg(unix)]
+#[test]
+fn the_process_environment_is_read_with_empty_as_unset_and_not_unicode_refused() {
+    use std::os::unix::ffi::OsStrExt as _;
+    const CHILD: &str = "TRIGON_ATTEST_TEST_CHILD";
+    const NAME: &str =
+        "the_process_environment_is_read_with_empty_as_unset_and_not_unicode_refused";
+    const READ: &[&str] = &[
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "TRIGON_EVIDENCE_CONFIG",
+        "TRIGON_PUBLISH_REPO",
+        "TRIGON_EVIDENCE_REPO",
+        "TRIGON_EVIDENCE_LOG_KEY",
+        "TRIGON_EVIDENCE_ATTESTATION_KEY",
+        "TRIGON_EVIDENCE_CHECKPOINT",
+        "TRIGON_EVIDENCE_TOFU",
+        "TRIGON_EVIDENCE_CACHE",
+        "TRIGON_EVIDENCE_STATE",
+    ];
+    if let Some(case) = std::env::var_os(CHILD) {
+        match case.to_str() {
+            Some("empty") => {
+                let e = Env::from_process().unwrap();
+                assert_eq!(e.publish_repo, None);
+                assert_eq!(e.evidence_cache, None);
+                assert_eq!(e.home, None);
+                assert!(e.cwd.is_absolute());
+            }
+            Some("not-unicode") => {
+                let m = Env::from_process().unwrap_err().to_string();
+                assert_eq!(m, "TRIGON_PUBLISH_REPO is not valid Unicode");
+            }
+            Some("cwd-gone") => {
+                // This child's own working directory, removed from under it.
+                let gone = std::env::temp_dir()
+                    .join(format!("trigon-evidence-config-{}-cwd-gone", std::process::id()));
+                std::fs::create_dir_all(&gone).unwrap();
+                std::env::set_current_dir(&gone).unwrap();
+                std::fs::remove_dir(&gone).unwrap();
+                let e = Env::from_process().unwrap_err();
+                assert!(
+                    matches!(
+                        &e,
+                        ConfigError::Env { var: "the working directory", message }
+                            if message.starts_with("cannot be read (")
+                    ),
+                    "{e:?}"
+                );
+                assert_eq!(e.exit_code(), 5);
+            }
+            other => panic!("no such case: {other:?}"),
+        }
+        return;
+    }
+    for (case, value) in [
+        ("empty", std::ffi::OsStr::new("")),
+        ("not-unicode", std::ffi::OsStr::from_bytes(b"repo-\xff")),
+        ("cwd-gone", std::ffi::OsStr::new("")),
+    ] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args([NAME, "--exact", "--test-threads=1"]);
+        for var in READ {
+            child.env_remove(var);
+        }
+        let out = child
+            .env(CHILD, case)
+            .env("HOME", "")
+            .env("TRIGON_EVIDENCE_CACHE", "")
+            .env("TRIGON_PUBLISH_REPO", value)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{case}: {said}");
+        assert!(
+            said.contains("1 passed"),
+            "{case}: the child ran the case: {said}"
+        );
+    }
+}

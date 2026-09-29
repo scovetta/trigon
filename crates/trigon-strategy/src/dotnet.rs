@@ -149,4 +149,16 @@ mod tests {
     fn empty_info_is_a_no_op() {
         assert!(with_assembly_version(&castle(), &AssemblyVersionInfo::default()).is_none());
     }
+
+    #[test]
+    fn a_manual_strategy_names_no_pack_step_and_is_left_alone() {
+        // Raw script has no `nuget/build/pack` step to hand the properties to, and splicing them
+        // into a script is not this rung's to guess at.
+        let s = crate::from_yaml(
+            "kind: manual\nlocation: { repo: https://example.invalid/x, ref: aa }\n\
+             build: dotnet pack -c Release\n",
+        )
+        .unwrap();
+        assert!(with_assembly_version(&s, &info()).is_none());
+    }
 }

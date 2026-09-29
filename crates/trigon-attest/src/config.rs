@@ -156,6 +156,13 @@ pub enum ConfigError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// The user's file could not be written. `add` and `remove` write it whole or not at all, so
+    /// it is as it was.
+    #[error("writing {}: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error(
         "TRIGON_EVIDENCE_CONFIG names {}, which does not exist. Unset it to read \
          ~/.config/trigon/evidence.toml, or point it at the file you meant",
@@ -1161,7 +1168,7 @@ pub fn add_source(env: &Env, new: &NewSource) -> Result<(PathBuf, Source), Confi
         .find(|s| s.name == new.name)
         .cloned()
         .expect("the source just added loads");
-    write_config(&path, &written).map_err(|source| ConfigError::Read {
+    write_config(&path, &written).map_err(|source| ConfigError::Write {
         path: path.clone(),
         source,
     })?;
@@ -1239,7 +1246,7 @@ pub fn remove_source(env: &Env, name: &str) -> Result<(PathBuf, Source), ConfigE
     }
     let written = doc.to_string();
     EvidenceConfig::load_with(env, Some(&written))?;
-    write_config(&path, &written).map_err(|e| ConfigError::Read {
+    write_config(&path, &written).map_err(|e| ConfigError::Write {
         path: path.clone(),
         source: e,
     })?;
@@ -1288,7 +1295,8 @@ fn link_target(path: &Path) -> std::io::Result<PathBuf> {
     // What `ELOOP` allows on Linux: past this, the links go round.
     const MOST_LINKS: usize = 40;
     let mut at = path.to_path_buf();
-    for _ in 0..MOST_LINKS {
+    // One look more than the links followed: the last may land on the file.
+    for _ in 0..=MOST_LINKS {
         match std::fs::symlink_metadata(&at) {
             Ok(m) if m.file_type().is_symlink() => {
                 let to = std::fs::read_link(&at)?;

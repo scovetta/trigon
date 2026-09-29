@@ -35,13 +35,14 @@
 //! record was resolved in a source of the user's. Downloaded without a token into a directory made
 //! for it that only this user can enter, and held to that digest as it is written. What this host
 //! publishes (`[publish] rebuilt_artifacts`) says nothing of what another operator's repository
-//! holds, so it plays no part. An exact verdict's rebuilt artifact is the published one, which no
-//! repository publishes again, so nothing is asked for it; there, where no repository that holds
-//! the record is on github.com, where none holds such an asset, or where GitHub cannot be asked,
-//! the check is not made, exit 5, and the user is asked for `--rebuild <file>`: another artifact
-//! is never guessed at. Then the record is checked and its claim re-derived exactly as the record
-//! form does (`crate::verify_record::report`). A void makes no claim to re-derive: it is reported,
-//! with its code, and said not to have been.
+//! holds, so it plays no part. An exact verdict's rebuilt artifact is the published one, byte for
+//! byte, which no repository publishes again: it is the `--upstream` file, held to the digest the
+//! verdict signs like any other, and nothing is asked of GitHub, so the signed command runs as
+//! written. Where no repository that holds the record is on github.com, where none holds such an
+//! asset, or where GitHub cannot be asked, the check is not made, exit 5, and the user is asked for
+//! `--rebuild <file>`: another artifact is never guessed at. Then the record is checked and its
+//! claim re-derived exactly as the record form does (`crate::verify_record::report`). A void makes
+//! no claim to re-derive: it is reported, with its code, and said not to have been.
 
 use std::cell::RefCell;
 use std::io::Write as _;
@@ -245,15 +246,29 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
         notes.extend(unanswered.iter().cloned());
         notes.extend(aside.iter().cloned());
         let void = v.kind() == RecordKind::Void;
-        // The rebuilt artifact, from its release asset where none is given; removed when this
-        // record's report is done.
-        let asset = match a.rerun && a.files.rebuild.is_none() && !void {
-            true => Some(rebuilt_asset(r, &named, f, v)?),
-            false => None,
-        };
+        // The rebuilt artifact where none is given: an exact verdict's is the upstream file, and
+        // any other's is its release asset, removed when this record's report is done.
+        let mut rebuild = a.files.rebuild;
+        let mut asset = None;
+        if a.rerun && rebuild.is_none() && !void {
+            let subject = f.leaf.subject.get("sha256").map(String::as_str);
+            match wanted(v.kind(), &v.statement.predicate, subject)? {
+                Wanted::Upstream(why) => {
+                    rebuild = a.files.upstream;
+                    notes.push(format!(
+                        "the rebuilt artifact is the upstream file given: {why}, so it is the \
+                         published artifact itself, byte for byte, which no evidence repository \
+                         publishes again as a release asset (docs/19 §4.1). It is held to the \
+                         rebuilt artifact's digest the verdict signs, as any rebuilt artifact is, \
+                         and nothing was asked of GitHub"
+                    ));
+                }
+                Wanted::Asset(digest) => asset = Some(rebuilt_asset(r, &named, f, &digest)?),
+            }
+        }
         let files = crate::Rerun {
             upstream: a.files.upstream,
-            rebuild: asset.as_ref().map(|d| d.path.as_path()).or(a.files.rebuild),
+            rebuild: asset.as_ref().map(|d| d.path.as_path()).or(rebuild),
             stabilizers: a.files.stabilizers,
         };
         notes.extend(asset.as_ref().map(|d| d.said.clone()));
@@ -624,25 +639,21 @@ const NAMED_TO_GITHUB: &str = "the artifact, and so the record, to GitHub (docs/
 /// nothing of another operator's repository.
 ///
 /// `r`'s own repository is asked first, and then that of every other source that holds the
-/// record, so that a mirror with no releases hides nothing; [`candidates`] says which. An exact
-/// verdict, a verdict that signs no rebuilt artifact, and a record no repository of which is on
-/// github.com — all asked nothing — and one that no repository asked holds such an asset for, or
-/// that GitHub cannot be asked about, are a check not made, exit 5, and the user is asked for
-/// `--rebuild <file>`: no other artifact is guessed at. An asset of the name that is other bytes
-/// is the evidence failing, exit 4, since an asset is named by its digest, where it is in `r`'s own
+/// record, so that a mirror with no releases hides nothing; [`candidates`] says which. `digest` is
+/// the one the verdict signs, as [`wanted`] read it. A record no repository of which is on
+/// github.com — asked nothing — and one that no repository asked holds such an asset for, or that
+/// GitHub cannot be asked about, are a check not made, exit 5, and the user is asked for `--rebuild
+/// <file>`: no other artifact is guessed at. An asset of the name that is other bytes is the
+/// evidence failing, exit 4, since an asset is named by its digest, where it is in `r`'s own
 /// repository; in another source's it is that repository's, not the record's, and the next is
 /// asked.
 fn rebuilt_asset(
     r: &Ready,
     named: &[&Ready],
     f: &trigon_attest::evidence::Found,
-    v: &trigon_attest::evidence::VerifiedRecord,
+    digest: &trigon_core::Digest,
 ) -> Result<Download, Stop> {
-    let digest = asset_digest(
-        v.kind(),
-        &v.statement.predicate,
-        f.leaf.subject.get("sha256").map(String::as_str),
-    )?;
+    let digest = *digest;
     let (candidates, considered, aside) = candidates(r, named, &f.leaf.record);
     let aside = match aside.is_empty() {
         true => String::new(),
@@ -747,18 +758,33 @@ fn rebuilt_asset(
     )))
 }
 
-/// The digest a verdict of `kind` signs for its rebuilt artifact, in `predicate`, which names the
-/// release asset to look for; or, where no asset is to be looked for, the check not made, exit 5,
-/// and nothing asked of GitHub. A verdict that signs none has nothing to find an asset by. An exact
-/// one's rebuilt artifact is the published artifact itself, byte for byte — its sha256 is the
-/// subject's, `subject` — which `publish` never uploads (`docs/19` §4.1): asking for it would
-/// spend the anonymous rate limit, and name the record to GitHub, for an asset that cannot be
-/// there.
-fn asset_digest(
+/// Where the rebuilt artifact of a verdict is had from when `--rebuild` is not given.
+#[derive(Debug, PartialEq)]
+enum Wanted {
+    /// The `--upstream` file, and why it is the rebuilt artifact.
+    Upstream(&'static str),
+    /// The release asset named by this digest, the one the verdict signs.
+    Asset(trigon_core::Digest),
+}
+
+/// Where a verdict of `kind` has its rebuilt artifact from, by what `predicate` signs of it, when
+/// `--rebuild` is not given. An exact verdict's rebuilt artifact is the published artifact itself,
+/// byte for byte — the sha256 it signs for it is the subject's, `subject`, and a verdict that signs
+/// the subject's is one too — which `publish` never uploads (`docs/19` §4.1): it is the
+/// `--upstream` file, which re-deriving holds to the rebuilt artifact's digest the verdict signs as
+/// it holds any rebuilt artifact, so the same signed command works either way (§4.2 item 6), and
+/// nothing is asked of GitHub, which would spend the anonymous rate limit, and name the record, for
+/// an asset that cannot be there. Any other verdict's is the release asset named by the digest it
+/// signs; one that signs none has nothing to find an asset by, and is the check not made, exit 5,
+/// with nothing asked of GitHub.
+fn wanted(
     kind: RecordKind,
     predicate: &serde_json::Value,
     subject: Option<&str>,
-) -> Result<trigon_core::Digest, Stop> {
+) -> Result<Wanted, Stop> {
+    if kind == RecordKind::Verdict(trigon_core::Match::Exact) {
+        return Ok(Wanted::Upstream("this verdict is exact"));
+    }
     let digest = predicate
         .pointer("/artifacts/rebuild/sha256")
         .and_then(|h| h.as_str())
@@ -770,17 +796,12 @@ fn asset_digest(
                  was asked of GitHub; {GIVE_REBUILD}"
             ))
         })?;
-    if kind == RecordKind::Verdict(trigon_core::Match::Exact)
-        || subject.is_some_and(|s| s == digest.to_hex())
-    {
-        return Err(cannot(anyhow!(
-            "--rerun-comparison needs the rebuilt artifact, and this verdict is exact: its rebuilt \
-             artifact is the published artifact itself, byte for byte, which no evidence \
-             repository publishes again as a release asset (docs/19 §4.1), so nothing was asked \
-             of GitHub; {GIVE_REBUILD} — for an exact verdict, the upstream file itself"
-        )));
+    if subject.is_some_and(|s| s == digest.to_hex()) {
+        return Ok(Wanted::Upstream(
+            "the sha256 this verdict signs for its rebuilt artifact is the subject's",
+        ));
     }
-    Ok(digest)
+    Ok(Wanted::Asset(digest))
 }
 
 /// The GitHub repositories the rebuilt artifact of `record` is looked for in, `r`'s own first and
@@ -1159,55 +1180,64 @@ mod tests {
         assert!(!dir.exists());
     }
 
-    /// Where no release asset is to be looked for, nothing is asked of GitHub and the check is not
-    /// made, exit 5, with the rebuilt artifact asked for — never exit 4, which would blame the
-    /// evidence: a verdict that signs no rebuilt artifact, and an exact one, whose rebuilt artifact
-    /// is the published one and is never uploaded, by its outcome or by its digest being the
-    /// subject's. Any other verdict names its asset by the digest it signs.
+    /// An exact verdict's rebuilt artifact is the upstream file, by its outcome or by the digest it
+    /// signs for its rebuilt artifact being the subject's, whatever else it signs: its falsifying
+    /// command runs as signed, with `--upstream` alone, and nothing is asked of GitHub. Any other
+    /// verdict names its asset by the digest it signs; where it signs none, nothing is asked of
+    /// GitHub and the check is not made, exit 5, with the rebuilt artifact asked for — never exit
+    /// 4, which would blame the evidence.
     #[test]
-    fn an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects() {
+    fn an_exact_verdicts_rebuilt_artifact_is_the_upstream_file_and_any_others_its_signed_asset() {
         use trigon_core::Match;
         let rebuilt = "ab".repeat(32);
         let subject = "cd".repeat(32);
         let signing = serde_json::json!({"artifacts": {"rebuild": {"sha256": rebuilt}}});
         for kind in [Match::Normalized, Match::NormalizedWithCaveats, Match::Divergent] {
-            let d = asset_digest(RecordKind::Verdict(kind), &signing, Some(&subject))
+            let w = wanted(RecordKind::Verdict(kind), &signing, Some(&subject))
                 .unwrap_or_else(|s| panic!("{kind:?}: {:#}", s.error));
-            assert_eq!(d.to_hex(), rebuilt, "{kind:?}");
+            assert_eq!(
+                w,
+                Wanted::Asset(trigon_core::Digest::from_hex(&rebuilt).unwrap()),
+                "{kind:?}"
+            );
         }
-        let cases = [
+        let upstream = [
+            // Exact by its outcome, whatever it signs of the rebuilt artifact: re-deriving holds
+            // the upstream file to that digest, as it holds any rebuilt artifact.
+            (Match::Exact, signing.clone(), "this verdict is exact"),
+            (Match::Exact, serde_json::json!({}), "this verdict is exact"),
+            // Exact by its digest: the rebuilt artifact it signs is the subject's bytes.
             (
-                RecordKind::Verdict(Match::Normalized),
-                serde_json::json!({"artifacts": {"upstream": {"sha256": subject}}}),
-                Some(subject.as_str()),
-                "signs no rebuilt artifact's sha256",
-            ),
-            (
-                RecordKind::Verdict(Match::Normalized),
-                serde_json::json!({"artifacts": {"rebuild": {"sha256": "not hex"}}}),
-                Some(subject.as_str()),
-                "signs no rebuilt artifact's sha256",
-            ),
-            (
-                RecordKind::Verdict(Match::Exact),
-                signing.clone(),
-                Some(subject.as_str()),
-                "this verdict is exact",
-            ),
-            (
-                RecordKind::Verdict(Match::Normalized),
+                Match::Normalized,
                 serde_json::json!({"artifacts": {"rebuild": {"sha256": subject}}}),
-                Some(subject.as_str()),
-                "this verdict is exact",
+                "is the subject's",
             ),
         ];
-        for (kind, predicate, subject, said) in cases {
-            let Err(stop) = asset_digest(kind, &predicate, subject) else {
-                panic!("{kind:?} {predicate}: an asset was looked for");
+        for (kind, predicate, why) in upstream {
+            match wanted(RecordKind::Verdict(kind), &predicate, Some(&subject)) {
+                Ok(Wanted::Upstream(said)) => assert!(said.contains(why), "{kind:?}: {said}"),
+                Ok(other) => panic!("{kind:?} {predicate}: {other:?}"),
+                Err(s) => panic!("{kind:?} {predicate}: {:#}", s.error),
+            }
+        }
+        // Without the subject's digest to compare, a signed digest is the asset's name.
+        assert_eq!(
+            wanted(RecordKind::Verdict(Match::Normalized), &signing, None).ok(),
+            Some(Wanted::Asset(trigon_core::Digest::from_hex(&rebuilt).unwrap()))
+        );
+        let refused = [
+            serde_json::json!({"artifacts": {"upstream": {"sha256": subject}}}),
+            serde_json::json!({"artifacts": {"rebuild": {"sha256": "not hex"}}}),
+            serde_json::json!({"artifacts": {"rebuild": {"sha256": 7}}}),
+        ];
+        for predicate in refused {
+            let normalized = RecordKind::Verdict(Match::Normalized);
+            let Err(stop) = wanted(normalized, &predicate, Some(&subject)) else {
+                panic!("{predicate}: an asset was looked for");
             };
             let e = format!("{:#}", stop.error);
             assert_eq!(stop.code, 5, "{e}");
-            assert!(e.contains(said), "{e}");
+            assert!(e.contains("signs no rebuilt artifact's sha256"), "{e}");
             assert!(e.contains("nothing was asked of GitHub"), "{e}");
             assert!(e.contains(GIVE_REBUILD), "{e}");
         }

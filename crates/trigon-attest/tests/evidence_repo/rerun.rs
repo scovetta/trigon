@@ -279,3 +279,213 @@ fn evidence_read_again_to_be_judged_is_held_to_its_digest_again() {
         (EvidenceState::Absent, None)
     );
 }
+
+/// Another set's module, handed in as the one a statement names: it stabilizes as the tar profile
+/// does, and says its digest is the one `profile_id`'s own digest is not.
+struct Impostor;
+
+impl ArchivedStabilizer for Impostor {
+    fn digest(&mut self, _profile_id: &str) -> Result<Digest, String> {
+        Ok(profile("zip").ok_or("no such profile")?.digest())
+    }
+
+    fn stabilize(
+        &mut self,
+        profile_id: &str,
+        format: Format,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        Native.stabilize(profile_id, format, bytes)
+    }
+}
+
+/// A module that cannot say what it is, or cannot stabilize.
+struct Broken {
+    digest: bool,
+}
+
+impl ArchivedStabilizer for Broken {
+    fn digest(&mut self, profile_id: &str) -> Result<Digest, String> {
+        match self.digest {
+            true => Native.digest(profile_id),
+            false => Err("the module trapped".into()),
+        }
+    }
+
+    fn stabilize(&mut self, _: &str, _: Format, _: &[u8]) -> Result<Vec<u8>, String> {
+        Err("the module trapped".into())
+    }
+}
+
+/// The one failure an archived set exists to prevent: a module implementing some other set gives a
+/// plausible digest, not an error, so its digest is held to the set the statement names before
+/// anything is stabilized, and one that is not it is refused as a set mismatch, never compared.
+#[test]
+fn an_archived_set_that_is_not_the_set_the_statement_names_is_refused_before_comparing() {
+    let (st, _) = published("b");
+    let p = &pairs()["b"];
+    let e = rederive_with(
+        &st,
+        p.upstream.clone(),
+        p.rebuilt.clone(),
+        Some(&mut Impostor),
+    )
+    .unwrap_err();
+    let trigon_attest::AttestError::SetMismatch { claimed, current } = &e else {
+        panic!("expected a set mismatch, got {e}");
+    };
+    let named = st.predicate["stabilizerSet"]["digest"]["sha256"]
+        .as_str()
+        .unwrap();
+    assert_eq!(claimed, &format!("tar@{}", &named[..12]));
+    let other = profile("zip").unwrap().digest().to_hex();
+    assert_eq!(
+        current,
+        &format!("tar@{} (the module supplied)", &other[..12])
+    );
+    assert!(!e.fails_verification(), "{e}");
+
+    // A module that fails is a module that failed: never a verdict either way.
+    for digest in [false, true] {
+        let e = rederive_with(
+            &st,
+            p.upstream.clone(),
+            p.rebuilt.clone(),
+            Some(&mut Broken { digest }),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, trigon_attest::AttestError::Malformed(m)
+                if m.contains("the archived set failed") && m.contains("trapped")),
+            "{e}"
+        );
+    }
+}
+
+/// Through an archived set, which returns stabilized bytes and no report, equal stabilized forms of
+/// different bytes re-derive as `normalized-with-caveats` and never `normalized`: the provenance
+/// cap needs every applied pass's risk and provenance, which a module cannot give, and the stronger
+/// outcome is never claimed on less evidence. Different stabilized forms are a divergence, which
+/// holds where the statement claims one.
+#[test]
+fn an_archived_set_re_derives_a_match_as_caveated_at_best_and_a_divergence_as_one() {
+    let (st, _) = published("a2");
+    assert_eq!(st.predicate["outcome"], "normalized");
+    let a = &pairs()["a"];
+    let d = rederive_with(
+        &st,
+        a.upstream.clone(),
+        a.rebuilt.clone(),
+        Some(&mut Native),
+    )
+    .unwrap();
+    assert_eq!(d.actual, trigon_core::Match::NormalizedWithCaveats);
+    assert!(d.digests_match);
+    assert_eq!(d.unchecked, ["differences", "applied", "members"]);
+
+    let (st, report) = published("b");
+    let b = &pairs()["b"];
+    let d = rederive_with(
+        &st,
+        b.upstream.clone(),
+        b.rebuilt.clone(),
+        Some(&mut Native),
+    )
+    .unwrap();
+    assert_eq!(d.actual, trigon_core::Match::Divergent);
+    assert_eq!(d.claimed, "divergent");
+    assert!(d.holds(), "{d:?}");
+    assert_eq!(d.check_report(&report).unwrap(), None);
+
+    // The stabilized digests are still held to the statement's, through the module as without it.
+    let mut lie = st.clone();
+    lie.predicate["stabilized"]["upstream"]["sha256"] = "0".repeat(64).into();
+    let e = rederive_with(
+        &lie,
+        b.upstream.clone(),
+        b.rebuilt.clone(),
+        Some(&mut Native),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            e,
+            trigon_attest::AttestError::ClaimRefuted {
+                side: "upstream",
+                ..
+            }
+        ),
+        "{e}"
+    );
+}
+
+/// A set this build does not carry, with no module for it, is said as such, with the sets it does
+/// carry: re-deriving under whatever set happens to be at hand would answer another question.
+#[test]
+fn a_set_this_build_does_not_carry_is_refused_naming_the_sets_it_does() {
+    let (mut st, _) = published("b");
+    st.predicate["stabilizerSet"]["id"] = "no-such-set".into();
+    let p = &pairs()["b"];
+    let e = rederive(&st, p.upstream.clone(), p.rebuilt.clone()).unwrap_err();
+    let trigon_attest::AttestError::SetMismatch { claimed, current } = &e else {
+        panic!("expected a set mismatch, got {e}");
+    };
+    assert_eq!(claimed, "no-such-set (unknown to this build)");
+    assert!(current.split(", ").any(|s| s == "tar"), "{current}");
+}
+
+/// A verdict that leaves out a field re-deriving needs is refused as damaged evidence, never read
+/// as agreeing: its archive format, the rebuilt artifact's raw digest, and either stabilized
+/// digest.
+#[test]
+fn a_verdict_missing_what_re_deriving_needs_is_refused_as_damaged_evidence() {
+    let (st, _) = published("b");
+    let p = &pairs()["b"];
+    for (pointer, says) in [
+        ("/archiveFormat", "names no archive format"),
+        (
+            "/artifacts/rebuild/sha256",
+            "no raw digest for the rebuild artifact",
+        ),
+        (
+            "/stabilized/upstream/sha256",
+            "no stabilized digest for the upstream artifact",
+        ),
+        (
+            "/stabilized/rebuild/sha256",
+            "no stabilized digest for the rebuild artifact",
+        ),
+    ] {
+        let mut edited = st.clone();
+        let (parent, field) = pointer.rsplit_once('/').unwrap();
+        let parent = match parent {
+            "" => &mut edited.predicate,
+            p => edited.predicate.pointer_mut(p).unwrap(),
+        };
+        parent.as_object_mut().unwrap().remove(field).unwrap();
+        let e = rederive(&edited, p.upstream.clone(), p.rebuilt.clone()).unwrap_err();
+        assert!(
+            matches!(&e, trigon_attest::AttestError::Evidence(m) if m.contains(says)),
+            "{pointer}: {e}"
+        );
+        assert!(!e.fails_verification(), "{pointer}: {e}");
+    }
+}
+
+/// A published report that leaves out its member report altogether disagrees with a re-derivation
+/// that has members: what it omits is not counted as agreeing.
+#[test]
+fn a_published_report_without_its_members_does_not_agree() {
+    let (st, report) = published("b");
+    let p = &pairs()["b"];
+    let d = rederive(&st, p.upstream.clone(), p.rebuilt.clone()).unwrap();
+    let mut edited: serde_json::Value = serde_json::from_slice(&report).unwrap();
+    edited.as_object_mut().unwrap().remove("diff").unwrap();
+    let got = d
+        .check_report(&serde_json::to_vec(&edited).unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(!got.agrees());
+    let fields: Vec<&str> = got.disagreements.iter().map(|x| x.field).collect();
+    assert!(fields.contains(&"diff.files"), "{fields:?}");
+}

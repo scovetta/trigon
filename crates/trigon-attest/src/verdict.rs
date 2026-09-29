@@ -145,9 +145,10 @@ impl Supersession {
 /// predicate type and the log's origin, and not the record's own digest, which is the digest of
 /// the file that contains it (`docs/19` §4.2 item 6). The client resolves the current record
 /// through the log. `<file>` is the upstream artifact the reader holds; where the repository that
-/// holds the record does not publish its rebuilt artifact (docs/19 D4), or the verdict is exact and
-/// its rebuilt artifact is that upstream artifact, the client also asks for `--rebuild <file>`, so
-/// the same signed command works either way.
+/// holds the record does not publish its rebuilt artifact (docs/19 D4), the client also asks for
+/// `--rebuild <file>`, so the same signed command works either way. An exact verdict's rebuilt
+/// artifact is that upstream artifact byte for byte, which no repository publishes again: the
+/// client takes the `<file>` given as it, held to the digest the verdict signs, and asks nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FalsifyingCommand {
     pub argv: Vec<String>,

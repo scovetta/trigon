@@ -540,3 +540,151 @@ fn of_two_current_verdicts_one_above_the_risk_cap_answers_whatever_their_order()
         3
     );
 }
+
+/// A verdict whose statement signs no risk, or a tier this build does not read, cannot be held to
+/// a `--max-risk`, and is never read as having applied nothing: under any cap it answers below the
+/// threshold, saying why. One that signs `null`, that nothing applied, meets any cap.
+#[test]
+fn a_verdict_that_signs_no_risk_this_build_reads_is_never_within_a_cap() {
+    use trigon_core::RiskTier;
+    type Edit = fn(&mut serde_json::Value);
+    let r = open_golden();
+    let a = r.lookup(&Key::parse("pkg:npm/demo-a@1.0.0").unwrap());
+    let with = |edit: Edit| {
+        let mut found = a.found.clone();
+        for f in &mut found {
+            if let RecordState::Verified(v) = &mut f.state {
+                edit(&mut v.statement.predicate);
+            }
+        }
+        trigon_attest::evidence::Lookup {
+            key: a.key.clone(),
+            found,
+        }
+    };
+    let edits: [(&str, Edit); 2] = [
+        ("no provenance cap", |p| {
+            p.as_object_mut().unwrap().remove("provenanceCap");
+        }),
+        ("a tier this build does not read", |p| {
+            p["provenanceCap"]["maxRiskApplied"] = "extreme".into()
+        }),
+    ];
+    for (what, edit) in edits {
+        let l = with(edit);
+        let got = l.answer_under(FLOOR, Some(RiskTier::Lossy));
+        assert_eq!(
+            got,
+            Answer::AboveMaxRisk {
+                outcome: Match::Normalized,
+                risk: None
+            },
+            "{what}"
+        );
+        assert_eq!(got.exit_code(FLOOR), 3, "{what}");
+        assert!(
+            got.to_string()
+                .contains("signs no risk to hold to the --max-risk"),
+            "{what}: {got}"
+        );
+        // With no cap asked for, it is its outcome.
+        assert_eq!(
+            l.answer_under(FLOOR, None),
+            Answer::Outcome(Match::Normalized),
+            "{what}"
+        );
+    }
+    let l = with(|p| p["provenanceCap"]["maxRiskApplied"] = serde_json::Value::Null);
+    assert_eq!(
+        l.answer_under(FLOOR, Some(RiskTier::Structural)),
+        Answer::Outcome(Match::Normalized)
+    );
+}
+
+/// Within one exit code the answer that says less for the package wins: of withdrawn and never
+/// checked, withdrawn, in either order; and of nothing at all, never checked.
+#[test]
+fn of_withdrawn_and_never_checked_withdrawn_answers() {
+    for answers in [
+        [Answer::NeverChecked, Answer::Withdrawn],
+        [Answer::Withdrawn, Answer::NeverChecked],
+    ] {
+        assert_eq!(Answer::most_severe(answers, FLOOR), Answer::Withdrawn);
+    }
+    assert_eq!(Answer::most_severe([], FLOOR), Answer::NeverChecked);
+}
+
+/// A risk tier is named as a statement signs it.
+#[test]
+fn a_risk_tier_is_named_as_a_statement_signs_it() {
+    use trigon_core::RiskTier;
+    for tier in [
+        RiskTier::Structural,
+        RiskTier::Metadata,
+        RiskTier::Content,
+        RiskTier::Lossy,
+    ] {
+        assert_eq!(
+            serde_json::to_value(tier).unwrap(),
+            trigon_attest::evidence::risk_name(tier)
+        );
+    }
+}
+
+/// A file is looked up in the index by every digest it has, and is said by its sha256; read from
+/// disk, it is the same key as its bytes.
+#[test]
+fn a_file_is_looked_up_by_every_digest_it_has() {
+    let pair = &pairs()["e"];
+    let key = Key::of_bytes(&pair.upstream);
+    let Key::File(d) = &key else { unreachable!() };
+    let names: Vec<String> = key.index_keys().iter().map(|k| k.name()).collect();
+    assert_eq!(
+        names,
+        [
+            format!("sha1:{}", d["sha1"]),
+            format!("sha256:{}", d["sha256"]),
+            format!("sha512:{}", d["sha512"]),
+        ]
+    );
+    assert_eq!(
+        key.to_string(),
+        format!("the file with sha256:{}", d["sha256"])
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join(pair.file());
+    std::fs::write(&path, &pair.upstream).unwrap();
+    assert_eq!(Key::of_file(&path).unwrap(), key);
+}
+
+/// A void may supersede a verdict about the same subject — a later run looked again and could not
+/// tell — and then the void is what the source says, and the verdict is returned marked, never
+/// hidden.
+#[test]
+fn a_void_that_supersedes_a_verdict_is_what_the_source_says() {
+    let p = pairs();
+    let k3 = attestation_key(3);
+    let v = verdict(&p["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let looked_again = crate::build::void(&p["a"], &k3, "1789000100-aaaaaaa2", T0 + 60);
+    let superseding = crate::build::resigned(&looked_again, &k3, T0 + 60, None, |_, st| {
+        st.predicate["supersedes"] = format!("sha256:{}", v.digest.to_hex()).into();
+        st.predicate["reason"] = "attempts_disagree_later".into();
+    });
+    assert_eq!(superseding.leaf.supersedes, Some(v.digest));
+    let tmp = tempfile::tempdir().unwrap();
+    small(tmp.path(), &[&v, &superseding]);
+    let found = open(tmp.path()).lookup(&Key::parse("pkg:npm/demo-a@1.0.0").unwrap());
+    assert_eq!(found.found.len(), 2);
+    let by: Vec<_> = found.found[0]
+        .superseded_by
+        .iter()
+        .map(|s| (s.record, s.reason))
+        .collect();
+    assert_eq!(
+        by,
+        [(superseding.digest, SupersedeReason::AttemptsDisagreeLater)]
+    );
+    assert!(found.found[1].is_current());
+    assert_eq!(found.answer(FLOOR), Answer::Void);
+    assert_eq!(found.answer(FLOOR).exit_code(FLOOR), 3);
+}

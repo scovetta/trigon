@@ -919,3 +919,310 @@ async fn a_worker_cannot_lease_across_its_class() {
         1
     );
 }
+
+/// A class is named as itself when it refuses, whichever class it is.
+///
+/// The judge case is above. An infer worker handed the build's kind and a build worker handed the
+/// judge's are the same deployment mistake, and an error that named the wrong class would send an
+/// operator to fix the wrong worker.
+#[tokio::test]
+async fn every_class_names_itself_when_it_refuses_a_kind() {
+    use trigon_engine::Class;
+
+    /// A worker that leases only judge jobs.
+    struct Judging;
+
+    #[async_trait]
+    impl Work for Judging {
+        fn kinds(&self) -> Vec<String> {
+            vec!["judge".into()]
+        }
+
+        fn unconfirmable(&self, _: &RunRecord) -> Option<String> {
+            None
+        }
+
+        async fn run(&self, _: &Job, _: &Progress) -> Result<Done, Failed> {
+            unreachable!("nothing may be leased across a class")
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "every-class").await;
+    let as_class = |class: Class| {
+        engine(
+            q.clone(),
+            Config {
+                worker: "w".into(),
+                class,
+                ..Default::default()
+            },
+        )
+    };
+
+    let e = as_class(Class::Infer)
+        .tick(Fake::answering(Some("exact")).as_ref())
+        .await
+        .expect_err("an infer worker must not lease a build");
+    let text = e.to_string();
+    assert!(text.contains("`infer` worker"), "{text}");
+    assert!(text.contains("`rebuild`"), "{text}");
+
+    let e = as_class(Class::Build)
+        .tick(&Judging)
+        .await
+        .expect_err("a build worker must not lease judging");
+    let text = e.to_string();
+    assert!(text.contains("`build` worker"), "{text}");
+    assert!(text.contains("`judge`"), "{text}");
+}
+
+/// A worker whose job was taken from it while it ran records nothing and asks nothing again.
+///
+/// `finish` refuses a worker that no longer holds the lease, so the other worker's answer is the
+/// one the queue keeps; the loop must treat that refusal as a lost race, not an error, and must not
+/// go on to act on an answer nothing accepted — no "recorded", and no confirmation of a verdict
+/// the queue never recorded.
+#[tokio::test]
+async fn a_worker_whose_job_was_taken_while_it_ran_records_nothing_and_asks_nothing() {
+    /// A build during which another worker takes the job, as one would once this worker's lease
+    /// had lapsed. Released and leased again here rather than waited out, so nothing depends on
+    /// how long anything takes.
+    struct Displaced {
+        q: Queue,
+    }
+
+    #[async_trait]
+    impl Work for Displaced {
+        fn kinds(&self) -> Vec<String> {
+            vec!["rebuild".into()]
+        }
+
+        fn unconfirmable(&self, _: &RunRecord) -> Option<String> {
+            None
+        }
+
+        async fn run(&self, job: &Job, _: &Progress) -> Result<Done, Failed> {
+            self.q
+                .fail(job.id, "slow", "the lease lapsed", Some(Duration::ZERO))
+                .await
+                .unwrap();
+            let taken = self
+                .q
+                .lease("fast", &["rebuild"], 1, Duration::from_secs(60))
+                .await
+                .unwrap();
+            assert_eq!(
+                taken.len(),
+                1,
+                "the fixture did not hand the job to another worker"
+            );
+            Ok(Done {
+                record: record(
+                    &format!("run-{}-{}", job.id, job.attempt),
+                    &job.target,
+                    Some("exact"),
+                    "ck1:the-work",
+                ),
+                record_ref: "00".repeat(32),
+            })
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "displaced").await;
+    let e = engine(
+        q.clone(),
+        Config {
+            worker: "slow".into(),
+            confirm_after: Duration::ZERO,
+            ..Default::default()
+        },
+    );
+    let id = q
+        .enqueue(&NewJob::rebuild("pkg:npm/a@1", "pkg:npm/a@1", Tier::Bulk))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        e.tick(&Displaced { q: q.clone() }).await.unwrap(),
+        1,
+        "losing the race is not an error"
+    );
+
+    // The other worker still holds it, and nothing was finished or queued behind it.
+    assert_eq!(
+        e.queue().depth().await.unwrap(),
+        vec![("leased".to_string(), 1)]
+    );
+    let holders: Vec<String> = q
+        .workers()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(w, ..)| w)
+        .collect();
+    assert_eq!(holders, ["fast"]);
+    let phases: Vec<String> = q
+        .events(id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, phase, _)| phase)
+        .collect();
+    assert!(phases.contains(&"leased".to_string()), "{phases:?}");
+    assert!(
+        !phases.contains(&"recorded".to_string()),
+        "a worker said it recorded an answer the queue refused: {phases:?}"
+    );
+}
+
+/// A worker told not to confirm records its verdict and asks nothing a second time.
+#[tokio::test]
+async fn a_worker_told_not_to_confirm_asks_nothing_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "no-confirm").await;
+    let e = engine(
+        q.clone(),
+        Config {
+            worker: "w1".into(),
+            confirm: false,
+            confirm_after: Duration::ZERO,
+            ..Default::default()
+        },
+    );
+    q.enqueue(&NewJob::rebuild("pkg:npm/a@1", "pkg:npm/a@1", Tier::Bulk))
+        .await
+        .unwrap();
+    e.tick(&KeyedByTheRun {
+        key: Some("ck1:the-work"),
+    })
+    .await
+    .unwrap();
+    assert_eq!(q.depth().await.unwrap(), vec![("done".to_string(), 1)]);
+}
+
+/// A build that asks the loop to stop while it is running, counting how often it was asked for its
+/// kinds and how often it ran. Its kinds are refused as another class's the first `refuse` times.
+struct StopsWhileRunning {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    refuse: usize,
+    asked: AtomicUsize,
+    ran: AtomicUsize,
+}
+
+#[async_trait]
+impl Work for StopsWhileRunning {
+    fn kinds(&self) -> Vec<String> {
+        let n = self.asked.fetch_add(1, Ordering::SeqCst);
+        vec![if n < self.refuse { "judge" } else { "rebuild" }.into()]
+    }
+
+    fn unconfirmable(&self, _: &RunRecord) -> Option<String> {
+        None
+    }
+
+    async fn run(&self, job: &Job, _: &Progress) -> Result<Done, Failed> {
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        self.stop.store(true, Ordering::SeqCst);
+        Ok(Done {
+            record: record(
+                &format!("run-{}-{}", job.id, job.attempt),
+                &job.target,
+                Some("exact"),
+                &job.cache_key,
+            ),
+            record_ref: "00".repeat(32),
+        })
+    }
+}
+
+fn looping(q: &Queue) -> Engine {
+    engine(
+        q.clone(),
+        Config {
+            worker: "w1".into(),
+            confirm: false,
+            // Nothing here waits on the queue being empty, so the idle wait is nothing.
+            idle: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+}
+
+/// `stop` is asked between jobs, never during one: the job in hand is finished and recorded, and
+/// the next is left on the queue for whoever asks next.
+#[tokio::test]
+async fn the_loop_finishes_the_job_in_hand_before_it_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "stop").await;
+    for i in 0..2 {
+        q.enqueue(&NewJob::rebuild(
+            format!("pkg:npm/p{i}@1"),
+            format!("k{i}"),
+            Tier::Bulk,
+        ))
+        .await
+        .unwrap();
+    }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let work = Arc::new(StopsWhileRunning {
+        stop: stop.clone(),
+        refuse: 0,
+        asked: AtomicUsize::new(0),
+        ran: AtomicUsize::new(0),
+    });
+    looping(&q).run(work.clone(), stop).await;
+
+    assert_eq!(work.ran.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        q.depth().await.unwrap(),
+        vec![("done".to_string(), 1), ("ready".to_string(), 1)],
+        "the job in hand was not finished, or the next was taken after the stop"
+    );
+
+    // And a loop told to stop before it starts takes nothing.
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let idle = Arc::new(StopsWhileRunning {
+        stop: stopped.clone(),
+        refuse: 0,
+        asked: AtomicUsize::new(0),
+        ran: AtomicUsize::new(0),
+    });
+    looping(&q).run(idle.clone(), stopped).await;
+    assert_eq!(idle.asked.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        q.depth().await.unwrap(),
+        vec![("done".to_string(), 1), ("ready".to_string(), 1)]
+    );
+}
+
+/// A tick that fails does not end the loop.
+///
+/// A worker that exits on a blip is a worker somebody has to restart. Here the first tick fails —
+/// the work asks for a kind outside its class — and the loop carries on to the next, which leases
+/// and finishes the job.
+#[tokio::test]
+async fn a_failed_tick_does_not_end_the_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let q = queue(&dir, "survives").await;
+    q.enqueue(&NewJob::rebuild("pkg:npm/a@1", "k1", Tier::Bulk))
+        .await
+        .unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let work = Arc::new(StopsWhileRunning {
+        stop: stop.clone(),
+        refuse: 1,
+        asked: AtomicUsize::new(0),
+        ran: AtomicUsize::new(0),
+    });
+    looping(&q).run(work.clone(), stop).await;
+
+    assert_eq!(
+        work.asked.load(Ordering::SeqCst),
+        2,
+        "the loop stopped at the failed tick"
+    );
+    assert_eq!(work.ran.load(Ordering::SeqCst), 1);
+    assert_eq!(q.depth().await.unwrap(), vec![("done".to_string(), 1)]);
+}

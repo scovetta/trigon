@@ -17,14 +17,31 @@
 //! signature) still shows. It is **lossy**: it drops resources, custom attributes, field data and
 //! the exact metadata encoding, so a match under it is `normalized_with_caveats`, never `exact`.
 //!
+//! A record is, in table order: the name, then the signature, each behind its length as a
+//! little-endian `u32`; then a byte, `0` for a method with no body read and `1` for one with a
+//! body, and the body's IL behind its length. Lengths, not separators, because a signature blob
+//! and an IL body may each hold any byte: framed by NUL and newline, a call moved out of a body
+//! into the tail of its signature, or a whole method folded into the body before it, read back as
+//! the records of the original program.
+//!
 //! Byte-level, no external tool: the same reason `passes.rs` reads a PE by hand rather than take on
 //! a decompiler or a metadata crate the verifier would then have to link and a sceptic re-audit.
 
+// Every offset here is a sum of fields the publisher wrote, and the archived stabilizer set runs
+// this code as a wasm32 guest, where `usize` is 32 bits and an overflow traps (release builds keep
+// `overflow-checks`). A trap there is an error where the native build returns bytes, so the
+// archived set could not re-check the artifact. Hence the checked reads, the differences rather
+// than sums in the section lookup, and the offsets past the file clamped or saturated rather than
+// wrapped: past the end is past the end, on either width.
 fn u16(b: &[u8], o: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(b.get(o..o + 2)?.try_into().ok()?))
+    Some(u16::from_le_bytes(
+        b.get(o..o.checked_add(2)?)?.try_into().ok()?,
+    ))
 }
 fn u32(b: &[u8], o: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?))
+    Some(u32::from_le_bytes(
+        b.get(o..o.checked_add(4)?)?.try_into().ok()?,
+    ))
 }
 
 /// The two heaps a method record resolves into, plus the sizes that decide how wide every index is.
@@ -86,7 +103,7 @@ impl Meta<'_> {
 
     /// A `#Strings` entry: a NUL-terminated UTF-8 run at `off`.
     fn string_at(&self, off: usize) -> &[u8] {
-        let start = self.strings + off;
+        let start = self.strings.saturating_add(off);
         let rest = self.b.get(start..).unwrap_or(&[]);
         let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
         &rest[..end]
@@ -94,7 +111,7 @@ impl Meta<'_> {
 
     /// A `#Blob` entry: a compressed-length prefix then that many bytes.
     fn blob_at(&self, off: usize) -> &[u8] {
-        let start = self.blob + off;
+        let start = self.blob.saturating_add(off);
         let Some(&b0) = self.b.get(start) else {
             return &[];
         };
@@ -123,7 +140,7 @@ pub fn canonical_managed(b: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let pe = u32(b, 0x3c)? as usize;
-    if b.get(pe..pe + 4)? != b"PE\0\0" {
+    if b.get(pe..pe.checked_add(4)?)? != b"PE\0\0" {
         return None;
     }
     let coff = pe + 4;
@@ -142,7 +159,13 @@ pub fn canonical_managed(b: &[u8]) -> Option<Vec<u8>> {
             let vsize = u32(b, s + 8)? as usize;
             let vaddr = u32(b, s + 12)? as usize;
             let praw = u32(b, s + 20)? as usize;
-            (rva >= vaddr && rva < vaddr + vsize.max(1)).then_some(praw + (rva - vaddr))
+            // `then`, not `then_some`: the offset is only computable once the RVA is known to be
+            // in this section, and an eager `rva - vaddr` panics on any RVA below it. An offset
+            // past the file is clamped to its end, which every caller reads as nothing there.
+            (rva >= vaddr && rva - vaddr < vsize.max(1)).then(|| {
+                praw.checked_add(rva - vaddr)
+                    .map_or(b.len(), |o| o.min(b.len()))
+            })
         })
     };
 
@@ -159,8 +182,8 @@ pub fn canonical_managed(b: &[u8]) -> Option<Vec<u8>> {
 
     // Stream directory: past the version string, a flags/count pair, then the stream headers.
     let ver_len = u32(b, md + 12)? as usize;
-    let after_ver = md + 16 + ((ver_len + 3) & !3);
-    let n_streams = u16(b, after_ver + 2)? as usize;
+    let after_ver = (md + 16).checked_add(ver_len.checked_add(3)? & !3)?;
+    let n_streams = u16(b, after_ver.checked_add(2)?)? as usize;
     let (mut tables_off, mut strings_off, mut blob_off) = (None, None, None);
     let mut q = after_ver + 4;
     for _ in 0..n_streams {
@@ -169,9 +192,9 @@ pub fn canonical_managed(b: &[u8]) -> Option<Vec<u8>> {
         let name_end = name_start + b.get(name_start..)?.iter().position(|&c| c == 0)?;
         let name = b.get(name_start..name_end)?;
         match name {
-            b"#~" | b"#-" => tables_off = Some(md + s_off),
-            b"#Strings" => strings_off = Some(md + s_off),
-            b"#Blob" => blob_off = Some(md + s_off),
+            b"#~" | b"#-" => tables_off = Some(md.saturating_add(s_off)),
+            b"#Strings" => strings_off = Some(md.saturating_add(s_off)),
+            b"#Blob" => blob_off = Some(md.saturating_add(s_off)),
             _ => {}
         }
         // Name is padded to a 4-byte boundary, counting its own terminator.
@@ -180,7 +203,7 @@ pub fn canonical_managed(b: &[u8]) -> Option<Vec<u8>> {
     let (tables, strings, blob) = (tables_off?, strings_off?, blob_off?);
 
     // `#~` header: HeapSizes at +6, the `Valid` bitmask at +8, then a row count per present table.
-    let heap_sizes = *b.get(tables + 6)?;
+    let heap_sizes = *b.get(tables.checked_add(6)?)?;
     let valid = u64::from_le_bytes(b.get(tables + 8..tables + 16)?.try_into().ok()?);
     let mut counts = [0u32; 64];
     let mut p = tables + 24; // after reserved/version/heapsizes/reserved/valid/sorted
@@ -202,7 +225,7 @@ pub fn canonical_managed(b: &[u8]) -> Option<Vec<u8>> {
     let mut row = p;
     for (t, &c) in counts.iter().enumerate().take(0x06) {
         if valid & (1 << t) != 0 {
-            row += meta.row_size(t)? * c as usize;
+            row = row.saturating_add(meta.row_size(t)?.saturating_mul(c as usize));
         }
     }
     if valid & (1 << 0x06) == 0 {
@@ -211,7 +234,15 @@ pub fn canonical_managed(b: &[u8]) -> Option<Vec<u8>> {
     let method_row = meta.row_size(0x06)?;
     let (s, bl) = (meta.str_w(), meta.blob_w());
 
-    let mut out = Vec::with_capacity(counts[0x06] as usize * 24);
+    // The row count is the file's own claim, so it sizes nothing the file cannot back: trusted as
+    // a capacity, a count of `u32::MAX` asked for ~100 GB and aborted before a row was read.
+    let mut out = Vec::with_capacity((counts[0x06] as usize).saturating_mul(24).min(b.len()));
+    // Every row may name the same heap entry or body, so the records can repeat one long string
+    // once per row — rows × file, not file: 258 KB crafted that way expanded to 524 MB. A genuine
+    // assembly's form is a fraction of the file, which holds each name, signature and body beside
+    // everything the form drops, so a form several times the file is not code this can honestly
+    // reduce. Declined, and the bytes are compared as they are.
+    let limit = b.len().saturating_mul(MAX_EXPANSION);
     for i in 0..counts[0x06] as usize {
         let r = row + i * method_row;
         let rva = u32(b, r)? as usize;
@@ -219,16 +250,31 @@ pub fn canonical_managed(b: &[u8]) -> Option<Vec<u8>> {
         let name_off = read_idx(b, r + 8, s)?;
         let sig_off = read_idx(b, r + 8 + s, bl)?;
 
-        out.extend_from_slice(meta.string_at(name_off));
-        out.push(0);
-        out.extend_from_slice(meta.blob_at(sig_off));
-        out.push(0);
-        if let Some(il) = method_il(b, &rva_to_off, rva) {
-            out.extend_from_slice(il);
+        put_field(&mut out, meta.string_at(name_off))?;
+        put_field(&mut out, meta.blob_at(sig_off))?;
+        match method_il(b, &rva_to_off, rva) {
+            Some(il) => {
+                out.push(1);
+                put_field(&mut out, il)?;
+            }
+            None => out.push(0),
         }
-        out.push(0x0a);
+        if out.len() > limit {
+            return None;
+        }
     }
     Some(out)
+}
+
+/// How many times its own size an assembly's canonical form may reach before it is declined.
+const MAX_EXPANSION: usize = 4;
+
+/// One field of a record: its length as a little-endian `u32`, then its bytes. A field too long for
+/// the length to name declines the assembly rather than write a length that is not the field's.
+fn put_field(out: &mut Vec<u8>, field: &[u8]) -> Option<()> {
+    out.extend_from_slice(&u32::try_from(field.len()).ok()?.to_le_bytes());
+    out.extend_from_slice(field);
+    Some(())
 }
 
 /// A heap index is 2 or 4 bytes wide, per the heap-size flags.

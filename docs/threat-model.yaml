@@ -350,12 +350,12 @@ host_side_effects:
     5
   provenance:
     kind: documented
-    source: crates/trigon/src/evidence/rerun.rs — `rebuilt_asset`, `asset_digest`, `candidates`, `fetch_asset`,
+    source: crates/trigon/src/evidence/rerun.rs — `rebuilt_asset`, `wanted`, `candidates`, `fetch_asset`,
       `Download`, `a_download_is_made_where_no_other_user_can_reach_it`, `plain_http_is_followed_to_this_machine_alone`,
-      `an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects`; crates/trigon/tests/lookup.rs
+      `an_exact_verdicts_rebuilt_artifact_is_the_upstream_file_and_any_others_its_signed_asset`; crates/trigon/tests/lookup.rs
       — `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`, `the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`,
       `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`, `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`,
-      `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`, `the_falsifying_command_re_derives_a_published_verdict`,
+      `an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`, `the_falsifying_command_re_derives_a_published_verdict`,
       `the_falsifying_command_across_a_succession_and_for_a_void`
 - effect: Reading a GitHub token
   stance: conditional
@@ -3192,7 +3192,7 @@ properties_claimed:
       `the_falsifying_command_is_answered_in_its_origins_log_alone`, `the_falsifying_command_weighs_every_source_it_asks`,
       `the_falsifying_command_across_a_succession_and_for_a_void`, `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`,
       `the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`, `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`,
-      `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`, `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`
+      `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`, `an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`
 - id: P30
   kind: resource-bound
   components:

@@ -194,3 +194,67 @@ fn the_messages_are_the_ones_a_repair_loop_gets() {
         );
     }
 }
+
+#[test]
+fn a_kind_that_is_not_a_name_is_refused_with_the_names_it_could_be() {
+    let m = from_yaml("kind: [flow]\nlocation: { repo: x, ref: y }\n")
+        .unwrap_err()
+        .to_string();
+    assert!(m.contains("`kind` must be one of"), "{m}");
+    assert!(m.contains("flow"), "{m}");
+}
+
+#[test]
+fn a_document_that_trails_off_into_prose_is_salvaged_and_says_how_much_it_dropped() {
+    // A model can stop answering and keep generating. The parser decides where the document
+    // ends, and the caller is told how many lines were dropped rather than salvaged silently.
+    let (s, dropped) = trigon_strategy::from_yaml_longest_prefix(&format!(
+        "{FLOW}I hope this helps! Let me know\n  if anything: is unclear.\n"
+    ))
+    .expect("the strategy before the prose");
+    assert_eq!(dropped, 2);
+    let Strategy::Flow(f) = s else {
+        panic!("expected a flow")
+    };
+    assert_eq!(f.output_dir.as_deref(), Some("dist"));
+
+    // A document with nothing to drop drops nothing.
+    assert_eq!(
+        trigon_strategy::from_yaml_longest_prefix(FLOW).unwrap().1,
+        0
+    );
+}
+
+#[test]
+fn a_document_no_prefix_of_which_parses_reports_its_own_error() {
+    // The first error is about the document the model meant to write; an error about a prefix
+    // this function invented would send the repair loop after the wrong line.
+    let src = "kind: flow\nlocation: { repo: x }\nbuild:\n  - runs: make\n";
+    let whole = from_yaml(src).unwrap_err().to_string();
+    let salvaged = trigon_strategy::from_yaml_longest_prefix(src)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(salvaged, whole);
+}
+
+#[test]
+fn a_bad_document_is_never_the_packages_fault_and_a_newer_one_is_ours_to_upgrade_for() {
+    // What a failure is charged to decides whose record it lands on. A document that does not
+    // parse is the definitions repository's, or whatever wrote it; a schema from the future means
+    // this build is behind, which is infrastructure.
+    use trigon_core::{Classify as _, Fault};
+    for src in [
+        "kind: flow\nlocation: [",
+        "location: { repo: x, ref: y }\n",
+        "kind: flow\nlocation: { repo: x }\n",
+        "kind: [flow]\n",
+    ] {
+        assert_eq!(
+            from_yaml(src).unwrap_err().fault(),
+            Fault::Policy,
+            "{src:?}"
+        );
+    }
+    let e = from_yaml("schema: 99\nkind: flow\nlocation: { repo: x, ref: y }\n").unwrap_err();
+    assert_eq!(e.fault(), Fault::Infra, "{e}");
+}

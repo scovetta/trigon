@@ -342,4 +342,53 @@ mod tests {
         assert!(html.contains("a&lt;b&gt;.whl"), "{html}");
         assert!(html.contains("q=1&amp;r=2"), "{html}");
     }
+
+    #[test]
+    fn an_index_with_no_files_removes_nothing_and_still_drops_the_version_listing() {
+        // The 1.1 `versions` listing is withheld from as well as `files`: leaving the target there
+        // offers a version with no files behind it.
+        let mut d = serde_json::json!({ "name": "demo", "versions": ["1.0", "2.0"] });
+        assert_eq!(filter_simple(&mut d, "2020-01-01T00:00:00"), 0);
+        let w = crate::Withheld {
+            project: "demo".into(),
+            version: "2.0".into(),
+        };
+        assert_eq!(withhold_version(&mut d, &w), 0);
+        assert_eq!(d["versions"], serde_json::json!(["1.0"]));
+    }
+
+    #[test]
+    fn a_file_whose_name_is_missing_is_kept_rather_than_guessed_at() {
+        let mut d = serde_json::json!({ "name": "demo", "files": [
+            { "url": "https://x/unnamed" },
+            { "filename": "demo-1.0.tar.gz", "url": "https://x/demo-1.0.tar.gz" },
+        ] });
+        let w = crate::Withheld {
+            project: "demo".into(),
+            version: "1.0".into(),
+        };
+        assert_eq!(withhold_version(&mut d, &w), 1);
+        assert_eq!(d["files"].as_array().unwrap().len(), 1);
+        assert_eq!(d["files"][0]["url"], "https://x/unnamed");
+    }
+
+    #[test]
+    fn a_wheel_name_with_no_version_segment_names_no_version() {
+        // Conservative where it is unsure: a filename that does not clearly name the version is
+        // kept, because dropping one wrongly silently removes a version from the index.
+        assert!(!is_version_of("demo.whl", "demo", "1.0"));
+        assert!(is_version_of("demo-1.0-py3-none-any.whl", "demo", "1.0"));
+    }
+
+    #[test]
+    fn a_file_with_no_url_is_not_rendered_as_a_link() {
+        let d = serde_json::json!({"files": [
+            {"filename": "demo-1.0.tar.gz", "hashes": {"sha256": "aaa"}},
+            {"filename": "demo-1.1.tar.gz", "url": "https://x/demo-1.1.tar.gz",
+             "requires-python": ">=3.8"}
+        ]});
+        let html = render_html(&d, "demo");
+        assert!(!html.contains("demo-1.0.tar.gz"), "{html}");
+        assert!(html.contains("data-requires-python=\"&gt;=3.8\""), "{html}");
+    }
 }

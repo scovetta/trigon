@@ -472,11 +472,24 @@ pub(crate) fn start_keys(
         None => AttestationKey::from_pem(&read("keys/attestation.pub")?)
             .map_err(|e| Failed::unreadable(anyhow!("{location}'s keys/attestation.pub: {e}")))?,
     };
+    // Only a key the source does not pin was read; one it pins is said to be pinned, never read.
+    let read = match (&source.log_key, &source.attestation_key) {
+        (None, None) => format!(
+            "the log key {log} and the attestation key {} were",
+            attestation.key_id()
+        ),
+        (None, Some(_)) => format!(
+            "the log key {log}, beside the attestation key {} the source pins, was",
+            attestation.key_id()
+        ),
+        (Some(_), _) => format!(
+            "the attestation key {}, beside the log key {log} the source pins, was",
+            attestation.key_id()
+        ),
+    };
     let said = format!(
-        "trusting on first use: the log key {log} and the attestation key {} were read from {}'s \
-         keys/ and recorded, and every answer from `{}` rests on them",
-        attestation.key_id(),
-        location,
+        "trusting on first use: {read} read from {location}'s keys/ and recorded, and every \
+         answer from `{}` rests on them",
         source.name
     );
     Ok((

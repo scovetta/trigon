@@ -207,6 +207,11 @@ async fn highest_node_release_at(client: &Client, instant: &str) -> Option<Strin
         .await
         .ok()?;
     let index: Vec<serde_json::Value> = serde_json::from_str(&body).ok()?;
+    highest_release_in(&index, day)
+}
+
+/// The choice [`highest_node_release_at`] makes, apart from the fetch, over `index.json`'s entries.
+fn highest_release_in(index: &[serde_json::Value], day: &str) -> Option<String> {
     index
         .iter()
         .filter(|e| e["date"].as_str().is_some_and(|d| d <= day))
@@ -1587,7 +1592,7 @@ mod nuget_package_id_tests {
 
 #[cfg(test)]
 mod node_substitution_tests {
-    use super::{is_plain_version, node_order};
+    use super::{highest_release_in, is_plain_version, node_order};
 
     /// What counts as a version a toolchain host will serve.
     ///
@@ -1667,5 +1672,39 @@ mod node_substitution_tests {
 
         assert!(node_order("7.7.4") > node_order("4.8.1"));
         assert!(node_order("8.0.0") > node_order("7.7.4"));
+    }
+
+    #[test]
+    fn the_substitute_is_the_highest_linux_release_out_by_the_publish_day() {
+        // Entries shaped as `nodejs.org/dist/index.json` writes them. On 2017-03-21 Node released
+        // both 4.8.1 and 7.7.4, and `isexe@2.0.0` reproduces only under the second.
+        let entry = |version: &str, date: &str, files: &[&str]| {
+            serde_json::json!({ "version": version, "date": date, "files": files })
+        };
+        let index = [
+            entry("v7.8.0", "2017-03-29", &["linux-x64", "osx-x64-tar"]),
+            entry("v7.7.4", "2017-03-21", &["linux-x64", "win-x64-exe"]),
+            entry("v4.8.1", "2017-03-21", &["linux-x64"]),
+            entry("v6.10.1", "2017-03-21", &["linux-x64"]),
+            entry("v6.9.5", "2017-01-31", &["linux-x64"]),
+            // Higher, earlier, and useless here: nothing `npm/install-node` could fetch.
+            entry("v7.9.9", "2017-03-01", &["win-x64-exe"]),
+            entry("v7.10.0-rc.1", "2017-03-01", &["linux-x64"]),
+            serde_json::json!({ "version": "v7.11.0", "files": ["linux-x64"] }),
+            serde_json::json!({ "version": 7, "date": "2017-03-01", "files": ["linux-x64"] }),
+            serde_json::json!({ "version": "7.12.0", "date": "2017-03-01", "files": ["linux-x64"] }),
+        ];
+        assert_eq!(
+            highest_release_in(&index, "2017-03-21").as_deref(),
+            Some("7.7.4")
+        );
+        // By number: 6.10.1 is above 6.9.5 although it sorts below it as a string.
+        assert_eq!(
+            highest_release_in(&index[2..], "2017-03-21").as_deref(),
+            Some("6.10.1")
+        );
+        // Nothing out yet is nothing, not the earliest release there is.
+        assert_eq!(highest_release_in(&index, "2016-01-01"), None);
+        assert_eq!(highest_release_in(&[], "2017-03-21"), None);
     }
 }

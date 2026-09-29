@@ -555,3 +555,25 @@ proptest! {
         );
     }
 }
+
+/// A tile the checkpoint's tree does not have is refused without a file being opened, and a tile it
+/// has is read once: a reader keeps what it read.
+#[test]
+fn a_tile_the_checkpoints_tree_does_not_have_is_refused_unread() {
+    let mem = Mem::default();
+    mem.apply(&plan_append(&Tree::new(), &[] as &[Vec<u8>], &entries(0..180)).unwrap());
+    mem.files
+        .borrow_mut()
+        .insert("tile/1/000.p/1".into(), vec![0xee; 32]);
+    let tiles = TileHashes::new(&mem, 180);
+    assert_eq!(tiles.size(), 180);
+    for (level, index) in [(0, 1), (1, 0)] {
+        let e = tiles.tile(level, index).unwrap_err();
+        assert!(matches!(e, LogError::Mismatch(_)), "{e}");
+        assert!(e.to_string().contains("has no tile"), "{e}");
+    }
+    let first = tiles.tile(0, 0).unwrap();
+    assert_eq!(first.len(), 180);
+    mem.files.borrow_mut().clear();
+    assert_eq!(tiles.tile(0, 0).unwrap(), first);
+}

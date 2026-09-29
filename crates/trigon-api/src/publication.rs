@@ -866,6 +866,49 @@ mod tests {
     }
 
     #[test]
+    fn the_nearest_pair_is_named_whichever_order_the_pairs_are_met_in() {
+        // Three attempts on one machine, where the operator accepts one: no pair confirms, and the
+        // reason given is the one for the pair that met the most conditions — not cold, which is
+        // one step from publishing — whether it is met before or after a pair that only lacked
+        // the interval.
+        let r = record(Some("exact"), "mirror-only");
+        let later_pair_nearer = with(vec![
+            attempt("a", "machine-id:one", 0, false),
+            attempt("b", "machine-id:one", 60, false),
+            attempt("c", "machine-id:one", 3 * HOUR, false),
+        ]);
+        let earlier_pair_nearer = with(vec![
+            attempt("a", "machine-id:one", 0, false),
+            attempt("b", "machine-id:one", 2 * HOUR, false),
+            attempt("c", "machine-id:one", 2 * HOUR + 60, false),
+        ]);
+        for c in [later_pair_nearer, earlier_pair_nearer] {
+            assert_eq!(
+                decide(&r, &c, rules(true, 3600)),
+                Publication::Withheld {
+                    because: Withheld::ConfirmationNotCold
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_published_run_carries_no_reason_and_every_other_decision_does() {
+        assert_eq!(Publication::Published.because(), None);
+        assert!(Publication::Published.is_public());
+        let void = Publication::Void {
+            because: Withheld::OpenEgress,
+        };
+        assert_eq!(void.because(), Some(Withheld::OpenEgress));
+        assert!(void.is_public(), "a void is shown, as a void");
+        let held = Publication::Withheld {
+            because: Withheld::KillSwitch,
+        };
+        assert_eq!(held.because(), Some(Withheld::KillSwitch));
+        assert!(!held.is_public());
+    }
+
+    #[test]
     fn attempts_that_do_not_say_where_they_ran_confirm_nothing() {
         let r = record(Some("exact"), "mirror-only");
         let mut c = confirmed();
@@ -1289,6 +1332,8 @@ mod tests {
             Withheld::OpenEgress,
             Withheld::GuardTripped,
             Withheld::NonBuiltinStabilizer,
+            Withheld::ProvenanceUnknown,
+            Withheld::ImageDerivedOutsideBoundary,
             Withheld::KillSwitch,
             Withheld::NoOutcome,
         ] {
@@ -1368,6 +1413,60 @@ mod tests {
                 "`{}` is a reason the gate can give and the page has no row for it; a reader \
                  would be shown the fallback sentence instead of why their finding was held back",
                 w.key()
+            );
+        }
+    }
+
+    /// `key()` is the wire name, as its doc says: the string `serde` writes for the same variant.
+    /// A page keyed on one while reading the other has two names for one reason, and the row
+    /// test above cannot see it, since an empty key is in every table.
+    #[test]
+    fn every_reason_s_key_is_the_name_serde_writes_for_it() {
+        for w in [
+            Withheld::AwaitingConfirmation,
+            Withheld::AttemptsDisagree,
+            Withheld::ConfirmationUnrecorded,
+            Withheld::AttemptsTooClose,
+            Withheld::SameHost,
+            Withheld::ConfirmationNotCold,
+            Withheld::OpenEgress,
+            Withheld::GuardTripped,
+            Withheld::NonBuiltinStabilizer,
+            Withheld::ImageDerivedOutsideBoundary,
+            Withheld::ProvenanceUnknown,
+            Withheld::KillSwitch,
+            Withheld::NoOutcome,
+        ] {
+            assert_eq!(
+                serde_json::to_value(w).unwrap(),
+                serde_json::Value::from(w.key()),
+                "{w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pair_that_lacked_only_another_machine_is_named_over_one_that_lacked_the_interval() {
+        // D8 off, three attempts on one machine: one pair is moments apart, and the others an
+        // interval apart. The nearest is the pair that only lacked a second machine, whether it
+        // is met before or after the one that lacked the interval too.
+        let r = record(Some("exact"), "mirror-only");
+        let too_close_first = with(vec![
+            attempt("a", "machine-id:one", 0, true),
+            attempt("b", "machine-id:one", 60, true),
+            attempt("c", "machine-id:one", 2 * HOUR, true),
+        ]);
+        let same_host_first = with(vec![
+            attempt("a", "machine-id:one", 0, true),
+            attempt("b", "machine-id:one", 2 * HOUR, true),
+            attempt("c", "machine-id:one", 2 * HOUR + 60, true),
+        ]);
+        for c in [too_close_first, same_host_first] {
+            assert_eq!(
+                decide(&r, &c, rules(false, 3600)),
+                Publication::Withheld {
+                    because: Withheld::SameHost
+                }
             );
         }
     }

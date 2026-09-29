@@ -510,6 +510,17 @@ fn lower_pypi(
                 // project needing anything beyond the backend stops with "Unmet dependencies".
                 ("no_isolation".to_string(), "false".to_string()),
                 ("dir".to_string(), project_dir.unwrap_or_default()),
+                // **Build what will be compared**, as the heuristic does. The caller names the
+                // artifact the run is about, and for a package with only platform wheels that is
+                // the sdist; the tool defaults to a wheel, so without this a CI-derived recipe
+                // built a wheel and the run compared it against an sdist.
+                (
+                    "kind".to_string(),
+                    match ctx.target.about.as_ref().map(|a| a.kind()) {
+                        Some(trigon_core::ArtifactKind::Sdist) => "sdist".to_string(),
+                        _ => "wheel".to_string(),
+                    },
+                ),
             ]),
             build.system_deps.clone(),
         )],

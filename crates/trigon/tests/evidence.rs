@@ -1859,3 +1859,340 @@ fn pruning_one_of_an_agreeing_pair_keeps_the_bytes_the_other_names() {
     assert!(!out.status.success(), "{said}");
     assert!(said.contains("the bytes are missing"), "{said}");
 }
+
+/// The evidence commands say what there is when there is little: with no source configured,
+/// `evidence list` says how to add one, and its JSON is an empty list, never an error;
+/// `--accept-state-loss` names only a source being synced, exit 5, and nothing is synced; `evidence
+/// add` with an initial checkpoint says the source is held to it; and `evidence list` says a
+/// source trusting on first use has its keys still to read, and when a sync last failed, and why.
+#[test]
+fn the_evidence_commands_say_what_there_is_when_there_is_little() {
+    let w = World::new("little");
+    let said = ok(&w.trigon(&["evidence", "list"]));
+    assert!(
+        said.contains("no evidence source is configured. Add one with `trigon evidence add"),
+        "{said}"
+    );
+    let out = w.trigon(&["evidence", "list", "--output", "json"]);
+    ok(&out);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "[]");
+
+    w.init();
+    let remote = w.remote.to_str().unwrap();
+    ok(&w.add("main", &[remote], &[]));
+    ok(&w.add("other", &[remote], &[]));
+    let said = exits(&w.sync(&["--source", "main", "--accept-state-loss", "other"]), 5);
+    assert!(
+        said.contains(
+            "--accept-state-loss other: no source being synced is named that; name it with \
+             --source too"
+        ),
+        "{said}"
+    );
+    let said = exits(&w.sync(&["--accept-state-loss", "nowhere"]), 5);
+    assert!(
+        said.contains("--accept-state-loss nowhere: no source being synced is named that"),
+        "{said}"
+    );
+    assert!(!said.contains("--source too"), "{said}");
+    assert!(!w.state("main").exists() && !w.state("other").exists());
+
+    let initial = w.dir.join("initial.checkpoint");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&w.remote)
+        .args(["show", "main:log/checkpoint"])
+        .output()
+        .unwrap();
+    std::fs::write(&initial, out.stdout).unwrap();
+    let said = ok(&w.add(
+        "pinned",
+        &[remote],
+        &["--checkpoint", initial.to_str().unwrap()],
+    ));
+    assert!(
+        said.contains(&format!("pinned    the initial checkpoint {}", initial.display())),
+        "{said}"
+    );
+
+    ok(&w.trigon(&["evidence", "add", "tofu", remote, "--trust-on-first-use"]));
+    let said = ok(&w.trigon(&["evidence", "list"]));
+    assert!(
+        said.contains(
+            "trust     on first use: its keys will be read from the repository on its first sync"
+        ),
+        "{said}"
+    );
+    // A sync that fails is said, with when and why.
+    std::fs::rename(&w.remote, w.dir.join("gone.git")).unwrap();
+    exits(&w.sync(&["--source", "main"]), 4);
+    let said = ok(&w.trigon(&["evidence", "list"]));
+    assert!(
+        said.lines()
+            .any(|l| l.starts_with("failed    20") && l.contains("Z: ")),
+        "{said}"
+    );
+}
+
+/// Trust on first use reads only a key the source does not pin, and only from `keys/` of the first
+/// location a first sync reaches: a location that cannot be reached is passed over for the next; a
+/// key the source pins is used as pinned, on the first sync and every one after, whatever `keys/`
+/// names, and the sync says which key it read; and a repository with no key to read, like no
+/// location reached, gives nothing to trust, so nothing is accepted.
+#[test]
+fn trust_on_first_use_reads_only_what_is_not_pinned_from_the_first_location_reached() {
+    let w = World::new("tofu-partial");
+    w.init();
+    w.publish_package("a", "aaaa");
+    let remote = w.remote.to_str().unwrap();
+    let recorded = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(w.state(name).join("keys")).unwrap()).unwrap()
+    };
+
+    // The first location is not there: the keys are read from the second.
+    let nowhere = w.dir.join("nowhere.git");
+    ok(&w.trigon(&[
+        "evidence",
+        "add",
+        "second",
+        nowhere.to_str().unwrap(),
+        remote,
+        "--trust-on-first-use",
+    ]));
+    let said = ok(&w.sync(&["--source", "second"]));
+    assert!(said.contains(nowhere.to_str().unwrap()), "{said}");
+    let keys = recorded("second");
+    assert_eq!(keys["firstUse"]["readFrom"], remote, "{keys}");
+    assert_eq!(keys["logKey"], w.vkey().to_string(), "{keys}");
+    assert!(w.state("second").join("checkpoint").is_file());
+
+    // One key pinned, the other read: the pinned one as pinned, now and on the next sync, and the
+    // sync says which was read and which is pinned.
+    let vkey = w.vkey().to_string();
+    let key = attestation().public_hex();
+    let id = |hex: &str| {
+        trigon_attest::AttestationKey::from_hex(hex)
+            .unwrap()
+            .key_id()
+    };
+    for (name, pin, note) in [
+        (
+            "log-pinned",
+            ["--log-key", vkey.as_str()],
+            format!(
+                "the attestation key {}, beside the log key {vkey} the source pins, was read from \
+                 {remote}'s keys/",
+                id(&key)
+            ),
+        ),
+        (
+            "key-pinned",
+            ["--attestation-key", key.as_str()],
+            format!(
+                "the log key {vkey}, beside the attestation key {} the source pins, was read from \
+                 {remote}'s keys/",
+                id(&key)
+            ),
+        ),
+    ] {
+        let mut args = vec!["evidence", "add", name, remote, "--trust-on-first-use"];
+        args.extend(pin);
+        ok(&w.trigon(&args));
+        let said = ok(&w.sync(&["--source", name]));
+        assert!(said.contains(&note), "{name}: {said}");
+        let keys = recorded(name);
+        assert_eq!(keys["logKey"], vkey, "{name}: {keys}");
+        assert_eq!(keys["attestationKey"], key, "{name}: {keys}");
+        assert_eq!(keys["firstUse"]["readFrom"], remote, "{name}: {keys}");
+        ok(&w.sync(&["--source", name]));
+        assert_eq!(recorded(name)["logKey"], vkey, "{name}");
+    }
+
+    // A pin that differs from what `keys/` publishes, so that a key read in its place would show.
+    // An attestation key of its own is recorded as pinned, beside the log key read, on the first
+    // sync and the next; the key `keys/attestation.pub` names is not taken.
+    let other = LocalKey::from_bytes(&[4; 32]).unwrap().public_hex();
+    assert_ne!(other, key);
+    ok(&w.trigon(&[
+        "evidence",
+        "add",
+        "other-key",
+        remote,
+        "--trust-on-first-use",
+        "--attestation-key",
+        &other,
+    ]));
+    let said = ok(&w.sync(&["--source", "other-key"]));
+    assert!(
+        said.contains(&format!(
+            "the log key {vkey}, beside the attestation key {} the source pins, was read from \
+             {remote}'s keys/",
+            id(&other)
+        )),
+        "{said}"
+    );
+    for sync in ["first", "next"] {
+        let keys = recorded("other-key");
+        assert_eq!(keys["attestationKey"], other, "{sync}: {keys}");
+        assert_eq!(
+            keys["attestationKeys"][0]["publicKey"], other,
+            "{sync}: {keys}"
+        );
+        assert_eq!(keys["logKey"], vkey, "{sync}: {keys}");
+        assert_eq!(keys["firstUse"]["readFrom"], remote, "{sync}: {keys}");
+        ok(&w.sync(&["--source", "other-key"]));
+    }
+    // And the record, signed by the key `keys/` names, is held to the pinned one, which did not
+    // sign it: it fails verification, where the source pinned to the signing key answers.
+    let lookup = |name: &str| {
+        w.trigon(&[
+            "lookup",
+            "pkg:npm/demo-a@1.0.0",
+            "--source",
+            name,
+            "--offline",
+        ])
+    };
+    exits(&lookup("key-pinned"), 0);
+    let said = exits(&lookup("other-key"), 4);
+    assert!(said.contains("failed verification"), "{said}");
+    // A log key of its own, of the same origin, is the one the checkpoint is held to: the log the
+    // repository signs does not verify under it, and nothing is accepted or recorded.
+    let other_log = LogSigner::from_seed(ORIGIN, [4; 32])
+        .unwrap()
+        .vkey()
+        .to_string();
+    assert_ne!(other_log, vkey);
+    ok(&w.trigon(&[
+        "evidence",
+        "add",
+        "other-log",
+        remote,
+        "--trust-on-first-use",
+        "--log-key",
+        &other_log,
+    ]));
+    exits(&w.sync(&["--source", "other-log"]), 4);
+    assert!(!w.state("other-log").join("checkpoint").exists());
+    assert!(!w.state("other-log").join("keys").exists());
+
+    // A repository with no `keys/log.vkey`.
+    let bare = w.dir.join("keyless.git");
+    git(
+        &w.dir,
+        &["clone", "--quiet", "--bare", remote, bare.to_str().unwrap()],
+    );
+    let c = w.dir.join("keyless");
+    git(
+        &w.dir,
+        &["clone", "--quiet", bare.to_str().unwrap(), c.to_str().unwrap()],
+    );
+    git(&c, &["rm", "--quiet", "keys/log.vkey"]);
+    git(&c, &["commit", "--quiet", "-m", "no key"]);
+    git(&c, &["push", "--quiet", "origin", "main"]);
+    ok(&w.trigon(&[
+        "evidence",
+        "add",
+        "keyless",
+        bare.to_str().unwrap(),
+        "--trust-on-first-use",
+    ]));
+    let said = exits(&w.sync(&["--source", "keyless"]), 4);
+    assert!(
+        said.contains("has no keys/log.vkey, so there is no key to trust on first use"),
+        "{said}"
+    );
+    assert!(!w.state("keyless").join("checkpoint").exists());
+    assert!(!w.state("keyless").join("keys").exists());
+
+    // No location reached at all: nothing to read a key from.
+    ok(&w.trigon(&[
+        "evidence",
+        "add",
+        "unreached",
+        nowhere.to_str().unwrap(),
+        "--trust-on-first-use",
+    ]));
+    let said = exits(&w.sync(&["--source", "unreached"]), 4);
+    assert!(
+        said.contains(
+            "`unreached` trusts on first use, and no location of it could be reached to read its \
+             keys from"
+        ),
+        "{said}"
+    );
+    assert!(!w.state("unreached").join("keys").exists());
+}
+
+/// Whichever order a source lists its locations in, the one furthest ahead answers and one behind
+/// it is said to lag; and a location whose log cannot be read — its leaves not there — is said to
+/// be, and the others answer.
+#[test]
+fn the_location_furthest_ahead_answers_whatever_order_they_are_listed_in() {
+    let w = World::new("mirror-order");
+    w.init();
+    w.publish_package("a", "aaaa");
+    let lagging = w.mirror("lagging.git");
+    w.publish_package("b", "bbbb");
+    let damaged = w.mirror("damaged.git");
+    let c = w.dir.join("damaging");
+    git(
+        &w.dir,
+        &["clone", "--quiet", damaged.to_str().unwrap(), c.to_str().unwrap()],
+    );
+    git(&c, &["rm", "--quiet", "log/tile/entries/000.p/2"]);
+    git(&c, &["commit", "--quiet", "-m", "leaves gone"]);
+    git(&c, &["push", "--quiet", "origin", "main"]);
+    let urls: Vec<String> = [&lagging, &damaged, &w.remote]
+        .iter()
+        .map(|p| format!("file://{}", p.display()))
+        .collect();
+    let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
+    ok(&w.add("main", &urls, &[]));
+    let said = ok(&w.sync(&[]));
+    for line in [
+        "remote.git (file): 2 leaves, answering",
+        "lagging.git (file): 1 leaves, lagging",
+        "lagging.git is lagging: it serves",
+        "damaged.git (file): unreachable",
+        "its log could not be read",
+    ] {
+        assert!(said.contains(line), "{line}\n{said}");
+    }
+    let accepted = std::fs::read_to_string(w.state("main").join("checkpoint")).unwrap();
+    assert_eq!(accepted.lines().nth(1), Some("2"), "{accepted}");
+}
+
+/// A state file found missing is said, never passed over (`docs/19` §6.1): the record of when a
+/// source last synced, and its key history, are each made again on the next sync, which says it
+/// was not there; the checkpoint last accepted, which is what a rollback is caught against, is
+/// kept.
+#[test]
+fn a_missing_sync_record_or_key_history_is_made_again_and_said() {
+    let w = World::new("state-missing");
+    w.init();
+    w.publish_package("a", "aaaa");
+    ok(&w.add("main", &[w.remote.to_str().unwrap()], &[]));
+    ok(&w.sync(&[]));
+    let accepted = std::fs::read(w.state("main").join("checkpoint")).unwrap();
+    for (file, says) in [
+        (
+            "sync",
+            "was not there, so when this source last synced was not known until now",
+        ),
+        ("keys", "was not there, and is written again from the log"),
+    ] {
+        let path = w.state("main").join(file);
+        std::fs::remove_file(&path).unwrap();
+        let said = ok(&w.sync(&[]));
+        assert!(
+            said.contains(&format!("{} {says}", path.display())),
+            "{file}: {said}"
+        );
+        assert!(path.is_file(), "{file}");
+        assert_eq!(
+            std::fs::read(w.state("main").join("checkpoint")).unwrap(),
+            accepted
+        );
+    }
+}

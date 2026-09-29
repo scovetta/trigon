@@ -89,3 +89,21 @@ fn canonicalizing_is_idempotent() {
     let twice = canonicalize(&serde_json::from_str(&once).unwrap()).unwrap();
     assert_eq!(once, twice);
 }
+
+#[test]
+fn every_control_character_with_a_short_form_uses_it_and_only_those_do() {
+    // RFC 8785 §3.2.2.2 via ECMAScript: `\b \t \n \f \r` have two-character forms and every other
+    // character below 0x20 is `\u00xx`, lower-case hex. DEL is above the range and passes through.
+    let v = json!({"s": "\u{8}\u{9}\u{a}\u{c}\u{d}|\u{0}\u{b}\u{1f}|\u{7f}"});
+    let bs = '\\';
+    let expected = format!(
+        "{{\"s\":\"{bs}b{bs}t{bs}n{bs}f{bs}r|{bs}u0000{bs}u000b{bs}u001f|\u{7f}\"}}"
+    );
+    assert_eq!(canonicalize(&v).unwrap(), expected);
+}
+
+#[test]
+fn a_key_is_escaped_as_a_value_is() {
+    let v = json!({"a\rb": 1});
+    assert_eq!(canonicalize(&v).unwrap(), "{\"a\\rb\":1}");
+}

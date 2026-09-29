@@ -276,7 +276,9 @@ impl Body {
                 .map(Cow::Borrowed)
                 .ok_or_else(|| crate::ArchiveError::Malformed {
                     format: "archive",
-                    detail: format!("body range {off}..{} out of bounds", off + len),
+                    // Saturating: a range whose end overflows is exactly the one being refused,
+                    // and `+` panicked on it under the workspace's overflow checks.
+                    detail: format!("body range {off}..{} out of bounds", off.saturating_add(*len)),
                 }),
             Body::Spilled { file, off, len } => {
                 let mut f = file.file.try_clone()?;
@@ -448,5 +450,41 @@ impl Entry {
             Body::Inline(v) => Ok(v),
             _ => unreachable!("just promoted to Inline"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::sync::Arc;
+
+    use super::{Body, SpillFile};
+
+    /// Nothing constructs `Body::Spilled` yet (`docs/16-findings.md` §3.15), but the read is here
+    /// and whoever wires spilling inherits it, so it is held to its window now.
+    #[test]
+    fn a_spilled_body_reads_exactly_its_window_of_the_spill_file() {
+        let mut f = tempfile::tempfile().unwrap();
+        f.write_all(b"....window....").unwrap();
+        let file = Arc::new(SpillFile { file: f });
+        let body = Body::Spilled {
+            file: file.clone(),
+            off: 4,
+            len: 6,
+        };
+        assert_eq!(body.len(), 6);
+        assert_eq!(body.bytes().unwrap().as_ref(), b"window");
+        // Twice: each read seeks, rather than trusting where the last one left the handle.
+        assert_eq!(body.bytes().unwrap().as_ref(), b"window");
+
+        let past_the_end = Body::Spilled {
+            file,
+            off: 10,
+            len: 10,
+        };
+        assert!(matches!(
+            past_the_end.bytes(),
+            Err(crate::ArchiveError::Io(_))
+        ));
     }
 }

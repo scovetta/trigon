@@ -110,3 +110,108 @@ impl Classify for MirrorError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whose fault each refusal is, and the status a client sees for it.
+    ///
+    /// The fault decides whose record a failure lands on. A registry's bad afternoon charged to
+    /// the package reads as a package that does not build, and a path shape this mirror told a
+    /// client to use and then does not serve is ours — never the package's, never the registry's.
+    #[test]
+    fn every_refusal_says_whose_fault_it_is_and_what_the_client_sees() {
+        let cases = [
+            (MirrorError::NoFilter, 400, Fault::Policy),
+            (
+                MirrorError::UnknownPlatform {
+                    found: "maven".into(),
+                },
+                400,
+                Fault::Policy,
+            ),
+            (
+                MirrorError::BadMoment {
+                    found: "yesterday".into(),
+                },
+                400,
+                Fault::Policy,
+            ),
+            (
+                MirrorError::HostNotAllowed {
+                    host: "cdn.evil.example".into(),
+                    route: "artifact",
+                },
+                403,
+                Fault::Policy,
+            ),
+            (
+                MirrorError::Refused {
+                    url: "https://registry.npmjs.org/a/-/a-1.0.0.tgz".into(),
+                },
+                403,
+                Fault::Policy,
+            ),
+            // Upstream's own status goes back to the client, so a 503 reads as a 503.
+            (
+                MirrorError::Upstream {
+                    platform: "npm".into(),
+                    status: 503,
+                },
+                503,
+                Fault::Upstream,
+            ),
+            (
+                MirrorError::Unfilterable {
+                    platform: "pypi".into(),
+                    content_type: "text/html".into(),
+                },
+                502,
+                Fault::Upstream,
+            ),
+            (
+                MirrorError::BadRedirect {
+                    found: "http://[".into(),
+                },
+                502,
+                Fault::Upstream,
+            ),
+            (
+                MirrorError::Bind {
+                    port: 8129,
+                    detail: "address in use".into(),
+                },
+                500,
+                Fault::Infra,
+            ),
+            (
+                MirrorError::Cache(std::io::Error::other("read-only file system")),
+                500,
+                Fault::Infra,
+            ),
+            (
+                MirrorError::NotFound {
+                    path: "/-nuget/2020-01-01T00:00:00Z/nonsense".into(),
+                },
+                404,
+                Fault::Bug,
+            ),
+        ];
+        for (e, status, fault) in cases {
+            assert_eq!((e.status(), e.fault()), (status, fault), "{e}");
+        }
+    }
+
+    #[test]
+    fn an_unfilterable_answer_names_what_upstream_sent() {
+        let e = MirrorError::Unfilterable {
+            platform: "pypi".into(),
+            content_type: "text/html".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "upstream pypi returned text/html, which cannot be filtered by date"
+        );
+    }
+}

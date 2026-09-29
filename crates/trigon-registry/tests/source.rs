@@ -8,11 +8,12 @@ use std::process::Command;
 
 use trigon_registry::SourceCache;
 
-fn tmpdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("trigon-source-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// A directory of this test's own, removed when the test is done with it.
+fn tmpdir(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("trigon-source-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -66,8 +67,9 @@ fn fixture(root: &Path) -> (PathBuf, String) {
 fn a_checkout_is_the_commit_that_was_asked_for_and_not_the_branch() {
     // The whole reason a rung reads the repository at a commit: `main` today is not what the
     // package was built from, and a file that arrived afterwards would be read as evidence.
-    let d = tmpdir("pinned");
-    let (repo, first) = fixture(&d);
+    let tmp = tmpdir("pinned");
+    let d = tmp.path();
+    let (repo, first) = fixture(d);
     let cache = SourceCache::new(d.join("cache")).trusting_local_paths();
 
     let c = cache.checkout(repo.to_str().unwrap(), &first).unwrap();
@@ -96,7 +98,8 @@ fn a_checkout_is_the_commit_that_was_asked_for_and_not_the_branch() {
 
 #[test]
 fn a_ref_that_is_not_a_commit_is_refused_rather_than_resolved() {
-    let d = tmpdir("ref");
+    let tmp = tmpdir("ref");
+    let d = tmp.path();
     let cache = SourceCache::new(d.join("cache"));
     for r in ["main", "v1.0.0", "ff8e7ba", ""] {
         let e = cache
@@ -114,7 +117,8 @@ fn a_ref_that_is_not_a_commit_is_refused_rather_than_resolved() {
 fn a_url_that_could_be_an_argument_is_refused() {
     // A repository URL comes from package metadata. git reads a leading dash as an option wherever
     // it appears, so `--upload-pack=…` in a field a package controls is a command on this host.
-    let d = tmpdir("argv");
+    let tmp = tmpdir("argv");
+    let d = tmp.path();
     let cache = SourceCache::new(d.join("cache"));
     let commit = "0".repeat(40);
     for url in [
@@ -135,8 +139,9 @@ fn a_url_that_could_be_an_argument_is_refused() {
 
 #[test]
 fn the_reader_lists_tracked_files_and_reads_the_manifests_it_knows() {
-    let d = tmpdir("read");
-    let (repo, first) = fixture(&d);
+    let tmp = tmpdir("read");
+    let d = tmp.path();
+    let (repo, first) = fixture(d);
     let c = SourceCache::new(d.join("cache"))
         .trusting_local_paths()
         .checkout(repo.to_str().unwrap(), &first)
@@ -172,8 +177,9 @@ fn a_checkout_carries_the_tag_that_names_its_commit() {
     // It was also tier-dependent, which is what made it invisible: at `--egress open` the source
     // phase runs `git clone` inside the container and gets every tag, so the version came out
     // right. Only an enforced tier, where the host does this shallow fetch instead, was wrong.
-    let root = tmpdir("tagged");
-    let (repo, first) = fixture(&root);
+    let tmp = tmpdir("tagged");
+    let root = tmp.path();
+    let (repo, first) = fixture(root);
     // An *annotated* tag, which is what a release usually is and which lists twice in `ls-remote`:
     // once as the tag object and once as the commit it dereferences to. Matching the wrong line
     // fetches nothing.
@@ -207,8 +213,9 @@ fn a_checkout_cached_before_tags_were_fetched_gets_them_on_the_next_hit() {
     // The fix would otherwise apply only to repositories nobody had built yet: a cached checkout is
     // reused, and one made before this existed has no tags and would never acquire any. Found by
     // the fix not working on the package it was written for.
-    let root = tmpdir("tag-backfill");
-    let (repo, first) = fixture(&root);
+    let tmp = tmpdir("tag-backfill");
+    let root = tmp.path();
+    let (repo, first) = fixture(root);
     let cache = SourceCache::new(root.join("cache")).trusting_local_paths();
 
     // The first checkout happens before the tag exists, so it legitimately has none.
@@ -226,8 +233,9 @@ fn a_commit_no_tag_names_reports_no_tags_rather_than_failing() {
     // Most commits are not releases. An untagged one is ordinary, so this is a note the caller can
     // act on and not a refusal — but it must be reported, because a VCS-versioned build will
     // silently produce a development version from it.
-    let root = tmpdir("untagged");
-    let (repo, first) = fixture(&root);
+    let tmp = tmpdir("untagged");
+    let root = tmp.path();
+    let (repo, first) = fixture(root);
     git(&repo, &["tag", "-a", "v2.0.0", "-m", "later", "HEAD"]);
 
     let cache = SourceCache::new(root.join("cache")).trusting_local_paths();
@@ -262,7 +270,8 @@ fn a_commit_no_tag_names_reports_no_tags_rather_than_failing() {
 #[test]
 #[cfg(unix)]
 fn a_manifest_that_is_a_symlink_out_of_the_checkout_is_not_read() {
-    let d = tmpdir("symlink");
+    let tmp = tmpdir("symlink");
+    let d = tmp.path();
     let repo = d.join("origin");
     std::fs::create_dir_all(repo.join("sub")).unwrap();
 

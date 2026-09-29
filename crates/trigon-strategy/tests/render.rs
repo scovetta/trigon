@@ -583,3 +583,106 @@ output_path: '*.tgz'
         );
     }
 }
+/// One top-level build step, rendered with these `with` values and this mirror.
+fn build_step(
+    script: &str,
+    with: &[(&str, &str)],
+    mirror: &str,
+) -> Result<String, trigon_strategy::StrategyError> {
+    let s = from_yaml(&format!(
+        "kind: flow\nlocation: {{ repo: r, ref: c }}\nbuild:\n  - runs: {}\n",
+        serde_json::to_string(script).unwrap()
+    ))
+    .unwrap();
+    let mut c = cx();
+    c.env.timewarp_base = mirror.to_string();
+    c.with = with
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    render(&s, &c, &ToolRegistry::builtin().unwrap()).map(|i| i.build)
+}
+
+#[test]
+fn a_list_parameter_that_is_not_json_is_an_error_naming_the_filter_and_the_line() {
+    // `pypi/install-deps` loops over `with.requirements | from_json`. A requirements list that is
+    // not JSON rendering as an empty loop would install nothing and build anyway; it is refused,
+    // and the message quotes the line the author wrote, because that is the repair loop's input.
+    let script = "{% for r in with.reqs | from_json %}pip install {{ r }}\n{% endfor %}";
+    let e = build_step(script, &[("reqs", "[\"wheel==0.40.0\"")], "timewarp").unwrap_err();
+    let m = e.to_string();
+    assert!(m.contains("from_json"), "{m}");
+    assert!(
+        m.contains("with.reqs | from_json"),
+        "the author's own line: {m}"
+    );
+
+    // An absent list is an empty one, which is what a tool with an optional list wants.
+    assert_eq!(
+        build_step(script, &[("reqs", "  ")], "timewarp").unwrap(),
+        ""
+    );
+    assert_eq!(
+        build_step(script, &[("reqs", "[\"a==1\", \"b==2\"]")], "timewarp").unwrap(),
+        "pip install a==1\npip install b==2"
+    );
+}
+
+#[test]
+fn a_value_passed_through_to_json_is_quoted_as_json_quotes_it() {
+    let got = build_step(
+        "echo {{ with.v | to_json }}",
+        &[("v", "it's \"quoted\"")],
+        "timewarp",
+    )
+    .unwrap();
+    assert_eq!(got, r#"echo "it's \"quoted\"""#);
+}
+
+#[test]
+fn indent_pads_every_line_that_has_something_on_it() {
+    // A blank line stays blank: trailing spaces in a heredoc are content, and a YAML block that
+    // gained them would not be the block that was written.
+    let got = build_step(
+        "cat <<EOF\n{{ with.body | indent(4) }}\nEOF",
+        &[("body", "a:\n\n  b: 1")],
+        "timewarp",
+    )
+    .unwrap();
+    assert_eq!(got, "cat <<EOF\n    a:\n\n      b: 1\nEOF");
+}
+
+#[test]
+fn a_mirror_url_with_no_moment_to_pin_is_refused() {
+    // Forwarding an absent publish time used to produce `http://pypi:none@timewarp/simple`, which
+    // the mirror reads as a real filter. An empty moment is not a pin.
+    let e = build_step(
+        "{{ timewarp_url('pypi', with.t) }}",
+        &[("t", "")],
+        "timewarp",
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("no moment to pin to"), "{e}");
+    assert_eq!(
+        build_step(
+            "{{ timewarp_url('pypi', with.t) }}",
+            &[("t", "2023-05-01T04:11:28Z")],
+            "timewarp:8080"
+        )
+        .unwrap(),
+        "http://pypi:2023-05-01T04:11:28Z@timewarp:8080"
+    );
+}
+
+#[test]
+fn the_mirror_host_is_only_there_when_a_mirror_is() {
+    // pip ignores a plain-HTTP index that is not also a trusted host, and resolves against the live
+    // index instead; the host is what makes it trusted, so asking for it with no mirror is an error
+    // rather than an empty `trusted-host`.
+    assert_eq!(
+        build_step("{{ timewarp_host() }}", &[], "timewarp:8080").unwrap(),
+        "timewarp:8080"
+    );
+    let e = build_step("{{ timewarp_host() }}", &[], "").unwrap_err();
+    assert!(e.to_string().contains("no mirror is configured"), "{e}");
+}

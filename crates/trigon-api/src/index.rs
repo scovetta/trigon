@@ -506,6 +506,23 @@ impl Index {
             .collect()
     }
 
+    /// Every run of one package, newest first, as a reader who is `public` or not is shown each:
+    /// the runs whose target is `purl`, or `purl` at a version. Every run the index holds is
+    /// asked, as [`Self::for_artifact`] asks: the route used a page of the newest 500 rows whose
+    /// text contained the purl, which another package's name can contain too, so a package with
+    /// runs read as never checked. A withheld run is not among them for a public reader, and a
+    /// void one is shown without its outcome.
+    pub fn for_target(&self, purl: &str, public: bool) -> Vec<Entry> {
+        let at_a_version = format!("{purl}@");
+        self.read_or_recover()
+            .entries
+            .iter()
+            .filter(|e| e.target == purl || e.target.starts_with(&at_a_version))
+            .filter(|e| !public || e.publication.is_public())
+            .map(|e| e.clone().shown(public))
+            .collect()
+    }
+
     /// The other attempts at `id`'s work that agree with it — the same cache key, outcome and
     /// agreement digest, none of them void — as the gate counts them.
     ///
@@ -1471,5 +1488,122 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), 7, "a row was served twice or skipped");
+    }
+
+    #[test]
+    fn a_new_index_is_empty() {
+        let ix = Index::default();
+        assert!(ix.is_empty());
+        assert_eq!(ix.len(), 0);
+        let one = rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None);
+        assert!(!index_of(vec![one]).is_empty());
+    }
+
+    #[test]
+    fn a_run_that_names_no_cause_is_counted_and_listed_as_unclassified() {
+        // No outcome, no failure signature, no terminal: nobody named why it produced nothing, and
+        // the count says so rather than dropping it from both denominators. The bar a reader can
+        // click lists what it counted.
+        let ix = index_of(vec![
+            rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None),
+            rec("1700000002-ab", "pkg:npm/b@1", None, None),
+        ]);
+        let s = ix.stats(false);
+        assert_eq!(s.by_fault.get("unclassified"), Some(&1));
+        assert_eq!(s.runs, 2);
+        let p = ix.page(
+            &Query {
+                fault: Some("unclassified".into()),
+                limit: 10,
+                ..Default::default()
+            },
+            false,
+        );
+        let ids: Vec<&str> = p.rows.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["1700000002-ab"]);
+    }
+
+    #[test]
+    fn the_ecosystem_filter_lists_that_ecosystem_and_nothing_else() {
+        let ix = index_of(vec![
+            rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None),
+            rec("1700000002-ab", "pkg:pypi/b@1", Some("exact"), None),
+            rec("1700000003-ac", "pkg:npm/c@1", Some("exact"), None),
+        ]);
+        let p = ix.page(
+            &Query {
+                ecosystem: Some("npm".into()),
+                limit: 10,
+                ..Default::default()
+            },
+            false,
+        );
+        let ids: Vec<&str> = p.rows.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["1700000003-ac", "1700000001-aa"]);
+        assert_eq!(p.total, 2);
+    }
+
+    #[test]
+    fn an_algorithm_no_run_computed_matches_nothing() {
+        // The digest is compared with the digest of the algorithm asked for, and with nothing else:
+        // a sha256 given under another name does not match the sha256.
+        let r = rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None);
+        let hex = r.upstream.sha256.to_hex();
+        let ix = index_of(vec![r]);
+        assert_eq!(ix.for_artifact("sha256", &hex, false).len(), 1);
+        assert!(ix.for_artifact("md5", &hex, false).is_empty());
+        assert!(ix.for_artifact("sha512", &hex, false).is_empty());
+    }
+
+    #[test]
+    fn a_run_with_no_key_agrees_with_nothing() {
+        // Two runs of one target with one outcome, neither keyed: nothing says they asked the same
+        // question, so neither is another's confirmation.
+        let ix = index_of(vec![
+            rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None),
+            rec("1700000002-ab", "pkg:npm/a@1", Some("exact"), None),
+        ]);
+        assert!(ix.agreeing("1700000002-ab").is_empty());
+        assert!(ix.agreeing("no-such-run").is_empty());
+
+        // Keyed, the same two agree.
+        let ix = index_of(vec![
+            rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), Some("k1")),
+            rec("1700000002-ab", "pkg:npm/a@1", Some("exact"), Some("k1")),
+        ]);
+        let agreeing: Vec<String> = ix
+            .agreeing("1700000002-ab")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(agreeing, ["1700000001-aa"]);
+    }
+
+    #[tokio::test]
+    async fn a_run_record_that_will_not_read_is_skipped_and_every_other_run_is_served() {
+        // One bad record must not take the corpus down: it is often exactly what somebody came to
+        // look at, and every other run is still worth serving.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::local(dir.path()).unwrap();
+        store
+            .put_run(&rec("1700000001-aa", "pkg:npm/a@1", Some("exact"), None))
+            .await
+            .unwrap();
+        store
+            .put_run(&rec("1700000002-ab", "pkg:npm/b@1", Some("exact"), None))
+            .await
+            .unwrap();
+        std::fs::write(
+            dir.path().join("runs/1700000002-ab.json"),
+            b"{\"id\": \"1700000002-a",
+        )
+        .unwrap();
+
+        let ix = Index::new();
+        let added = ix.refresh(&store, no_interval()).await.expect("a refresh");
+        assert_eq!(added, 1);
+        assert!(ix.get("1700000001-aa").is_some());
+        assert!(ix.get("1700000002-ab").is_none());
+        assert_eq!(ix.len(), 1);
     }
 }

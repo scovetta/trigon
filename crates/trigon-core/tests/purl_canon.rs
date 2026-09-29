@@ -202,3 +202,34 @@ fn every_canonical_form_is_a_fixed_point_however_its_parts_were_spelt() {
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
+
+#[test]
+fn a_canonical_purl_displays_as_its_canonical_form() {
+    // Written into a message or a statement with `{}`, it is the key a reader looks up, so it
+    // prints as nothing else.
+    let c = canonicalize("PKG:npm/@Babel/Core@7.24.0?B=2&a=1#./x").unwrap();
+    assert_eq!(c.to_string(), "pkg:npm/%40Babel/core@7.24.0?a=1&b=2#x");
+    assert_eq!(c.to_string(), c.as_str());
+}
+
+#[test]
+fn a_malformed_escape_is_named_as_it_was_written_and_no_further() {
+    // The message points at the one place to fix: the `%` and the two characters an escape takes,
+    // or what there is of them at the end of the component.
+    for (input, near) in [
+        ("pkg:npm/left%2pad@1.3.0", "%2p"),
+        ("pkg:npm/left%zzpad@1.3.0", "%zz"),
+        ("pkg:npm/left-pad@1.3.0%", "%"),
+        ("pkg:npm/left-pad@1.3.0%2", "%2"),
+        ("pkg:npm/left-pad@1.3.0%+f", "%+f"),
+    ] {
+        assert_eq!(
+            canonicalize(input),
+            Err(PurlCanonError::BadEscape {
+                purl: input.to_string(),
+                near: near.to_string(),
+            }),
+            "{input}"
+        );
+    }
+}

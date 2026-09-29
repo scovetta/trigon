@@ -551,3 +551,105 @@ fn the_set_manifest_file_is_canonical_json_and_not_the_set_digest() {
     let file = Subject::of_bytes("m", &bytes, false).digest["sha256"].clone();
     assert_ne!(file, set.digest().to_hex());
 }
+
+/// A void may supersede an earlier record — a later run looked again and could not tell — and signs
+/// what it supersedes and why inside its statement, as a verdict does.
+#[test]
+fn a_void_that_supersedes_signs_what_and_why() {
+    let purl = canonicalize(PURL).unwrap();
+    let trips = vec!["package/index.js arrived from registry.npmjs.org".to_string()];
+    let record = Digest::from_bytes([0x5e; 32]);
+    let st = Statement::void(
+        subject(b"x"),
+        &VoidFacts {
+            supersedes: Some(Supersession {
+                record,
+                reason: SupersedeReason::AttemptsDisagreeLater,
+            }),
+            ..void_facts(&purl, &trips, &[])
+        },
+    );
+    assert_eq!(st.predicate_type, VOID);
+    assert_eq!(
+        st.predicate["supersedes"],
+        format!("sha256:{}", record.to_hex())
+    );
+    assert_eq!(st.predicate["reason"], "attempts_disagree_later");
+    let plain = Statement::void(subject(b"x"), &void_facts(&purl, &trips, &[]));
+    assert!(plain.predicate.get("supersedes").is_none());
+    assert!(plain.predicate.get("reason").is_none());
+}
+
+/// A stabilizer a person or a model wrote is named with who wrote it, once whichever sides it fired
+/// on; a builtin one is never named as authored. What the verdict signs of each applied pass, on
+/// each side, says the same.
+#[test]
+fn an_authored_stabilizer_is_named_with_who_wrote_it_and_a_builtin_is_not() {
+    let (u, r) = (tar(1, b"x"), tar(2, b"x"));
+    let c = comparison(&u, &r);
+    assert!(!c.applied().is_empty(), "the tar profile edits a time");
+    assert!(
+        AuthoredPass::of(&c).is_empty(),
+        "every pass here is builtin"
+    );
+
+    let builtin = serde_json::to_value(&c).unwrap();
+    // Each pass that applied, the side it fired on, and its risk, as the comparison records them.
+    let mut fired: Vec<(&str, String)> = Vec::new();
+    let mut risk = std::collections::BTreeMap::<String, String>::new();
+    for side in ["upstream", "rebuild"] {
+        for a in builtin[side]["applied"].as_array().unwrap() {
+            let id = a["id"].as_str().unwrap().to_string();
+            risk.insert(id.clone(), a["risk"].as_str().unwrap().to_string());
+            fired.push((side, id));
+        }
+    }
+    assert!(
+        ["upstream", "rebuild"]
+            .iter()
+            .all(|side| fired.iter().any(|(s, _)| s == side)),
+        "each side's time is edited: {fired:?}"
+    );
+
+    let model = serde_json::json!({ "kind": "model", "model_id": "m-1", "run_id": "r-1" });
+    let human = serde_json::json!({ "kind": "human", "reviewer": "a reviewer" });
+    for (kind, who) in [("model", &model), ("human", &human)] {
+        let mut v = builtin.clone();
+        for side in ["upstream", "rebuild"] {
+            for a in v[side]["applied"].as_array_mut().unwrap() {
+                a["provenance"] = who.clone();
+            }
+        }
+        let authored: trigon_compare::Comparison = serde_json::from_value(v).unwrap();
+        let passes = AuthoredPass::of(&authored);
+        assert_eq!(passes.len(), risk.len(), "{kind}: each once: {passes:?}");
+        for (id, tier) in &risk {
+            let pass = AuthoredPass {
+                id: id.clone(),
+                risk: tier.clone(),
+                provenance: kind.into(),
+            };
+            assert!(passes.contains(&pass), "{kind}: {pass:?} in {passes:?}");
+        }
+
+        let st = Statement::equivalence("demo-1.0.0.tar", &authored);
+        let said: Vec<(&str, &str, &str)> = st.predicate["applied"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["side"].as_str().unwrap(),
+                    a["id"].as_str().unwrap(),
+                    a["provenance"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        let meant: Vec<(&str, &str, &str)> = fired
+            .iter()
+            .map(|(side, id)| (*side, id.as_str(), kind))
+            .collect();
+        assert_eq!(said, meant, "{kind}");
+        assert_eq!(st.predicate["provenanceCap"]["allBuiltin"], false, "{kind}");
+    }
+}

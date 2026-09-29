@@ -289,3 +289,29 @@ fn every_transport_has_a_name_a_message_can_use() {
         assert_eq!(t.to_string(), name);
     }
 }
+
+/// Before the colon, an empty user, a user with a colon of its own, or nothing at all is no host;
+/// and a bracket that neither begins the location nor follows a user is no IPv6 host. Each is
+/// refused under the colon rule, never handed to git as SSH to a host nobody meant.
+#[test]
+fn what_is_not_a_host_before_the_colon_is_refused() {
+    for s in [
+        "@example.org:repo",
+        "a:b@[::1]:repo",
+        ":repo",
+        "x[::1]:repo",
+    ] {
+        let e = parse(s).expect_err(s);
+        assert!(e.contains("as SSH to the host"), "{s}: {e}");
+    }
+}
+
+/// A relative path is taken from the directory it is relative to, and is refused where that
+/// directory is not absolute: it would name a different place from every working directory.
+#[test]
+fn a_relative_path_against_a_relative_directory_is_refused() {
+    let e = Location::parse("evidence", Path::new("relative/dir"), None)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("`relative/dir`, is not absolute"), "{e}");
+}

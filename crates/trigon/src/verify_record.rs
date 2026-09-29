@@ -1168,7 +1168,9 @@ fn json_of(r: &Report, code: i32) -> Value {
 
 /// The JSON document for a check that stopped before it had a record to report on: the exit code,
 /// what stopped it, why, and, for a log that equivocates or does not extend the checkpoint it is
-/// held to, both signed notes, which §8 has the client print.
+/// held to, both signed notes, which §8 has the client print. A stop with any other code than 4 or
+/// 5 is `--lookup` finding no current record to check, with what the sources say of the artifact
+/// instead — never checked, withdrawn, or a record of another predicate — which is no failure.
 fn stopped(code: i32, error: &anyhow::Error) -> Value {
     let log = error.downcast_ref::<LogError>();
     let stopped = match (code, log) {
@@ -1177,7 +1179,8 @@ fn stopped(code: i32, error: &anyhow::Error) -> Value {
         (_, Some(LogError::Inconsistent { .. })) => "inconsistent",
         (_, Some(l)) if l.fails_verification() => "log-failed-verification",
         (_, Some(_)) => "log-unreadable",
-        _ => "failed-verification",
+        (FAILED, None) => "failed-verification",
+        _ => "no-current-record",
     };
     let notes = match log {
         Some(LogError::Equivocation {

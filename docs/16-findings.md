@@ -5459,15 +5459,29 @@ record, and the phase's done-when.
   `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`, which refuses and fails the
   listings and the download under each setting,
   `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`,
-  `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`, and `rerun::tests`. Phase
-  6c's review, below, found what the first cut of it missed.
+  `an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`, and
+  `rerun::tests`. Phase 6c's review, below, found what the first cut of it missed.
 - **Whether an exact verdict's falsifying command should take `--upstream` as its rebuilt
   artifact.** An exact verdict signs a rebuilt artifact whose sha256 is the subject's, so the
   upstream file the command is given, which is held to the subject, is that artifact byte for byte,
   and the signed command could run as written. It asks for `--rebuild <file>` instead, exit 5, and
   says the upstream file is it: whether a falsifying command should re-derive a claim from one file
   given once and used twice is a decision, not an inference, and `docs/19` §4.2 item 6 says the
-  command takes `--rebuild` where the rebuilt artifact is not published.
+  command takes `--rebuild` where the rebuilt artifact is not published. **Changed in the test
+  coverage pass of 2026-09-28, for the owner to confirm: it takes it.** The same item promises
+  that the same signed command works either way, and for an exact verdict it never ran as signed:
+  it exited 5 every time. Without `--rebuild`, an exact verdict — by its outcome, or by the sha256
+  it signs for its rebuilt artifact being the subject's — takes the `--upstream` file as its
+  rebuilt artifact, held to the digest the verdict signs as any rebuilt artifact is, so the wrong
+  file is still a check not made, exit 5, never a refutation; GitHub is asked nothing, and
+  `--rebuild` given is used as given. `docs/19` §4.2 item 6 and §6, `docs/09`,
+  `docs/using-trigon.md`, the threat model (P45), the `--rebuild` help and `FalsifyingCommand`'s
+  doc comment say so. Held by
+  `an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`
+  (`crates/trigon/tests/lookup.rs`, which replaced
+  `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`) and
+  `rerun::tests::an_exact_verdicts_rebuilt_artifact_is_the_upstream_file_and_any_others_its_signed_asset`
+  (which replaced `an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects`).
 - **Whether `--remote` should refuse a source it cannot hold to a key history**, rather than answer
   under the pinned key alone and say so. Built: it answers, fails any record under a changed key,
   and says why.
@@ -5554,8 +5568,10 @@ test that fails without the fix (`crates/trigon/tests/lookup.rs`):
   never uploads an exact verdict's rebuilt artifact (`docs/19` §4.1), and the lookup listed every
   series release and every page of its assets on the anonymous rate limit, then exited 5 saying
   the repository did not publish it. It asks nothing now, and says the upstream file is the
-  rebuilt artifact (`an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`);
-  whether to take it without being asked is left for the owner (above).
+  rebuilt artifact
+  (`an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`, first
+  `an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github`); whether to take it
+  without being asked was left for the owner, and the coverage pass took it (above).
 - **Every series release was searched**, each up to ten pages of assets, against the sixty requests
   an hour GitHub allows a client with no token, so a record behind six full releases could not be
   reached, and every lookup that found nothing spent the hour's quota. Only the series of the
@@ -5586,8 +5602,9 @@ test that fails without the fix (`crates/trigon/tests/lookup.rs`):
   asked, which the test shows with `0.0.0.0` — not loopback, and reaching the test's own server,
   which would see the request (`the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`). A
   verdict that signs no rebuilt artifact, exit 5 too, is held by `rerun::tests`
-  (`an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects`), since `publish` signs
-  no such verdict to test it through. `docs/19` §6 says GitHub refusing or unreachable is exit 5,
-  which it had left out.
+  (`an_exact_verdicts_rebuilt_artifact_is_the_upstream_file_and_any_others_its_signed_asset`,
+  first `an_asset_is_looked_for_only_by_a_signed_digest_other_than_the_subjects`), since
+  `publish` signs no such verdict to test it through. `docs/19` §6 says GitHub refusing or
+  unreachable is exit 5, which it had left out.
 - **The falsifying-command test resolved its record in a source not on github.com** and held
   another source's asset to it; it removes that source first now, as it meant to.

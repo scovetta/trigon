@@ -156,7 +156,12 @@ fn assembly_attr<'a>(line: &'a str, attr: &str) -> Option<&'a str> {
 /// already carries and keeps the reader out of the business of walking custom-attribute blobs.
 /// `None` when the assembly cannot be decompiled or carries no version attribute at all.
 pub fn assembly_version_info(dll: &[u8]) -> Option<trigon_strategy::AssemblyVersionInfo> {
-    let cs = source(dll)?;
+    version_info_in(&source(dll)?)
+}
+
+/// The version stamps a decompilation's assembly-level attributes carry, or `None` if it carries
+/// none. Apart from [`assembly_version_info`] so the reading can be tested without a container.
+fn version_info_in(cs: &str) -> Option<trigon_strategy::AssemblyVersionInfo> {
     let mut info = trigon_strategy::AssemblyVersionInfo::default();
     // The attributes sit in the first dozens of lines; a bound keeps a pathological decompilation
     // from being scanned in full.
@@ -265,6 +270,75 @@ mod tests {
         for no in ["Castle.Core.nuspec", "a.xml", "readme.txt", "A.dll.config", "x.pdb"] {
             assert!(!looks_like_assembly(no), "{no}");
         }
+    }
+
+    /// The top of a decompilation as ILSpy writes one, `castle.core`'s shape: the assembly-level
+    /// attributes, among others, indented or not.
+    const CASTLE: &str = "using System.Reflection;\n\
+        [assembly: CompilationRelaxations(8)]\n\
+        [assembly: AssemblyCompany(\"Castle Project Contributors\")]\n\
+        [assembly: AssemblyCopyright(\"Copyright (c) 2004-2022 Castle Project\")]\n\
+        [assembly: AssemblyFileVersion(\"5.1.1\")]\n    \
+        [assembly: AssemblyInformationalVersion(\"5.1.1+2dc1b1b\")]\n\
+        [assembly: AssemblyTitle(\"Castle Core\")]\n\
+        [assembly: AssemblyVersion(\"5.0.0.0\")]\n\
+        namespace Castle.Core { }\n";
+
+    #[test]
+    fn the_version_stamps_are_read_from_the_attributes_ilspy_emits() {
+        assert!(CASTLE.contains("\n    [assembly: AssemblyInformationalVersion"), "the fixture");
+        let info = version_info_in(CASTLE).unwrap();
+        assert_eq!(info.assembly_version.as_deref(), Some("5.0.0.0"));
+        assert_eq!(info.file_version.as_deref(), Some("5.1.1"));
+        assert_eq!(info.informational_version.as_deref(), Some("5.1.1+2dc1b1b"));
+        assert_eq!(
+            info.copyright.as_deref(),
+            Some("Copyright (c) 2004-2022 Castle Project")
+        );
+        // The package version is what a `.csproj` `Version` becomes: the informational version.
+        assert_eq!(info.version.as_deref(), Some("5.1.1+2dc1b1b"));
+    }
+
+    #[test]
+    fn the_file_version_stands_in_where_no_informational_version_was_set() {
+        let cs = "[assembly: AssemblyFileVersion(\"2.3.4.0\")]\n\
+                  [assembly: AssemblyVersion(\"2.0.0.0\")]\n";
+        let info = version_info_in(cs).unwrap();
+        assert_eq!(info.version.as_deref(), Some("2.3.4.0"));
+        assert_eq!(info.informational_version, None);
+        // Only an assembly version: stamped, and no package version to infer from it.
+        let info = version_info_in("[assembly: AssemblyVersion(\"1.0.0.0\")]").unwrap();
+        assert_eq!(info.assembly_version.as_deref(), Some("1.0.0.0"));
+        assert_eq!(info.version, None);
+    }
+
+    #[test]
+    fn a_decompilation_with_no_version_attribute_has_nothing_to_offer() {
+        assert_eq!(version_info_in("public class C { }\n"), None);
+        assert_eq!(version_info_in(""), None);
+        // Other attributes are not version stamps.
+        assert_eq!(
+            version_info_in("[assembly: AssemblyTitle(\"Castle Core\")]\n"),
+            None
+        );
+        // Nor is an attribute ILSpy did not finish, or one that is not assembly-level.
+        assert_eq!(
+            version_info_in("[assembly: AssemblyVersion(\"1.0.0.0\"\n"),
+            None
+        );
+        assert_eq!(version_info_in("[AssemblyVersion(\"1.0.0.0\")]\n"), None);
+    }
+
+    /// The attributes sit at the top; a pathological decompilation is not scanned in full.
+    #[test]
+    fn only_the_top_of_a_decompilation_is_read() {
+        let at = |line: usize| {
+            let mut cs = "// filler\n".repeat(line - 1);
+            cs.push_str("[assembly: AssemblyVersion(\"9.9.9.9\")]\n");
+            version_info_in(&cs)
+        };
+        assert!(at(400).is_some());
+        assert_eq!(at(401), None);
     }
 
     /// The whole path — build the image, decompile two real assemblies, diff the C# — proves that

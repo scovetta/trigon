@@ -735,6 +735,46 @@ mod tests {
 }
 
 #[cfg(test)]
+mod canonical_repo_tests {
+    use super::canonicalize_repo;
+
+    #[test]
+    fn every_spelling_package_json_uses_for_a_github_repository_is_one_https_url() {
+        // Left alone, the SSH spellings would have us clone with credentials we do not have, and
+        // the cache would hold four entries for one repository.
+        for raw in [
+            "git+ssh://git@github.com/a/b.git",
+            "ssh://git@github.com/a/b",
+            "git://github.com/a/b.git",
+            "git+https://github.com/a/b.git",
+            "http://github.com/a/b",
+            "https://github.com/a/b/",
+            "github:a/b",
+            "git@github.com:a/b.git",
+            "a/b",
+            "  a/b  ",
+        ] {
+            assert_eq!(canonicalize_repo(raw), "https://github.com/a/b", "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_spelling_it_does_not_recognise_is_left_as_written() {
+        // Not guessed at: a string that is not plainly a GitHub shorthand is not rewritten into
+        // one, and what it is stays visible to whatever refuses it next.
+        for raw in [
+            "bitbucket:a/b",
+            "git@gitlab.com:a/b",
+            "a/b/c",
+            "just words/here",
+            "file:///srv/repo",
+        ] {
+            assert_eq!(canonicalize_repo(raw), raw, "{raw:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod subdir_tests {
     use super::repo_subdir;
     use serde_json::json;

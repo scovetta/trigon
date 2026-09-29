@@ -609,3 +609,225 @@ impl std::fmt::Display for Decline {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_field_becomes_a_pin_a_series_or_an_honest_unknown() {
+        let unknown = |raw: &str, why| VersionSpec::Unknown {
+            raw: raw.to_string(),
+            why,
+        };
+        for (raw, full, want) in [
+            ("3.11.7", 2, VersionSpec::Pinned("3.11.7".into())),
+            ("3.12", 2, VersionSpec::Pinned("3.12".into())),
+            (" 18.17.1 ", 3, VersionSpec::Pinned("18.17.1".into())),
+            (
+                "3",
+                2,
+                VersionSpec::Series {
+                    lo: "3".into(),
+                    hi: "4".into(),
+                },
+            ),
+            (
+                "24",
+                3,
+                VersionSpec::Series {
+                    lo: "24".into(),
+                    hi: "25".into(),
+                },
+            ),
+            (
+                "18.9",
+                3,
+                VersionSpec::Series {
+                    lo: "18.9".into(),
+                    hi: "18.10".into(),
+                },
+            ),
+            ("", 2, unknown("", WhyUnknown::Wildcard)),
+            ("3.x", 2, unknown("3.x", WhyUnknown::Wildcard)),
+            ("lts/*", 3, unknown("lts/*", WhyUnknown::Wildcard)),
+            ("latest", 3, unknown("latest", WhyUnknown::Wildcard)),
+            ("3..11", 2, unknown("3..11", WhyUnknown::Wildcard)),
+            (
+                "${{ matrix.python }}",
+                2,
+                unknown("${{ matrix.python }}", WhyUnknown::Expression),
+            ),
+            (">=3.9", 2, unknown(">=3.9", WhyUnknown::RangeSpec)),
+            ("~=3.9", 2, unknown("~=3.9", WhyUnknown::RangeSpec)),
+            ("^18", 3, unknown("^18", WhyUnknown::RangeSpec)),
+            ("3.9, <4", 2, unknown("3.9, <4", WhyUnknown::RangeSpec)),
+            ("3.9 3.10", 2, unknown("3.9 3.10", WhyUnknown::RangeSpec)),
+            // A component too large to bump names no series.
+            (
+                "99999999999999999999",
+                3,
+                unknown("99999999999999999999", WhyUnknown::Wildcard),
+            ),
+        ] {
+            assert_eq!(VersionSpec::classify(raw, full), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_release_trigger_outranks_a_tag_which_outranks_everything_else() {
+        let ranked = |t: TriggerKind| t.rank();
+        assert!(ranked(TriggerKind::ReleasePublished) > ranked(TriggerKind::TagPush));
+        assert!(ranked(TriggerKind::TagPush) > ranked(TriggerKind::Dispatch));
+        assert_eq!(
+            ranked(TriggerKind::Dispatch),
+            ranked(TriggerKind::Call),
+            "two ways a human starts a release"
+        );
+        assert!(ranked(TriggerKind::Dispatch) > ranked(TriggerKind::BranchPush));
+        assert_eq!(
+            ranked(TriggerKind::BranchPush),
+            ranked(TriggerKind::PullRequest)
+        );
+        assert!(ranked(TriggerKind::Schedule) > ranked(TriggerKind::Other("gollum".into())));
+    }
+
+    #[test]
+    fn every_decline_names_what_it_is_about() {
+        // The decline is the only explanation a `no-strategy` verdict carries, so each one has to
+        // carry its subject: the command, the job, the secret, the runner.
+        for (d, subject) in [
+            (Decline::NoPinnedCommit, "no commit is pinned"),
+            (
+                Decline::SourceUnreadable {
+                    detail: "git fetch failed".into(),
+                },
+                "git fetch failed",
+            ),
+            (Decline::NoWorkflows, "`.github/workflows`"),
+            (
+                Decline::NoQualifyingJob { jobs_seen: 7 },
+                "none of the 7 job(s)",
+            ),
+            (
+                Decline::RecipesTie {
+                    top: vec!["a.yml:build".into(), "b.yml:build".into()],
+                    disagree_on: "the toolchain",
+                },
+                "a.yml:build and b.yml:build rank equally and disagree on the toolchain",
+            ),
+            (
+                Decline::BuildJobUnreachable {
+                    publish_job: "publish".into(),
+                    artifact: "dist".into(),
+                },
+                "`publish` publishes an artifact (`dist`)",
+            ),
+            (
+                Decline::BuildJobRunsNoBuild { job: "tag".into() },
+                "`tag` was selected",
+            ),
+            (
+                Decline::BuildIsOneUnmodelledStep {
+                    action: "hynek/build-and-inspect-python-package".into(),
+                },
+                "`hynek/build-and-inspect-python-package`",
+            ),
+            (
+                Decline::UnresolvedExpression {
+                    field: "working-directory",
+                    raw: "${{ matrix.dir }}".into(),
+                },
+                "`working-directory` is `${{ matrix.dir }}`",
+            ),
+            (
+                Decline::SecretInBuild {
+                    names: vec!["A".into(), "B".into()],
+                },
+                "reads `secrets.A`, `secrets.B`",
+            ),
+            (
+                Decline::BuildConsumesAnotherJobsOutput {
+                    artifact: "wheels".into(),
+                },
+                "downloads `wheels` from another job",
+            ),
+            (
+                Decline::ArtifactChangedAfterTheBuild {
+                    step: "sign".into(),
+                },
+                "`sign` runs in the publish job",
+            ),
+            (
+                Decline::VersionComputedAtPublishTime {
+                    step: "npm version".into(),
+                },
+                "`npm version` computes the published version",
+            ),
+            (
+                Decline::NoToolForBuildCommand {
+                    command: "nox -s build".into(),
+                },
+                "`nox -s build` is the build",
+            ),
+            (
+                Decline::RecipeIncomplete {
+                    command: "make docs".into(),
+                },
+                "`make docs` alongside it",
+            ),
+            (
+                Decline::BuildRewritesTheTree {
+                    command: "sed -i x f".into(),
+                },
+                "`sed -i x f` rewrites the working tree",
+            ),
+            (
+                Decline::PackageManagerUnsupported {
+                    manager: "pnpm".into(),
+                },
+                "ships no pnpm tool",
+            ),
+            (
+                Decline::RunnerOutOfScope(OutOfScope::NonX86("ubuntu-24.04-arm".into())),
+                "`ubuntu-24.04-arm` is a Linux runner that is not x86-64",
+            ),
+            (
+                Decline::NothingTheHeuristicLacks {
+                    because: "npm recorded it".into(),
+                },
+                "adds nothing to what the registry already recorded: npm recorded it",
+            ),
+        ] {
+            let text = d.to_string();
+            assert!(text.contains(subject), "{d:?}: {text}");
+        }
+        // The literal it refuses to render is spelled as Actions spells it.
+        let text = Decline::UnresolvedExpression {
+            field: "f",
+            raw: "r".into(),
+        }
+        .to_string();
+        assert!(text.ends_with("a literal `${{ }}`"), "{text}");
+        for (o, subject) in [
+            (
+                OutOfScope::MacOs("macos-14".into()),
+                "`macos-14` is a macOS runner",
+            ),
+            (
+                OutOfScope::Windows("windows-2022".into()),
+                "`windows-2022` is a Windows runner",
+            ),
+            (
+                OutOfScope::SelfHosted,
+                "the job runs on a self-hosted runner",
+            ),
+            (
+                OutOfScope::UnknownLabel("x".into()),
+                "`x` is a runner label this build does not recognise",
+            ),
+        ] {
+            assert_eq!(o.to_string(), subject);
+        }
+    }
+}

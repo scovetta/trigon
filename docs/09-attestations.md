@@ -1081,11 +1081,12 @@ for it under a random name that only the user can enter, and held to that digest
 other bytes in the repository of the source the record was resolved in fail, exit 4, and in another
 source's are that repository's, and the next is asked. A download names the artifact to GitHub, and
 the report says so however it ended. An exact verdict's rebuilt artifact is the upstream artifact
-itself, which no repository publishes again, so GitHub is asked nothing for it, and neither is it
-for a record no repository of which is on github.com; there, where no repository asked holds the
-asset, where GitHub refuses or cannot be reached, or where the verdict signs no rebuilt artifact,
-the check is not made, exit 5, and it asks for `--rebuild <file>` — the upstream file, for an exact
-verdict; no other artifact is guessed at.
+itself, which no repository publishes again, so GitHub is asked nothing for it and the upstream
+file is taken as it, held to the digest the verdict signs: its falsifying command runs as signed.
+Nor is GitHub asked anything for a record no repository of which is on github.com; there, where no
+repository asked holds the asset, where GitHub refuses or cannot be reached, or where the verdict
+signs no rebuilt artifact, the check is not made, exit 5, and it asks for `--rebuild <file>`; no
+other artifact is guessed at.
 
 `trigon lookup <key>` and `trigon check <lockfile>` answer from the same clones, and report every
 record with the fields below; `19` §6 has them. `--remote` on either reads one question's files

@@ -148,6 +148,13 @@ impl<P: Provider> Provider for Recorder<P> {
         self.inner.caps()
     }
 
+    /// The wrapped provider's, not the trait's default. Every live provider runs inside one of
+    /// these, so answering `Default` here dropped the operator's `+no-reasoning` before any request
+    /// was built, and recorded the default as what had been asked for.
+    fn reasoning(&self) -> Reasoning {
+        self.inner.reasoning()
+    }
+
     fn complete(&self, req: &Request) -> Result<Response, LlmError> {
         let resp = self.inner.complete(req)?;
         let turn = Turn {
@@ -235,7 +242,10 @@ impl Provider for Replaying {
                  Answering it from the recording would make a changed prompt look derived.",
                 i + 1,
                 &asked[..12],
-                &turn.prompt_sha256[..12],
+                // Not sliced blind: a transcript is a file somebody can edit, and a recorded digest
+                // shorter than twelve bytes, or cut inside a character, panicked here. Twelve
+                // characters and no more, whatever the field holds: this lands in a log line.
+                turn.prompt_sha256.chars().take(12).collect::<String>(),
             )));
         }
         Ok(Response {
@@ -422,5 +432,118 @@ mod tests {
 
         let back: Transcript = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
         assert_eq!(back, t);
+    }
+
+    #[test]
+    fn the_recorded_answer_provider_is_pinned_by_construction() {
+        // Its answers *are* the recording, so a transcript it produced replays as what it is.
+        assert!(is_snapshot("replay"));
+        let r = Recorder::new(Replay::once("an answer"));
+        r.complete(&request("sys", "body")).unwrap();
+        assert!(r.transcript("t").replayable());
+        // And an id with nothing in it pins nothing.
+        assert!(!is_snapshot(""));
+    }
+
+    #[test]
+    fn a_recorder_is_the_provider_it_wraps_and_a_replay_says_it_is_one() {
+        // Wrapping is what keeps recording from being a second code path: what the caller sees of
+        // the provider has to be the provider's.
+        let r = Recorder::new(Replay::once("a"));
+        assert_eq!(r.id(), "replay");
+        assert_eq!(r.caps(), Replay::once("a").caps());
+        assert_eq!(Replaying::new(Transcript::new("t")).id(), "replaying");
+    }
+
+    /// A provider configured to ask for no reasoning, the way `ollama:<tag>+no-reasoning` is.
+    struct Quiet(Replay);
+
+    impl Provider for Quiet {
+        fn id(&self) -> &str {
+            "quiet"
+        }
+        fn caps(&self) -> ModelCaps {
+            self.0.caps()
+        }
+        fn complete(&self, req: &Request) -> Result<Response, LlmError> {
+            self.0.complete(req)
+        }
+        fn reasoning(&self) -> Reasoning {
+            Reasoning::Off
+        }
+    }
+
+    #[test]
+    fn a_recorded_provider_still_asks_for_the_reasoning_it_was_configured_with() {
+        // `Provider::reasoning` is the operator's choice, which the caller copies into each request
+        // so it is recorded. A recorder that answered with the trait's default in place of the
+        // inner provider's dropped that choice silently: production wraps every live provider in
+        // one, so `+no-reasoning` reached no request at all, and every transcript said the
+        // default had been asked for.
+        let answer = r#"{"diagnosis":"d","strategy":"kind: flow\n"}"#;
+        let r = Recorder::new(Quiet(Replay::once(answer)));
+        assert_eq!(r.reasoning(), Reasoning::Off);
+
+        // Through the whole composition a run builds: the recorder shared, and boxed for the
+        // counter that sits outside it.
+        let shared = std::sync::Arc::new(Recorder::new(
+            Box::new(Quiet(Replay::once(answer))) as Box<dyn Provider>
+        ));
+        let outer: Box<dyn Provider> = Box::new(shared.clone());
+        assert_eq!(outer.reasoning(), Reasoning::Off);
+
+        let task = crate::Task {
+            purl: "pkg:npm/a@1.0.0",
+            ecosystem: trigon_core::Ecosystem::Npm,
+            repo_files: &[],
+            manifests: &[],
+            evidence: &[],
+            previous: None,
+            failure: None,
+            log: None,
+            divergence: None,
+            rejected: None,
+        };
+        crate::propose(outer.as_ref(), "replay", &task).unwrap();
+        let t = shared.transcript("pkg:npm/a@1.0.0");
+        assert_eq!(t.turns.len(), 1);
+        assert_eq!(t.turns[0].reasoning_asked, Reasoning::Off);
+    }
+
+    #[test]
+    fn a_recording_whose_digest_is_not_one_is_refused_rather_than_panicking() {
+        // A transcript is a file `--model replay:` reads, and a hand-edited or truncated one is
+        // input like any other. A digest too short to quote, or cut inside a character, is a
+        // recording of a different question and says so.
+        for recorded in ["abc", "aéééééééééé"] {
+            let r = Recorder::new(Replay::once("an answer"));
+            r.complete(&request("sys", "body")).unwrap();
+            let mut t = r.transcript("t");
+            t.turns[0].prompt_sha256 = recorded.into();
+            let e = Replaying::new(t)
+                .complete(&request("sys", "body"))
+                .unwrap_err();
+            assert!(matches!(e, LlmError::Malformed(_)), "{e:?}");
+            assert!(e.to_string().contains("different question"), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_recorded_digest_is_quoted_by_its_first_twelve_characters_and_never_whole() {
+        // The field is whatever the file says, and the error lands in a log line. A long value
+        // with a character that straddles byte twelve must not be echoed whole in place of a
+        // prefix, which is what falling back to the full field on a bad slice did.
+        let recorded = format!("aéééééé{}", "x".repeat(100_000));
+        let r = Recorder::new(Replay::once("an answer"));
+        r.complete(&request("sys", "body")).unwrap();
+        let mut t = r.transcript("t");
+        t.turns[0].prompt_sha256 = recorded;
+        let e = Replaying::new(t)
+            .complete(&request("sys", "body"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("different question"), "{e}");
+        assert!(e.contains("against aéééééé"), "{e}");
+        assert!(e.len() < 500, "{} bytes", e.len());
     }
 }

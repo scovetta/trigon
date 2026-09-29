@@ -255,4 +255,36 @@ mod tests {
     fn an_empty_transcript_is_an_empty_summary_not_an_error() {
         assert_eq!(summarize(b""), Summary::default());
     }
+
+    #[test]
+    fn a_url_with_a_credential_and_no_host_is_labelled_as_having_none() {
+        // The userinfo is removed before anything else is read, so a URL that is nothing but a
+        // credential labels its row as hostless rather than with the credential.
+        let s = summarize(
+            concat!(
+                r#"{"route":"artifact","url":"https://user:secret-token@/a.tgz","bytes":5}"#,
+                "\n",
+            )
+            .as_bytes(),
+        );
+        let hosts: Vec<&str> = s.hosts.iter().map(|h| h.host.as_str()).collect();
+        assert_eq!(hosts, ["(no host)"]);
+    }
+
+    #[test]
+    fn a_route_this_build_does_not_know_is_listed_after_the_ones_a_build_meets() {
+        let s = summarize(
+            concat!(
+                r#"{"route":"telemetry","url":"https://t.example/x","bytes":1}"#,
+                "\n",
+                r#"{"route":"artifact","url":"https://r.example/a.tgz","bytes":1}"#,
+                "\n",
+                r#"{"route":"toolchain","url":"https://n.example/node","bytes":1}"#,
+                "\n",
+            )
+            .as_bytes(),
+        );
+        let names: Vec<&str> = s.routes.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["toolchain", "artifact", "telemetry"]);
+    }
 }

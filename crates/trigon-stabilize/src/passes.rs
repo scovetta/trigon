@@ -467,8 +467,12 @@ archive_pass!(
 
 // --- .NET assemblies -----------------------------------------------------------------------------
 
+// Checked, because the stream directory's count sits wherever the metadata's version length puts
+// it, up to `u32::MAX`, and in the archived wasm32 guest that is `usize::MAX`: `o + 2` there traps
+// rather than failing the read. Each `u32le` offset is a bounded step from one inside the file.
 fn u16le(b: &[u8], o: usize) -> Option<u16> {
-    b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]))
+    b.get(o..o.checked_add(2)?)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
 }
 fn u32le(b: &[u8], o: usize) -> Option<u32> {
     b.get(o..o + 4)
@@ -487,7 +491,7 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
         return None;
     }
     let pe = u32le(b, 0x3c)? as usize;
-    if b.get(pe..pe + 4)? != b"PE\0\0" {
+    if b.get(pe..pe.checked_add(4)?)? != b"PE\0\0" {
         return None;
     }
     let coff = pe + 4;
@@ -514,7 +518,15 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
             let vsize = u32le(b, s + 8)? as usize;
             let vaddr = u32le(b, s + 12)? as usize;
             let praw = u32le(b, s + 20)? as usize;
-            (rva >= vaddr && rva < vaddr + vsize.max(1)).then_some(praw + (rva - vaddr))
+            // `then`, not `then_some`: an eager `rva - vaddr` panics on any RVA below the section.
+            // A difference rather than `vaddr + vsize`, and an offset past the file clamped to its
+            // end, because the archived wasm32 guest runs this with a 32-bit `usize` and traps on
+            // overflow; every caller reads the end of the file as nothing there, as it reads any
+            // offset past it.
+            (rva >= vaddr && rva - vaddr < vsize.max(1)).then(|| {
+                praw.checked_add(rva - vaddr)
+                    .map_or(b.len(), |o| o.min(b.len()))
+            })
         })
     };
 
@@ -582,8 +594,8 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
     {
         let ver_len = u32le(b, md + 12)? as usize;
         let ver_padded = ver_len.checked_add(3)? & !3;
-        let after_ver = md + 16 + ver_padded;
-        let streams = u16le(b, after_ver + 2)? as usize;
+        let after_ver = (md + 16).checked_add(ver_padded)?;
+        let streams = u16le(b, after_ver.checked_add(2)?)? as usize;
         let mut q = after_ver + 4;
         for _ in 0..streams {
             let s_off = u32le(b, q)? as usize;
@@ -592,16 +604,32 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
             let name_end = name_start + b.get(name_start..)?.iter().position(|&c| c == 0)?;
             let name = b.get(name_start..name_end)?;
             let name_padded = (name_end - name_start + 1).checked_add(3)? & !3;
-            if name == b"#GUID" {
-                let heap = md.checked_add(s_off)?;
-                if heap.checked_add(s_size).is_some_and(|end| end <= b.len()) {
-                    regions.push((heap, s_size));
-                }
+            // A heap too far out for `md + s_off` to name is past the file like any other, and
+            // skipped like one: a `?` here declined the whole assembly on 32 bits alone.
+            if name == b"#GUID"
+                && let Some(heap) = md.checked_add(s_off)
+                && heap.checked_add(s_size).is_some_and(|end| end <= b.len())
+            {
+                regions.push((heap, s_size));
             }
             q = name_start + name_padded;
         }
     }
-    Some(regions)
+    // Merged before they are returned. Each debug entry names a region the file states, so a
+    // crafted directory can name the whole file once per entry, and zeroed one region at a time
+    // that is entries × file: 2000 entries over a 65 KB file took half a second in a debug build,
+    // growing with the square of the file. The union names exactly the same bytes. A region past
+    // the end was never zeroed, so it is dropped first rather than merged into one in range.
+    regions.retain(|&(o, l)| o + l <= b.len());
+    regions.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(regions.len());
+    for (o, l) in regions {
+        match merged.last_mut() {
+            Some((mo, ml)) if o <= *mo + *ml => *ml = (*ml).max(o + l - *mo),
+            _ => merged.push((o, l)),
+        }
+    }
+    Some(merged)
 }
 
 entry_pass!(
@@ -805,7 +833,10 @@ fn normalize_readme_markers(t: &str) -> Option<String> {
         out.pop();
         changed = true;
     }
-    changed.then_some(out)
+    // The pop above also fires on the empty piece `split` yields after a final newline, so
+    // `changed` alone claimed every readme that ends in one — a `Content` pass in `applied`, and a
+    // capped verdict, for a file left byte for byte as it was.
+    (changed && out != t).then_some(out)
 }
 
 /// Every builtin pass. Used by the profile registry and by the dependency-policy test.
@@ -837,6 +868,15 @@ pub fn all_builtin() -> Vec<Arc<dyn Stabilizer>> {
         Arc::new(DotnetIlCanonical),
         Arc::new(NupkgRepositoryBranch),
         Arc::new(NupkgReadmeMarkers),
+        // The wheel and gemspec passes were missing, so the "every builtin pass" this returns
+        // omitted the one `Finalize` pass and every pass that runs inside `metadata.gz`.
+        Arc::new(WheelDirectUrl),
+        Arc::new(PycHeader),
+        Arc::new(WheelMetadataEol),
+        Arc::new(WheelRecord),
+        Arc::new(GemMetadataDate),
+        Arc::new(GemMetadataRubygemsVersion),
+        Arc::new(GemMetadataCertChain),
     ]
 }
 
@@ -1294,7 +1334,9 @@ fn normalize_rels(body: &mut Vec<u8>) -> bool {
                     out.extend_from_slice(b"Target=\"/");
                     out.extend_from_slice(PSMDCP_CANONICAL);
                     out.push(b'"');
-                    changed = true;
+                    // Only a target not already canonical is a change, or a second pass over
+                    // stabilized bytes claims work and the set stops being idempotent.
+                    changed |= value.strip_prefix(b"/") != Some(PSMDCP_CANONICAL);
                     i = end + 1;
                     continue;
                 }
@@ -1825,5 +1867,60 @@ mod dotnet_assembly_tests {
         assert!(dotnet_build_identity_regions(&[]).is_none());
         // `MZ` but nothing after: must not panic, must decline.
         assert!(dotnet_build_identity_regions(b"MZ").is_none());
+    }
+
+    /// The regions come back merged: sorted, apart, and inside the file. A crafted debug directory
+    /// names the whole file from each of its entries, and zeroing those one at a time costs entries
+    /// × file. Zeroing either list reaches the same bytes, so only the list can show the merge.
+    #[test]
+    fn the_regions_come_back_merged_so_each_byte_is_named_once() {
+        fn set16(f: &mut [u8], at: usize, x: u16) {
+            f[at..at + 2].copy_from_slice(&x.to_le_bytes());
+        }
+        fn set32(f: &mut [u8], at: usize, x: u32) {
+            f[at..at + 4].copy_from_slice(&x.to_le_bytes());
+        }
+        // A PE32 image with one section at RVA 0x2000, file offset 0x200: a CLI header, then the
+        // debug entries, each naming every byte of the file but the first.
+        const ENTRIES: usize = 2000;
+        let len = 0x200 + 72 + 28 * ENTRIES;
+        let mut f = vec![0u8; len];
+        f[0..2].copy_from_slice(b"MZ");
+        set32(&mut f, 0x3c, 0x80);
+        f[0x80..0x84].copy_from_slice(b"PE\0\0");
+        let coff = 0x84;
+        set16(&mut f, coff + 2, 1);
+        set32(&mut f, coff + 4, 0x6543_2100);
+        set16(&mut f, coff + 16, 96 + 16 * 8);
+        let opt = coff + 20;
+        set16(&mut f, opt, 0x10b);
+        set32(&mut f, opt + 64, 0x0001_2345);
+        let dir = opt + 96;
+        set32(&mut f, dir + 6 * 8, 0x2000 + 72);
+        set32(&mut f, dir + 6 * 8 + 4, (28 * ENTRIES) as u32);
+        set32(&mut f, dir + 14 * 8, 0x2000);
+        set32(&mut f, dir + 14 * 8 + 4, 72);
+        let sh = dir + 16 * 8;
+        set32(&mut f, sh + 8, (len - 0x200) as u32);
+        set32(&mut f, sh + 12, 0x2000);
+        set32(&mut f, sh + 16, (len - 0x200) as u32);
+        set32(&mut f, sh + 20, 0x200);
+        set32(&mut f, 0x200, 72);
+        for i in 0..ENTRIES {
+            let e = 0x200 + 72 + 28 * i;
+            set32(&mut f, e + 4, 1);
+            set32(&mut f, e + 16, (len - 1) as u32);
+            set32(&mut f, e + 24, 1);
+        }
+
+        let regions = dotnet_build_identity_regions(&f).expect("a managed image");
+        for w in regions.windows(2) {
+            let ((o1, l1), (o2, _)) = (w[0], w[1]);
+            assert!(o2 > o1 + l1, "{:?} and {:?} overlap or touch", w[0], w[1]);
+        }
+        assert!(regions.iter().all(|&(o, l)| o + l <= len), "{regions:?}");
+        // The timestamp, the checksum, the directory slot and every entry's own stamp lie inside
+        // what the entries name, so the union is that one region.
+        assert_eq!(regions, [(1, len - 1)]);
     }
 }

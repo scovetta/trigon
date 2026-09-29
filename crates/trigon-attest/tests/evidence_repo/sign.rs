@@ -548,3 +548,231 @@ fn nothing_past_the_size_to_sign_is_read_or_signed() {
     // Told to sign the planted size, it reads the planted leaf, and refuses it.
     assert!(check(tmp.path(), 3).is_err());
 }
+
+/// A successor's first tree is held, before its key signs it, to what every client following the
+/// succession holds it to: its predecessor has ended, its one leaf decodes and is a
+/// log-continuation, and that continuation is signed by the predecessor's key as well as its own.
+#[test]
+fn a_successors_first_tree_is_begun_only_as_every_client_would_follow_it() {
+    use trigon_attest::log::{
+        DirFiles, LogContinuationLeaf, SignedNote, find_predecessor, verify_beginning,
+    };
+    let begin = |root: &Path| {
+        let pred = find_predecessor(root, &log_key().vkey(), &successor_key().vkey()).unwrap();
+        verify_beginning(
+            &DirFiles::in_repository(root, "log/1"),
+            &successor_key().vkey(),
+            1,
+            &pred,
+        )
+    };
+
+    // What is begun says which log it is and which it continues.
+    let tmp = tempfile::tempdir().unwrap();
+    succeeded(tmp.path(), |last| vec![continuation(T0 + 60, last)]);
+    let begun = begin(tmp.path()).unwrap();
+    assert_eq!(begun.origin(), successor_key().name());
+    assert_eq!(begun.predecessor().origin(), crate::common::ORIGIN);
+    assert_eq!(begun.predecessor().size(), 2);
+    assert_eq!(begun.checkpoint().size, 1);
+
+    // A first leaf that is not a log-continuation.
+    let tmp = tempfile::tempdir().unwrap();
+    succeeded(tmp.path(), |_| vec![heartbeat(T0 + 60)]);
+    let e = err(begin(tmp.path()));
+    assert!(e.contains("is not a log-continuation"), "{e}");
+
+    // One that is not a leaf at all.
+    let tmp = tempfile::tempdir().unwrap();
+    succeeded(tmp.path(), |last| vec![continuation(T0 + 60, last)]);
+    let mut next = Writer::init(&tmp.path().join("log/1"), successor_key());
+    next.append_raw(vec![b"not a leaf".to_vec()]);
+    std::fs::remove_file(tmp.path().join("log/1/checkpoint")).unwrap();
+    let e = begin(tmp.path()).unwrap_err();
+    assert!(matches!(e, LogError::Malformed(_)), "{e}");
+    assert!(e.to_string().contains("leaf 0"), "{e}");
+
+    // The final checkpoint, signed by the successor's key and a stranger's and not by the key of
+    // the log it continues.
+    let stranger = LogSigner::from_seed("example.com/stranger", [31; 32]).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    succeeded(tmp.path(), |last| {
+        let note = SignedNote::sign(&last.checkpoint().body(), &successor_key())
+            .unwrap()
+            .cosign(&stranger)
+            .unwrap();
+        vec![Leaf::LogContinuation(LogContinuationLeaf {
+            time: T0 + 60,
+            checkpoint: note.to_string(),
+        })]
+    });
+    let e = err(begin(tmp.path()));
+    assert!(
+        e.contains("is not signed by the log key of `example.com/trigon-evidence`"),
+        "{e}"
+    );
+
+    // A log that has not ended names no successor to begin.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut w = Writer::init(&tmp.path().join("log"), log_key());
+    w.append(&heartbeats(T0, 2));
+    let pred = verify_log(&w.files(), &log_key().vkey(), None).unwrap();
+    let e = err(verify_beginning(
+        &DirFiles::in_repository(tmp.path(), "log/1"),
+        &successor_key().vkey(),
+        1,
+        &pred,
+    ));
+    assert!(e.contains("has not ended"), "{e}");
+}
+
+/// The predecessor a successor is begun from is found by following the chain in the successor's
+/// own repository: a chain that goes on in another repository first, or that leads back to a
+/// directory it has read, has no predecessor for it here.
+#[test]
+fn a_predecessor_is_found_only_along_the_chain_this_repository_holds() {
+    use trigon_attest::log::{LogEndLeaf, Successor, find_predecessor};
+    let wanted = LogSigner::from_seed("example.com/trigon-evidence/9", [19; 32]).unwrap();
+    let end = |time: u64, dir: &str, urls: Vec<String>| {
+        Leaf::LogEnd(LogEndLeaf {
+            time,
+            successor: Successor {
+                origin: successor_key().name().into(),
+                log_key: successor_key().vkey().to_string(),
+                urls,
+                dir: dir.into(),
+            },
+        })
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut w = Writer::init(&tmp.path().join("log"), log_key());
+    let elsewhere = vec!["https://example.com/owner/trigon-evidence-2.git".to_string()];
+    w.append(&[end(T0, "log", elsewhere)]);
+    let e = err(find_predecessor(
+        tmp.path(),
+        &log_key().vkey(),
+        &wanted.vkey(),
+    ));
+    assert!(e.contains("goes on in another repository"), "{e}");
+
+    // `log/` ends naming `log/1`, whose own log-end names `log/1` again.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut old = Writer::init(&tmp.path().join("log"), log_key());
+    old.append(&[end(T0, "log/1", Vec::new())]);
+    let mut next = Writer::init(&tmp.path().join("log/1"), successor_key());
+    let back = LogSigner::from_seed("example.com/trigon-evidence/2", [20; 32]).unwrap();
+    next.append(&[
+        continuation(T0 + 60, &old.checkpoint()),
+        Leaf::LogEnd(LogEndLeaf {
+            time: T0 + 120,
+            successor: Successor {
+                origin: back.name().into(),
+                log_key: back.vkey().to_string(),
+                urls: Vec::new(),
+                dir: "log/1".into(),
+            },
+        }),
+    ]);
+    let e = err(find_predecessor(
+        tmp.path(),
+        &log_key().vkey(),
+        &wanted.vkey(),
+    ));
+    assert!(e.contains("holds an earlier log of the chain"), "{e}");
+    // The log that names the key asked for is found, however far along the chain.
+    let found = find_predecessor(tmp.path(), &log_key().vkey(), &back.vkey()).unwrap();
+    assert_eq!(found.origin(), successor_key().name());
+}
+
+/// A log-continuation begins a successor and is signed only as that log's first tree (`log sign
+/// --continuing`): never appended beneath a checkpoint of the log's own and signed as any leaf.
+#[test]
+fn a_log_continuation_is_never_signed_as_an_appended_leaf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut old = Writer::init(&root.join("old"), log_key());
+    old.append(&heartbeats(T0, 1));
+    // The successor, with a checkpoint of nothing, and the continuation appended beneath it.
+    let mut log = Writer::init(&root.join("log"), successor_key());
+    let empty = log.read("checkpoint");
+    log.append(&[continuation(T0 + 60, &old.checkpoint())]);
+    log.write("checkpoint", &empty);
+    let e = err(check_to_sign(
+        root,
+        "log",
+        &successor_key().vkey(),
+        1,
+        &pinned(),
+        None,
+        None,
+    ));
+    assert!(
+        e.contains("leaf 0") && e.contains("is a log-continuation, which begins a successor"),
+        "{e}"
+    );
+}
+
+/// Evidence that is there and cannot be read is no more beside its record than evidence that is
+/// absent: the log key signs no leaf whose record a reader could never re-derive.
+#[test]
+fn a_record_whose_evidence_cannot_be_read_is_not_signed() {
+    let p = pairs();
+    let k3 = attestation_key(3);
+    let a = verdict(&p["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let b = verdict(&p["b"], &k3, "1789000000-bbbbbbbb", None, T0 + 60);
+    let tmp = tempfile::tempdir().unwrap();
+    let size = unsigned(tmp.path(), &[&a], &[Leaf::Record(b.leaf.clone())], &[&b]);
+    let manifest = tmp.path().join(trigon_attest::evidence::evidence_path(
+        &crate::build::sha256(&b.evidence[0]),
+    ));
+    std::fs::remove_file(&manifest).unwrap();
+    std::fs::create_dir(&manifest).unwrap();
+    let e = err(check(tmp.path(), size));
+    assert!(
+        e.contains("leaf 1") && e.contains("is unreadable (") && e.contains("not a regular file"),
+        "{e}"
+    );
+}
+
+/// A new leaf that does not decode is refused, and the tree with it, once the leaves the
+/// checkpoint signs are shown to be intact.
+#[test]
+fn a_tree_whose_new_leaf_is_not_a_leaf_is_not_signed() {
+    let a = verdict(
+        &pairs()["a"],
+        &attestation_key(3),
+        "1789000000-aaaaaaa1",
+        None,
+        T0,
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    a.write(root);
+    let mut log = Writer::init(&root.join("log"), log_key());
+    log.append(&[Leaf::Record(a.leaf.clone())]);
+    let signed = log.read("checkpoint");
+    log.append_raw(vec![br#"{"kind":"heartbeat"}"#.to_vec()]);
+    log.write("checkpoint", &signed);
+    let e = check(root, 2).unwrap_err();
+    assert!(matches!(e, Unsignable::Log(LogError::Malformed(_))), "{e}");
+    assert!(e.to_string().contains("leaf 1"), "{e}");
+}
+
+/// A successor's first checkpoint is held to `follow` again as it is signed, over the files as
+/// they are then: a tree altered after it was checked is never signed, and nothing is written.
+#[test]
+fn a_successors_first_tree_altered_after_it_was_checked_is_not_signed() {
+    use trigon_attest::evidence::check_to_begin;
+    use trigon_attest::log::{DirFiles, find_predecessor};
+    let tmp = tempfile::tempdir().unwrap();
+    succeeded(tmp.path(), |last| vec![continuation(T0 + 60, last)]);
+    let pred = find_predecessor(tmp.path(), &log_key().vkey(), &successor_key().vkey()).unwrap();
+    let begun =
+        check_to_begin(tmp.path(), "log/1", &successor_key().vkey(), 1, &pred, None).unwrap();
+    write(tmp.path(), "log/1/tile/0/000.p/1", &[0; 32]);
+    let files = DirFiles::in_repository(tmp.path(), "log/1");
+    let e = begun.sign(&successor_key(), &files).unwrap_err();
+    assert!(matches!(e, LogError::Mismatch(_)), "{e}");
+    assert!(!tmp.path().join("log/1/checkpoint").exists());
+}

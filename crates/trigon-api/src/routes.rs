@@ -857,21 +857,12 @@ pub async fn artifact(State(api): S, Path(digest): Path<String>) -> Response {
     json(hits)
 }
 
-/// Every run against one package, newest first: the version ladder.
+/// Every run against one package, newest first: the version ladder. Every run, not a page of them:
+/// see [`crate::index::Index::for_target`].
 pub async fn target(State(api): S, Path(purl): Path<String>) -> Response {
-    let page = api.index.page(
-        &Query {
-            q: Some(purl.clone()),
-            limit: 500,
-            ..Default::default()
-        },
-        api.principal() == Principal::Anonymous,
-    );
-    let rows: Vec<_> = page
-        .rows
-        .into_iter()
-        .filter(|e| e.target == purl || e.target.starts_with(&format!("{purl}@")))
-        .collect();
+    let rows = api
+        .index
+        .for_target(&purl, api.principal() == Principal::Anonymous);
     if rows.is_empty() {
         return refuse(
             StatusCode::NOT_FOUND,
@@ -1251,5 +1242,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A class is read off the field of the record that names the blob, and each field names the
+    /// class the evidence table was written for. The per-run routes rest on this: a mapping that
+    /// filed a build log or a model exchange under an anonymous class would serve it to anybody.
+    #[test]
+    fn each_field_a_route_names_is_read_with_its_own_class() {
+        let d = |n: u8| Digest::from_bytes([n; 32]);
+        let mut r = trigon_store::RunRecord::new(
+            "1700000001-aa",
+            "pkg:npm/a@1",
+            trigon_store::ArtifactRef {
+                name: "a.tgz".into(),
+                sha256: d(0),
+                bytes: 1,
+                stored: true,
+            },
+            trigon_store::Environment {
+                base_image: "x@sha256:0".into(),
+                derived_image: None,
+                egress: "mirror".into(),
+                isolation: "podman".into(),
+                attestable: true,
+                registry_moment: None,
+                pin: None,
+                guard_manifest: None,
+                guarded_members: None,
+            },
+            "2026-01-01T00:00:00Z",
+        );
+        for what in [
+            "comparison",
+            "log",
+            "network",
+            "transcript",
+            "strategy",
+            "instructions",
+        ] {
+            assert_eq!(digest_of(&r, what), None, "`{what}` was never recorded");
+        }
+        r.comparison = Some(d(1));
+        r.build_log = Some(d(2));
+        r.network_transcript = Some(d(3));
+        r.transcript = Some(d(4));
+        r.strategy = Some(d(5));
+        r.instructions = Some(d(6));
+        assert_eq!(digest_of(&r, "comparison"), Some((d(1), Class::Comparison)));
+        assert_eq!(digest_of(&r, "log"), Some((d(2), Class::BuildLog)));
+        assert_eq!(digest_of(&r, "network"), Some((d(3), Class::Transcript)));
+        assert_eq!(
+            digest_of(&r, "transcript"),
+            Some((d(4), Class::ModelTranscript))
+        );
+        assert_eq!(digest_of(&r, "strategy"), Some((d(5), Class::Definition)));
+        assert_eq!(
+            digest_of(&r, "instructions"),
+            Some((d(6), Class::Definition))
+        );
+        // A field the caller names that the record does not have is nothing, never a guess.
+        assert_eq!(digest_of(&r, "upstream"), None);
+    }
+
+    /// Every class is served as data. Bytes from an artifact or a log that a browser rendered as a
+    /// page would run somebody else's content on this origin.
+    #[test]
+    fn no_class_is_served_as_something_a_browser_renders_as_a_page() {
+        for c in Class::ALL {
+            let t = content_type(c);
+            assert!(
+                !t.contains("html") && !t.contains("javascript") && !t.contains("svg"),
+                "{c:?} is served as {t}"
+            );
+        }
+        assert_eq!(content_type(Class::Artifact), "application/octet-stream");
+        assert_eq!(content_type(Class::BuildLog), "text/plain; charset=utf-8");
+        assert_eq!(
+            content_type(Class::ModelTranscript),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(content_type(Class::Transcript), "application/x-ndjson");
     }
 }

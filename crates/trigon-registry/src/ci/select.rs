@@ -484,19 +484,39 @@ fn uploads_artifact(wf: &Workflow, job: &Job, wanted: &str, glob: bool) -> Optio
 /// expansion and character classes, and a pattern using them matches nothing here rather than
 /// matching something approximate. A wrong build job is worse than an unresolved edge.
 fn glob_matches(pattern: &str, name: &str) -> bool {
-    fn go(p: &[u8], n: &[u8]) -> bool {
-        match p.first() {
-            None => n.is_empty(),
-            Some(b'*') => (0..=n.len()).any(|i| go(&p[1..], &n[i..])),
-            Some(b'?') => !n.is_empty() && go(&p[1..], &n[1..]),
-            Some(c) => n.first() == Some(c) && go(&p[1..], &n[1..]),
-        }
-    }
     // Anything minimatch can do that this cannot, it must not pretend to do.
     if pattern.contains(['{', '[', '!', '+', '(']) {
         return false;
     }
-    go(pattern.as_bytes(), name.as_bytes())
+    // One pass that backs up only to the most recent `*`, which is linear in the pattern times the
+    // name. The recursive form tried every split at every `*` and was exponential in their number:
+    // the pattern is a workflow a package controls, and `**********x` against a long artifact name
+    // held the rung, and the sweep lane with it, for as long as nobody noticed.
+    let (p, n) = (pattern.as_bytes(), name.as_bytes());
+    let (mut pi, mut ni) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        match p.get(pi) {
+            Some(b'*') => {
+                star = Some((pi, ni));
+                pi += 1;
+            }
+            Some(c) if *c == b'?' || *c == n[ni] => {
+                pi += 1;
+                ni += 1;
+            }
+            _ => match star {
+                // Let the last `*` swallow one more character, and try again from after it.
+                Some((sp, sn)) => {
+                    star = Some((sp, sn + 1));
+                    pi = sp + 1;
+                    ni = sn + 1;
+                }
+                None => return false,
+            },
+        }
+    }
+    p[pi..].iter().all(|c| *c == b'*')
 }
 
 /// Every job this one depends on, transitively, including itself.
@@ -966,5 +986,84 @@ fn version_from_file(
         tool: tool.into(),
         spec: VersionSpec::classify(first, full_components),
         from,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_download_pattern_matches_the_way_the_part_workflows_use_does() {
+        for (pattern, name, want) in [
+            ("dist-*", "dist-ubuntu-22.04", true),
+            ("dist-*", "dist-", true),
+            ("dist-*", "wheels-ubuntu", false),
+            ("*", "anything", true),
+            ("*", "", true),
+            ("wheel-?", "wheel-a", true),
+            ("wheel-?", "wheel-", false),
+            ("wheel-?", "wheel-ab", false),
+            ("*-linux-*", "cp312-linux-x86_64", true),
+            ("*-linux-*", "cp312-macos-arm64", false),
+            ("a*b*c", "aXbYbZc", true),
+            ("a*b*c", "aXbYbZ", false),
+            ("exact", "exact", true),
+            ("exact", "exactly", false),
+            ("", "", true),
+            ("", "x", false),
+            // What minimatch can do and this cannot is refused, never approximated: a wrong build
+            // job is worse than an unresolved edge.
+            ("dist-{a,b}", "dist-a", false),
+            ("dist-[ab]", "dist-a", false),
+            ("!(dist)", "wheels", false),
+        ] {
+            assert_eq!(glob_matches(pattern, name), want, "{pattern:?} vs {name:?}");
+        }
+    }
+
+    #[test]
+    fn a_pattern_full_of_stars_costs_no_more_than_the_name_is_long() {
+        // The pattern comes from a workflow a package controls. Every split tried at every `*` is
+        // exponential in the number of stars, and a rung that hangs holds its sweep lane with it.
+        //
+        // Run apart and bounded, so a matcher that goes exponential again fails here by name
+        // instead of leaving the suite running forever. The linear one needs about 160,000 steps
+        // for this; the bound is there for the other one, not to time this one.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let pattern = format!("{}x", "*".repeat(40));
+            let name = "a".repeat(4_000);
+            let _ = tx.send((
+                glob_matches(&pattern, &name),
+                glob_matches(&pattern, &format!("{name}x")),
+            ));
+        });
+        let answers = rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(
+            answers,
+            Ok((false, true)),
+            "forty stars against a long name did not finish"
+        );
+    }
+
+    #[test]
+    fn the_jobs_a_job_depends_on_are_followed_transitively_and_a_cycle_ends() {
+        let wf = crate::ci::parse::parse_workflow(
+            "w.yml",
+            "jobs:\n  publish:\n    needs: [build]\n  build:\n    needs: lint\n  \
+             lint:\n    needs: publish\n  unrelated:\n    steps: []\n",
+        )
+        .unwrap();
+        let got = needs_closure(&wf, "publish");
+        assert_eq!(
+            got.into_iter().collect::<Vec<_>>(),
+            ["build", "lint", "publish"]
+        );
+        // A job nobody defined is still named, so an edge to it is not silently a different job.
+        assert_eq!(
+            needs_closure(&wf, "ghost").into_iter().collect::<Vec<_>>(),
+            ["ghost"]
+        );
     }
 }

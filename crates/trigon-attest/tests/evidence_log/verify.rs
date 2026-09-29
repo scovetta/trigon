@@ -485,6 +485,59 @@ fn a_file_longer_than_its_kind_can_be_is_refused_unread() {
     );
 }
 
+/// A witness cosigns a checkpoint by adding a line to it (`docs/19` §2.3), so a checkpoint as
+/// cosigned as a note can be is read whole, and verifies under the log's key with every witness's
+/// line read past: the limit on a checkpoint's length is well above what a witnessed one comes to.
+#[test]
+fn a_checkpoint_cosigned_by_as_many_witnesses_as_a_note_holds_is_read() {
+    use trigon_attest::log::note::MAX_SIGNATURES;
+    let (_tmp, w, _) = log_of(&[3]);
+    let mut note = w.checkpoint().note().clone();
+    for i in 1..MAX_SIGNATURES {
+        let witness = LogSigner::from_seed(&format!("witness.example/{i}"), [i as u8; 32]);
+        note = note.cosign(&witness.unwrap()).unwrap();
+    }
+    let bytes = note.to_string();
+    assert!(bytes.len() > 8 * 1024, "{}", bytes.len());
+    w.write("checkpoint", bytes.as_bytes());
+    let log = verify_log(&w.files(), &log_key().vkey(), None).unwrap();
+    assert_eq!(log.size(), 3);
+    assert_eq!(
+        log.checkpoint().note().signatures().len(),
+        MAX_SIGNATURES
+    );
+}
+
+/// A refusal that compares two roots names each as a checkpoint writes it, in base64, so a reader
+/// can set it beside the signed notes it carries: the root the leaves hash to, and the one the
+/// checkpoint last accepted signs for them.
+#[test]
+fn a_refusal_names_the_roots_it_compares_as_a_checkpoint_writes_them() {
+    use base64::Engine as _;
+    let b64 = |h: &[u8; 32]| base64::engine::general_purpose::STANDARD.encode(h);
+    let (_tmp, w, _) = log_of(&[3, 250]);
+    let (_other, mut rewritten, _) = log_of(&[]);
+    let mut entries = w.entries[..100].to_vec();
+    entries[50] = heartbeat(T0 + 50 * 60 + 30).encode().unwrap();
+    rewritten.append_raw(entries);
+    let forked = rewritten.checkpoint();
+    assert!(forked.to_string().contains(&b64(forked.root())));
+    let e = verify_log(&w.files(), &log_key().vkey(), Some(&forked)).unwrap_err();
+    let LogError::Inconsistent { why, .. } = &e else {
+        panic!("expected an equivocation, got {e}")
+    };
+    let prefix = w.tree.root_at(100).unwrap();
+    assert_ne!(prefix, *forked.root());
+    assert!(
+        why.contains(&format!(
+            "hash to {}, and the checkpoint last accepted signs {} for them",
+            b64(&prefix),
+            b64(forked.root())
+        )),
+        "{why}"
+    );
+}
+
 #[test]
 fn a_verified_log_plans_its_next_append_and_refuses_one_that_breaks_its_rules() {
     let (_tmp, mut w, _) = log_of(&[250]);
@@ -517,6 +570,54 @@ fn a_verified_log_plans_its_next_append_and_refuses_one_that_breaks_its_rules() 
         .plan_append(&[heartbeat(T0 + 10_000_001)])
         .unwrap_err();
     assert!(e.to_string().contains("nothing is appended"), "{e}");
+}
+
+/// A log only grows, and a tree of the size its checkpoint signs has not shrunk: it is an extension
+/// with nothing new, which extends every checkpoint published of it up to that size.
+#[test]
+fn a_tree_of_the_signed_size_is_an_extension_with_nothing_new() {
+    use trigon_attest::log::verify_extension;
+    let (_tmp, w, history) = log_of(&[3, 5]);
+    let pin = log_key().vkey();
+    let ext = verify_extension(&w.files(), &pin, 8).unwrap();
+    assert_eq!((ext.size(), ext.base().size()), (8, 8));
+    assert_eq!(ext.new_leaves().count(), 0);
+    for published in &history {
+        ext.check_extends(published).unwrap();
+    }
+    let e = verify_extension(&w.files(), &pin, 7).unwrap_err();
+    assert!(matches!(e, LogError::Rule(_)), "{e}");
+    assert!(e.to_string().contains("a log only grows"), "{e}");
+}
+
+/// A planned leaf is judged at its place in the log it is appended to, not in the batch: a log-end
+/// is last where it ends the batch, however many leaves come before it; a log-continuation is
+/// refused at any place but a log's first; and a refusal names the leaf by its index in the log.
+#[test]
+fn a_planned_leaf_is_judged_at_its_place_in_the_log() {
+    let (_tmp, w, _) = log_of(&[250]);
+    let log = verify_log(&w.files(), &log_key().vkey(), None).unwrap();
+    let t = T0 + 250 * 60;
+    let ending = [heartbeats(t, 2), vec![crate::rotation::log_end(t + 120)]].concat();
+    log.plan_append(&ending).unwrap();
+    let continued = [
+        heartbeats(t, 2),
+        vec![crate::rotation::continuation(t + 120)],
+    ]
+    .concat();
+    for (at, leaves) in [
+        (250, vec![crate::rotation::continuation(t)]),
+        (252, continued),
+    ] {
+        let e = log.plan_append(&leaves).unwrap_err();
+        assert!(matches!(e, LogError::Rule(_)), "{e}");
+        let says = format!("leaf {at} is a log-continuation, and one is only ever a log's first");
+        assert!(e.to_string().contains(&says), "{e}");
+    }
+    let e = log
+        .plan_append(&[heartbeat(t), heartbeat(t - 1)])
+        .unwrap_err();
+    assert!(e.to_string().contains("leaf 251 was logged at"), "{e}");
 }
 
 /// The writer is held to what the readers apply, as far as a log can know it: a leaf every reader
@@ -635,4 +736,66 @@ fn the_notes_a_refusal_shows_are_escaped_and_kept_as_read() {
     );
     assert!(shown.contains(r"x\u{7f}\u{9b}2J"), "{shown}");
     assert!(shown.contains(&history[2].to_string()), "{shown}");
+}
+
+/// A log's files are read by paths inside its directory: one that climbs out of it, or starts at
+/// the root, is refused before anything is opened; a link that leads nowhere, or a path through a
+/// file, is no file.
+#[cfg(unix)]
+#[test]
+fn a_path_out_of_the_log_is_refused_and_a_link_to_nothing_is_no_file() {
+    use trigon_attest::log::LogFiles as _;
+    let (_tmp, w, _) = log_of(&[3]);
+    let files = w.files();
+    assert_eq!(files.root(), w.root);
+    for path in ["../checkpoint", "/etc/passwd", "tile/../checkpoint"] {
+        let e = files.read(path, 1024).unwrap_err();
+        assert!(matches!(e, LogError::Malformed(_)), "{path}: {e}");
+        assert!(
+            e.to_string()
+                .contains("is not a path inside a log's directory"),
+            "{path}: {e}"
+        );
+    }
+    std::os::unix::fs::symlink(w.root.join("nowhere"), w.root.join("dangling")).unwrap();
+    assert_eq!(files.read("dangling", 1024).unwrap(), None);
+    assert_eq!(files.read("checkpoint/beneath", 1024).unwrap(), None);
+}
+
+/// Files about to be written are read before those on disk, held to the same limit, and named as
+/// to be written; every other path is read from beneath them.
+#[test]
+fn staged_files_are_read_first_and_held_to_the_same_limit() {
+    use trigon_attest::log::{LogFiles as _, Staged};
+    let (_tmp, w, _) = log_of(&[3]);
+    let files = w.files();
+    let staged = std::collections::BTreeMap::from([("checkpoint".to_string(), b"staged".to_vec())]);
+    let s = Staged::new(&staged, &files);
+    assert_eq!(s.read("checkpoint", 6).unwrap(), Some(b"staged".to_vec()));
+    let e = s.read("checkpoint", 5).unwrap_err();
+    assert!(matches!(e, LogError::Malformed(_)), "{e}");
+    assert!(e.to_string().contains("would be 6 bytes"), "{e}");
+    assert_eq!(
+        s.read("tile/0/000.p/3", 96).unwrap(),
+        Some(w.read("tile/0/000.p/3"))
+    );
+    assert_eq!(s.shown("checkpoint"), "checkpoint (to be written)");
+    assert_eq!(s.shown("tile/0/000.p/3"), files.shown("tile/0/000.p/3"));
+}
+
+/// A file that cannot be read for any reason but its absence is an error, never an absent file: a
+/// link that goes round, or a name longer than the filesystem takes.
+#[cfg(unix)]
+#[test]
+fn a_file_that_cannot_be_read_is_an_error_and_never_absent() {
+    use trigon_attest::log::LogFiles as _;
+    let (_tmp, w, _) = log_of(&[3]);
+    let files = w.files();
+    std::os::unix::fs::symlink(w.root.join("round-b"), w.root.join("round-a")).unwrap();
+    std::os::unix::fs::symlink(w.root.join("round-a"), w.root.join("round-b")).unwrap();
+    let long = "x".repeat(300);
+    for path in ["round-a", long.as_str()] {
+        let e = files.read(path, 1024).unwrap_err();
+        assert!(matches!(e, LogError::Io { .. }), "{e}");
+    }
 }

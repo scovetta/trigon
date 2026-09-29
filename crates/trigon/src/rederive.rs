@@ -224,3 +224,151 @@ fn disagreement(a: &Comparison, b: &Comparison) -> Option<String> {
         _ => Some("one side has a member report and the other does not".into()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trigon_compare::FileStatus;
+    use trigon_core::Digest;
+
+    /// A gzipped tarball of `members`, every one stamped `mtime`.
+    fn tgz(members: &[(&str, &[u8])], mtime: u64) -> Vec<u8> {
+        let mut b = ::tar::Builder::new(Vec::new());
+        for (name, body) in members {
+            let mut h = ::tar::Header::new_ustar();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_mtime(mtime);
+            h.set_cksum();
+            b.append_data(&mut h, *name, *body).unwrap();
+        }
+        let mut gz = Vec::new();
+        {
+            use std::io::Write as _;
+            let mut e = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
+            e.write_all(&b.into_inner().unwrap()).unwrap();
+            e.finish().unwrap();
+        }
+        gz
+    }
+
+    /// A real comparison with a member report: two members, one of which differs in content.
+    fn divergent() -> Comparison {
+        let set = trigon_stabilize::profile("tar-gzip").unwrap();
+        let c = compare_bytes(
+            tgz(&[("package/a.js", b"a\n"), ("package/b.js", b"one\n")], 1_700_000_000),
+            tgz(&[("package/a.js", b"a\n"), ("package/b.js", b"two\n")], 1_600_000_000),
+            trigon_core::Format::TarGz,
+            &set,
+            &Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(c.outcome, trigon_core::Match::Divergent, "the fixture");
+        assert!(c.diff.as_ref().is_some_and(|d| d.files.len() == 2), "the fixture");
+        c
+    }
+
+    fn other() -> Digest {
+        Digest::from_bytes([7u8; 32])
+    }
+
+    #[test]
+    fn a_comparison_agrees_with_itself() {
+        let a = divergent();
+        assert_eq!(disagreement(&a, &a.clone()), None);
+    }
+
+    /// What an older binary wrote lacks what a newer one adds — attribution, the progression, raw
+    /// member names — and none of those is something a verdict rests on.
+    #[test]
+    fn what_an_older_binary_did_not_record_is_not_a_disagreement() {
+        let fresh = divergent();
+        let mut old = fresh.clone();
+        let d = old.diff.as_mut().unwrap();
+        d.field_edits.clear();
+        d.progression = None;
+        for f in &mut d.files {
+            f.upstream_raw_path = None;
+            f.rebuild_raw_path = None;
+        }
+        assert_eq!(disagreement(&old, &fresh), None);
+    }
+
+    /// Every field a verdict rests on is compared, and the first that differs is named.
+    #[test]
+    fn each_thing_a_verdict_rests_on_is_named_when_it_differs() {
+        let a = divergent();
+        let differs = |edit: &dyn Fn(&mut Comparison)| {
+            let mut b = a.clone();
+            edit(&mut b);
+            disagreement(&a, &b)
+        };
+        type Edit = Box<dyn Fn(&mut Comparison)>;
+        let cases: Vec<(&str, Edit)> = vec![
+            (
+                "outcome divergent vs normalized",
+                Box::new(|b| b.outcome = trigon_core::Match::Normalized),
+            ),
+            ("upstream raw digest", Box::new(|b| b.upstream.raw.sha256 = other())),
+            (
+                "upstream stabilized digest",
+                Box::new(|b| b.upstream.stabilized.sha256 = other()),
+            ),
+            ("upstream stabilizer set", Box::new(|b| b.upstream.set.1 = other())),
+            ("rebuild raw digest", Box::new(|b| b.rebuild.raw.sha256 = other())),
+            (
+                "rebuild stabilized digest",
+                Box::new(|b| b.rebuild.stabilized.sha256 = other()),
+            ),
+            (
+                "rebuild stabilizer set",
+                Box::new(|b| b.rebuild.set.0 = trigon_core::ProfileId::new("other")),
+            ),
+            (
+                "member counts",
+                Box::new(|b| b.diff.as_mut().unwrap().identical += 1),
+            ),
+            (
+                "member counts",
+                Box::new(|b| b.diff.as_mut().unwrap().executable_differs += 1),
+            ),
+            (
+                "difference signature",
+                Box::new(|b| {
+                    b.diff.as_mut().unwrap().codes.insert("entry:mode@x".into());
+                }),
+            ),
+            (
+                "member statuses",
+                Box::new(|b| b.diff.as_mut().unwrap().files[0].status = FileStatus::OnlyRebuild),
+            ),
+            (
+                "one side has a member report and the other does not",
+                Box::new(|b| b.diff = None),
+            ),
+        ];
+        for (want, edit) in &cases {
+            assert_eq!(differs(edit.as_ref()).as_deref(), Some(*want));
+        }
+        // A member of the same status under another name is a different member.
+        let renamed = differs(&|b| {
+            let f = &mut b.diff.as_mut().unwrap().files[0];
+            f.path = trigon_core::EntryPath::from("package/renamed.js");
+        });
+        assert_eq!(renamed.as_deref(), Some("member statuses"));
+    }
+
+    /// Two comparisons without a member report agree on it; the outcome is still compared.
+    #[test]
+    fn two_comparisons_without_a_member_report_agree_on_having_none() {
+        let mut a = divergent();
+        a.diff = None;
+        assert_eq!(disagreement(&a, &a.clone()), None);
+        let mut b = a.clone();
+        b.outcome = trigon_core::Match::Exact;
+        assert_eq!(
+            disagreement(&a, &b).as_deref(),
+            Some("outcome divergent vs exact")
+        );
+    }
+}

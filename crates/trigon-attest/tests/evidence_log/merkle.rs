@@ -4,7 +4,8 @@
 use proptest::prelude::*;
 use serde_json::Value;
 use trigon_attest::log::merkle::{
-    Hash, empty_root, leaf_hash, node_hash, root, verify_consistency, verify_inclusion,
+    Hash, Subtrees, consistency_proof, empty_root, inclusion_proof, leaf_hash, node_hash, root,
+    root_of, verify_consistency, verify_inclusion,
 };
 use trigon_attest::log::{LogError, Tree};
 
@@ -250,4 +251,66 @@ proptest! {
             prop_assert!(verify_consistency(m, n, &a, &tree.root(), &proof).is_err());
         }
     }
+}
+
+/// A proof longer than any tree's is refused before it is walked, and a consistency proof short of
+/// the levels between its two trees is refused; nor is a tree ever asked to extend a larger one.
+#[test]
+fn a_proof_of_a_length_no_tree_has_is_refused() {
+    let tree = Tree::from_leaf_hashes((0..7u8).map(|i| leaf_hash(&[i])));
+    let r = tree.root();
+    let leaf = tree.leaf_hash(3).unwrap();
+    let long = vec![[0; 32]; 66];
+    assert!(mismatch(verify_inclusion(3, 7, &leaf, &long, &r)).contains("longer than any tree's"));
+    let (m, n) = (6, 7);
+    let a = tree.root_at(m).unwrap();
+    assert!(mismatch(verify_consistency(m, n, &a, &r, &long)).contains("longer than any tree's"));
+    let proof = tree.consistency_proof(m, n).unwrap();
+    verify_consistency(m, n, &a, &r, &proof).unwrap();
+    let shorter = &proof[..proof.len() - 1];
+    assert!(mismatch(verify_consistency(m, n, &a, &r, shorter)).contains("fewer hashes"));
+    let e = tree.consistency_proof(n, m).unwrap_err();
+    assert!(matches!(e, LogError::Mismatch(_)), "{e}");
+    assert!(e.to_string().contains("cannot extend"), "{e}");
+}
+
+/// A tree of as many leaves as a size can count, every leaf the same: each complete subtree of a
+/// height has one hash, so the tree is held as 65 hashes and still answers as a tree of that size.
+struct Uniform(Vec<Hash>);
+
+impl Uniform {
+    fn new() -> Uniform {
+        let mut rows = vec![leaf_hash(b"the same leaf")];
+        for _ in 0..64 {
+            let below = *rows.last().unwrap();
+            rows.push(node_hash(&below, &below));
+        }
+        Uniform(rows)
+    }
+}
+
+impl Subtrees for Uniform {
+    fn subtree(&self, height: u32, _index: u64) -> Result<Hash, LogError> {
+        Ok(self.0[height as usize])
+    }
+}
+
+/// The longest proof any tree has is read, not refused for its length: from 3 leaves to
+/// `u64::MAX`, a consistency proof is 65 hashes, and an inclusion proof in that tree 64. One hash
+/// more is longer than any tree's.
+#[test]
+fn the_longest_proof_a_tree_can_have_verifies() {
+    let t = Uniform::new();
+    let (m, n) = (3, u64::MAX);
+    let (a, b) = (root_of(&t, m).unwrap(), root_of(&t, n).unwrap());
+    let proof = consistency_proof(&t, m, n).unwrap();
+    assert_eq!(proof.len(), 65);
+    verify_consistency(m, n, &a, &b, &proof).unwrap();
+    let longer = [proof.clone(), vec![[0; 32]]].concat();
+    assert!(mismatch(verify_consistency(m, n, &a, &b, &longer)).contains("longer than any tree's"));
+
+    let proof = inclusion_proof(&t, 0, n).unwrap();
+    assert_eq!(proof.len(), 64);
+    verify_inclusion(0, n, &t.0[0], &proof, &b).unwrap();
+    verify_inclusion(n - 1, n, &t.0[0], &inclusion_proof(&t, n - 1, n).unwrap(), &b).unwrap();
 }

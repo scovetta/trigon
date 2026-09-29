@@ -573,6 +573,30 @@ mod tests {
         assert!(names.contains(&"network.jsonl"), "{names:?}");
     }
 
+    /// The scripts that ran are named by their digest where the run kept them, and not at all
+    /// where it did not.
+    #[test]
+    fn the_instructions_a_run_kept_are_named_and_none_are_invented() {
+        let d = Digest::from_bytes([2; 32]);
+        let kept = "1c".repeat(32);
+        let s = Statement::rebuild(
+            Subject::new("a.tgz", &d),
+            &RunFacts {
+                instructions: Some(&kept),
+                ..facts()
+            },
+        );
+        let byproducts = s.predicate["runDetails"]["byproducts"].as_array().unwrap();
+        let instructions = byproducts
+            .iter()
+            .find(|b| b["name"] == "instructions")
+            .expect("the instructions are named");
+        assert_eq!(instructions["digest"]["sha256"], kept);
+        let s = Statement::rebuild(Subject::new("a.tgz", &d), &facts());
+        let byproducts = s.predicate["runDetails"]["byproducts"].as_array().unwrap();
+        assert!(byproducts.iter().all(|b| b["name"] != "instructions"));
+    }
+
     #[test]
     fn the_tier_and_the_transcript_cannot_come_apart() {
         // The tier used to be read off `attestable`, which is a second field that had to agree with

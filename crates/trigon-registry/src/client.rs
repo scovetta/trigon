@@ -112,7 +112,12 @@ impl Client {
                     attempt += 1;
                     continue;
                 }
-                Err(e) => return Err(e.into()),
+                // Counted, as a status that outlasts the retries is: a sweep whose registry kept
+                // dropping the connection must not report a clean run against that host.
+                Err(e) => {
+                    politeness::note_failure(&host);
+                    return Err(e.into());
+                }
             };
 
             let status = response.status();
@@ -202,12 +207,24 @@ fn github_token() -> Option<&'static str> {
     static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     TOKEN
         .get_or_init(|| {
-            std::env::var("GITHUB_TOKEN")
-                .or_else(|_| std::env::var("GH_TOKEN"))
-                .ok()
-                .filter(|t| !t.trim().is_empty())
+            token_from(
+                std::env::var("GITHUB_TOKEN").ok(),
+                std::env::var("GH_TOKEN").ok(),
+            )
         })
         .as_deref()
+}
+
+/// The token out of `GITHUB_TOKEN` and `GH_TOKEN`'s values: the first when it holds one.
+///
+/// A blank value is no token, and so does not hide the other variable's. It did: `GITHUB_TOKEN`
+/// set to nothing — what a workflow gets from `${{ secrets.X }}` when the secret is missing — was
+/// taken, found blank, and the `GH_TOKEN` beside it never read.
+fn token_from(github: Option<String>, gh: Option<String>) -> Option<String> {
+    [github, gh]
+        .into_iter()
+        .flatten()
+        .find(|t| !t.trim().is_empty())
 }
 
 /// Whether a GitHub token is configured, for a report that has to explain a throttled run.
@@ -257,6 +274,22 @@ mod tests {
             ua.contains("https://"),
             "it must say where to complain: {ua}"
         );
+    }
+
+    #[test]
+    fn either_variable_carries_the_token_and_a_blank_one_carries_none() {
+        let v = |s: &str| Some(s.to_string());
+        assert_eq!(token_from(v("a"), v("b")).as_deref(), Some("a"));
+        assert_eq!(
+            token_from(None, v("b")).as_deref(),
+            Some("b"),
+            "what `gh` sets is enough on its own"
+        );
+        assert_eq!(token_from(v("a"), None).as_deref(), Some("a"));
+        assert_eq!(token_from(None, None), None);
+        // A blank value is no token, and does not hide the other variable's.
+        assert_eq!(token_from(v("  "), v("b")).as_deref(), Some("b"));
+        assert_eq!(token_from(v(""), v(" \n")), None);
     }
 
     #[test]

@@ -402,6 +402,7 @@ fn a_generated_key_writes_itself_in_gos_format_and_reads_back() {
     assert!(skey.starts_with("PRIVATE+KEY+example.org/log+"), "{skey}");
     let back = LogSigner::from_skey(&skey).unwrap();
     assert_eq!(back.vkey(), k.vkey());
+    assert_eq!(&back.verifying_key(), k.vkey().verifying_key());
     // Its verifier key is one `LogVkey::parse` reads, and verifies its notes.
     let vkey = LogVkey::parse(&k.vkey().to_string()).unwrap();
     SignedNote::sign("hello\n", &back)
@@ -425,5 +426,36 @@ fn a_signers_debug_form_shows_nothing_of_the_key() {
     assert!(
         !shown.contains("AYEKFALV") && !shown.contains("seed"),
         "{shown}"
+    );
+}
+
+/// A signature line holds a key hash and at least one byte of signature, as Go reads it: one byte
+/// is enough to be read, by a key not pinned read past, and by the pinned key refused when it is
+/// checked, since the length a key type needs is that key's to hold it to. The key hash alone is
+/// not a signature line.
+#[test]
+fn a_signature_line_holds_a_key_hash_and_at_least_one_byte() {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let (text, line) = (v("text"), v("peterLine"));
+    let one_byte = format!("\u{2014} Witness {}\n", b64.encode([1, 2, 3, 4, 5]));
+    let note = SignedNote::parse(format!("{text}\n{line}{one_byte}").as_bytes()).unwrap();
+    assert_eq!(note.signatures().len(), 2);
+    assert_eq!(note.signatures()[1].name(), "Witness");
+    assert_eq!(note.signatures()[1].key_hash(), [1, 2, 3, 4]);
+    note.verify(&peter()).unwrap();
+
+    let peters = format!("\u{2014} PeterNeumann {}\n", b64.encode([0xc7, 0x4f, 0x20, 0xa3, 5]));
+    let note = SignedNote::parse(format!("{text}\n{peters}").as_bytes()).unwrap();
+    let e = note.verify(&peter()).unwrap_err();
+    assert!(matches!(e, LogError::BadSignature(_)), "{e}");
+
+    let hash_alone = format!("\u{2014} Witness {}\n", b64.encode([1, 2, 3, 4]));
+    let e = err(SignedNote::parse(
+        format!("{text}\n{line}{hash_alone}").as_bytes(),
+    ));
+    assert!(
+        e.contains("is 4 bytes, shorter than a key hash and a signature"),
+        "{e}"
     );
 }

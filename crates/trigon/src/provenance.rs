@@ -111,8 +111,12 @@ impl Scope {
 /// cache's own constructor makes the directory it is given, and a page is read-only.
 pub fn checkout_dir(root: &Path, repo: &str, commit: &str) -> PathBuf {
     use sha2::Digest as _;
+    // Spelled as the cache spells them before it hashes: the URL trimmed, the commit trimmed and
+    // lower-cased. A record that carries a commit in capitals names the checkout the cache wrote
+    // under the lower-case key, and hashing it as given looked in a directory nobody made.
+    let commit = commit.trim().to_ascii_lowercase();
     let mut h = sha2::Sha256::new();
-    h.update(repo.as_bytes());
+    h.update(repo.trim().as_bytes());
     h.update([0]);
     h.update(commit.as_bytes());
     root.join(&format!("{:x}", h.finalize())[..32])
@@ -496,6 +500,214 @@ mod tests {
         assert_eq!(t[2].1, 2);
         // Every state is present even at zero, so a reader is never left to infer one.
         assert_eq!(t.len(), 4);
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The directory this reads is the one the rungs' cache wrote, for the commit as a record
+    /// spells it: a page that computed another key would say "not on this machine" about a
+    /// checkout that is.
+    #[test]
+    fn the_checkout_it_looks_for_is_the_one_the_source_cache_wrote() {
+        let origin = tree("origin", &[("LICENSE.md", b"MIT\n")]);
+        git(&origin, &["init", "--quiet", "-b", "main"]);
+        git(&origin, &["add", "-A"]);
+        git(&origin, &["commit", "--quiet", "-m", "one"]);
+        let commit = git(&origin, &["rev-parse", "HEAD"]);
+        let repo = origin.to_string_lossy().into_owned();
+        let root = std::env::temp_dir()
+            .join(format!("trigon-prov-{}", std::process::id()))
+            .join("sources");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let fetched = trigon_registry::SourceCache::new(&root)
+            .trusting_local_paths()
+            .checkout(&repo, &commit.to_ascii_uppercase())
+            .unwrap();
+        // Every spelling the cache accepts for this repository and commit names the checkout it
+        // wrote: the cache trims both and lower-cases the commit before it hashes them.
+        let padded = format!(" {repo}\n");
+        let upper = commit.to_ascii_uppercase();
+        let upper_padded = format!(" {upper}\n");
+        let again = trigon_registry::SourceCache::new(&root)
+            .trusting_local_paths()
+            .checkout(&padded, &upper_padded)
+            .unwrap();
+        assert_eq!(
+            again.path, fetched.path,
+            "the cache's own reading of that spelling"
+        );
+        for (repo, spelled) in [
+            (&repo, &commit),
+            (&repo, &upper),
+            (&repo, &upper_padded),
+            (&padded, &commit),
+            (&padded, &upper_padded),
+        ] {
+            assert_eq!(
+                checkout_dir(&root, repo, spelled),
+                fetched.path,
+                "{repo:?} {spelled:?}"
+            );
+        }
+        // And what is found there is the commit's.
+        let members = vec![("LICENSE.md".to_string(), sha(b"MIT\n"), 4)];
+        let (out, scope) = join(
+            &members,
+            Some(&checkout_dir(&root, &repo, &commit)),
+            None,
+            &commit,
+        );
+        assert!(scope.searched);
+        assert_eq!(out[0].origin, Origin::Verbatim);
+    }
+
+    /// Four states, four sentences and four colours, and the normalized one names its pass.
+    #[test]
+    fn each_origin_says_what_it_is_and_the_normalized_one_names_its_pass() {
+        let all = [
+            Origin::Verbatim,
+            Origin::Normalized("nupkg-text-eol"),
+            Origin::Built,
+            Origin::Unknown,
+        ];
+        assert_eq!(all[0].label(), "carried verbatim");
+        assert_eq!(all[1].label(), "carried after `nupkg-text-eol`");
+        assert_eq!(all[2].label(), "the build made this");
+        assert_eq!(all[3].label(), "unknown — no checkout");
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a.label(), b.label());
+                assert_ne!(a.colour(), b.colour(), "{a:?} and {b:?} look alike");
+            }
+        }
+    }
+
+    /// Normalized members are counted apart from verbatim ones, under the pass that explains them.
+    #[test]
+    fn the_tally_counts_normalized_members_apart_and_names_their_pass() {
+        let dir = tree("tally", &[("a.txt", b"one\n"), ("b.txt", b"two\n")]);
+        let members = vec![
+            ("a.txt".to_string(), sha(b"one\n"), 4),
+            ("b.txt".to_string(), sha(b"two\r\n"), 5),
+            ("c.bin".to_string(), sha(b"\x00built"), 6),
+        ];
+        let (out, _) = join(&members, Some(&dir), None, "d50b912e");
+        let t = tally(&out);
+        assert_eq!(
+            t,
+            vec![
+                (Origin::Verbatim, 1),
+                (Origin::Normalized("nupkg-text-eol"), 1),
+                (Origin::Built, 1),
+                (Origin::Unknown, 0),
+            ]
+        );
+    }
+
+    /// Only text gets a CRLF form: bytes with a NUL are not text, bytes already carrying a `\r` are
+    /// not LF text, and bytes with no line to end have no other form. None of them may match as
+    /// "carried after a pass" on the strength of a rewrite that pass would never make.
+    #[test]
+    fn only_lf_text_is_given_a_line_ending_form() {
+        let dir = tree(
+            "crlf",
+            &[
+                ("binary.dat", b"a\nb\x00\n"),
+                ("mixed.txt", b"a\r\nb\n"),
+                ("oneline.txt", b"no newline"),
+            ],
+        );
+        let members = vec![
+            ("binary.dat".to_string(), sha(b"a\r\nb\x00\r\n"), 7),
+            ("mixed.txt".to_string(), sha(b"a\r\r\nb\r\n"), 8),
+            ("oneline.txt".to_string(), sha(b"no newline"), 10),
+        ];
+        let (out, _) = join(&members, Some(&dir), None, "d50b912e");
+        assert_eq!(out[0].origin, Origin::Built);
+        assert_eq!(out[1].origin, Origin::Built);
+        // Its bytes are the commit's as they stand.
+        assert_eq!(out[2].origin, Origin::Verbatim);
+        assert_eq!(to_crlf(b"no newline"), None);
+        assert_eq!(to_crlf(b"a\nb\n").as_deref(), Some(&b"a\r\nb\r\n"[..]));
+    }
+
+    /// A checkout fetched again is read again: the index is keyed on the directory's mtime as well
+    /// as its path, so a changed tree is not answered from the index of the old one.
+    #[test]
+    fn a_checkout_that_changed_is_read_again() {
+        let dir = tree("refetched", &[("old.txt", b"old\n")]);
+        let members = vec![("new.txt".to_string(), sha(b"new\n"), 4)];
+        let (out, _) = join(&members, Some(&dir), None, "d50b912e");
+        assert_eq!(out[0].origin, Origin::Built);
+
+        std::fs::write(dir.join("new.txt"), b"new\n").unwrap();
+        // A fetch a second later: the directory's time moves on, whatever the clock's resolution.
+        let later = std::fs::metadata(&dir).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(5);
+        std::fs::File::open(&dir).unwrap().set_modified(later).unwrap();
+        let (out, scope) = join(&members, Some(&dir), None, "d50b912e");
+        assert_eq!(out[0].origin, Origin::Verbatim);
+        assert_eq!(scope.files, 2);
+    }
+
+    /// A directory or a file the walk cannot read is passed over, and the rest of the checkout is
+    /// still searched: one unreadable corner does not turn every member into "the build made this".
+    #[test]
+    fn what_cannot_be_read_is_passed_over_and_the_rest_is_still_searched() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tree(
+            "unreadable",
+            &[
+                ("open/a.txt", b"readable\n"),
+                ("sealed/b.txt", b"sealed\n"),
+                ("locked.txt", b"locked\n"),
+            ],
+        );
+        let set = |p: &Path, mode: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        set(&dir.join("sealed"), 0o000);
+        set(&dir.join("locked.txt"), 0o000);
+        // A user the permissions do not stop (root) reads everything, and there is nothing to test.
+        let stopped = std::fs::read_dir(dir.join("sealed")).is_err()
+            && std::fs::read(dir.join("locked.txt")).is_err();
+        let members = vec![
+            ("a.txt".to_string(), sha(b"readable\n"), 9),
+            ("b.txt".to_string(), sha(b"sealed\n"), 7),
+            ("locked.txt".to_string(), sha(b"locked\n"), 7),
+        ];
+        let (out, scope) = join(&members, Some(&dir), None, "d50b912e");
+        set(&dir.join("sealed"), 0o755);
+        set(&dir.join("locked.txt"), 0o644);
+        assert!(scope.searched);
+        assert_eq!(out[0].origin, Origin::Verbatim, "the readable part was not searched");
+        if stopped {
+            assert_eq!(out[1].origin, Origin::Built);
+            assert_eq!(out[2].origin, Origin::Built);
+        }
+    }
+
+    /// A commit shorter than the eight characters a sentence shows is shown whole.
+    #[test]
+    fn a_short_commit_is_shown_whole() {
+        let dir = tree("short", &[("a", b"a")]);
+        let (_, scope) = join(&[], Some(&dir), None, "abc");
+        assert_eq!(scope.where_we_looked(), "1 file(s) at abc");
     }
 
     #[test]

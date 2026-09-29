@@ -16,5 +16,6 @@ mod golden;
 mod lookup;
 mod paths;
 mod records;
+mod repository;
 mod rerun;
 mod sign;

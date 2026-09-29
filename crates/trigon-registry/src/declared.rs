@@ -520,4 +520,92 @@ mod tests {
         assert_eq!(f.checks[1].result, CheckResult::Unchecked);
         assert!(f.note.unwrap().contains("blake2b_256"));
     }
+
+    #[test]
+    fn several_declarations_left_unchecked_are_each_named_in_the_note() {
+        // A checked sha256 beside two algorithms this build has no hasher for. Both are named, and
+        // the sentence agrees with its subject: a reader counting what was not checked must be
+        // able to count it from the note.
+        let c = Computed::of(b"x");
+        let declared = vec![
+            from_hex("sha256", &c.hex("sha256").unwrap(), "pypi:digests.sha256").unwrap(),
+            from_hex("blake2b_256", &"ab".repeat(32), "pypi:digests.blake2b_256").unwrap(),
+            from_hex("sha3_256", &"cd".repeat(32), "pypi:digests.sha3_256").unwrap(),
+        ];
+        let f = verify("pypi", &meta(declared), Computed::of(b"x"), 1).unwrap();
+        assert_eq!(
+            f.checks.iter().map(|c| c.result).collect::<Vec<_>>(),
+            [
+                CheckResult::Matched,
+                CheckResult::Unchecked,
+                CheckResult::Unchecked
+            ]
+        );
+        let note = f.note.expect("what was not checked is said");
+        assert!(note.contains("blake2b_256"), "{note}");
+        assert!(note.contains("sha3_256"), "{note}");
+        assert!(note.contains("they are recorded and not checked"), "{note}");
+    }
+
+    #[test]
+    fn an_integrity_string_that_is_only_whitespace_is_refused_as_empty() {
+        // Present and empty is not "declared nothing": the field was written, and whatever wrote
+        // it meant something by it. Recording it as absence is how a check disappears.
+        for blank in ["", "   ", "\t\n"] {
+            let e = sri(blank, "npm:dist.integrity").unwrap_err();
+            assert!(e.contains("present and empty"), "{blank:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn an_algorithm_whose_width_is_unknown_is_checked_only_for_being_hex() {
+        // Shape-checking by width needs to know the width. For an algorithm this crate has never
+        // heard of the value is still refused when it is not hex, and kept, lowercased, when it
+        // is: it is recorded unchecked rather than dropped.
+        let d = from_hex("SHA3_256", " ABCD ", "pypi:digests.sha3_256").unwrap();
+        assert_eq!(d.algorithm, "sha3_256");
+        assert_eq!(d.value, "abcd");
+        assert!(from_hex("sha3_256", "abc", "pypi:digests.sha3_256").is_err());
+        assert!(from_hex("sha3_256", "wxyz", "pypi:digests.sha3_256").is_err());
+        assert!(from_hex("sha3_256", "", "pypi:digests.sha3_256").is_err());
+        assert!(from_base64("sha3_256", "", "x").is_err());
+    }
+
+    #[test]
+    fn a_digest_of_the_wrong_width_for_its_algorithm_is_refused() {
+        // A byte short or a byte over is not a digest of that algorithm, and a declaration that is
+        // not one is refused rather than checked against bytes it can never match or recorded.
+        for (algorithm, width) in [
+            ("md5", 16),
+            ("sha1", 20),
+            ("sha256", 32),
+            ("blake2b_256", 32),
+            ("sha384", 48),
+            ("sha512", 64),
+        ] {
+            assert!(
+                from_hex(algorithm, &"ab".repeat(width), "x").is_ok(),
+                "{algorithm}"
+            );
+            for wrong in [width - 1, width + 1] {
+                assert!(
+                    from_hex(algorithm, &"ab".repeat(wrong), "x").is_err(),
+                    "{algorithm} of {wrong} bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn base64_with_more_padding_than_a_value_can_have_is_refused() {
+        // Padding is optional, and there is never more than two of it: a third `=` is not padding,
+        // and a value carrying it is not a digest this reads.
+        assert_eq!(base64_decode("AAAA"), Some(vec![0, 0, 0]));
+        assert_eq!(base64_decode("AAA="), Some(vec![0, 0]));
+        assert_eq!(base64_decode("AA=="), Some(vec![0]));
+        assert_eq!(base64_decode("AA"), Some(vec![0]));
+        for bad in ["AA===", "AAAA===", "AAAAAA====", "==="] {
+            assert_eq!(base64_decode(bad), None, "{bad}");
+        }
+    }
 }

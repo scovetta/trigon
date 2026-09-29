@@ -164,3 +164,32 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 pub fn url_for(host: &str, platform: Platform, moment: &str) -> String {
     format!("http://{}:{moment}@{host}", platform.as_str())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_platform_is_read_back_from_the_name_it_writes() {
+        // The name rides in credentials and in `/-artifact/{platform}/` paths the mirror wrote
+        // itself, so a platform whose name does not parse back is a URL this mirror hands out and
+        // then refuses.
+        for p in [
+            Platform::Npm,
+            Platform::PyPI,
+            Platform::NuGet,
+            Platform::Cargo,
+        ] {
+            assert_eq!(Platform::parse(p.as_str()), Some(p));
+        }
+        assert_eq!(Platform::parse("maven"), None);
+    }
+
+    #[test]
+    fn every_upstream_is_a_registry_this_mirror_names_itself() {
+        assert_eq!(Platform::Npm.upstream(), "https://registry.npmjs.org");
+        assert_eq!(Platform::PyPI.upstream(), "https://pypi.org");
+        assert_eq!(Platform::NuGet.upstream(), "https://api.nuget.org");
+        assert_eq!(Platform::Cargo.upstream(), "https://index.crates.io");
+    }
+}

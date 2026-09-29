@@ -610,8 +610,9 @@ acute. Every record must carry, and every client that shows a record must render
    it is depends on the record and its source alone: the client's own `[publish]
    rebuilt_artifacts` says what the client's host publishes, and nothing of another operator's
    repository. An exact verdict's rebuilt artifact is the published artifact byte for byte, which
-   no repository publishes again (§4.1), so for one the command asks nothing, and takes `--rebuild
-   <file>`, which the upstream file is. The dispute pointer is a typed object, such as
+   no repository publishes again (§4.1), so for one the command asks nothing, and the upstream file
+   is its rebuilt artifact, held to the digest the verdict signs like any other: the command runs
+   as signed, with `--upstream` alone. The dispute pointer is a typed object, such as
    `{"kind": "url", "url": …}`, pointing at the repository's issues. Both carry the namespace, so D3
    is decided before either is signed.
 7. **The digests of the evidence the record names**: the comparison report, the rebuilt artifact,
@@ -797,8 +798,8 @@ trigon verify-attestation --record <file> --source <name> \
 - **`verify-attestation --lookup`**, which is also the form of a record's falsifying command (§4.2
   item 6), resolves the current record in the clone of the source whose origin `--origin` names, and
   fetches the evidence it names, so `--rerun-comparison` needs only the upstream artifact from the
-  user, and the rebuilt artifact too unless the repository that holds the record publishes it (D4),
-  which no repository does for an exact verdict. Without `--rebuild <file>` it looks for the release
+  user, and the rebuilt artifact too unless the repository that holds the record publishes it (D4)
+  or the verdict is exact. Without `--rebuild <file>` it looks for the release
   asset `sha256-<hex>` of the digest the verdict signs in that repository's `rebuilt-YYYY-MM`
   releases, where the repository is on github.com by an HTTPS or an SSH location, asking GitHub's
   API without a token; then in those of every other source that holds the record, but never one a
@@ -808,11 +809,13 @@ trigon verify-attestation --record <file> --source <name> \
   allows a client with no token, however many releases of other months the repository has. It holds
   what it downloads to that digest: other bytes in the repository of the source the record was
   resolved in fail, exit 4, and in another source's are that repository's, and the next is asked. A
-  repository elsewhere is asked nothing, and neither is GitHub for an exact verdict; there, where no
-  such asset exists, or where GitHub refuses or cannot be reached, the check is not made, exit 5,
-  and it asks for `--rebuild <file>`, never guessing at another artifact. With `--rebuild <file>` it
-  fetches nothing for the rebuilt artifact. The client's own `[publish] rebuilt_artifacts` plays no
-  part: it governs what `publish` uploads.
+  repository elsewhere is asked nothing, and neither is GitHub for an exact verdict, whose rebuilt
+  artifact is the upstream file itself, held to the digest the verdict signs; a verdict that signs
+  the subject's sha256 as its rebuilt artifact's is one. Where no such asset exists, or where GitHub
+  refuses or cannot be reached, the check is not made, exit 5, and it asks for `--rebuild <file>`,
+  never guessing at another artifact. With `--rebuild <file>` it fetches nothing for the rebuilt
+  artifact. The client's own `[publish] rebuilt_artifacts` plays no part: it governs what `publish`
+  uploads.
 - **The network-free verifier** (`--no-default-features`) takes `--record <file> --evidence <dir>`
   for one source, with that source's keys and last accepted checkpoint from `--source <name>` (read
   from `evidence.toml` and the state directory) or given as `--log-vkey`, `--attestation-key` and
@@ -1314,8 +1317,8 @@ entry was removed is still found; a superseded record is shown superseded; a che
 not extend the stored one is refused, and so is a clone rolled back behind the state directory; a
 record with one byte changed fails verification with exit 4; a withdrawn record reads as withdrawn;
 `verify-attestation --lookup … --rerun-comparison` re-derives a published verdict from the upstream
-file and, where the repository that holds the record does not publish rebuilt artifacts (D4) or the
-verdict is exact, the rebuilt one; a source is configured by `evidence.toml`, by
+file alone for an exact verdict, and from the rebuilt one too where the repository that holds the
+record does not publish rebuilt artifacts (D4); a source is configured by `evidence.toml`, by
 `TRIGON_EVIDENCE_REPO`, and by `evidence add`, with an HTTPS URL, a `file://` URL and a local path
 each; a project's `.trigon/evidence.toml` that tries to add a URL to an existing source is refused;
 and, with two sources configured, a divergence in either fails the check and the disagreement is
@@ -1337,7 +1340,8 @@ exit 4; no such asset, including one only in a release outside the series, is ex
 to pass `--rebuild <file>`; a source not on github.com is the same, with no request made;
 `--rebuild` given makes no request; and the consumer's own setting, unset or either value, changes
 none of it. Built ([findings](16-findings.md) §3.103), and its review added: an exact verdict makes
-no request, exit 5, and names the upstream file as its rebuilt artifact; only the series of the
+no request and takes the upstream file as its rebuilt artifact, held to the digest it signs (it
+exited 5 at first, asking for that file again as `--rebuild`); only the series of the
 record's month and the months either side are listed, so that full releases of other months cost
 nothing; an unfinished upload is passed over, and a failed download goes on to the next release;
 GitHub refusing or failing is exit 5, never a refutation, and a download asked for is said to have

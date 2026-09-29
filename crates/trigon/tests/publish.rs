@@ -324,6 +324,13 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// `script` as the executable git hook at `path`.
+fn hook(path: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::write(path, script).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 fn text(out: &Output) -> String {
     format!(
         "{}{}",
@@ -2659,6 +2666,100 @@ fn a_succession_into_another_repository_is_begun_there_after_the_end_is_pushed()
     assert_eq!(found.current().count(), 1);
 }
 
+/// A successor in another repository is begun there only where nothing has been begun since it
+/// was looked at, and only by a push the repository takes. One written to between that look,
+/// before the log-end, and the beginning, after it, is refused, saying who to look for; one that
+/// refuses the push is not begun, and the push is never forced. Either way the old log has ended
+/// naming it, and `log succeed` run again, once the repository is as it should be, begins it.
+#[test]
+fn a_successor_elsewhere_written_to_meanwhile_or_refusing_the_push_is_begun_only_when_run_again() {
+    let w = World::new("succeed-refused");
+    w.init(w.remote.to_str().unwrap());
+    let pa = Package::new("a", false);
+    let (a, _) = pair(&w, &pa, "aaaa");
+    ok(&w.publish(&[&a]));
+    let next = w.log_key_for(SUCCESSOR, "successor.key");
+    let successor = w.dir.join("successor.git");
+    git(
+        &w.dir,
+        &["init", "--quiet", "--bare", "-b", "main", "successor.git"],
+    );
+    let url = "https://github.com/owner/successor.git";
+    w.gitconfig(&format!(
+        "[url \"file://{}\"]\n\tinsteadOf = {url}\n",
+        successor.display()
+    ));
+    let succeed = || {
+        w.trigon(&[
+            "log",
+            "succeed",
+            "--store",
+            w.store.to_str().unwrap(),
+            "--repo",
+            w.remote.to_str().unwrap(),
+            "--origin",
+            SUCCESSOR,
+            "--log-key",
+            next.to_str().unwrap(),
+            "--url",
+            url,
+        ])
+    };
+    let refs = || git(&successor, &["for-each-ref"]);
+
+    // Somebody writes a log into the successor's repository the moment the old log's end lands:
+    // after it was looked at, before the successor is begun there.
+    let writer = w.dir.join("writer");
+    hook(
+        &w.remote.join("hooks/post-receive"),
+        &format!(
+            "#!/bin/sh\nrm -f \"$0\"\nunset GIT_DIR\nset -e\n\
+             git clone --quiet '{s}' '{c}'\nmkdir '{c}/log'\necho theirs >'{c}/log/checkpoint'\n\
+             git -C '{c}' add log\n\
+             git -C '{c}' -c user.name=t -c user.email=t@example.invalid commit --quiet -m t\n\
+             git -C '{c}' push --quiet origin HEAD:main\n",
+            s = successor.display(),
+            c = writer.display()
+        ),
+    );
+    let said = refused(&succeed());
+    assert!(said.contains("has log/ on `main` already"), "{said}");
+    assert!(
+        said.contains("which was looked at before the log-end was written"),
+        "{said}"
+    );
+    assert!(
+        said.contains("remove what they wrote, and run `trigon log succeed` again"),
+        "{said}"
+    );
+    assert_eq!(w.commits(), 3, "the old log has ended");
+    assert_ne!(refs(), "", "the hook wrote to the successor's repository");
+
+    // What they wrote is removed, and now the repository refuses the push: not begun.
+    git(&successor, &["update-ref", "-d", "refs/heads/main"]);
+    let refuse = successor.join("hooks/pre-receive");
+    hook(&refuse, "#!/bin/sh\nexit 1\n");
+    let said = refused(&succeed());
+    assert!(
+        said.contains(&format!(
+            "`{SUCCESSOR}` was not begun in {url}: the push was refused, never forced"
+        )),
+        "{said}"
+    );
+    assert_eq!(refs(), "", "nothing was begun");
+    assert_eq!(w.commits(), 3, "the old log is not written again");
+
+    // Once the repository takes the push, run again, it begins the successor.
+    std::fs::remove_file(&refuse).unwrap();
+    let said = ok(&succeed());
+    assert!(
+        said.contains(&format!("begun     `{SUCCESSOR}` at log")),
+        "{said}"
+    );
+    assert_eq!(git(&successor, &["rev-list", "--count", "main"]), "1");
+    assert_eq!(w.commits(), 3);
+}
+
 /// Publishing into a successor in another repository reads the whole chain before step 2's
 /// refusals, through an evidence source that reaches the log it continues: a verdict for an
 /// artifact with a current record in the old repository is refused as a second current record,
@@ -2990,6 +3091,9 @@ struct GitHubState {
     upload_origin: Option<String>,
     /// Refuse every upload, quoting back the `Authorization` header it came with.
     echo_token: bool,
+    /// Another writer's upload, which reaches the release first: the next upload finds an asset
+    /// of its name there, of these bytes and in this state, and is refused, as GitHub refuses one.
+    race: Option<(Vec<u8>, String)>,
 }
 
 /// The few endpoints of GitHub's REST API that publishing uses — list releases, create one, list a
@@ -3267,9 +3371,19 @@ fn route(
             .to_string();
         let aid = s.next;
         s.next += 1;
+        let race = s.race.take();
         let Some(r) = s.releases.iter_mut().find(|r| r.id == id) else {
             return (404, json!({"message": "Not Found"}));
         };
+        if let Some((bytes, state)) = race {
+            r.assets.push(FakeAsset {
+                id: aid,
+                name,
+                bytes,
+                state,
+            });
+            return (422, json!({"message": "Validation Failed"}));
+        }
         if r.assets.iter().any(|a| a.name == name) {
             return (422, json!({"message": "Validation Failed"}));
         }
@@ -4243,4 +4357,1050 @@ fn the_kill_switch_withholds_a_divergence_the_feed_would_publish() {
     let xml = std::fs::read_to_string(clone.join("feed/divergences.atom")).unwrap();
     let doc = roxmltree::Document::parse(&xml).unwrap();
     assert_eq!(atom(doc.root_element(), "entry").len(), 1);
+}
+
+/// Two attempts at `p` nobody attested, as `pair` makes them otherwise: their ids, the first
+/// first.
+fn unattested(w: &World, p: &Package, tag: &str) -> (String, String) {
+    let store = Store::local(&w.store).unwrap();
+    let (a, b) = (
+        format!("1789000000-{tag}0001"),
+        format!("1789007200-{tag}0002"),
+    );
+    let key = format!("ck1:{tag}");
+    rt().block_on(async {
+        for (id, host, started) in [
+            (&a, 'a', "2026-09-27T00:00:00Z"),
+            (&b, 'b', "2026-09-27T02:00:00Z"),
+        ] {
+            attempt(&store, id, p, &key, host, started, "mirror-only").await;
+        }
+    });
+    (a, b)
+}
+
+/// A publication is refused whole, with every refusal said at once and nothing written, for each
+/// run it cannot publish (`docs/19` §3): a run named twice, and one the store does not hold; a
+/// run with no verdict signed, and one whose verdict was signed with no key; a second run about an
+/// artifact another run of the same publication is about; and a run whose evidence the store no
+/// longer holds, since a record is published with the evidence it names. Nothing named, and more
+/// than one kind of thing, are refused before anything is read.
+#[test]
+fn a_publication_is_refused_whole_for_every_run_it_cannot_publish() {
+    let w = World::new("refusals");
+    w.init(w.remote.to_str().unwrap());
+    let said = refused(&w.publish(&[]));
+    assert!(said.contains("name what to publish"), "{said}");
+    let (a, _) = pair(&w, &Package::new("a", false), "aaaa");
+    let said = refused(&w.publish(&[&a, "--heartbeat"]));
+    assert!(said.contains("publish one thing at a time"), "{said}");
+
+    // The same artifact again, under another cache key.
+    let (again, _) = pair(&w, &Package::new("a", false), "a2a2");
+    // Nobody attested it.
+    let (b, _) = unattested(&w, &Package::new("b", false), "bbbb");
+    // Attested, and with no key.
+    let (c, _) = unattested(&w, &Package::new("c", false), "cccc");
+    let said = ok(&w.trigon(&["attest", &c, "--store", w.store.to_str().unwrap()]));
+    assert!(said.contains("unsigned"), "{said}");
+    // Attested, and then its guard manifest gone from the store.
+    let (e, _) = pair(&w, &Package::new("e", false), "eeee");
+    let guard = trigon_attest::Record::digest_of(br#"{"artifact":"e","members":["x"]}"#).to_hex();
+    std::fs::remove_file(
+        w.store
+            .join(format!("blobs/sha256/{}/{guard}", &guard[..2])),
+    )
+    .unwrap();
+
+    let none = "1789000000-n0ne0001";
+    let said = refused(&w.publish(&[&a, &a, none, &again, &b, &c, &e]));
+    for says in [
+        "refusing to publish, and nothing was written".to_string(),
+        format!("run `{a}`: it is named twice"),
+        format!("run `{none}`: the store holds no such run"),
+        format!(
+            "run `{again}`: it is about the same artifact, sha256:{}, as run `{a}`, named \
+             before it",
+            Package::new("a", false).sha256()
+        ),
+        format!(
+            "run `{b}`: it has no `https://trigon.dev/equivalence/v2` statement to publish. Sign \
+             one with `trigon attest {b} --key <key>`"
+        ),
+        format!("run `{c}`: its `https://trigon.dev/equivalence/v2` statement is unsigned"),
+        format!("run `{e}`: its `guardManifest` evidence, sha256:{guard}, is not in the store"),
+    ] {
+        assert!(said.contains(&says), "{says}\n{said}");
+    }
+    assert!(!said.contains(&format!("run `{a}`: it has")), "{said}");
+    assert_eq!(w.commits(), 1);
+    for id in [&a, &again, &b, &c, &e] {
+        assert!(w.run(id).published.is_none(), "{id}");
+    }
+    // What it can publish, it then publishes.
+    ok(&w.publish(&[&a]));
+    assert_eq!(w.commits(), 2);
+}
+
+/// A verdict is published with where to dispute it, as the repository says (`docs/19` §4.2 item
+/// 6): one whose signed pointer is another place than `[publish] disputes`, and one published with
+/// no `[publish] disputes` set, are each refused, and nothing is written; attested under the
+/// repository's, it publishes.
+#[test]
+fn a_verdict_is_published_only_with_the_repositorys_dispute_pointer() {
+    let w = World::new("disputes");
+    w.init(w.remote.to_str().unwrap());
+    let (a, _) = pair(&w, &Package::new("a", false), "aaaa");
+    let config = |publish: &str| {
+        std::fs::write(
+            w.dir.join("home/.config/trigon/evidence.toml"),
+            format!(
+                "[publish]\norigin = \"{ORIGIN}\"\n{publish}log_key = \"{}\"\n",
+                w.log_key.display()
+            ),
+        )
+        .unwrap();
+    };
+    let elsewhere = "https://example.org/elsewhere/issues";
+    config(&format!("disputes = \"{elsewhere}\"\n"));
+    let said = refused(&w.publish(&[&a]));
+    assert!(
+        said.contains(&format!(
+            "its dispute pointer is `{DISPUTES}`, and `[publish] disputes` is `{elsewhere}`"
+        )),
+        "{said}"
+    );
+    config("");
+    let said = refused(&w.publish(&[&a]));
+    assert!(
+        said.contains("`[publish] disputes` is not set, and a verdict is published with where to \
+                       dispute it"),
+        "{said}"
+    );
+    assert_eq!(w.commits(), 1);
+    w.config("");
+    ok(&w.publish(&[&a]));
+    assert_eq!(w.commits(), 2);
+}
+
+/// `log init` holds what it is given to what `publish` would accept before anything is begun: an
+/// origin other than `[publish] origin`, no `[publish] disputes`, no log key, no repository, and
+/// a log key of another origin are each refused, and the repository is left with no commit; and
+/// so is a repository that refuses the push, which is never forced.
+#[test]
+fn log_init_begins_nothing_publish_would_refuse() {
+    let w = World::new("init-refusals");
+    let key = attestation().public_hex();
+    let remote = w.remote.to_str().unwrap().to_string();
+    let init = |args: &[&str]| {
+        let mut all = vec!["log", "init", "--attestation-key", key.as_str()];
+        all.extend_from_slice(args);
+        w.trigon(&all)
+    };
+    let config = |text: &str| {
+        std::fs::write(w.dir.join("home/.config/trigon/evidence.toml"), text).unwrap();
+    };
+    let said = refused(&init(&["--origin", "example.com/other", "--repo", &remote]));
+    assert!(
+        said.contains("--origin is `example.com/other`, and `[publish] origin` is"),
+        "{said}"
+    );
+    config(&format!(
+        "[publish]\norigin = \"{ORIGIN}\"\nlog_key = \"{}\"\n",
+        w.log_key.display()
+    ));
+    let said = refused(&init(&["--origin", ORIGIN, "--repo", &remote]));
+    assert!(said.contains("`[publish] disputes` is not set"), "{said}");
+    config(&format!(
+        "[publish]\norigin = \"{ORIGIN}\"\ndisputes = \"{DISPUTES}\"\n"
+    ));
+    let said = refused(&init(&["--origin", ORIGIN, "--repo", &remote]));
+    assert!(said.contains("no log key: give --log-key <file>"), "{said}");
+    w.config("");
+    let said = refused(&init(&["--origin", ORIGIN]));
+    assert!(said.contains("no repository is named"), "{said}");
+    let other = w.dir.join("other.key");
+    ok(&w.trigon(&[
+        "log",
+        "keygen",
+        "--origin",
+        "example.com/other",
+        "--out",
+        other.to_str().unwrap(),
+    ]));
+    let said = refused(&init(&[
+        "--origin",
+        ORIGIN,
+        "--repo",
+        &remote,
+        "--log-key",
+        other.to_str().unwrap(),
+    ]));
+    assert!(
+        said.contains(&format!(
+            "is for the log `example.com/other`, and --origin is `{ORIGIN}`"
+        )),
+        "{said}"
+    );
+    assert_eq!(git(&w.remote, &["for-each-ref"]), "");
+    // Everything it is given in order, and the repository refuses the push: nothing is begun, and
+    // the push is not forced past the refusal.
+    let refuse = w.remote.join("hooks/pre-receive");
+    hook(&refuse, "#!/bin/sh\nexit 1\n");
+    let said = refused(&init(&["--origin", ORIGIN, "--repo", &remote]));
+    assert!(
+        said.contains(&format!(
+            "Nothing was begun in {remote}: the push was refused, never forced"
+        )),
+        "{said}"
+    );
+    assert_eq!(git(&w.remote, &["for-each-ref"]), "");
+    std::fs::remove_file(&refuse).unwrap();
+    w.init(&remote);
+}
+
+/// A log begun in a working tree in place that fails is discarded from it (`docs/19` §10 phase
+/// 5): the tree is left as it was — its branch where it was, its own README as the branch has it,
+/// no `keys/` or `log/`, nothing staged — and, where the branch had no commit, with no commit and
+/// no README.
+#[test]
+fn a_log_begun_in_place_that_fails_leaves_the_tree_as_it_was() {
+    let w = World::new("init-unwind");
+    let key = attestation().public_hex();
+    let other = w.dir.join("other.key");
+    ok(&w.trigon(&[
+        "log",
+        "keygen",
+        "--origin",
+        "example.com/other",
+        "--out",
+        other.to_str().unwrap(),
+    ]));
+    let init = |tree: &Path, log_key: &Path| {
+        w.trigon(&[
+            "log",
+            "init",
+            "--origin",
+            ORIGIN,
+            "--repo",
+            tree.to_str().unwrap(),
+            "--attestation-key",
+            &key,
+            "--log-key",
+            log_key.to_str().unwrap(),
+        ])
+    };
+    let status = |tree: &Path| git(tree, &["status", "--porcelain", "--untracked-files=all"]);
+
+    let tree = w.dir.join("tree");
+    git(&w.dir, &["init", "--quiet", "-b", "main", "tree"]);
+    std::fs::write(tree.join("README.md"), "the project's own\n").unwrap();
+    git(&tree, &["add", "README.md"]);
+    git(&tree, &["commit", "--quiet", "-m", "readme"]);
+    let head = git(&tree, &["rev-parse", "HEAD"]);
+    let said = refused(&init(&tree, &other));
+    assert!(said.contains("is for the log `example.com/other`"), "{said}");
+    assert!(!tree.join("keys").exists() && !tree.join("log").exists());
+    assert_eq!(
+        std::fs::read_to_string(tree.join("README.md")).unwrap(),
+        "the project's own\n"
+    );
+    assert_eq!(git(&tree, &["rev-parse", "HEAD"]), head);
+    assert_eq!(status(&tree), "");
+
+    let empty = w.dir.join("empty");
+    git(&w.dir, &["init", "--quiet", "-b", "main", "empty"]);
+    let said = refused(&init(&empty, &other));
+    assert!(said.contains("is for the log `example.com/other`"), "{said}");
+    for gone in ["keys", "log", "README.md"] {
+        assert!(!empty.join(gone).exists(), "{gone}");
+    }
+    assert!(
+        !Command::new("git")
+            .arg("-C")
+            .arg(&empty)
+            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(status(&empty), "");
+
+    // With its own key, the log is begun in the tree, on top of its branch.
+    ok(&init(&tree, &w.log_key));
+    assert_eq!(git(&tree, &["rev-parse", "HEAD~1"]), head);
+    assert!(tree.join("keys/log.vkey").is_file());
+}
+
+/// A log begun in a working tree in place that fails late is discarded as one that fails early is
+/// (`docs/19` §10 phase 5): where the commit is refused, once the README has replaced the branch's
+/// and everything is staged, and where the commit is made and then moved before it is read back.
+/// The branch is where it was, or has no commit where it had none; the README is the branch's, byte
+/// for byte, or there is none; `keys/` and `log/` are gone; and nothing is staged or left behind.
+#[test]
+fn a_log_begun_in_place_whose_commit_fails_or_is_moved_leaves_the_tree_as_it_was() {
+    let w = World::new("init-unwind-commit");
+    let init = |tree: &Path| w.init_as(tree.to_str().unwrap(), ORIGIN);
+    let status = |tree: &Path| git(tree, &["status", "--porcelain", "--untracked-files=all"]);
+    let unborn = |tree: &Path| {
+        !Command::new("git")
+            .arg("-C")
+            .arg(tree)
+            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    // The branch's README, in bytes no README `log init` writes has.
+    let readme: &[u8] = b"the project's own\r\nno newline at the end";
+    // `prepare-commit-msg` runs under `--no-verify`, and its failing aborts the commit. A
+    // `post-commit` that amends HEAD with a file the publication does not write has the commit
+    // read back refused; it removes itself first, since the amend runs it again.
+    let hooks = [
+        (
+            "prepare-commit-msg",
+            "#!/bin/sh\nexit 1\n",
+            "git commit failed",
+        ),
+        (
+            "post-commit",
+            "#!/bin/sh\nrm -f \"$0\"\nblob=$(echo extra | git hash-object -w --stdin)\n\
+             git update-index --add --cacheinfo 100644,\"$blob\",extra\n\
+             git commit --quiet --amend --no-verify --no-edit\n",
+            "it changes `extra`, which the publication does not write",
+        ),
+    ];
+    for (name, script, why) in hooks {
+        // A branch with a README.
+        let tree = w.dir.join(format!("tree-{name}"));
+        git(
+            &w.dir,
+            &["init", "--quiet", "-b", "main", tree.to_str().unwrap()],
+        );
+        std::fs::write(tree.join("README.md"), readme).unwrap();
+        git(&tree, &["add", "README.md"]);
+        git(&tree, &["commit", "--quiet", "-m", "readme"]);
+        let head = git(&tree, &["rev-parse", "HEAD"]);
+        let installed = tree.join(".git/hooks").join(name);
+        hook(&installed, script);
+        let said = refused(&init(&tree));
+        assert!(said.contains(why), "{name}: {said}");
+        assert!(!tree.join("keys").exists(), "{name}");
+        assert!(!tree.join("log").exists(), "{name}");
+        assert_eq!(
+            std::fs::read(tree.join("README.md")).unwrap(),
+            readme,
+            "{name}"
+        );
+        assert_eq!(git(&tree, &["rev-parse", "HEAD"]), head, "{name}");
+        assert_eq!(
+            git(&tree, &["symbolic-ref", "HEAD"]),
+            "refs/heads/main",
+            "{name}"
+        );
+        assert_eq!(status(&tree), "", "{name}");
+        // And a log is begun there once the hook is gone, on top of the branch.
+        let _ = std::fs::remove_file(&installed);
+        ok(&init(&tree));
+        assert_eq!(git(&tree, &["rev-parse", "HEAD~1"]), head, "{name}");
+
+        // A branch with no commit yet.
+        let empty = w.dir.join(format!("empty-{name}"));
+        git(
+            &w.dir,
+            &["init", "--quiet", "-b", "main", empty.to_str().unwrap()],
+        );
+        hook(&empty.join(".git/hooks").join(name), script);
+        let said = refused(&init(&empty));
+        assert!(said.contains(why), "{name}: {said}");
+        for gone in ["keys", "log", "README.md"] {
+            assert!(!empty.join(gone).exists(), "{name}: {gone}");
+        }
+        assert!(unborn(&empty), "{name}");
+        assert_eq!(
+            git(&empty, &["symbolic-ref", "HEAD"]),
+            "refs/heads/main",
+            "{name}"
+        );
+        assert_eq!(status(&empty), "", "{name}");
+        assert_eq!(git(&empty, &["ls-files", "--stage"]), "", "{name}");
+    }
+}
+
+/// `log sign` signs only a log's directory, and only a tree it can check: `--log` naming anything
+/// but `log` or `log/<n>`, no `--size`, and a tree with no attestation key to check its records
+/// under are each refused, and the tree's checkpoint is left as it was. It begins a log only in a
+/// directory of the tree's own, never through a `keys` that is a link out of it; and it holds the
+/// newest checkpoint this host published to no more than a checkpoint's length.
+#[test]
+fn log_sign_refuses_what_it_cannot_check_and_writes_nothing() {
+    let w = World::new("sign-refusals");
+    w.init(w.remote.to_str().unwrap());
+    let tree = w.clone_fresh("tree");
+    let checkpoint = std::fs::read(tree.join("log/checkpoint")).unwrap();
+    let sign = |extra: &[&str]| {
+        let mut all = vec![
+            "log",
+            "sign",
+            "--tree",
+            tree.to_str().unwrap(),
+            "--key",
+            w.log_key.to_str().unwrap(),
+        ];
+        all.extend_from_slice(extra);
+        w.trigon(&all)
+    };
+    for dir in ["logs", "log/0", "log/01", "log/x", "log/", "../log", "log/1/2"] {
+        let said = refused(&sign(&["--log", dir, "--size", "0"]));
+        assert!(said.contains("is not a log's directory"), "{dir}: {said}");
+    }
+    let said = refused(&sign(&[]));
+    assert!(said.contains("--size"), "{said}");
+    std::fs::remove_file(tree.join("keys/attestation.pub")).unwrap();
+    let said = refused(&sign(&["--size", "0"]));
+    assert!(
+        said.contains("so the tree names no attestation key to check its records under"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read(tree.join("log/checkpoint")).unwrap(), checkpoint);
+
+    // A new log's tree whose `keys` leads out of it.
+    let fresh = w.dir.join("fresh");
+    let outside = w.dir.join("outside");
+    std::fs::create_dir_all(&fresh).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, fresh.join("keys")).unwrap();
+    let new_key = w.dir.join("fresh.key");
+    ok(&w.trigon(&[
+        "log",
+        "keygen",
+        "--origin",
+        "example.com/fresh",
+        "--out",
+        new_key.to_str().unwrap(),
+    ]));
+    let said = refused(&w.trigon(&[
+        "log",
+        "sign",
+        "--init",
+        "--tree",
+        fresh.to_str().unwrap(),
+        "--key",
+        new_key.to_str().unwrap(),
+    ]));
+    assert!(said.contains("is a link or a file"), "{said}");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    assert!(!fresh.join("log").exists());
+
+    // The newest checkpoint this host published, grown past any checkpoint's length.
+    let newest = newest_published(&w);
+    std::fs::create_dir_all(newest.parent().unwrap()).unwrap();
+    std::fs::write(&newest, vec![b'x'; 128 * 1024]).unwrap();
+    let said = refused(&w.publish(&["--heartbeat"]));
+    assert!(said.contains("and no checkpoint is"), "{said}");
+    assert_eq!(w.commits(), 1);
+}
+
+/// Every file under `dir` whose name `wanted` accepts.
+fn files_under(dir: &Path, wanted: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(files_under(&p, wanted));
+        } else if p.file_name().and_then(|n| n.to_str()).is_some_and(wanted) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// A withdrawal is published only as what it is, of a record it can withdraw, and a supersession
+/// only of the record current for its artifact (`docs/19` §3): a statement of another kind given
+/// as a withdrawal, an unsigned withdrawal, a withdrawal of a record the chain does not hold, one
+/// of a record already superseded, a supersession of a record no longer current, and one of a
+/// record the chain does not hold are each refused, and nothing is written.
+#[test]
+fn a_withdrawal_or_a_supersession_is_published_only_of_the_current_record() {
+    let w = World::new("withdrawal-refusals");
+    w.init(w.remote.to_str().unwrap());
+    let p = Package::new("a", false);
+    let (first, _) = pair(&w, &p, "aaaa");
+    ok(&w.publish(&[&first]));
+    let digest = w.run(&first).published.unwrap().record;
+    let file = record_file(&w.clone_fresh("reader"), &digest);
+    let withdraw = |record: &Path, signed: bool| -> PathBuf {
+        let mut args = vec![
+            "attest",
+            "--withdraw",
+            record.to_str().unwrap(),
+            "--reason",
+            "withdrawn",
+            "--store",
+            w.store.to_str().unwrap(),
+        ];
+        if signed {
+            args.extend(["--key", w.key.to_str().unwrap()]);
+        }
+        let said = ok(&w.trigon(&args));
+        w.store.join(
+            said.lines()
+                .find_map(|l| {
+                    l.trim()
+                        .strip_prefix("withdrawals/")
+                        .map(|r| format!("withdrawals/{r}"))
+                })
+                .unwrap_or_else(|| panic!("no withdrawal filed: {said}")),
+        )
+    };
+    let publish = |envelope: &Path| w.publish(&["--withdrawal", envelope.to_str().unwrap()]);
+
+    // The verdict's own envelope, given as a withdrawal.
+    let verdict = files_under(&w.store.join("attestations"), &|n| {
+        n.contains("equivalence") && n.ends_with(".intoto.json")
+    });
+    let said = refused(&publish(&verdict[0]));
+    assert!(
+        said.contains(
+            "statement, and --withdrawal publishes a `https://trigon.dev/withdrawal/v1`"
+        ),
+        "{said}"
+    );
+    let said = refused(&publish(&withdraw(&file, false)));
+    assert!(
+        said.contains("is unsigned; sign the withdrawal with `trigon attest --withdraw"),
+        "{said}"
+    );
+    // The record's file with a byte more is another record, which no leaf logs.
+    let other = w.dir.join("other-record.json");
+    let mut bytes = std::fs::read(&file).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(&other, bytes).unwrap();
+    let said = refused(&publish(&withdraw(&other, true)));
+    assert!(
+        said.contains("which this repository's chain of logs does not hold; a withdrawal is \
+                       published only of a logged record"),
+        "{said}"
+    );
+    assert_eq!(w.commits(), 2);
+
+    // Superseded, and then withdrawn: the withdrawal is of a record no longer current.
+    let (second, _) = pair(&w, &p, "a2a2");
+    let supersede = |id: &str, of: &Path| {
+        w.attest(
+            id,
+            &["--supersedes", of.to_str().unwrap(), "--reason", "set_changed"],
+        );
+    };
+    supersede(&second, &file);
+    ok(&w.publish(&[&second]));
+    let current = w.run(&second).published.unwrap().record;
+    let said = refused(&publish(&withdraw(&file, true)));
+    assert!(
+        said.contains(&format!(
+            "sha256:{} is already superseded, by sha256:{}",
+            digest.to_hex(),
+            current.to_hex()
+        )),
+        "{said}"
+    );
+    assert!(said.contains("withdraw the record that is current"), "{said}");
+
+    // A third run, superseding the record its artifact no longer has current, and then one no
+    // leaf logs.
+    let (third, _) = pair(&w, &p, "a3a3");
+    supersede(&third, &file);
+    let said = refused(&w.publish(&[&third]));
+    assert!(
+        said.contains(&format!(
+            "it supersedes sha256:{}, and the record current for its artifact is sha256:{}; \
+             supersede that one",
+            digest.to_hex(),
+            current.to_hex()
+        )),
+        "{said}"
+    );
+    supersede(&third, &other);
+    let said = refused(&w.publish(&[&third]));
+    assert!(
+        said.contains("which this repository's chain of logs does not hold, so no client would \
+                       ever apply it"),
+        "{said}"
+    );
+    assert_eq!(w.commits(), 3);
+}
+
+/// A rebuilt artifact is uploaded only as the bytes its verdict signs, from the store (`docs/19`
+/// D4): a run whose rebuilt artifact in the store is not the one its verdict signs, one whose bytes
+/// the store no longer holds, and one whose bytes are not the size the run recorded are each
+/// refused, with nothing uploaded and nothing committed.
+#[test]
+fn a_rebuilt_artifact_is_uploaded_only_as_the_bytes_its_verdict_signs() {
+    let w = World::new("release-store");
+    let gh = FakeGitHub::start();
+    w.on_github("");
+    let edit = |id: &str, change: &dyn Fn(&mut RunRecord)| {
+        rt().block_on(async {
+            let store = Store::local(&w.store).unwrap();
+            let mut r = store.get_run(id).await.unwrap();
+            change(&mut r);
+            store.put_run(&r).await.unwrap();
+        });
+    };
+    let refused_with = |id: &str, says: &str| {
+        let before = w.commits();
+        let said = refused(&w.publish_with(&gh, &[id]));
+        assert!(said.contains(says), "{says}\n{said}");
+        assert_eq!(w.commits(), before);
+        assert!(
+            gh.state().seen.iter().all(|r| r.method != "POST"),
+            "something was uploaded or created"
+        );
+        assert!(w.run(id).published.is_none());
+    };
+
+    // The store's rebuilt artifact is another than the verdict signs.
+    let pa = Package::new("a", false);
+    let (a, _) = pair(&w, &pa, "aaaa");
+    let signed = trigon_attest::Record::digest_of(&pa.rebuilt);
+    let other = trigon_core::Digest::from_bytes([7; 32]);
+    edit(&a, &|r| r.rebuild.as_mut().unwrap().sha256 = other);
+    refused_with(
+        &a,
+        &format!(
+            "its rebuilt artifact is sha256:{} in the store, and its verdict signs sha256:{}; \
+             attest it again",
+            other.to_hex(),
+            signed.to_hex()
+        ),
+    );
+
+    // The bytes gone from the store.
+    let pb = Package::new("b", false);
+    let (b, _) = pair(&w, &pb, "bbbb");
+    let hex = trigon_attest::Record::digest_of(&pb.rebuilt).to_hex();
+    std::fs::remove_file(w.store.join(format!("blobs/sha256/{}/{hex}", &hex[..2]))).unwrap();
+    refused_with(
+        &b,
+        &format!(
+            "its rebuilt artifact, sha256:{hex}, is not a release asset of {GITHUB_REPO} yet, and \
+             it is not in the store to upload"
+        ),
+    );
+
+    // Its bytes not the size the run recorded.
+    let pc = Package::new("c", false);
+    let (c, _) = pair(&w, &pc, "cccc");
+    let size = pc.rebuilt.len() as u64;
+    edit(&c, &|r| r.rebuild.as_mut().unwrap().bytes = size + 1);
+    refused_with(
+        &c,
+        &format!(
+            "its rebuilt artifact is {size} bytes in the store and {} as the run recorded it",
+            size + 1
+        ),
+    );
+}
+
+/// Publishing gives up once it has lost the push to another writer as many times as it tries,
+/// with nothing of its own published (`docs/19` D5: one host publishes): each time the remote
+/// moves between its commit and its push, it discards the commit and builds again on what is
+/// there, and after the last attempt it says so, and to find the other writer.
+#[test]
+fn a_publisher_that_always_loses_the_push_gives_up_and_says_why() {
+    let w = World::new("always-lost");
+    w.init(w.remote.to_str().unwrap());
+    let (a, _) = pair(&w, &Package::new("a", false), "aaaa");
+    ok(&w.publish(&["--heartbeat"]));
+    let other = w.clone_fresh("other-writer");
+    // Another writer, which pushes a commit of its own the moment this one has committed.
+    let hook = state_dir(&w.store).join("clone/.git/hooks/post-commit");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nunset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX\n\
+             export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=o \
+             GIT_AUTHOR_EMAIL=o@example.invalid GIT_COMMITTER_NAME=o \
+             GIT_COMMITTER_EMAIL=o@example.invalid\n\
+             cd '{}' && git fetch -q origin && git reset -q --hard origin/main && \
+             git commit -q --allow-empty -m 'another writer' && git push -q origin HEAD:main\n",
+            other.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let before = w.commits();
+    let said = refused(&w.publish(&[&a]));
+    for n in 1..=5 {
+        assert!(
+            said.contains(&format!(
+                "lost      the push to another writer (attempt {n} of 5)"
+            )),
+            "{n}: {said}"
+        );
+    }
+    assert!(
+        said.contains("lost the push 5 times running to another writer of"),
+        "{said}"
+    );
+    assert!(said.contains("find the other one"), "{said}");
+    // The other writer's five commits, and nothing of this one's.
+    assert_eq!(w.commits(), before + 5);
+    assert!(w.run(&a).published.is_none());
+    let commits = git(&w.remote, &["rev-list", "--parents", "main"]);
+    assert!(
+        commits.lines().all(|l| l.split(' ').count() <= 2),
+        "{commits}"
+    );
+    let clone = w.clone_fresh("reader");
+    assert_eq!(w.open(&clone).record_leaves().count(), 0);
+}
+
+/// `log sign` reads what it holds a tree to from the tree and from the host, and refuses where it
+/// cannot: a successor's directory that is not the last log of the chain, a tree whose chain it
+/// cannot read for want of `keys/log.vkey`, a successor begun from a tree that names no chain,
+/// and a host with neither `XDG_STATE_HOME` nor `HOME`, under which the newest checkpoint it
+/// published is kept. Nothing is signed.
+#[test]
+fn log_sign_refuses_a_chain_it_cannot_read() {
+    let w = World::new("sign-chain");
+    w.init(w.remote.to_str().unwrap());
+    let tree = w.clone_fresh("tree");
+    let checkpoint = std::fs::read(tree.join("log/checkpoint")).unwrap();
+    let next = w.log_key_for(SUCCESSOR, "successor.key");
+    let sign = |key: &Path, extra: &[&str]| {
+        let mut all = vec![
+            "log",
+            "sign",
+            "--tree",
+            tree.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+        ];
+        all.extend_from_slice(extra);
+        w.command(&all)
+    };
+    let said = refused(&sign(&w.log_key, &["--log", "log/1", "--size", "0"]).output().unwrap());
+    assert!(
+        said.contains(
+            "`log/1` is not the last log of the chain keys/log.vkey begins, and only the last log \
+             of a chain is extended"
+        ),
+        "{said}"
+    );
+    let empty = w.dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let said = refused(
+        &sign(
+            &next,
+            &[
+                "--log",
+                "log/1",
+                "--size",
+                "1",
+                "--continuing",
+                empty.to_str().unwrap(),
+            ],
+        )
+        .output()
+        .unwrap(),
+    );
+    assert!(
+        said.contains("is not there, so the chain the successor continues cannot be read"),
+        "{said}"
+    );
+    let said = refused(
+        &sign(&w.log_key, &["--size", "0"])
+            .env_remove("HOME")
+            .env_remove("XDG_STATE_HOME")
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        said.contains("neither XDG_STATE_HOME nor HOME is set"),
+        "{said}"
+    );
+    std::fs::remove_file(tree.join("keys/log.vkey")).unwrap();
+    let said = refused(&sign(&w.log_key, &["--log", "log/1", "--size", "0"]).output().unwrap());
+    assert!(
+        said.contains("is not there, so the chain `log/1` is in cannot be read"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read(tree.join("log/checkpoint")).unwrap(), checkpoint);
+    assert!(!tree.join("log/1").exists());
+}
+
+/// `publish` knows the repository it writes to, and the log it extends there, before anything is
+/// written: no repository named, no `[publish] origin`, a path that is no git repository, a
+/// repository with no branch to publish on, and one whose branch holds no `keys/log.vkey` are each
+/// refused, and none of them is written to.
+#[test]
+fn publish_refuses_a_repository_it_cannot_publish_to() {
+    let w = World::new("where");
+    let publish = |repo: Option<&Path>| {
+        let mut args = vec!["publish", "--store", w.store.to_str().unwrap(), "--heartbeat"];
+        if let Some(r) = repo {
+            args.extend(["--repo", r.to_str().unwrap()]);
+        }
+        w.trigon(&args)
+    };
+    let said = refused(&publish(None));
+    assert!(
+        said.contains("no evidence repository is named: give --repo <location>"),
+        "{said}"
+    );
+    std::fs::write(
+        w.dir.join("home/.config/trigon/evidence.toml"),
+        format!(
+            "[publish]\ndisputes = \"{DISPUTES}\"\nlog_key = \"{}\"\n",
+            w.log_key.display()
+        ),
+    )
+    .unwrap();
+    let said = refused(&publish(Some(&w.remote)));
+    assert!(
+        said.contains("`[publish] origin` is not set in evidence.toml"),
+        "{said}"
+    );
+    w.config("");
+    let plain = w.dir.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let said = refused(&publish(Some(&plain)));
+    assert!(said.contains("is not a git repository"), "{said}");
+    assert_eq!(std::fs::read_dir(&plain).unwrap().count(), 0);
+
+    // An empty repository: no branch, so no log.
+    let said = refused(&publish(Some(&w.remote)));
+    assert!(
+        said.contains("has no log on its branch: create it with `trigon log init"),
+        "{said}"
+    );
+    assert_eq!(git(&w.remote, &["for-each-ref"]), "");
+    // A branch with no keys: no log was begun there.
+    let seeded_repo = w.dir.join("seeded.git");
+    seeded(&seeded_repo, &[("README.md", b"a project\n")]);
+    let head = git(&seeded_repo, &["rev-parse", "main"]);
+    let said = refused(&publish(Some(&seeded_repo)));
+    assert!(
+        said.contains(
+            "has no keys/log.vkey, so it is not an evidence repository, or its log was never \
+             begun"
+        ),
+        "{said}"
+    );
+    assert_eq!(git(&seeded_repo, &["rev-parse", "main"]), head);
+}
+
+/// A log is begun in a working tree in place only as the tree is committed, and only where its
+/// branch names no git attributes, which could rewrite the bytes of what is written: a tree with
+/// a change not committed, and one whose branch has a `.gitattributes`, are each refused, and
+/// nothing is written into either.
+#[test]
+fn a_log_is_begun_in_place_only_in_a_clean_tree_with_no_attributes() {
+    let w = World::new("init-in-place");
+    let key = attestation().public_hex();
+    let init = |tree: &Path| {
+        w.trigon(&[
+            "log",
+            "init",
+            "--origin",
+            ORIGIN,
+            "--repo",
+            tree.to_str().unwrap(),
+            "--attestation-key",
+            &key,
+        ])
+    };
+    let tree = |name: &str, files: &[(&str, &str)]| {
+        let t = w.dir.join(name);
+        git(&w.dir, &["init", "--quiet", "-b", "main", name]);
+        for (path, text) in files {
+            std::fs::write(t.join(path), text).unwrap();
+        }
+        git(&t, &["add", "--all"]);
+        git(&t, &["commit", "--quiet", "-m", "files"]);
+        t
+    };
+    let dirty = tree("dirty", &[("README.md", "committed\n")]);
+    std::fs::write(dirty.join("README.md"), "changed since\n").unwrap();
+    let said = refused(&init(&dirty));
+    assert!(said.contains("cannot have a log begun in it"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dirty.join("README.md")).unwrap(),
+        "changed since\n"
+    );
+    let attributed = tree(
+        "attributed",
+        &[("README.md", "committed\n"), (".gitattributes", "* text=auto\n")],
+    );
+    let head = git(&attributed, &["rev-parse", "HEAD"]);
+    let said = refused(&init(&attributed));
+    assert!(said.contains("cannot have a log begun in it"), "{said}");
+    assert!(said.contains(".gitattributes"), "{said}");
+    assert_eq!(git(&attributed, &["rev-parse", "HEAD"]), head);
+    for t in [&dirty, &attributed] {
+        assert!(!t.join("keys").exists() && !t.join("log").exists());
+    }
+}
+
+/// `publish --prune` drops each published run's rebuilt artifact by the store's own rule once the
+/// publication is pushed, and says which way it went: the bytes deleted where no other run names
+/// them — a second attempt that rebuilt other bytes to the same finding — and kept whole for a
+/// divergence, whose rebuilt artifact is what a dispute is answered with.
+#[test]
+fn publish_prunes_by_the_stores_rule_and_says_which_way_it_went() {
+    let w = World::new("prune-ways");
+    w.init(w.remote.to_str().unwrap());
+    w.config("divergences = \"feed\"\n");
+    let store = Store::local(&w.store).unwrap();
+    // Two attempts that agree, each of whose rebuilt artifacts is bytes of its own.
+    let first = Package::new("d", false);
+    let second = Package {
+        rebuilt: tgz(b"module.exports = 'd'\n", 3),
+        ..Package::new("d", false)
+    };
+    assert_ne!(first.rebuilt, second.rebuilt);
+    let (a, b) = ("1789000000-dddd0001", "1789007200-dddd0002");
+    rt().block_on(async {
+        attempt(&store, a, &first, "ck1:dddd", 'a', "2026-09-27T00:00:00Z", "mirror-only").await;
+        attempt(&store, b, &second, "ck1:dddd", 'b', "2026-09-27T02:00:00Z", "mirror-only").await;
+    });
+    w.attest(a, &[]);
+    let said = ok(&w.publish(&[a, "--prune"]));
+    assert!(
+        said.contains(&format!(
+            "pruned    run {a}'s rebuilt artifact; its digests remain"
+        )),
+        "{said}"
+    );
+    let run = w.run(a);
+    assert!(run.published.is_some());
+    let rebuilt = run.rebuild.unwrap();
+    assert!(!rebuilt.stored);
+    let hex = rebuilt.sha256.to_hex();
+    assert!(!w.store.join(format!("blobs/sha256/{}/{hex}", &hex[..2])).exists());
+    assert!(w.run(b).rebuild.unwrap().stored);
+
+    let (d, _) = pair(&w, &Package::new("x", true), "xxxx");
+    let said = ok(&w.publish(&[&d, "--prune"]));
+    assert!(
+        said.contains(&format!(
+            "kept      run {d}'s rebuilt artifact: a divergence keeps its bytes"
+        )),
+        "{said}"
+    );
+    assert!(w.run(&d).rebuild.unwrap().stored);
+}
+
+/// A dry run says what the publication would do, and does nothing: a heartbeat not due is said to
+/// be; a run a publication killed after its push logged is said to be completed, at its leaf; and
+/// a rebuilt artifact that would be uploaded is said to need a token where none is set.
+#[test]
+fn a_dry_run_says_what_it_would_do_and_does_nothing() {
+    let w = World::new("dry-says");
+    w.init(w.remote.to_str().unwrap());
+    ok(&w.publish(&["--heartbeat"]));
+    let before = (w.head(), w.commits());
+    let said = ok(&w.publish(&["--heartbeat", "--dry-run"]));
+    assert!(said.contains("heartbeat not due"), "{said}");
+    assert_eq!((w.head(), w.commits()), before);
+
+    let (a, _) = pair(&w, &Package::new("a", false), "aaaa");
+    let out = w
+        .command(&[
+            "publish",
+            "--store",
+            w.store.to_str().unwrap(),
+            "--repo",
+            w.remote.to_str().unwrap(),
+            &a,
+        ])
+        .env("TRIGON_PUBLISH_DIE_AT", "pushed")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(137), "{}", text(&out));
+    let before = (w.head(), w.commits());
+    let said = ok(&w.publish(&[&a, "--dry-run"]));
+    assert!(
+        said.contains(&format!("complete  run {a}: its record sha256:")),
+        "{said}"
+    );
+    assert!(said.contains("is logged at leaf 1"), "{said}");
+    assert!(w.run(&a).published.is_none(), "a dry run records nothing");
+    assert_eq!((w.head(), w.commits()), before);
+    ok(&w.publish(&[&a]));
+    assert!(w.run(&a).published.is_some());
+
+    // Rebuilt artifacts published as release assets, and no token.
+    let g = World::new("dry-no-token");
+    g.on_github("");
+    let (b, _) = pair(&g, &Package::new("b", false), "bbbb");
+    let said = ok(&g.trigon(&["publish", "--store", g.store.to_str().unwrap(), &b, "--dry-run"]));
+    assert!(
+        said.contains(
+            "neither GITHUB_TOKEN nor GH_TOKEN is set, and `trigon publish` itself would refuse \
+             to upload without one"
+        ),
+        "{said}"
+    );
+    assert_eq!(g.commits(), 1);
+}
+
+/// Another writer's upload of the asset's name, landing between the listing and this upload, is
+/// held to the artifact as any asset found is: the artifact itself is taken as the upload, and the
+/// record committed; other bytes, an asset GitHub reports no digest for, and one it has not
+/// finished are each refused with nothing committed, for the next publish to upload again.
+#[test]
+fn an_upload_that_loses_its_name_to_another_is_held_to_the_artifact() {
+    let w = World::new("release-race");
+    let gh = FakeGitHub::start();
+    w.on_github("");
+    gh.release(&format!("rebuilt-{}", this_month()), false);
+    let raced = |p: &Package, tag: &str, bytes: Vec<u8>, state: &str, no_digest: bool| {
+        let (id, _) = pair(&w, p, tag);
+        {
+            let mut s = gh.state();
+            s.race = Some((bytes, state.into()));
+            s.no_digest = no_digest;
+        }
+        let out = w.publish_with(&gh, &[&id]);
+        (id, out)
+    };
+    let pa = Package::new("a", false);
+    let (a, out) = raced(&pa, "aaaa", pa.rebuilt.clone(), "uploaded", false);
+    ok(&out);
+    assert!(w.run(&a).published.is_some());
+    assert_eq!(w.commits(), 2);
+
+    let pb = Package::new("b", false);
+    let other = Package::new("b", true).rebuilt;
+    let (b, out) = raced(&pb, "bbbb", other, "uploaded", false);
+    let said = refused(&out);
+    assert!(said.contains("so that one is not the artifact"), "{said}");
+    assert!(w.run(&b).published.is_none());
+
+    let pc = Package::new("c", false);
+    let (c, out) = raced(&pc, "cccc", pc.rebuilt.clone(), "uploaded", true);
+    let said = refused(&out);
+    assert!(
+        said.contains("another upload of that name reached release"),
+        "{said}"
+    );
+    assert!(said.contains("GitHub reports no digest for it"), "{said}");
+    assert!(w.run(&c).published.is_none());
+
+    let pd = Package::new("d", false);
+    let (d, out) = raced(&pd, "dddd", pd.rebuilt.clone(), "starter", false);
+    let said = refused(&out);
+    assert!(
+        said.contains("GitHub reports its state as `starter`, not uploaded"),
+        "{said}"
+    );
+    assert!(w.run(&d).published.is_none());
+    assert_eq!(w.commits(), 2);
 }

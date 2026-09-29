@@ -208,3 +208,35 @@ fn a_match_outcome_reads_back_as_itself() {
         "hyphens are not the spelling"
     );
 }
+
+#[test]
+fn an_exact_version_nobody_can_order_is_skipped_rather_than_contradicting() {
+    // "nightly" has no place in a dotted numeric order. Ordering it as text would put it somewhere
+    // wrong; skipping it leaves the claims that can be compared.
+    for evidence in [
+        [exact("nightly", "a"), exact("1.65", "b")],
+        [exact("1.65", "b"), exact("nightly", "a")],
+    ] {
+        assert_eq!(
+            resolve_toolchain("cargo", &evidence),
+            ToolchainResolution::Pinned {
+                version: "1.65".into()
+            }
+        );
+    }
+    let r = resolve_toolchain("cargo", &[exact("stable", "a")]);
+    assert_eq!(r, ToolchainResolution::Unconstrained, "a claim we cannot read is not a pin");
+    assert!(r.needs_help());
+}
+
+#[test]
+fn a_rung_that_names_a_commit_is_exact_and_one_that_names_a_tag_or_a_repository_is_not() {
+    use trigon_core::SourceDiscovery as S;
+    for s in [S::RegistryCommit, S::PublishedProvenance, S::Definition] {
+        assert!(s.is_exact(), "{s:?} identifies a commit on its own");
+    }
+    // A tag still has to be resolved to a commit, and a declared repository names none.
+    for s in [S::RegistryMetadata, S::ExactTag, S::PrefixedTag, S::FuzzyTag] {
+        assert!(!s.is_exact(), "{s:?} needs a commit resolved");
+    }
+}

@@ -229,4 +229,14 @@ mod tests {
         // the result is a path crates.io actually serves.
         assert!(!c["dl"].as_str().unwrap().contains('{'));
     }
+
+    #[test]
+    fn blank_lines_are_neither_served_nor_counted_as_withheld() {
+        // `withheld` is evidence the pin did something, so a blank line between two records is not
+        // a version the filter removed.
+        let spaced = format!("\n{}\n   \n", INDEX.lines().next().unwrap());
+        let (out, withheld, _unyanked) = filter_index(&spaced, "2026-12-01T00:00:00");
+        assert_eq!(withheld, 0);
+        assert_eq!(out.lines().count(), 1, "{out}");
+    }
 }

@@ -737,3 +737,468 @@ fn a_verdict_without_what_answers_it_fails_verification() {
     verify_alone(&eq).unwrap();
     verify_alone(&div).unwrap();
 }
+
+/// `bytes`, logged under `like`'s leaf with only the record digest changed: for a record file
+/// `record_leaf` would refuse to write a leaf for, or one whose leaf is beside the point.
+fn logged_as(bytes: Vec<u8>, like: &Made) -> Made {
+    Made {
+        leaf: trigon_attest::log::RecordLeaf {
+            record: sha256(&bytes),
+            ..like.leaf.clone()
+        },
+        digest: sha256(&bytes),
+        bytes,
+        evidence: like.evidence.clone(),
+    }
+}
+
+/// `m`'s record file with statement `at` replaced by `st`, signed with `key`, and the file encoded
+/// as it stands rather than assembled again: a record `Record::assemble` would refuse to write.
+fn with_statement(m: &Made, at: usize, st: &Statement, key: &LocalKey) -> Vec<u8> {
+    let mut record = Record::from_slice(&m.bytes).unwrap();
+    record.statements[at] = sign_statement(st, key).unwrap();
+    record.encode().unwrap()
+}
+
+/// Each failure has a short name of its own, which `--output json` carries for a machine to sort
+/// by.
+#[test]
+fn every_way_a_record_fails_has_a_name_of_its_own() {
+    let d = sha256(b"a record");
+    let at = LeafPos { log: 0, index: 1 };
+    let why = || "why".to_string();
+    let names: Vec<&str> = [
+        RecordFailure::Unlogged { record: d },
+        RecordFailure::LoggedTwice {
+            record: d,
+            leaves: vec![at, at],
+        },
+        RecordFailure::NotItsLeaf { leaf: d, file: d },
+        RecordFailure::Unreadable(why()),
+        RecordFailure::Signature(why()),
+        RecordFailure::Leaf(why()),
+        RecordFailure::Statements(why()),
+        RecordFailure::Recourse(why()),
+        RecordFailure::Map(why()),
+        RecordFailure::Evidence(why()),
+        RecordFailure::WrongKey(why()),
+    ]
+    .iter()
+    .map(RecordFailure::kind)
+    .collect();
+    assert_eq!(
+        names,
+        [
+            "unlogged",
+            "logged-twice",
+            "not-its-leaf",
+            "unreadable",
+            "signature",
+            "disagrees-with-leaf",
+            "statements",
+            "no-recourse",
+            "unsigned-map",
+            "evidence",
+            "wrong-key",
+        ]
+    );
+}
+
+/// An envelope a record holds is an in-toto statement, or the record is unreadable: another payload
+/// type, or a payload that is not a statement, is refused before any signature is trusted.
+#[test]
+fn an_envelope_that_is_not_an_in_toto_statement_makes_its_record_unreadable() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+
+    let mut record = Record::from_slice(&m.bytes).unwrap();
+    record.statements[1].payload_type = "application/json".into();
+    let e = verify_alone(&logged_as(record.encode().unwrap(), &m)).unwrap_err();
+    assert!(matches!(e, RecordFailure::Unreadable(_)), "{e}");
+    assert!(e.to_string().contains("`application/json`"), "{e}");
+
+    let mut record = Record::from_slice(&m.bytes).unwrap();
+    record.statements[1] = trigon_attest::Envelope::new(br#"{"not":"a statement"}"#, Vec::new());
+    let e = record.statement().unwrap_err();
+    assert!(e.to_string().contains("not an in-toto statement"), "{e}");
+    let e = verify_alone(&logged_as(record.encode().unwrap(), &m)).unwrap_err();
+    assert!(matches!(e, RecordFailure::Unreadable(_)), "{e}");
+    assert!(e.to_string().contains("not an in-toto statement"), "{e}");
+}
+
+/// A record is one result about one artifact. A statement naming two subjects is refused by the
+/// writer, which will not assemble or log it, and by every reader, however it came to be logged.
+#[test]
+fn a_statement_about_two_subjects_is_neither_written_nor_accepted() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let mut st = m.statement();
+    st.subject.push(pairs()["b"].subject());
+    let bytes = with_statement(&m, 0, &st, &k3);
+
+    let e = record_leaf(&bytes, &k3.key_id(), T0).unwrap_err();
+    assert!(e.to_string().contains("names 2 subjects"), "{e}");
+    let statements = Record::from_slice(&bytes).unwrap().statements;
+    let e = Record::assemble(statements).unwrap_err();
+    assert!(e.to_string().contains("names 2"), "{e}");
+
+    let e = verify_alone(&logged_as(bytes, &m)).unwrap_err();
+    assert!(matches!(e, RecordFailure::Leaf(_)), "{e}");
+    assert!(e.to_string().contains("names 2 subjects"), "{e}");
+}
+
+/// A record holds one result: two verdicts in one file is no record, and a writer will not
+/// assemble a statement that signs no purl, since no client could find it by one.
+#[test]
+fn a_record_is_one_result_that_can_be_found() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let mut record = Record::from_slice(&m.bytes).unwrap();
+    record.statements.push(record.statements[0].clone());
+    let e = record.statement().unwrap_err();
+    assert!(e.to_string().contains("holds 2 verdict"), "{e}");
+    let e = verify_alone(&logged_as(record.encode().unwrap(), &m)).unwrap_err();
+    assert!(matches!(e, RecordFailure::Unreadable(_)), "{e}");
+
+    let mut st = m.statement();
+    st.predicate.as_object_mut().unwrap().remove("purl");
+    let bytes = with_statement(&m, 0, &st, &k3);
+    let statements = Record::from_slice(&bytes).unwrap().statements;
+    let e = Record::assemble(statements).unwrap_err();
+    assert!(e.to_string().contains("signs no purl"), "{e}");
+}
+
+/// A statement signs each piece of evidence as `{"sha256": <64 lowercase hex>}` under its
+/// `evidence`. Anything else is not a digest this build can check, and is refused rather than read
+/// past — by the writer assembling the record, and by a reader comparing the map against it.
+#[test]
+fn evidence_signed_as_anything_but_a_sha256_is_refused_not_read_past() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let hex = m.statement().predicate["evidence"]["comparison"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (what, evidence) in [
+        ("not an object", serde_json::json!("sha256:0")),
+        (
+            "capitals",
+            serde_json::json!({ "comparison": { "sha256": hex.to_uppercase() } }),
+        ),
+        (
+            "too short",
+            serde_json::json!({ "comparison": { "sha256": &hex[..63] } }),
+        ),
+        (
+            "a second digest",
+            serde_json::json!({ "comparison": { "sha256": hex, "sha512": "00" } }),
+        ),
+        ("a bare string", serde_json::json!({ "comparison": hex })),
+    ] {
+        let mut st = m.statement();
+        st.predicate["evidence"] = evidence;
+        let bytes = with_statement(&m, 0, &st, &k3);
+        let statements = Record::from_slice(&bytes).unwrap().statements;
+        let e = Record::assemble(statements).unwrap_err();
+        assert!(e.to_string().contains("signs"), "{what}: {e}");
+        let e = verify_alone(&logged_as(bytes, &m)).unwrap_err();
+        assert!(matches!(e, RecordFailure::Unreadable(_)), "{what}: {e}");
+    }
+}
+
+/// A statement of a kind this build does not read, signed by the source's key, is read past: a
+/// later writer may add one, and a reader that refused it would refuse every record after it.
+#[test]
+fn a_signed_statement_of_a_kind_this_build_does_not_read_is_read_past() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let mut record = Record::from_slice(&m.bytes).unwrap();
+    let mut later: Statement =
+        serde_json::from_slice(&record.statements[1].decoded_payload().unwrap()).unwrap();
+    later.predicate_type = "https://example.com/a-later-kind/v1".into();
+    record.statements.push(sign_statement(&later, &k3).unwrap());
+    let bytes = Record::assemble(record.statements)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let with = Made {
+        leaf: leaf_for(&bytes, &k3, T0),
+        digest: sha256(&bytes),
+        bytes,
+        evidence: m.evidence.clone(),
+    };
+    let v = verify_alone(&with).unwrap();
+    assert_eq!(v.kind(), RecordKind::Verdict(Match::Normalized));
+    assert_eq!(v.record.statements.len(), 4);
+}
+
+/// What accompanies a verdict is compared as signed, and a value that is not a string is shown as
+/// its JSON, never as though it were absent.
+#[test]
+fn a_rebuild_of_another_run_is_refused_whatever_its_run_is_written_as() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let edited = resigned(&m, &k3, T0, None, |i, st| {
+        if i == 1 {
+            st.predicate["runDetails"]["metadata"]["invocationId"] = 7.into()
+        }
+    });
+    let e = verify_alone(&edited).unwrap_err();
+    assert!(matches!(e, RecordFailure::Statements(_)), "{e}");
+    assert!(
+        e.to_string()
+            .contains("of the run `7`, and its verdict of the run `1789000000-aaaaaaa1`"),
+        "{e}"
+    );
+}
+
+/// A falsifying command is an argv a client runs without parsing a shell line: one signed as
+/// anything else is no recourse.
+#[test]
+fn a_falsifying_command_that_is_not_an_argv_is_no_recourse() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let edited = resigned(&m, &k3, T0, None, |i, st| {
+        if i == 0 {
+            st.predicate["falsifyingCommand"] =
+                "trigon verify-attestation --lookup sha256:00".into()
+        }
+    });
+    let e = verify_alone(&edited).unwrap_err();
+    assert!(matches!(e, RecordFailure::Recourse(_)), "{e}");
+    assert!(e.to_string().contains("that is not an argv"), "{e}");
+}
+
+/// An unsigned map left empty disagrees with a statement that signs a subject and evidence: it is
+/// said as naming nothing, never passed as naming what the statement does.
+#[test]
+fn an_unsigned_map_emptied_disagrees_with_what_is_signed() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    for (says, edit) in [
+        (
+            "its unsigned subject names no digest",
+            (|r: &mut Record| r.subject.digests.clear()) as fn(&mut Record),
+        ),
+        ("its unsigned evidence map names nothing", |r| {
+            r.evidence.clear()
+        }),
+    ] {
+        let mut record = Record::from_slice(&m.bytes).unwrap();
+        edit(&mut record);
+        let e = verify_alone(&logged_as(record.encode().unwrap(), &m)).unwrap_err();
+        assert!(matches!(e, RecordFailure::Map(_)), "{says}: {e}");
+        assert!(e.to_string().contains(says), "{says}: {e}");
+    }
+}
+
+/// Evidence that is there and cannot be read is unchecked, with why, and never passed: the record
+/// still verifies on what it signs, as with evidence a clone left out.
+#[test]
+fn evidence_that_cannot_be_read_is_unchecked_and_never_passed() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy(&repo(), tmp.path());
+    let r = open(tmp.path());
+    let bytes = r.read_record(&digest("a2")).unwrap().unwrap();
+    let v = r.verify_record(&bytes).unwrap();
+    let comparison = v.evidence.iter().find(|e| e.name == "comparison").unwrap();
+    let path = tmp
+        .path()
+        .join(trigon_attest::evidence::evidence_path(&comparison.digest));
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let v = r.verify_record(&bytes).unwrap();
+    let state = &v
+        .evidence
+        .iter()
+        .find(|e| e.name == "comparison")
+        .unwrap()
+        .state;
+    assert!(
+        matches!(state, EvidenceState::Unreadable(why) if why.contains("not a regular file")),
+        "{state:?}"
+    );
+    assert!(!state.checked());
+    assert_eq!(v.unchecked().count(), 2);
+}
+
+/// Found under a key the signed subject does not carry, or under a purl or a package that is not
+/// one under the rule the record was signed under, a record is refused as found under the wrong
+/// key: never accepted for a key it is not about.
+#[test]
+fn a_record_is_never_accepted_under_a_key_it_does_not_carry() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    // The verdict and its observation about a subject with no sha1.
+    let without = resigned(&m, &k3, T0, None, |i, st| {
+        if i != 1 {
+            st.subject[0].digest.remove("sha1");
+        }
+    });
+    let sha1 = m.leaf.subject["sha1"].clone();
+    let tmp = tempfile::tempdir().unwrap();
+    small(tmp.path(), &[&without, &m]);
+    let r = open(tmp.path());
+    let check = |made: &Made, key: Key| {
+        let (pos, leaf) = r
+            .record_leaves()
+            .find(|(_, l)| l.record == made.digest)
+            .unwrap();
+        check_record(
+            &made.bytes,
+            Some((pos, leaf)),
+            ORIGIN,
+            r.keys(),
+            r.files(),
+            Some(&key),
+        )
+    };
+    let e = check(
+        &without,
+        Key::Digest {
+            algorithm: "sha1",
+            hex: sha1.clone(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(e, RecordFailure::WrongKey(_)), "{e}");
+    assert!(e.to_string().contains("names no sha1"), "{e}");
+
+    // A purl or a package that is none under the record's rule matches no leaf, and is refused
+    // where a record is checked against it all the same.
+    for key in [
+        Key::Purl("not a purl".into()),
+        Key::Package("not a purl".into()),
+    ] {
+        assert!(!key.matches(&m.leaf), "{key}");
+        let e = check(&m, key.clone()).unwrap_err();
+        assert!(matches!(e, RecordFailure::WrongKey(_)), "{key}: {e}");
+    }
+}
+
+/// An observation that signs no egress tier, where its verdict's run signs one, is not an
+/// observation of that run: refused, and its absence said as none.
+#[test]
+fn an_observation_that_signs_no_egress_tier_is_not_of_its_verdicts_run() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let edited = resigned(&m, &k3, T0, None, |i, st| {
+        if i == 2 {
+            st.predicate.as_object_mut().unwrap().remove("egressTier");
+        }
+    });
+    let e = verify_alone(&edited).unwrap_err();
+    assert!(matches!(e, RecordFailure::Statements(_)), "{e}");
+    assert!(
+        e.to_string()
+            .contains("under the egress tier none, and its verdict's run under `mirror-only`"),
+        "{e}"
+    );
+}
+
+/// Evidence read through another reader than the repository's own directory — a partial clone's
+/// objects — is held to its signed digest all the same: the bytes signed are returned, other bytes
+/// fail, and a file not there is unchecked.
+#[test]
+fn evidence_read_through_another_reader_is_held_to_its_signed_digest() {
+    use trigon_attest::evidence::read_evidence_from;
+    let r = open_golden();
+    let bytes = r.read_record(&digest("a2")).unwrap().unwrap();
+    let v = r.verify_record(&bytes).unwrap();
+    let report = v.evidence.iter().find(|e| e.name == "comparison").unwrap();
+    let (state, read) = read_evidence_from(r.files(), report).unwrap();
+    assert_eq!(state, EvidenceState::Matches);
+    assert_eq!(sha256(&read.unwrap()), report.digest);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let elsewhere = DirFiles::new(tmp.path());
+    assert_eq!(
+        read_evidence_from(&elsewhere, report).unwrap(),
+        (EvidenceState::Absent, None)
+    );
+    let path = trigon_attest::evidence::evidence_path(&report.digest);
+    crate::build::write(tmp.path(), &path, b"another report");
+    let e = read_evidence_from(&elsewhere, report).unwrap_err();
+    assert!(matches!(e, RecordFailure::Evidence(_)), "{e}");
+    let asset = v
+        .evidence
+        .iter()
+        .find(|e| e.name == "rebuiltArtifact")
+        .unwrap();
+    assert_eq!(
+        read_evidence_from(&elsewhere, asset).unwrap(),
+        (EvidenceState::ReleaseAsset, None)
+    );
+}
+
+/// A falsifying command too short to be `trigon verify-attestation` is no recourse, said as what it
+/// is and never read past its end; and the command alone, with no flag after it, resolves no
+/// record.
+#[test]
+fn a_falsifying_command_too_short_to_resolve_a_record_is_no_recourse() {
+    let k3 = attestation_key(3);
+    let m = verdict(&pairs()["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let cases: [(&[&str], &str); 3] = [
+        (&[], "is not `trigon verify-attestation`: ``"),
+        (&["trigon"], "is not `trigon verify-attestation`: `trigon`"),
+        (&["trigon", "verify-attestation"], "without `--lookup`"),
+    ];
+    for (argv, says) in cases {
+        let edited = resigned(&m, &k3, T0, None, |i, st| {
+            if i == 0 {
+                st.predicate["falsifyingCommand"]["argv"] = serde_json::json!(argv);
+            }
+        });
+        let e = verify_alone(&edited).unwrap_err();
+        assert!(matches!(e, RecordFailure::Recourse(_)), "{argv:?}: {e}");
+        assert!(e.to_string().contains(says), "{argv:?}: {e}");
+    }
+}
+
+/// A void or a withdrawal is one statement alone, whatever a second one is: even a statement of a
+/// kind this build reads past beside a verdict, signed by the source's key, makes it no void and no
+/// withdrawal.
+#[test]
+fn a_void_or_a_withdrawal_with_any_second_statement_is_refused() {
+    let p = pairs();
+    let k3 = attestation_key(3);
+    let v = void(&p["c"], &k3, "1789000000-cccccccc", T0);
+    let of = verdict(&p["a"], &k3, "1789000000-aaaaaaa1", None, T0);
+    let w = withdrawal(&of, &k3, T0 + 60);
+    for m in [&v, &w] {
+        verify_alone(m).unwrap();
+        let mut record = Record::from_slice(&m.bytes).unwrap();
+        let mut later = m.statement();
+        later.predicate_type = "https://example.com/a-later-kind/v1".into();
+        record.statements.push(sign_statement(&later, &k3).unwrap());
+        let e = verify_alone(&logged_as(record.encode().unwrap(), m)).unwrap_err();
+        assert!(matches!(e, RecordFailure::Statements(_)), "{e}");
+        assert!(
+            e.to_string().contains("holds one statement, and this one holds 2"),
+            "{e}"
+        );
+    }
+}
+
+/// A dispute pointer is somewhere a reader can open: `https://` and a place after it. The scheme
+/// alone points nowhere, and is no recourse.
+#[test]
+fn a_dispute_pointer_that_is_the_scheme_alone_is_no_recourse() {
+    let k3 = attestation_key(3);
+    let div = verdict(&pairs()["b"], &k3, "1789000000-bbbbbbbb", None, T0);
+    for (url, verifies) in [("https://", false), ("https://x", true)] {
+        let edited = resigned(&div, &k3, T0, None, |i, st| {
+            if i == 0 {
+                st.predicate["disputePointer"]["url"] = url.into();
+            }
+        });
+        match verify_alone(&edited) {
+            Ok(_) => assert!(verifies, "{url}"),
+            Err(e) => {
+                assert!(!verifies, "{url}: {e}");
+                assert!(matches!(e, RecordFailure::Recourse(_)), "{url}: {e}");
+                assert!(e.to_string().contains("not an `https://` URL"), "{url}: {e}");
+            }
+        }
+    }
+}

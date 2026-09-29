@@ -358,6 +358,65 @@ mod tests {
         );
     }
 
+    fn builder(root: &std::path::Path) -> Builder {
+        Builder {
+            image: "docker.io/library/node@sha256:00".into(),
+            egress: "mirror-only".into(),
+            work: root.join("work"),
+            store: root.join("store"),
+            timeout: 1,
+            definitions: None,
+            mirror_image: "localhost/trigon-mirror".into(),
+            model: None,
+            source_cache: None,
+            verbose: false,
+        }
+    }
+
+    /// The engine asks the builder, and the builder answers as the gate does.
+    #[test]
+    fn the_builder_refuses_to_confirm_what_the_gate_calls_void() {
+        let b = builder(std::path::Path::new("/nonexistent"));
+        let void = verdict("1790000000-aaaaaaaa", "open");
+        assert_eq!(Work::unconfirmable(&b, &void), unconfirmable(&void));
+        assert!(Work::unconfirmable(&b, &void).is_some());
+        let clean = verdict("1790000002-aaaaaaaa", "mirror-only");
+        assert_eq!(Work::unconfirmable(&b, &clean), None);
+        assert_eq!(b.kinds(), vec!["rebuild".to_string()]);
+        // What a log line shows of it: the image it builds in and the tier it builds at.
+        let shown = format!("{b:?}");
+        assert!(shown.contains("mirror-only") && shown.contains("node@sha256:00"), "{shown}");
+    }
+
+    /// The record the job hands the outbox is the one the run wrote, and the reference it hands
+    /// with it names that record's canonical bytes in the blob store.
+    #[tokio::test]
+    async fn a_run_is_read_back_and_kept_as_the_blob_its_reference_names() {
+        let dir = std::env::temp_dir().join(format!("trigon-worker-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = dir.join("store");
+        let r = verdict("1790000003-aaaaaaaa", "mirror-only");
+        Store::local(&store).unwrap().put_run(&r).await.unwrap();
+
+        let (record, record_ref) = read_back(&store, &r.id).await.unwrap();
+        assert_eq!(record.id, r.id);
+        assert_eq!(record.outcome.as_deref(), Some("divergent"));
+        let bytes = serde_json::to_vec(&record).unwrap();
+        assert_eq!(record_ref, trigon_store::digest_of(&bytes).to_hex());
+        let kept = Store::local(&store)
+            .unwrap()
+            .blobs()
+            .get(&trigon_store::digest_of(&bytes))
+            .await
+            .unwrap();
+        assert_eq!(&kept[..], &bytes[..]);
+
+        // A run the store does not hold is an error, said as the reading of it.
+        let e = read_back(&store, "1790000009-ffffffff").await.unwrap_err();
+        assert!(format!("{e:#}").starts_with("reading the run back"), "{e:#}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A confirmation whose run cannot be repeated goes dead at once, rather than being leased,
     /// refused and backed off until it has failed three times: the refusal is a fact about the
     /// stored record, and every worker running this Trigon gives it again.

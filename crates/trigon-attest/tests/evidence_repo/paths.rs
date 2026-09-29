@@ -188,3 +188,49 @@ fn an_index_file_reads_past_what_a_later_writer_adds_and_refuses_a_key_that_is_n
     let bad = br#"{"key":"sha1:0E7C","records":[]}"#;
     assert!(IndexFile::parse(bad).is_err());
 }
+
+/// A file that is not an index file at all is refused, and never read as an empty one.
+#[test]
+fn a_file_that_is_not_an_index_file_is_refused() {
+    for bytes in [&b"not json"[..], br#"{"key":"sha1:0e7c"}"#, b"[]"] {
+        let e = IndexFile::parse(bytes).unwrap_err();
+        assert!(
+            matches!(e, trigon_attest::log::LogError::Malformed(_)),
+            "{e}"
+        );
+        assert!(e.to_string().contains("not an index file"), "{e}");
+    }
+}
+
+/// A leaf whose keys cannot be filed — a digest of an algorithm no subject carries, a purl that is
+/// not one — is refused, naming its record, rather than filed under something else.
+#[test]
+fn a_leaf_whose_keys_cannot_be_filed_is_refused_naming_its_record() {
+    let source = verify_source(&repo(), &log_key().vkey(), None).unwrap();
+    let (_, leaf) = source.logs[0]
+        .log
+        .leaves()
+        .find_map(|(i, l)| match l {
+            trigon_attest::log::Leaf::Record(r) => Some((i, r.clone())),
+            _ => None,
+        })
+        .unwrap();
+    let keys = IndexKey::of_leaf(&leaf).unwrap();
+    assert_eq!(keys.len(), leaf.subject.len() + 2);
+    assert_eq!(keys[0].to_string(), keys[0].name());
+
+    let mut md5 = leaf.clone();
+    md5.subject.insert("md5".into(), "0".repeat(32));
+    let mut not_a_purl = leaf.clone();
+    not_a_purl.purl = "left-pad@1.3.0".into();
+    for bad in [md5, not_a_purl] {
+        let e = IndexKey::of_leaf(&bad).unwrap_err();
+        assert!(
+            e.to_string().contains(&format!(
+                "the record leaf for sha256:{} names a key that cannot be filed",
+                leaf.record.to_hex()
+            )),
+            "{e}"
+        );
+    }
+}

@@ -75,7 +75,10 @@ pub fn run(lockfile: &Path, store_path: &Path, format: &str) -> Result<()> {
         .enable_all()
         .build()?;
     let known = rt.block_on(async {
-        let store = Store::local(store_path)?;
+        // `existing`, not `local`: this only reads. `local` creates what it is pointed at, so a
+        // mistyped `--store` became an empty store, every package in the lockfile read as `never
+        // checked` of a store that had never existed, and the command exited 0.
+        let store = Store::existing(store_path)?;
         verdicts(&store).await
     })?;
 
@@ -419,6 +422,24 @@ mod tests {
         assert_eq!(t["packages"], 3);
         assert_eq!(t["tally"]["reproduced"], 1);
         assert_eq!(t["tally"]["never checked"], 1);
+    }
+
+    /// `clap` admits only the three formats, and `run` refuses anything else by name rather than
+    /// falling back to one of them, before it prints a line.
+    #[test]
+    fn a_format_it_does_not_write_is_refused_by_name() {
+        let d = std::env::temp_dir().join(format!("trigon-check-format-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("store")).unwrap();
+        let lock = d.join("package-lock.json");
+        std::fs::write(
+            &lock,
+            r#"{"packages": {"": {}, "node_modules/a": {"version": "1.0.0"}}}"#,
+        )
+        .unwrap();
+        let e = run(&lock, &d.join("store"), "yaml").unwrap_err().to_string();
+        assert!(e.contains("`yaml` is not a format this writes"), "{e}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// No rate, anywhere, over any of it.

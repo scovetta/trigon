@@ -303,5 +303,62 @@ mod tests {
         assert_eq!(first_that_wins([2, 3, 1, 0]), 1);
         assert_eq!(first_that_wins([2, 3]), 3);
         assert_eq!(first_that_wins([]), 0);
+        // 5, the tool failing, wins over every other code, 4 among them.
+        assert_eq!(first_that_wins([4, 1, 5, 3, 2]), 5);
+    }
+
+    /// A source no sync of has ever worked cannot answer, and says whether one was tried.
+    #[test]
+    fn a_source_no_sync_of_has_worked_is_unknown_and_says_why() {
+        let now = 100 * DAY;
+        let f = freshness();
+        let tried = SyncRecord {
+            last_attempt: Some(now - 60),
+            ..Default::default()
+        };
+        assert_eq!(
+            Standing::of(&f, Some(&tried), Some(now), now),
+            Standing::Unknown {
+                why: "no sync of it has worked".into()
+            }
+        );
+        let failed = SyncRecord {
+            failure: Some(Failure {
+                at: now - 60,
+                why: "could not be reached".into(),
+                refused: false,
+            }),
+            ..tried
+        };
+        assert_eq!(
+            Standing::of(&f, Some(&failed), Some(now), now),
+            Standing::Unknown {
+                why: "no sync of it has worked; the last failed: could not be reached".into()
+            }
+        );
+    }
+
+    /// Each standing has the name a report and `--output json` give it, and only a fresh or a
+    /// usable source is answered from.
+    #[test]
+    fn each_standing_has_its_name_and_only_fresh_or_usable_answers() {
+        let why = || "why".to_string();
+        for (s, key, answers) in [
+            (Standing::Fresh, "fresh", true),
+            (
+                Standing::Usable {
+                    failure: why(),
+                    stale_at: 0,
+                },
+                "usable",
+                true,
+            ),
+            (Standing::Frozen { newest: None }, "frozen", false),
+            (Standing::Unknown { why: why() }, "unknown", false),
+            (Standing::Refused { why: why() }, "refused", false),
+        ] {
+            assert_eq!(s.key(), key);
+            assert_eq!(s.answers(), answers, "{key}");
+        }
     }
 }

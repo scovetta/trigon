@@ -17,14 +17,14 @@
 //! of the source's GitHub repository whatever the consumer's own `rebuilt_artifacts` says — looked
 //! for in the series of the record's month and either side alone, in every repository that holds
 //! the record but a project's where the user's own resolved it — and asked for where that
-//! repository has none, where GitHub cannot be asked, and for an exact verdict, which asks GitHub
-//! nothing; a source configured by `evidence.toml`, by `TRIGON_EVIDENCE_REPO` and by `evidence
-//! add`, with an HTTPS URL, a `file://` URL and a local path; two sources, a divergence in either
-//! failing the check with the disagreement printed, an unreachable source that is not required
-//! leaving only its own answers missing, and a record signed with one source's key refused in
-//! another's repository; `--remote` proving inclusion and refusing a record it cannot prove; the
-//! record form reading a source's clones across repositories; and a sync removing the clone of a
-//! location no longer configured.
+//! repository has none and where GitHub cannot be asked, and taken from the upstream file for an
+//! exact verdict, which asks GitHub nothing; a source configured by `evidence.toml`, by
+//! `TRIGON_EVIDENCE_REPO` and by `evidence add`, with an HTTPS URL, a `file://` URL and a local
+//! path; two sources, a divergence in either failing the check with the disagreement printed, an
+//! unreachable source that is not required leaving only its own answers missing, and a record
+//! signed with one source's key refused in another's repository; `--remote` proving inclusion and
+//! refusing a record it cannot prove; the record form reading a source's clones across
+//! repositories; and a sync removing the clone of a location no longer configured.
 
 use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -782,6 +782,9 @@ struct Served {
     fail: Vec<(String, u16)>,
     /// Paths answered `302 Found`, and where to.
     redirect: Vec<(String, String)>,
+    /// Paths, by their end, answered with no `content-length`: the body is whatever comes before
+    /// the connection closes, as from a host that does not say how long it is.
+    no_length: Vec<String>,
     /// Every path asked for, in order.
     asked: Vec<String>,
 }
@@ -879,19 +882,24 @@ fn serve_one(
         }
     }
     let (status, body) = route(state, addr, &path);
-    let location = state
-        .lock()
-        .unwrap()
-        .redirect
-        .iter()
-        .find(|(p, _)| path == *p)
-        .map(|(_, to)| format!("location: {to}\r\n"))
-        .unwrap_or_default();
+    let (location, length) = {
+        let s = state.lock().unwrap();
+        let location = s
+            .redirect
+            .iter()
+            .find(|(p, _)| path == *p)
+            .map(|(_, to)| format!("location: {to}\r\n"))
+            .unwrap_or_default();
+        let length = match s.no_length.iter().any(|p| path.ends_with(p.as_str())) {
+            true => String::new(),
+            false => format!("content-length: {}\r\n", body.len()),
+        };
+        (location, length)
+    };
     let mut out = stream;
     write!(
         out,
-        "HTTP/1.1 {status} X\r\n{location}content-length: {}\r\nconnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status} X\r\n{location}{length}connection: close\r\n\r\n"
     )?;
     out.write_all(&body)?;
     out.flush()
@@ -2397,11 +2405,14 @@ fn the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record() {
 }
 
 /// An exact verdict's rebuilt artifact is the published artifact itself, byte for byte, which no
-/// evidence repository publishes again: its falsifying command asks GitHub for nothing, whatever
-/// the repository holds and whatever the consumer's own setting, and asks for `--rebuild <file>`,
-/// which the upstream file is, exit 5; given it, the claim is re-derived.
+/// evidence repository publishes again (§4.1): its falsifying command runs as signed, with the
+/// upstream file alone, which is its rebuilt artifact, and re-derives the claim, exit 0, asking
+/// GitHub for nothing, whatever the repository holds and whatever the consumer's own setting (§4.2
+/// item 6: the same signed command works either way). The upstream file is held to the digests
+/// the verdict signs as any is, so the wrong one is a check not made, exit 5; and `--rebuild`
+/// given is used as given.
 #[test]
-fn an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github() {
+fn an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github() {
     let t = Rebuilt::new("rebuilt-exact", Package::exact("x"));
     let w = &t.w;
     let url = github_url_to(w, &w.remote);
@@ -2412,20 +2423,30 @@ fn an_exact_verdicts_rebuilt_artifact_is_asked_for_and_never_of_github() {
     for s in SETTINGS {
         t.set(s);
         t.server.asked();
-        let said = exits(&t.run(None), 5);
-        assert!(said.contains("this verdict is exact"), "{s:?}: {said}");
-        assert!(said.contains("nothing was asked of GitHub"), "{s:?}: {said}");
+        let said = exits(&t.run(None), 0);
         assert!(
-            said.contains(&format!(
-                "{GIVE_REBUILD} — for an exact verdict, the upstream file itself"
-            )),
+            said.contains("the rebuilt artifact is the upstream file given: this verdict is exact"),
             "{s:?}: {said}"
         );
+        assert!(said.contains("nothing was asked of GitHub"), "{s:?}: {said}");
+        assert!(said.contains("rederived exact under"), "{s:?}: {said}");
+        assert!(said.contains("the claim holds"), "{s:?}: {said}");
+        assert!(!said.contains("--rebuild <file>"), "{s:?}: {said}");
         assert_eq!(t.server.asked(), Vec::<String>::new(), "{s:?}");
         let said = exits(&t.run(Some(&t.upstream)), 0);
         assert!(said.contains("the claim holds"), "{s:?}: {said}");
+        assert!(!said.contains("is the upstream file given"), "{s:?}: {said}");
         assert_eq!(t.server.asked(), Vec::<String>::new(), "{s:?}");
     }
+    // Another file as the upstream one is not the artifact the verdict is about: the check is not
+    // made, exit 5, and it is not blamed on the record.
+    std::fs::write(&t.upstream, Package::exact("y").upstream).unwrap();
+    let said = exits(&t.run(None), 5);
+    assert!(
+        said.contains("the upstream artifact given is not the one this statement is about"),
+        "{said}"
+    );
+    assert_eq!(t.server.asked(), Vec::<String>::new());
 }
 
 /// A source answers whether `evidence.toml` names it, `TRIGON_EVIDENCE_REPO` adds it, or `evidence
@@ -3673,4 +3694,883 @@ fn lookup_takes_every_form_of_key() {
     let said = exits(&w.trigon(&["lookup", &format!("sha256:{}", a.sha256())]), 0);
     assert!(!said.contains("collision-broken"), "{said}");
     exits(&w.trigon(&["lookup", "pkg:npm/demo-nothing@1.0.0"]), 2);
+}
+
+/// `verify-attestation --record <file> --source <name>` with no `--evidence` reads the source's
+/// clones as its last sync left them, and says what they rest on. A source not configured is the
+/// tool unable to check, 5; one never synced has no clone to read, 4; a stale one still has its
+/// record checked, and what it says of the artifact now is unknown, 4; one whose accepted
+/// checkpoint is gone after it synced is refused, never read against nothing, 4; and one trusted
+/// on first use is read under the keys its first sync recorded, and says so.
+#[test]
+fn the_record_form_reads_a_sources_clones_as_they_stand() {
+    let w = World::new("record-standing");
+    w.init();
+    let a = Package::new("a", false);
+    let ra = w.record_of(&w.publish_package(&a, "aaaa"));
+    let file = w.checkout("files").join(record_path(&ra));
+    let file = file.to_str().unwrap();
+    let record = |source: &str| {
+        w.trigon(&["verify-attestation", "--record", file, "--source", source])
+    };
+    ok(&w.add("main", &[w.remote.to_str().unwrap()], &[]));
+    let said = exits(&record("nowhere"), 5);
+    assert!(said.contains("the sources configured are main"), "{said}");
+    let said = exits(&record("main"), 4);
+    assert!(
+        said.contains("cannot be read; run `trigon evidence sync --source <name>`"),
+        "{said}"
+    );
+
+    ok(&w.sync(&[]));
+    let said = exits(&record("main"), 0);
+    assert!(said.contains("read from its clones in"), "{said}");
+    assert!(
+        said.contains("the chain is held to the checkpoint last accepted, in"),
+        "{said}"
+    );
+    assert!(said.contains("answer    normalized"), "{said}");
+
+    // Stale: the record is checked, and what the source says of the artifact now is not known.
+    w.synced_at("main", now() - 2 * 86_400);
+    let said = exits(&record("main"), 4);
+    assert!(said.contains(&format!("record    sha256:{ra}")), "{said}");
+    assert!(
+        said.contains("so what it says of the artifact now is not known"),
+        "{said}"
+    );
+    assert!(said.contains("answer    unknown"), "{said}");
+    assert!(!said.contains("answer    normalized"), "{said}");
+    w.synced_at("main", now());
+    exits(&record("main"), 0);
+
+    // The checkpoint last accepted gone and the clones kept: refused, as a sync refuses it.
+    std::fs::remove_file(w.state("main").join("checkpoint")).unwrap();
+    let said = exits(&record("main"), 4);
+    assert!(said.contains("do not verify"), "{said}");
+    assert!(said.contains("--accept-state-loss main"), "{said}");
+    assert!(!said.contains("answer    normalized"), "{said}");
+
+    // Trusted on first use: nothing to read it under until a sync recorded the keys it read.
+    ok(&w.trigon(&[
+        "evidence",
+        "add",
+        "tofu",
+        w.remote.to_str().unwrap(),
+        "--trust-on-first-use",
+    ]));
+    let said = exits(&record("tofu"), 4);
+    assert!(
+        said.contains("no sync has recorded the keys it read"),
+        "{said}"
+    );
+    ok(&w.sync(&["--source", "tofu"]));
+    let said = exits(&record("tofu"), 0);
+    assert!(
+        said.contains("resting on keys trusted on first use: read from"),
+        "{said}"
+    );
+    assert!(said.contains("by its first sync, and pinned since"), "{said}");
+
+    // A project's own source is named as the project's, from its clones and from a directory.
+    let url = github_url_to(&w, &w.remote);
+    let project = w.dir.join("project/.trigon");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("proj.checkpoint"), checkpoint_of(&w.remote)).unwrap();
+    std::fs::write(
+        project.join("evidence.toml"),
+        format!(
+            "[[source]]\nname = \"proj\"\nurls = [\"{url}\"]\nlog_key = \"{}\"\n\
+             attestation_key = \"{}\"\ncheckpoint = \"proj.checkpoint\"\n",
+            w.vkey(),
+            w.attestation().public_hex()
+        ),
+    )
+    .unwrap();
+    ok(&w.sync(&["--source", "proj"]));
+    let named = format!(
+        "source    `proj`, added by the project's own {}",
+        project.join("evidence.toml").display()
+    );
+    let said = exits(&record("proj"), 0);
+    assert!(said.contains(&named), "{said}");
+    let dir = w.checkout("proj-files");
+    let said = exits(
+        &w.trigon(&[
+            "verify-attestation",
+            "--record",
+            file,
+            "--evidence",
+            dir.to_str().unwrap(),
+            "--source",
+            "proj",
+        ]),
+        0,
+    );
+    assert!(said.contains(&named), "{said}");
+}
+
+/// `--remote` takes nothing an index file says on its word (`docs/19` §6), since whoever can push
+/// can alter one: an index file served under another key's path lists nothing for this one, and
+/// fails verification; an entry naming another artifact's record at that record's own leaf is no
+/// answer for this artifact, which is never checked; an entry at a leaf that logs no record, or in
+/// a log the chain does not reach, fails verification, as a file that is not an index file does;
+/// one longer than any index file is not read, and the source cannot answer; a record the index
+/// lists and the host does not serve is a deletion; and where no checkpoint is served, or the
+/// host redirects to plain HTTP elsewhere, nothing is read and the source cannot answer.
+#[test]
+fn remote_takes_nothing_an_index_file_says_on_its_word() {
+    let w = World::new("remote-index");
+    w.init();
+    let (a, b) = (Package::new("a", false), Package::new("b", false));
+    let ra = w.record_of(&w.publish_package(&a, "aaaa"));
+    w.publish_package(&b, "bbbb");
+    w.append_signed(
+        &w.remote,
+        vec![Leaf::Heartbeat(HeartbeatLeaf { time: now() })],
+        &[],
+    );
+    let server = Server::start();
+    let served = w.checkout("served");
+    server.state().serve("owner/trigon-evidence", &served);
+    let url = github_url_to(&w, &w.remote);
+    ok(&w.add("gh", &[url], &[]));
+    let remote = |key: &str| {
+        let mut c = w.command(&["lookup", key, "--remote"]);
+        c.env("TRIGON_EVIDENCE_RAW_BASE", server.url());
+        c.output().unwrap()
+    };
+    exits(&remote(&a.integrity()), 0);
+    let index_of = |p: &Package| {
+        let h = p.sha512();
+        served.join(format!("index/sha512/{}/{}/{h}.json", &h[..2], &h[2..4]))
+    };
+    let index = index_of(&a);
+    let original = std::fs::read(&index).unwrap();
+    let of_b = std::fs::read(index_of(&b)).unwrap();
+    let edited = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut f: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        edit(&mut f);
+        std::fs::write(&index, serde_json::to_vec(&f).unwrap()).unwrap();
+    };
+
+    // b's index file served where a's is.
+    std::fs::write(&index, &of_b).unwrap();
+    let said = exits(&remote(&a.integrity()), 4);
+    assert!(
+        said.contains("nothing it lists is taken for this key"),
+        "{said}"
+    );
+    assert!(said.contains("FAILED VERIFICATION"), "{said}");
+
+    // a's index listing b's record at b's own leaf: a leaf about b answers nothing about a.
+    let b_entries: serde_json::Value = serde_json::from_slice(&of_b).unwrap();
+    edited(&|f| f["records"] = b_entries["records"].clone());
+    let said = exits(&remote(&a.integrity()), 2);
+    assert!(said.contains("never checked"), "{said}");
+    assert!(!said.contains("answer    normalized"), "{said}");
+
+    // a's record listed at the leaf of the heartbeat, which logs no record.
+    edited(&|f| f["records"][0]["leaf"] = serde_json::json!(2));
+    let said = exits(&remote(&a.integrity()), 4);
+    assert!(
+        said.contains("which is a `heartbeat` leaf and names no record"),
+        "{said}"
+    );
+
+    // a's record listed in a log this chain does not reach.
+    edited(&|f| f["records"][0]["log"] = serde_json::json!("log/7"));
+    let said = exits(&remote(&a.integrity()), 4);
+    assert!(
+        said.contains("a log this source's chain does not reach"),
+        "{said}"
+    );
+
+    // Not an index file at all: nothing is taken from it, and it fails verification.
+    std::fs::write(&index, b"not an index file").unwrap();
+    let said = exits(&remote(&a.integrity()), 4);
+    assert!(said.contains("FAILED VERIFICATION"), "{said}");
+    assert!(!said.contains("answer    normalized"), "{said}");
+    // Longer than any index file is read: not read, and the source cannot answer.
+    std::fs::write(&index, vec![b' '; (4 << 20) + 1]).unwrap();
+    let said = exits(&remote(&a.integrity()), 4);
+    assert!(said.contains("answer    unknown"), "{said}");
+    assert!(
+        said.contains("it is longer than the 4194304 bytes read of one"),
+        "{said}"
+    );
+    // And so it is where the host does not say how long it is: the bound is held to what is read,
+    // not to what the host says. Under the bound, a file of no stated length is read whole.
+    let h = a.sha512();
+    let path = format!("index/sha512/{}/{}/{h}.json", &h[..2], &h[2..4]);
+    server.state().no_length.push(path);
+    let said = exits(&remote(&a.integrity()), 4);
+    assert!(said.contains("answer    unknown"), "{said}");
+    assert!(
+        said.contains("it is longer than the 4194304 bytes read of one"),
+        "{said}"
+    );
+    std::fs::write(&index, &original).unwrap();
+    exits(&remote(&a.integrity()), 0);
+    server.state().no_length.clear();
+
+    // Listed as it was, and its record file not served: a deletion.
+    std::fs::write(&index, &original).unwrap();
+    let rec = served.join(record_path(&ra));
+    let bytes = std::fs::read(&rec).unwrap();
+    std::fs::remove_file(&rec).unwrap();
+    let said = exits(&remote(&a.integrity()), 4);
+    assert!(said.contains("DELETED"), "{said}");
+    std::fs::write(&rec, bytes).unwrap();
+    exits(&remote(&a.integrity()), 0);
+
+    // No checkpoint served where the log should be, and one the host redirects to plain HTTP off
+    // this machine, which is not followed: nothing is read, and the source cannot answer.
+    let checkpoint = served.join("log/checkpoint");
+    let note = std::fs::read(&checkpoint).unwrap();
+    std::fs::remove_file(&checkpoint).unwrap();
+    let said = exits(&remote(&a.integrity()), 4);
+    assert!(said.contains("answer    unknown"), "{said}");
+    assert!(
+        said.contains("is not there: nothing is served where the log should be"),
+        "{said}"
+    );
+    std::fs::write(&checkpoint, note).unwrap();
+    let path = "/owner/trigon-evidence/HEAD/log/checkpoint".to_string();
+    server.state().redirect = vec![(
+        path.clone(),
+        format!("http://0.0.0.0:{}/elsewhere", server.addr.port()),
+    )];
+    server.asked();
+    let said = exits(&remote(&a.integrity()), 4);
+    assert!(said.contains("answer    unknown"), "{said}");
+    assert!(said.contains("it answered 302"), "{said}");
+    assert!(!server.asked().iter().any(|p| p == "/elsewhere"));
+    server.state().redirect.clear();
+    exits(&remote(&a.integrity()), 0);
+}
+
+/// A log read over `--remote` is frozen as a clone is (`docs/19` §6): one with no leaf, which
+/// says nothing of how recent it is, and one whose newest leaf is older than `frozen_after`,
+/// answer unknown, exit 4, whatever it holds. A source trusted on first use is read under the keys
+/// its first sync recorded, and its answers say so.
+#[test]
+fn remote_answers_unknown_for_a_frozen_log() {
+    let w = World::new("remote-frozen");
+    w.init();
+    let server = Server::start();
+    let url = github_url_to(&w, &w.remote);
+    ok(&w.trigon(&["evidence", "add", "gh", url, "--trust-on-first-use"]));
+    ok(&w.sync(&[]));
+    let remote = || {
+        server
+            .state()
+            .serve("owner/trigon-evidence", &w.checkout("served"));
+        let mut c = w.command(&["lookup", &format!("sha256:{}", "ab".repeat(32)), "--remote"]);
+        c.env("TRIGON_EVIDENCE_RAW_BASE", server.url());
+        c.output().unwrap()
+    };
+    let said = exits(&remote(), 4);
+    assert!(said.contains("answer    unknown"), "{said}");
+    assert!(said.contains("frozen: its log has no leaf"), "{said}");
+    assert!(
+        said.contains("resting on keys trusted on first use, read from"),
+        "{said}"
+    );
+
+    w.append_signed(
+        &w.remote,
+        vec![Leaf::Heartbeat(HeartbeatLeaf {
+            time: now() - 30 * 86_400,
+        })],
+        &[],
+    );
+    let said = exits(&remote(), 4);
+    assert!(said.contains("answer    unknown"), "{said}");
+    assert!(
+        said.contains("frozen: its newest leaf was logged"),
+        "{said}"
+    );
+    // Measured against `frozen_after`: sixty days, and it answers, never checked.
+    w.append_config("[freshness]\nfrozen_after = \"60d\"\n");
+    let said = exits(&remote(), 2);
+    assert!(said.contains("never checked"), "{said}");
+}
+
+/// The falsifying command resolves a subject by its sha256, as a record's command names it, and
+/// nothing else, 5. Where the subject has no current verdict or void to check, it says what the
+/// source says instead, with that answer's code: never checked, 2; a record of another predicate
+/// than the one asked for, the source's own answer; a withdrawal, 2. A JSON reader is never told
+/// that anything failed verification, which is exit 4's; what such a stop is called is not
+/// documented, so it is not held here. And without `--origin`, current records in two sources are
+/// refused as ambiguous, 5.
+#[test]
+fn the_falsifying_command_says_what_the_source_says_where_there_is_nothing_to_re_derive() {
+    let w = World::new("nothing-to-rederive");
+    w.init();
+    let a = Package::new("a", false);
+    let id = w.publish_package(&a, "aaaa");
+    let other = World::with("nothing-to-rederive-other", "example.com/other", 4);
+    other.init();
+    other.publish_package(&a, "oooo");
+    ok(&w.add("main", &[w.remote.to_str().unwrap()], &[]));
+    ok(&w.sync(&[]));
+    let subject = format!("sha256:{}", a.sha256());
+    let lookup = |extra: &[&str]| {
+        let mut args = vec!["verify-attestation", "--lookup"];
+        args.extend_from_slice(extra);
+        w.trigon(&args)
+    };
+    for key in [
+        format!("sha512:{}", a.sha512()),
+        a.integrity(),
+        a.target(),
+        "sha256:not-hex".into(),
+    ] {
+        let said = exits(&lookup(&[&key]), 5);
+        assert!(
+            said.contains("--lookup takes the subject's sha256, `sha256:<64 hex digits>`"),
+            "{key}: {said}"
+        );
+    }
+
+    // A record of another predicate than the one asked for: what the source says of the
+    // artifact, and its code.
+    let said = exits(
+        &lookup(&[
+            &subject,
+            "--predicate",
+            "https://trigon.dev/divergence/v2",
+            "--origin",
+            ORIGIN,
+        ]),
+        0,
+    );
+    assert!(
+        said.contains("no current record of that predicate is logged for it"),
+        "{said}"
+    );
+    assert!(said.contains("`main` says normalized"), "{said}");
+    // Nothing logged for it: never checked.
+    let nothing = format!("sha256:{}", "0".repeat(64));
+    let said = exits(&lookup(&[&nothing]), 2);
+    assert!(
+        said.contains("no current verdict or void is logged for it"),
+        "{said}"
+    );
+    // Nothing failed: the stop is not called what exit 4's are.
+    let not_failed = |doc: &serde_json::Value| {
+        assert_eq!(doc["exit"], 2, "{doc}");
+        let stopped = doc["stopped"].as_str().unwrap_or_else(|| panic!("{doc}"));
+        for failed in ["failed-verification", "log-failed-verification"] {
+            assert_ne!(stopped, failed, "{doc}");
+        }
+    };
+    let doc = json_of(&lookup(&[&nothing, "--output", "json"]), 2);
+    not_failed(&doc);
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("`main` says never checked"),
+        "{doc}"
+    );
+
+    // Two sources of two logs, each with a current record: which one the command was signed in is
+    // for `--origin` to say.
+    ok(&w.add_pinned(&other, "other", &[other.remote.to_str().unwrap()], &[]));
+    ok(&w.sync(&[]));
+    let said = exits(&lookup(&[&subject]), 5);
+    assert!(
+        said.contains("`main` and `other` each hold a current record for"),
+        "{said}"
+    );
+    assert!(said.contains("name the log it was published in with --origin"), "{said}");
+    exits(&lookup(&[&subject, "--origin", ORIGIN]), 0);
+    exits(&lookup(&[&subject, "--origin", "example.com/other"]), 0);
+
+    // Withdrawn: nothing to re-derive, and the withdrawal's code.
+    let clone = w.checkout("reader");
+    let file = clone.join(record_path(&w.record_of(&id)));
+    let said = ok(&w.trigon(&[
+        "attest",
+        "--withdraw",
+        file.to_str().unwrap(),
+        "--reason",
+        "withdrawn",
+        "--store",
+        w.store.to_str().unwrap(),
+        "--key",
+        w.key.to_str().unwrap(),
+    ]));
+    let envelope = w.store.join(
+        said.lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("withdrawals/")
+                    .map(|r| format!("withdrawals/{r}"))
+            })
+            .unwrap_or_else(|| panic!("no withdrawal filed: {said}")),
+    );
+    ok(&w.publish(&["--withdrawal", envelope.to_str().unwrap()]));
+    ok(&w.sync(&["--source", "main"]));
+    let said = exits(&lookup(&[&subject, "--origin", ORIGIN]), 2);
+    assert!(
+        said.contains("its only current record is a withdrawal, so there is no verdict to \
+                       re-derive"),
+        "{said}"
+    );
+    assert!(said.contains("`main` says withdrawn"), "{said}");
+    let doc = json_of(
+        &lookup(&[&subject, "--origin", ORIGIN, "--output", "json"]),
+        2,
+    );
+    not_failed(&doc);
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("`main` says withdrawn"),
+        "{doc}"
+    );
+}
+
+/// Log the record the attested run `id` makes, at `time`, on top of the log in `w`'s remote, with
+/// the evidence it names from the store, as `publish` would and whatever `publish` would refuse:
+/// the record's sha256, in hex.
+fn log_by_hand(w: &World, id: &str, time: u64) -> String {
+    let mut envelopes = Vec::new();
+    let mut dirs = vec![w.store.join("attestations")];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.parent().and_then(Path::file_name) == Some(id.as_ref())
+                && p.to_string_lossy().ends_with(".intoto.json")
+            {
+                envelopes.push(
+                    serde_json::from_slice::<trigon_attest::Envelope>(&std::fs::read(&p).unwrap())
+                        .unwrap(),
+                );
+            }
+        }
+    }
+    let record = trigon_attest::Record::assemble(envelopes).unwrap();
+    let bytes = record.encode().unwrap();
+    let digest = trigon_attest::Record::digest_of(&bytes).to_hex();
+    let key = trigon_attest::AttestationKey::from(w.attestation().public_key());
+    let leaf = trigon_attest::evidence::record_leaf(&bytes, &key.key_id(), time).unwrap();
+    let mut files = vec![(record_path(&digest), bytes.clone())];
+    for (name, value) in &record.evidence {
+        let hex = value.trim_start_matches("sha256:");
+        if let Ok(blob) = std::fs::read(w.store.join(format!("blobs/sha256/{}/{hex}", &hex[..2])))
+        {
+            files.push((
+                format!("evidence/sha256/{}/{}/{hex}", &hex[..2], &hex[2..4]),
+                blob,
+            ));
+        } else {
+            assert_eq!(name, "rebuiltArtifact", "{name} is not in the store");
+        }
+    }
+    w.append_signed(&w.remote, vec![Leaf::Record(leaf)], &files);
+    digest
+}
+
+/// Where a source holds more than one current record for an artifact — two records nothing
+/// supersedes, which `publish` never logs and a log can hold all the same — the falsifying command
+/// checks and shows each, and the more severe decides: in text one after another, numbered, and
+/// in JSON as a list; and asked for one predicate, the record of it alone is checked, and answers
+/// with what the source says of the artifact, the divergence among it.
+#[test]
+fn the_falsifying_command_shows_every_current_record_and_the_more_severe_decides() {
+    let w = World::new("two-current");
+    w.init();
+    let a = Package::new("a", false);
+    w.publish_package(&a, "aaaa");
+    // A divergence of the same artifact, signed, and logged beside it by hand, with its evidence.
+    let (id, _) = pair(&w, &Package::new("a", true), "dddd");
+    let digest = log_by_hand(&w, &id, now());
+    ok(&w.add("main", &[w.remote.to_str().unwrap()], &[]));
+    ok(&w.sync(&[]));
+
+    let subject = format!("sha256:{}", a.sha256());
+    let args = ["verify-attestation", "--lookup", &subject, "--origin", ORIGIN];
+    let said = exits(&w.trigon(&args), 1);
+    for line in [
+        "current   record 1 of 2: the source holds more than one current record for this \
+         artifact, so each is shown, and the more severe decides",
+        "current   record 2 of 2",
+        "claims    normalized",
+        "claims    divergent",
+        &format!("record    sha256:{digest}"),
+    ] {
+        assert!(said.contains(line), "{line}\n{said}");
+    }
+    let mut json = args.to_vec();
+    json.extend(["--output", "json"]);
+    let out = w.trigon(&json);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let docs: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(docs.len(), 2, "{docs:?}");
+    let mut claims: Vec<&str> = docs.iter().map(|d| d["claims"].as_str().unwrap()).collect();
+    claims.sort_unstable();
+    assert_eq!(claims, ["divergent", "normalized"]);
+
+    // One predicate: its record alone, answering with what the source says of the artifact.
+    let mut one = args.to_vec();
+    one.extend(["--predicate", "https://trigon.dev/equivalence/v2"]);
+    let said = exits(&w.trigon(&one), 1);
+    assert!(!said.contains("record 1 of 2"), "{said}");
+    assert!(said.contains("claims    normalized"), "{said}");
+    assert!(!said.contains("claims    divergent"), "{said}");
+    assert!(
+        said.contains("answer    divergent — what this source says of the artifact now, from 2 \
+                       record(s)"),
+        "{said}"
+    );
+
+    // Two records nothing supersedes: one supersession can replace only one of them, and none is
+    // published.
+    let (third, _) = pair(&w, &a, "a3a3");
+    let file = w.checkout("files").join(record_path(&digest));
+    w.attest(
+        &third,
+        &["--supersedes", file.to_str().unwrap(), "--reason", "set_changed"],
+    );
+    let out = w.publish(&[&third]);
+    let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains("its artifact has 2 records nothing supersedes, and one supersession can \
+                       replace only one of them"),
+        "{said}"
+    );
+}
+
+/// `--remote` follows a succession within the repository into the successor's directory, and
+/// holds what it reads to the state as a sync does: served as it was before the succession, the
+/// chain reaches no log of the accepted checkpoint's origin, and is refused as behind it; an index
+/// entry past the leaves of the log that ended fails verification; and a source whose accepted
+/// checkpoint is gone after it synced is refused, as its clones are.
+#[test]
+fn remote_follows_a_succession_in_place_and_refuses_what_is_behind_the_state() {
+    let w = World::new("remote-in-place");
+    w.init();
+    let a = Package::new("a", false);
+    w.publish_package(&a, "aaaa");
+    let before = w.checkout("before");
+    let next = w.dir.join("successor.key");
+    let successor = format!("{ORIGIN}/1");
+    ok(&w.trigon(&[
+        "log",
+        "keygen",
+        "--origin",
+        &successor,
+        "--out",
+        next.to_str().unwrap(),
+    ]));
+    ok(&w.trigon(&[
+        "log",
+        "succeed",
+        "--store",
+        w.store.to_str().unwrap(),
+        "--repo",
+        w.remote.to_str().unwrap(),
+        "--origin",
+        &successor,
+        "--log-key",
+        next.to_str().unwrap(),
+    ]));
+    let server = Server::start();
+    let after = w.checkout("after");
+    server.state().serve("owner/trigon-evidence", &after);
+    let url = github_url_to(&w, &w.remote);
+    ok(&w.add("gh", &[url], &[]));
+    let remote = || {
+        let mut c = w.command(&["lookup", &a.integrity(), "--remote"]);
+        c.env("TRIGON_EVIDENCE_RAW_BASE", server.url());
+        c.output().unwrap()
+    };
+    let said = exits(&remote(), 0);
+    assert!(said.contains("answer    normalized"), "{said}");
+    assert!(
+        said.contains(&format!("leaves of `{successor}`, read over HTTPS")),
+        "{said}"
+    );
+    ok(&w.sync(&[]));
+    exits(&remote(), 0);
+
+    server.state().serve("owner/trigon-evidence", &before);
+    let said = exits(&remote(), 4);
+    assert!(said.contains("answer    REFUSED"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "the checkpoint last accepted is for `{successor}`, and no log this source's chain \
+             reaches over HTTPS has that origin"
+        )),
+        "{said}"
+    );
+
+    server.state().serve("owner/trigon-evidence", &after);
+    exits(&remote(), 0);
+    // An index entry past the leaves of the log that has ended can only be a lie.
+    let sha512 = a.sha512();
+    let index = after.join(format!(
+        "index/sha512/{}/{}/{sha512}.json",
+        &sha512[..2],
+        &sha512[2..4]
+    ));
+    let original = std::fs::read(&index).unwrap();
+    let mut f: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    f["records"][0]["leaf"] = serde_json::json!(7);
+    std::fs::write(&index, serde_json::to_vec(&f).unwrap()).unwrap();
+    let said = exits(&remote(), 4);
+    assert!(said.contains("FAILED VERIFICATION"), "{said}");
+    assert!(
+        said.contains("and that log has ended: the record fails verification"),
+        "{said}"
+    );
+    std::fs::write(&index, &original).unwrap();
+    exits(&remote(), 0);
+    std::fs::remove_file(w.state("gh").join("checkpoint")).unwrap();
+    let said = exits(&remote(), 4);
+    assert!(said.contains("answer    REFUSED"), "{said}");
+    assert!(said.contains("--accept-state-loss gh"), "{said}");
+}
+
+/// What `lookup` and `check` say in JSON they say in text too: `--remote`'s three caveats whenever
+/// it is used, and with `-v` every file it asked the host for, each of which names the package
+/// asked about; a key given as a file, named by its digests, and a package name as every version
+/// of it; and a source whose last sync was refused as why a package fails a check.
+#[test]
+fn the_text_reports_say_what_the_json_does() {
+    let w = World::new("text-reports");
+    w.init();
+    let a = Package::new("a", false);
+    w.publish_package(&a, "aaaa");
+    let server = Server::start();
+    server
+        .state()
+        .serve("owner/trigon-evidence", &w.checkout("served"));
+    let url = github_url_to(&w, &w.remote);
+    ok(&w.add("gh", &[url], &[]));
+    let lock = lockfile(&w, &[("demo-a", &a.integrity())]);
+    let lock = lock.to_str().unwrap();
+    let remote = |args: &[&str]| {
+        let mut c = w.command(args);
+        c.env("TRIGON_EVIDENCE_RAW_BASE", server.url());
+        c.output().unwrap()
+    };
+    let said = exits(&remote(&["check", lock, "--remote"]), 0);
+    assert_eq!(said.matches("caveat    --remote").count(), 3, "{said}");
+    let said = exits(&remote(&["lookup", &a.integrity(), "--remote", "-v"]), 0);
+    assert!(
+        said.contains(&format!(
+            "fetched   {}/owner/trigon-evidence/HEAD/log/checkpoint",
+            server.url()
+        )),
+        "{said}"
+    );
+    let sha512 = a.sha512();
+    assert!(
+        said.contains(&format!(
+            "fetched   {}/owner/trigon-evidence/HEAD/index/sha512/{}/{}/{sha512}.json",
+            server.url(),
+            &sha512[..2],
+            &sha512[2..4]
+        )),
+        "{said}"
+    );
+
+    ok(&w.sync(&[]));
+    let file = w.dir.join(a.file());
+    std::fs::write(&file, &a.upstream).unwrap();
+    let said = exits(&w.trigon(&["lookup", file.to_str().unwrap()]), 0);
+    assert!(
+        said.contains(&format!("key       the file with sha256:{}", a.sha256())),
+        "{said}"
+    );
+    assert!(said.contains(&format!("sha512:{sha512}")), "{said}");
+    let said = exits(&w.trigon(&["lookup", "pkg:npm/demo-a"]), 0);
+    assert!(
+        said.contains("key       pkg:npm/demo-a, every version"),
+        "{said}"
+    );
+
+    // Rolled back behind what the sync accepted: refused, and the check fails for it, whatever
+    // another source answers.
+    let before = git(&w.remote, &["rev-parse", "main"]);
+    w.publish_package(&Package::new("b", false), "bbbb");
+    let mirror = w.dir.join("mirror.git");
+    git(
+        &w.dir,
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            w.remote.to_str().unwrap(),
+            mirror.to_str().unwrap(),
+        ],
+    );
+    ok(&w.add("mirror", &[mirror.to_str().unwrap()], &[]));
+    ok(&w.sync(&[]));
+    git(&w.remote, &["update-ref", "refs/heads/main", &before]);
+    exits(&w.sync(&[]), 4);
+    let said = exits(&w.trigon(&["check", lock]), 4);
+    assert!(
+        said.contains(&format!(
+            "  !  {} — normalized; fails the check: `gh` refused: its last sync failed \
+             verification",
+            a.target()
+        )),
+        "{said}"
+    );
+}
+
+/// A record checked from a source's clones answers unknown, exit 4, where the source cannot say
+/// what it says of the artifact now (`docs/19` §6): frozen, its newest leaf older than
+/// `frozen_after`, and refused, its last sync having failed verification. The record itself is
+/// still checked, and shown.
+#[test]
+fn the_record_form_answers_unknown_for_a_frozen_or_refused_source() {
+    let w = World::new("record-frozen");
+    w.init();
+    let (id, _) = pair(&w, &Package::new("a", false), "aaaa");
+    let digest = log_by_hand(&w, &id, now() - 30 * 86_400);
+    ok(&w.add("main", &[w.remote.to_str().unwrap()], &[]));
+    ok(&w.sync(&[]));
+    let file = w.checkout("files").join(record_path(&digest));
+    let record = || {
+        w.trigon(&[
+            "verify-attestation",
+            "--record",
+            file.to_str().unwrap(),
+            "--source",
+            "main",
+        ])
+    };
+    let said = exits(&record(), 4);
+    for line in [
+        format!("record    sha256:{digest}"),
+        "`main` is frozen: its newest leaf was logged".into(),
+        "longer ago than `frozen_after`, so what it says of the artifact now is not known".into(),
+        "answer    unknown".into(),
+    ] {
+        assert!(said.contains(&line), "{line}\n{said}");
+    }
+    // Measured against `frozen_after`: sixty days, and it answers.
+    w.append_config("[freshness]\nfrozen_after = \"60d\"\n");
+    exits(&record(), 0);
+
+    // Rolled back behind the checkpoint a sync accepted: that sync is refused, and so is every
+    // answer the source would give.
+    let before = git(&w.remote, &["rev-parse", "main"]);
+    w.append_signed(
+        &w.remote,
+        vec![Leaf::Heartbeat(HeartbeatLeaf { time: now() })],
+        &[],
+    );
+    ok(&w.sync(&[]));
+    git(&w.remote, &["update-ref", "refs/heads/main", &before]);
+    exits(&w.sync(&[]), 4);
+    let said = exits(&record(), 4);
+    assert!(said.contains(&format!("record    sha256:{digest}")), "{said}");
+    assert!(said.contains("`main` is refused: "), "{said}");
+    assert!(said.contains("answer    unknown"), "{said}");
+}
+
+/// A source of the command's origin whose last sync was refused is still one the command is
+/// answered in, found by the log key its last good sync recorded, and weighed as `lookup` weighs
+/// it: the record current in the other source is checked, and the command fails, exit 4, saying
+/// which source could not answer.
+#[test]
+fn the_falsifying_command_weighs_a_refused_source_of_its_origin() {
+    let w = World::new("weighs-refused");
+    w.init();
+    let a = Package::new("a", false);
+    w.publish_package(&a, "aaaa");
+    let mirror = w.dir.join("mirror.git");
+    git(
+        &w.dir,
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            w.remote.to_str().unwrap(),
+            mirror.to_str().unwrap(),
+        ],
+    );
+    let old = git(&mirror, &["rev-parse", "main"]);
+    ok(&w.add("main", &[w.remote.to_str().unwrap()], &[]));
+    ok(&w.add("mirror", &[mirror.to_str().unwrap()], &[]));
+    w.publish_package(&Package::new("b", false), "bbbb");
+    git(
+        &mirror,
+        &["fetch", "--quiet", w.remote.to_str().unwrap(), "main:main"],
+    );
+    ok(&w.sync(&[]));
+    // The mirror rolled back behind what its sync accepted.
+    git(&mirror, &["update-ref", "refs/heads/main", &old]);
+    exits(&w.sync(&[]), 4);
+    let subject = format!("sha256:{}", a.sha256());
+    let said = exits(
+        &w.trigon(&["verify-attestation", "--lookup", &subject, "--origin", ORIGIN]),
+        4,
+    );
+    assert!(
+        said.contains(&format!(
+            "resolved as the current record of {subject} in `main`"
+        )),
+        "{said}"
+    );
+    assert!(said.contains("`mirror` cannot answer"), "{said}");
+    assert!(said.contains("exit 4, not this record's 0"), "{said}");
+}
+
+/// `check` in text lists the packages that did not pass most severe first, in `docs/19` §6's order
+/// of its codes — a divergence, then a void, then one never checked — whatever order the lockfile
+/// names them in; one that passed is listed only when asked with `-v`; and the check exits with
+/// the most severe code, the divergence's.
+#[test]
+fn check_lists_what_did_not_pass_most_severe_first() {
+    let w = World::new("check-order");
+    w.init();
+    w.config("divergences = \"feed\"\n");
+    let (a, d, v, n) = (
+        Package::new("a", false),
+        Package::new("d", true),
+        Package::void("v"),
+        Package::new("n", false),
+    );
+    w.publish_package(&a, "aaaa");
+    w.publish_package(&d, "dddd");
+    w.publish_package(&v, "vvvv");
+    ok(&w.add("main", &[w.remote.to_str().unwrap()], &[]));
+    let lock = lockfile(
+        &w,
+        &[
+            ("demo-n", &n.integrity()),
+            ("demo-v", &v.integrity()),
+            ("demo-a", &a.integrity()),
+            ("demo-d", &d.integrity()),
+        ],
+    );
+    let said = exits(&w.trigon(&["check", lock.to_str().unwrap()]), 1);
+    let at = |p: &Package, status: &str| {
+        said.find(&format!("{} — {status}", p.target()))
+            .unwrap_or_else(|| panic!("{} {status}: {said}", p.target()))
+    };
+    assert!(at(&d, "divergent") < at(&v, "void"), "{said}");
+    assert!(at(&v, "void") < at(&n, "never checked"), "{said}");
+    assert!(
+        !said.contains(&format!("{} — normalized", a.target())),
+        "{said}"
+    );
+    let said = exits(&w.trigon(&["check", lock.to_str().unwrap(), "-v"]), 1);
+    assert!(
+        said.contains(&format!("{} — normalized", a.target())),
+        "{said}"
+    );
 }

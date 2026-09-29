@@ -331,4 +331,85 @@ mod tests {
         };
         assert!(without_yarn(&Strategy::Flow(flow), &prop_types()).is_none());
     }
+
+    #[test]
+    fn the_scripts_are_read_from_the_checkouts_manifest_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("trigon-yarn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // No manifest at all: nothing to rewrite with.
+        assert!(scripts_from_checkout(&dir).is_empty());
+
+        std::fs::write(dir.join("package.json"), "{ not json").unwrap();
+        assert!(scripts_from_checkout(&dir).is_empty());
+
+        std::fs::write(dir.join("package.json"), r#"{"name": "x"}"#).unwrap();
+        assert!(scripts_from_checkout(&dir).is_empty());
+
+        // A script that is not a string is not a command, and is dropped rather than guessed at.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts": {"build": "yarn umd", "umd": "browserify x", "weird": 7}}"#,
+        )
+        .unwrap();
+        let got = scripts_from_checkout(&dir);
+        assert_eq!(
+            got.into_iter().collect::<Vec<_>>(),
+            [
+                ("build".to_string(), "yarn umd".to_string()),
+                ("umd".to_string(), "browserify x".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn manual(deps: &str, build: &str) -> Strategy {
+        Strategy::Manual(crate::ManualStrategy {
+            location: crate::Location {
+                repo: "https://example.invalid/x".into(),
+                git_ref: "aa".into(),
+                subdir: None,
+            },
+            deps: deps.into(),
+            build: build.into(),
+            output_dir: None,
+            output_path: None,
+        })
+    }
+
+    #[test]
+    fn a_manual_strategy_is_rewritten_the_same_way_and_refused_the_same_way() {
+        // Raw scripts are what a model emits, and the rewrite is the same rewrite.
+        let got = without_yarn(&manual("npm ci", "yarn build"), &prop_types()).expect("rewritten");
+        let Strategy::Manual(m) = got else {
+            panic!("shape changed")
+        };
+        assert_eq!(m.deps, "npm ci");
+        assert_eq!(m.build, "( npm run umd && npm run umd-min )");
+
+        // Half a rewrite is worse than none: a recipe that still needs yarn to install fails
+        // later and looks like a different problem.
+        assert!(without_yarn(&manual("yarn install", "yarn build"), &prop_types()).is_none());
+        // And nothing to rewrite is `None`, not the same strategy handed back.
+        assert!(without_yarn(&manual("npm ci", "npm pack"), &prop_types()).is_none());
+    }
+
+    #[test]
+    fn with_no_scripts_or_no_steps_there_is_nothing_to_rewrite() {
+        assert!(without_yarn(&manual("", "yarn build"), &BTreeMap::new()).is_none());
+        let hint = Strategy::LocationHint(crate::LocationHint {
+            location: crate::Location::default(),
+            note: None,
+        });
+        assert!(without_yarn(&hint, &prop_types()).is_none());
+    }
+
+    #[test]
+    fn scripts_that_call_each_other_forever_are_refused_rather_than_followed() {
+        let cycle: BTreeMap<String, String> = [("a", "yarn b"), ("b", "yarn a")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert_eq!(rewrite("yarn a", &cycle, 0), None);
+    }
 }

@@ -303,26 +303,42 @@ impl PodmanBuild {
                 }
             }
         }
-        // Drain whatever the other pipe still holds after the first one closed.
-        while let Some(l) = err.next_line().await? {
-            push_to(
-                self.opts.on_event.as_ref(),
-                &self.events,
-                BuildEvent::Stderr(l.clone()),
-            );
-            append(log, &l, &self.named);
+        // Drain whatever the other pipe still holds after the first one closed, and wait for the
+        // process — **under the same deadline.** Neither used to have one, so a process that closed
+        // a stream, or both, and went on running was waited on for ever: the limit held only while
+        // both pipes were open, which made it something a build could opt out of.
+        let finished = tokio::time::timeout_at(deadline, async {
+            while let Some(l) = err.next_line().await? {
+                push_to(
+                    self.opts.on_event.as_ref(),
+                    &self.events,
+                    BuildEvent::Stderr(l.clone()),
+                );
+                append(log, &l, &self.named);
+            }
+            while let Some(l) = out.next_line().await? {
+                push_to(
+                    self.opts.on_event.as_ref(),
+                    &self.events,
+                    BuildEvent::Stdout(l.clone()),
+                );
+                append(log, &l, &self.named);
+            }
+            child.wait().await
+        })
+        .await;
+        match finished {
+            Ok(status) => Ok(status?.code().unwrap_or(-1)),
+            Err(_) => {
+                tracing::warn!(
+                    phase = ?phase,
+                    timeout_s = self.opts.limits.wall_clock.as_secs(),
+                    "wall-clock limit reached after the output closed, killing the build"
+                );
+                let _ = child.start_kill();
+                Err(SandboxError::Timeout(self.opts.limits.wall_clock))
+            }
         }
-        while let Some(l) = out.next_line().await? {
-            push_to(
-                self.opts.on_event.as_ref(),
-                &self.events,
-                BuildEvent::Stdout(l.clone()),
-            );
-            append(log, &l, &self.named);
-        }
-
-        let status = child.wait().await?;
-        Ok(status.code().unwrap_or(-1))
     }
 }
 

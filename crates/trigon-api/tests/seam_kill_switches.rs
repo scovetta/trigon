@@ -191,3 +191,79 @@ async fn the_switch_is_read_again_on_its_timer() {
     }
     assert_eq!(state, "set");
 }
+
+/// A reader that panicked has read nothing, which is `unknown` — never `clear`, and never an
+/// answer it did not give.
+#[tokio::test]
+async fn a_reader_that_panics_has_read_nothing_and_is_reported_unknown() {
+    let read: RepositorySwitchReader = Arc::new(|| panic!("`git` could not be run"));
+    let cached = trigon_api::cached_switch(read, Duration::from_secs(3600)).await;
+    let r = cached();
+    assert_eq!(r.state, SwitchState::Unknown);
+    assert!(r.as_of.is_none());
+    assert!(r.detail.contains("reading it failed"), "{}", r.detail);
+
+    let h = health(api_reading(false, Principal::Operator, Some(cached))).await;
+    assert_eq!(h["kill_switches"]["repository"]["state"], "unknown");
+}
+
+/// A reader that answered and then panicked has not answered again: it is `unknown`, keeping only
+/// where the repository is — never the last state it read, which may since have changed.
+#[tokio::test]
+async fn a_reader_that_panics_after_answering_is_unknown_and_not_its_last_answer() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let third = Arc::new(tokio::sync::Notify::new());
+    let (counted, begun) = (calls.clone(), third.clone());
+    let read: RepositorySwitchReader =
+        Arc::new(move || match counted.fetch_add(1, Ordering::SeqCst) {
+            0 => switch(SwitchState::Set),
+            n => {
+                if n >= 2 {
+                    begun.notify_one();
+                }
+                panic!("`git` could not be run")
+            }
+        });
+    let cached = trigon_api::cached_switch(read, Duration::from_millis(1)).await;
+    assert_eq!(cached().state, SwitchState::Set);
+
+    // Reads are one at a time, so once the third has begun the second's answer is the one held.
+    tokio::time::timeout(Duration::from_secs(60), third.notified())
+        .await
+        .expect("the switch was not read again on its timer");
+    let r = cached();
+    assert_eq!(r.state, SwitchState::Unknown);
+    assert_eq!(r.repository, "/srv/trigon-evidence.git");
+    assert!(r.as_of.is_none());
+    assert!(r.detail.contains("reading it failed"), "{}", r.detail);
+}
+
+/// The timer stops once nothing holds the switch it keeps, and lets the reader go: a server that
+/// has dropped it does not go on running `git` to read it.
+#[tokio::test]
+async fn the_timer_stops_once_nothing_holds_the_switch() {
+    /// Says when the reader it is captured in has been dropped.
+    struct Dropped(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    let (tx, dropped) = tokio::sync::oneshot::channel();
+    let guard = Dropped(Some(tx));
+    let read: RepositorySwitchReader = Arc::new(move || {
+        let _held = &guard;
+        switch(SwitchState::Clear)
+    });
+    let cached = trigon_api::cached_switch(read, Duration::from_millis(1)).await;
+    assert_eq!(cached().state, SwitchState::Clear);
+
+    drop(cached);
+    tokio::time::timeout(Duration::from_secs(60), dropped)
+        .await
+        .expect("the timer went on reading a switch nothing holds")
+        .expect("the reader said it was dropped");
+}

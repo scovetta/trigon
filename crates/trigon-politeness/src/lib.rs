@@ -206,7 +206,8 @@ pub fn note_failure(host: &str) {
 /// `retry_after` is what the server asked for. Honouring it is the difference between being
 /// throttled and being banned.
 pub fn throttled(host: &str, retry_after: Option<Duration>) {
-    let until = Instant::now() + retry_after.unwrap_or(BLIND_BACKOFF);
+    let wait = retry_after.unwrap_or(BLIND_BACKOFF);
+    let until = Instant::now() + wait;
     with(host, |h| {
         h.traffic.throttled += 1;
         // Never brought forward. A slot already further out was put there by a longer backoff or a
@@ -215,6 +216,15 @@ pub fn throttled(host: &str, retry_after: Option<Duration>) {
             h.next = Some(until);
         }
     });
+    // **And the shared slot, where there is one.** `reserve` reads the file first and never
+    // consults the map above while a directory is shared, so a backoff written only there held off
+    // nobody: the mirror, which always shares its cache directory, waited out its declared interval
+    // and asked again of a host that had just told it how long to wait.
+    if let Ok(g) = SHARED.lock()
+        && let Some(dir) = g.as_ref()
+    {
+        let _ = hold_shared(dir, host, now_micros() + wait.as_micros() as u64);
+    }
 }
 
 /// What this process has asked of each host so far.
@@ -567,6 +577,29 @@ fn slot_path(dir: &std::path::Path, host: &str) -> std::path::PathBuf {
 /// queue — a limiter that failed open on a permissions problem would be a control that reports
 /// success while doing nothing, which is the defect this repository keeps finding.
 fn reserve_shared(dir: &std::path::Path, host: &str, interval: Duration) -> Option<Duration> {
+    with_slot(dir, host, |stored, now| {
+        let at = stored.max(now);
+        (
+            at + interval.as_micros() as u64,
+            Duration::from_micros(at - now),
+        )
+    })
+}
+
+/// Push the shared slot for `host` out to `until`, in wall-clock microseconds.
+///
+/// Never brought forward, for the reason [`throttled`] gives about the in-memory one.
+fn hold_shared(dir: &std::path::Path, host: &str, until: u64) -> Option<()> {
+    with_slot(dir, host, |stored, _| (stored.max(until), ()))
+}
+
+/// Lock `host`'s slot file, hand `update` what it holds and the wall clock, and store the slot it
+/// returns. `None` where the file cannot be used at all.
+fn with_slot<R>(
+    dir: &std::path::Path,
+    host: &str,
+    update: impl FnOnce(u64, u64) -> (u64, R),
+) -> Option<R> {
     use std::io::{Read as _, Seek as _, Write as _};
     use std::os::unix::io::AsRawFd as _;
 
@@ -599,9 +632,7 @@ fn reserve_shared(dir: &std::path::Path, host: &str, interval: Duration) -> Opti
         // A fresh file, or a torn one. Either way the honest reading is "no slot claimed yet".
         Err(_) => 0,
     };
-    let now = now_micros();
-    let at = stored.max(now);
-    let next = at + interval.as_micros() as u64;
+    let (next, answer) = update(stored, now_micros());
     let written = file
         .seek(std::io::SeekFrom::Start(0))
         .and_then(|_| file.write_all(&next.to_le_bytes()))
@@ -610,7 +641,7 @@ fn reserve_shared(dir: &std::path::Path, host: &str, interval: Duration) -> Opti
     if !written {
         return None;
     }
-    Some(Duration::from_micros(at - now))
+    Some(answer)
 }
 
 #[cfg(test)]
@@ -620,13 +651,27 @@ mod shared_across_processes {
     // two locks would be two groups of tests racing rather than one group serialized.
     use super::tests::guard;
 
-    fn dir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir()
-            .join(format!("trigon-pace-{}", std::process::id()))
-            .join(name);
+    /// A directory of this test's own, removed when the test is done with it.
+    struct Dir(std::path::PathBuf);
+
+    impl std::ops::Deref for Dir {
+        type Target = std::path::PathBuf;
+        fn deref(&self) -> &std::path::PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn dir(name: &str) -> Dir {
+        let d = std::env::temp_dir().join(format!("trigon-pace-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        d
+        Dir(d)
     }
 
     #[test]
@@ -696,5 +741,79 @@ mod shared_across_processes {
             reserve_shared(missing, "a.test", Duration::from_millis(100)),
             None
         );
+    }
+
+    #[test]
+    fn a_shared_directory_is_where_this_processs_own_slots_are_claimed() {
+        // `share_with` is how the mirror joins the line every other mirror in a sweep stands in.
+        // A slot this process claims through `pace` has to land in the file, or the next container
+        // starts from an empty queue.
+        let _g = guard();
+        reset();
+        set_min_interval_for(Route::Index, Duration::from_millis(100));
+        let d = dir("joined");
+        share_with(d.clone());
+        let first = reserve("joined.test", Route::Index);
+        // Another process, which shares nothing with this one but the directory.
+        let other = reserve_shared(&d, "joined.test", Duration::from_millis(100));
+        reset();
+        assert_eq!(first, Duration::ZERO);
+        let other = other.expect("the slot file is usable");
+        assert!(
+            other >= Duration::from_millis(90),
+            "the other process did not queue behind this one: {other:?}"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_shared_leaves_the_in_memory_queue_in_force() {
+        // A cache that is not a directory must not turn the limiter off: this process still paces
+        // itself, which is slower to notice than a shared queue and never faster than no limit.
+        let _g = guard();
+        reset();
+        set_min_interval_for(Route::Index, Duration::from_millis(100));
+        let d = dir("not-a-directory");
+        let file = d.join("file");
+        std::fs::write(&file, b"").unwrap();
+        share_with(file.join("cache"));
+        let first = reserve("fallback.test", Route::Index);
+        let second = reserve("fallback.test", Route::Index);
+        reset();
+        assert_eq!(first, Duration::ZERO);
+        assert!(second > Duration::from_millis(60), "{second:?}");
+        assert!(!file.join("cache").exists());
+    }
+
+    #[test]
+    fn a_host_that_says_slow_down_holds_off_every_process_sharing_the_queue() {
+        // The mirror always shares its cache directory, and `reserve` reads the file before the
+        // map. A 429 recorded only in the map held off nobody: the mirror waited its declared 20ms
+        // and asked again of a host that had just said how long to wait.
+        let _g = guard();
+        reset();
+        let d = dir("throttled");
+        share_with(d.clone());
+        throttled("busy.test", Some(Duration::from_secs(5)));
+        let here = reserve("busy.test", Route::Bytes);
+        let other = reserve_shared(&d, "busy.test", Duration::from_millis(20));
+        reset();
+        assert!(here > Duration::from_secs(4), "this process: {here:?}");
+        let other = other.expect("the slot file is usable");
+        assert!(other > Duration::from_secs(4), "another process: {other:?}");
+    }
+
+    #[test]
+    fn a_lighter_backoff_does_not_shorten_the_shared_one() {
+        // The file keeps the rule the map keeps: a slot further out was put there by a longer wait
+        // or a deeper queue, and a second, smaller `Retry-After` does not undo it.
+        let _g = guard();
+        reset();
+        let d = dir("never-forward");
+        share_with(d.clone());
+        throttled("slow.test", Some(Duration::from_secs(30)));
+        throttled("slow.test", Some(Duration::from_secs(1)));
+        let wait = reserve_shared(&d, "slow.test", Duration::from_millis(20));
+        reset();
+        assert!(wait.unwrap() > Duration::from_secs(25), "{wait:?}");
     }
 }

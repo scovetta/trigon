@@ -1050,6 +1050,174 @@ mod tests {
     }
 
     #[test]
+    fn a_character_cut_by_the_window_edge_is_not_binary_and_a_bad_byte_before_it_is() {
+        // One ASCII byte first, so the window's last byte is the first half of an `é`.
+        let mut s = b"a".to_vec();
+        s.extend("é".repeat(4100).bytes());
+        assert!(
+            std::str::from_utf8(&s[..8 << 10]).is_err(),
+            "the fixture must cut a character"
+        );
+        assert!(
+            binary_because(&s).is_none(),
+            "a character cut by the window edge was read as binary"
+        );
+        // Excusing the edge is not excusing everything: a bad byte well inside the window is still
+        // bytes that are not text.
+        s[10] = 0xff;
+        assert!(binary_because(&s).is_some_and(|w| w.contains("UTF-8")));
+    }
+
+    #[test]
+    fn an_artifact_over_the_cap_is_refused_by_the_reader_whatever_its_record_said() {
+        // The route refuses from the record's size before fetching; a record can carry a wrong
+        // size, and this is the check that actually holds.
+        let e = read(vec![0u8; MAX_ARTIFACT + 1], "pkg.zip", "any").unwrap_err();
+        assert!(e.contains("will not parse anything over"), "{e}");
+        assert!(e.contains("still downloadable"), "{e}");
+        let e = names(vec![0u8; MAX_ARTIFACT + 1], "pkg.zip").unwrap_err();
+        assert!(e.contains("will not parse anything over"), "{e}");
+    }
+
+    #[test]
+    fn a_member_over_the_cap_is_refused_as_too_large_and_never_as_absent() {
+        let big = vec![b'x'; MAX_MEMBER + 1];
+        let mut tar = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tar);
+            for (name, body) in [
+                ("package/big.bin", &big[..]),
+                ("package/small.txt", b"ok\n"),
+            ] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(body.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                b.append_data(&mut h, name, body).unwrap();
+            }
+            b.finish().unwrap();
+        }
+        let e = read(tar.clone(), "pkg.tar", "package/big.bin").unwrap_err();
+        assert!(e.contains("will not return anything over"), "{e}");
+        assert!(
+            !e.contains("no member"),
+            "a member too large was reported absent: {e}"
+        );
+        // The cap is on the member asked for, not on the artifact holding it.
+        assert_eq!(read(tar, "pkg.tar", "package/small.txt").unwrap(), b"ok\n");
+    }
+
+    #[test]
+    fn more_differing_regions_than_are_shown_are_counted_rather_than_dropped() {
+        // Twenty differences far enough apart that none coalesces: the view shows as many windows
+        // as it shows, and says how many it left.
+        let a = vec![0u8; 40_000];
+        let mut b = a.clone();
+        for i in 0..20 {
+            b[1_000 + i * 1_500] = 1;
+        }
+        let d = hex_diff(Some(&a), Some(&b));
+        assert_eq!(d.differing_runs, 20);
+        assert_eq!(d.differing_bytes, 20);
+        assert_eq!(d.regions.len() + d.regions_omitted, 20);
+        assert!(
+            d.regions_omitted > 0,
+            "every region fitted, so nothing was tested"
+        );
+        assert!(d.regions.len() <= MAX_HEX_REGIONS);
+    }
+
+    #[test]
+    fn a_member_on_one_side_shows_that_sides_bytes_and_nothing_for_the_other() {
+        let d = hex_diff(Some(b"only upstream has this"), None);
+        assert_eq!(d.regions.len(), 1);
+        assert_eq!(d.regions[0].offset, 0);
+        assert_eq!(d.regions[0].upstream, hex(b"only upstream has this"));
+        assert_eq!(d.regions[0].rebuild, "");
+        assert_eq!(
+            d.differing_bytes, 22,
+            "every byte of a one-sided member is a difference"
+        );
+        assert_eq!(d.first_difference, None);
+
+        // An empty member on one side is a member, with no bytes to show.
+        let empty = hex_diff(None, Some(b""));
+        assert!(empty.regions.is_empty());
+        assert_eq!(empty.differing_bytes, 0);
+
+        // And a window into two empty members is an empty window, not a panic.
+        let win = hex_window(Some(b""), Some(b""), 4096);
+        assert!(win.regions.is_empty());
+        assert_eq!(win.shown_bytes, 0);
+    }
+
+    #[test]
+    fn a_view_asked_for_an_offset_shows_the_window_there() {
+        let a = vec![0u8; 20_000];
+        let mut b = a.clone();
+        b[100] = 1;
+        let v = view("x.bin", Some(a), Some(b), Some(12_345));
+        let hex = v.hex.expect("a hex view");
+        assert_eq!(hex.regions.len(), 1);
+        assert_eq!(hex.regions[0].offset, 12_345 & !0xF);
+        assert_eq!(hex.regions_omitted, 0, "a window is not an omission");
+        assert_eq!(
+            hex.first_difference,
+            Some(100),
+            "and the counts are the whole file's"
+        );
+    }
+
+    #[test]
+    fn a_text_member_past_the_text_cap_says_how_much_of_it_was_read() {
+        // Identical for the first `MAX_TEXT` bytes and different after: what was read agrees, and
+        // the view says it read only part rather than calling the two the same.
+        let up = "same\n".repeat((MAX_TEXT / 5) + 1_000).into_bytes();
+        let mut rb = up.clone();
+        rb.extend_from_slice(b"only the rebuild has this line\n");
+        let t = text_diff(Some(&up), Some(&rb));
+        assert!(t.hunks.is_empty());
+        let said = t.truncated.expect("the view did not say it read only part");
+        assert!(said.contains(&human(MAX_TEXT as u64)), "{said}");
+    }
+
+    #[test]
+    fn there_are_two_sides_and_no_third() {
+        let r = trigon_store::RunRecord::new(
+            "1700000001-aa",
+            "pkg:npm/a@1",
+            trigon_store::ArtifactRef {
+                name: "a.tgz".into(),
+                sha256: Digest::from_bytes([1; 32]),
+                bytes: 1,
+                stored: true,
+            },
+            trigon_store::Environment {
+                base_image: "x@sha256:0".into(),
+                derived_image: None,
+                egress: "mirror".into(),
+                isolation: "podman".into(),
+                attestable: true,
+                registry_moment: None,
+                pin: None,
+                guard_manifest: None,
+                guarded_members: None,
+            },
+            "2026-01-01T00:00:00Z",
+        );
+        assert_eq!(
+            side_digest(&r, "upstream"),
+            Some((Digest::from_bytes([1; 32]), "a.tgz".into()))
+        );
+        assert_eq!(
+            side_digest(&r, "rebuild"),
+            None,
+            "no rebuild artifact, no rebuild side"
+        );
+        assert_eq!(side_digest(&r, "sideways"), None);
+    }
+
+    #[test]
     fn alignment_finds_an_insertion_rather_than_rewriting_the_tail() {
         let a = lines("one\ntwo\nthree");
         let b = lines("one\ninserted\ntwo\nthree");

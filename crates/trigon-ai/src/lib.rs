@@ -20,6 +20,9 @@ mod provider;
 mod repair;
 mod transcript;
 
+#[cfg(test)]
+mod test_log;
+
 pub use builder::{Candidate, Task, candidate_schema, parse_candidate, prompt, propose};
 pub use copilot::Copilot;
 pub use eval::{Capability, Change, Flips, Labelled, Observation, Rate, Scorecard, flips, score};

@@ -374,6 +374,29 @@ fn a_continuation_logged_before_the_log_end_is_refused() {
     assert!(matches!(e, LogError::Rule(_)), "{e}");
 }
 
+/// No earlier than the log-end is all a continuation's time is held to: one logged in the same
+/// second is followed, and a successor not yet begun is begun with it.
+#[test]
+fn a_continuation_logged_in_the_same_second_as_the_log_end_is_followed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old = ended(tmp.path(), &[], log_end(T0 + 600));
+    let cont = continuation_of(&old, T0 + 600, &[log_key(), successor_key()]);
+    successor_at(tmp.path(), "log/1", successor_key(), &[cont]);
+    let source = verify_source(tmp.path(), &log_key().vkey(), None).unwrap();
+    let dirs: Vec<&str> = source.logs.iter().map(|c| c.dir.as_str()).collect();
+    assert_eq!(dirs, ["log", "log/1"]);
+
+    std::fs::remove_file(tmp.path().join("log/1/checkpoint")).unwrap();
+    let begun = trigon_attest::log::verify_beginning(
+        &DirFiles::new(tmp.path().join("log/1")),
+        &successor_key().vkey(),
+        1,
+        &source.logs[0].log,
+    )
+    .unwrap();
+    assert_eq!(begun.checkpoint().size, 1);
+}
+
 #[test]
 fn a_successor_with_the_old_logs_origin_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
@@ -695,4 +718,38 @@ impl CloneForTest for LogSigner {
     fn clone_for_test(&self) -> LogSigner {
         LogSigner::from_skey(&self.to_skey()).unwrap()
     }
+}
+
+/// A key history read back from what a sync recorded is held to the shape following the log's key
+/// changes leaves: at least one key, the first made current by no change, the last retired by
+/// none. A history of any other shape is refused, never read as some history.
+#[test]
+fn a_recorded_key_history_of_any_other_shape_is_refused() {
+    use trigon_attest::log::KeyEpoch;
+    let epoch = |n: u8, from: Option<LeafPos>, until: Option<LeafPos>| KeyEpoch {
+        key: key(n),
+        from,
+        until,
+    };
+    for (epochs, says) in [
+        (Vec::new(), "it has no key"),
+        (
+            vec![epoch(3, Some(at(0, 1)), None)],
+            "its first key was made current by a key change",
+        ),
+        (
+            vec![epoch(3, None, Some(at(0, 1)))],
+            "its last key is retired",
+        ),
+    ] {
+        let e = KeyHistory::from_epochs(epochs).unwrap_err();
+        assert!(matches!(e, LogError::Malformed(_)), "{says}: {e}");
+        assert!(e.to_string().contains(says), "{says}: {e}");
+    }
+    let history = KeyHistory::from_epochs(vec![
+        epoch(3, None, Some(at(0, 1))),
+        epoch(4, Some(at(0, 1)), None),
+    ])
+    .unwrap();
+    assert_eq!(history.current(), &key(4));
 }

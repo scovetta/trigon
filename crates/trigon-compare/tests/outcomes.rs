@@ -398,6 +398,32 @@ fn executable_differences_are_counted_apart() {
 }
 
 #[test]
+fn a_member_is_classed_by_its_own_names_extension_in_any_case() {
+    use trigon_compare::ContentKind::{self, *};
+    let kind = |p: &str| ContentKind::classify(&trigon_core::EntryPath::from(p));
+    for (path, want) in [
+        ("lib/net45/Foo.DLL", Executable),
+        ("pkg/native/libx.so", Executable),
+        ("com/x/Main.class", Executable),
+        ("src/lib.rs", Source),
+        ("pkg/x.py", Source),
+        ("include/x.H", Source),
+        ("README.md", Documentation),
+        ("docs/guide.RST", Documentation),
+        ("LICENSE.txt", Documentation),
+        ("Cargo.toml", Metadata),
+        ("package.json", Metadata),
+        ("pkg/setup.cfg", Metadata),
+        ("logo.png", Binary),
+        // A directory's extension says nothing about the file inside it.
+        ("lib.so/notes", Binary),
+        ("src.rs/logo.png", Binary),
+    ] {
+        assert_eq!(kind(path), want, "{path}");
+    }
+}
+
+#[test]
 fn nested_members_are_named_through_the_container() {
     // A difference inside a gem should name the file, not the container.
     let build = |inner_body: &[u8]| {
@@ -441,6 +467,50 @@ fn nested_members_are_named_through_the_container() {
         named.iter().any(|n| n == "data.tar.gz!lib/rails.rb"),
         "expected the inner file to be named, got {named:?}"
     );
+}
+
+#[test]
+fn a_renamed_member_keeps_the_name_each_artifact_holds_it_under() {
+    // A member is reported under the name the set gave it, which neither artifact carries; a
+    // reader going back to the bytes needs each side's own spelling, and only where it differs.
+    use std::io::Write as _;
+    let nupkg = |folder: &str| {
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        w.start_file("Demo.nuspec", opts).unwrap();
+        w.write_all(b"<package/>\n").unwrap();
+        w.start_file(format!("lib/{folder}/Demo.dll"), opts).unwrap();
+        w.write_all(b"the same assembly").unwrap();
+        w.finish().unwrap().into_inner()
+    };
+    let c = compare_bytes(
+        nupkg("portable-net45%2Bwin8"),
+        nupkg("portable45-net45+win8"),
+        Format::Zip,
+        &profile("nupkg").unwrap(),
+        &Limits::default(),
+    )
+    .unwrap();
+    let d = c.diff.as_ref().unwrap();
+    let file = |p: &str| {
+        d.files
+            .iter()
+            .find(|f| f.path.to_lossy() == p)
+            .unwrap_or_else(|| panic!("no `{p}` in {:?}", d.files))
+    };
+    let dll = file("lib/portable-net45+win8/Demo.dll");
+    assert_eq!(dll.status, FileStatus::Identical);
+    let raw = |p: &Option<trigon_core::EntryPath>| p.as_ref().map(|p| p.to_lossy().into_owned());
+    assert_eq!(
+        (raw(&dll.upstream_raw_path), raw(&dll.rebuild_raw_path)),
+        (
+            Some("lib/portable-net45%2Bwin8/Demo.dll".to_string()),
+            Some("lib/portable45-net45+win8/Demo.dll".to_string())
+        )
+    );
+    let nuspec = file("Demo.nuspec");
+    assert_eq!((&nuspec.upstream_raw_path, &nuspec.rebuild_raw_path), (&None, &None));
 }
 
 #[test]

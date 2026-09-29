@@ -1016,3 +1016,358 @@ fn a_log_that_continues_elsewhere_answers_unknown_and_exits_4() {
         assert!(!said.contains("current   yes"), "{name}: {said}");
     }
 }
+
+/// A JSON reader gets a document on every exit, naming what stopped the check before any record
+/// was read (`docs/19` §6): arguments that cannot be checked, 5; a log whose checkpoint another
+/// key of its name signed, 4, as the source failing verification; one whose leaves are not there,
+/// 4, as a log that cannot be read, which says nothing of the source's honesty; and a log behind
+/// the checkpoint it is held to, 4, with both signed notes, as §8 has a client keep them.
+#[test]
+fn a_json_reader_is_told_what_stopped_the_check() {
+    let stopped = |out: &Output, code: i32| -> serde_json::Value {
+        assert_eq!(out.status.code(), Some(code), "{}", text(out));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", text(out)));
+        assert_eq!(doc["exit"], code, "{doc}");
+        assert!(doc["error"].is_string(), "{doc}");
+        doc
+    };
+    // No keys to check it against: the tool could not check at all.
+    let rec = record(&repo(), "e");
+    let out = verify(&[
+        "--record",
+        rec.to_str().unwrap(),
+        "--evidence",
+        repo().to_str().unwrap(),
+        "--output",
+        "json",
+    ]);
+    let doc = stopped(&out, 5);
+    assert_eq!(doc["stopped"], "cannot-check", "{doc}");
+    assert!(doc["error"].as_str().unwrap().contains("--source"), "{doc}");
+    assert_eq!(doc["signedNotes"], serde_json::Value::Null, "{doc}");
+
+    // The checkpoint signed again by another key under the log's own name.
+    let root = scratch("json-other-key");
+    copy_dir(&repo(), &root);
+    let note = std::fs::read(root.join("log/checkpoint")).unwrap();
+    let cp = Checkpoint::parse(
+        trigon_attest::log::SignedNote::parse(&note)
+            .unwrap()
+            .text(),
+    )
+    .unwrap();
+    let other = LogSigner::from_seed("example.com/trigon-evidence", [9; 32]).unwrap();
+    std::fs::write(
+        root.join("log/checkpoint"),
+        SignedCheckpoint::sign(&cp, &other).unwrap().to_string(),
+    )
+    .unwrap();
+    let doc = stopped(&check(&root, "e", &["--output", "json"]), 4);
+    assert_eq!(doc["stopped"], "log-failed-verification", "{doc}");
+    // And in text, the source's fault, never trigon's.
+    let said = text(&check(&root, "e", &[]));
+    assert!(said.contains("the evidence source's"), "{said}");
+
+    // The checkpoint as signed, and the leaves it signs not there to be read.
+    std::fs::copy(repo().join("log/checkpoint"), root.join("log/checkpoint")).unwrap();
+    std::fs::remove_file(root.join("log/tile/entries/000.p/15")).unwrap();
+    let doc = stopped(&check(&root, "e", &["--output", "json"]), 4);
+    assert_eq!(doc["stopped"], "log-unreadable", "{doc}");
+
+    // Rolled back behind the checkpoint given as accepted: both notes, the accepted first.
+    let root = scratch("json-rollback");
+    copy_dir(&repo(), &root);
+    let behind = fixture().join("checkpoints/9.checkpoint");
+    std::fs::copy(&behind, root.join("log/checkpoint")).unwrap();
+    std::fs::remove_dir_all(root.join("log/1")).unwrap();
+    let later = fixture().join("checkpoints/14.checkpoint");
+    let doc = stopped(
+        &check(
+            &root,
+            "a1",
+            &["--checkpoint", later.to_str().unwrap(), "--output", "json"],
+        ),
+        4,
+    );
+    assert_eq!(doc["stopped"], "inconsistent", "{doc}");
+    let notes = doc["signedNotes"].as_array().unwrap();
+    assert_eq!(notes.len(), 2, "{doc}");
+    assert_eq!(
+        notes[0]["accepted"],
+        std::fs::read_to_string(&later).unwrap(),
+        "{doc}"
+    );
+    assert!(notes[1]["offered"].is_string(), "{doc}");
+}
+
+/// The source form reads its keys and checkpoint from the configuration and the state, so keys
+/// given beside `--source` are refused whether or not a directory is given; and each file
+/// `--rerun-comparison` reads must be a file. Both before anything is verified: 5.
+#[test]
+fn the_source_form_and_the_rerun_files_take_only_what_they_read() {
+    let rec = record(&repo(), "b");
+    let keys = keys();
+    let mut args = vec!["--record", rec.to_str().unwrap(), "--source", "golden"];
+    args.extend(keys.iter().map(String::as_str));
+    let out = verify(&args);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(5), "{said}");
+    assert!(
+        said.contains("--source takes the source's keys and checkpoint from its configuration"),
+        "{said}"
+    );
+
+    let dir = fixture().join("artifacts");
+    let a = dir.join("demo-a-1.0.0.tar");
+    let out = check(
+        &repo(),
+        "a2",
+        &[
+            "--rerun-comparison",
+            "--upstream",
+            dir.to_str().unwrap(),
+            "--rebuild",
+            a.to_str().unwrap(),
+        ],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(5), "{said}");
+    assert!(said.contains("is not a file"), "{said}");
+}
+
+/// Re-deriving holds the published comparison report to the claim only where the report can be
+/// read. From a directory without the evidence, as a default clone is, the claim is re-derived,
+/// and the report is said to be unchecked — never agreeing, and never failing — so the record
+/// answers as it does.
+#[test]
+fn a_report_the_directory_does_not_hold_is_unchecked_and_never_agrees() {
+    let root = scratch("no-report");
+    copy_dir(&repo(), &root);
+    std::fs::remove_dir_all(root.join("evidence")).unwrap();
+    let a = fixture().join("artifacts");
+    let rerun = [
+        "--rerun-comparison",
+        "--upstream",
+        &a.join("demo-a-1.0.0.tar").display().to_string(),
+        "--rebuild",
+        &a.join("rebuilt-demo-a-1.0.0.tar").display().to_string(),
+    ]
+    .map(String::from);
+    let rerun: Vec<&str> = rerun.iter().map(String::as_str).collect();
+    let out = check(&root, "a2", &rerun);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert!(said.contains("the claim holds"), "{said}");
+    assert!(said.contains("report    unchecked: sha256:"), "{said}");
+    assert!(said.contains("not in this directory: unchecked"), "{said}");
+    assert!(!said.contains("agrees with the re-derivation"), "{said}");
+
+    let mut json = rerun.clone();
+    json.extend(["--output", "json"]);
+    let out = check(&root, "a2", &json);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["report"]["agrees"], serde_json::Value::Null, "{doc}");
+    assert!(
+        doc["report"]["unchecked"]
+            .as_str()
+            .unwrap()
+            .contains("not in this directory"),
+        "{doc}"
+    );
+    assert_eq!(doc["rederived"]["holds"], true, "{doc}");
+}
+
+/// What the source says of the artifact now, where the log continues in a repository the
+/// directory does not hold, is `unknown` to a JSON reader too, with why, and never the record's
+/// own answer; and 4.
+#[test]
+fn a_json_reader_is_told_unknown_where_the_log_continues_elsewhere() {
+    let p = build::pairs();
+    let k3 = common::attestation_key(3);
+    let a = build::verdict(&p["a"], &k3, "1789000000-aaaaaaa1", None, common::T0);
+    let root = scratch("continues-json");
+    let mut log = common::Writer::init(&root.join("log"), common::log_key());
+    log.append(&[
+        Leaf::Record(a.leaf.clone()),
+        Leaf::LogEnd(LogEndLeaf {
+            time: common::T0 + 60,
+            successor: Successor {
+                origin: common::SUCCESSOR.into(),
+                log_key: common::successor_key().vkey().to_string(),
+                urls: vec!["https://example.org/next.git".into()],
+                dir: "log".into(),
+            },
+        }),
+    ]);
+    a.write(&root);
+    let out = check_made(&root, &a, &["--output", "json"]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["exit"], 4, "{doc}");
+    assert_eq!(doc["verified"], true, "{doc}");
+    assert_eq!(doc["answer"], "unknown", "{doc}");
+    assert!(
+        doc["unknown"]
+            .as_str()
+            .unwrap()
+            .contains("the log continues as `example.com/trigon-evidence/1`"),
+        "{doc}"
+    );
+}
+
+/// `docs/19` §4.2: a field a statement does not sign is shown as absent, never as a value, and
+/// `attestable: false` as not attestable: a verdict signed with no run, no egress tier and no
+/// building Trigon, and one with no signer named and no `attestable`.
+#[test]
+fn a_field_a_verdict_does_not_sign_is_shown_as_absent() {
+    let p = build::pairs();
+    let k3 = common::attestation_key(3);
+    let honest = build::verdict(&p["a"], &k3, "1789000000-aaaaaaa1", None, common::T0);
+    type Edit = Box<dyn Fn(usize, &mut trigon_attest::Statement)>;
+    let cases: [(&str, Edit, &[&str]); 2] = [
+        (
+            "unsigned",
+            Box::new(|i, st| {
+                if i == 0 {
+                    let o = st.predicate.as_object_mut().unwrap();
+                    o.remove("run");
+                    o.remove("egressTier");
+                    o.insert("attestable".into(), json!(false));
+                    o["trigonVersion"].as_object_mut().unwrap().remove("builder");
+                }
+            }),
+            &[
+                "run       none signed",
+                "trigon    built by a Trigon the run did not record, signed by 0.0.0+git.2222",
+                "egress    no tier signed, not attestable",
+            ],
+        ),
+        (
+            "no-signer",
+            Box::new(|i, st| {
+                if i == 0 {
+                    let o = st.predicate.as_object_mut().unwrap();
+                    o.remove("attestable");
+                    o["trigonVersion"].as_object_mut().unwrap().remove("attestor");
+                }
+            }),
+            &[
+                "trigon    built by 0.0.0+git.1111111111111111111111111111111111111111; the \
+                 signer is not named",
+                "egress    mirror-only, `attestable` not signed",
+            ],
+        ),
+    ];
+    for (name, edit, lines) in cases {
+        let m = build::resigned(&honest, &k3, common::T0, None, edit);
+        let root = scratch(&format!("absent-{name}"));
+        build::small(&root, &[&m]);
+        let out = check_made(&root, &m, &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(0), "{name}: {said}");
+        for line in lines {
+            assert!(said.contains(line), "{name}: {line}\n{said}");
+        }
+    }
+}
+
+/// Re-deriving holds the published comparison report the verdict signs to the claim: a report
+/// that is the bytes the verdict signs and no comparison at all fails the record, exit 4, as the
+/// evidence failing verification, never as a report left unchecked; and a verdict that names no
+/// report has none to hold, which is said, and the record answers as it does.
+#[test]
+fn a_signed_report_that_is_no_comparison_fails_the_record() {
+    let p = build::pairs();
+    let k3 = common::attestation_key(3);
+    let honest = build::verdict(&p["a"], &k3, "1789000000-aaaaaaa1", None, common::T0);
+    let dir = scratch("no-comparison");
+    let (u, r) = artifacts(&dir, &p["a"]);
+    let rerun = ["--rerun-comparison", "--upstream", &u, "--rebuild", &r];
+    let garbage = b"no comparison report at all".to_vec();
+    let signs = build::sha256(&garbage).to_hex();
+    let mut evidence = honest.evidence.clone();
+    evidence[1] = garbage;
+    let m = build::resigned(&honest, &k3, common::T0, Some(evidence), move |i, st| {
+        if i == 0 {
+            st.predicate["evidence"]["comparison"]["sha256"] = signs.clone().into();
+        }
+    });
+    let root = dir.join("garbage");
+    build::small(&root, &[&m]);
+    // As a record, the report is the bytes it signs, and it verifies.
+    let out = check_made(&root, &m, &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let out = check_made(&root, &m, &rerun);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(4), "{said}");
+    assert!(said.contains("the claim holds"), "{said}");
+    assert!(said.contains("report    FAILED verification: "), "{said}");
+    let mut json = rerun.to_vec();
+    json.extend(["--output", "json"]);
+    let out = check_made(&root, &m, &json);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["report"]["agrees"], false, "{doc}");
+    assert!(doc["report"]["failed"].is_string(), "{doc}");
+
+    // A verdict that signs no report.
+    let m = build::resigned(&honest, &k3, common::T0, None, |i, st| {
+        if i == 0 {
+            st.predicate["evidence"]
+                .as_object_mut()
+                .unwrap()
+                .remove("comparison");
+        }
+    });
+    let root = dir.join("none");
+    build::small(&root, &[&m]);
+    let out = check_made(&root, &m, &rerun);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert!(said.contains("the claim holds"), "{said}");
+    assert!(said.contains("report    unchecked: the verdict names none"), "{said}");
+}
+
+/// A checkpoint given as last accepted that is of no log the directory's chain reaches, where the
+/// chain continues nowhere else, is never passed over: what is here is behind what was accepted,
+/// and the source is refused, exit 4, with both signed notes.
+#[test]
+fn a_checkpoint_of_no_log_the_chain_reaches_is_refused_as_a_rollback() {
+    let d = scratch("unrelated-checkpoint");
+    let unrelated = LogSigner::from_seed("example.net/unrelated", [6; 32]).unwrap();
+    let cp = d.join("unrelated.checkpoint");
+    std::fs::write(
+        &cp,
+        SignedCheckpoint::sign(
+            &Checkpoint {
+                origin: "example.net/unrelated".into(),
+                size: 3,
+                root: [5; 32],
+            },
+            &unrelated,
+        )
+        .unwrap()
+        .to_string(),
+    )
+    .unwrap();
+    let out = check(&repo(), "e", &["--checkpoint", cp.to_str().unwrap()]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(4), "{said}");
+    assert!(
+        said.contains(
+            "the checkpoint last accepted is for `example.net/unrelated`, and no log this \
+             repository's chain reaches has that origin"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("answer    exact"), "{said}");
+    let out = check(
+        &repo(),
+        "e",
+        &["--checkpoint", cp.to_str().unwrap(), "--output", "json"],
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["stopped"], "inconsistent", "{doc}");
+}

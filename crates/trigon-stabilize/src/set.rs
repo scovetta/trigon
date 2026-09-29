@@ -308,7 +308,11 @@ fn record_field_changes(
             if a.ctime != b.ctime {
                 edit("tar.ctime");
             }
-            for k in a.pax.keys().chain(b.pax.keys()) {
+            // Each keyword once: one present on both sides turns up in both key lists, and it is
+            // still one field one pass changed, as the comparator's set of codes names it.
+            let keys: std::collections::BTreeSet<&String> =
+                a.pax.keys().chain(b.pax.keys()).collect();
+            for k in keys {
                 if a.pax.get(k) != b.pax.get(k) {
                     edit(&format!("tar.pax.{k}"));
                 }

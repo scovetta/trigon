@@ -504,4 +504,21 @@ mod tests {
         assert_eq!(encode("1.0+b", true), "1.0%2Bb");
         assert_eq!(encode("caf\u{e9}", false), "caf%C3%A9");
     }
+
+    #[test]
+    fn every_escape_decodes_to_its_byte_whatever_the_case_of_its_hex() {
+        // `%4a` and `%4A` are one spelling of `J`. Most escapes a purl carries (`%2d`, `%2e`,
+        // `%2b`) decode right even through a digit table that reads `a`..`f` wrongly, so every
+        // byte is held here and not only the ones the vectors happen to use.
+        for b in 0..0x80u8 {
+            let want = char::from(b).to_string();
+            for escape in [format!("%{b:02x}"), format!("%{b:02X}")] {
+                assert_eq!(decode("pkg:", &escape, "name"), Ok(want.clone()), "{escape}");
+            }
+        }
+        assert_eq!(
+            decode("pkg:", "caf%c3%a9", "name"),
+            Ok("caf\u{e9}".to_string())
+        );
+    }
 }

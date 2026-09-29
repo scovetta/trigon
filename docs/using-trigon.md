@@ -576,8 +576,8 @@ With `rebuilt_artifacts = "github-release"` ([`19`](19-distribution-and-lookup.m
 verdict's rebuilt artifact but an exact one's is published beside its record, so that
 `verify-attestation --rerun-comparison` needs nothing from the person running it but the published
 artifact. An exact verdict's rebuilt artifact is the published artifact byte for byte, and is never
-uploaded (below): its falsifying command asks for it as `--rebuild <file>`, which the published
-artifact is. It is a release asset of the evidence repository, never a file in git: named
+uploaded (below): its falsifying command takes the upstream file, `--upstream`, as its rebuilt
+artifact too. Others are release assets of the evidence repository, never files in git: named
 `sha256-<hex>` by the digest the verdict signs, in the month's release, `rebuilt-2026-09`, continued
 as `rebuilt-2026-09.2` and so on once a release holds GitHub's 1,000 assets. The setting says what
 `publish` uploads and nothing else: `verify-attestation --lookup` looks for a record's rebuilt
@@ -1023,10 +1023,11 @@ directory made for it that only you can enter, and held to that digest: other by
 repository of the source that resolved the record are refused, `4`; in another source's, they are
 that repository's, and the next is asked. Downloading it names the artifact to GitHub, and the
 report says so however it ended. An exact verdict's rebuilt artifact is the published artifact
-itself, never uploaded, so GitHub is asked nothing: pass the upstream file as `--rebuild` too.
-There, where no repository that holds the record is on github.com, which asks GitHub nothing, where
-none holds such an asset, or where GitHub refuses or cannot be reached, the check is not made, `5`,
-and it asks for `--rebuild <file>`.
+itself, never uploaded, so GitHub is asked nothing and the upstream file is taken as the rebuilt
+artifact too, held to the digest the verdict signs: its falsifying command runs as signed, with
+`--upstream` alone. Where no repository that holds the record is on github.com, which asks GitHub
+nothing, where none holds such an asset, or where GitHub refuses or cannot be reached, the check is
+not made, `5`, and it asks for `--rebuild <file>`.
 
 `verify-attestation --record <file> --source <name>` without `--evidence` reads the same clones,
 following the source's chain into every repository its log has gone on in; it is in the verifier

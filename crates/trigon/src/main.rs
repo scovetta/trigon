@@ -231,9 +231,10 @@ enum Cmd {
         /// The rebuilt artifact. Required by `--rerun-comparison`, except with `--lookup`, where
         /// without it the one the verdict names is looked for as a release asset of the GitHub
         /// repository that holds the record, downloaded, and held to its digest; where that
-        /// repository is not on github.com or does not publish it, or the verdict is exact, whose
-        /// rebuilt artifact is the upstream file itself, it is asked for. Given, it is used, and
-        /// nothing is fetched for it.
+        /// repository is not on github.com or does not publish it, it is asked for. An exact
+        /// verdict's rebuilt artifact is the published artifact itself, so without it the
+        /// `--upstream` file is taken as it, held to the digest the verdict signs, and nothing is
+        /// asked. Given, it is used, and nothing is fetched for it.
         #[arg(long, requires = "rerun_comparison")]
         rebuild: Option<PathBuf>,
         /// The stabilizer set the attestation was made under: a published `.json` manifest, or a
@@ -1829,6 +1830,75 @@ mod fault_report {
             whose(Fault::Upstream, &damaged),
             "the evidence's: it is damaged, or is not what it says it is"
         );
+    }
+
+    /// An error that is about no evidence is said by its class alone, and only `Bug` blames
+    /// trigon: infrastructure is ours and retryable, the rest are the artifact's, the package's
+    /// build's, or a policy's.
+    #[test]
+    fn an_error_about_no_evidence_is_said_by_its_class() {
+        let e = anyhow::anyhow!("the mirror container did not start");
+        assert_eq!(
+            whose(Fault::Infra, &e),
+            "ours: infrastructure, and retryable"
+        );
+        assert_eq!(whose(Fault::Upstream, &e), "the published artifact's");
+        assert_eq!(whose(Fault::Build, &e), "the package's own build");
+        assert_eq!(whose(Fault::Policy, &e), "a policy this run is enforcing");
+        for fault in [Fault::Infra, Fault::Upstream, Fault::Build, Fault::Policy] {
+            assert!(!whose(fault, &e).contains("bug in trigon"), "{fault:?}");
+        }
+        assert_eq!(whose(Fault::Bug, &e), "a bug in trigon; please report it");
+    }
+
+    /// Whether a failure is worth trying again is the error's own answer where it has one, and its
+    /// class's only where it has none: the value `report_fault` logs. A rejected key and a rate
+    /// limit are both a provider's `Http`, both `Infra` by class, and only one is worth asking
+    /// again; and it is asked however the error reaches `main`, bare or under a command's context.
+    #[cfg(feature = "build")]
+    #[test]
+    fn retryability_is_asked_of_the_error_before_its_class() {
+        use super::retryable_of;
+        use trigon_ai::LlmError;
+        use trigon_mirror::MirrorError;
+
+        let rejected = LlmError::Http {
+            status: 401,
+            body: "invalid key".into(),
+        };
+        assert_eq!(rejected.fault(), Fault::Infra);
+        assert!(
+            Fault::Infra.is_retryable(),
+            "the class alone would retry it"
+        );
+        assert_eq!(retryable_of(&anyhow::Error::new(rejected)), Some(false));
+        let limited = LlmError::Http {
+            status: 429,
+            body: String::new(),
+        };
+        let e = anyhow::Error::new(limited).context("asking the model");
+        assert_eq!(retryable_of(&e), Some(true));
+
+        // A mirror asked with no moment, or for a platform it does not serve, answers the same way
+        // every time; a port it could not bind is this machine's, and may be free next time.
+        assert_eq!(
+            retryable_of(&anyhow::Error::new(MirrorError::NoFilter)),
+            Some(false)
+        );
+        let e = anyhow::Error::new(MirrorError::UnknownPlatform {
+            found: "maven".into(),
+        })
+        .context("starting the mirror");
+        assert_eq!(retryable_of(&e), Some(false));
+        let e = anyhow::Error::new(MirrorError::Bind {
+            port: 8129,
+            detail: "address in use".into(),
+        });
+        assert_eq!(retryable_of(&e), Some(true));
+
+        // An error that classifies nothing has no answer of its own, and the class decides.
+        let e = anyhow::anyhow!("the mirror container did not start");
+        assert_eq!(retryable_of(&e), None);
     }
 }
 
@@ -4285,6 +4355,42 @@ fn short_ref(reference: &str) -> String {
     out
 }
 
+#[cfg(all(test, feature = "build"))]
+mod short_ref_tests {
+    use super::short_ref;
+
+    /// A run of 32 or more hex digits is a digest and is cut to twelve, alone or embedded in a
+    /// readable reference; everything else — a tag, a branch, a version, a shorter run — is left
+    /// exactly as it is.
+    #[test]
+    fn a_long_hex_run_is_shortened_and_everything_else_is_left_alone() {
+        let commit = "ff8e7ba8b4122829cf66125ca8445cac7f073bce";
+        assert_eq!(short_ref(commit), "ff8e7ba8b412…");
+        let id = "7cdd".repeat(16);
+        assert_eq!(short_ref(&id), "7cdd7cdd7cdd…");
+        assert_eq!(
+            short_ref(&format!("mcr.microsoft.com/dotnet/sdk@sha256:{id}")),
+            "mcr.microsoft.com/dotnet/sdk@sha256:7cdd7cdd7cdd…"
+        );
+        assert_eq!(
+            short_ref(&format!("{commit} and {id}")),
+            "ff8e7ba8b412… and 7cdd7cdd7cdd…"
+        );
+        // Thirty-two is a digest; thirty-one is not.
+        assert_eq!(short_ref(&"a".repeat(32)), format!("{}…", "a".repeat(12)));
+        assert_eq!(short_ref(&"a".repeat(31)), "a".repeat(31));
+        for plain in [
+            "docker.io/library/debian:bookworm-slim",
+            "mcr.microsoft.com/dotnet/sdk:8.0",
+            "v1.3.0",
+            "refs/heads/main",
+            "",
+        ] {
+            assert_eq!(short_ref(plain), plain);
+        }
+    }
+}
+
 /// What selects a profile, in the words the reader would use to cause it.
 ///
 /// Empty where nothing does, which is the answer worth having: a profile no selector reaches is a
@@ -4624,6 +4730,75 @@ fn strategy_location(file: &Path, import: bool) -> Result<(String, trigon_strate
         )
     })?;
     Ok((src, loc))
+}
+
+#[cfg(all(test, feature = "build"))]
+mod strategy_location_tests {
+    use super::strategy_location;
+
+    fn file(what: &str, text: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("trigon-location-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join(what);
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    /// The location is read without rendering, from our format and from the prior art's alike, so
+    /// an enforced tier can fetch the source before the render needs to know it has.
+    #[test]
+    fn the_location_is_read_from_either_format_without_rendering() {
+        let ours = file(
+            "ours.yaml",
+            "schema: 1\nkind: flow\nlocation:\n  repo: https://github.com/owner/demo\n  ref: \
+             cafebabe\n  subdir: pkg\nsrc:\n- uses: git-checkout\nbuild:\n- runs: make\n\
+             output_path: out.tgz\n",
+        );
+        let (src, loc) = strategy_location(&ours, false).unwrap();
+        assert_eq!(src, std::fs::read_to_string(&ours).unwrap());
+        assert_eq!(loc.repo, "https://github.com/owner/demo");
+        assert_eq!(loc.git_ref, "cafebabe");
+        assert_eq!(loc.subdir.as_deref(), Some("pkg"));
+
+        let imported = file(
+            "build.yaml",
+            "flow:\n  location:\n    repo: https://github.com/a/b\n    ref: deadbeef\n  src:\n    \
+             - uses: git-checkout\n  build:\n    - runs: make\n  output_dir: dist\n",
+        );
+        let (_, loc) = strategy_location(&imported, true).unwrap();
+        assert_eq!(loc.repo, "https://github.com/a/b");
+        assert_eq!(loc.git_ref, "deadbeef");
+    }
+
+    /// A strategy that names no source has nothing to fetch for an enforced tier, and says so
+    /// rather than handing back an empty location to clone.
+    #[test]
+    fn a_strategy_with_no_source_location_says_there_is_nothing_to_fetch() {
+        let prebuilt = file(
+            "prebuilt.yaml",
+            "kind: prebuilt\nurl: https://example.invalid/x.whl\nsha256: ab\napproved_by: \
+             someone\nreason: upstream builds it reproducibly\n",
+        );
+        let e = strategy_location(&prebuilt, false).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("names no source location, so there is nothing to fetch"),
+            "{e:#}"
+        );
+    }
+
+    /// A document that does not parse is refused naming it, as a render refuses it.
+    #[test]
+    fn a_document_that_does_not_parse_is_refused_with_its_path() {
+        let bad = file("bad.yaml", "kind: [flow\n");
+        let e = strategy_location(&bad, false).unwrap_err();
+        assert!(
+            format!("{e:#}").contains(&bad.display().to_string()),
+            "{e:#}"
+        );
+        let e = strategy_location(&bad, true).unwrap_err();
+        assert!(format!("{e:#}").contains("importing"), "{e:#}");
+    }
 }
 
 /// Read a strategy document, lower it if it is the prior art's format, and render it.
@@ -5173,6 +5348,14 @@ mod rebuild {
             // Our own error, not the package's. Recorded as such rather than left absent, because
             // an absent outcome and a failure of ours read alike to anybody counting.
             Err(e) => report.error = Some(e.to_string()),
+        }
+        // The directory as well, because `run_body` makes it only once the target has parsed: a
+        // target that is not a package URL, or a `--model` that is not a provider, ended the run
+        // before then, and `docs/18-management-ui.md` has `run.json` on every terminal outcome.
+        // After the confirmation's refusal above, which returns before a work directory says a
+        // run happened.
+        if let Err(e) = std::fs::create_dir_all(&work) {
+            tracing::warn!("could not make {}: {e}", work.display());
         }
         report.write(&work);
         out
@@ -8645,6 +8828,133 @@ output_path: '*.tgz'
             assert!(format!("{e:#}").contains("which --confirm names"), "{e:#}");
         }
 
+        /// What the run was judged under, and how its strategy was derived, have to be what this
+        /// binary can hold a second attempt to. Each refusal is a fact about the record or about
+        /// this binary, so it is `Unrepeatable` — the type a worker reads to stop asking again —
+        /// and says which fact.
+        #[test]
+        fn a_run_whose_judgement_cannot_be_held_to_here_is_refused_as_unrepeatable() {
+            let work = tmpdir("confirm-refuses-judgement");
+            let (dir, r) = recorded(&work, "2026-09-27T10:00:00Z", "mirror-only");
+            let (rt, s) = store(&dir);
+            let stored: trigon_compare::Comparison = serde_json::from_slice(
+                &rt.block_on(s.blobs().get(&r.comparison.unwrap())).unwrap(),
+            )
+            .unwrap();
+            let with_set = |id: &str, digest: trigon_core::Digest| {
+                let mut c = stored.clone();
+                c.upstream.set = (trigon_core::ProfileId::new(id), digest);
+                rt.block_on(s.blobs().put(serde_json::to_vec(&c).unwrap()))
+                    .unwrap()
+            };
+            let retired = with_set("tar-gzip-retired", stored.upstream.set.1);
+            let other_digest = with_set("tar-gzip", trigon_core::Digest::from_bytes([9u8; 32]));
+            let refused = |edit: &dyn Fn(&mut trigon_store::RunRecord)| {
+                let mut changed = r.clone();
+                edit(&mut changed);
+                put(&dir, &changed);
+                confirming(&mut args_for(&work, &dir), &r.id, false).unwrap_err()
+            };
+            for (what, edit, says) in [
+                (
+                    "no comparison",
+                    (&|r: &mut trigon_store::RunRecord| r.comparison = None)
+                        as &dyn Fn(&mut trigon_store::RunRecord),
+                    "records a verdict and no comparison",
+                ),
+                (
+                    "a set this binary does not carry",
+                    &|r: &mut trigon_store::RunRecord| r.comparison = Some(retired),
+                    "stabilizer set `tar-gzip-retired`, which this binary does not carry",
+                ),
+                (
+                    "a set this binary carries as something else",
+                    &|r: &mut trigon_store::RunRecord| r.comparison = Some(other_digest),
+                    "A confirmation under another set answers another question",
+                ),
+                (
+                    "a derivation this binary does not know",
+                    &|r: &mut trigon_store::RunRecord| r.derivation = Some("guessed".into()),
+                    "which is not a derivation this binary knows",
+                ),
+            ] {
+                let e = refused(edit);
+                assert!(format!("{e:#}").contains(says), "{what}: {e:#}");
+                assert!(e.downcast_ref::<Unrepeatable>().is_some(), "{what}: {e:#}");
+            }
+            // And the refusal names the derivation it was given.
+            let e =
+                refused(&|r: &mut trigon_store::RunRecord| r.derivation = Some("guessed".into()));
+            assert!(format!("{e:#}").contains("guessed"), "{e:#}");
+
+            // A strategy blob the store does not hold cannot be repeated either, and says so.
+            let e = refused(&|r: &mut trigon_store::RunRecord| {
+                r.strategy = Some(trigon_core::Digest::from_bytes([3u8; 32]))
+            });
+            assert!(
+                format!("{e:#}").contains("reading the strategy blob run"),
+                "{e:#}"
+            );
+
+            // And the record as it was is repeated, saying so on a terminal.
+            put(&dir, &r);
+            let c = confirming(&mut args_for(&work, &dir), &r.id, true).unwrap();
+            assert_eq!(c.run, r.id);
+        }
+
+        /// A run that failed to build is signed as what it is — its build observation, filed under
+        /// it — and `rebuild --attest` writes no claim about a result, because there is none.
+        #[test]
+        fn rebuild_attest_of_a_failed_build_files_its_observation_and_writes_no_claim() {
+            let work = tmpdir("attest-failed");
+            let bytes = tgz();
+            let up = work.join(ARTIFACT);
+            std::fs::write(&up, &bytes).unwrap();
+            let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
+            let mut args = inputs(&work, &strategy, b"{}");
+            args.upstream_digests = Some(fetched(&bytes));
+            let rec = Recording {
+                inputs: Some(args),
+                upstream: Some((up, trigon_store::digest_of(&bytes), bytes.len() as u64)),
+                record_id: None,
+            };
+            let failed = Ok(Ran::from(Outcome::BuildFailed {
+                phase: "build".into(),
+                signature: None,
+            }));
+            let dir = work.join("store");
+            let report = crate::progress::RunReport::new(PURL);
+            let id = record_terminal(&dir, &rec, &report, &failed)
+                .unwrap()
+                .unwrap();
+
+            let path = work.join("claim.json");
+            let config = EvidenceConfig::load(&Env {
+                cwd: work.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+            attest_what_was_recorded(&dir, Some(&id), &path, &config, &trigon_attest::Unsigned)
+                .unwrap();
+            assert!(
+                !path.exists(),
+                "a claim was written about a run with no result"
+            );
+            let (rt, s) = store(&dir);
+            let r = rt.block_on(s.get_run(&id)).unwrap();
+            let filed: Vec<String> = r
+                .attestations
+                .iter()
+                .map(|p| {
+                    let e = rt.block_on(s.get_attestation(p)).unwrap();
+                    let st: trigon_attest::Statement =
+                        serde_json::from_slice(&e.decoded_payload().unwrap()).unwrap();
+                    st.predicate_type
+                })
+                .collect();
+            assert_eq!(filed, [trigon_attest::BUILD_OBSERVATION]);
+        }
+
         fn signed(dir: &Path, work: &Path, id: &str) -> (trigon_attest::Statement, Vec<String>) {
             let path = work.join("claim.json");
             let config = EvidenceConfig::load(&Env {
@@ -9740,6 +10050,513 @@ output_path: '*.tgz'
             assert_eq!(newest_file(&out), None);
         }
     }
+
+    #[cfg(test)]
+    mod what_a_run_concludes {
+        //! How a finished build becomes an outcome, a cluster and a record, without podman: the
+        //! comparison `judge` makes, the signature a divergence clusters on, the outcome a failure
+        //! becomes, the copy of a judged artifact that outlives the next attempt, the text a model
+        //! is shown, and the record of a run that reached no verdict.
+        use super::*;
+        use trigon_core::{Classify as _, Fault, Match};
+
+        fn tmpdir(tag: &str) -> PathBuf {
+            let d =
+                std::env::temp_dir().join(format!("trigon-concludes-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        fn tgz(members: &[(&str, &[u8])], mtime: u64) -> Vec<u8> {
+            let mut b = ::tar::Builder::new(Vec::new());
+            for (name, body) in members {
+                let mut h = ::tar::Header::new_ustar();
+                h.set_size(body.len() as u64);
+                h.set_mode(0o644);
+                h.set_mtime(mtime);
+                h.set_cksum();
+                b.append_data(&mut h, *name, *body).unwrap();
+            }
+            let tar = b.into_inner().unwrap();
+            let mut gz = Vec::new();
+            {
+                use std::io::Write as _;
+                let mut e = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
+                e.write_all(&tar).unwrap();
+                e.finish().unwrap();
+            }
+            gz
+        }
+
+        fn compare(a: &[u8], b: &[u8]) -> trigon_compare::Comparison {
+            compare_bytes(
+                a.to_vec(),
+                b.to_vec(),
+                Format::TarGz,
+                &trigon_stabilize::profile("tar-gzip").unwrap(),
+                &Limits::default(),
+            )
+            .unwrap()
+        }
+
+        /// Members `m00.js`… holding `body`, one per name.
+        fn many(n: usize, body: &'static [u8]) -> Vec<u8> {
+            let names: Vec<String> = (0..n).map(|i| format!("package/m{i:02}.js")).collect();
+            let members: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), body)).collect();
+            tgz(&members, 1)
+        }
+
+        #[test]
+        fn judge_compares_the_two_artifacts_as_verify_does() {
+            let d = tmpdir("judge");
+            let (up, rb) = (d.join("demo-1.0.0.tgz"), d.join("rebuilt.tgz"));
+            std::fs::write(&up, tgz(&[("package/index.js", b"x")], 1)).unwrap();
+            std::fs::write(&rb, tgz(&[("package/index.js", b"x")], 2)).unwrap();
+            let c = judge(&up, &rb).unwrap();
+            assert_eq!(c.outcome, Match::Normalized);
+            assert_eq!(c.upstream.set.0.as_str(), "tar-gzip");
+        }
+
+        /// A build of the wrong kind of distribution is a statement about the recipe, and is said
+        /// to be one: never fed to the upstream's parser, where it would read as the published
+        /// artifact being malformed and send somebody to look at the registry.
+        #[test]
+        fn a_rebuild_of_another_kind_is_the_recipe_and_not_a_malformed_upstream() {
+            let d = tmpdir("kind");
+            let up = d.join("demo-1.0.0.tar.gz");
+            let rb = d.join("demo-1.0.0-py3-none-any.whl");
+            std::fs::write(&up, tgz(&[("demo-1.0.0/setup.py", b"x")], 1)).unwrap();
+            std::fs::write(&rb, b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0").unwrap();
+            match judge(&up, &rb) {
+                Err(Outcome::Failed { detail, .. }) => {
+                    assert!(
+                        detail.contains(
+                            "the build produced a Zip and the artifact under test is a TarGz"
+                        ),
+                        "{detail}"
+                    );
+                    assert!(detail.contains("wrong kind of distribution"), "{detail}");
+                    assert!(!detail.contains("malformed"), "{detail}");
+                }
+                Err(other) => panic!("{other:?}"),
+                Ok(c) => panic!("compared: {}", c.outcome),
+            }
+        }
+
+        /// A comparison that could not run keeps the classification the comparison gave it —
+        /// whose fault it is survives to the caller — while a file that is not there at all is
+        /// ours.
+        #[test]
+        fn a_comparison_that_cannot_run_keeps_the_fault_it_was_given() {
+            let d = tmpdir("cannot-run");
+            let (up, rb) = (d.join("demo-1.0.0.tgz"), d.join("rebuilt.tgz"));
+            let garbage = b"\x1f\x8b not really a gzip member".to_vec();
+            let good = tgz(&[("package/index.js", b"x")], 1);
+            std::fs::write(&up, &garbage).unwrap();
+            std::fs::write(&rb, &good).unwrap();
+            let said = compare_bytes(
+                garbage,
+                good,
+                Format::TarGz,
+                &trigon_stabilize::profile("tar-gzip").unwrap(),
+                &Limits::default(),
+            )
+            .expect_err("a broken gzip does not compare");
+            match judge(&up, &rb) {
+                Err(Outcome::Failed { fault, detail }) => {
+                    assert_eq!(fault, said.fault());
+                    assert_eq!(detail, said.to_string());
+                }
+                Err(other) => panic!("{other:?}"),
+                Ok(c) => panic!("compared: {}", c.outcome),
+            }
+            match judge(&d.join("gone.tgz"), &rb) {
+                Err(Outcome::Failed {
+                    fault: Fault::Infra,
+                    ..
+                }) => {}
+                Err(other) => panic!("{other:?}"),
+                Ok(c) => panic!("compared: {}", c.outcome),
+            }
+        }
+
+        /// A divergence clusters on the classes of difference and never on the file names: the
+        /// same shape of difference in another package is the same cluster.
+        #[test]
+        fn a_divergence_clusters_on_what_differs_and_never_on_which_file() {
+            let a = tgz(
+                &[("package/index.js", b"one"), ("package/lost.js", b"x")],
+                1,
+            );
+            let b = tgz(&[("package/index.js", b"two")], 1);
+            let c = compare(&a, &b);
+            assert_eq!(c.outcome, Match::Divergent);
+            let s = divergence_signature(&c);
+            assert_eq!(s.code, "divergence");
+            let subject = s.subject.clone().expect("a divergence names its classes");
+            let mut classes: Vec<&str> = c
+                .diff
+                .as_ref()
+                .unwrap()
+                .codes
+                .iter()
+                .map(|k| k.split('@').next().unwrap())
+                .collect();
+            classes.sort_unstable();
+            classes.dedup();
+            assert_eq!(subject, classes.join(","));
+            assert!(
+                !subject.contains("index.js") && !subject.contains('@'),
+                "{subject}"
+            );
+            // Repairable, since a different recipe is what can fix it; not retryable, since the
+            // same recipe gives the same bytes; the package's build, not our infrastructure.
+            assert_eq!(s.fault, Fault::Build);
+            assert!(s.repairable && !s.retryable);
+            assert_eq!(
+                s.evidence,
+                "0 identical, 1 differ, 1 only upstream, 0 only in the rebuild"
+            );
+
+            let a = tgz(&[("lib/main.js", b"uno"), ("lib/gone.js", b"y")], 1);
+            let b = tgz(&[("lib/main.js", b"dos")], 1);
+            assert_eq!(divergence_signature(&compare(&a, &b)).key(), s.key());
+
+            let mut bare = c.clone();
+            bare.diff = None;
+            let s = divergence_signature(&bare);
+            assert_eq!(s.subject, None);
+            assert_eq!(s.evidence, "the stabilized digests differ");
+        }
+
+        /// Only a build that ran and failed is a package that did not build. Anything else is a
+        /// failure to test it, carrying the fault it already had, and ours where it had none.
+        #[test]
+        fn only_a_build_that_ran_is_a_package_that_did_not_build() {
+            let signature = trigon_core::classify("npm ERR! code E404\nnpm ERR! 404 Not Found");
+            let failure = crate::BuildFailure {
+                phase: "deps".into(),
+                exit_code: 1,
+                signature: signature.clone(),
+            };
+            let e = anyhow::Error::new(failure).context("building the target");
+            match build_outcome(&e) {
+                Outcome::BuildFailed {
+                    phase,
+                    signature: Some(s),
+                } => {
+                    assert_eq!(phase, "deps");
+                    assert_eq!(s.key(), signature.key());
+                }
+                other => panic!("{other:?}"),
+            }
+
+            let refused = trigon_sandbox::SandboxError::ImageNotPinned("debian:bookworm".into());
+            let fault = refused.fault();
+            match build_outcome(&anyhow::Error::new(refused)) {
+                Outcome::Failed { fault: f, detail } => {
+                    assert_eq!(f, fault);
+                    assert!(detail.contains("not pinned by digest"), "{detail}");
+                }
+                other => panic!("{other:?}"),
+            }
+
+            let ours = build_outcome(&anyhow::anyhow!("the mirror container did not start"));
+            assert_eq!(ours.label(), "error:infra");
+            assert!(!ours.is_evidence());
+        }
+
+        /// The label is the sweep's outcome taxonomy and what a record's `terminal` says; the
+        /// cluster, the model-call count and whether it is evidence are each read off the outcome.
+        #[test]
+        fn every_outcome_has_its_label_cluster_and_count() {
+            let signature =
+                trigon_core::classify("fatal error: Python.h: No such file or directory");
+            let cases: Vec<(Outcome, &str, Option<String>, u32, bool)> = vec![
+                (
+                    Outcome::Compared(Match::NormalizedWithCaveats),
+                    "normalized_with_caveats",
+                    None,
+                    0,
+                    true,
+                ),
+                (Outcome::NoStrategy, "no-strategy", None, 0, false),
+                (
+                    Outcome::BuildFailed {
+                        phase: "deps".into(),
+                        signature: Some(signature.clone()),
+                    },
+                    "build-failed:deps",
+                    Some(signature.key()),
+                    0,
+                    false,
+                ),
+                (
+                    Outcome::BuildFailed {
+                        phase: "build".into(),
+                        signature: None,
+                    },
+                    "build-failed:build",
+                    None,
+                    0,
+                    false,
+                ),
+                (
+                    Outcome::Failed {
+                        fault: Fault::Upstream,
+                        detail: "malformed zip".into(),
+                    },
+                    "error:upstream",
+                    Some("error:malformed zip".into()),
+                    0,
+                    false,
+                ),
+                (
+                    Outcome::Void {
+                        reason: "the artifact arrived".into(),
+                    },
+                    "void",
+                    None,
+                    0,
+                    false,
+                ),
+                (
+                    Outcome::Recorded("divergent".into(), Some("divergence:x".into()), 3),
+                    "divergent",
+                    Some("divergence:x".into()),
+                    3,
+                    true,
+                ),
+                (
+                    Outcome::Recorded("error:infra".into(), None, 1),
+                    "error:infra",
+                    None,
+                    1,
+                    false,
+                ),
+            ];
+            for (o, label, cluster, calls, evidence) in cases {
+                assert_eq!(o.label(), label, "{o:?}");
+                assert_eq!(o.cluster(), cluster, "{o:?}");
+                assert_eq!(o.model_calls(), calls, "{o:?}");
+                assert_eq!(o.is_evidence(), evidence, "{o:?}");
+            }
+        }
+
+        /// The judged artifact is copied out of the directory the next attempt clears, under
+        /// `kept/` — never over the published artifact at the top of the work directory, whose
+        /// name it usually shares — with the build log where the record looks for it.
+        #[test]
+        fn a_judged_artifact_is_kept_beside_the_published_one_and_never_over_it() {
+            let work = tmpdir("keep");
+            let name = "left-pad-1.3.0.tgz";
+            std::fs::write(work.join(name), b"the published bytes").unwrap();
+            let attempt = work.join("rebuild/strategy-1");
+            std::fs::create_dir_all(&attempt).unwrap();
+            std::fs::write(attempt.join(name), b"the rebuilt bytes").unwrap();
+            std::fs::write(work.join("rebuild/build.log"), b"the log").unwrap();
+
+            let kept = keep_judged(&work, &attempt.join(name));
+            assert_eq!(kept, work.join("kept").join(name));
+            assert_eq!(std::fs::read(&kept).unwrap(), b"the rebuilt bytes");
+            assert_eq!(
+                std::fs::read(work.join(name)).unwrap(),
+                b"the published bytes"
+            );
+            assert_eq!(std::fs::read(work.join("build.log")).unwrap(), b"the log");
+            // And the copy is not moved: the rebuild directory still has its own.
+            assert!(attempt.join(name).exists());
+            std::fs::remove_dir_all(work.join("rebuild")).unwrap();
+            assert!(kept.exists(), "the next attempt's wipe took the kept copy");
+
+            // A copy that could not be made names the file that is missing, never a substitute.
+            let gone = work.join("rebuild/strategy-2").join(name);
+            assert_eq!(keep_judged(&work, &gone), gone);
+        }
+
+        /// A build whose output lands in a subdirectory is still found, beside anything this
+        /// process wrote at the top.
+        #[test]
+        fn an_artifact_the_build_wrote_into_a_subdirectory_is_found() {
+            let out = tmpdir("subdir").join("rebuild");
+            std::fs::create_dir_all(out.join("dist")).unwrap();
+            std::fs::write(out.join("build.log"), b"ours").unwrap();
+            let artifact = out.join("dist/demo-1.0.0.tgz");
+            std::fs::write(&artifact, b"built here").unwrap();
+            assert_eq!(newest_file(&out), Some(artifact));
+        }
+
+        /// The brief a repair is written from: counts, the codes, the differing members, each list
+        /// capped, and a sentence where there is no member detail at all.
+        #[test]
+        fn the_divergence_brief_caps_its_lists_and_says_what_it_left_out() {
+            let c = compare(&many(45, b"one"), &many(45, b"two"));
+            let brief = divergence_brief(&c);
+            assert!(
+                brief.starts_with(
+                    "0 members identical, 45 differ, 0 only in the published artifact, 0 only in \
+                     the rebuild.\n"
+                ),
+                "{brief}"
+            );
+            let codes = c.diff.as_ref().unwrap().codes.len();
+            assert!(codes > 40, "{codes}");
+            assert!(
+                brief.contains(&format!("  … and {} more\n", codes - 40)),
+                "{brief}"
+            );
+            let named = brief
+                .lines()
+                .filter(|l| l.starts_with("  Differs "))
+                .count();
+            assert_eq!(named, 40, "{brief}");
+
+            let mut bare = c.clone();
+            bare.diff = None;
+            assert_eq!(
+                divergence_brief(&bare),
+                "the stabilized digests differ, with no member-level detail available"
+            );
+        }
+
+        /// What a model is shown of a divergence: the raw members, marked, each side by its own
+        /// name, with what normalization already discounted said out loud, and how many members
+        /// it was not shown.
+        #[test]
+        fn the_diff_a_model_reads_shows_the_members_and_says_what_it_left_out() {
+            let d = tmpdir("opinion");
+            let (up, rb) = (d.join("demo-1.0.0.tgz"), d.join("rebuilt.tgz"));
+
+            // Nothing differs once normalized: nothing to show.
+            let (a, b) = (
+                tgz(&[("package/index.js", b"x\n")], 1),
+                tgz(&[("package/index.js", b"x\n")], 2),
+            );
+            std::fs::write(&up, &a).unwrap();
+            std::fs::write(&rb, &b).unwrap();
+            assert!(diff_for_opinion(&up, &rb, &compare(&a, &b)).is_none());
+
+            let a = tgz(
+                &[
+                    ("package/index.js", b"line one\nold\n"),
+                    ("package/lost.js", b"gone\n"),
+                ],
+                1,
+            );
+            let b = tgz(&[("package/index.js", b"line one\nnew\n")], 2);
+            std::fs::write(&up, &a).unwrap();
+            std::fs::write(&rb, &b).unwrap();
+            let (text, shown, differing) = diff_for_opinion(&up, &rb, &compare(&a, &b)).unwrap();
+            assert_eq!((shown, differing), (2, 2), "{text}");
+            assert!(
+                text.starts_with(
+                    "`-` lines are the published artifact, `+` lines are the rebuild.\n"
+                ),
+                "{text}"
+            );
+            assert!(text.contains("ran after normalization ("), "{text}");
+            assert!(text.contains("tar-time"), "{text}");
+            assert!(text.contains("=== package/index.js — in both;"), "{text}");
+            assert!(text.contains("\n-old\n+new\n"), "{text}");
+            assert!(
+                text.contains("=== package/lost.js — only in the published artifact;"),
+                "{text}"
+            );
+            assert!(!text.contains("not shown"), "{text}");
+
+            let (a, b) = (many(11, b"one\n"), many(11, b"two\n"));
+            std::fs::write(&up, &a).unwrap();
+            std::fs::write(&rb, &b).unwrap();
+            let (text, shown, differing) = diff_for_opinion(&up, &rb, &compare(&a, &b)).unwrap();
+            assert_eq!((shown, differing), (8, 11));
+            assert!(
+                text.ends_with("\n… and 3 more differing member(s) not shown.\n"),
+                "{text}"
+            );
+        }
+
+        /// A run that died before it had an artifact is not recorded in the store — there is
+        /// nothing for a record to be about — and one that ended in our own error is recorded as
+        /// `failed`, with what the report knew: the guard trip, the tokens, the phases it timed.
+        #[test]
+        fn a_run_that_reached_no_verdict_is_recorded_with_what_it_knew() {
+            use super::record_keeps_what_the_run_threw_away::{
+                STRATEGY, fetched, inputs, store, tgz,
+            };
+            let work = tmpdir("terminal");
+            let dir = work.join("store");
+            let purl = "pkg:npm/left-pad@1.3.0";
+            let failed: Result<Ran> = Err(anyhow::anyhow!("the mirror container did not start"));
+
+            let nothing = Recording::default();
+            let report = crate::progress::RunReport::new(purl);
+            assert_eq!(
+                record_terminal(&dir, &nothing, &report, &failed).unwrap(),
+                None
+            );
+            let (rt, s) = store(&dir);
+            assert!(rt.block_on(s.list_runs()).unwrap().is_empty());
+
+            let bytes = tgz();
+            let up = work.join("left-pad-1.3.0.tgz");
+            std::fs::write(&up, &bytes).unwrap();
+            let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
+            let mut args = inputs(&work, &strategy, b"{}");
+            args.upstream_digests = Some(fetched(&bytes));
+            let rec = Recording {
+                inputs: Some(args),
+                upstream: Some((
+                    up.clone(),
+                    trigon_store::digest_of(&bytes),
+                    bytes.len() as u64,
+                )),
+                record_id: None,
+            };
+            let trip = "the artifact under test arrived from registry.npmjs.org".to_string();
+            let mut report = crate::progress::RunReport::new(purl);
+            report.void_reason = Some(trip.clone());
+            report.model = Some("replay:transcript.json".into());
+            report.tokens_in = Some(120);
+            report.tokens_out = Some(30);
+            report.model_calls = 2;
+            report.timings = vec![
+                ("source".into(), Some(1.5)),
+                ("deps".into(), None),
+                ("build".into(), Some(3.0)),
+            ];
+            let id = record_terminal(&dir, &rec, &report, &failed)
+                .unwrap()
+                .expect("recorded");
+            let r = rt.block_on(s.get_run(&id)).unwrap();
+            assert_eq!(r.terminal.as_deref(), Some("failed"));
+            assert_eq!(r.outcome, None);
+            assert!(!r.is_evidence());
+            assert_eq!(r.guard_trips, std::slice::from_ref(&trip));
+            let costs = r.costs.unwrap();
+            assert_eq!(costs.tokens.len(), 1);
+            let t = &costs.tokens[0];
+            assert_eq!((t.input, t.cached_input, t.output), (120, 0, 30));
+            assert_eq!((t.model.as_str(), t.calls), ("replay:transcript.json", 2));
+            // A floor: the phase with no reading is left out, not counted as zero.
+            assert_eq!(costs.build_seconds, Some(4.5));
+            assert_eq!((costs.artifact_bytes, costs.log_bytes), (Some(0), Some(0)));
+
+            // A void the report already carries is one trip, not two. A store of its own, since a
+            // run id is to the second.
+            let void: Result<Ran> = Ok(Ran::from(Outcome::Void {
+                reason: trip.clone(),
+            }));
+            let dir = work.join("store-void");
+            let id = record_terminal(&dir, &rec, &report, &void)
+                .unwrap()
+                .unwrap();
+            let (rt, s) = store(&dir);
+            let r = rt.block_on(s.get_run(&id)).unwrap();
+            assert_eq!(r.terminal.as_deref(), Some("void"));
+            assert_eq!(r.guard_trips, [trip]);
+        }
+    }
 }
 
 #[cfg(feature = "build")]
@@ -10605,6 +11422,37 @@ mod mirror {
             Ok(())
         })
     }
+
+    #[cfg(test)]
+    mod derived_tag_tests {
+        use super::derived_tag;
+
+        const PARENT: &str = "docker.io/library/debian@sha256:aa";
+
+        fn tag(parent: &str, packages: &[&str]) -> String {
+            let packages: Vec<String> = packages.iter().map(|p| p.to_string()).collect();
+            derived_tag(parent, &packages)
+        }
+
+        /// Named by what is in it, so two runs wanting one set find one image: the order and the
+        /// repeats of a list do not make another, and another parent or another set does.
+        #[test]
+        fn a_derived_image_is_named_by_what_is_in_it_and_nothing_else() {
+            let t = tag(PARENT, &["git", "wget"]);
+            let hex = t
+                .strip_prefix("localhost/trigon-base:auto-")
+                .unwrap_or_else(|| panic!("{t}"));
+            assert_eq!(hex.len(), 16, "{t}");
+            assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()), "{t}");
+            assert_eq!(t, tag(PARENT, &["wget", "git", "git"]));
+            assert_ne!(t, tag(PARENT, &["git"]));
+            assert_ne!(t, tag(PARENT, &["git", "wget", "ssh"]));
+            assert_ne!(
+                t,
+                tag("docker.io/library/debian@sha256:bb", &["git", "wget"])
+            );
+        }
+    }
 }
 
 #[cfg(feature = "build")]
@@ -11418,6 +12266,20 @@ mod sweep {
             assert_ne!(a.cluster(), x.cluster());
         }
 
+        /// The line a cluster shows is one line, cut at a character rather than a byte — build
+        /// logs are not ASCII — and marked where it was cut.
+        #[test]
+        fn a_long_evidence_line_is_cut_at_a_character_and_marked() {
+            assert_eq!(short_evidence("  npm ERR! 404  "), "npm ERR! 404");
+            let long = format!("  {}  ", "é".repeat(200));
+            let cut = short_evidence(&long);
+            assert_eq!(cut.chars().count(), 96);
+            assert!(cut.ends_with('…'), "{cut}");
+            assert!(cut.starts_with('é'), "{cut}");
+            let exact = "x".repeat(96);
+            assert_eq!(short_evidence(&exact), exact);
+        }
+
         #[test]
         fn an_infrastructure_failure_is_not_counted_as_a_package_that_does_not_build() {
             let ours = Outcome::Failed {
@@ -11510,6 +12372,88 @@ fn dotnet_version_repair(
     // tripwire reads that guard out of the source and a validation hidden in here is invisible to
     // it.
     trigon_strategy::with_assembly_version(strategy, &info)
+}
+
+#[cfg(all(test, feature = "build"))]
+mod version_repair_guards {
+    //! The guards on either side of the .NET version rung that need no decompiler: when it has
+    //! nothing to try, and when what it proposes changes nothing.
+    use super::{changes_anything, dotnet_version_repair};
+
+    const STRATEGY: &str = "schema: 1\nkind: flow\nlocation:\n  repo: https://github.com/o/d\n  \
+                            ref: cafebabe\nsrc:\n- uses: git-checkout\nbuild:\n- runs: make\n\
+                            output_path: out.tgz\n";
+
+    fn tgz(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut b = ::tar::Builder::new(Vec::new());
+        for (name, body) in members {
+            let mut h = ::tar::Header::new_ustar();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, *name, *body).unwrap();
+        }
+        let mut gz = Vec::new();
+        {
+            use std::io::Write as _;
+            let mut e = flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
+            e.write_all(&b.into_inner().unwrap()).unwrap();
+            e.finish().unwrap();
+        }
+        gz
+    }
+
+    fn compare(a: &[u8], b: &[u8]) -> trigon_compare::Comparison {
+        trigon_compare::compare_bytes(
+            a.to_vec(),
+            b.to_vec(),
+            trigon_core::Format::TarGz,
+            &trigon_stabilize::profile("tar-gzip").unwrap(),
+            &trigon_archive::Limits::default(),
+        )
+        .unwrap()
+    }
+
+    /// The rung fires only on a differing managed assembly, and only from the published bytes:
+    /// a divergence with no assembly in it, a comparison with no member detail, and published
+    /// bytes that are not there each propose nothing.
+    #[test]
+    fn the_version_rung_proposes_nothing_without_a_differing_assembly_it_can_read() {
+        let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
+        let d = std::env::temp_dir().join(format!("trigon-version-rung-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let up = d.join("demo-1.0.0.tgz");
+
+        let (a, b) = (
+            tgz(&[("lib/readme.txt", b"one")]),
+            tgz(&[("lib/readme.txt", b"two")]),
+        );
+        std::fs::write(&up, &a).unwrap();
+        let c = compare(&a, &b);
+        assert!(dotnet_version_repair(&c, &up, &strategy).is_none());
+        let mut bare = c.clone();
+        bare.diff = None;
+        assert!(dotnet_version_repair(&bare, &up, &strategy).is_none());
+
+        let (a, b) = (
+            tgz(&[("lib/net8.0/Demo.dll", b"MZ one")]),
+            tgz(&[("lib/net8.0/Demo.dll", b"MZ two")]),
+        );
+        let c = compare(&a, &b);
+        assert!(dotnet_version_repair(&c, &d.join("gone.tgz"), &strategy).is_none());
+    }
+
+    /// A proposal whose digest is the one that just ran changes nothing and is not rebuilt; one
+    /// with no digest to compare against, or another digest, is a change.
+    #[test]
+    fn a_proposal_that_renders_to_the_same_digest_changes_nothing() {
+        let strategy = trigon_strategy::from_yaml(STRATEGY).unwrap();
+        let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+        let digest = trigon_strategy::strategy_digest(&strategy, &tools).unwrap();
+        assert!(!changes_anything(&strategy, &Some(digest)));
+        assert!(changes_anything(&strategy, &None));
+        assert!(changes_anything(&strategy, &Some("00".repeat(32))));
+    }
 }
 
 #[cfg(feature = "build")]
@@ -12030,7 +12974,15 @@ fn verify_attestation(
         .context("the envelope's payload is not an in-toto statement")?;
 
     let signature = match (env.is_signed(), public_key) {
-        (false, _) => "unsigned".to_string(),
+        // A key pinned, and no signature to check against it: the check was asked for and cannot
+        // pass. This said `unsigned` and exited 0, so a bundle whose signature had been stripped
+        // passed a check that pinned the key it was stripped of — an unsigned bundle treated as
+        // verified, which is what keeping the two answers apart exists to prevent.
+        (false, Some(_)) => {
+            return Err(anyhow::Error::new(trigon_attest::AttestError::Unsigned)
+                .context("--public-key names the key this bundle must be signed by"));
+        }
+        (false, None) => "unsigned".to_string(),
         (true, None) => format!(
             "present ({}), not checked — pass --public-key to check it",
             env.signatures
@@ -13325,6 +14277,32 @@ mod attestor {
     }
 
     #[cfg(test)]
+    mod what_signs_rebuild_attest {
+        /// The key in the file signs, as `trigon attest --key` signs with it; no key signs as
+        /// nobody, which the statement says; and a key that cannot be read stops the signing
+        /// rather than falling back to unsigned.
+        #[test]
+        fn the_named_key_signs_and_no_key_signs_as_nobody() {
+            let d = std::env::temp_dir().join(format!("trigon-signer-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            let key = trigon_attest::LocalKey::generate();
+            let hex: String = key.seed().iter().map(|b| format!("{b:02x}")).collect();
+            let path = d.join("signing.key");
+            std::fs::write(&path, format!("{hex}\n")).unwrap();
+
+            let signer = super::signer(Some(&path)).unwrap();
+            assert!(!signer.key_id().is_empty());
+            assert_eq!(signer.key_id(), trigon_attest::Signer::key_id(&key));
+            assert!(super::signer(None).unwrap().key_id().is_empty());
+            let e = super::signer(Some(&d.join("missing.key")))
+                .err()
+                .expect("it signed");
+            assert!(format!("{e:#}").contains("reading key"), "{e:#}");
+        }
+    }
+
+    #[cfg(test)]
     mod a_refusal_to_sign_says_why {
         use super::refusal;
 
@@ -13960,55 +14938,46 @@ output_path: '*.tgz'
     }
 }
 
+/// The `global.json` that applies to a project, if any.
+///
+/// .NET resolves `global.json` by walking up from the project directory to the filesystem root and
+/// taking the first one it finds. This walks up from `subdir` to `root` — the checkout boundary,
+/// which is as far as anything we build reaches — through [`dirs_in_checkout`], so only real
+/// directories inside it are searched, and only a regular file is read: a `global.json` that is a
+/// link is followed nowhere, since a checkout is what the package's repository put there and a link
+/// out of it names a file the package never carried. Repositories almost always keep the file at
+/// the root, so the common case is one `read` at the top of the walk.
+///
+/// Build-only: nothing in the verifier chooses an SDK, so under `--no-default-features` this and
+/// its siblings below have no caller and `-D warnings` would reject them.
+#[cfg(feature = "build")]
+fn dotnet_global_json(root: &Path, subdir: Option<&str>) -> Option<String> {
+    let (dirs, _) = dirs_in_checkout(root, subdir)?;
+    dirs.iter().rev().find_map(|dir| {
+        let file = dir.join("global.json");
+        if !std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) {
+            return None;
+        }
+        std::fs::read_to_string(&file).ok()
+    })
+}
+
 /// The text of the project file a .NET build would compile, from a checkout on disk.
 ///
 /// Best effort, and the caller treats absence as "no floor" rather than as an answer. Searched
 /// under the strategy's `subdir` where it names one, because a monorepo's other projects target
-/// whatever they like and the one being packed is the only one whose framework matters.
+/// whatever they like and the one being packed is the only one whose framework matters. A `subdir`
+/// that is not a real directory inside the checkout — one reached through a link, or named with
+/// `..` or from `/` — is searched nowhere, so the walk starts inside the checkout.
 ///
 /// The first `.csproj` in sorted order rather than a search for the right one: the strategy already
 /// chose which project to build, and re-deriving that here would be a second answer to a question
 /// `nuget_project` settled. Where a directory holds several, their target frameworks are almost
 /// always the same, and `choose` takes the highest anyway.
 #[cfg(feature = "build")]
-/// The `global.json` that applies to a project, if any.
-///
-/// .NET resolves `global.json` by walking up from the project directory to the filesystem root and
-/// taking the first one it finds. This walks up from `subdir` to `root` — the checkout boundary,
-/// which is as far as anything we build reaches, and the `starts_with` guard keeps the walk from
-/// escaping it. Repositories almost always keep the file at the root, so the common case is one
-/// `read` at the top of the walk.
-///
-/// Build-only: nothing in the verifier chooses an SDK, so under `--no-default-features` this and
-/// its sibling below have no caller and `-D warnings` would reject them.
-#[cfg(feature = "build")]
-fn dotnet_global_json(root: &Path, subdir: Option<&str>) -> Option<String> {
-    let start = match subdir {
-        Some(d) => root.join(d),
-        None => root.to_path_buf(),
-    };
-    let mut dir = start.as_path();
-    loop {
-        if let Ok(text) = std::fs::read_to_string(dir.join("global.json")) {
-            return Some(text);
-        }
-        if dir == root {
-            break;
-        }
-        match dir.parent() {
-            Some(p) if p.starts_with(root) => dir = p,
-            _ => break,
-        }
-    }
-    None
-}
-
-#[cfg(feature = "build")]
 fn dotnet_project_text(root: &Path, subdir: Option<&str>) -> Option<String> {
-    let start = match subdir {
-        Some(d) => root.join(d),
-        None => root.to_path_buf(),
-    };
+    let (dirs, whole) = dirs_in_checkout(root, subdir)?;
+    let start = dirs.last().filter(|_| whole)?.clone();
     let mut found: Vec<std::path::PathBuf> = Vec::new();
     let mut stack = vec![start];
     // Bounded: a deep tree should not turn a pre-flight into a walk of the whole repository.
@@ -14019,11 +14988,20 @@ fn dotnet_project_text(root: &Path, subdir: Option<&str>) -> Option<String> {
         };
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_dir() {
+            // The entry's own type, which is `lstat`'s, so a link found in the walk is followed
+            // nowhere. `is_dir` follows one, and a checkout is what the package's repository put
+            // there: a link out of it had the walk read a project the package never carried, and
+            // a link back up the tree had it walk the same directories until the kernel stopped
+            // resolving the path.
+            let Ok(kind) = e.file_type() else { continue };
+            if kind.is_dir() {
                 if p.file_name().is_some_and(|n| n == ".git") {
                     continue;
                 }
                 stack.push(p);
+                continue;
+            }
+            if !kind.is_file() {
                 continue;
             }
             seen += 1;
@@ -14037,6 +15015,31 @@ fn dotnet_project_text(root: &Path, subdir: Option<&str>) -> Option<String> {
     }
     found.sort();
     std::fs::read_to_string(found.first()?).ok()
+}
+
+/// The directories from `root` down to `subdir` that are really inside the checkout, outermost
+/// first, and whether they reach all of `subdir`.
+///
+/// Each step is a plain name and a directory that is not a link, checked with `lstat`: a link names
+/// wherever the package's repository pointed it, which may be anywhere on this machine. The list
+/// stops at the first step that is not — a link, or a directory that is not there — and a `subdir`
+/// that climbs with `..` or starts from `/` is `None`, since it names nothing inside the checkout.
+#[cfg(feature = "build")]
+fn dirs_in_checkout(root: &Path, subdir: Option<&str>) -> Option<(Vec<PathBuf>, bool)> {
+    let mut dirs = vec![root.to_path_buf()];
+    let mut dir = root.to_path_buf();
+    for step in Path::new(subdir.unwrap_or_default()).components() {
+        match step {
+            std::path::Component::Normal(name) => dir.push(name),
+            std::path::Component::CurDir => continue,
+            _ => return None,
+        }
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+            return Some((dirs, false));
+        }
+        dirs.push(dir.clone());
+    }
+    Some((dirs, true))
 }
 
 #[cfg(all(test, feature = "build"))]
@@ -14092,6 +15095,136 @@ mod global_json_tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    /// Nor is one outside it read by any other way out: a `global.json` that is a link, a `subdir`
+    /// reached through a linked directory, or one that climbs out with `..` or starts from `/`.
+    /// The checkout is what the package's repository put there, and each of these names a file it
+    /// never carried.
+    #[cfg(unix)]
+    #[test]
+    fn a_global_json_outside_the_checkout_is_not_read_through_a_link_or_a_climb() {
+        let base = std::env::temp_dir().join(format!("trigon-gj-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join("global.json"),
+            r#"{ "sdk": { "version": "6.0.0" } }"#,
+        )
+        .unwrap();
+        let root = base.join("checkout");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        std::os::unix::fs::symlink(outside.join("global.json"), root.join("global.json")).unwrap();
+        assert_eq!(dotnet_global_json(&root, None), None);
+        assert_eq!(dotnet_global_json(&root, Some("src")), None);
+
+        std::os::unix::fs::symlink(&outside, root.join("src/vendor")).unwrap();
+        assert_eq!(dotnet_global_json(&root, Some("src/vendor")), None);
+        assert_eq!(dotnet_global_json(&root, Some("../outside")), None);
+        assert_eq!(
+            dotnet_global_json(&root, Some(outside.to_str().unwrap())),
+            None
+        );
+
+        // The same file, really in the checkout, is read.
+        std::fs::remove_file(root.join("global.json")).unwrap();
+        std::fs::copy(outside.join("global.json"), root.join("global.json")).unwrap();
+        assert!(dotnet_global_json(&root, Some("src")).is_some_and(|t| t.contains("6.0.0")));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(all(test, feature = "build"))]
+mod project_text_tests {
+    //! `dotnet_project_text` reads a checkout of the package's own repository — input the
+    //! package's authors control — to find the framework the SDK choice is floored by.
+    use super::dotnet_project_text;
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("trigon-csproj-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Under the strategy's `subdir`, the first project in sorted order, however deep, and nothing
+    /// under `.git`.
+    #[test]
+    fn the_project_is_found_under_the_subdir_and_never_in_git() {
+        let root = tmpdir("found");
+        let pkg = root.join("src/Demo");
+        std::fs::create_dir_all(pkg.join("nested")).unwrap();
+        std::fs::write(pkg.join("nested/B.csproj"), "<B/>").unwrap();
+        std::fs::write(pkg.join("nested/A.csproj"), "<A/>").unwrap();
+        std::fs::write(root.join("Other.csproj"), "<Other/>").unwrap();
+        std::fs::create_dir_all(root.join("src/Demo/.git")).unwrap();
+        std::fs::write(root.join("src/Demo/.git/0.csproj"), "<Git/>").unwrap();
+
+        assert_eq!(
+            dotnet_project_text(&root, Some("src/Demo")).as_deref(),
+            Some("<A/>")
+        );
+        assert_eq!(
+            dotnet_project_text(&root, None).as_deref(),
+            Some("<Other/>"),
+            "from the root, the first in sorted order"
+        );
+        assert_eq!(dotnet_project_text(&root, Some("src/Missing")), None);
+    }
+
+    /// A link in the checkout is followed nowhere: a project outside the checkout is not the
+    /// package's, whether the link names its directory or the file itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_checkout_is_not_followed() {
+        let base = tmpdir("links");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("Elsewhere.csproj"), "<Elsewhere/>").unwrap();
+        let root = base.join("checkout");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("vendor")).unwrap();
+        assert_eq!(dotnet_project_text(&root, None), None);
+
+        std::os::unix::fs::symlink(outside.join("Elsewhere.csproj"), root.join("Linked.csproj"))
+            .unwrap();
+        assert_eq!(dotnet_project_text(&root, None), None);
+
+        // And a link back up the tree is not walked either.
+        std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
+        std::fs::write(root.join("Real.csproj"), "<Real/>").unwrap();
+        assert_eq!(dotnet_project_text(&root, None).as_deref(), Some("<Real/>"));
+    }
+
+    /// Nor does the walk start outside it: a `subdir` that is a link out of the checkout, or that
+    /// climbs out with `..` or starts from `/`, is searched nowhere.
+    #[cfg(unix)]
+    #[test]
+    fn a_subdir_that_leaves_the_checkout_is_not_searched() {
+        let base = tmpdir("subdir-out");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("Elsewhere.csproj"), "<Elsewhere/>").unwrap();
+        let root = base.join("checkout");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("src/Demo")).unwrap();
+
+        assert_eq!(dotnet_project_text(&root, Some("src/Demo")), None);
+        assert_eq!(dotnet_project_text(&root, Some("../outside")), None);
+        assert_eq!(
+            dotnet_project_text(&root, Some(outside.to_str().unwrap())),
+            None
+        );
+
+        // A `.` in the subdir is the directory it is in.
+        std::fs::write(root.join("src/Real.csproj"), "<Real/>").unwrap();
+        assert_eq!(
+            dotnet_project_text(&root, Some("./src")).as_deref(),
+            Some("<Real/>")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -14119,6 +15252,10 @@ mod build_version_tests {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
+            // The repositories are the test's own, and so is how they are made: a host that signs
+            // every commit, or hooks every one, would otherwise fail the setup.
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .output()
             .expect("git runs")
             .status
@@ -14187,6 +15324,22 @@ mod build_version_tests {
     }
 
     #[test]
+    fn a_tree_whose_state_cannot_be_read_is_not_called_clean() {
+        // `git status` refusing — here over an index it cannot read, while the commit is still
+        // there to name — is not an answer that the tree matches the commit. Unable to tell is
+        // not clean.
+        let d = dir("unreadable-index");
+        git(&d, &["init", "-q"]);
+        std::fs::write(d.join("a"), "one").unwrap();
+        git(&d, &["add", "a"]);
+        git(&d, &["commit", "-q", "-m", "one"]);
+        let (clean, _) = build_version("1.2.3", &d);
+        assert!(!clean.ends_with(".dirty"), "{clean}");
+        std::fs::write(d.join(".git/index"), "not an index").unwrap();
+        assert_eq!(build_version("1.2.3", &d).0, format!("{clean}.dirty"));
+    }
+
+    #[test]
     fn asking_whether_the_tree_is_dirty_writes_nothing() {
         // A file whose stat no longer matches the index, with the same content: `git status`
         // refreshes that entry and writes the index back under `index.lock`, which a `git commit`
@@ -14246,5 +15399,185 @@ mod build_version_tests {
             "{}",
             crate::TRIGON_VERSION
         );
+    }
+}
+
+#[cfg(all(test, feature = "build"))]
+mod mirror_source_tests {
+    //! `src/mirror_source.rs`: the digest `build.rs` bakes into the binary for the staleness check
+    //! and `mirror-image` stamps on the image it builds. One function, two callers that must agree.
+
+    use std::path::{Path, PathBuf};
+
+    /// A workspace holding a mirror crate of `files`, each `(path under the crate, body)`, written
+    /// in the order given.
+    fn workspace(what: &str, files: &[(&str, &str)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "trigon-mirror-source-{}-{what}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        for (path, body) in files {
+            let p = root.join("crates/trigon-mirror").join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        root
+    }
+
+    const MIRROR: &[(&str, &str)] = &[
+        ("Cargo.toml", "[package]\nname = \"trigon-mirror\"\n"),
+        ("src/lib.rs", "pub mod routes;\n"),
+        ("src/routes/mod.rs", "pub mod npm;\n"),
+        ("src/routes/npm.rs", "pub fn packument() {}\n"),
+    ];
+
+    fn digest(root: &Path) -> String {
+        crate::mirror_source_digest(root).unwrap()
+    }
+
+    /// The digest of a mirror crate of `files`, worked out here by the rule the function states
+    /// rather than asked of it: the manifest and every file under `src/`, by path from the
+    /// workspace root in sorted order, each path then a zero byte then the file's bytes then a
+    /// zero byte, under SHA-256, as sixteen hex characters.
+    fn expected(files: &[(&str, &str)]) -> String {
+        use sha2::Digest as _;
+        let mut counted: Vec<(String, &str)> = files
+            .iter()
+            .filter(|(p, _)| *p == "Cargo.toml" || p.starts_with("src/"))
+            .map(|(p, body)| (format!("crates/trigon-mirror/{p}"), *body))
+            .collect();
+        counted.sort();
+        let mut h = sha2::Sha256::new();
+        for (path, body) in &counted {
+            h.update(path.as_bytes());
+            h.update([0]);
+            h.update(body.as_bytes());
+            h.update([0]);
+        }
+        format!("{:x}", h.finalize())[..16].to_string()
+    }
+
+    #[test]
+    fn the_digest_is_of_the_mirrors_manifest_and_sources_whatever_order_they_are_listed_in() {
+        let base = digest(&workspace("base", MIRROR));
+        assert_eq!(base.len(), 16, "{base}");
+        assert!(base.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "{base}");
+        // Over the files in sorted order, whatever order the directory listed them in. Comparing
+        // two trees with each other is not enough: a filesystem that lists by name hash lists
+        // both alike, so a digest that followed the listing would still agree with itself.
+        assert_eq!(base, expected(MIRROR));
+
+        // The same files written in the other order: a directory listing's order is the
+        // filesystem's, and a digest that followed it would change for no reason.
+        let reversed: Vec<(&str, &str)> = MIRROR.iter().rev().copied().collect();
+        assert_eq!(digest(&workspace("reversed", &reversed)), base);
+        // And a directory of many, written forwards and backwards, so that neither a listing by
+        // hash nor one by creation can come back sorted by chance.
+        let routes: Vec<(String, String)> = ["cargo", "gem", "go", "maven", "npm", "nuget", "pypi"]
+            .iter()
+            .map(|n| (format!("src/routes/{n}.rs"), format!("pub fn {n}() {{}}\n")))
+            .collect();
+        let mut many: Vec<(&str, &str)> = MIRROR[..2].to_vec();
+        many.extend(routes.iter().map(|(p, b)| (p.as_str(), b.as_str())));
+        let want = expected(&many);
+        assert_eq!(digest(&workspace("many", &many)), want);
+        many.reverse();
+        assert_eq!(digest(&workspace("many-reversed", &many)), want);
+
+        // What decides how the mirror behaves moves it: a source, nested or not, and the manifest.
+        let changed = |what: &str, path: &str, body: &str| {
+            let mut files = MIRROR.to_vec();
+            match files.iter_mut().find(|(p, _)| *p == path) {
+                Some(f) => f.1 = body,
+                None => files.push((path, body)),
+            }
+            digest(&workspace(what, &files))
+        };
+        assert_ne!(changed("route", "src/routes/npm.rs", "pub fn packument() { 1 }\n"), base);
+        assert_ne!(changed("new", "src/routes/pypi.rs", "pub fn simple() {}\n"), base);
+        assert_ne!(changed("manifest", "Cargo.toml", "[package]\nname = \"x\"\n"), base);
+        // A file moved is a change, even with its bytes the same.
+        let moved: Vec<(&str, &str)> = MIRROR
+            .iter()
+            .map(|(p, b)| (if *p == "src/routes/npm.rs" { "src/routes/yarn.rs" } else { *p }, *b))
+            .collect();
+        assert_ne!(digest(&workspace("moved", &moved)), base);
+
+        // What does not decide it leaves it alone: the mirror's tests and readme, and every other
+        // crate, whose changes would make a warning that fires on every commit.
+        assert_eq!(changed("tests", "tests/routes.rs", "#[test] fn t() {}\n"), base);
+        assert_eq!(changed("readme", "README.md", "# the mirror\n"), base);
+        let root = workspace("neighbour", MIRROR);
+        std::fs::create_dir_all(root.join("crates/trigon-core/src")).unwrap();
+        std::fs::write(root.join("crates/trigon-core/src/lib.rs"), "pub fn f() {}\n").unwrap();
+        assert_eq!(digest(&root), base);
+    }
+
+    #[test]
+    fn a_tree_without_the_mirrors_source_is_an_error_not_a_digest() {
+        let root = workspace("absent", &[]);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(crate::mirror_source_digest(&root).is_err());
+        // A manifest alone is not the source either.
+        let root = workspace("manifest-only", &MIRROR[..1]);
+        assert!(crate::mirror_source_digest(&root).is_err());
+    }
+
+    /// A file or directory of the mirror's manifest and sources modified after this binary's
+    /// digest was baked, if there is one.
+    ///
+    /// Baked when the build script ran, no later than this test binary was written and no later
+    /// than Cargo last wrote the script's `output` beside `OUT_DIR` — which a later build of
+    /// another target can rewrite — so the earlier of the two is the bound. A directory counts,
+    /// because removing or renaming a file changes its directory and no file.
+    fn edited_since_the_digest_was_baked(root: &Path) -> Option<PathBuf> {
+        let modified = |p: &Path| p.metadata().and_then(|m| m.modified()).ok();
+        let script = Path::new(env!("OUT_DIR")).with_file_name("output");
+        let exe = std::env::current_exe().ok();
+        let baked = [modified(&script), exe.as_deref().and_then(modified)]
+            .into_iter()
+            .flatten()
+            .min()?;
+        let mirror = root.join("crates/trigon-mirror");
+        let mut seen = vec![mirror.join("Cargo.toml")];
+        let mut stack = vec![mirror.join("src")];
+        while let Some(d) = stack.pop() {
+            seen.push(d.clone());
+            for entry in std::fs::read_dir(&d).ok()?.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    seen.push(p);
+                }
+            }
+        }
+        seen.into_iter().find(|p| modified(p).is_some_and(|t| t > baked))
+    }
+
+    /// What `build.rs` baked in is what the same function says of the checkout this binary was
+    /// built from, so the staleness check compares like with like.
+    ///
+    /// Held where the question has an answer. A build with no mirror sources beside it bakes
+    /// `unknown` and has nothing to compare with; and sources edited after the digest was baked are
+    /// not the sources this binary was built from, so a difference then is the edit, not the
+    /// build script. A baked `unknown` beside sources that are there is not excused: that is a
+    /// build script that looked in the wrong place.
+    #[test]
+    fn this_binary_carries_the_digest_of_the_mirror_it_was_built_from() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(now) = crate::mirror_source_digest(&root) else {
+            eprintln!("no mirror sources beside this build: the baked digest is not checked");
+            return;
+        };
+        if let Some(edited) = edited_since_the_digest_was_baked(&root) {
+            eprintln!(
+                "{} changed after the digest was baked: the baked digest is not checked",
+                edited.display()
+            );
+            return;
+        }
+        assert_eq!(env!("TRIGON_MIRROR_SOURCE"), now);
     }
 }

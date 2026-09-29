@@ -177,6 +177,17 @@ fn line_of(text: &str, needle: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Where an SPDX element's id is declared: the line that carries its `SPDXID`, and not the first
+/// that names it, which may be `documentDescribes` above the packages. The first line that names
+/// it where none carries both.
+fn line_of_id(text: &str, id: &str) -> usize {
+    let quoted = format!("\"{id}\"");
+    text.lines()
+        .position(|l| l.contains("\"SPDXID\"") && l.contains(&quoted))
+        .map(|i| i + 1)
+        .unwrap_or_else(|| line_of(text, &quoted))
+}
+
 fn npm_lock(text: &str) -> Result<Vec<Package>, LockfileError> {
     let v: serde_json::Value =
         serde_json::from_str(text)
@@ -444,9 +455,9 @@ fn spdx(text: &str) -> Result<Vec<Package>, LockfileError> {
         // A versionless purl may name several packages of the SBOM, each of its own version, so
         // those are found by their SPDX id, which names one.
         let line = match (&given, field("SPDXID")) {
-            (Some(_), Some(id)) if purl != given => line_of(text, &format!("\"{id}\"")),
+            (Some(_), Some(id)) if purl != given => line_of_id(text, &id),
             (Some(p), _) => line_of(text, p),
-            (None, Some(id)) => line_of(text, &format!("\"{id}\"")),
+            (None, Some(id)) => line_of_id(text, &id),
             (None, None) => 0,
         };
         out.push(Package {
@@ -866,5 +877,155 @@ mod tests {
             reqs[0].alternatives(),
             "a requirement's hashes are pip's alternatives"
         );
+    }
+
+    /// A package's line is 1-based, as a code-scanning UI counts them: the line its entry is
+    /// written on, in every kind of file, and not the one before it.
+    #[test]
+    fn a_package_is_reported_on_the_line_its_entry_is_written_on() {
+        let v3 = "{\n  \"lockfileVersion\": 3,\n  \"packages\": {\n    \"\": {},\n    \
+                  \"node_modules/left-pad\": { \"version\": \"1.3.0\" }\n  }\n}\n";
+        let v1 = "{\n  \"lockfileVersion\": 1,\n  \"dependencies\": {\n    \
+                  \"left-pad\": { \"version\": \"1.3.0\" }\n  }\n}\n";
+        let sbom = "{ \"packages\": [\n  { \"SPDXID\": \"SPDXRef-a\", \"name\": \"a\" },\n  \
+                    { \"name\": \"b\", \"externalRefs\": [ { \"referenceType\": \"purl\",\n    \
+                    \"referenceLocator\": \"pkg:npm/b@1.0.0\" } ] }\n] }\n";
+        for (text, kind, want) in [
+            (v3, Kind::NpmLock, vec![("pkg:npm/left-pad@1.3.0", 5)]),
+            (v1, Kind::NpmLock, vec![("pkg:npm/left-pad@1.3.0", 4)]),
+            (sbom, Kind::Spdx, vec![("", 2), ("pkg:npm/b@1.0.0", 4)]),
+        ] {
+            let got = parse(text, kind).expect("parse");
+            let lines: Vec<(&str, usize)> =
+                got.iter().map(|p| (p.purl.as_str(), p.line)).collect();
+            assert_eq!(lines, want, "{text}");
+        }
+    }
+
+    /// A package found by its SPDX id is found where the id is declared, not wherever the document
+    /// first names it: a document may list `documentDescribes` above its packages, and that line
+    /// is no package's, so a code-scanning UI pointed there points at nothing the finding is about.
+    #[test]
+    fn a_package_found_by_its_spdx_id_is_found_where_the_id_is_declared() {
+        let text = r#"{
+  "documentDescribes": [ "SPDXRef-a", "SPDXRef-b" ],
+  "packages": [
+    { "name": "vendored", "versionInfo": "1.0",
+      "SPDXID": "SPDXRef-a" },
+    { "name": "foo", "versionInfo": "2.0",
+      "SPDXID" : "SPDXRef-b",
+      "externalRefs": [ { "referenceType": "purl", "referenceLocator": "pkg:npm/foo" } ] },
+    { "name": "split", "versionInfo": "3.0", "SPDXID":
+      "SPDXRef-c" }
+  ]
+}"#;
+        let got = parse(text, Kind::Spdx).expect("parse");
+        let lines: Vec<(&str, usize)> = got.iter().map(|p| (p.name.as_str(), p.line)).collect();
+        // The last writes its id's key and value on two lines, and is found by the line that
+        // names it.
+        assert_eq!(lines, [("split", 10), ("vendored", 5), ("foo", 7)]);
+    }
+
+    /// The terminal table's glyphs are the ones `docs/11-interfaces.md` §4 draws, never-checked's
+    /// a `?` and not a blank, which reads as green; and no two statuses print the same label,
+    /// since two printed alike are one row to a reader.
+    #[test]
+    fn every_status_prints_a_glyph_and_a_label_of_its_own() {
+        let all = [
+            Status::Reproduced,
+            Status::Caveats,
+            Status::Divergent,
+            Status::Unsupported,
+            Status::NeverChecked,
+        ];
+        let glyphs: Vec<&str> = all.iter().map(|s| s.glyph()).collect();
+        assert_eq!(glyphs, ["✔", "◐", "✖", "⊘", "?"]);
+        let labels: BTreeSet<&str> = all.iter().map(|s| s.label()).collect();
+        assert_eq!(labels.len(), all.len(), "{labels:?}");
+        assert!(labels.iter().all(|l| !l.trim().is_empty()), "{labels:?}");
+        assert_eq!(Status::NeverChecked.label(), "never checked");
+    }
+
+    /// A `--hash` or an SBOM checksum that is not `<algorithm>:<hex>` names no digest, and is left
+    /// out rather than kept as one: a package is looked up by what it declares, and a declaration
+    /// that is not a digest, or is one under no algorithm, finds nothing or the wrong thing.
+    #[test]
+    fn a_declared_digest_that_is_not_hex_under_a_named_algorithm_is_left_out() {
+        let a = "a".repeat(64);
+        let got = parse(
+            &format!(
+                "x==1.0 --hash=sha256:not-hex --hash=:{a} --hash=sha256: --hash=sha256:{a}\n"
+            ),
+            Kind::Requirements,
+        )
+        .expect("parse");
+        let kept: Vec<(&str, &str)> = got[0]
+            .digests
+            .iter()
+            .map(|d| (d.algorithm.as_str(), d.value.as_str()))
+            .collect();
+        assert_eq!(kept, [("sha256", a.as_str())]);
+
+        let got = parse(
+            r#"{ "packages": [ { "name": "v", "versionInfo": "1", "checksums": [
+                 { "algorithm": "SHA256", "checksumValue": "zz" },
+                 { "algorithm": "", "checksumValue": "ab" },
+                 { "algorithm": "SHA1", "checksumValue": "" },
+                 { "algorithm": "SHA1", "checksumValue": "CD" } ] } ] }"#,
+            Kind::Spdx,
+        )
+        .expect("parse");
+        let kept: Vec<(&str, &str)> = got[0]
+            .digests
+            .iter()
+            .map(|d| (d.algorithm.as_str(), d.value.as_str()))
+            .collect();
+        assert_eq!(kept, [("sha1", "cd")]);
+    }
+
+    /// A `#` begins a comment only at the start of a line or after whitespace, as pip reads one
+    /// (`(^|\s+)#`). Inside a word it is part of the word, and what follows it is still read.
+    #[test]
+    fn a_hash_sign_inside_a_word_does_not_begin_a_comment() {
+        let a = "a".repeat(64);
+        let got = parse(
+            &format!("x==1.0 --config-settings=a#b --hash=sha256:{a}\n"),
+            Kind::Requirements,
+        )
+        .expect("parse");
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].purl, "pkg:pypi/x@1.0");
+        assert_eq!(got[0].digests.len(), 1, "the hash after the `#` was cut: {got:?}");
+    }
+
+    /// Two packages an SBOM names without a purl are two packages unless nothing tells them apart:
+    /// merged on a name alone, the answer for one would stand for the other, which nothing checked.
+    #[test]
+    fn packages_without_a_purl_are_merged_only_where_nothing_tells_them_apart() {
+        let got = parse(
+            r#"{ "packages": [
+                 { "name": "vendored", "versionInfo": "1.0" },
+                 { "name": "vendored", "versionInfo": "1.0" },
+                 { "name": "vendored", "versionInfo": "2.0" },
+                 { "name": "other", "versionInfo": "1.0" },
+                 { "name": "vendored", "versionInfo": "1.0",
+                   "checksums": [ { "algorithm": "SHA256", "checksumValue": "ab" } ] } ] }"#,
+            Kind::Spdx,
+        )
+        .expect("parse");
+        let rows: Vec<(&str, &str, usize)> = got
+            .iter()
+            .map(|p| (p.name.as_str(), p.version.as_str(), p.digests.len()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("other", "1.0", 0),
+                ("vendored", "1.0", 0),
+                ("vendored", "1.0", 1),
+                ("vendored", "2.0", 0),
+            ]
+        );
+        assert!(got.iter().all(|p| p.purl.is_empty()), "{got:?}");
     }
 }

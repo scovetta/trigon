@@ -54,7 +54,11 @@ async fn who(api: &Api, headers: &HeaderMap) -> Result<Option<trigon_store::Prin
     let Some(raw) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        // The scheme is case-insensitive (RFC 9110 §11.1). Matched as `Bearer ` alone, `bearer`
+        // presented a credential and was read as none — its holder treated as the public.
+        .and_then(|v| v.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, token)| token)
     else {
         return Ok(None);
     };
