@@ -452,12 +452,13 @@ fn spdx(text: &str) -> Result<Vec<Package>, LockfileError> {
                     .collect()
             })
             .unwrap_or_default();
-        // A versionless purl may name several packages of the SBOM, each of its own version, so
-        // those are found by their SPDX id, which names one.
-        let line = match (&given, field("SPDXID")) {
-            (Some(_), Some(id)) if purl != given => line_of_id(text, &id),
-            (Some(p), _) => line_of(text, p),
-            (None, Some(id)) => line_of_id(text, &id),
+        // Found by its SPDX id wherever it has one, since an id names one package and a purl may
+        // name several: a versionless purl every version the SBOM lists, a versioned one two
+        // artifacts of that version. Without an id, by its purl whole, as the JSON string it is:
+        // unquoted, `pkg:npm/a@1.0` is found on the line of `pkg:npm/a@1.0.1`.
+        let line = match (field("SPDXID"), &given) {
+            (Some(id), _) => line_of_id(text, &id),
+            (None, Some(p)) => line_of(text, &format!("\"{p}\"")),
             (None, None) => 0,
         };
         out.push(Package {
@@ -924,6 +925,57 @@ mod tests {
         // The last writes its id's key and value on two lines, and is found by the line that
         // names it.
         assert_eq!(lines, [("split", 10), ("vendored", 5), ("foo", 7)]);
+    }
+
+    /// A package is reported on its own entry's line and never on another's, though another entry
+    /// writes its purl too: two artifacts of one version are two packages, and a purl may begin
+    /// another's (`pkg:npm/a@1.0` begins `pkg:npm/a@1.0.1`). The first line naming the purl was
+    /// the other package's, and a code-scanning UI pointed there points at a package the finding
+    /// is not about.
+    #[test]
+    fn a_package_whose_purl_another_entry_writes_is_reported_on_its_own_entry() {
+        let text = r#"{
+  "packages": [
+    { "SPDXID": "SPDXRef-newer", "name": "a",
+      "externalRefs": [ { "referenceType": "purl", "referenceLocator": "pkg:npm/a@1.0.1" } ] },
+    { "SPDXID": "SPDXRef-older", "name": "a",
+      "externalRefs": [ { "referenceType": "purl", "referenceLocator": "pkg:npm/a@1.0" } ] },
+    { "SPDXID": "SPDXRef-registry", "name": "b",
+      "externalRefs": [ { "referenceType": "purl", "referenceLocator": "pkg:npm/b@2.0.0" } ],
+      "checksums": [ { "algorithm": "SHA256", "checksumValue": "aa" } ] },
+    { "SPDXID": "SPDXRef-fork", "name": "b",
+      "externalRefs": [ { "referenceType": "purl", "referenceLocator": "pkg:npm/b@2.0.0" } ],
+      "checksums": [ { "algorithm": "SHA256", "checksumValue": "bb" } ] },
+    { "name": "c",
+      "externalRefs": [ { "referenceType": "purl", "referenceLocator": "pkg:npm/c@3.0.1" } ] },
+    { "name": "c",
+      "externalRefs": [ { "referenceType": "purl", "referenceLocator": "pkg:npm/c@3.0" } ] }
+  ]
+}"#;
+        let got = parse(text, Kind::Spdx).expect("parse");
+        // Each entry by its purl and its checksum, and the lines it is written on.
+        let entries = [
+            ("pkg:npm/a@1.0.1", "", 3..=4),
+            ("pkg:npm/a@1.0", "", 5..=6),
+            ("pkg:npm/b@2.0.0", "aa", 7..=9),
+            ("pkg:npm/b@2.0.0", "bb", 10..=12),
+            ("pkg:npm/c@3.0.1", "", 13..=14),
+            ("pkg:npm/c@3.0", "", 15..=16),
+        ];
+        assert_eq!(got.len(), entries.len(), "{got:?}");
+        for (purl, digest, lines) in entries {
+            let p = got
+                .iter()
+                .find(|p| {
+                    p.purl == purl && p.digests.first().map_or("", |d| d.value.as_str()) == digest
+                })
+                .unwrap_or_else(|| panic!("no {purl} {digest}: {got:?}"));
+            assert!(
+                lines.contains(&p.line),
+                "{purl} {digest} is reported on line {}, outside its entry's {lines:?}",
+                p.line
+            );
+        }
     }
 
     /// The terminal table's glyphs are the ones `docs/11-interfaces.md` §4 draws, never-checked's
