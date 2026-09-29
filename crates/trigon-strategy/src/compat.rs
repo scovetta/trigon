@@ -256,6 +256,9 @@ fn tgz_glob(loc: &Location) -> String {
     }
 }
 
+/// A step of an imported definition. Its values are what the definition's author wrote, so they
+/// stay templates, as they would be in a definition written here; nothing in them was read from a
+/// package.
 fn uses(tool: &str, with: BTreeMap<String, String>) -> Step {
     Step {
         body: StepBody::Uses {
@@ -264,6 +267,7 @@ fn uses(tool: &str, with: BTreeMap<String, String>) -> Step {
         },
         needs: Vec::new(),
         when: None,
+        literal: BTreeMap::new(),
     }
 }
 
@@ -329,6 +333,7 @@ fn step(v: &Value) -> Result<Step, StrategyError> {
         body,
         needs,
         when: None,
+        literal: BTreeMap::new(),
     })
 }
 

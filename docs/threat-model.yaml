@@ -11,11 +11,11 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:302b9d5e6fa65750cbb6ec00aa5d3f63beb0206453e9df63f2ce5c493156f3c3
+prose_version: docs/threat-model.md@sha256:b36fb5a75af7b2dae176c0a22631a05c01c708b033f94db593a9fd43014a49d3
 model_status: unratified-draft
 triage_policy: strict
 confidence:
-  documented: 263
+  documented: 266
   maintainer: 0
   inferred: 5
   assumption: 3
@@ -643,6 +643,19 @@ entry_points:
     provenance:
       kind: documented
       source: docs/12-security.md §5
+  - name: npm's _nodeVersion and _npmVersion, and the script a release workflow runs as npm run <name>
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - resource-name
+    - x-shell-script
+    caller_must_enforce: lowered into a tool only as a plain x.y.z and a bare name (is_plain_version,
+      bare_program), on the heuristic rung and on the CI rung that displaces it; otherwise the rung declines
+      by name, and a _nodeVersion built from master is left to the heuristic, which replaces it with the
+      nearest release and says so
+    provenance:
+      kind: documented
+      source: docs/16-findings.md §3.104; crates/trigon-registry/tests/ci.rs — `the_values_the_heuristic_checks_are_checked_before_they_are_lowered`
 - id: strategy parse
   component: multiple
   parameters:
@@ -667,6 +680,18 @@ entry_points:
     provenance:
       kind: documented
       source: docs/04-strategies.md §3
+  - name: 'a value a rung read from outside the strategy: a .NET version stamp or copyright, a package.json
+      script body, a registry''s versions and publish time, a wheel''s Generator:, a workflow''s directory
+      and script'
+    attacker_controllable: true
+    control_kinds:
+    - data
+    - x-template-source
+    caller_must_enforce: nothing — it is carried as the step's literal and never parsed as a template
+      (P46)
+    provenance:
+      kind: documented
+      source: docs/04-strategies.md §3.3; docs/16-findings.md §3.104
 - id: build container
   component: multiple
   parameters:
@@ -1521,6 +1546,15 @@ contract_dimensions:
   status: claimed
   conditions: render depth is bounded
   property_id: P27
+  provenance:
+    kind: documented
+    source: docs/threat-model.md §1.7
+- component: strategy-rendering
+  dimension: x-template-source
+  status: claimed
+  conditions: a value a rung read from the package, its registry document or its repository is the step's
+    literal, handed on as written and never parsed as a template
+  property_id: P46
   provenance:
     kind: documented
     source: docs/threat-model.md §1.7
@@ -3201,6 +3235,29 @@ properties_claimed:
       `the_falsifying_command_across_a_succession_and_for_a_void`, `the_rebuilt_artifact_is_found_by_the_record_and_its_source_alone`,
       `the_rebuilt_artifact_is_looked_for_only_where_publish_puts_it`, `the_rebuilt_artifact_is_not_had_where_github_cannot_be_asked`,
       `the_rebuilt_artifact_is_asked_of_the_repositories_that_hold_the_record`, `an_exact_verdict_re_derives_from_the_upstream_file_alone_and_never_asks_github`
+- id: P46
+  kind: integrity
+  components:
+  - strategy-rendering
+  tier: security-critical
+  conditions: a strategy a rung wrote; a strategy an author or a model wrote keeps its templates, and
+    what a package can make a model write is P7's boundary, not this
+  violation_symptoms:
+  - 'the package under test evaluating a template in its own build recipe: a stamp, a directory or a pin
+    built as another value, a render the package fails, a recipe conditioned on the rebuilder''s host'
+  statement: Nothing a rung read from outside the strategy is template source. A step's runs, if and with
+    values are templates; what a rung copies from the package under test, its registry document or its
+    repository goes in the step's literal map instead, which the renderer hands to the tool as the parameter
+    of that name exactly as written, or prints where a template reads it as {{ literal.<name> }}, and
+    never
+  provenance:
+    kind: documented
+    source: docs/04-strategies.md §3.3; docs/16-findings.md §3.104; crates/trigon-strategy/tests/literals.rs
+      — `a_copyright_reaches_the_dotnet_invocation_byte_for_byte_and_is_never_evaluated`, `a_literal_is_passed_as_written_where_the_same_text_in_with_is_rendered`,
+      `a_parameter_given_both_ways_is_refused_when_parsed_and_when_rendered`, `a_tool_receives_a_literal_as_a_parameter_and_never_sees_its_callers_literals`;
+      crates/trigon-strategy/src/yarn.rs — `a_script_body_reaches_the_build_as_written_and_is_never_evaluated`;
+      crates/trigon-registry/tests/infer.rs — `the_backend_the_wheel_names_reaches_the_build_as_written_and_is_never_evaluated`;
+      crates/trigon-registry/tests/ci.rs — `what_a_workflow_says_reaches_the_build_as_written_and_is_never_evaluated`
 - id: P30
   kind: resource-bound
   components:

@@ -17,6 +17,7 @@ use super::cmd::{self, Cmd};
 use super::recipe::{
     BuildPublishLink, CiRecipe, CiStep, Decline, RunnerSpec, StepPhase, ToolPin, VersionSpec,
 };
+use crate::heuristic::{bare_program, is_plain_version};
 use crate::infer::{Candidate, Derivation, confidence_of};
 use crate::model::ResolvedTarget;
 
@@ -570,6 +571,50 @@ fn lower_npm(
         });
     };
 
+    // **What the heuristic checks, checked here the same way.** This rung displaces the heuristic's
+    // candidate, so a value the heuristic declines or replaces and this rung passes on is its check
+    // undone for every package whose release runs a script. A literal keeps each value out of the
+    // template engine; these keep it out of the shell and out of npm's own spec parser.
+    //
+    // `_npmVersion` is whatever the publishing client wrote — `framer-motion` records a lerna
+    // user-agent — and reaches `npm install -g "npm@…"`, where `npm:<alias>@<v>` or a git URL is
+    // read as which npm packs the artifact, and a user-agent fails the deps phase in a way that is
+    // charged to the package. There is no npm to install from it, so the heuristic declines too.
+    if !is_plain_version(&npm) {
+        return Err(Decline::UnfitValue {
+            what: "the registry's `_npmVersion`",
+            value: npm,
+            because: "which names a publishing client rather than an npm release: there is no npm \
+                      to install from it, and the one that packed this release is unknown",
+        });
+    }
+    // A Node built from master that no host serves. The heuristic replaces it with the highest
+    // release at the publish instant, which takes Node's release index; this rung reads nothing
+    // but the repository, so it leaves the target to the heuristic, and the build script the
+    // workflow names goes with it.
+    if !is_plain_version(&node) {
+        return Err(Decline::UnfitValue {
+            what: "the registry's `_nodeVersion`",
+            value: node,
+            because: "which is not a release any host serves: the heuristic replaces it with the \
+                      nearest one that is and says so, which takes Node's release index this rung \
+                      does not read",
+        });
+    }
+    // The workflow's text, with its quotes already stripped by the argv split: `npm run "x'$(id)'"`
+    // arrives as `x'$(id)'`. `npm/build/custom` runs it inside `TRIGON_NPM_CMD='… npm run <name>'`,
+    // where its own `'` ends the quoting. The heuristic lowers a script name only where it passes
+    // `bare_program`, and so does this.
+    if !bare_program(&script) {
+        return Err(Decline::UnfitValue {
+            what: "the script the release runs",
+            value: script,
+            because: "which is more than a script name, and the name reaches a shell: only \
+                      letters, digits, spaces and `@._/,:+-` are lowered, as the heuristic lowers \
+                      them",
+        });
+    }
+
     let mut deps = BTreeMap::from([
         ("node_version".to_string(), node),
         ("npm_version".to_string(), npm.clone()),
@@ -728,14 +773,21 @@ fn digest_of(text: &str) -> trigon_core::Digest {
     trigon_core::Digest::from_bytes(h.finalize().into())
 }
 
-fn uses(tool: &str, with: BTreeMap<String, String>, needs: Vec<String>) -> Step {
+/// A step whose every parameter is a literal: handed to the tool as written, never rendered.
+///
+/// A workflow is the repository's text — its `python-version`, its `working-directory`, the script
+/// its release job runs — and the rest was read from the registry or the published wheel. A `with`
+/// value is a template, so any of it carrying `{{`, `{%` or `{#` would be evaluated, and the
+/// repository under test would be writing part of its own recipe.
+fn uses(tool: &str, literal: BTreeMap<String, String>, needs: Vec<String>) -> Step {
     Step {
         body: StepBody::Uses {
             tool: tool.into(),
-            with,
+            with: BTreeMap::new(),
         },
         needs,
         when: None,
+        literal,
     }
 }
 

@@ -97,10 +97,11 @@ fn payload<T: DeserializeOwned>(body: Value, kind: &str) -> Result<T, StrategyEr
     })
 }
 
-/// Serialize a strategy back to YAML, `schema` first.
+/// Serialize a strategy back to YAML, `schema` first: the oldest schema that can read it
+/// ([`Strategy::schema`]), so a build too old for the document refuses it by its version.
 pub fn to_yaml(s: &Strategy) -> Result<String, StrategyError> {
     let body = serde_yaml_ng::to_string(s)?;
-    Ok(format!("schema: {CURRENT_SCHEMA}\n{body}"))
+    Ok(format!("schema: {}\n{body}", s.schema()))
 }
 
 /// Parse, and where the tail will not parse, parse the longest prefix that does.

@@ -22,7 +22,7 @@ applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
 [[entry]]
 file = "six-1.16.0-py2.py3-none-any.whl"
 stabilized = "52aaaa3c76ee80a19d95d4bd1ebaf602fc57b2a0637366507f5b1954eb1306b9"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
 
 [[entry]]
 file = "rake-13.2.1.gem"

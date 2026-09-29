@@ -456,6 +456,11 @@ A strategy document is YAML:
 Those are all the fields there are, and the names are exact: an unknown one is rejected, not
 ignored.
 
+A step you are shown may also carry `literal: { ... }` beside `with`: values read from the
+registry, the package or its repository, handed to the tool exactly as written and never evaluated
+as a template. Keep them there. `with` is for values that are templates, like
+`{{ intrinsics.publish_time }}`; a name belongs in one or the other, never both.
+
 `ref` must be a resolved commit, never a tag or branch: a tag moves and the claim would move with
 it.
 
@@ -649,6 +654,19 @@ mod tests {
         assert!(STRATEGY_SHAPE.contains("subdir"));
         assert!(
             STRATEGY_SHAPE.contains("monorepo"),
+            "and says what it is for"
+        );
+    }
+
+    #[test]
+    fn the_shape_names_the_literals_a_strategy_it_is_shown_carries() {
+        // An inferred strategy hands every parameter to its tool as a literal, so a model asked to
+        // repair one is shown `literal:` — and told, a line above, that an unknown field is
+        // rejected. Unexplained, the one thing a repair should not do is the natural one: move the
+        // values into `with`, where the package's text is evaluated as a template.
+        assert!(STRATEGY_SHAPE.contains("literal: { ... }"));
+        assert!(
+            STRATEGY_SHAPE.contains("never evaluated"),
             "and says what it is for"
         );
     }

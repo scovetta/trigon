@@ -48,6 +48,7 @@ KIND = {
     "P34": "integrity", "P35": "integrity", "P36": "integrity", "P37": "integrity",
     "P38": "confidentiality", "P39": "integrity", "P40": "integrity", "P41": "integrity",
     "P42": "correctness", "P43": "integrity", "P44": "integrity", "P45": "integrity",
+    "P46": "integrity",
 }
 
 ADVERSARIES = [

@@ -502,6 +502,16 @@ pub enum Decline {
         manager: String,
     },
     RunnerOutOfScope(OutOfScope),
+    /// A value the lowering would hand a tool fails the check the heuristic applies to it: an
+    /// `_npmVersion` that names a publishing client rather than an npm release, a `_nodeVersion` no
+    /// host serves, a script name that is more than a name. This rung displaces the heuristic's
+    /// candidate, so passing such a value on here would undo that check for every package whose
+    /// release runs a script.
+    UnfitValue {
+        what: &'static str,
+        value: String,
+        because: &'static str,
+    },
     /// The rung read the workflow, learned things, and has nothing the heuristic below does not
     /// already know better. See `mod.rs` for why this is the npm default rather than an edge case.
     NothingTheHeuristicLacks {
@@ -602,6 +612,11 @@ impl std::fmt::Display for Decline {
                  would be a different recipe rather than an approximation of this one"
             ),
             Decline::RunnerOutOfScope(o) => write!(f, "{o}"),
+            Decline::UnfitValue {
+                what,
+                value,
+                because,
+            } => write!(f, "{what} is `{value}`, {because}"),
             Decline::NothingTheHeuristicLacks { because } => write!(
                 f,
                 "the workflow adds nothing to what the registry already recorded: {because}"
@@ -791,6 +806,14 @@ mod tests {
             (
                 Decline::RunnerOutOfScope(OutOfScope::NonX86("ubuntu-24.04-arm".into())),
                 "`ubuntu-24.04-arm` is a Linux runner that is not x86-64",
+            ),
+            (
+                Decline::UnfitValue {
+                    what: "the registry's `_npmVersion`",
+                    value: "lerna/4.0.0".into(),
+                    because: "which names no npm release",
+                },
+                "the registry's `_npmVersion` is `lerna/4.0.0`, which names no npm release",
             ),
             (
                 Decline::NothingTheHeuristicLacks {

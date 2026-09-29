@@ -3130,6 +3130,7 @@ dependencies = [
  "trigon-compare",
  "trigon-core",
  "trigon-stabilize",
+ "zip",
 ]
 
 [[package]]

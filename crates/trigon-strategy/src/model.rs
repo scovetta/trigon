@@ -10,11 +10,22 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// The schema version every strategy document declares.
+/// The newest schema version this build reads.
 ///
 /// The prior art has no version field. Adding one costs a line and buys the ability to change the
 /// format later without invalidating every document ever written.
-pub const CURRENT_SCHEMA: u32 = 1;
+///
+/// - **1**: the format as first written.
+/// - **2**: a step's `literal` map (`docs/04-strategies.md` §3.3). A build that knows only 1
+///   refused a document carrying one as having an unknown field, which is safe and says nothing
+///   about upgrading; declared as 2, it is refused as a schema newer than the build, which does.
+///
+/// A document declares the oldest schema that can read it ([`Strategy::schema`]), so one without a
+/// literal is still schema 1, and its canonical form and `strategy_digest` did not move. Every
+/// version is read. 2 only added a field, so a document of 1 is one of 2 as it stands, and one that
+/// declares 1 and carries a literal is read as well: a model is shown the shape as schema 1, and
+/// there is nothing else such a document could mean.
+pub const CURRENT_SCHEMA: u32 = 2;
 
 /// What to do to reproduce an artifact.
 ///
@@ -51,6 +62,19 @@ impl Strategy {
             Strategy::Flow(f) => Some(&f.location),
             Strategy::Manual(m) => Some(&m.location),
             Strategy::Prebuilt(_) => None,
+        }
+    }
+
+    /// The oldest schema that can read this strategy, which is the one its document declares: 2
+    /// where a step carries a literal, 1 otherwise. See [`CURRENT_SCHEMA`].
+    pub fn schema(&self) -> u32 {
+        let Strategy::Flow(f) = self else {
+            return 1;
+        };
+        let mut steps = f.src.iter().chain(&f.deps).chain(&f.build);
+        match steps.any(|s| !s.literal.is_empty()) {
+            true => 2,
+            false => 1,
         }
     }
 }
@@ -143,6 +167,42 @@ pub struct Step {
     pub needs: Vec<String>,
     /// Render-time condition. The step is dropped when this renders empty or `false`.
     pub when: Option<String>,
+    /// Values the step is given as data: never parsed as a template, whatever they contain.
+    ///
+    /// **This is where text from outside the strategy goes.** `runs`, `if` and every `with` value
+    /// are templates, and a value copied into one from the package under test, its registry
+    /// document or its repository is evaluated as the template it happens to look like. A .NET
+    /// copyright carrying `{{`, `{%` or `{#` — ILSpy does not escape braces — would be rendered
+    /// as one, or fail the render on a name that is not defined, and the package would be
+    /// steering its own build recipe. A literal is not read by the template engine at all: a
+    /// `uses` step hands each to its tool as the parameter of that name, exactly as written, and
+    /// any template of the step can read one by name as `{{ literal.<name> }}`, which renders the
+    /// value and never evaluates it. `docs/04-strategies.md` §3.3.
+    pub literal: BTreeMap<String, String>,
+}
+
+impl Step {
+    /// A parameter this step gives both as a template and as a literal, if any. A parameter is
+    /// one or the other: which of two values a tool received should not depend on the order two
+    /// maps are merged in.
+    pub(crate) fn given_twice(&self) -> Option<&str> {
+        let StepBody::Uses { with, .. } = &self.body else {
+            return None;
+        };
+        self.literal
+            .keys()
+            .find(|k| with.contains_key(*k))
+            .map(String::as_str)
+    }
+}
+
+/// What a step given a parameter both ways is told.
+pub(crate) fn given_twice_message(name: &str) -> String {
+    format!(
+        "`{name}` is given both in `with`, where it is a template, and in `literal`, where it is \
+         taken as written. A parameter is one or the other: keep it in `literal` if it is a value \
+         read from outside the strategy, in `with` if it is a template you wrote."
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +212,8 @@ pub enum StepBody {
     /// A named tool from the registry, with its parameters.
     Uses {
         tool: String,
+        /// Parameters that are templates, rendered before the tool sees them. What the step
+        /// carries as data instead is [`Step::literal`].
         with: BTreeMap<String, String>,
     },
 }
@@ -168,6 +230,10 @@ pub struct StepRaw {
     /// that digest vary between runs of the same binary. See `docs/04-strategies.md` §3.2 (2).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub with: BTreeMap<String, String>,
+    /// Taken as written, never rendered. See [`Step::literal`]. Omitted when empty, so a strategy
+    /// that carries none has the canonical form, and the digest, it had before this field existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub literal: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
     #[serde(rename = "if", default, skip_serializing_if = "Option::is_none")]
@@ -239,11 +305,16 @@ impl TryFrom<StepRaw> for Step {
                 with: r.with,
             },
         };
-        Ok(Step {
+        let step = Step {
             body,
             needs: r.needs,
             when: r.when,
-        })
+            literal: r.literal,
+        };
+        if let Some(name) = step.given_twice() {
+            return Err(given_twice_message(name));
+        }
+        Ok(step)
     }
 }
 
@@ -257,6 +328,7 @@ impl From<Step> for StepRaw {
             runs,
             uses,
             with,
+            literal: s.literal,
             needs: s.needs,
             when: s.when,
         }

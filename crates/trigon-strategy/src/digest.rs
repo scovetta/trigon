@@ -66,8 +66,19 @@ fn collect_tools(step: &Step, tools: &ToolRegistry, out: &mut std::collections::
 }
 
 /// A strategy as canonical JSON.
+///
+/// With its schema where that is above 1 ([`Strategy::schema`]). This is the `strategy.json` a run
+/// stores and a record names, and a build too old to read it has to be able to say so from the
+/// document, rather than stumble on a field it does not know. Schema 1 stays implicit, as it always
+/// was, so a strategy without literals has the canonical form and the digest it had.
 pub fn canonical(s: &Strategy) -> Result<String, StrategyError> {
-    canonical_value(&serde_yaml_ng::to_value(s)?)
+    let mut v = serde_yaml_ng::to_value(s)?;
+    if s.schema() > 1
+        && let serde_yaml_ng::Value::Mapping(m) = &mut v
+    {
+        m.insert("schema".into(), serde_yaml_ng::Value::from(s.schema()));
+    }
+    canonical_value(&v)
 }
 
 fn canonical_value(v: &serde_yaml_ng::Value) -> Result<String, StrategyError> {

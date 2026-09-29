@@ -42,7 +42,7 @@ A `cibuildwheel`-built binary wheel with a Rust extension. This example shows wh
 | **Build** | manylinux container, pinned Rust toolchain, `SOURCE_DATE_EPOCH` set, `umask 022`, egress `MirrorOnly` with `PIP_INDEX_URL` pointed at the time-filtered mirror. `python -m build --wheel -n`. Minutes, not seconds. |
 | **Repair loop, if needed** | Likely failure: a Rust toolchain window that is wide or contradictory. `ToolchainResolution::Unconstrained` is the **typed** signal to escalate ([`02-domain-model.md`](02-domain-model.md) §2). Builder gets the compressed log, the evidence list, and the CI recipe; emits a patched strategy. Failure signature is normalized and cached, so the next Rust-extension wheel with the same signature costs nothing. |
 | **Clean re-runs** | Two, on different workers. |
-| **Stabilize** | Profile **`wheel`**: zip set + `wheel-generator` + `wheel-direct-url` (`Lossy`) + `pyc-header` (`Content`) + **`wheel-record` at `StageFinalize`**. `RECORD` regeneration must run last because `wheel-direct-url` changed membership. |
+| **Stabilize** | Profile **`wheel`**: zip set + `wheel-generator` + `wheel-direct-url` (`Lossy`) + `pyc-header` (`Content`) + **`wheel-record-v2` at `StageFinalize`**. `RECORD` regeneration must run last because `wheel-direct-url` changed membership. |
 | **Compare** | The `.so` is the crux. If the Rust toolchain, LLVM version and linker flags all matched, the `.so` is byte-identical after normalization and the outcome is `NormalizedWithCaveats` (because `pyc-header` and `wheel-direct-url` are `Content`/`Lossy`). If the `.so` differs, the note reads `ExecutableContentDiffers`, which is **never benign**, and the outcome is `Divergent`. |
 | **Verdict** | **`Reproduced { NormalizedWithCaveats }`** on a good day; **`Divergent`** with an executable-content note otherwise; **`Unsupported`** if the platform could not be hosted. |
 
@@ -104,6 +104,6 @@ where it belongs. And a divergence can carry actionable advice rather than an ac
 | Risk tiers do real work | Examples 2, 3 and 4 all land at `NormalizedWithCaveats` for concrete, stated reasons |
 | `Unsupported` is a scope statement | Example 2's macOS branch |
 | Most targets never touch a model | Examples 1, 3 and 4 need zero model calls; example 2 needs one only on a genuine toolchain contradiction |
-| `StageFinalize` is necessary | Example 2's `wheel-record` after a membership change |
+| `StageFinalize` is necessary | Example 2's `wheel-record-v2` after a membership change |
 | Recursion is structural | Example 3's `data.tar.gz` |
 | Divergences can be actionable | Example 4's `pdb-paths` finding |

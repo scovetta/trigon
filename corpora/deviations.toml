@@ -129,8 +129,8 @@ RECORD is listed here too, and the reason is a chain rather than a second decisi
 manifest of sha256 over the members, so any member whose bytes we change shows up there. That does
 make the RECORD patterns broader than the .pyc ones, and a RECORD-only difference from some other
 cause would be absorbed by them. The narrower alternative is to compare RECORD against the members
-it describes rather than against the reference, which belongs with the wheel-record pass rather than
-here.
+it describes rather than against the reference, which belongs with the wheel-record-v2 pass rather
+than here.
 """
 
 [[deviation]]

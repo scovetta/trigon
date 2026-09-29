@@ -23,6 +23,12 @@ pub struct Context {
     pub intrinsics: IntrinsicsCtx,
     /// Tool parameters. Populated per step, empty at the top level.
     pub with: BTreeMap<String, String>,
+    /// The `literal` values of the step being rendered, and only that step's: a tool's steps see
+    /// the tool's own, never their caller's. Set by the renderer, so a caller leaves it empty.
+    ///
+    /// Read as `{{ literal.<name> }}`, which prints the value and does not evaluate it — the
+    /// difference between data and template source that [`crate::Step::literal`] exists for.
+    pub literal: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

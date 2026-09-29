@@ -156,12 +156,21 @@ async fn read_pypi(name: &str, workflows: &[Wf], extra: &[(&str, &str)]) -> Arc<
 }
 
 async fn read_npm(name: &str, workflows: &[Wf], toolchain: bool) -> Arc<CiReading> {
+    read_npm_recorded(name, workflows, toolchain.then_some(("24.1.0", "11.3.0"))).await
+}
+
+/// [`read_npm`], with the `_nodeVersion` and `_npmVersion` the registry recorded, if any.
+async fn read_npm_recorded(
+    name: &str,
+    workflows: &[Wf],
+    recorded: Option<(&str, &str)>,
+) -> Arc<CiReading> {
     let (root, url, commit) = repo(name, workflows, &[]);
     let mut t = target(Ecosystem::Npm, name, "1.2.3", &url, &commit);
-    if toolchain {
+    if let Some((node, npm)) = recorded {
         for (tool, version, source) in [
-            ("node", "24.1.0", "npm:_nodeVersion"),
-            ("npm", "11.3.0", "npm:_npmVersion"),
+            ("node", node, "npm:_nodeVersion"),
+            ("npm", npm, "npm:_npmVersion"),
         ] {
             t.intrinsics.evidence.push(Evidence::new(
                 Claim::ToolchainExact {
@@ -185,8 +194,13 @@ fn params(strategy: &Strategy, phase: &str) -> BTreeMap<String, String> {
         "build" => &f.build,
         _ => &f.src,
     };
+    // A workflow is the repository's text, so every parameter lowered from one is a literal and
+    // none a template the repository could steer.
     match &steps[0].body {
-        StepBody::Uses { with, .. } => with.clone(),
+        StepBody::Uses { with, .. } => {
+            assert!(with.is_empty(), "a lowered parameter is a template: {with:?}");
+            steps[0].literal.clone()
+        }
         other => panic!("expected a tool step, got {other:?}"),
     }
 }
@@ -703,6 +717,91 @@ async fn a_partial_version_is_a_range_so_it_narrows_the_registry_rather_than_fig
     );
 }
 
+/// **What the heuristic checks, this rung checks too.** It displaces the heuristic's candidate, so
+/// a value the heuristic declines or replaces and this rung passes on is the check undone for every
+/// package whose release workflow runs a script. Each of these reached the build unchecked: the
+/// script name inside `TRIGON_NPM_CMD='… npm run <name> …'`, where its own `'` ends the quoting
+/// and `$(id)` runs; a publishing client's user-agent as `npm install -g "npm@<it>"`, where npm's
+/// spec parser reads it, and the build failure is charged to the package; a Node built from master
+/// as a download that 404s. Each is declined by name, and the evidence still gets out.
+#[tokio::test]
+async fn the_values_the_heuristic_checks_are_checked_before_they_are_lowered() {
+    let crafted: &'static str = NODE_SERIES
+        .replace("npm run build", r#"npm run "x'$(id)'""#)
+        .leak();
+    for (name, workflow, recorded, what, value) in [
+        (
+            "npm-script",
+            crafted,
+            ("24.1.0", "11.3.0"),
+            "the script the release runs",
+            "x'$(id)'",
+        ),
+        (
+            "npm-agent",
+            NODE_SERIES,
+            ("22.14.0", "lerna/4.0.0/node@v22.14.0+arm64 (darwin)"),
+            "the registry's `_npmVersion`",
+            "lerna/4.0.0/node@v22.14.0+arm64 (darwin)",
+        ),
+        (
+            "npm-agent-spaces",
+            NODE_SERIES,
+            ("18.17.1", "npm/9.6.7 node/v18.17.1 linux x64"),
+            "the registry's `_npmVersion`",
+            "npm/9.6.7 node/v18.17.1 linux x64",
+        ),
+        (
+            "npm-alias",
+            NODE_SERIES,
+            ("18.17.1", "npm:evil@1.0.0"),
+            "the registry's `_npmVersion`",
+            "npm:evil@1.0.0",
+        ),
+        (
+            "npm-master",
+            NODE_SERIES,
+            ("8.0.0-pre", "4.4.2"),
+            "the registry's `_nodeVersion`",
+            "8.0.0-pre",
+        ),
+    ] {
+        let r =
+            read_npm_recorded(name, &[Wf::Inline("release.yml", workflow)], Some(recorded)).await;
+        assert!(r.candidate.is_none(), "{name}: {:?}", r.candidate);
+        let Some(Decline::UnfitValue {
+            what: got_what,
+            value: got_value,
+            ..
+        }) = &r.declined
+        else {
+            panic!("{name}: {:?}", r.declined)
+        };
+        assert_eq!((*got_what, got_value.as_str()), (what, value), "{name}");
+        assert!(
+            r.evidence
+                .iter()
+                .any(|e| matches!(&e.claim, Claim::ToolchainRange { tool, .. } if tool == "node")),
+            "{name}: the evidence still gets out: {:?}",
+            r.evidence
+        );
+    }
+
+    // A Node the heuristic can replace is left to it, and the reason says so.
+    let r = read_npm_recorded(
+        "npm-master-says",
+        &[Wf::Inline("release.yml", NODE_SERIES)],
+        Some(("8.0.0-pre", "4.4.2")),
+    )
+    .await;
+    let why = r
+        .declined
+        .as_ref()
+        .map(Decline::to_string)
+        .unwrap_or_default();
+    assert!(why.contains("the heuristic"), "{why}");
+}
+
 #[tokio::test]
 async fn an_npm_release_produces_a_candidate_only_where_it_knows_more_than_the_registry() {
     // The displacement rule. `CiDerived` sits above `Heuristic` and `infer()` takes the first
@@ -968,6 +1067,54 @@ async fn only_the_workflows_directory_itself_is_read() {
 // ---------------------------------------------------------------------------------------------
 // The candidate has to be executable, not merely well-typed
 // ---------------------------------------------------------------------------------------------
+
+/// A release that builds a directory whose name the repository chose to look like a template.
+const TEMPLATE_IN_A_DIRECTORY: &str = r#"
+name: Release
+on:
+  release:
+    types: [published]
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - run: python -m build pkg{{7*7}}{%if%}{#
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"#;
+
+#[tokio::test]
+async fn what_a_workflow_says_reaches_the_build_as_written_and_is_never_evaluated() {
+    // The directory is the repository's text, lowered into a tool parameter. As a template it
+    // built `pkg49`, or failed the render on `{% if %}`, so the repository under test chose what
+    // the recipe built; as a literal it is the directory the workflow named.
+    let r = read_pypi(
+        "template-dir",
+        &[Wf::Inline("release.yml", TEMPLATE_IN_A_DIRECTORY)],
+        &[],
+    )
+    .await;
+    let c = r
+        .candidate
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", r.declined));
+    assert_eq!(params(&c.strategy, "build")["dir"], "pkg{{7*7}}{%if%}{#");
+
+    let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+    let rendered = trigon_strategy::render(&c.strategy, &Default::default(), &tools)
+        .unwrap_or_else(|e| panic!("the lowered strategy does not render: {e}"));
+    assert!(
+        rendered
+            .build
+            .ends_with("-m build --wheel pkg{{7*7}}{%if%}{#"),
+        "{}",
+        rendered.build
+    );
+}
 
 #[tokio::test]
 async fn a_ci_derived_candidate_renders_against_the_builtin_tools() {

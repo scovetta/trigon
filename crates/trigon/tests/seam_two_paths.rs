@@ -51,7 +51,7 @@ fn dir(name: &str) -> PathBuf {
 // ---------------------------------------------------------------------------------------------
 
 /// A wheel whose `METADATA` and `WHEEL` carry CRLF (so `wheel-metadata-eol` fires) and whose
-/// `RECORD` is wrong (so `wheel-record` regenerates it). Under the plain zip set both are inert,
+/// `RECORD` is wrong (so `wheel-record-v2` regenerates it). Under the plain zip set both are inert,
 /// which is exactly what makes this the fixture that separates the two profiles.
 const WHEEL_MEMBERS: &[(&str, &[u8])] = &[
     ("demo/__init__.py", b"x = 1\n"),

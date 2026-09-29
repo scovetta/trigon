@@ -2064,9 +2064,9 @@ fn ceiling_panel(applied: &[trigon_stabilize::Applied], outcome: Option<&str>) -
 
 /// Which passes did the work, how much, and under whose authority.
 ///
-/// Bar length is `entries_touched`, which `docs/08` calls the triage number: "wheel-record touched
-/// 412 entries" is a diagnosis. Risk is the colour. Provenance is a column, and it is new — the
-/// field has existed as long as `Applied` has and no page had ever rendered it.
+/// Bar length is `entries_touched`, which `docs/02` calls the triage number: "wheel-record-v2
+/// touched 412 entries" is a diagnosis. Risk is the colour. Provenance is a column, and it is new —
+/// the field has existed as long as `Applied` has and no page had ever rendered it.
 fn ledger_table(applied: &[trigon_stabilize::Applied]) -> String {
     if applied.is_empty() {
         return "<h2>The ledger</h2><p class=\"note\">no pass changed anything on either side, so                 the two artifacts were compared exactly as published. The verdict, whatever it is,                 is about the bytes and owes nothing to normalization.</p>"

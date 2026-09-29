@@ -75,8 +75,13 @@ fn tool_params(strategy: &Strategy, phase: &str) -> BTreeMap<String, String> {
         "build" => &f.build,
         _ => &f.src,
     };
+    // Everything an inferred strategy hands a tool was read from outside it, so all of it is
+    // literal and none of it a template the package's text could steer.
     match &steps[0].body {
-        StepBody::Uses { with, .. } => with.clone(),
+        StepBody::Uses { with, .. } => {
+            assert!(with.is_empty(), "an inferred parameter is a template: {with:?}");
+            steps[0].literal.clone()
+        }
         other => panic!("expected a tool step, got {other:?}"),
     }
 }
@@ -313,6 +318,30 @@ async fn the_backend_the_wheel_names_is_pinned() {
 }
 
 #[tokio::test]
+async fn the_backend_the_wheel_names_reaches_the_build_as_written_and_is_never_evaluated() {
+    // `Generator:` is a line of the published wheel's own `WHEEL` file, so the pin is the package's
+    // text. As a template, `{{ 7*7 }}` pinned `hatchling==49` and `{% if %}` failed the render: the
+    // package under test chose the backend its rebuild installed. As a literal it is what the wheel
+    // names.
+    let pin = "hatchling=={{ 7*7 }}{% if %}{#";
+    let (s, _) = pypi_strategy(Some(("hatchling", "{{ 7*7 }}{% if %}{#"))).await;
+    assert_eq!(tool_params(&s, "deps")["build_backend"], pin);
+
+    let cx = trigon_strategy::Context {
+        env: trigon_strategy::EnvCtx {
+            timewarp_base: "timewarp:8129".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tools = trigon_strategy::ToolRegistry::builtin().unwrap();
+    let rendered = trigon_strategy::render(&s, &cx, &tools)
+        .unwrap_or_else(|e| panic!("the inferred strategy does not render: {e}"));
+    assert!(rendered.deps.contains(pin), "{}", rendered.deps);
+    assert!(!rendered.deps.contains("==49"), "{}", rendered.deps);
+}
+
+#[tokio::test]
 async fn a_pin_travels_to_the_build_phase_as_a_constraint() {
     // The environment that matters is the isolated one the frontend builds, and pre-installing the
     // backend does nothing for it. The constraint file is how a version is pinned inside an
@@ -422,7 +451,8 @@ async fn a_declared_build_changes_nothing_without_a_repository_to_check_it_again
         panic!("expected a tool")
     };
     assert_eq!(tool, "npm/build/pack", "no repository, no build step");
-    assert!(!with.contains_key("command"));
+    assert!(with.is_empty(), "{with:?}");
+    assert!(!f.build[0].literal.contains_key("command"));
     assert!(
         !got[0].assumptions.iter().any(|a| a.contains("npm run")),
         "nothing was assumed, because nothing was done: {:?}",

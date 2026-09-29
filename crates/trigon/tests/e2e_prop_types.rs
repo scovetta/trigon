@@ -49,10 +49,13 @@ fn scripts() -> BTreeMap<String, String> {
     .collect()
 }
 
-/// One shell fragment through the deterministic rung, via a one-step strategy.
+/// One shell fragment through the deterministic rung, via a one-step strategy, as the build script
+/// it renders to.
 ///
-///  works on strategies rather than strings, because that is what the repair loop
-/// hands it; this wraps a command in the smallest strategy that carries one.
+/// `without_yarn` works on strategies rather than strings, because that is what the repair loop
+/// hands it; this wraps a command in the smallest strategy that carries one. Rendered, because the
+/// expansion of a script is the repository's text and is kept as a literal of the step, which the
+/// step's template reads by name: what runs is the rendered script, not the template.
 fn rewritten(cmd: &str, scripts: &BTreeMap<String, String>) -> Option<String> {
     use trigon_strategy::{FlowStrategy, Location, Step, StepBody, Strategy};
     let one = Strategy::Flow(FlowStrategy {
@@ -67,17 +70,16 @@ fn rewritten(cmd: &str, scripts: &BTreeMap<String, String>) -> Option<String> {
             body: StepBody::Runs(cmd.to_string()),
             needs: vec![],
             when: None,
+            literal: BTreeMap::new(),
         }],
         output_dir: None,
         output_path: None,
     });
-    match trigon_strategy::without_yarn(&one, scripts)? {
-        Strategy::Flow(f) => match &f.build[0].body {
-            StepBody::Runs(s) => Some(s.clone()),
-            _ => None,
-        },
-        _ => None,
-    }
+    let next = trigon_strategy::without_yarn(&one, scripts)?;
+    let tools = trigon_strategy::ToolRegistry::builtin().expect("registry");
+    let rendered = trigon_strategy::render(&next, &Default::default(), &tools)
+        .unwrap_or_else(|e| panic!("the rewritten strategy does not render: {e}"));
+    Some(rendered.build)
 }
 
 /// What the pipeline made of one answer.

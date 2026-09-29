@@ -89,8 +89,8 @@ fn leaves_normalized_reachable(risk: RiskTier, provenance: &Provenance) -> bool 
         RiskTier::Structural => true,
         // Timestamps, modes, owners: the benign nondeterminism this project exists to absorb.
         RiskTier::Metadata => true,
-        // Rewrites bytes inside a distributed file. `wheel-record` is the builtin example, and it
-        // is why a wheel that needed its RECORD regenerated cannot present as a clean match.
+        // Rewrites bytes inside a distributed file. `wheel-record-v2` is the builtin example, and
+        // it is why a wheel that needed its RECORD regenerated cannot present as a clean match.
         RiskTier::Content => false,
         // Discards information outright.
         RiskTier::Lossy => false,

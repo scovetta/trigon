@@ -81,12 +81,17 @@ fn flow(c: &Candidate) -> &FlowStrategy {
     f
 }
 
-/// Every tool step of a phase, with its parameters.
+/// Every tool step of a phase, with its parameters — all of them literals, since everything the
+/// heuristic hands a tool was read from outside the strategy, and none a template the package's
+/// text could steer.
 fn tools(steps: &[trigon_strategy::Step]) -> Vec<(String, BTreeMap<String, String>)> {
     steps
         .iter()
         .map(|s| match &s.body {
-            StepBody::Uses { tool, with } => (tool.clone(), with.clone()),
+            StepBody::Uses { tool, with } => {
+                assert!(with.is_empty(), "`{tool}` is given a template: {with:?}");
+                (tool.clone(), s.literal.clone())
+            }
             other => panic!("expected a tool step, got {other:?}"),
         })
         .collect()

@@ -3820,7 +3820,7 @@ fn resolve_format(path: &Path, explicit: Option<&str>) -> Result<Format> {
 /// Which stabilizer set to use.
 ///
 /// The container format is not enough. A wheel and an arbitrary zip are both `Format::Zip`, and
-/// the wheel needs `wheel-record` and `pyc-header` on top of the zip set: without them a rebuilt
+/// the wheel needs `wheel-record-v2` and `pyc-header` on top of the zip set: without them a rebuilt
 /// wheel's RECORD is compared against the published one line for line rather than regenerated from
 /// the members that are actually there, so one differing member reports as two. The artifact kind
 /// is what selects the profile, and for these extensions the filename carries it unambiguously.

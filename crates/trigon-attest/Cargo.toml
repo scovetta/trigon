@@ -32,5 +32,7 @@ toml_edit.workspace = true
 
 [dev-dependencies]
 tar = "0.4"
+# Writing wheels for `tests/renamed_pass.rs`. A dev-dependency, so nothing the verifier links.
+zip.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

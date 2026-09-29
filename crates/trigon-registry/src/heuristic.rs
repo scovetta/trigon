@@ -45,7 +45,10 @@ fn unrun_build(target: &ResolvedTarget) -> Option<(String, String)> {
 /// this rung has checked nothing about. A rung that cannot tell what it is about to run should not
 /// be the one deciding to run it; that is the Builder's job, and the divergence that says so is
 /// how it gets there.
-fn bare_program(command: &str) -> bool {
+///
+/// The CI rung applies the same check to the script a release workflow runs, since it displaces
+/// this rung's candidate.
+pub(crate) fn bare_program(command: &str) -> bool {
     !command.is_empty()
         && command
             .chars()
@@ -60,14 +63,23 @@ fn plural(n: usize, what: &str) -> String {
     }
 }
 
-fn uses(tool: &str, with: BTreeMap<String, String>) -> Step {
+/// A step whose every parameter is a literal: handed to the tool as written, never rendered.
+///
+/// **What this rung passes a tool is data.** A Node or npm version, a publish time, a backend pin,
+/// a script name, a crate's name, the version the feed served — each was read from a registry
+/// document, the published artifact or the repository, or put together from what was, and a `with`
+/// value is a template: text from any of them carrying `{{`, `{%` or `{#` would be evaluated, and
+/// the package under test would be writing part of its own recipe. The values this code chooses
+/// itself — a path, a flag — are not templates either, so nothing here is.
+fn uses(tool: &str, literal: BTreeMap<String, String>) -> Step {
     Step {
         body: StepBody::Uses {
             tool: tool.into(),
-            with,
+            with: BTreeMap::new(),
         },
         needs: Vec::new(),
         when: None,
+        literal,
     }
 }
 
@@ -161,7 +173,9 @@ pub struct NpmInferrer {
 /// `npm install -g npm@…` unquoted and the parenthesis ended the deps phase with
 /// `Syntax error: "(" unexpected`, filed as `unknown` and charged to the package. A value that is
 /// not a version cannot be installed, so there is nothing to salvage and the rung declines.
-fn is_plain_version(version: &str) -> bool {
+///
+/// The CI rung gates both fields on it too, since it displaces this rung's candidate.
+pub(crate) fn is_plain_version(version: &str) -> bool {
     let numeric =
         |p: Option<&str>| p.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
     let mut parts = version.split('.');

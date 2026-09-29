@@ -3497,6 +3497,14 @@ an era-appropriate SDK the residual is the structural debug layout ([B46](17-bac
 ([B45](17-backlog.md)). Two of the three layers are now built; the third is the SDK-by-publish-date
 frontier.
 
+**Correction.** "Sets them on the `nuget/build/pack` step" set them as `with` values, and a `with`
+value is a template. The stamps are the publisher's text — ILSpy writes a copyright with its braces
+as they are — so a copyright carrying `{{ 7*7 }}` would have been built as `49`, and one carrying
+`{% if %}` failed the render and lost the rung. They are the step's literals now, handed to the
+tool as written, and reach `dotnet` MSBuild-escaped, since `-p:` splits a value on `;` and `,` and
+decodes `%XX`
+([3.104](#3104-text-from-the-package-under-test-was-template-source)).
+
 ### 3.83 SDK by publish date: build with the toolchain the CI had, not the one the target names
 
 Piece three of the castle.core work, and the layer [3.82](#382-version-reconstruction-build-the-assembly-with-the-version-the-feed-served)
@@ -3613,6 +3621,39 @@ This makes the transform legible member by member, and closes the two gaps [3.90
 **A comparator wart this exposed, and where it is handled.** `signature` compares the stabilized archive *in memory*, where three fields are stale shadows of what the writer will emit: an entry's `size` and `zip.crc32` are recomputed from the body on every write (`trigon_archive::zip`), and a zip's `meta.mode` is a parse-time shadow of `external_attrs`, which is what the writer actually stores. So a member the passes made byte-identical can still carry `entry:size`, `entry:zip.crc32` and `entry:mode` codes that cannot reach the output. These are filtered from the *projection* — `size` and `crc32` always (redundant with `body@`), `mode` when `external_attrs` was reconciled — so the UI does not report "still differs" on a member that is byte-for-byte identical. The stored blob keeps every code, and the real fix (not emitting a difference for a field the writer recomputes) belongs in `signature` itself, where it changes the published divergence signature and so is deferred to a change that can version it — see B47.
 
 **Correction.** "A body rewrite is taken from the pass's own `Touched::bytes`" held for entry passes only, and not for all of those. An archive pass reports its work for the archive as a whole, so `wheel-record` regenerating RECORD and `nupkg-packaging-names` rewriting `_rels/.rels` named no member, and `nupkg-doc-member-order` rewrote a documentation file and reported no bytes — each reconciled body read as a difference nothing addressed, the opposite of what an edit's absence is meant to say. An archive pass that reports work now has every body compared across it: one the archive still borrows is compared only if the pass promoted it, against the bytes it borrowed, so a 2 GB wheel's bodies are still never copied; one already in memory by its digest, kept from pass to pass, since reading it is a pass over memory and not a copy. Promotion alone is not a change — `nupkg-packaging-names` asks for `_rels/.rels` mutably whether or not it rewrites it. The doc-member pass reports the bytes it wrote, as `nupkg-doc-member-order-v2`: its signed `bytesChanged` changed, and the same id would have re-derived old statements differently under the digest they were signed with. `apply`, which the archived set runs and nothing reads edits from, takes no fingerprints at all. Measured on a 256 MB wheel of deflated members, `apply_traced` went from 0.20 s to 1.0 s — each body read four times, before the first archive pass and after the three that reported work — and `apply` is unchanged. That changes what a wheel comparison re-derives to: nearly every wheel's RECORD is regenerated, so a report published with field edits before this would re-derive with a `body` edit on RECORD it does not carry, which `check_report` counts as a disagreement and `verify-record --rerun-comparison` as a refutation of an honest record. The `wheel` set's ids did not change with it, so neither did its digest, and the record would have been re-derived here rather than under its archived set. So the regenerating pass is `wheel-record-v2`, writing the same RECORD under a new id: a new set digest, which sends such a record to its archived set, where the report is unchecked rather than refuted. The `nupkg` set, whose `_rels/.rels` edit is the other new one, has a new digest already through `nupkg-doc-member-order-v2` and `dotnet-il-canonical-v2`.
+
+**The id, confirmed** (2026-09-29). What the rename rests on, checked rather than argued:
+
+- **The id alone moved the digest.** Today's `wheel` set with its RECORD pass given back the id
+  `wheel-record` hashes to `58632c3c627d…`, the digest every wheel record signed before 62781a8
+  names; under `wheel-record-v2` it is `738725964c4a…`. Nothing else in the set's rows moved
+  (`the_new_id_alone_is_what_moved_the_wheel_digest`, `crates/trigon-attest/tests/renamed_pass.rs`).
+- **An old record goes to its archived set, and is not refuted.** A statement made under that set,
+  naming `wheel-record` in `applied`, is refused by today's set as a set mismatch, which fails no
+  verification, and re-derived through the archived one: the outcome and both stabilized digests
+  hold, and `differences`, `applied`, `members` and a published report with no `body` edit on
+  RECORD are unchecked, never refuted
+  (`a_record_naming_wheel_record_is_re_derived_through_its_archived_set_and_never_refuted`). Had the
+  digest stayed, the same honest report re-derived natively disagrees on `diff.field_edits` at
+  RECORD (`under_an_unchanged_digest_an_honest_report_would_have_read_as_refuted`).
+- **Against the code that signed them.** The archived module built from 16ffc71, the commit before
+  62781a8, gives `wheel@58632c3c627d`. Each of the eight corpus wheels was paired with a copy
+  re-zipped deflated, with other times and its RECORD reversed; today's binary signed the pair, and
+  the statement was rewritten to what 16ffc71 would have signed — that digest, `wheel-record` in
+  `applied`. `verify-attestation --rerun-comparison --stabilizers` held every one through the old
+  module, so the old code stabilizes each to the bytes today's does. Today's set refuses the same
+  statements as a set mismatch, and the old module refuses one made under today's set.
+- **The corpus.** The 63 golden digests of `m0` and `m0-smoke`, eight of them wheels, did not move,
+  so `wheel-record-v2` writes the RECORD they were golded under. Their `applied` lists named
+  `wheel-record` and now name `wheel-record-v2`; that is the only change, so nothing was re-golded.
+- **Where it is named.** The rename itself — `passes.rs`, the profile, the UI's descriptions with
+  the old id kept as superseded, docs/03, docs/05's table, the tests that match on it — is
+  62781a8's. What still called the current pass by the old id is renamed now: docs/14's worked
+  example, docs/02's triage example and the `watch` comment quoting it, `predicate_sides.rs`'s
+  fixture, `corpora/deviations.toml`, and a comment each in `statement.rs`, `main.rs`,
+  `seam_two_paths.rs` and `seam_provenance_cap.rs`. ADR-0002, docs/05's argument against the six
+  rungs, its table of defects, and the comments recounting finding 2 name the pass as it was then,
+  and keep that name.
 
 ### 3.92 What a review of the publication design measured, and why Rekor is being removed
 
@@ -5612,3 +5653,151 @@ test that fails without the fix (`crates/trigon/tests/lookup.rs`):
   unreachable is exit 5, which it had left out.
 - **The falsifying-command test resolved its record in a source not on github.com** and held
   another source's asset to it; it removes that source first now, as it meant to.
+
+### 3.104 Text from the package under test was template source
+
+A follow-up to 62781a8, on 2026-09-29. `crates/trigon-strategy/src/render.rs` renders every `runs`,
+`if` and `with` value of a strategy as a minijinja template, which is what lets an author write `{{
+intrinsics.publish_time }}`. The rungs that write strategies put text from the thing under test into
+those same places, so the package's text was evaluated as the template it happened to look like, and
+the package was writing part of its own build recipe.
+
+**Every path, found by reading each producer of a strategy.**
+
+- **The .NET version rung** (`with_assembly_version`,
+  [3.82](#382-version-reconstruction-build-the-assembly-with-the-version-the-feed-served)):
+  `AssemblyVersion`, `AssemblyFileVersion`, `AssemblyInformationalVersion` and the copyright, read
+  from ILSpy's decompilation of the published assembly (`decompile::assembly_attr`). ILSpy does not
+  escape braces, so a copyright is exactly what the publisher typed. Into the pack step's `with`.
+- **The yarn rung** (`without_yarn`, [3.67](#367-two-ways-to-run-yarn-and-the-code-had-neither)):
+  script bodies from the checkout's `package.json`, spliced into a `runs` template where a script
+  reaches yarn.
+- **The heuristic rungs** (`trigon-registry/src/heuristic.rs`): npm's `_nodeVersion` and
+  `_npmVersion`, the publish time, the name of the script the registry document says nothing runs;
+  PyPI's backend pin from the wheel's own `Generator:` line and `<name>!=<version>`; the Rust
+  version and the crate's name; NuGet's feed version and the feed URL built around the publish time.
+- **The CI rung** (`trigon-registry/src/ci/lower.rs`): the Python version, the project directory and
+  the npm script, all from the repository's workflow, beside the registry's versions, the publish
+  time and the backend pin.
+
+Not paths: the context (`location`, `target`, `intrinsics`, `env`) is read through variables, and a
+variable prints its value without evaluating it; a composite tool forwards `"{{ with.x }}"`, which
+is the same; a tool parameter's default is never rendered. A definitions entry, a strategy written
+by hand, an imported prior-art definition and a model's proposal are authored text, and their
+templates are meant; what a package can make a model write is the prompt-injection boundary of
+`docs/12-security.md` §4, not this.
+
+**What it allowed.** `{{ 7*7 }}` rendered as `49`, so a stamp or a directory was built as something
+the package never said. `{% if %}` or an unclosed `{#` failed the render, and a rung whose proposal
+does not render is a repair lost: a package could switch off its own version reconstruction with its
+copyright. `{% if env.arch == 'x86_64' %}` made the recipe depend on the rebuilder's host, and
+`{{ env.timewarp_base }}` wrote the mirror's address into the artifact. Evaluation gave the package
+nothing the shell would have: a stamp is shell-quoted and MSBuild-escaped after it is rendered, and
+a script body is shell the build runs anyway. The harm is a recipe, and so a verdict, steered by the
+thing it judges.
+
+62781a8 closed part of it for the .NET stamps: a stamp carrying `{{`, `{%` or `{#` was wrapped in
+`{% raw %}…{% endraw %}`, and one that said `endraw` was left out. That kept the text out of the
+evaluator only as long as the wrapping was spelled right, set no copyright at all for a publisher
+whose copyright said `endraw`, and left the other three rungs as they were.
+
+**The fix: `literal:`, a map beside `with` that is never parsed** (`docs/04-strategies.md` §3.3). A
+`uses` step hands each literal to its tool as the parameter of that name, exactly as written, and
+any template of the step can read one as `{{ literal.<name> }}`, which prints it. A tool's own steps
+never see their caller's literals; a name given both in `with` and in `literal` is refused at parse
+and at render; and an empty map is omitted, so a strategy that carries none has the canonical form
+and the `strategy_digest` it had, while one that carries any declares `schema: 2`. Each rung now
+puts what it read there:
+
+- the .NET rung sets the stamps as literals, and a `with` template for the same parameter gives way
+  to the stamp, unless it is the stamp already as plain text — a definition's `version: 5.1.1` —
+  which renders to it and stays;
+- the yarn rung keeps each expansion as `literal.script_<name>`, the key spelled from the script's
+  name in ASCII letters, digits and `_` alone, since the name is the repository's and `umd-min`
+  would read as `umd - min`, and the `runs` template reads it by name: `( {{ literal.script_build }}
+  )`;
+- the heuristic and CI rungs pass every parameter as a literal, and a strategy either writes has no
+  `with` at all.
+
+The heuristic and CI strategies' canonical forms moved with it, so their `strategy_digest`s did, and
+a cached verdict keyed by one is rebuilt once, as after any change to what a rung writes. The model
+is told what `literal:` is (`STRATEGY_SHAPE`), since a repair prompt now shows it one and says an
+unknown field is rejected.
+
+**How a stamp reaches MSBuild.** `-p:Name=value` splits the value on `;` and `,`, drops `"`, and
+decodes `%XX`, and MSBuild expands `@(…)` where the property is used; `msbuild_escape` (62781a8)
+spells each of those `%XX`, which MSBuild decodes back. Measured again, end to end, with the
+arguments the renderer writes for a pack step whose literals are the copyright `© 2004 {{ 7*7 }} {%
+if %} {# Castle; a,b 100%3B "q" it's @(I) $(P) %(M) *? \` and the informational version `5.1.1+{{
+7*7 }};x,y`: a class library built with them by SDK 10.0.401, in a container with `--network none`,
+carries both attributes byte for byte, and no `49`.
+
+**Tests.** `crates/trigon-strategy/tests/literals.rs`:
+`a_copyright_reaches_the_dotnet_invocation_byte_for_byte_and_is_never_evaluated` (through `sh` as
+the build runs it, and decoded as MSBuild decodes it),
+`a_literal_is_passed_as_written_where_the_same_text_in_with_is_rendered`,
+`an_authored_template_still_renders_beside_a_literal`,
+`a_parameter_given_both_ways_is_refused_when_parsed_and_when_rendered`,
+`a_literal_the_tool_does_not_declare_is_refused`,
+`a_tool_receives_a_literal_as_a_parameter_and_never_sees_its_callers_literals`,
+`literals_round_trip_and_a_strategy_without_them_is_unchanged`. In the rungs:
+`a_stamp_that_reads_as_a_template_is_set_as_written_and_does_not_loop`,
+`a_stamp_that_says_endraw_is_set_like_any_other`,
+`a_template_the_step_gave_a_stamp_gives_way_to_the_literal` (`dotnet.rs`);
+`a_script_body_reaches_the_build_as_written_and_is_never_evaluated`,
+`two_scripts_whose_names_spell_one_key_keep_two_and_one_script_keeps_one` (`yarn.rs`);
+`the_backend_the_wheel_names_reaches_the_build_as_written_and_is_never_evaluated`
+(`trigon-registry/tests/infer.rs`); and
+`what_a_workflow_says_reaches_the_build_as_written_and_is_never_evaluated` (`tests/ci.rs`). The
+helpers every heuristic and CI test reads parameters through now fail on any `with` value, so each
+of those tests holds the rule too. Rendering literals as templates, tried on purpose, fails three of
+the first seven.
+
+**What review found after, and what changed** (2026-09-29). Four defects, each with the test that
+would have caught it.
+
+- **The CI npm rung checked nothing the heuristic checks.** With template evaluation closed, the
+  shell and npm's own spec parser were still open, on the rung that runs above the heuristic and
+  replaces its candidate. The heuristic declines an `_npmVersion` that is not a plain `x.y.z`,
+  replaces a `_nodeVersion` no host serves, and lowers a script name only where `bare_program`
+  passes it; `lower_npm` took all three as they came. The argv split strips a workflow's quotes, so
+  `npm run "x'$(id)'"` lowered to the script `x'$(id)'`, and `npm/npx` writes it inside
+  `TRIGON_NPM_CMD='… npm run <name> …'`, where its own `'` ends the quoting and `$(id)` runs. A
+  user-agent `_npmVersion` reached `npm install -g "npm@…"`, where npm reads `npm:<alias>@<v>` or a
+  git URL as which npm packs the artifact, and a user-agent fails the deps phase and is charged to
+  the package — the failure `is_plain_version` was written for. The CI rung now applies the
+  heuristic's own `is_plain_version` and `bare_program`, and declines by name
+  (`Decline::UnfitValue`); a `_nodeVersion` from master goes back to the heuristic, which replaces
+  it and says so, since that takes Node's release index and this rung reads only the repository
+  (`the_values_the_heuristic_checks_are_checked_before_they_are_lowered`, `tests/ci.rs`).
+- **The .NET rung reported a change it did not make.** A step already carrying every stamp as plain
+  `with` text equal to it — a strategy this rung wrote in 62781a8, kept as a definitions entry or by
+  hand — had each value moved to `literal`: the rendered script was byte for byte the same, the
+  `strategy_digest` was not, and `changes_anything`, which compares digests, rebuilt an identical
+  .NET recipe and recorded a repair that changed nothing. A `with` value that is the stamp and that
+  the engine renders to itself — no `{{`, `{%` or `{#`, no trailing newline for it to trim — now
+  stays, and the rung returns `None` as its documentation says
+  (`a_step_already_carrying_the_stamps_as_plain_values_is_left_alone`, `dotnet.rs`; the rule held
+  to the engine by `a_text_that_renders_as_itself_is_what_the_engine_renders_unchanged`,
+  `render.rs`).
+- **The yarn rung flattened a multi-line step into one line.** This predates the literal splice
+  and lives in the same function: `rewrite` split a fragment on whitespace and joined it with
+  spaces, so `runs: |` holding `cd {{ location.subdir }}`, `npm ci` and `npm run build` became
+  `cd pkg npm ci ( npm run umd && npm run umd-min )`, which `sh` refuses at the `(`, and a manual
+  `build: |` the same. `usable` only renders, so the rewrite was accepted and a build spent on a
+  syntax error reported against the package; a step with no yarn in it came back respaced, which
+  read as a change. The rewrite is line by line now, replacing only the call and copying the rest
+  through as it was, and a call does not run on into the next line, as it would not for the shell
+  (`a_multi_line_step_keeps_its_lines_and_only_the_call_is_rewritten`,
+  `a_multi_line_manual_script_keeps_its_lines`, `yarn.rs`, each read back by `sh -n`).
+- **A document with literals still said `schema: 1`.** `StepRaw` denies unknown fields, so a build
+  from before `literal` refused such a document as having an unknown field `literal` — safe, and
+  nothing in it says to upgrade, which is what the version field exists to say (`docs/04` §4). A
+  document now declares the oldest schema that can read it: 2 where a step carries a literal, and
+  1 otherwise, so a strategy without literals keeps its canonical form and digest. The YAML and the
+  canonical JSON a record stores both say it, the second only where it is above 1, and an older
+  build refuses either as a schema newer than it understands. Both versions are read, and so is a
+  literal under a declared 1, which is how a model shown the shape as schema 1 writes one
+  (`a_strategy_with_literals_declares_schema_two_and_one_without_still_declares_one`,
+  `tests/literals.rs`). The heuristic and CI strategies' canonical forms carry `"schema":2`, so
+  their digests moved once more with this change.

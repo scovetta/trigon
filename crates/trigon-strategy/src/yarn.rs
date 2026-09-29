@@ -72,10 +72,10 @@ pub fn without_yarn(strategy: &Strategy, scripts: &BTreeMap<String, String>) -> 
     let phases: Vec<&mut Vec<Step>> = match &mut next {
         Strategy::Flow(f) => vec![&mut f.src, &mut f.deps, &mut f.build],
         // A manual strategy is raw scripts, which is what a model emits. Same rewrite, different
-        // shape.
+        // shape — and inlined, since a manual strategy is never rendered.
         Strategy::Manual(m) => {
             for script in [&mut m.deps, &mut m.build] {
-                let rewritten = rewrite(script.as_str(), scripts, 0)?;
+                let rewritten = rewrite(script.as_str(), scripts, 0, &mut Splice::Inline)?;
                 if rewritten != *script {
                     *script = rewritten;
                     changed = true;
@@ -91,9 +91,11 @@ pub fn without_yarn(strategy: &Strategy, scripts: &BTreeMap<String, String>) -> 
             let StepBody::Runs(script) = &step.body else {
                 continue;
             };
-            let rewritten = rewrite(script, scripts, 0)?;
+            let mut literal = step.literal.clone();
+            let rewritten = rewrite(script, scripts, 0, &mut Splice::Literal(&mut literal))?;
             if &rewritten != script {
                 step.body = StepBody::Runs(rewritten);
+                step.literal = literal;
                 changed = true;
             }
         }
@@ -101,47 +103,101 @@ pub fn without_yarn(strategy: &Strategy, scripts: &BTreeMap<String, String>) -> 
     changed.then_some(next)
 }
 
+/// Where the expansion of a script goes.
+///
+/// **A `runs` step is a template, and a script body is the repository's text.** Spliced into the
+/// step, `"build": "echo {{ 7*7 }}"` in a checkout's `package.json` was rendered as the template it
+/// looks like — `echo 49` — or failed the render on a name that is not defined, so the repository
+/// under test chose what its own build recipe said. Into a template the expansion is a literal of
+/// the step instead, which the template prints by name and never evaluates. A manual strategy is
+/// raw shell that is never rendered, so there it is spliced in as it is.
+enum Splice<'a> {
+    Inline,
+    Literal(&'a mut BTreeMap<String, String>),
+}
+
 /// One shell fragment, with `yarn` taken out of it.
 ///
 /// `None` where a `yarn` call is not a task-runner call, which is the whole safety property: this
 /// must never turn `yarn install` into something that looks like it worked.
-fn rewrite(cmd: &str, scripts: &BTreeMap<String, String>, depth: u8) -> Option<String> {
+///
+/// **Line by line, and only the call is replaced.** Everything else is copied through as it was —
+/// newlines, indentation, the spacing between words — because a step is shell, and a newline in it
+/// ends a command. Split on whitespace and joined with spaces, a multi-line `runs: |` step became
+/// one line, `cd pkg npm ci ( npm run umd && npm run umd-min )`, which `sh` refuses at the `(`: the
+/// rung spent a build on a syntax error, and the failure was reported against the package. A step
+/// with no yarn in it came back respaced, which read as a change. A call does not run on into the
+/// next line either: `yarn` alone at the end of one is `yarn install`, as it is to the shell.
+fn rewrite(
+    cmd: &str,
+    scripts: &BTreeMap<String, String>,
+    depth: u8,
+    splice: &mut Splice<'_>,
+) -> Option<String> {
     if depth >= MAX_DEPTH {
         return None;
     }
-    let words: Vec<&str> = cmd.split_whitespace().collect();
-    let mut out: Vec<String> = Vec::with_capacity(words.len());
-    let mut i = 0usize;
+    let mut out = String::with_capacity(cmd.len());
+    for line in cmd.split_inclusive('\n') {
+        let words = words_of(line);
+        let word = |i: usize| words.get(i).map(|&(_, w)| w);
+        // How far into `line` has been written to `out`.
+        let mut copied = 0usize;
+        let mut i = 0usize;
 
-    while i < words.len() {
-        let w = words[i];
-        // `yarn run x` and `yarn x` are the same call. Anything else — `install`, `add`, a flag —
-        // is yarn doing something only yarn does.
-        if w == "yarn" {
-            let (name, skip) = match words.get(i + 1) {
-                Some(&"run") => (words.get(i + 2).copied(), 3),
-                Some(other) => (Some(*other), 2),
-                None => (None, 1),
+        while let Some(w) = word(i) {
+            // `yarn run x` and `yarn x` are the same call. Anything else — `install`, `add`, a
+            // flag — is yarn doing something only yarn does.
+            let (name, take) = if w == "yarn" {
+                match word(i + 1) {
+                    Some("run") => (word(i + 2), 3),
+                    Some(other) => (Some(other), 2),
+                    None => (None, 1),
+                }
+            // `npm run <s>` where `<s>` itself reaches yarn. Expanding it is what actually fixes
+            // `prop-types`, whose strategy never mentions yarn — `build` does, two levels down.
+            } else if w == "npm"
+                && word(i + 1) == Some("run")
+                && let Some(name) = word(i + 2)
+                && reaches_yarn(name, scripts)
+            {
+                (Some(name), 3)
+            } else {
+                i += 1;
+                continue;
             };
-            out.push(invoke(name?, scripts, depth)?);
-            i += skip;
-            continue;
+            let replacement = invoke(name?, scripts, depth, splice)?;
+            let (start, _) = words[i];
+            let (last, last_word) = words[i + take - 1];
+            out.push_str(&line[copied..start]);
+            out.push_str(&replacement);
+            copied = last + last_word.len();
+            i += take;
         }
-        // `npm run <s>` where `<s>` itself reaches yarn. Expanding it is what actually fixes
-        // `prop-types`, whose strategy never mentions yarn — `build` does, two levels down.
-        if w == "npm"
-            && words.get(i + 1) == Some(&"run")
-            && let Some(name) = words.get(i + 2)
-            && reaches_yarn(name, scripts)
-        {
-            out.push(invoke(name, scripts, depth)?);
-            i += 3;
-            continue;
-        }
-        out.push(w.to_string());
-        i += 1;
+        out.push_str(&line[copied..]);
     }
-    Some(out.join(" "))
+    Some(out)
+}
+
+/// The words of one line, where `split_whitespace` would split it, each with the byte offset it
+/// starts at, so a rewrite can replace a call and copy the text around it through untouched.
+fn words_of(line: &str) -> Vec<(usize, &str)> {
+    let mut words = Vec::new();
+    let mut start = None;
+    for (at, c) in line.char_indices() {
+        match (c.is_whitespace(), start) {
+            (true, Some(s)) => {
+                words.push((s, &line[s..at]));
+                start = None;
+            }
+            (false, None) => start = Some(at),
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        words.push((s, &line[s..]));
+    }
+    words
 }
 
 /// How to run one named script without yarn.
@@ -150,14 +206,58 @@ fn rewrite(cmd: &str, scripts: &BTreeMap<String, String>, depth: u8) -> Option<S
 /// yarn — `umd` is browserify and rewrites cleanly, while `build` is `yarn umd && yarn umd-min`
 /// and `npm run build` would find yarn again one level down. A script that reaches yarn is
 /// expanded into what it would have run.
-fn invoke(name: &str, scripts: &BTreeMap<String, String>, depth: u8) -> Option<String> {
+///
+/// The name is a word of the fragment being rewritten, so `npm run <name>` is that fragment's own
+/// text. The expansion is the script's body, which is the repository's, and goes where `splice`
+/// says; what it expands to in turn is part of it, so everything below goes in with it.
+fn invoke(
+    name: &str,
+    scripts: &BTreeMap<String, String>,
+    depth: u8,
+    splice: &mut Splice<'_>,
+) -> Option<String> {
     let body = scripts.get(name)?;
     if !reaches_yarn(name, scripts) {
         return Some(format!("npm run {name}"));
     }
+    let expanded = rewrite(body, scripts, depth + 1, &mut Splice::Inline)?;
     // Parenthesised, because an expansion carrying `&&` into the middle of a larger command would
     // otherwise rebind what follows it.
-    Some(format!("( {} )", rewrite(body, scripts, depth + 1)?))
+    Some(match splice {
+        Splice::Inline => format!("( {expanded} )"),
+        Splice::Literal(literal) => {
+            format!("( {{{{ literal.{} }}}} )", key_for(name, expanded, literal))
+        }
+    })
+}
+
+/// The literal an expansion of `name` is kept under, added to `literal` if it is not there yet.
+///
+/// Named for the script, so a reviewer reading `( {{ literal.script_build }} )` knows what it
+/// stands for — but spelled from ASCII letters, digits and `_` alone, because the name is the
+/// repository's and the key is read in a template: `umd-min` would read as `umd - min`. The same
+/// key again is the same expansion; one already taken by other text gets a number.
+fn key_for(name: &str, expanded: String, literal: &mut BTreeMap<String, String>) -> String {
+    let base: String = name
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => c,
+            _ => '_',
+        })
+        .collect();
+    let base = format!("script_{base}");
+    let mut key = base.clone();
+    for n in 2.. {
+        match literal.get(&key) {
+            None => {
+                literal.insert(key.clone(), expanded);
+                break;
+            }
+            Some(v) if *v == expanded => break,
+            Some(_) => key = format!("{base}_{n}"),
+        }
+    }
+    key
 }
 
 /// Whether running this script would invoke yarn directly.
@@ -170,6 +270,11 @@ fn reaches_yarn(name: &str, scripts: &BTreeMap<String, String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fragment rewritten as a manual strategy's is, with every expansion spliced in.
+    fn inline(cmd: &str, scripts: &BTreeMap<String, String>) -> Option<String> {
+        rewrite(cmd, scripts, 0, &mut Splice::Inline)
+    }
 
     /// `prop-types@15.8.1`, from the published artifact's own `package.json`.
     fn prop_types() -> BTreeMap<String, String> {
@@ -192,16 +297,16 @@ mod tests {
         // `yarn build` is not `npm run build`: `build` is itself `yarn umd && yarn umd-min`, so
         // the rewrite has to go through it rather than hand yarn to npm.
         assert_eq!(
-            rewrite("yarn build", &s, 0).as_deref(),
+            inline("yarn build", &s).as_deref(),
             Some("( npm run umd && npm run umd-min )")
         );
         assert_eq!(
-            rewrite("yarn umd && yarn umd-min", &s, 0).as_deref(),
+            inline("yarn umd && yarn umd-min", &s).as_deref(),
             Some("npm run umd && npm run umd-min")
         );
         // `yarn run x` is the same call spelled longer.
         assert_eq!(
-            rewrite("yarn run umd", &s, 0).as_deref(),
+            inline("yarn run umd", &s).as_deref(),
             Some("npm run umd")
         );
     }
@@ -211,7 +316,7 @@ mod tests {
     fn npm_run_reaching_yarn_two_levels_down_is_expanded() {
         let s = prop_types();
         assert_eq!(
-            rewrite("npm run build", &s, 0).as_deref(),
+            inline("npm run build", &s).as_deref(),
             Some("( npm run umd && npm run umd-min )"),
             "the strategy runs `npm run build`; `build` is what reaches yarn"
         );
@@ -230,7 +335,7 @@ mod tests {
             "yarn",
         ] {
             assert_eq!(
-                rewrite(cmd, &s, 0),
+                inline(cmd, &s),
                 None,
                 "`{cmd}` is yarn doing something only yarn does"
             );
@@ -241,14 +346,14 @@ mod tests {
     fn a_script_that_does_not_exist_is_not_a_task_runner_call() {
         // `yarn frobnicate` where nothing declares `frobnicate` is not a call we can rewrite, and
         // guessing would turn a clear failure into a confusing one.
-        assert_eq!(rewrite("yarn frobnicate", &prop_types(), 0), None);
+        assert_eq!(inline("yarn frobnicate", &prop_types()), None);
     }
 
     #[test]
     fn a_command_with_no_yarn_in_it_is_returned_unchanged() {
         let s = prop_types();
         for cmd in ["npm run tests-only", "npm pack", "make all"] {
-            assert_eq!(rewrite(cmd, &s, 0).as_deref(), Some(cmd));
+            assert_eq!(inline(cmd, &s).as_deref(), Some(cmd));
         }
     }
 
@@ -262,8 +367,8 @@ mod tests {
         // Both forms follow the cycle and both stop rather than recursing. `npm run a` is not a
         // fix here either: `a` reaches yarn, so it has to be expanded, and expanding it arrives
         // back at `a`.
-        assert_eq!(rewrite("yarn a", &s, 0), None);
-        assert_eq!(rewrite("npm run a", &s, 0), None);
+        assert_eq!(inline("yarn a", &s), None);
+        assert_eq!(inline("npm run a", &s), None);
     }
 
     #[test]
@@ -282,6 +387,7 @@ mod tests {
                     body: StepBody::Runs("npm run build".into()),
                     needs: vec![],
                     when: None,
+                    literal: BTreeMap::new(),
                 },
                 Step {
                     body: StepBody::Uses {
@@ -290,6 +396,7 @@ mod tests {
                     },
                     needs: vec![],
                     when: None,
+                    literal: BTreeMap::new(),
                 },
             ],
             output_dir: Some(".".into()),
@@ -300,12 +407,170 @@ mod tests {
         let Strategy::Flow(f) = &after else {
             panic!("shape changed")
         };
+        // The expansion is the repository's text, so it is a literal of the step, which the
+        // template prints by name.
         assert_eq!(
             f.build[0].body,
-            StepBody::Runs("( npm run umd && npm run umd-min )".into())
+            StepBody::Runs("( {{ literal.script_build }} )".into())
+        );
+        assert_eq!(
+            f.build[0].literal.get("script_build").map(String::as_str),
+            Some("npm run umd && npm run umd-min")
         );
         // The tool step is untouched: it never mentioned yarn.
         assert!(matches!(f.build[1].body, StepBody::Uses { .. }));
+        assert!(f.build[1].literal.is_empty());
+        // And a second pass finds no yarn left, so the rung does not loop.
+        assert!(without_yarn(&after, &prop_types()).is_none());
+    }
+
+    /// A flow strategy of one `runs` step, rewritten and rendered as the run renders it.
+    fn rendered(runs: &str, scripts: &BTreeMap<String, String>) -> (Strategy, String) {
+        let s = crate::from_yaml(&format!(
+            "schema: 1\nkind: flow\nlocation:\n  repo: https://example.invalid/x\n  ref: aa\n\
+             \x20 subdir: pkg\nbuild:\n  - runs: '{runs}'\noutput_path: '*.tgz'\n"
+        ))
+        .expect("parses");
+        let next = without_yarn(&s, scripts).expect("something to rewrite");
+        let tools = crate::ToolRegistry::builtin().expect("registry");
+        let built = crate::render(&next, &crate::Context::default(), &tools)
+            .expect("renders")
+            .build;
+        (next, built)
+    }
+
+    /// **A script body is the repository's text, and never template source.** Spliced into the
+    /// `runs` template, `{{ 7*7 }}` built as `49`, `{% if %}` failed the render and `{#` opened a
+    /// comment that swallowed the rest of the step: the package under test was writing its own
+    /// recipe. As a literal it reaches the build script byte for byte — and the fragment's own
+    /// template around it still renders.
+    #[test]
+    fn a_script_body_reaches_the_build_as_written_and_is_never_evaluated() {
+        let body = "yarn umd && echo {{ 7*7 }} {% if %} {#";
+        let scripts: BTreeMap<String, String> = [("build", body), ("umd", "browserify x")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let (_, built) = rendered("cd {{ location.subdir }} && npm run build", &scripts);
+        assert_eq!(
+            built,
+            "cd pkg && ( npm run umd && echo {{ 7*7 }} {% if %} {# )"
+        );
+    }
+
+    /// A key is spelled from the script's name and read in a template, so what the repository
+    /// named a script cannot become template syntax; two names that spell one key keep two keys,
+    /// and one script expanded twice keeps one.
+    #[test]
+    fn two_scripts_whose_names_spell_one_key_keep_two_and_one_script_keeps_one() {
+        let scripts: BTreeMap<String, String> = [
+            ("umd-min", "yarn x"),
+            ("umd_min", "yarn y"),
+            ("x", "echo x"),
+            ("y", "echo y"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let (next, built) = rendered(
+            "npm run umd-min && yarn umd_min && yarn umd-min",
+            &scripts,
+        );
+        let Strategy::Flow(f) = &next else {
+            panic!("shape changed")
+        };
+        assert_eq!(
+            f.build[0].body,
+            StepBody::Runs(
+                "( {{ literal.script_umd_min }} ) && ( {{ literal.script_umd_min_2 }} ) && \
+                 ( {{ literal.script_umd_min }} )"
+                    .into()
+            )
+        );
+        assert_eq!(f.build[0].literal.len(), 2, "{:?}", f.build[0].literal);
+        assert_eq!(
+            built,
+            "( npm run x ) && ( npm run y ) && ( npm run x )"
+        );
+    }
+
+    /// Whether `sh` reads a script without a syntax error. `-n` parses and runs nothing.
+    fn parses_as_shell(script: &str) -> Result<(), String> {
+        let out = std::process::Command::new("sh")
+            .args(["-n", "-c", script])
+            .env_clear()
+            .output()
+            .expect("sh runs");
+        match out.status.success() {
+            true => Ok(()),
+            false => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
+        }
+    }
+
+    /// **A step keeps its lines, and only the call is rewritten.** A `runs: |` step is shell, and
+    /// a newline in it ends a command. Split on whitespace and joined with spaces, this step
+    /// became `cd {{ location.subdir }} npm ci ( {{ literal.script_build }} )`, which `sh` refuses
+    /// at the `(`: the rung spent a build on a syntax error, and the failure was the package's. A
+    /// step with no yarn in it, beside one that has, is not touched at all, spacing included.
+    #[test]
+    fn a_multi_line_step_keeps_its_lines_and_only_the_call_is_rewritten() {
+        let s = crate::from_yaml(
+            "schema: 1\nkind: flow\nlocation:\n  repo: https://example.invalid/x\n  ref: aa\n\
+             \x20 subdir: pkg\nbuild:\n  - runs: |\n      cd {{ location.subdir }}\n      \
+             npm ci\n      npm run build\n  - runs: |\n      echo  one\n\n        echo two\n\
+             output_path: '*.tgz'\n",
+        )
+        .expect("parses");
+        let next = without_yarn(&s, &prop_types()).expect("something to rewrite");
+        let (Strategy::Flow(before), Strategy::Flow(f)) = (&s, &next) else {
+            panic!("shape changed")
+        };
+        assert_eq!(
+            f.build[0].body,
+            StepBody::Runs(
+                "cd {{ location.subdir }}\nnpm ci\n( {{ literal.script_build }} )\n".into()
+            )
+        );
+        assert_eq!(f.build[1], before.build[1], "no yarn, so not touched");
+
+        let tools = crate::ToolRegistry::builtin().expect("registry");
+        let built = crate::render(&next, &crate::Context::default(), &tools)
+            .expect("renders")
+            .build;
+        assert_eq!(
+            built,
+            "cd pkg\nnpm ci\n( npm run umd && npm run umd-min )\necho  one\n\n  echo two"
+        );
+        parses_as_shell(&built).unwrap_or_else(|e| panic!("{e}\n{built}"));
+
+        // A call does not run on into the next line, as it would not for the shell: `yarn` alone
+        // at the end of one is `yarn install`, which is not a task-runner call.
+        assert_eq!(inline("yarn\nbuild", &prop_types()), None);
+    }
+
+    /// The same for a manual strategy's scripts, which are never rendered: each line is kept, and a
+    /// strategy whose only multi-line script has no yarn in it has nothing to rewrite.
+    #[test]
+    fn a_multi_line_manual_script_keeps_its_lines() {
+        let got = without_yarn(
+            &manual("npm ci\n", "npm ci\nnpm run build\nnpm pack\n"),
+            &prop_types(),
+        )
+        .expect("rewritten");
+        let Strategy::Manual(m) = got else {
+            panic!("shape changed")
+        };
+        assert_eq!(m.deps, "npm ci\n", "no yarn, so not touched");
+        assert_eq!(
+            m.build,
+            "npm ci\n( npm run umd && npm run umd-min )\nnpm pack\n"
+        );
+        parses_as_shell(&m.build).unwrap_or_else(|e| panic!("{e}\n{}", m.build));
+
+        assert!(
+            without_yarn(&manual("npm ci\n", "npm ci\n  npm pack\n"), &prop_types()).is_none(),
+            "only whitespace would have changed"
+        );
     }
 
     #[test]
@@ -325,6 +590,7 @@ mod tests {
                 body: StepBody::Runs("npm pack".into()),
                 needs: vec![],
                 when: None,
+                literal: BTreeMap::new(),
             }],
             output_dir: None,
             output_path: None,
@@ -410,6 +676,6 @@ mod tests {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        assert_eq!(rewrite("yarn a", &cycle, 0), None);
+        assert_eq!(inline("yarn a", &cycle), None);
     }
 }
