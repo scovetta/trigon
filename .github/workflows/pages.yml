@@ -1,0 +1,61 @@
+name: pages
+
+# Publishes docs/web, the static information page, to GitHub Pages. The page is plain HTML and CSS
+# with no build step; what this does to it is rewrite its links out of docs/web.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/web/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a newer one waits rather than cancelling a deployment halfway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # The page links to the docs and scripts beside it (`../introduction.md`,
+      # `../../scripts/evidence-e2e.sh`), which work when the repository is browsed and are not
+      # published: only docs/web is. On the published copy they point at the same files on GitHub,
+      # at the branch this deploys from. `../../` first, so a link two levels up is not read as one
+      # level up into docs/.
+      - name: Point links outside docs/web at GitHub
+        env:
+          BLOB: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}
+        run: |
+          mkdir -p _site
+          cp -r docs/web/. _site/
+          sed -E -i \
+            -e "s#(href|src)=\"\.\./\.\./([^\"]+)\"#\1=\"$BLOB/\2\"#g" \
+            -e "s#(href|src)=\"\.\./([^\"]+)\"#\1=\"$BLOB/docs/\2\"#g" \
+            _site/*.html
+          if grep -nE '(href|src)="\.\./' _site/*.html; then
+            echo "a link still leaves the published site" >&2
+            exit 1
+          fi
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
