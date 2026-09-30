@@ -300,8 +300,8 @@
   <span class="t-lbl">stabilizers </span> tar-gzip <span class="t-mut">(cadb3a863443…)</span>
 
   <span class="t-lbl">            </span> <span class="t-hd">upstream          </span> <span class="t-hd">rebuild</span>
-  <span class="t-lbl">raw         </span> <span class="t-id">aff3730d91b7…     </span> <span class="t-id">f3694ddda3cc…     </span> <span class="t-bad">≠</span>
-  <span class="t-lbl">container   </span> <span class="t-id">fa8a7ca19526…     </span> <span class="t-id">e5c766d02de1…     </span> <span class="t-bad">≠</span>
+  <span class="t-lbl">raw         </span> <span class="t-id">aff3730d91b7…     </span> <span class="t-id">25633255e22d…     </span> <span class="t-bad">≠</span>
+  <span class="t-lbl">container   </span> <span class="t-id">fa8a7ca19526…     </span> <span class="t-id">56837aed83af…     </span> <span class="t-bad">≠</span>
   <span class="t-lbl">stabilized  </span> <span class="t-id">441b279b8b59…     </span> <span class="t-id">441b279b8b59…     </span> <span class="t-ok">=</span>
 
   <span class="t-mut">containers differ as well as the framing</span>
@@ -355,7 +355,7 @@
         <p>The build behind that verdict could reach the mirror and nothing else. Its network
           transcript lists the 403 responses that crossed into the build, each with its URL and
           SHA-256: 178 index requests, 224 package tarballs from registry.npmjs.org and one Node.js
-          toolchain download. The mirror withheld 3,694 versions that did not yet exist when the
+          toolchain download. The mirror withheld 3,695 versions that did not yet exist when the
           publisher released wrappy 1.0.2. The source was <code>github.com/npm/wrappy</code> at
           commit <code>71d91b6d</code>, the commit npm’s own <code>gitHead</code> names.</p>
         <p>A consumer who trusts the evidence repository looks the package up in a verified local
@@ -371,17 +371,18 @@ key       pkg:npm/wrappy@1.0.2
 source    `e2e`, from
           …/evidence-e2e/evidence.toml;
           as of 1 leaves of `example.org/trigon-e2e-evidence`
+checkpoint example.org/trigon-e2e-evidence 1 KnTTCmL6O1enzpv/eyZctnyfq+OFB3kSH/qyKfaO1QM=
 answer    <span class="t-ok">normalized</span> — from 1 record(s) its log holds for it
-record    sha256:d8056931f30e38ef0d918a0279994288d33203dfdadd54c9a9ce58c804b697cd at leaf 0 of `example.org/trigon-e2e-evidence`, current
+record    sha256:489556d6f1e8a16f7e0d2db9a6614485bc8ec007dd573ad8accdedbcd5185ea9 at leaf 0 of `example.org/trigon-e2e-evidence`, current
 subject   wrappy-1.0.2.tgz (aff3730d91b7b1e143822956d14608f563163cf11b9d0ae602df1fe1e430fdfb)
 purl      pkg:npm/wrappy@1.0.2
 predicate https://trigon.dev/equivalence/v2
 claims    normalized
 set       tar-gzip,
           sha256:cadb3a863443a703bcfb7bd35e08581cee2a2d54c78b661bd2c43e483120bdbb
-run       1790736574-aff3730d, 2026-09-30T02:48:48Z to 2026-09-30T02:49:34Z
-trigon    built by 0.0.0+git.50b0f14983ecbe1f3b1d6c315c9ea5368240d4fa.dirty, signed by
-          0.0.0+git.50b0f14983ecbe1f3b1d6c315c9ea5368240d4fa.dirty
+run       1790790643-aff3730d, 2026-09-30T17:49:55Z to 2026-09-30T17:50:43Z
+trigon    built by 0.0.0+git.f4f622e4f8774f2bef41ee715444788691125986.dirty, signed by
+          0.0.0+git.f4f622e4f8774f2bef41ee715444788691125986.dirty
 egress    mirror-only, attestable
 derived   heuristic
 falsify   trigon verify-attestation --lookup
@@ -390,8 +391,9 @@ falsify   trigon verify-attestation --lookup
           example.org/trigon-e2e-evidence --rerun-comparison --upstream &lt;file&gt;
 dispute   https://example.org/trigon-e2e-evidence/issues
 evidence  not checked here: comparison, guardManifest, rebuiltArtifact,
-          stabilizerSetManifest, strategy. A clone keeps `evidence/` out, and
-          `verify-attestation --lookup` fetches what it re-derives the claim from
+          stabilizerSetManifest, stabilizerSetModule, strategy. A clone keeps
+          `evidence/` out, and `verify-attestation --lookup` fetches what it
+          re-derives the claim from
 
 exit      0: every answer at or above the threshold</code></pre>
         </div>
@@ -433,20 +435,21 @@ exit      0: every answer at or above the threshold</code></pre>
         <div class="term-box">
           <div class="term-bar"><span>work/evidence-e2e/evidence-checkout</span><span>the published repository</span></div>
 <pre tabindex="0" role="region" aria-label="The published evidence repository"><code><span class="t-prompt">$</span> <span class="t-cmd">git log --oneline</span>
-95cc62a publish: 1 record, tree 0 → 1
-256e028 log init: example.org/trigon-e2e-evidence, tree 0
+91a2028 publish: 1 record, tree 0 → 1
+96e9ee6 log init: example.org/trigon-e2e-evidence, tree 0
 
 <span class="t-prompt">$</span> <span class="t-cmd">cat log/checkpoint</span>
 example.org/trigon-e2e-evidence
 1
-VOBph+Q84AVyr/rx/zrxjbPhD2+5KxojcALq1Mk92D8=
+KnTTCmL6O1enzpv/eyZctnyfq+OFB3kSH/qyKfaO1QM=
 
-— example.org/trigon-e2e-evidence fS3UI4Q6rvVW9U2RLBmaDi25k9mJOqfsXRZjvzpf6N1ovisrpuJ1QBwVlwxuE7i+CMSBXtaIaZsmbNzNqtBKMHudtAM=
+— example.org/trigon-e2e-evidence Wzm6XaeHEQA4U5lfIy4YjaSbrN4LeCVc76VjHMq1TeSert5X6/HCV8JAZMrW63AuPuSqfdzdkGhFT5DAVenJM+wMCAE=
 
 <span class="t-prompt">$</span> <span class="t-cmd">find . -path ./.git -prune -o -type f -print | sort</span>
+./evidence/sha256/94/53/94534b0c30d7cb4babd914554a2f6f7ff089812ab4b2f156e81f4e55e0a741f1
 ./evidence/sha256/a3/20/a3202e95bd1ad16c3477e69b294ecb9c42c129028e8a79a7a6fc8f8d7d247ca5
 ./evidence/sha256/bd/46/bd4688433cbcae27bf0f2f1c8527b1d9448ed9320127ddaceb23d6c2ba29d42a
-./evidence/sha256/c0/7e/c07e73922de9f4797889e5ec421a122c1800fbd3471859064d3c01ad49fe2b57
+./evidence/sha256/c2/bf/c2bfc22d0363c6b87316e3aad46081fd9935cea1bec2e8550b758bd4ba660884
 ./evidence/sha256/e5/a2/e5a2d4a4ca749ece8545bf332214fdc535c87a0e716e8890cce1d905a4f7652e
 ./index/pkg1/df/52/df5243a83ef7ccf4493e4d70a55ba3c17bf9588a03cfae9bd39fbbb9c6486bb9.json
 ./index/purl1/66/d7/66d7067b6b146e9c4c8a3f8c1fdc6b4bc7ab152181eea1de0371dd98851db07a.json
@@ -459,12 +462,14 @@ VOBph+Q84AVyr/rx/zrxjbPhD2+5KxojcALq1Mk92D8=
 ./log/tile/0/000.p/1
 ./log/tile/entries/000.p/1
 ./README.md
-./records/d8/05/d8056931f30e38ef0d918a0279994288d33203dfdadd54c9a9ce58c804b697cd.json</code></pre>
+./records/48/95/489556d6f1e8a16f7e0d2db9a6614485bc8ec007dd573ad8accdedbcd5185ea9.json</code></pre>
         </div>
         <figcaption>The local evidence repository the end-to-end script published into: the log’s
           first commit, one publication, and a signed checkpoint over a tree of one leaf. A consumer
           can find the record by sha1, sha256, sha512 or purl, the keys a lockfile might hold it by,
-          and under the package name alone, which lists every version.</figcaption>
+          and under the package name alone, which lists every version. <code>evidence/</code> also
+          holds the stabilizer-set module the verdict names, so the claim can still be re-derived
+          after Trigon stops carrying that set.</figcaption>
       </figure>
 
       <div class="prose">
@@ -485,6 +490,7 @@ VOBph+Q84AVyr/rx/zrxjbPhD2+5KxojcALq1Mk92D8=
 source    `e2e`, from
           …/evidence-e2e/evidence.toml;
           as of 1 leaves of `example.org/trigon-e2e-evidence`
+checkpoint example.org/trigon-e2e-evidence 1 KnTTCmL6O1enzpv/eyZctnyfq+OFB3kSH/qyKfaO1QM=
 
   <span class="t-ok">✔</span> <span class="t-ok">normalized              </span> <span class="t-ok">    1</span>   <span class="t-ok">▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓</span>
   <span class="t-bad">✖</span> <span class="t-bad">divergent               </span> <span class="t-bad">    0</span>   <span class="t-mut">░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░</span>
@@ -528,7 +534,7 @@ exit      0: every answer at or above the threshold</code></pre>
     --predicate https://trigon.dev/equivalence/v2 --origin example.org/trigon-e2e-evidence \
     --rerun-comparison --upstream wrappy-1.0.2.tgz --rebuild rebuilt-wrappy-1.0.2.tgz</span>
 <span class="t-note">…</span>
-signature verified under 84ac3085700db6ca, the source's attestation key at its leaf
+signature verified under 5eccadc90c9ef3f4, the source's attestation key at its leaf
 claims    normalized
 <span class="t-note">…</span>
 current   yes: nothing the log holds supersedes it
@@ -539,8 +545,8 @@ report    the published comparison report agrees with the re-derivation on all i
 
 <span class="t-prompt">$</span> <span class="t-cmd">trigon verify-attestation --record record-tampered.json --source e2e</span>
 <span class="t-note">…</span>
-record    sha256:20dfeb3be9423b96348570f35f478d3b7161bdfad44e0d5f7131932934a3a94a
-verified  NO — the record failed verification: no leaf of the log names the record sha256:20dfeb3be9423b96348570f35f478d3b7161bdfad44e0d5f7131932934a3a94a: it is unlogged, and a record the log does not hold is never shown as a verdict (docs/19 §8)
+record    sha256:0cdbe5802a8d61cce1a0b0ae3b273fdb558d17dc8793a11654a9603d78fcc3c8
+verified  NO — the record failed verification: no leaf of the log names the record sha256:0cdbe5802a8d61cce1a0b0ae3b273fdb558d17dc8793a11654a9603d78fcc3c8: it is unlogged, and a record the log does not hold is never shown as a verdict (docs/19 §8)
 <span class="t-prompt">$</span> <span class="t-cmd">echo $?</span>
 4</code></pre>
         </div>
