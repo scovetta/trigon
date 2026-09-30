@@ -12,14 +12,16 @@
 //! What it reads, in order, each able to add to what came before and none able to take away:
 //!
 //! 1. The user's file, `$XDG_CONFIG_HOME/trigon/evidence.toml` (`~/.config/trigon/evidence.toml`
-//!    when that is unset), or the file `TRIGON_EVIDENCE_CONFIG` names instead.
+//!    when that is unset), or the file `TRIGON_EVIDENCE_CONFIG` names instead, or the file
+//!    `trigon --config` names instead of either ([`Env::with_config_file`]).
 //! 2. The environment: `TRIGON_PUBLISH_REPO` replaces `[publish] repo`; `TRIGON_EVIDENCE_REPO`
 //!    adds a required source named `env`, pinned by `TRIGON_EVIDENCE_LOG_KEY` and
 //!    `TRIGON_EVIDENCE_ATTESTATION_KEY`; `TRIGON_EVIDENCE_CACHE` and `TRIGON_EVIDENCE_STATE`
 //!    replace the two directories.
 //! 3. The project's file, `.trigon/evidence.toml` in the working directory, unless
-//!    `TRIGON_EVIDENCE_CONFIG` is set. It is chosen by whoever controls the project — in CI on a
-//!    pull request, its author — so it is held to less: see [`load`]'s project rules.
+//!    `TRIGON_EVIDENCE_CONFIG` or `--config` names a file. It is chosen by whoever controls the
+//!    project — in CI on a pull request, its author — so it is held to less: see [`load`]'s
+//!    project rules.
 //!
 //! **An unknown key is an error, in every table.** This file pins the keys a verdict is checked
 //! against, and a typo in a security setting that is silently ignored is a setting that is
@@ -59,8 +61,11 @@ pub struct Env {
     pub xdg_config_home: Option<PathBuf>,
     pub xdg_cache_home: Option<PathBuf>,
     pub xdg_state_home: Option<PathBuf>,
-    /// `TRIGON_EVIDENCE_CONFIG`
+    /// `TRIGON_EVIDENCE_CONFIG`, or the file `--config` names in its place.
     pub evidence_config: Option<PathBuf>,
+    /// Whether [`Self::evidence_config`] came from `--config` rather than the environment, so
+    /// that a message about the file names what the user typed.
+    pub config_from_flag: bool,
     /// `TRIGON_PUBLISH_REPO`
     pub publish_repo: Option<String>,
     /// `TRIGON_EVIDENCE_REPO`: one or more locations, separated by whitespace.
@@ -108,6 +113,7 @@ impl Env {
             xdg_cache_home: path("XDG_CACHE_HOME"),
             xdg_state_home: path("XDG_STATE_HOME"),
             evidence_config: path("TRIGON_EVIDENCE_CONFIG"),
+            config_from_flag: false,
             publish_repo: text("TRIGON_PUBLISH_REPO")?,
             evidence_repo: text("TRIGON_EVIDENCE_REPO")?,
             evidence_log_key: text("TRIGON_EVIDENCE_LOG_KEY")?,
@@ -132,6 +138,15 @@ impl Env {
     /// such as the newest checkpoint it has published of a log.
     pub fn state_home(&self) -> Option<PathBuf> {
         self.xdg(&self.xdg_state_home, ".local/state")
+    }
+
+    /// Read `path` as the user's own file in place of `TRIGON_EVIDENCE_CONFIG` and the default,
+    /// as `trigon --config` asks. The flag does everything the variable does, and wins over it: a
+    /// command line says more about one run than the environment the run inherited.
+    pub fn with_config_file(mut self, path: PathBuf) -> Env {
+        self.evidence_config = Some(path);
+        self.config_from_flag = true;
+        self
     }
 
     /// Where the user's own `evidence.toml` is, whether or not it exists.
@@ -169,6 +184,12 @@ pub enum ConfigError {
         path.display()
     )]
     NamedFileMissing { path: PathBuf },
+    /// [`Self::NamedFileMissing`], for the file `--config` named.
+    #[error(
+        "--config names {}, which does not exist. Point it at the file you meant, or leave it out",
+        path.display()
+    )]
+    FlagFileMissing { path: PathBuf },
     #[error("{}: {message}", path.display())]
     File { path: PathBuf, message: String },
     #[error(
@@ -361,7 +382,7 @@ impl Default for Freshness {
 /// thing under test, and every such answer names the file that added it (`docs/19` §2.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AddedBy {
-    /// The user's own `evidence.toml`, or the file `TRIGON_EVIDENCE_CONFIG` named.
+    /// The user's own `evidence.toml`, or the file `TRIGON_EVIDENCE_CONFIG` or `--config` named.
     UserFile(PathBuf),
     /// A project's `.trigon/evidence.toml`.
     ProjectFile(PathBuf),
@@ -448,6 +469,9 @@ impl EvidenceConfig {
                 None => match std::fs::read_to_string(&path) {
                     Ok(text) => Some(text),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        if env.config_from_flag {
+                            return Err(ConfigError::FlagFileMissing { path });
+                        }
                         if env.evidence_config.is_some() {
                             return Err(ConfigError::NamedFileMissing { path });
                         }
@@ -1035,9 +1059,10 @@ pub struct NewSource {
     pub trust_on_first_use: bool,
 }
 
-/// Add a `[[source]]` to the user's `evidence.toml` — or the file `TRIGON_EVIDENCE_CONFIG` names,
-/// made if it is not there — keeping every comment and the order of everything already in it
-/// (`docs/19` §6.1). Returns the file written, and the source as the configuration now loads it.
+/// Add a `[[source]]` to the user's `evidence.toml` — or the file `--config` or
+/// `TRIGON_EVIDENCE_CONFIG` names, made if it is not there — keeping every comment and the order
+/// of everything already in it (`docs/19` §6.1). Returns the file written, and the source as the
+/// configuration now loads it.
 ///
 /// Held to every rule a source in the file is held to, and checked against the whole
 /// configuration — the file, the environment and the project's file — before anything is written:
@@ -1233,8 +1258,8 @@ pub fn remove_source(env: &Env, name: &str) -> Result<(PathBuf, Source), ConfigE
                 message: format!(
                     "`{}` was added by this project's own file, which is the project's to change: \
                      `trigon evidence remove` edits only your own evidence.toml. To leave the \
-                     project's sources out of one run, set TRIGON_EVIDENCE_CONFIG, which turns \
-                     the project's file off",
+                     project's sources out of one run, pass --config or set \
+                     TRIGON_EVIDENCE_CONFIG: either turns the project's file off",
                     source.name
                 ),
             });

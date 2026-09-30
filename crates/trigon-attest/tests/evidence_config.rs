@@ -564,6 +564,43 @@ fn trigon_evidence_config_names_the_file_instead_and_turns_off_the_projects() {
 }
 
 #[test]
+fn the_config_flag_names_the_file_in_place_of_the_variables() {
+    let r = root("flag");
+    write(&user_file(&r), "[publish]\nbranch = \"from-user-file\"\n");
+    let named = r.join("elsewhere/evidence.toml");
+    write(&named, "[publish]\nbranch = \"from-named-file\"\n");
+    let flagged = r.join("flagged.toml");
+    write(&flagged, "[publish]\nbranch = \"from-flag\"\n");
+    write(
+        &project_file(&r),
+        "[publish]\nbranch = \"a project may not set this, and is not read\"\n",
+    );
+    let mut e = env(&r);
+    e.evidence_config = Some(named);
+    let c = loads(&e.with_config_file(flagged.clone()));
+    assert_eq!(c.publish().branch, "from-flag");
+    assert_eq!(c.files_read(), std::slice::from_ref(&flagged));
+    let c = loads(&env(&r).with_config_file(flagged.clone()));
+    assert_eq!(c.files_read(), [flagged], "the project's file is off");
+
+    // A name that names nothing is an error, and says it was the flag that named it.
+    let m = load(&env(&r).with_config_file(r.join("nowhere.toml"))).unwrap_err();
+    assert!(
+        m.starts_with("--config names") && m.contains("nowhere.toml"),
+        "{m}"
+    );
+    assert!(!m.contains("TRIGON_EVIDENCE_CONFIG"), "{m}");
+
+    // Relative to the working directory.
+    write(
+        &r.join("project/cfg.toml"),
+        "[publish]\nbranch = \"relative\"\n",
+    );
+    let e = env(&r).with_config_file(PathBuf::from("cfg.toml"));
+    assert_eq!(loads(&e).publish().branch, "relative");
+}
+
+#[test]
 fn the_default_file_is_under_xdg_config_home_when_it_is_set() {
     let r = root("xdg-config");
     write(

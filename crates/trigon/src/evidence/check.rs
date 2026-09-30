@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use trigon_attest::config::{Env, EvidenceConfig};
+use trigon_attest::config::EvidenceConfig;
 use trigon_attest::evidence::{Answer, Key, Said, exit_code, risk_name};
 use trigon_attest::location::printable;
 use trigon_core::{Match, Package, RiskTier};
@@ -202,7 +202,7 @@ fn answer(args: Args) -> Result<u8> {
         // An unreadable lockfile is the tool failing before it could answer: exit 5.
         Err(e) => crate::verify_record::usage(&e.to_string()),
     };
-    let env = Env::from_process()?;
+    let env = crate::evidence_env()?;
     let config = EvidenceConfig::load(&env)?;
     let via = match (args.offline, args.remote) {
         (_, true) => Via::Remote,

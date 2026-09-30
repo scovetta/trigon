@@ -154,7 +154,7 @@ pub(crate) fn sign(args: SignArgs) -> Result<()> {
         );
     }
     let signer = LogSigner::from_file(&args.key)?;
-    let env = Env::from_process()?;
+    let env = crate::evidence_env()?;
     let newest = NewestPublished::of(&env, signer.name())?;
     let published = newest.open(&signer.vkey()).context("refusing to sign")?;
     if args.init {

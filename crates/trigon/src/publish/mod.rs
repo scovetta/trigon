@@ -381,7 +381,7 @@ pub(crate) fn succeed(args: SucceedArgs) -> Result<()> {
 }
 
 fn publish(common: Common, what: What) -> Result<()> {
-    let env = Env::from_process()?;
+    let env = crate::evidence_env()?;
     let config = EvidenceConfig::load(&env)?;
     crate::say_config_notes(&config);
     let settings = settings(&config, &common, &env, &what)?;

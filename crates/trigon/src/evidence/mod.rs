@@ -22,7 +22,7 @@ pub(crate) mod sync;
 use anyhow::{Result, anyhow};
 use serde_json::json;
 use trigon_attest::config::{
-    AddedBy, ConfigError, Env, EvidenceConfig, NewSource, Source, add_source, remove_source,
+    AddedBy, ConfigError, EvidenceConfig, NewSource, Source, add_source, remove_source,
 };
 use trigon_attest::evidence::{Said, Standing, ago};
 use trigon_attest::location::printable;
@@ -44,7 +44,7 @@ pub(crate) fn now() -> u64 {
 
 /// `trigon evidence add`.
 pub(crate) fn add(new: NewSource) -> Result<()> {
-    let env = Env::from_process()?;
+    let env = crate::evidence_env()?;
     let (path, source) = add_source(&env, &new)?;
     println!("added     `{}` to {}", source.name, path.display());
     match &source.log_key {
@@ -74,7 +74,7 @@ pub(crate) fn add(new: NewSource) -> Result<()> {
 /// `trigon evidence remove`: the source out of the user's file, and its clones and state with it,
 /// since a source added again under the name is a new source and starts over.
 pub(crate) fn remove(name: &str) -> Result<()> {
-    let env = Env::from_process()?;
+    let env = crate::evidence_env()?;
     // The directories are asked of the configuration as it is before the source goes.
     let config = EvidenceConfig::load(&env)?;
     let (path, source) = remove_source(&env, name)?;
@@ -111,7 +111,7 @@ pub(crate) struct SyncArgs {
 /// it is configured. Exits 0 when every one synced, and 4 when any did not — refused because it
 /// failed verification or lost its state, or not reached — each saying what it answers from now.
 pub(crate) fn sync_command(args: SyncArgs) -> Result<()> {
-    let env = Env::from_process()?;
+    let env = crate::evidence_env()?;
     let config = EvidenceConfig::load(&env)?;
     let chosen = chosen(&config, &args.sources)?;
     for n in &args.accept_state_loss {
@@ -328,7 +328,7 @@ fn standing_said(s: &Standing) -> String {
 /// `trigon evidence list`: every source, with what its state says of it and how it stands now —
 /// its clones verified as a command asking it would, touching no network ([`Mode::Offline`]).
 pub(crate) fn list(output: OutputFormat, verbose: bool) -> Result<()> {
-    let env = Env::from_process()?;
+    let env = crate::evidence_env()?;
     let config = EvidenceConfig::load(&env)?;
     if config.sources().is_empty() {
         match output {
@@ -674,6 +674,7 @@ mod tests {
     use std::process::Command;
 
     use trigon_attest::LocalKey;
+    use trigon_attest::config::Env;
     use trigon_attest::evidence::{Answer, Key};
     use trigon_attest::log::{
         Checkpoint, HeartbeatLeaf, Leaf, LogSigner, SignedCheckpoint, Tree, plan_append,

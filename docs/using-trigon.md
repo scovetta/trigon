@@ -795,13 +795,13 @@ note      https://codeberg.org/owner/trigon-evidence.git is lagging: it serves â
 ```
 
 **Adding one.** `evidence add <name> <url>â€¦ --log-key <vkey> --attestation-key <key>` writes a
-`[[source]]` into your `evidence.toml` (or the file `TRIGON_EVIDENCE_CONFIG` names, creating it if
-it is not there), keeping every comment and the order of what is already in it. Every URL is a
-location of the one log, a mirror, and mirrors are how Trigon catches a split view before witnesses
-exist. `add` takes a relative path from where you run the command, and writes it absolute. The name
-is the source's directory in the cache and the state directory, so `add` refuses a name any source
-already has, ignoring case, whichever file or variable added it. `--checkpoint <file>` pins an
-initial checkpoint, which must open under the log key; `--required` makes a check fail while the
+`[[source]]` into your `evidence.toml` (or the file `--config` or `TRIGON_EVIDENCE_CONFIG` names,
+creating it if it is not there), keeping every comment and the order of what is already in it. Every
+URL is a location of the one log, a mirror, and mirrors are how Trigon catches a split view before
+witnesses exist. `add` takes a relative path from where you run the command, and writes it absolute.
+The name is the source's directory in the cache and the state directory, so `add` refuses a name any
+source already has, ignoring case, whichever file or variable added it. `--checkpoint <file>` pins
+an initial checkpoint, which must open under the log key; `--required` makes a check fail while the
 source cannot answer. `add` refuses a source that pins neither key, or only one of them, unless you
 pass `--trust-on-first-use` (below).
 
@@ -1113,7 +1113,9 @@ repository's kill-switch. `trigon evidence` reads and writes the `[[source]]` ta
 `[freshness]`, and `trigon lookup`, `trigon check` and `verify-attestation` read them too.
 
 The file is `~/.config/trigon/evidence.toml` (`$XDG_CONFIG_HOME/trigon/evidence.toml`), or whatever
-`TRIGON_EVIDENCE_CONFIG` names instead. Every key, with its default:
+`TRIGON_EVIDENCE_CONFIG` names instead. To use another file for one command, pass `--config <file>`
+to any command, before or after its name: `trigon lookup --config ci.toml pkg:npm/left-pad@1.3.0`.
+The flag wins over the variable, and does what the variable does. Every key, with its default:
 
 ```toml
 [publish]
@@ -1206,9 +1208,10 @@ are kept in (`~/.cache/trigon/evidence`, `~/.local/state/trigon/evidence`). With
 nowhere else.
 
 **A project's own sources.** Trigon also reads `.trigon/evidence.toml` in the working directory,
-unless `TRIGON_EVIDENCE_CONFIG` is set. Whoever controls the project chooses that file (in CI, the
-author of the pull request), so it may only add `[[source]]` entries under new names, each with both
-keys and an initial checkpoint, HTTPS URLs only, and files inside the project. The file itself must
+unless `TRIGON_EVIDENCE_CONFIG` or `--config` names a file. Whoever controls the project chooses
+that file (in CI, the author of the pull request), so it may only add `[[source]]` entries under
+new names, each with both keys and an initial checkpoint, HTTPS URLs only, and files inside the
+project. The file itself must
 be inside the project too, once symlinks are followed, and a regular file of at most 64 KiB.
 Anything else makes Trigon refuse the whole file, naming the rule it broke. Trigon compares source
 names ignoring case, in every file, since each is a directory under `~/.cache/trigon/evidence`.

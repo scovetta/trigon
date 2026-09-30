@@ -47,6 +47,15 @@ struct Cli {
     /// text|json` — `json` is never themed.
     #[arg(long, value_enum, default_value_t = ThemeArg::Auto, global = true)]
     theme: ThemeArg,
+
+    /// Read this evidence.toml as your own, in place of ~/.config/trigon/evidence.toml and of the
+    /// file TRIGON_EVIDENCE_CONFIG names.
+    ///
+    /// It does for one command what TRIGON_EVIDENCE_CONFIG does: the project's
+    /// .trigon/evidence.toml is not read, and `evidence add` and `remove` write to this file, `add`
+    /// making it if it is not there. A relative path is from the working directory.
+    #[arg(long, global = true, value_name = "FILE")]
+    config: Option<PathBuf>,
 }
 
 /// The `--theme` values, named as the reader types them. Kept apart from [`style::Theme`] so `clap`
@@ -1306,8 +1315,8 @@ enum LogCmd {
 #[cfg(feature = "build")]
 #[derive(Subcommand, Debug)]
 enum EvidenceCmd {
-    /// Add a source to your evidence.toml (or the file TRIGON_EVIDENCE_CONFIG names), keeping its
-    /// comments and order.
+    /// Add a source to your evidence.toml (or the file --config or TRIGON_EVIDENCE_CONFIG names),
+    /// keeping its comments and order.
     ///
     /// A source is one log: every URL is a location of it, a mirror. It is pinned by both keys
     /// unless `--trust-on-first-use`, which reads a key it does not pin from the repository's
@@ -1630,6 +1639,10 @@ fn main() -> Result<()> {
     // Before any output: the palette functions read this, and the first write must already know it.
     style::set_theme(cli.theme.into());
     init_logging(cli.verbose, cli.log_json);
+    if let Some(path) = cli.config {
+        // Before any command reads the configuration: `evidence_env` reads this.
+        let _ = CONFIG_FILE.set(path);
+    }
     let result = dispatch(cli.cmd, cli.verbose > 0);
     if let Err(e) = &result {
         report_fault(e);
@@ -1644,18 +1657,34 @@ fn main() -> Result<()> {
     result
 }
 
+/// The file `--config` named, set once by `main` before any command runs.
+static CONFIG_FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The environment the evidence configuration is read from, with the file `--config` named in place
+/// of `TRIGON_EVIDENCE_CONFIG`'s. Every command that reads `evidence.toml` captures its `Env` here,
+/// so the flag reaches each of them as the variable does.
+pub(crate) fn evidence_env()
+-> Result<trigon_attest::config::Env, trigon_attest::config::ConfigError> {
+    let env = trigon_attest::config::Env::from_process()?;
+    Ok(match CONFIG_FILE.get() {
+        Some(path) => env.with_config_file(path.clone()),
+        None => env,
+    })
+}
+
 /// Whether a command line is one whose exit codes are `docs/19` §6's — `check`, `lookup`, and the
 /// record and lookup forms of `verify-attestation` — read from the raw arguments, so that a
 /// command `clap` refuses exits 5, the tool failing, and not `clap`'s 2, which §6 gives to "never
 /// checked": a CI job that lets 2 through would pass a mistyped invocation that checked nothing.
 fn exits_as_section_6(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
     let args: Vec<std::ffi::OsString> = args.into_iter().collect();
-    // The subcommand is the first word that is neither a global flag nor `--theme`'s value.
+    // The subcommand is the first word that is neither a global flag nor the value of `--theme` or
+    // `--config`.
     let mut command = None;
     let mut words = args.iter().skip(1);
     while let Some(a) = words.next() {
         match a.to_str() {
-            Some("--theme") => {
+            Some("--theme" | "--config") => {
                 words.next();
             }
             Some(w) if w.starts_with('-') => {}
@@ -2501,9 +2530,7 @@ fn dispatch(cmd: Cmd, verbose: bool) -> Result<()> {
         } => {
             // The gate's settings, which decide when a confirmation may run and where. Read once,
             // here, as `trigon serve` and `trigon attest` read them.
-            let evidence = trigon_attest::config::EvidenceConfig::load(
-                &trigon_attest::config::Env::from_process()?,
-            )?;
+            let evidence = trigon_attest::config::EvidenceConfig::load(&crate::evidence_env()?)?;
             say_config_notes(&evidence);
             let publish = evidence.publish().clone();
             worker::serve(
@@ -4127,8 +4154,7 @@ fn serve_corpus(
     // differently here than `publish` does would show a run as published that is never published.
     // A machine with no `evidence.toml` gets the defaults, as every command does; one whose file
     // does not parse is refused, as every command refuses it.
-    let evidence =
-        trigon_attest::config::EvidenceConfig::load(&trigon_attest::config::Env::from_process()?)?;
+    let evidence = trigon_attest::config::EvidenceConfig::load(&crate::evidence_env()?)?;
     say_config_notes(&evidence);
     let cfg = trigon_api::Config {
         bind,
@@ -5489,10 +5515,7 @@ mod rebuild {
             Some(run) => {
                 let c = confirming(&mut args, &run, verbose)?;
                 // What the gate will make of this attempt, which it says before the build.
-                let gate = gate_settings(
-                    &trigon_attest::config::Env::from_process()?,
-                    crate::say_config_note,
-                )?;
+                let gate = gate_settings(&crate::evidence_env()?, crate::say_config_note)?;
                 Some(Confirming { gate, ..c })
             }
             None => None,
@@ -6084,9 +6107,7 @@ mod rebuild {
         // default tier every run it signed was a void signed as a verdict (`docs/16-findings.md`
         // §3.97).
         if let (Some((path, key)), Some(dir)) = (&attest, &store) {
-            let config = trigon_attest::config::EvidenceConfig::load(
-                &trigon_attest::config::Env::from_process()?,
-            )?;
+            let config = trigon_attest::config::EvidenceConfig::load(&crate::evidence_env()?)?;
             let signer = crate::attestor::signer(key.as_deref())?;
             attest_what_was_recorded(
                 dir,
@@ -13907,7 +13928,7 @@ fn print_rederived(d: Option<&trigon_attest::Rederived>) {
 mod attestor {
     use anyhow::{Context, Result, bail};
     use std::path::Path;
-    use trigon_attest::config::{Env, EvidenceConfig};
+    use trigon_attest::config::EvidenceConfig;
     use trigon_attest::{
         AuthoredPass, EvidenceDigests, Record, RunFacts, RunIdentity, Statement, Subject,
         SupersedeReason, Supersession, VerdictFacts, VoidFacts,
@@ -13930,7 +13951,7 @@ mod attestor {
     pub fn run(args: Args) -> Result<()> {
         // Before anything is read or signed: a configuration file with an unknown key or a pin
         // that does not parse is refused here, and the main loop exits 5 on it.
-        let config = EvidenceConfig::load(&Env::from_process()?)?;
+        let config = EvidenceConfig::load(&crate::evidence_env()?)?;
         crate::say_config_notes(&config);
         let signer: Box<dyn trigon_attest::Signer> = match &args.key {
             Some(p) => Box::new(crate::load_key(p)?),

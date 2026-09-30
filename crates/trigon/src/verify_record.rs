@@ -31,9 +31,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, anyhow};
 use serde_json::{Value, json};
-use trigon_attest::config::{
-    AddedBy, Env, EvidenceConfig, read_attestation_key, read_checkpoint_file,
-};
+use trigon_attest::config::{AddedBy, EvidenceConfig, read_attestation_key, read_checkpoint_file};
 use trigon_attest::evidence::{
     Answer, EvidenceState, Key, Lookup, RecordFailure, RecordKind, Repository, Standing,
     VerifiedRecord, read_evidence_from,
@@ -267,7 +265,7 @@ struct Pinned {
 fn pins(a: &Args<'_>) -> Result<Pinned, Stop> {
     match (a.source, a.log_vkey, a.attestation_key, a.checkpoint) {
         (Some(name), None, None, None) => {
-            let config = Env::from_process()
+            let config = crate::evidence_env()
                 .and_then(|env| EvidenceConfig::load(&env))
                 .map_err(cannot)?;
             let p = config.pins(name).map_err(cannot)?;
@@ -548,7 +546,7 @@ fn from_directory(a: &Args<'_>, evidence: &Path) -> Result<Opened, Stop> {
 /// is fetched; a source that is stale or frozen still has its record checked, and what it says of
 /// the artifact now is unknown.
 fn from_clones(name: &str) -> Result<Opened, Stop> {
-    let config = Env::from_process()
+    let config = crate::evidence_env()
         .and_then(|env| EvidenceConfig::load(&env))
         .map_err(cannot)?;
     let source = config

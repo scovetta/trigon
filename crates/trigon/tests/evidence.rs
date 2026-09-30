@@ -1670,6 +1670,107 @@ fn add_list_and_remove_keep_the_file_as_it_was() {
     );
 }
 
+/// `--config <file>` names the user's own file for one command, before the subcommand or after it,
+/// and in place of the one `TRIGON_EVIDENCE_CONFIG` names: `evidence add` makes it and writes
+/// there, leaving the default file as it was; `list`, `lookup` and `remove` read it; a project's
+/// file is not read beside it; and a file it names that is not there stops a command with exit 5,
+/// saying so. An argument `clap` refuses after `--config <file>` is still exit 5 for `lookup`.
+#[test]
+fn config_names_the_users_file_for_one_command() {
+    let w = World::new("config-flag");
+    w.init();
+    let p = Package::new("a", false);
+    w.publish_package("a", "aaaa");
+    let default = std::fs::read_to_string(w.config_path()).unwrap();
+    let (mine, named) = (w.dir.join("mine.toml"), w.dir.join("named.toml"));
+    let m = mine.to_str().unwrap();
+    let remote = w.remote.to_str().unwrap();
+    let under_variable = |args: &[&str]| {
+        w.command(args)
+            .env("TRIGON_EVIDENCE_CONFIG", &named)
+            .output()
+            .unwrap()
+    };
+    let names = |out: &Output| {
+        let t = ok(out);
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {t}"));
+        rows.iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let list = ["evidence", "list", "--output", "json"];
+
+    let said = ok(&w.add("flagged", &[remote], &["--config", m]));
+    assert!(said.contains(&format!("`flagged` to {m}")), "{said}");
+    assert!(
+        std::fs::read_to_string(&mine)
+            .unwrap()
+            .contains("name = \"flagged\""),
+    );
+    assert_eq!(std::fs::read_to_string(w.config_path()).unwrap(), default);
+    let vkey = w.vkey().to_string();
+    let key = attestation().public_hex();
+    ok(&under_variable(&[
+        "evidence",
+        "add",
+        "named",
+        remote,
+        "--log-key",
+        &vkey,
+        "--attestation-key",
+        &key,
+    ]));
+
+    assert!(
+        names(&w.trigon(&list)).is_empty(),
+        "the default file has none"
+    );
+    assert_eq!(
+        names(&w.trigon(&[&["--config", m][..], &list].concat())),
+        ["flagged"]
+    );
+    assert_eq!(
+        names(&w.trigon(&[&list[..], &["--config", m]].concat())),
+        ["flagged"]
+    );
+    assert_eq!(names(&under_variable(&list)), ["named"]);
+    let both = under_variable(&[&["--config", m][..], &list].concat());
+    assert_eq!(names(&both), ["flagged"], "the flag wins over the variable");
+
+    let said = exits(&w.trigon(&["lookup", &p.target()]), 5);
+    assert!(said.contains("no evidence source is configured"), "{said}");
+    let said = exits(&w.trigon(&["--config", m, "lookup", &p.target()]), 0);
+    assert!(said.contains("flagged"), "{said}");
+
+    // A project's file is not read beside it: one that would be refused whole is not.
+    let project = w.dir.join("project/.trigon/evidence.toml");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    std::fs::write(&project, "[publish]\norigin = \"evil.example/x\"\n").unwrap();
+    exits(&w.trigon(&list), 5);
+    assert_eq!(
+        names(&w.trigon(&[&["--config", m][..], &list].concat())),
+        ["flagged"]
+    );
+    std::fs::remove_file(&project).unwrap();
+
+    let said = ok(&w.trigon(&["--config", m, "evidence", "remove", "flagged"]));
+    assert!(said.contains("removed   `flagged`"), "{said}");
+    assert!(names(&w.trigon(&[&["--config", m][..], &list].concat())).is_empty());
+    assert_eq!(std::fs::read_to_string(w.config_path()).unwrap(), default);
+
+    let said = exits(
+        &w.trigon(&["--config", "nowhere.toml", "lookup", &p.target()]),
+        5,
+    );
+    assert!(
+        said.contains("--config names") && said.contains("nowhere.toml"),
+        "{said}"
+    );
+    let said = exits(&w.trigon(&["--config", m, "lookup", "--bogus"]), 5);
+    assert!(said.contains("--bogus"), "{said}");
+}
+
 /// A project's `.trigon/evidence.toml` may only add sources, each with both keys and a checkpoint
 /// pinned and HTTPS URLs only, and a file that tries anything else is refused whole: a URL added to
 /// an existing source, trust on first use, an `http://` or `file://` URL, `required`. A source it
@@ -1748,6 +1849,7 @@ fn a_projects_file_is_held_to_its_rules_and_its_sources_name_it() {
     );
     let said = exits(&w.trigon(&["evidence", "remove", "theirs"]), 5);
     assert!(said.contains("the project's to change"), "{said}");
+    assert!(said.contains("pass --config"), "{said}");
 }
 
 /// A project's source is fetched over HTTPS only, and so is where its log goes on: a log-end,

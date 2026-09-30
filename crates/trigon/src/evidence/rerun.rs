@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, anyhow, bail};
 use serde::Deserialize;
 use sha2::Digest as _;
-use trigon_attest::config::{AddedBy, Env, EvidenceConfig};
+use trigon_attest::config::{AddedBy, EvidenceConfig};
 use trigon_attest::evidence::{
     Answer, Key, RECORD_LIMIT, RecordKind, Said, exit_code, first_that_wins, record_path,
 };
@@ -104,7 +104,7 @@ fn check(a: &Args<'_>) -> Result<i32, Stop> {
         }
     };
     verify_record::rerun_files(a.rerun, a.files, false)?;
-    let config = Env::from_process()
+    let config = crate::evidence_env()
         .and_then(|env| EvidenceConfig::load(&env))
         .map_err(cannot)?;
     let now = super::now();

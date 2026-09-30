@@ -21,7 +21,7 @@
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
-use trigon_attest::config::{AddedBy, Env, EvidenceConfig, Source};
+use trigon_attest::config::{AddedBy, EvidenceConfig, Source};
 use trigon_attest::evidence::{
     Answer, Found, Key, Lookup, RecordFailure, RecordKind, RecordState, Said, Standing, exit_code,
     first_that_wins,
@@ -694,7 +694,7 @@ fn answer(args: Args) -> Result<u8> {
             }
         }
     };
-    let env = Env::from_process()?;
+    let env = crate::evidence_env()?;
     let config = EvidenceConfig::load(&env)?;
     let via = match (args.offline, args.remote) {
         (_, true) => Via::Remote,

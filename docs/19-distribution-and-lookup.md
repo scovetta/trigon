@@ -320,7 +320,8 @@ single-machine setups use.
 
 **Configuration.** `evidence.toml` is read from `$XDG_CONFIG_HOME/trigon/evidence.toml`
 (`~/.config/trigon/evidence.toml` when the variable is unset). If `TRIGON_EVIDENCE_CONFIG` names a
-file, that file is read instead.
+file, that file is read instead, and `--config <file>`, a flag every command takes, names one for
+that command in place of either.
 
 ```toml
 [publish]
@@ -360,18 +361,18 @@ without both keys is refused unless `trust_on_first_use = true`, the file form o
 to `false`, and `repo`, `origin`, `disputes`, `log_key` and `checkpoint` to unset.
 
 **A project's own sources.** `.trigon/evidence.toml` in the working directory is read too, unless
-`TRIGON_EVIDENCE_CONFIG` is set. It is chosen by whoever controls the project — in CI on a pull
-request, by the pull request's author — so it is held to less. It may only add `[[source]]` entries,
-each under a new name, with both keys and an initial checkpoint pinned, and with HTTPS URLs only. It
-cannot add a URL to a source that already exists, change or remove one, turn on trust on first use,
-set `required`, or change any other setting, and a file that tries is refused whole. A file it names
-— the checkpoint, a PEM attestation key — must be inside the working directory once symlinks are
-followed, so a project cannot have Trigon read a file of the host's by calling it a key, and so must
-`.trigon/evidence.toml` itself, which must also be a regular file of at most 64 KiB; its refusals
-quote its strings escaped, and a parse error gives the line and column without quoting the line.
-A source's name is its directory under the cache and state directories, so names are compared
-ignoring ASCII case, in every file: on a case-insensitive filesystem `Trigon` is `trigon`'s
-directory. Every answer from such a source names the file that added it.
+`TRIGON_EVIDENCE_CONFIG` or `--config` names a file. It is chosen by whoever controls the project —
+in CI on a pull request, by the pull request's author — so it is held to less. It may only add
+`[[source]]` entries, each under a new name, with both keys and an initial checkpoint pinned, and
+with HTTPS URLs only. It cannot add a URL to a source that already exists, change or remove one,
+turn on trust on first use, set `required`, or change any other setting, and a file that tries is
+refused whole. A file it names — the checkpoint, a PEM attestation key — must be inside the working
+directory once symlinks are followed, so a project cannot have Trigon read a file of the host's by
+calling it a key, and so must `.trigon/evidence.toml` itself, which must also be a regular file of
+at most 64 KiB; its refusals quote its strings escaped, and a parse error gives the line and column
+without quoting the line. A source's name is its directory under the cache and state directories, so
+names are compared ignoring ASCII case, in every file: on a case-insensitive filesystem `Trigon` is
+`trigon`'s directory. Every answer from such a source names the file that added it.
 
 **Environment.** Each variable overrides the files for one run:
 

@@ -11,7 +11,7 @@
 # closing disposition, whatever model_status says. See x-non-closing-outcome.
 schema: threat-model-sidecar/v2
 project: trigon
-prose_version: docs/threat-model.md@sha256:dbe9094b02cc50dd1f492d02ef9e8aba4f692ab579e15799361946d78befeb24
+prose_version: docs/threat-model.md@sha256:3c0866a77b3cb48f5508c7d788ab087be3e46398e0b1a4f601c0613404f498f2
 model_status: unratified-draft
 triage_policy: strict
 confidence:
@@ -295,7 +295,7 @@ host_side_effects:
 - effect: Writing evidence.toml
   stance: conditional
   components: []
-  conditions: 'only trigon evidence add and remove: the user''s file, or the file TRIGON_EVIDENCE_CONFIG
+  conditions: 'only trigon evidence add and remove: the user''s file, or the file --config or TRIGON_EVIDENCE_CONFIG
     names — made where it is not there — rewritten whole by rename beside the file a symlinked path leads
     to, the link kept, its permissions, comments and order kept, and only once the file as it would be
     loads under every rule; never a project''s file'

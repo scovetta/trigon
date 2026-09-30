@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use trigon_attest::config::{Env, EvidenceConfig, check_origin, read_attestation_key};
+use trigon_attest::config::{EvidenceConfig, check_origin, read_attestation_key};
 use trigon_attest::location::Location;
 use trigon_attest::log::{Checkpoint, SignedCheckpoint};
 use trigon_attest::{AttestationKey, LogVkey};
@@ -36,7 +36,7 @@ pub(crate) struct InitArgs {
 }
 
 pub(crate) fn run(args: InitArgs) -> Result<()> {
-    let env = Env::from_process()?;
+    let env = crate::evidence_env()?;
     let config = EvidenceConfig::load(&env)?;
     let p = config.publish();
     check_origin(&args.origin).map_err(anyhow::Error::msg)?;
