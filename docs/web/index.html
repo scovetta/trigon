@@ -307,8 +307,8 @@
   <span class="t-mut">containers differ as well as the framing</span>
 
   <span class="t-hd">applied</span>
-    gzip-meta                <span class="t-mut">metadata  </span> <span class="t-mut">     1 entries</span>
-    tar-entry-order          <span class="t-id">structural</span> <span class="t-mut">     4 entries</span>
+    gzip-meta-v2             <span class="t-mut">metadata  </span> <span class="t-mut">     1 entries</span>
+    tar-entry-order-v2       <span class="t-id">structural</span> <span class="t-mut">     4 entries</span>
     tar-mode                 <span class="t-mut">metadata  </span> <span class="t-mut">     4 entries</span>
     tar-owners               <span class="t-mut">metadata  </span> <span class="t-mut">     4 entries</span>
     tar-time                 <span class="t-mut">metadata  </span> <span class="t-mut">     4 entries</span>
@@ -340,7 +340,7 @@
             <dd>Five stabilizers fired: the gzip header, the order of members, and the modes, owners
               and timestamps of four files. Each ships with Trigon and is no riskier than metadata,
               so the outcome is <code>normalized</code>. Structural, the tier of
-              <code>tar-entry-order</code>, ranks below metadata: it reorders or reframes without
+              <code>tar-entry-order-v2</code>, ranks below metadata: it reorders or reframes without
               changing any file’s content.</dd>
           </div>
           <div>

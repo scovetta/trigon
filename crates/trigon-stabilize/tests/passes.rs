@@ -47,7 +47,11 @@ fn two_archives_differing_only_in_metadata_stabilize_identically() {
 #[test]
 fn entry_order_is_normalized() {
     let (out, applied) = stabilize(tar_with(1, 1, "x", 0o644), Format::Tar, "tar");
-    assert!(applied.iter().any(|x| x.id.as_str() == "tar-entry-order"));
+    assert!(
+        applied
+            .iter()
+            .any(|x| x.id.as_str() == "tar-entry-order-v2")
+    );
     let mut notes = Vec::new();
     let p = parse(out, Format::Tar, &Limits::default(), &mut notes).unwrap();
     let names: Vec<_> = p
@@ -228,9 +232,9 @@ fn record_is_regenerated_after_membership_changes() {
     );
 
     let ids: Vec<_> = applied.iter().map(|a| a.id.as_str().to_string()).collect();
-    assert!(ids.contains(&"wheel-record-v2".to_string()));
+    assert!(ids.contains(&"wheel-record-v3".to_string()));
     assert!(ids.contains(&"wheel-direct-url".to_string()));
-    assert!(ids.contains(&"pyc-header".to_string()));
+    assert!(ids.contains(&"pyc-header-v2".to_string()));
 }
 
 #[test]

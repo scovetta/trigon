@@ -116,10 +116,12 @@ test = "crates/trigon-stabilize/tests/pyc_header.rs"
 summary = "We zero the source mtime embedded in a timestamp-validated .pyc; the reference has no .pyc pass."
 detail = """
 A PEP 552 header is 16 bytes: magic, a flags word, and 8 bytes whose meaning bit 0 of the flags
-selects. With the bit clear those are the source mtime and the source size. The mtime is the mtime
-of the .py file on the machine that compiled it, so two builds of identical source from different
-checkouts produce different .pyc bytes. That is exactly the nondeterminism a stabilizer removes, and
-the reference's stabilizer list for wheels has nothing that touches a .pyc.
+selects. With the bit clear those are the source mtime and the source size. Before 3.7 there is no
+flags word and the mtime follows the magic directly, so pyc-header-v2 reads the magic number to know
+which header it is looking at. The mtime is the mtime of the .py file on the machine that compiled
+it, so two builds of identical source from different checkouts produce different .pyc bytes. That
+is exactly the nondeterminism a stabilizer removes, and the reference's stabilizer list for wheels
+has nothing that touches a .pyc.
 
 We zero the four mtime bytes and nothing else. Not the magic, which identifies the bytecode version.
 Not the flags, which say how to read the rest. Not the source size or the source hash, which are
@@ -129,7 +131,7 @@ RECORD is listed here too, and the reason is a chain rather than a second decisi
 manifest of sha256 over the members, so any member whose bytes we change shows up there. That does
 make the RECORD patterns broader than the .pyc ones, and a RECORD-only difference from some other
 cause would be absorbed by them. The narrower alternative is to compare RECORD against the members
-it describes rather than against the reference, which belongs with the wheel-record-v2 pass rather
+it describes rather than against the reference, which belongs with the wheel-record-v3 pass rather
 than here.
 """
 
@@ -140,9 +142,9 @@ applies_to = ["gem"]
 test = "crates/trigon-stabilize/tests/gem_metadata.rs"
 summary = "We normalize the three gemspec fields that carry build noise; the reference also reformats the document."
 detail = """
-gem-metadata-date, gem-metadata-rubygems-version and gem-metadata-cert-chain are implemented and
-match the reference's substitutions exactly: the same replacement date, the same 0.0.0, the same
-empty cert chain.
+gem-metadata-date-v2, gem-metadata-rubygems-version-v2 and gem-metadata-cert-chain-v2 are
+implemented and match the reference's substitutions exactly: the same replacement date, the same
+0.0.0, the same empty cert chain.
 
 gem-metadata-yaml-normalize is not, and will not be. It round-trips the whole gemspec through a YAML
 serializer, which re-indents every list and drops the document marker. Our metadata.gz has the same

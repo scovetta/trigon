@@ -165,8 +165,8 @@ $ trigon verify wrappy-1.0.2.tgz rebuilt-wrappy-1.0.2.tgz
   stabilized   441b279b8b59…      441b279b8b59…      =
 
   applied
-    gzip-meta                metadata        1 entries
-    tar-entry-order          structural      4 entries
+    gzip-meta-v2             metadata        1 entries
+    tar-entry-order-v2       structural      4 entries
     tar-mode                 metadata        4 entries
     tar-owners               metadata        4 entries
     tar-time                 metadata        4 entries

@@ -193,12 +193,15 @@ fn a_spec_with_nothing_to_change_is_left_untouched() {
     let applied = apply(&profile("gem").unwrap(), &mut p.archive);
     let ids: Vec<&str> = applied.iter().map(|a| a.id.as_str()).collect();
     assert!(
-        !ids.contains(&"gem-metadata-date"),
+        !ids.contains(&"gem-metadata-date-v2"),
         "a no-op pass must stay out of applied: {ids:?}"
     );
-    assert!(!ids.contains(&"gem-metadata-rubygems-version"), "{ids:?}");
+    assert!(
+        !ids.contains(&"gem-metadata-rubygems-version-v2"),
+        "{ids:?}"
+    );
     // The cert chain is still there, so that one does fire.
-    assert!(ids.contains(&"gem-metadata-cert-chain"), "{ids:?}");
+    assert!(ids.contains(&"gem-metadata-cert-chain-v2"), "{ids:?}");
 }
 
 #[test]

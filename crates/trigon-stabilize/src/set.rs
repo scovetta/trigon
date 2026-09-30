@@ -254,7 +254,7 @@ impl Fp {
 /// rewrote it takes.
 ///
 /// An entry pass reports each body it rewrote through its own `Touched::bytes`, one entry at a
-/// time. An archive pass reports its work for the archive as a whole — `wheel-record-v2`
+/// time. An archive pass reports its work for the archive as a whole — `wheel-record-v3`
 /// regenerating RECORD, `nupkg-packaging-names` rewriting `_rels/.rels` — and no count of its names
 /// the member.
 /// So its bodies are compared across it instead, and promotion to `Inline` is not taken for a

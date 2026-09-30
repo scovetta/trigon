@@ -42,8 +42,8 @@ $ trigon verify left-pad-1.3.0.tgz rebuilt/left-pad-1.3.0.tgz
   containers differ as well as the framing
 
   applied
-    gzip-meta                metadata        1 entries
-    tar-entry-order          structural     10 entries
+    gzip-meta-v2             metadata        1 entries
+    tar-entry-order-v2       structural     10 entries
     tar-mode                 metadata       10 entries
     tar-time                 metadata       10 entries
 

@@ -7,7 +7,9 @@
 //! 2. Every stabilizer carries its own [`RiskTier`] and [`Provenance`], so the attestation predicate
 //!    is derived mechanically rather than from a side table someone forgets to update.
 //! 3. Stabilizers are **total**. They return no error. A parse failure inside one falls back to the
-//!    original bytes and emits a note, which leaves no half-stabilized state to reason about.
+//!    original bytes and reports no change, which leaves no half-stabilized state to reason about.
+//!    It declines silently: neither hook is given anywhere to put a note, so a member a pass could
+//!    not read looks, in `applied`, like one it had nothing to do to.
 //!
 //! See `docs/05-archive-and-normalization.md` §3.
 

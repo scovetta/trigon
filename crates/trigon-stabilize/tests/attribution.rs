@@ -364,9 +364,9 @@ fn a_body_an_archive_pass_rewrites_is_attributed_to_it() {
         ]),
         Format::Zip,
     );
-    let (_, edits) = apply_traced(&only("wheel", "wheel-record-v2"), &mut a);
+    let (_, edits) = apply_traced(&only("wheel", "wheel-record-v3"), &mut a);
     assert!(
-        edits.contains(&by("pkg-1.0.dist-info/RECORD", "body", "wheel-record-v2")),
+        edits.contains(&by("pkg-1.0.dist-info/RECORD", "body", "wheel-record-v3")),
         "{edits:?}"
     );
 
@@ -536,7 +536,7 @@ fn a_sets_ids_run_default_then_patch_then_finalize() {
     // is regenerated, so the manifest describes the wheel the patch left.
     assert_eq!(
         ids[ids.len() - 2..],
-        ["a-custom-patch", "wheel-record-v2"],
+        ["a-custom-patch", "wheel-record-v3"],
         "{ids:?}"
     );
     let defaults = &ids[..ids.len() - 2];

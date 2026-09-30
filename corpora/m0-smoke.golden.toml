@@ -7,24 +7,24 @@ corpus_hash = "2b2ceca189912aa4189c99710f03e27e7ca4ee63c61811f7ff44fdfbd8fa1fca"
 [[entry]]
 file = "left-pad-1.3.0.tgz"
 stabilized = "f0a01941419d36db32cc3ef51e7e7ac02c346b4a0c37cd7c0c94fd8a6c2727ae"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "ms-2.1.3.tgz"
 stabilized = "3e5017f523cd4e9f9db24bb7d61cebfce2be5b9ff2c38810c27ceb27e05b22c4"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "itoa-1.0.11.crate"
 stabilized = "f84a5179537f61286e692bd85202c3601ef5582ce2d807e2c77d125ef97f2252"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "six-1.16.0-py2.py3-none-any.whl"
 stabilized = "52aaaa3c76ee80a19d95d4bd1ebaf602fc57b2a0637366507f5b1954eb1306b9"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v3"]
 
 [[entry]]
 file = "rake-13.2.1.gem"
 stabilized = "d5395393bdcef7912c2f2b7d470fdfb4c716359a671619cf61c8c6933bc0020c"
-applied = ["gem-exclude-checksums", "gem-metadata-date", "gem-metadata-rubygems-version", "gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gem-exclude-checksums", "gem-metadata-date-v2", "gem-metadata-rubygems-version-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]

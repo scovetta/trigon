@@ -606,11 +606,11 @@ fn the_ref_a_publisher_built_from_is_dropped_and_the_commit_kept() {
         "<repository type=\"git\" url=\"https://github.com/devlooped/moq\" commit=\"26d6a4d\" />",
     );
     let (a, applied) = stabilize(
-        &only("nupkg-repository-branch"),
+        &only("nupkg-repository-branch-v2"),
         zip(&[("Moq.nuspec", &with)]),
     );
     let (b, none) = stabilize(
-        &only("nupkg-repository-branch"),
+        &only("nupkg-repository-branch-v2"),
         zip(&[("Moq.nuspec", &without)]),
     );
     assert_eq!(member(a.clone(), "Moq.nuspec"), member(b, "Moq.nuspec"));
@@ -626,9 +626,63 @@ fn the_ref_a_publisher_built_from_is_dropped_and_the_commit_kept() {
 fn a_different_commit_still_shows() {
     let a = nuspec("<repository type=\"git\" branch=\"main\" commit=\"26d6a4d\" />");
     let b = nuspec("<repository type=\"git\" branch=\"main\" commit=\"0badc0d\" />");
-    let (sa, _) = stabilize(&only("nupkg-repository-branch"), zip(&[("Moq.nuspec", &a)]));
-    let (sb, _) = stabilize(&only("nupkg-repository-branch"), zip(&[("Moq.nuspec", &b)]));
+    let (sa, _) = stabilize(
+        &only("nupkg-repository-branch-v2"),
+        zip(&[("Moq.nuspec", &a)]),
+    );
+    let (sb, _) = stabilize(
+        &only("nupkg-repository-branch-v2"),
+        zip(&[("Moq.nuspec", &b)]),
+    );
     assert!(sa != sb);
+}
+
+#[test]
+fn a_branch_inside_another_attributes_value_is_text_and_stays() {
+    // Found by a search for ` branch="`, the text inside the URL was taken for the attribute, and
+    // the cut ran on through the opening quote of `commit`: the nuspec read as one with another URL
+    // and no commit, and matched one that said so, as a clean `normalized`.
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let a = nuspec(&format!(
+        "<repository type=\"git\" url=\"https://example.com/r branch=\" commit=\"{commit}\" />"
+    ));
+    let b = nuspec(&format!(
+        "<repository type=\"git\" url=\"https://example.com/r{commit}\" />"
+    ));
+    let (sa, applied) = stabilize(&nupkg(), zip(&[("Demo.nuspec", &a)]));
+    let (sb, _) = stabilize(&nupkg(), zip(&[("Demo.nuspec", &b)]));
+    assert!(
+        sa != sb,
+        "a nuspec with a commit matched one without: {applied:?}"
+    );
+    assert!(
+        !ids(&applied).contains(&"nupkg-repository-branch-v2"),
+        "{applied:?}"
+    );
+
+    // An attribute named `branch` still goes, after another's value that mentions one, in either
+    // quote, after any whitespace; and one the tag names twice is not guessed between.
+    for spec in [
+        "<repository url=\"https://example.com/r branch=\" branch=\"main\" commit=\"26d6a4d\" />",
+        "<repository url='x'\n    branch='main' commit=\"26d6a4d\">",
+    ] {
+        let (out, applied) = stabilize(
+            &only("nupkg-repository-branch-v2"),
+            zip(&[("Demo.nuspec", &nuspec(spec))]),
+        );
+        assert_eq!(ids(&applied), ["nupkg-repository-branch-v2"], "{spec}");
+        let text = member(out, "Demo.nuspec");
+        assert!(
+            !text.contains("main") && text.contains("commit=\"26d6a4d\""),
+            "{text}"
+        );
+    }
+    let twice = nuspec("<repository branch=\"a\" branch=\"b\" commit=\"26d6a4d\" />");
+    let (_, applied) = stabilize(
+        &only("nupkg-repository-branch-v2"),
+        zip(&[("Demo.nuspec", &twice)]),
+    );
+    assert!(applied.is_empty(), "{applied:?}");
 }
 
 #[test]
@@ -642,7 +696,7 @@ fn a_branch_attribute_anywhere_but_the_repository_element_is_kept() {
         b"<package><repository branch=\"keep\"".to_vec(),
     ] {
         let (out, applied) = stabilize(
-            &only("nupkg-repository-branch"),
+            &only("nupkg-repository-branch-v2"),
             zip(&[("Moq.nuspec", &spec)]),
         );
         assert!(applied.is_empty(), "{applied:?}");
@@ -650,7 +704,10 @@ fn a_branch_attribute_anywhere_but_the_repository_element_is_kept() {
     }
     // And only a `.nuspec` is read for it.
     let other = nuspec("<repository branch=\"v1\" />");
-    let (_, applied) = stabilize(&only("nupkg-repository-branch"), zip(&[("x.xml", &other)]));
+    let (_, applied) = stabilize(
+        &only("nupkg-repository-branch-v2"),
+        zip(&[("x.xml", &other)]),
+    );
     assert!(applied.is_empty(), "{applied:?}");
 }
 
@@ -667,11 +724,11 @@ fn nugetizer_markers_and_the_blanks_they_leave_are_normalized_away() {
                      <!-- https://github.com/devlooped/sponsors/raw/main/footer.md -->\n";
     let rebuild = "# Moq\n\nThe mocking library.\n\nSponsored by the people below.\n";
     let (a, applied) = stabilize(
-        &only("nupkg-readme-markers"),
+        &only("nupkg-readme-markers-v2"),
         zip(&[("readme.md", publisher.as_bytes())]),
     );
     let (b, _) = stabilize(
-        &only("nupkg-readme-markers"),
+        &only("nupkg-readme-markers-v2"),
         zip(&[("readme.md", rebuild.as_bytes())]),
     );
     assert_eq!(member(a.clone(), "readme.md"), rebuild);
@@ -684,7 +741,7 @@ fn a_prose_comment_is_not_a_marker() {
     // A comment with words in it is the author's, and a reader of the source sees it.
     let md = "# Demo\n<!-- do not edit: generated from the wiki -->\n<!-- -->\ntext\n";
     let (out, applied) = stabilize(
-        &only("nupkg-readme-markers"),
+        &only("nupkg-readme-markers-v2"),
         zip(&[("README.md", md.as_bytes())]),
     );
     assert_eq!(member(out, "README.md"), md);
@@ -698,7 +755,7 @@ fn a_readme_with_nothing_to_normalize_is_not_claimed() {
     // `normalized` — for a file the pass left byte for byte as it was.
     for md in ["# Demo\n\nSome text.\n", "no trailing newline", ""] {
         let (out, applied) = stabilize(
-            &only("nupkg-readme-markers"),
+            &only("nupkg-readme-markers-v2"),
             zip(&[("README.md", md.as_bytes())]),
         );
         assert!(
@@ -713,7 +770,7 @@ fn a_readme_with_nothing_to_normalize_is_not_claimed() {
 fn only_markdown_is_read_for_markers() {
     let txt = "<!-- include footer.md -->\ntext\n";
     let (out, applied) = stabilize(
-        &only("nupkg-readme-markers"),
+        &only("nupkg-readme-markers-v2"),
         zip(&[("notes.txt", txt.as_bytes())]),
     );
     assert!(applied.is_empty(), "{applied:?}");

@@ -120,13 +120,13 @@ fn nupkg_passes_leave_an_unreadable_member_alone() {
         parsed(zip(&members), Format::Zip),
         &names,
         &[
-            "nupkg-repository-branch",
-            "nupkg-readme-markers",
+            "nupkg-repository-branch-v2",
+            "nupkg-readme-markers-v2",
             "nupkg-text-eol",
             "nupkg-doc-member-order-v2",
             "nupkg-packager-version",
-            "dotnet-assembly-identity",
-            "dotnet-il-canonical-v2",
+            "dotnet-assembly-identity-v2",
+            "dotnet-il-canonical-v3",
         ],
     );
 }
@@ -152,7 +152,7 @@ fn wheel_passes_leave_an_unreadable_member_alone_and_record_as_it_arrived() {
             "pkg/__pycache__/m.cpython-312.pyc",
             "pkg-1.0.dist-info/METADATA",
         ],
-        &["pyc-header", "wheel-metadata-eol", "wheel-record-v2"],
+        &["pyc-header-v2", "wheel-metadata-eol", "wheel-record-v3"],
     );
 
     let mut a = parsed(
@@ -188,7 +188,7 @@ fn tar_content_passes_leave_an_unreadable_member_alone() {
         "crate",
         a,
         &["x-1.0.0/.cargo_vcs_info.json"],
-        &["cargo-vcs-hash"],
+        &["cargo-vcs-hash-v2"],
     );
 
     let a = parsed(
@@ -202,7 +202,7 @@ fn tar_content_passes_leave_an_unreadable_member_alone() {
         "npm-tarball",
         a,
         &["package/package.json"],
-        &["npm-install-fields"],
+        &["npm-install-fields-v2"],
     );
 }
 
@@ -225,9 +225,9 @@ fn gem_metadata_passes_leave_an_unreadable_spec_alone() {
         "`{inner_name}` was replaced"
     );
     for r in [
-        "gem-metadata-date",
-        "gem-metadata-rubygems-version",
-        "gem-metadata-cert-chain",
+        "gem-metadata-date-v2",
+        "gem-metadata-rubygems-version-v2",
+        "gem-metadata-cert-chain-v2",
     ] {
         assert!(
             !applied.iter().any(|x| x.id.as_str() == r),

@@ -44,7 +44,7 @@ immediate coverage. Risk tiers exist for the people who disagree: they can deman
 | tar **write** | none | **Hand-roll (~400 lines).** `tar::Header` is a `[u8; 512]` newtype with no first-class PAX-record emission, and we depend on forcing PAX format so that a timestamp field survives at all. Header checksum, name and prefix split, the PAX `"%d %s=%s\n"` length fixpoint, ordered records, and the long-name rule below. |
 | zip **read** | none | **Hand-roll (~250 lines).** Started out delegating to the `zip` crate, and that crate hides the four fields stabilization has to control: version-made-by, version-needed, general-purpose flags, and internal attributes. Walking the central directory ourselves costs 250 lines and gives every field. The crate stays a dev-dependency, where it cross-checks our output the way an external implementation should. |
 | zip **write** | none | **Hand-roll (~300 lines).** The crate cannot set general-purpose bit flags, creator/reader version, or zeroed CRC and size fields, and stabilization needs all three. |
-| gzip read | `flate2` (`DeflateDecoder`) | **Frame it ourselves, inflate with the crate.** Our header reader exposes XFL and FEXTRA, which `GzHeader` does not. It reads what `MultiGzDecoder` and gunzip read: every member, each held to its own CRC-32 and ISIZE, contents concatenated. Bytes after the last member that begin no other are kept, written back and compared (`container:gzip.trailing`), never dropped. Reading only the first member, with the file's last eight bytes as its trailer, let a second member hide behind a forged CRC. |
+| gzip read | `flate2` (`DeflateDecoder`) | **Frame it ourselves, inflate with the crate.** Our header reader exposes XFL and FEXTRA, which `GzHeader` does not. It reads every member, each held to its own CRC-32 and ISIZE, and refuses a file whose members after the first hold data: gunzip, Node and Python read every member, RubyGems and Cargo the first alone, so such a file holds no one content to compare. Read as every member's content, a gem whose payload put its last entry in a second member matched an honest build of all of them ([`16-findings.md`](16-findings.md) §3.106). Bytes after the last member that begin no other are kept, written back and compared (`container:gzip.trailing`), never dropped. Reading only the first member, with the file's last eight bytes as its trailer, let a second member hide behind a forged CRC. |
 | gzip write | `flate2::GzBuilder` at `Compression::none()` | Workable. Verify the XFL byte, and hand-roll if it comes out wrong. The container runs about 100 lines, and stored-deflate framing is a few more. |
 | CRC32 | `crc32fast` | Fine. |
 | `ar` (for `.deb`, later) | none | Hand-roll (~60 lines). No maintained crate worth the dependency. |
@@ -69,6 +69,13 @@ the `prefix` field, which stays NUL on every header we write. PAX records are or
 lexicographically by keyword. We already force PAX for timestamps, so this costs nothing and removes
 a whole class of ambiguity. The rule is a stabilizer-independent property of the writer: it applies
 whether or not `tar-time` ran.
+
+A record holds the name or linkname as the bytes it is, and the reader keeps every record's value as
+bytes too. POSIX lets a value be binary, and an extended attribute's often is. Decoded lossily, two
+names that differed past their hundredth byte only in bytes that are not UTF-8 became one record,
+and with the header field holding the same first hundred bytes, two entries wrote the same bytes
+([`16-findings.md`](16-findings.md) §3.106). A keyword is text, and one that is not UTF-8 is
+refused.
 
 Where the input used a GNU long name or a prefix split, the output uses PAX, so the stabilized form
 differs from the input encoding by design. Each such entry carries a `LongNameReencoded` note. A
@@ -167,6 +174,14 @@ where the **profile** says the nesting is structural, which for gems is exactly 
 `metadata.gz` and `checksums.yaml.gz`. Entry passes still apply at every depth, so the tar inside a
 gem's `data.tar.gz` is normalized as usual.
 
+Where the passes do normalize a nested archive, its bytes are the serializer's whether or not any of
+them found something to change. `gzip-meta-v2` marks each gzip layer the profile calls structural
+changed, and `tar-entry-order-v2` each nested tar, so each is written again
+([`stabilizers.md`](stabilizers.md) §1.2). Written back as it arrived, a gem whose members were
+compressed at another level, or a `.tar.gz` a package ships that happened to arrive already sorted,
+stayed apart from one that differed in nothing a pass normalizes. A `.tar.gz` a package ships keeps
+its gzip header, which is the package's; a `.gz` of anything else keeps its bytes.
+
 A pass that hashes members must then ask for `Entry::stabilized_bytes` rather than
 `Entry::body_bytes`, because a nested archive has no bytes of its own until it is written. The
 alternative, skipping the members it cannot read, is silent membership deletion, and membership
@@ -215,7 +230,7 @@ stated rule rather than whatever the writer happens to do:
 | `Hardlink` | → 0777 | → 0 | must be empty | preserved verbatim | The target names another member, so normalizing it would break the reference. |
 | `CharDevice`, `BlockDevice` | → 0777 | → 0 | must be empty | n/a | `tar-device` zeroes major and minor. A device node in a package artifact is worth a note of its own. |
 | `Fifo` | → 0777 | → 0 | must be empty | n/a | |
-| `Other(flag)` | untouched | untouched | preserved | n/a | An unrecognized typeflag is passed through byte for byte and noted. Guessing is worse than declining. |
+| `Other(flag)` | untouched | → 0 | preserved | n/a | An unrecognized typeflag keeps its typeflag, its mode and its body, and is noted. Guessing is worse than declining. `tar-owners` still zeroes its owners, and `tar-time`, `tar-xattrs` and `tar-device` change it as they change any other entry. |
 
 Two rules fall out of that table and belong in the writer rather than in a stabilizer. An entry whose
 kind requires an empty body carries `size = 0` on the wire regardless of what the parser found, and a
@@ -261,8 +276,8 @@ above all, and `RECORD` is a manifest *of* membership.
 | Tier | Meaning | Examples |
 |---|---|---|
 | `Structural` | Reorders or reframes without changing any file's content, **or drops integrity metadata computed over content we are rebuilding** | entry ordering, compression method, gzip framing, checksum and signature exclusion |
-| `Metadata` | Rewrites fields that are not the distributed content | timestamps, modes, uid/gid, archive comments |
-| `Content` | Rewrites bytes inside a distributed file | line endings, `RECORD` regeneration, PE timestamp and MVID, `.pyc` header |
+| `Metadata` | Rewrites fields that are not the distributed content | timestamps, modes, uid/gid, archive comments, an assembly's PE timestamp and MVID |
+| `Content` | Rewrites bytes inside a distributed file | line endings, `RECORD` regeneration, `.pyc` header |
 | `Lossy` | Removes distributed content, or information we cannot re-derive | dropping a source file, dropping documentation |
 
 The placement of signature and checksum exclusion took a second pass. Treating them as `Lossy` caps
@@ -277,8 +292,10 @@ consumer would have received. `wheel-direct-url` stays `Lossy`, because `direct_
 the installer reads.
 
 **Totality.** Stabilizers return no error. A parse failure inside one falls back to the original
-bytes and emits a note, which leaves no half-stabilized state to reason about. A fuzz target asserts
-that `apply` never panics.
+bytes and reports no change, which leaves no half-stabilized state to reason about. It declines
+silently: neither hook has anywhere to put a note, so in `applied` a member a pass could not read
+looks like one it had nothing to do to, and the notes a run carries are the parser's. A fuzz target
+asserts that `apply` never panics.
 
 They do return `Touched`. `entries_touched` and `bytes_changed` reach the attestation, and a signed
 number should not rest on every pass author remembering to set a flag. `applied` then reports only
@@ -299,6 +316,10 @@ The digest enters the run key and the attestation. A hand-bumped version integer
 promise someone forgets to keep.
 
 ### 3.1 Catalogue
+
+Trigon's first design listed the passes below. [`stabilizers.md`](stabilizers.md) documents every
+pass the build ships, the .NET assembly and NuGet packaging passes among them, and a test holds that
+page to the code. Its §5 maps each id below that did not ship under its own name.
 
 **tar**
 
@@ -344,7 +365,7 @@ present and zero is its unset value. Our model carries `Option<u32>` so that rea
 
 | id | Transform | Risk | Stage |
 |---|---|---|---|
-| `wheel-record-v2` | recompute `RECORD` from actual members: `path,sha256=<urlsafe-b64>,<size>`, sorted, PEP 376 CSV quoting, `RECORD,,` last | Content | **Finalize** |
+| `wheel-record` | recompute `RECORD` from actual members: `path,sha256=<urlsafe-b64>,<size>`, sorted, PEP 376 CSV quoting, `RECORD,,` last | Content | **Finalize** |
 | `wheel-generator` | normalize the `Generator:` line in `WHEEL` | Metadata | Default |
 | `wheel-direct-url` | drop `direct_url.json` | Lossy | Default |
 | `pyc-header` | zero the timestamp/hash field in `.pyc` headers | Content | Default |

@@ -10,6 +10,10 @@
 //! field edits name RECORD's `body` as rewritten by it, and a comparison report published before
 //! that does not carry the edit. The pass became `wheel-record-v2`, which moved the `wheel` set's
 //! digest, so an old record is refused by today's set and re-derived through its archived one.
+//!
+//! Two of the set's passes have been renamed since, for changes of their own
+//! (`docs/16-findings.md` §3.106): the RECORD pass is `wheel-record-v3` and `pyc-header` is
+//! `pyc-header-v2`. The published set is rebuilt here from today's by giving both their old ids.
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -23,42 +27,44 @@ use trigon_stabilize::{Cx, Stabilizer, StabilizerSet, profile};
 /// The `wheel` set's digest before 62781a8, which every wheel record signed until then names.
 const PUBLISHED: &str = "58632c3c627d30f9ddd01c3b2f8ae292e89af5e2b6f0893fc4cfba4e5a7d425d";
 
-/// `wheel-record-v2` under the id it had: the same pass, writing the same RECORD.
+/// Today's pass under the id it was published with. On the wheels this file builds, which ship
+/// no `.pyc` and one `.dist-info`, each writes what it wrote then.
 #[derive(Debug)]
-struct AsPublished(Arc<dyn Stabilizer>);
+struct AsPublished(&'static str, Arc<dyn Stabilizer>);
 
 impl Stabilizer for AsPublished {
     fn id(&self) -> StabilizerId {
-        StabilizerId::new("wheel-record")
+        StabilizerId::new(self.0)
     }
     fn stage(&self) -> trigon_stabilize::Stage {
-        self.0.stage()
+        self.1.stage()
     }
     fn risk(&self) -> RiskTier {
-        self.0.risk()
+        self.1.risk()
     }
     fn provenance(&self) -> Provenance {
-        self.0.provenance()
+        self.1.provenance()
     }
     fn applies(&self, cx: &Cx) -> bool {
-        self.0.applies(cx)
+        self.1.applies(cx)
     }
     fn on_archive(&self, a: &mut Archive, cx: &Cx) -> trigon_stabilize::Touched {
-        self.0.on_archive(a, cx)
+        self.1.on_archive(a, cx)
     }
     fn on_entry(&self, e: &mut Entry, cx: &Cx) -> trigon_stabilize::Touched {
-        self.0.on_entry(e, cx)
+        self.1.on_entry(e, cx)
     }
 }
 
-/// The `wheel` set as it was published: today's, with the RECORD pass under its old id.
+/// The `wheel` set as it was published: today's, with the renamed passes under their old ids.
 fn as_published() -> StabilizerSet {
     let members = profile("wheel")
         .unwrap()
         .members
         .into_iter()
         .map(|m| match m.id().as_str() {
-            "wheel-record-v2" => Arc::new(AsPublished(m)) as Arc<dyn Stabilizer>,
+            "wheel-record-v3" => Arc::new(AsPublished("wheel-record", m)) as Arc<dyn Stabilizer>,
+            "pyc-header-v2" => Arc::new(AsPublished("pyc-header", m)) as Arc<dyn Stabilizer>,
             _ => m,
         })
         .collect();
@@ -139,8 +145,8 @@ fn written_before_attribution(c: &trigon_compare::Comparison) -> Vec<u8> {
 
 #[test]
 fn the_new_id_alone_is_what_moved_the_wheel_digest() {
-    // The published set is today's with one id changed back, and it hashes to the digest records
-    // were signed under: nothing else about the set moved, and the id is what moved it.
+    // The published set is today's with the renamed ids changed back, and it hashes to the digest
+    // records were signed under: nothing else about the set moved, and the ids are what moved it.
     assert_eq!(as_published().digest().to_hex(), PUBLISHED);
     assert_ne!(profile("wheel").unwrap().digest().to_hex(), PUBLISHED);
 }

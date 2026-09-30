@@ -17,7 +17,7 @@ the text says so rather than smoothing it over.
 | **Materialize** | Narrow fetch (`--filter=blob:none --single-branch`) at the pinned commit into the source cache. |
 | **Build** | Base image `trigon/base-node@sha256:…` with node 8.12.0 and npm 6.4.1. Egress `MirrorOnly`; `RegistryMoment::Timestamp(2018-11-22T17:00:04Z)`. `npm pack`. Sub-10-second build. |
 | **Extract** | `left-pad-1.3.0.tgz` at the workspace root. |
-| **Stabilize** | Profile **`npm-tarball`**: tar set + gzip set + `npm-prefix` + `npm-install-fields`. All `Builtin`, all `risk <= Metadata`. |
+| **Stabilize** | Profile **`npm-tarball`**, chosen with `--profile npm-tarball`: the `.tgz` name alone selects `tar-gzip` ([`stabilizers.md`](stabilizers.md) §1.1). Tar set + gzip set + `npm-install-fields-v2`. All `Builtin`, all `risk <= Metadata`. |
 | **Compare** | Raw digests differ (gzip framing). Stabilized digests equal. `container_bit_identical = false`. |
 | **Verdict** | **`Reproduced { Normalized }`.** Provenance cap clean: all applied stabilizers `Builtin`, max risk `Metadata`. |
 | **Attest** | `rebuild/v1` + SLSA provenance + `equivalence/v1` + `buildobservation/v1` (tier 1, artifact-hash check performed, not matched). |
@@ -42,8 +42,8 @@ A `cibuildwheel`-built binary wheel with a Rust extension. This example shows wh
 | **Build** | manylinux container, pinned Rust toolchain, `SOURCE_DATE_EPOCH` set, `umask 022`, egress `MirrorOnly` with `PIP_INDEX_URL` pointed at the time-filtered mirror. `python -m build --wheel -n`. Minutes, not seconds. |
 | **Repair loop, if needed** | Likely failure: a Rust toolchain window that is wide or contradictory. `ToolchainResolution::Unconstrained` is the **typed** signal to escalate ([`02-domain-model.md`](02-domain-model.md) §2). Builder gets the compressed log, the evidence list, and the CI recipe; emits a patched strategy. Failure signature is normalized and cached, so the next Rust-extension wheel with the same signature costs nothing. |
 | **Clean re-runs** | Two, on different workers. |
-| **Stabilize** | Profile **`wheel`**: zip set + `wheel-generator` + `wheel-direct-url` (`Lossy`) + `pyc-header` (`Content`) + **`wheel-record-v2` at `StageFinalize`**. `RECORD` regeneration must run last because `wheel-direct-url` changed membership. |
-| **Compare** | The `.so` is the crux. If the Rust toolchain, LLVM version and linker flags all matched, the `.so` is byte-identical after normalization and the outcome is `NormalizedWithCaveats` (because `pyc-header` and `wheel-direct-url` are `Content`/`Lossy`). If the `.so` differs, the note reads `ExecutableContentDiffers`, which is **never benign**, and the outcome is `Divergent`. |
+| **Stabilize** | Profile **`wheel`**: zip set + `wheel-direct-url` (`Lossy`) + `pyc-header-v2` (`Content`) + `wheel-metadata-eol` (`Content`) + **`wheel-record-v3` at `StageFinalize`**. `RECORD` regeneration must run last because `wheel-direct-url` changed membership. |
+| **Compare** | The `.so` is the crux. If the Rust toolchain, LLVM version and linker flags all matched, the `.so` is byte-identical after normalization and the outcome is `NormalizedWithCaveats` when a `Content` or `Lossy` pass changed something, as `wheel-record-v3` does whenever the published `RECORD` is not already in its form, and `Normalized` when none did ([`stabilizers.md`](stabilizers.md) §1.4). If the `.so` differs, the note reads `ExecutableContentDiffers`, which is **never benign**, and the outcome is `Divergent`. |
 | **Verdict** | **`Reproduced { NormalizedWithCaveats }`** on a good day; **`Divergent`** with an executable-content note otherwise; **`Unsupported`** if the platform could not be hosted. |
 
 **What this example shows:** `Unsupported` is a first-class outcome that states scope. The
@@ -65,7 +65,7 @@ verification infrastructure exists for it today.
 | **InferStrategy** | Rung 4, heuristic: a `.gemspec` at the resolved subdirectory → flow template **`gem/build`**, with Ruby pinned from `required_ruby_version` intersected with the release current at publish time. |
 | **Build** | `gem build rails.gemspec --output /out/rails-7.1.3.gem`, `SOURCE_DATE_EPOCH` set to the publish timestamp (not 315619200, because the publishing RubyGems predates that default). |
 | **Likely failure** | The gemspec's file list is commonly computed with `git ls-files`, which makes the manifest depend on working-tree state. A dirty or differently-pruned checkout produces a different member list. This is a known failure class with a cached repair. |
-| **Stabilize** | Profile **`gem`**. Outer tar set + gzip set; **structural recursion** into `data.tar.gz` and `metadata.gz` (a `Body::Nested` rather than a stabilizer, see [ADR-0004](adr/0004-own-the-archive-writers.md)); `gem-metadata-yaml-normalize` (`Content`), `gem-metadata-date`, `gem-metadata-rubygems-version`, `gem-metadata-cert-chain` (`Structural`), `gem-exclude-checksums` (`Structural`), `gem-exclude-signatures` (`Structural`). |
+| **Stabilize** | Profile **`gem`**. Outer tar set + gzip set; **structural recursion** into `data.tar.gz` and `metadata.gz` (a `Body::Nested` rather than a stabilizer, see [ADR-0004](adr/0004-own-the-archive-writers.md)); `gem-metadata-date-v2` and `gem-metadata-rubygems-version-v2` (`Metadata`), `gem-metadata-cert-chain-v2` (`Structural`), `gem-exclude-checksums` (`Structural`), `gem-exclude-signatures` (`Structural`). |
 | **Compare** | Every applied stabilizer is `Builtin` at `Structural` or `Metadata` risk, so the provenance cap stays quiet. Checksum and signature exclusion sit at `Structural` because both are integrity metadata over content we are rebuilding ([`05`](05-archive-and-normalization.md) §3). |
 | **Verdict** | **`Reproduced { Normalized }`**, which matters: an earlier draft put checksum and signature exclusion at `Lossy` and thereby denied every gem a clean tier. The gemspec `git ls-files` failure class is what pushes a gem to caveats or divergence. |
 
@@ -104,6 +104,6 @@ where it belongs. And a divergence can carry actionable advice rather than an ac
 | Risk tiers do real work | Examples 2, 3 and 4 all land at `NormalizedWithCaveats` for concrete, stated reasons |
 | `Unsupported` is a scope statement | Example 2's macOS branch |
 | Most targets never touch a model | Examples 1, 3 and 4 need zero model calls; example 2 needs one only on a genuine toolchain contradiction |
-| `StageFinalize` is necessary | Example 2's `wheel-record-v2` after a membership change |
+| `StageFinalize` is necessary | Example 2's `wheel-record-v3` after a membership change |
 | Recursion is structural | Example 3's `data.tar.gz` |
 | Divergences can be actionable | Example 4's `pdb-paths` finding |

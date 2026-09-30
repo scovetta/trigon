@@ -7,212 +7,212 @@ corpus_hash = "c1cec98d27144d7d85cedfebb03054e434ecc45fde57630695eeb092f3af70a7"
 [[entry]]
 file = "A-Mazed-0.1.0.crate"
 stabilized = "606cacdbcf89864a3eb72bb1504acafd39a9bbe414165b9f0d9ae3519167976e"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "A2VConverter-0.1.1.crate"
 stabilized = "921c72f412a62d06cafb0e96494f2e95bcd8638c9b0723919c736c8ad99fec4c"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "ABC-ECS-0.2.1.crate"
 stabilized = "85756b07ae9f127d4bd5ec6e707d58ec348fba58ec8d9c6a47f506097e766af5"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "ABC_Game_Engine-0.1.2.crate"
 stabilized = "94eb5a950a8ecbb28ea343b0a58e4dfb95ec83a24b80a7a2f0b8ed9678b19414"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "ABC_lumenpyx-0.1.0.crate"
 stabilized = "20f84185985494a529d72aaeb9256dd16b76b74eb507670f646f99a6b18c3d9a"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "ABtree-0.8.0.crate"
 stabilized = "a7ed58d62b7787409dbd75bcd90a01009a194651ca5720166df3b0fccac659eb"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "ADA_Standards-1.2.2.crate"
 stabilized = "08133ecaa0ae393de82c3485e6be73cd97357914d865ef01021580893bdc37ac"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "ADuCM302x-0.1.0.crate"
 stabilized = "1e0a9b5d4d7c23fbd6ea28dd47a2d6876b5210a9196e7b2ccb9a52035863f99d"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "AISHub-data-collector-2.0.0.crate"
 stabilized = "0e8af6869295d9989edc331f1bae6258212e2ca00e3f986a569a107df8e92489"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "AJ_find-0.1.0.crate"
 stabilized = "721d1551a7bccefa42b90c5ee3398623920020ea5817c64183e7bdf78ba0554c"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "AJ_jmp-0.1.0.crate"
 stabilized = "f353b30d1f9da69a0bb3e2a1c5b46fff86206200e966509c7c229879fced6d9b"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "ARGenus-0.4.0.crate"
 stabilized = "3d6310cd84c4f55bb226bacc65db6dd3af2c99ca51463b9872345dfc4f171e40"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "Acatsama0871-0.1.0.crate"
 stabilized = "0a7e3aa2612dcb329925ac911f852491811b95f04311e88ecd76ea5e94f2f84f"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "AccountingCenter-0.1.0.crate"
 stabilized = "e1c2035161ff03958a7092a15c80d946df4b47c0d8471bea4df55fb13c9ed8a7"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "Actix-rs-0.1.0.crate"
 stabilized = "90ae92cdc2690c1834abbe651f1c32ab99feeb6be09b2d34f7f73422f79271a7"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "Actor-rs-0.1.0.crate"
 stabilized = "be1c9580227a4addc03558565def5694031deeaf0476699cd33896b214635e6e"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "Actorize-0.1.0.crate"
 stabilized = "d2255c16ee9eda60a6f3ca510f7297762d062874cdd75f95edcc84b3149f32bc"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "AmanitaMuscaria-0.0.5.crate"
 stabilized = "58dd663bdc1d182b06c80d73ec33f90131dd89217d0c56cfbb49693cf69c814e"
-applied = ["cargo-vcs-hash", "gzip-meta", "tar-mode", "tar-time"]
+applied = ["cargo-vcs-hash-v2", "gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "Arknights-0.1.2.crate"
 stabilized = "eec383d514cabe9127237514cda46dc46af65a2c14ac2b0e1dc443afd8e123e6"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "ai_git-2.0.0.gem"
 stabilized = "a42b099c7e2e94504fd0d8cc9fff8098c61a6a72dca497018d843a2a9d084ae9"
-applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version", "gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "ballistics-engine-0.37.0.gem"
 stabilized = "2359d02c842c63c17f69022d3a84e93c51aae496b707cc804adc02d1a2a9ffa7"
-applied = ["gem-exclude-checksums", "gem-metadata-date", "gem-metadata-rubygems-version", "gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gem-exclude-checksums", "gem-metadata-date-v2", "gem-metadata-rubygems-version-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "branchproof-0.7.0.gem"
 stabilized = "e3411675d5b2d521f5b2c7d478fced313d8f8e14c5fcef52836f5f39286948ce"
-applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version", "gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "enumy-0.10.0.gem"
 stabilized = "5a513ebbd4dcce952064433764abb10cea52366c768aa99bb7348ddbb2d17b5f"
-applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version", "gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "git-4.4.4.gem"
 stabilized = "7d3b6b595a819abccedf9114a17da5e910239d35b0102dc0c97da056b7efdc29"
-applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version", "gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "git-5.5.0.gem"
 stabilized = "4439e0a32a1979ec868348c98859067673474f74822be5c32984171d4aa58e3b"
-applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version", "gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gem-exclude-checksums", "gem-metadata-rubygems-version-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "kryptic-daemon-client-1.1.1.gem"
 stabilized = "1a54dcfc49d29eaa4f02ff89fa5468bc9312ceef5858f8afaefef21158c8f7e2"
-applied = ["gem-exclude-checksums", "gem-metadata-date", "gem-metadata-rubygems-version", "gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gem-exclude-checksums", "gem-metadata-date-v2", "gem-metadata-rubygems-version-v2", "gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "cli-2.337.1.tgz"
 stabilized = "2e8a83dd4d1c623a582e85116dc5ce9dd12ccc424fedc97f895e87402408b638"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-internal-14.5.1.tgz"
 stabilized = "d22acca1333e27a5f2a7ace9a1f19b8354ab88ab1cdc4278e10bdbd54dddec34"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-module-new-0.1.6.tgz"
 stabilized = "ecd2becf9c20a58cf04074e5cfce9fa60435b9676943fd61b046a731fefc445c"
-applied = ["gzip-meta", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-7.1.3.tgz"
 stabilized = "079baf3ed45990c115c06b086b753a6857a87bb2cc7c0479111ff9a39287deb1"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-5.1.3.tgz"
 stabilized = "15297776fc4dd06b89718ce4fd836027513e1ca1f82672bfbf74d30888886b19"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-15.10.39.tgz"
 stabilized = "d81d8833f4c6b002af7a927bf06444c94812e9e8cd7613975f82e950f56073ab"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-10.1.1.tgz"
 stabilized = "269e40963cb9de0d87c5c941fd2a8eff316cb4a9db2670a576180e77cec18c2d"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-57.0.23.tgz"
 stabilized = "c09e3e21a8764763e31365ae50752b0535cdb322c7ffcd6a36874da1cebe02a4"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "copilot-linux-x64-1.0.83.tgz"
 stabilized = "0643766b37507e83a0d92b376a52614441b5af4beda823c2f3aa8dfd7b2a7c1a"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "gemini-cli-core-0.59.0.tgz"
 stabilized = "d083bba5899d5a2646377119f4833cd7c2e32c73eea7199572e1d7d934590b18"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "gemini-cli-0.59.0.tgz"
 stabilized = "5448cb5a549cd7b61f62959d502e4c099ee33c85dedb77e00139c9f4f37be0a1"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "m365agentstoolkit-cli-1.1.16.tgz"
 stabilized = "9d9f82c7b80f2e5075acd003155c2a28cbc83161fda9ef48f87e1ecff1417e83"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-4.0.1487.tgz"
 stabilized = "0a7b88b02e977c4b1f504e3f88e39a533a669b9b4982027462d1ee5a0899058a"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-8.10.0.tgz"
 stabilized = "55807a56d62e44007869c44e8a31aebe5aa3e9f3db0e545c15d7500ef8ab48c5"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-4.8.0.tgz"
 stabilized = "41242e536ce570c3a7761eb37cb19ac4e29557e8041d1bd087db564e921e5a6b"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-1.1.170.tgz"
 stabilized = "3d839dbbd56def30755d7f598bbaa2716292373013ab727182e9dd2b7e95d9ee"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "cli-linux-x64-musl-2.117.0.tgz"
@@ -227,69 +227,69 @@ applied = ["tar-mode", "tar-time"]
 [[entry]]
 file = "cli-4.0.66.tgz"
 stabilized = "c08ed0856b113c838731ca9fcb1dd3207010ca5413d89c5a91db36bcaadb2580"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "byterover-cli-3.16.1.tgz"
 stabilized = "c2094c66a38910f50d63ff1baa8c6dc205a27872b494e4ac2422bfe4fdd033f1"
-applied = ["tar-entry-order", "tar-mode", "tar-time"]
+applied = ["tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "devextreme-cli-1.17.0.tgz"
 stabilized = "87304431c07183715ff2b56b68ea1e088085ab95ca25928dfab58b8093ff1174"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "react-native-cli-2.0.1.tgz"
 stabilized = "4d8fba86bcf623ded58f0b1a350a593cc8d50caeb85069bef30cd736e63eabdc"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time", "tar-xattrs"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time", "tar-xattrs"]
 
 [[entry]]
 file = "trpc-cli-0.16.0.tgz"
 stabilized = "09c5944f1822f2e16e5b84daf193206d3a9a5fe0a0f1c5f881033932c74519ad"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-time"]
 
 [[entry]]
 file = "acid_vault-2.1.0-py3-none-any.whl"
 stabilized = "87e00f4c8084b368d8a56209c81014dfa439e18c9e8ae8ac7811121a25b5d00b"
-applied = ["pyc-header", "wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
+applied = ["pyc-header-v2", "wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v3"]
 
 [[entry]]
 file = "aegisx-0.0.4.tar.gz"
 stabilized = "524204d547ed946ebeef558bd9847bedf42242cef254126855ac729cc237fe8f"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "djangocms-terminal-0.0.14.tar.gz"
 stabilized = "05b74bd8fb7cceaecae454226f1f959201b2d253799ac300fa87e2eae4d11883"
-applied = ["gzip-meta", "tar-entry-order", "tar-mode", "tar-owners", "tar-time"]
+applied = ["gzip-meta-v2", "tar-entry-order-v2", "tar-mode", "tar-owners", "tar-time"]
 
 [[entry]]
 file = "econml-0.17.0-cp310-cp310-macosx_11_0_arm64.whl"
 stabilized = "ddbb7a5091ce219edc883cfc76fba736f2d87a4dd8237a5b901442bed4a49932"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v3"]
 
 [[entry]]
 file = "feagi_bv_windows-2.3.37-py3-none-any.whl"
 stabilized = "025a9c2ef932a54ef925621ca47d935d85a57d700703a824fc3b68125e782689"
-applied = ["wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
+applied = ["wheel-metadata-eol", "zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v3"]
 
 [[entry]]
 file = "homecom_alt-1.7.2-py3-none-any.whl"
 stabilized = "7f73c34b675c3ab0db573d73e37c37f2de0e30a17a7bf975f189493ed625d21f"
-applied = ["zip-compression", "zip-entry-order", "zip-misc", "zip-time", "zip-versions", "wheel-record-v2"]
+applied = ["zip-compression", "zip-entry-order", "zip-misc", "zip-time", "zip-versions", "wheel-record-v3"]
 
 [[entry]]
 file = "ipumspy-0.8.2-py3-none-any.whl"
 stabilized = "2bce08725247c38b2462e86f9bb20a23bcd8c392d478dbb49bba1628ca65c84b"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v3"]
 
 [[entry]]
 file = "pdspy-2.0.8-cp310-cp310-macosx_11_0_arm64.whl"
 stabilized = "dc30df2c9af3eca99b9994577a92d72485e2cf652ed1abf96d849bd4bf847660"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v3"]
 
 [[entry]]
 file = "your-0.6.7-py3-none-any.whl"
 stabilized = "523d0743e33c312c18675afe080808bd3cd8af9bd65ffa2640f29b284ea28fd5"
-applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v2"]
+applied = ["zip-compression", "zip-entry-order", "zip-time", "zip-versions", "wheel-record-v3"]

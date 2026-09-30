@@ -5,9 +5,9 @@
 //! there before it — or the test proves the fixture, not the pass.
 
 use trigon_archive::{
-    Archive, EntryKind, Limits, RawMeta, TarRaw, Trailer, ZipRaw, parse, serialize,
+    Archive, ArchiveError, EntryKind, Limits, RawMeta, TarRaw, Trailer, ZipRaw, parse, serialize,
 };
-use trigon_core::{Format, Note, RiskTier};
+use trigon_core::{Format, Note, NoteCode, RiskTier};
 use trigon_stabilize::{Applied, FieldEdit, StabilizerSet, apply, apply_traced, profile};
 
 fn tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -88,7 +88,7 @@ fn packed_with(records: &[(&str, &str)]) -> Archive {
             unreachable!()
         };
         for (k, v) in records {
-            raw.pax.insert(k.to_string(), v.to_string());
+            raw.pax.insert(k.to_string(), v.as_bytes().to_vec());
         }
         e.mark_dirty();
     }
@@ -317,7 +317,7 @@ fn fields_an_installing_client_injects_are_dropped() {
     assert_eq!(a, b);
     let x = applied
         .iter()
-        .find(|x| x.id.as_str() == "npm-install-fields")
+        .find(|x| x.id.as_str() == "npm-install-fields-v2")
         .unwrap();
     assert_eq!(x.risk, RiskTier::Metadata);
     let dropped: u64 = installed
@@ -348,7 +348,7 @@ fn fields_injected_last_leave_the_object_well_formed() {
     // The comma is a byte the pass removed too, counted beside the lines it dropped.
     let x = applied
         .iter()
-        .find(|x| x.id.as_str() == "npm-install-fields")
+        .find(|x| x.id.as_str() == "npm-install-fields-v2")
         .unwrap();
     let dropped: u64 = installed
         .lines()
@@ -377,7 +377,7 @@ fn a_package_json_with_nothing_injected_is_not_claimed() {
     let authored =
         "{\n  \"name\": \"x\",\n  \"description\": \"mentions \\\"_id\\\" in prose\"\n}\n";
     let (out, applied) = stabilized(&profile("npm-tarball").unwrap(), npm(authored));
-    assert!(!fired(&applied, "npm-install-fields"), "{applied:?}");
+    assert!(!fired(&applied, "npm-install-fields-v2"), "{applied:?}");
     assert_eq!(
         body_of(out, Format::TarGz, "package/package.json"),
         authored
@@ -421,7 +421,7 @@ fn the_commit_a_crate_was_packaged_from_is_masked_and_nothing_around_it_moves() 
         assert_eq!(a, b, "{}", shape(one));
         let x = applied
             .iter()
-            .find(|x| x.id.as_str() == "cargo-vcs-hash")
+            .find(|x| x.id.as_str() == "cargo-vcs-hash-v2")
             .unwrap();
         assert_eq!(
             (x.risk, x.entries_touched, x.bytes_changed),
@@ -443,7 +443,7 @@ fn a_sha1_that_is_not_forty_hex_digits_is_left_as_it_is() {
         "{\"git\":{\"rev\":\"0123456789abcdef0123456789abcdef01234567\"}}",
     ] {
         let (out, applied) = stabilized(&set, crate_with(text));
-        assert!(!fired(&applied, "cargo-vcs-hash"), "{text}: {applied:?}");
+        assert!(!fired(&applied, "cargo-vcs-hash-v2"), "{text}: {applied:?}");
         assert_eq!(
             body_of(out, Format::TarGz, &format!("demo-0.1.0/{VCS_INFO}")),
             text
@@ -474,7 +474,7 @@ fn a_record_inside_a_tarball_the_wheel_ships_is_left_as_the_tarball_has_it() {
     let mut a = parsed(wheel, Format::Zip);
     let applied = apply(&profile("wheel").unwrap(), &mut a);
     assert!(
-        fired(&applied, "wheel-record-v2"),
+        fired(&applied, "wheel-record-v3"),
         "the wheel's own RECORD: {applied:?}"
     );
     let shipped = a
@@ -491,6 +491,78 @@ fn a_record_inside_a_tarball_the_wheel_ships_is_left_as_the_tarball_has_it() {
         .find(|e| e.path.ends_with(b".dist-info/RECORD"))
         .expect("the vendored RECORD");
     assert_eq!(record.body_bytes().unwrap().as_ref(), stale.as_bytes());
+}
+
+/// A wheel that vendors a distribution with its `.dist-info`, as `zzz-1.0-py3-none-any.whl` does:
+/// under `aaa/_vendor/`, which sorts before the wheel's own `zzz-1.0.dist-info`.
+fn vendoring(own_record: &[u8]) -> Vec<u8> {
+    zip(
+        &[
+            ("zzz/__init__.py", b""),
+            ("aaa/_vendor/dep-1.0.dist-info/RECORD", b"dep/x.py,,\n"),
+            ("aaa/_vendor/dep-1.0.dist-info/METADATA", b"Name: dep\n"),
+            ("zzz-1.0.dist-info/METADATA", b"Name: zzz\n"),
+            ("zzz-1.0.dist-info/RECORD", own_record),
+        ],
+        "",
+    )
+}
+
+#[test]
+fn the_wheels_own_record_is_regenerated_though_a_vendored_one_sorts_first() {
+    // `wheel-record-v2` took the first `.dist-info/RECORD` in path order: the vendored one. It
+    // regenerated that, a file the wheel ships, and compared the wheel's own as published, so two
+    // wheels whose own RECORDs differed only in how their builders wrote them stayed apart.
+    let set = profile("wheel").unwrap();
+    let (a, applied) = stabilized(&set, parsed(vendoring(b"stale\n"), Format::Zip));
+    let (b, _) = stabilized(
+        &set,
+        parsed(
+            vendoring(b"zzz/__init__.py,,\nzzz-1.0.dist-info/RECORD,,\n"),
+            Format::Zip,
+        ),
+    );
+    assert!(fired(&applied, "wheel-record-v3"), "{applied:?}");
+    assert_eq!(
+        body_of(
+            a.clone(),
+            Format::Zip,
+            "aaa/_vendor/dep-1.0.dist-info/RECORD"
+        ),
+        "dep/x.py,,\n",
+        "the vendored RECORD is the wheel's content"
+    );
+    let own = body_of(a.clone(), Format::Zip, "zzz-1.0.dist-info/RECORD");
+    assert!(
+        own.contains("aaa/_vendor/dep-1.0.dist-info/RECORD,sha256="),
+        "the wheel's RECORD lists the vendored one as a member: {own}"
+    );
+    assert!(own.ends_with("zzz-1.0.dist-info/RECORD,,\n"), "{own}");
+    assert_eq!(a, b, "the wheel's own RECORD was compared as published");
+}
+
+#[test]
+fn a_wheel_with_two_dist_info_directories_at_its_root_keeps_every_record() {
+    // The format puts one `.dist-info` at the root and pip refuses a wheel with two, so neither
+    // RECORD is the wheel's by the format, and neither is rewritten on a guess.
+    let bytes = zip(
+        &[
+            ("a-1.0.dist-info/RECORD", b"stale a\n"),
+            ("b-1.0.dist-info/RECORD", b"stale b\n"),
+            ("pkg/__init__.py", b""),
+        ],
+        "",
+    );
+    let (out, applied) = stabilized(&profile("wheel").unwrap(), parsed(bytes, Format::Zip));
+    assert!(!fired(&applied, "wheel-record-v3"), "{applied:?}");
+    assert_eq!(
+        body_of(out.clone(), Format::Zip, "a-1.0.dist-info/RECORD"),
+        "stale a\n"
+    );
+    assert_eq!(
+        body_of(out, Format::Zip, "b-1.0.dist-info/RECORD"),
+        "stale b\n"
+    );
 }
 
 #[test]
@@ -536,7 +608,7 @@ fn an_unsigned_gem_has_no_certificate_chain_to_drop() {
     let gem = tar(&[("metadata.gz", &gzip(spec.as_bytes()))]);
     let set = profile("gem")
         .unwrap()
-        .filtered(&["gem-metadata-cert-chain".into()], &[]);
+        .filtered(&["gem-metadata-cert-chain-v2".into()], &[]);
     let (_, applied) = stabilized(&set, parsed(gem, Format::Tar));
     assert!(applied.is_empty(), "{applied:?}");
 }
@@ -575,7 +647,7 @@ fn the_gzip_headers_of_a_gems_own_members_are_normalized() {
         a, b,
         "two gems differing only in their members' gzip headers"
     );
-    assert!(fired(&applied, "gzip-meta"), "{applied:?}");
+    assert!(fired(&applied, "gzip-meta-v2"), "{applied:?}");
 }
 
 #[test]
@@ -617,6 +689,160 @@ fn a_gzip_file_a_package_ships_keeps_its_header() {
         x, y,
         "a difference in a file the package ships is still a difference"
     );
+}
+
+/// Gzip with a clean header, at a compression level of the caller's.
+fn gzip_at(body: &[u8], level: u32) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(level));
+    e.write_all(body).unwrap();
+    e.finish().unwrap()
+}
+
+/// A tar already in the form the tar passes leave, in the order given: PAX atime 0, mtime 0, mode
+/// 0777, no owner. Nothing in it is left for a pass to change but, perhaps, the order.
+fn settled_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let set = profile("tar")
+        .unwrap()
+        .filtered(&["all".into()], &["tar-entry-order-v2".into()]);
+    let mut a = parsed(tar(entries), Format::Tar);
+    apply(&set, &mut a);
+    serialize(&a, true).unwrap()
+}
+
+#[test]
+fn a_nested_tar_is_written_back_sorted_when_only_its_order_moved() {
+    // The pair that showed it (`docs/16-findings.md` §3.106): one `pkg/inner.tar.gz` each, the same
+    // two members in either order and nothing else to normalize in them. The sort marked no member,
+    // so the inner archive went out as it arrived, and the two stayed `divergent` with the pass in
+    // `applied`.
+    let outer = |order: &[(&str, &[u8])]| {
+        let inner = gzip_at(&settled_tar(order), 9);
+        gzip(&tar(&[("pkg/inner.tar.gz", &inner)]))
+    };
+    let (a, b): (&[u8], &[u8]) = (b"a", b"b");
+    let x = outer(&[("a", a), ("b", b)]);
+    let y = outer(&[("b", b), ("a", a)]);
+    assert_ne!(x, y);
+    let set = profile("tar-gzip").unwrap();
+    let (sx, _) = stabilized(&set, parsed(x, Format::TarGz));
+    let (sy, applied) = stabilized(&set, parsed(y, Format::TarGz));
+    assert!(fired(&applied, "tar-entry-order-v2"), "{applied:?}");
+    assert!(
+        sx == sy,
+        "two archives differing only in an order the pass sorted"
+    );
+}
+
+#[test]
+fn the_gzip_framing_of_a_gem_is_written_again_however_it_was_compressed() {
+    // A gem's own members are framing, and the serializer writes framing uncompressed so that no
+    // encoder's choices reach a digest. One with a clean header and nothing inside to normalize
+    // went out as it arrived, and two gems that differed only in `gem build`'s compression level
+    // stayed `divergent`.
+    let spec = b"--- !ruby/object:Gem::Specification\nname: x\n\
+                 date: 1980-01-02 00:00:00.000000000 Z\n";
+    let payload = settled_tar(&[("lib/x.rb", b"X = 1\n")]);
+    let gem = |level: u32| {
+        tar(&[
+            ("data.tar.gz", &gzip_at(&payload, level)),
+            ("metadata.gz", &gzip_at(spec, level)),
+        ])
+    };
+    assert_ne!(gem(1), gem(9));
+    let set = profile("gem").unwrap();
+    let (a, _) = stabilized(&set, parsed(gem(1), Format::Tar));
+    let (b, _) = stabilized(&set, parsed(gem(9), Format::Tar));
+    assert!(
+        a == b,
+        "two gems differing only in the compression level of their framing"
+    );
+}
+
+#[test]
+fn a_gzip_file_a_package_ships_keeps_its_compressed_bytes() {
+    // The other side of the line, and a limit rather than a defect: a `.gz` that is not a tar is
+    // a file the package delivers, nothing normalizes what it holds, and it is compared as it was
+    // shipped, its compression level with it.
+    let package = |level: u32| {
+        gzip(&tar(&[
+            ("package/package.json", b"{}\n"),
+            (
+                "package/banner.json.gz",
+                &gzip_at(&b"{\"hello\": 1}\n".repeat(64), level),
+            ),
+        ]))
+    };
+    let set = profile("tar-gzip").unwrap();
+    let (x, _) = stabilized(&set, parsed(package(1), Format::TarGz));
+    let (y, _) = stabilized(&set, parsed(package(9), Format::TarGz));
+    assert_ne!(x, y);
+}
+
+/// A tar of two small entries split after the first: the first member holds the first entry and no
+/// end of archive, the second the rest.
+fn in_two_members(whole: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    use std::io::Read as _;
+    let two = [gzip(&whole[..1024]), gzip(&whole[1024..])].concat();
+    // What Cargo's `GzDecoder` and RubyGems' `GzipReader` read of it: the first member, one entry.
+    let mut first = Vec::new();
+    flate2::read::GzDecoder::new(&two[..])
+        .read_to_end(&mut first)
+        .unwrap();
+    assert_eq!(
+        first,
+        whole[..1024],
+        "the fixture splits after the first entry"
+    );
+    (gzip(whole), two)
+}
+
+#[test]
+fn a_gem_whose_payload_rubygems_reads_in_part_does_not_match_the_whole_of_it() {
+    // RubyGems reads `data.tar.gz` as its first gzip member and stops; gunzip reads every member.
+    // A payload whose last entry sat in a second member was read here as the whole tar, written
+    // again as one member, and matched an honest build of every entry, though the gem installs
+    // without the last one (`docs/16-findings.md` §3.106). The layer is not opened now, and the
+    // two compare as the bytes they are.
+    let whole = tar(&[("lib/a.rb", b"A = 1\n"), ("lib/hardening.rb", b"H = 1\n")]);
+    let (one, two) = in_two_members(&whole);
+    let gem = |data: &[u8]| tar(&[("data.tar.gz", data)]);
+    let set = profile("gem").unwrap();
+    let (honest, _) = stabilized(&set, parsed(gem(&one), Format::Tar));
+    let mut notes: Vec<Note> = Vec::new();
+    let split = parse(gem(&two), Format::Tar, &Limits::default(), &mut notes).unwrap();
+    assert!(
+        notes.iter().any(|n| n.code == NoteCode::NestedParseFailed),
+        "{notes:?}"
+    );
+    let (partial, applied) = stabilized(&set, split.archive);
+    assert!(
+        honest != partial,
+        "a gem RubyGems installs in part matched the whole of it: {applied:?}"
+    );
+}
+
+#[test]
+fn a_crate_whose_gzip_layer_holds_a_second_member_of_data_is_refused() {
+    // Cargo unpacks a `.crate` through `flate2`'s `GzDecoder`, which reads the first member and
+    // stops. Read as every member, a crate in two installed only its first member's files and
+    // matched a rebuild of all of them. It is refused, and reaches no verdict.
+    let whole = tar(&[
+        ("x-1.0/src/lib.rs", b"pub fn a() {}\n"),
+        ("x-1.0/src/b.rs", b"pub fn b() {}\n"),
+    ]);
+    let (_, two) = in_two_members(&whole);
+    let mut notes: Vec<Note> = Vec::new();
+    match parse(two, Format::TarGz, &Limits::default(), &mut notes) {
+        Err(ArchiveError::Malformed {
+            format: "gzip",
+            detail,
+        }) => assert!(
+            detail.contains("holds data after a first member"),
+            "{detail}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 // --- metadata of the other format ----------------------------------------------------------------
@@ -711,9 +937,9 @@ fn gzip_meta_declines_a_trailer_that_is_not_a_gzip_header() {
     let gz = w.finish().unwrap();
     let set = profile("tar-gzip")
         .unwrap()
-        .filtered(&["gzip-meta".into()], &[]);
+        .filtered(&["gzip-meta-v2".into()], &[]);
     let (_, applied) = stabilized(&set, parsed(gz.clone(), Format::TarGz));
-    assert!(fired(&applied, "gzip-meta"), "{applied:?}");
+    assert!(fired(&applied, "gzip-meta-v2"), "{applied:?}");
 
     let mut a = parsed(gz, Format::TarGz);
     let foreign = Trailer::Zip {

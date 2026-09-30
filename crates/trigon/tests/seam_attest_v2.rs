@@ -527,6 +527,11 @@ fn a_divergence_is_signed_as_divergence_v2_and_re_derives() {
 
 #[test]
 fn a_v1_bundle_signed_before_v2_existed_still_verifies_through_the_binary() {
+    // The signature verifies and the claim reads as it always did. Re-deriving it needs the
+    // `tar-gzip` set it was signed under, which this binary no longer carries since two of that
+    // set's passes took new ids (`docs/16-findings.md` §3.106): the binary names the set and where
+    // its manifest is published, and refutes nothing. `crates/trigon-attest/tests/verdicts.rs`
+    // re-derives the same bundles through that set.
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-statements");
     let public = std::fs::read_to_string(fixtures.join("public.hex")).unwrap();
     let d = dir("v1");
@@ -542,28 +547,42 @@ fn a_v1_bundle_signed_before_v2_existed_still_verifies_through_the_binary() {
             "divergent",
         ),
     ] {
-        let out = trigon(
-            &d,
-            &[
-                "verify-attestation",
-                fixtures.join(bundle).to_str().unwrap(),
-                "--public-key",
-                public.trim(),
-                "--rerun-comparison",
-                "--upstream",
-                fixtures.join("demo-1.0.0.tgz").to_str().unwrap(),
-                "--rebuild",
-                fixtures.join(rebuilt).to_str().unwrap(),
-            ],
-            &[],
-        );
+        let path = fixtures.join(bundle);
+        let read = [
+            "verify-attestation",
+            path.to_str().unwrap(),
+            "--public-key",
+            public.trim(),
+        ];
+        let out = trigon(&d, &read, &[]);
         let text = ok(&out);
         assert!(text.contains("signature verified"), "{bundle}: {text}");
         assert!(
             text.contains(&format!("claims    {claims}")),
             "{bundle}: {text}"
         );
-        assert!(text.contains("the claim holds"), "{bundle}: {text}");
+
+        let upstream = fixtures.join("demo-1.0.0.tgz");
+        let rebuilt = fixtures.join(rebuilt);
+        let mut rerun = read.to_vec();
+        rerun.extend([
+            "--rerun-comparison",
+            "--upstream",
+            upstream.to_str().unwrap(),
+            "--rebuild",
+            rebuilt.to_str().unwrap(),
+        ]);
+        let out = trigon(&d, &rerun, &[]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "{bundle}: re-derived under another set"
+        );
+        assert!(
+            err.contains("The set this claim was made under is `tar-gzip@4598411b636d`"),
+            "{bundle}: {err}"
+        );
+        assert!(!err.contains("refuted"), "{bundle}: {err}");
     }
 }
 

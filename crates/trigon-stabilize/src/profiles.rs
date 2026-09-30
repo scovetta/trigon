@@ -42,6 +42,10 @@ fn gzip_set() -> Vec<Arc<dyn Stabilizer>> {
 }
 
 /// Look up a profile by id.
+///
+/// The order a profile lists its passes in here decides nothing: [`StabilizerSet::new`] sorts them
+/// by stage, then by id, and that is the order they run in. A pass that has to run before another
+/// at the same stage gets there by its id.
 pub fn profile(id: &str) -> Option<StabilizerSet> {
     let members: Vec<Arc<dyn Stabilizer>> = match id {
         "tar" => tar_set(),
@@ -77,9 +81,11 @@ pub fn profile(id: &str) -> Option<StabilizerSet> {
         // what is left is packaging bookkeeping: the gallery's signature, a per-pack GUID in a
         // member name, and the name of the machine that packed it.
         "nupkg" => [
-            // **Before the zip set.** This renames entries, and `zip-entry-order` sorts them; a
-            // rename afterwards would leave the sort stale and the digest dependent on the order
-            // the two spellings happened to arrive in.
+            // This renames entries, and `zip-entry-order` sorts them, so it has to run first: a
+            // rename after the sort would leave the order stale and the digest dependent on the
+            // order the two spellings happened to arrive in. It does, because `nupkg-…` sorts
+            // before `zip-…`, as it does for `nupkg-packaging-names`, the other renaming pass.
+            // Listing it first here would not have been enough on its own.
             vec![Arc::new(NupkgPortableFolderName) as Arc<dyn Stabilizer>],
             zip_set(),
             vec![
@@ -89,8 +95,11 @@ pub fn profile(id: &str) -> Option<StabilizerSet> {
                 Arc::new(NupkgTextEol) as Arc<dyn Stabilizer>,
                 Arc::new(NupkgDocMemberOrder) as Arc<dyn Stabilizer>,
                 Arc::new(DotnetAssemblyIdentity) as Arc<dyn Stabilizer>,
-                // Last, and lossy: reduce a managed assembly to its functional
-                // code when the identity pass left a layout residual it cannot align.
+                // Lossy: reduce a managed assembly to its functional code. It runs second in the
+                // set, straight after the identity pass (`dotnet-a…` sorts before `dotnet-i…`),
+                // and on every assembly it can read, whether or not the identity pass left a
+                // layout residual behind: a `.nupkg` holding an assembly it reads reaches a clean
+                // verdict only as `exact`.
                 Arc::new(DotnetIlCanonical) as Arc<dyn Stabilizer>,
                 Arc::new(NupkgRepositoryBranch) as Arc<dyn Stabilizer>,
                 Arc::new(NupkgReadmeMarkers) as Arc<dyn Stabilizer>,
@@ -170,6 +179,7 @@ mod profile_coverage {
             "crate",
             "gem",
             "wheel",
+            "nupkg",
             "raw",
         ] {
             assert!(

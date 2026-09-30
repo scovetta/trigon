@@ -136,7 +136,7 @@ fn stabilizers_lists_a_profile_with_its_set_digest() {
         .unwrap();
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("wheel-record-v2"), "{text}");
+    assert!(text.contains("wheel-record-v3"), "{text}");
     assert!(
         text.contains("finalize"),
         "RECORD regeneration must show as a finalize pass: {text}"
@@ -177,7 +177,7 @@ fn listing_the_profiles_names_the_one_nothing_selects() {
     );
     // And the cap is described as conditional, because `compare` reads it off the passes that
     // fired rather than off the profile.
-    assert!(text.contains("wheel-record-v2 (content)"), "{text}");
+    assert!(text.contains("wheel-record-v3 (content)"), "{text}");
     assert!(
         text.contains("caps nothing on a run where it found nothing to do"),
         "{text}"

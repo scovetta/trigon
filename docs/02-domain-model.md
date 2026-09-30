@@ -285,7 +285,7 @@ pub enum Provenance { Builtin, Human { reviewer: String }, Model { model_id: Str
 ```
 
 `entries_touched` and `bytes_changed` cost nothing, since they fall out of the dirty bits the
-walker already sets, and they are the triage numbers people reach for. "`wheel-record-v2` touched
+walker already sets, and they are the triage numbers people reach for. "`wheel-record-v3` touched
 412 entries" is a diagnosis. A pass rate is a statistic.
 
 The invariant from [`00-overview.md`](00-overview.md) §3.1 becomes a function over this struct:

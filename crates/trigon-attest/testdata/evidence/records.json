@@ -5,7 +5,7 @@
     "outcome": "normalized",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-a@1.0.0",
-    "record": "sha256:339ebead967f7cced3ac1f4aa5ca4b6b7a3c46bcac14a3c2e756a00b1798aa50",
+    "record": "sha256:baa642e4b52392c10978d191db0f67ba640f24fa83e8aadae2651b8cf3b7dd96",
     "subject": "7cba4129b0181da4e195d4a468870c8a1c24db880453840d186041fca13f8331"
   },
   "a2": {
@@ -14,7 +14,7 @@
     "outcome": "normalized",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-a@1.0.0",
-    "record": "sha256:8b6b74b2c06a0422f681a025ed9f0bde86dc946cd0e2d6bbdcfb9bda45323eca",
+    "record": "sha256:d773195b709cf00a8d6dbeac0758ad30c7876d8228641dc95dfcba42c64bb565",
     "subject": "7cba4129b0181da4e195d4a468870c8a1c24db880453840d186041fca13f8331"
   },
   "b": {
@@ -23,7 +23,7 @@
     "outcome": "divergent",
     "predicateType": "https://trigon.dev/divergence/v2",
     "purl": "pkg:npm/demo-b@1.0.0",
-    "record": "sha256:ec36aacdb29e51c07c2a992001e8babebb41e5e2eb71313be72fe124d3f03023",
+    "record": "sha256:e44e577990cfde4207378ecd99b6078b14e75c374215f0195f5ed7fe0d00cf21",
     "subject": "e6e254df9e57aa84d95980525bdf2da331b73877992f183e6d9a2d9049ee6741"
   },
   "c": {
@@ -41,7 +41,7 @@
     "outcome": "exact",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-d@1.0.0",
-    "record": "sha256:5ce07046466f5f43bd987dee9d5b36cd2a71bc4302c44e2f2178f1d5e5484fa0",
+    "record": "sha256:655b32fe780338151e5283db37f9156bc35da97035c5ef514640096810c71f3f",
     "subject": "2344967826f80ba0efd280084a418a4d2b4abe46140155d1c2d64fb893664c98"
   },
   "e": {
@@ -50,7 +50,7 @@
     "outcome": "exact",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-e@1.0.0",
-    "record": "sha256:6f88ef0024b409757eff3ac5290bff67dc8e09940f155842f091d15000bcc9ac",
+    "record": "sha256:3e704cdb51656047467966ccf9be9e1d4a65a0403fb3770dc4f195cfa990343f",
     "subject": "12ed1bec483722111bd6f27ad515866481b2c4355e4ad40221b77bc73fee73f7"
   },
   "f": {
@@ -59,7 +59,7 @@
     "outcome": "normalized",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-f@1.0.0",
-    "record": "sha256:6564f0f4092d48e5fe0fdb4f0e66708f344b70f7c9b04d4ee964805bfe851071",
+    "record": "sha256:e9cf22f5bf464b6ba190d0d314e82f72b995f9229873787cbb9cb7de37303687",
     "subject": "3734ccae4380724cf7a3a29fce39fc83fd1d45188139009869118b0e660ee5ff"
   },
   "g": {
@@ -68,7 +68,7 @@
     "outcome": "normalized",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-g@1.0.0",
-    "record": "sha256:1df07f180e39752849adecbf1f040e141e0b29e8312fe711038e47ee245c8bf4",
+    "record": "sha256:035fbf1a5d35c821e23e41e18d42b180faf836d55100ae8bd80b4d7948ccdb8c",
     "subject": "3ec71381c6abffe9e2ec79728ecf1dbe1451ea57a8d75d592b18de118cd26fcf"
   },
   "h": {
@@ -77,7 +77,7 @@
     "outcome": "normalized",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-h@1.0.0",
-    "record": "sha256:0234af5b446381d490a1cfe04b231e7c50ccbee23181db0f417c145f3b3a12b6",
+    "record": "sha256:c305816d8fc2c7c87ceb7cb400a8aa6a7c7ca26000fe78294d9f351ccb1c07f1",
     "subject": "76a4d3fe91421f4227fc089ac37dfd183b8a331f83aa9dfac7d90b8d2c73a8ad"
   },
   "i": {
@@ -86,7 +86,7 @@
     "outcome": "normalized",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-i@1.0.0",
-    "record": "sha256:075308b943e181fd19d40a5fa4d4e0a196d9232b98aeb11fe4b0f6d3c175a9eb",
+    "record": "sha256:f882cfda09d1e13e6eae58f07ea98b45f98ec87d9bce60b792f8fb651dfdb452",
     "subject": "206295cfb6468ea83c25c30095ccccbdb207a5c45304f59b53e93d11ef91adfc"
   },
   "j": {
@@ -95,7 +95,7 @@
     "outcome": "normalized",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-j@1.0.0",
-    "record": "sha256:c133cb6d36b3e148e42bc8768d4aa932c1bef859ab129bd3cc1cc92356c34ba8",
+    "record": "sha256:503e83ef53bbf31f04e0baa4324d783edf9f3124382fc2fd83b19db196025426",
     "subject": "d7c33ab69ce79e780b66006696d7c268190aef7a5968f1a133c107e43d6319aa"
   },
   "k": {
@@ -104,7 +104,7 @@
     "outcome": "normalized",
     "predicateType": "https://trigon.dev/equivalence/v2",
     "purl": "pkg:npm/demo-k@1.0.0",
-    "record": "sha256:7c11a0b3120e062abed748b9e23cf0dc33601a07730caa8b73669a15c91a6c7f",
+    "record": "sha256:73457439fbe3e219e5077eb6cf60e8e41130367a57371bf44a2508f96677c6c0",
     "subject": "db81c9cc2c39ad8c4e3dc04ad346325bb3f8c2524bad6d43f53885cbe283b96a"
   },
   "w": {
@@ -113,7 +113,7 @@
     "outcome": null,
     "predicateType": "https://trigon.dev/withdrawal/v1",
     "purl": "pkg:npm/demo-d@1.0.0",
-    "record": "sha256:cbc28f3212bf3cf2f1a369f3877c87490009dc067dfab475e7b2c4e01736d93a",
+    "record": "sha256:4197668f7f106d2ccdbaae708c3dc05b39f24745a2cd769b87868f51009e7dd4",
     "subject": "2344967826f80ba0efd280084a418a4d2b4abe46140155d1c2d64fb893664c98"
   }
 }

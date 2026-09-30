@@ -72,7 +72,8 @@ fn external(bytes: &[u8]) -> Vec<Seen> {
             Some(exts) => exts
                 .map(|x| {
                     let x = x.unwrap();
-                    (x.key().unwrap().to_string(), x.value().unwrap().to_string())
+                    let value = String::from_utf8_lossy(x.value_bytes()).into_owned();
+                    (x.key().unwrap().to_string(), value)
                 })
                 .collect(),
             None => Vec::new(),
@@ -132,9 +133,9 @@ fn pax_times_are_lifted_and_every_other_record_survives_in_keyword_order() {
         (Some(1_700_000_000), Some(1_600_000_000))
     );
     // The rest are kept verbatim for the writer to re-emit.
-    let kept: BTreeMap<String, String> = [("SCHILY.xattr.user.k", "v"), ("comment", "hello")]
+    let kept: BTreeMap<String, Vec<u8>> = [("SCHILY.xattr.user.k", "v"), ("comment", "hello")]
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
         .collect();
     assert_eq!(t.pax, kept);
 
@@ -242,6 +243,106 @@ fn a_link_target_longer_than_the_header_field_is_carried_whole() {
     assert_eq!(seen[0].pax, vec![("linkpath".to_string(), target.clone())]);
     assert_eq!(seen[0].link.as_deref(), Some(target.as_bytes()));
     assert_eq!(&header(&out, b"link")[157..257], &target.as_bytes()[..100]);
+}
+
+#[test]
+fn a_long_name_or_link_target_that_is_not_utf8_is_written_as_the_bytes_it_is() {
+    // Past the hundred bytes the ustar fields hold, only a PAX record carries a name or a link
+    // target, and the writer filled the record by decoding the bytes lossily. Two entries whose
+    // names, or whose targets, differed there only in bytes that are not UTF-8 each became one
+    // record and wrote the same bytes: two packages that differed in which file they shipped, or in
+    // where a link pointed, stabilized to one digest.
+    let long = |last: u8| {
+        let mut p = format!("pkg/{}/f", "d".repeat(120)).into_bytes();
+        p.extend_from_slice(&[last, b'.', b't', b'x', b't']);
+        p
+    };
+    let mut written = Vec::new();
+    for last in [0xff, 0xfe] {
+        let name = long(last);
+        let mut b = ::tar::Builder::new(Vec::new());
+        b.append_pax_extensions([("path", &name[..])]).unwrap();
+        let mut h = ustar(2);
+        h.set_cksum();
+        b.append_data(&mut h, "file", &b"hi"[..]).unwrap();
+        b.append_pax_extensions([("linkpath", &name[..])]).unwrap();
+        let mut h = ::tar::Header::new_ustar();
+        h.set_entry_type(::tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        b.append_link(&mut h, "link", "short").unwrap();
+        let (a, _) = read(b.into_inner().unwrap());
+        assert_eq!(a.entries[0].path.as_bytes(), &name[..], "read as the bytes");
+
+        let out = write(&a);
+        let seen = external(&out);
+        assert_eq!(seen[0].path, name, "the name read back is the one written");
+        assert_eq!(
+            seen[1].link.as_deref(),
+            Some(&name[..]),
+            "and so is the target"
+        );
+        written.push(out);
+    }
+    assert_ne!(written[0], written[1]);
+}
+
+#[test]
+fn a_record_value_that_is_not_utf8_is_kept_as_its_bytes() {
+    // POSIX lets a value be binary, and an extended attribute's is as often as not: a Linux
+    // capability set is a struct. Decoded lossily, two values became one record, and two archives
+    // that differed only there compared equal in any set that keeps the records.
+    let key = "SCHILY.xattr.security.capability";
+    let mut written = Vec::new();
+    for v in [&b"\x01\xff\x00\x02"[..], b"\x01\xfe\x00\x02"] {
+        let mut b = ::tar::Builder::new(Vec::new());
+        b.append_pax_extensions([(key, v)]).unwrap();
+        let mut h = ustar(2);
+        h.set_cksum();
+        b.append_data(&mut h, "a", &b"hi"[..]).unwrap();
+        let (mut a, _) = read(b.into_inner().unwrap());
+        assert_eq!(raw(&mut a, 0).pax[key], v);
+
+        let out = write(&a);
+        let (mut back, _) = read(out.clone());
+        assert_eq!(
+            raw(&mut back, 0).pax,
+            raw(&mut a, 0).pax,
+            "parse(write(a)) == a"
+        );
+        written.push(out);
+    }
+    assert_ne!(written[0], written[1]);
+}
+
+#[test]
+fn a_pax_keyword_that_is_not_utf8_is_refused() {
+    // A keyword is text. Decoded lossily, two keywords that differed in a byte that is not UTF-8
+    // became one, and the second record overwrote the first; refused, neither is guessed at.
+    let mut b = ::tar::Builder::new(Vec::new());
+    let record = b"8 k\xffy=v\n";
+    let mut h = ::tar::Header::new_ustar();
+    h.set_entry_type(::tar::EntryType::XHeader);
+    h.set_size(record.len() as u64);
+    h.set_mode(0o644);
+    h.set_cksum();
+    b.append_data(&mut h, "PaxHeaders.0/a", &record[..])
+        .unwrap();
+    let mut h = ustar(2);
+    h.set_cksum();
+    b.append_data(&mut h, "a", &b"hi"[..]).unwrap();
+    let mut notes = Vec::new();
+    match tar::read(
+        Arc::new(SourceMap::owned(b.into_inner().unwrap())),
+        &Limits::default(),
+        &mut notes,
+    ) {
+        Err(ArchiveError::Malformed { format, detail }) => {
+            assert_eq!(format, "tar");
+            assert!(detail.contains("PAX keyword that is not UTF-8"), "{detail}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 // --- entry kinds ----------------------------------------------------------------------------------

@@ -4,17 +4,17 @@
 //! `docs/19` §4.2's list, one field at a time, at the library. `crates/trigon/tests/` holds the
 //! same list through `trigon attest`, which is where the facts come from a stored run.
 
-use trigon_archive::Limits;
+use trigon_archive::{Archive, Entry, Limits};
 use trigon_attest::{
-    AuthoredPass, DIVERGENCE_V2, EQUIVALENCE_V2, Envelope, EvidenceDigests, FalsifyingCommand,
-    LocalKey, REBUILD, Record, RunFacts, RunIdentity, Signer as _, Statement, Subject,
-    SupersedeReason, Supersession, VOID, VerdictFacts, VoidFacts, WITHDRAWAL, rederive,
-    sign_statement, verify_signature,
+    ArchivedStabilizer, AttestError, AuthoredPass, DIVERGENCE_V2, EQUIVALENCE_V2, Envelope,
+    EvidenceDigests, FalsifyingCommand, LocalKey, REBUILD, Record, RunFacts, RunIdentity,
+    Signer as _, Statement, Subject, SupersedeReason, Supersession, VOID, VerdictFacts, VoidFacts,
+    WITHDRAWAL, rederive, rederive_with, sign_statement, verify_signature,
 };
 use trigon_compare::compare_bytes;
 use trigon_core::purl::canonicalize;
-use trigon_core::{Digest, Format};
-use trigon_stabilize::profile;
+use trigon_core::{Digest, Format, StabilizerId};
+use trigon_stabilize::{Cx, Stabilizer, StabilizerSet, profile};
 
 fn tar(mtime: u64, body: &[u8]) -> Vec<u8> {
     let mut b = ::tar::Builder::new(Vec::new());
@@ -442,20 +442,91 @@ fn a_rebuild_statement_with_the_set_still_reads_in_the_types_a_verifier_already_
 /// The v1 bundles `trigon verify --attest` signed at `255d2f5`, before any of this existed.
 const V1: &str = "../trigon/tests/fixtures/v1-statements";
 
+/// A pass under the id it had when the v1 bundles were signed. On their artifacts, a flat `.tgz`
+/// with nothing nested in it, each writes what it wrote then, and the digests below prove it.
+#[derive(Debug)]
+struct AsSigned(&'static str, std::sync::Arc<dyn Stabilizer>);
+
+impl Stabilizer for AsSigned {
+    fn id(&self) -> StabilizerId {
+        StabilizerId::new(self.0)
+    }
+    fn stage(&self) -> trigon_stabilize::Stage {
+        self.1.stage()
+    }
+    fn risk(&self) -> trigon_core::RiskTier {
+        self.1.risk()
+    }
+    fn provenance(&self) -> trigon_core::Provenance {
+        self.1.provenance()
+    }
+    fn applies(&self, cx: &Cx) -> bool {
+        self.1.applies(cx)
+    }
+    fn on_archive(&self, a: &mut Archive, cx: &Cx) -> trigon_stabilize::Touched {
+        self.1.on_archive(a, cx)
+    }
+    fn on_entry(&self, e: &mut Entry, cx: &Cx) -> trigon_stabilize::Touched {
+        self.1.on_entry(e, cx)
+    }
+}
+
+/// The `tar-gzip` set the v1 bundles name: today's, with the two passes renamed since
+/// (`docs/16-findings.md` §3.106) under the ids they had.
+fn tar_gzip_as_signed() -> StabilizerSet {
+    let members = profile("tar-gzip")
+        .unwrap()
+        .members
+        .into_iter()
+        .map(|m| match m.id().as_str() {
+            "gzip-meta-v2" => std::sync::Arc::new(AsSigned("gzip-meta", m)) as _,
+            "tar-entry-order-v2" => std::sync::Arc::new(AsSigned("tar-entry-order", m)) as _,
+            _ => m,
+        })
+        .collect();
+    StabilizerSet::new("tar-gzip", members)
+}
+
+/// The module a verifier would load for that set: stabilized bytes, and no report.
+struct Archived;
+
+impl ArchivedStabilizer for Archived {
+    fn digest(&mut self, profile_id: &str) -> Result<Digest, String> {
+        match profile_id {
+            "tar-gzip" => Ok(tar_gzip_as_signed().digest()),
+            other => Err(format!("this module carries `tar-gzip`, not `{other}`")),
+        }
+    }
+
+    fn stabilize(&mut self, _: &str, format: Format, bytes: &[u8]) -> Result<Vec<u8>, String> {
+        let set = tar_gzip_as_signed();
+        let (_, archive) =
+            trigon_compare::summarize(bytes.to_vec(), format, &set, &Limits::default())
+                .map_err(|e| e.to_string())?;
+        trigon_archive::serialize(&archive, true).map_err(|e| e.to_string())
+    }
+}
+
 #[test]
 fn a_v1_bundle_signed_before_v2_existed_still_verifies_and_rederives() {
+    // Its signature verifies as it always did. Its set is the `tar-gzip` of `255d2f5`, which
+    // today's is not since two of its passes took new ids, so today's refuses to re-derive it as
+    // a set mismatch, which refutes nothing, and the set it was signed under re-derives it.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(V1);
     let public = std::fs::read_to_string(dir.join("public.hex")).unwrap();
     let upstream = std::fs::read(dir.join("demo-1.0.0.tgz")).unwrap();
-    for (bundle, rebuilt, outcome) in [
+    for (bundle, rebuilt, outcome, through_a_module) in [
         (
             "equivalence-v1.intoto.json",
             "rebuilt-demo-1.0.0.tgz",
             "normalized",
+            // A module returns bytes and no tiers, so a match it re-derives is caveated at best.
+            "normalized_with_caveats",
         ),
         (
             "divergence-v1.intoto.json",
             "diverged-demo-1.0.0.tgz",
+            "divergent",
             "divergent",
         ),
     ] {
@@ -467,14 +538,22 @@ fn a_v1_bundle_signed_before_v2_existed_still_verifies_and_rederives() {
         );
         let st: Statement = serde_json::from_slice(&env.decoded_payload().unwrap()).unwrap();
         assert!(st.predicate_type.ends_with("/v1"), "{bundle}");
-        let out = rederive(
-            &st,
-            upstream.clone(),
-            std::fs::read(dir.join(rebuilt)).unwrap(),
-        )
-        .unwrap();
-        assert!(out.holds(), "{bundle}: {out:?}");
+        let rebuilt = std::fs::read(dir.join(rebuilt)).unwrap();
+
+        let e = rederive(&st, upstream.clone(), rebuilt.clone()).unwrap_err();
+        let AttestError::SetMismatch { claimed, .. } = &e else {
+            panic!("{bundle}: expected a set mismatch, got {e}");
+        };
+        assert_eq!(
+            claimed,
+            &format!("tar-gzip@{}", &tar_gzip_as_signed().digest().to_hex()[..12])
+        );
+        assert!(!e.fails_verification(), "{bundle}: {e}");
+
+        let out = rederive_with(&st, upstream.clone(), rebuilt, Some(&mut Archived)).unwrap();
+        assert!(out.digests_match, "{bundle}: {out:?}");
         assert_eq!(out.claimed, outcome);
+        assert_eq!(out.actual.to_string(), through_a_module, "{bundle}");
     }
 }
 

@@ -13,7 +13,7 @@
 //! `nuget/build/pack` as standard MSBuild properties, which override whatever the project derived
 //! them from — as the step's literals, because they are the publisher's text and a template would
 //! evaluate it. What remains after this is the build-identity residual (signature, MVID, debug
-//! layout) that `dotnet-assembly-identity` and the build environment handle.
+//! layout) that `dotnet-assembly-identity-v2` and the build environment handle.
 
 use crate::model::{Step, StepBody, Strategy};
 use crate::render::renders_as_itself;

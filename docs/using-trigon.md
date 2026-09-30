@@ -84,7 +84,7 @@ $ trigon verify upstream.whl rebuild.whl
   stabilized   87e00f4c8084…      87e00f4c8084…      =
 
   applied
-    pyc-header               content         7 entries
+    pyc-header-v2            content         7 entries
     wheel-metadata-eol       content         1 entries
 ```
 
@@ -194,8 +194,8 @@ Most of what the verdict says is in this list, so do not skip it.
 
 ```
   applied
-    gzip-meta                metadata        1 entries
-    tar-entry-order          structural      3 entries
+    gzip-meta-v2             metadata        1 entries
+    tar-entry-order-v2       structural      3 entries
     tar-time                 metadata        3 entries
 ```
 
@@ -205,7 +205,7 @@ tiers, least to most invasive:
 
 - `structural`: reordering and framing. Changes no bytes of any member.
 - `metadata`: timestamps, modes, owners.
-- `content`: rewrites a member's bytes. `wheel-record-v2` regenerating a wheel's `RECORD` is one.
+- `content`: rewrites a member's bytes. `wheel-record-v3` regenerating a wheel's `RECORD` is one.
 - `lossy`: drops information.
 
 **`normalized` is the tier gate.** Trigon does not report `normalized` if any applied stabilizer is
@@ -234,7 +234,7 @@ transform you have not looked at.
 A line like this one
 
 ```
-  capped below `normalized`: cargo-vcs-hash is Builtin at Content risk
+  capped below `normalized`: cargo-vcs-hash-v2 is Builtin at Content risk
 ```
 
 means the two artifacts *did* stabilize to the same digest, and that the outcome is
@@ -245,11 +245,11 @@ transform to go and look at. The line appears only when the cap decided the outc
 
 ```
 $ trigon stabilizers --profile npm-tarball
-npm-tarball (562ce45ae6056536bb12b7995d670e06fcfaeee86cd59567fb7484e63aca4314)
+npm-tarball (8b992c8410f03e2b6cf47420e262f5a71d276d0cd88f330512c9ffed30cf4862)
 
-  gzip-meta          metadata    default   Builtin
-  tar-entry-order    structural  default   Builtin
-  tar-time           metadata    default   Builtin
+  gzip-meta-v2          metadata    default   Builtin
+  tar-entry-order-v2    structural  default   Builtin
+  tar-time              metadata    default   Builtin
 ```
 
 The long hex is the **set digest**, and it appears in every attestation. You cannot re-derive a

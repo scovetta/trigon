@@ -69,17 +69,19 @@ Two flow templates:
   then runs `npm pack`.
 
 ### Output and stabilizer profile
-`{name}-{version}.tgz`, tar+gzip. The profile *should* be tar set + gzip set + `npm-tarball`, which
-normalizes the `package/` prefix and drops `_resolved` / `_integrity` / `_from` fields injected by
-the installing client.
+`{name}-{version}.tgz`, tar+gzip. The profile *should* be `npm-tarball`: the tar and gzip passes and
+`npm-install-fields-v2`, which drops the `_resolved`, `_integrity`, `_from` and `_id` fields an
+installing client injects into `package.json`. Nothing normalizes the `package/` prefix: the
+design's `npm-prefix` pass was never built, and a member keeps the directory it was packed under.
 
 **It is not what runs.** The selector matches on extension — `.whl`, `.crate`, `.gem`, `.nupkg` —
 and a `.tgz` matches none of them, so every npm artifact falls to the format's fallback and gets
 plain `tar-gzip`. Every npm run in the store carries `tar-gzip`'s set digest, and
-`npm-install-fields` has never run on anything this tool has verified. `trigon stabilizers --list-profiles`
-names it: the profile exists, and nothing selects it. Fixing it is a decision about verdicts rather than a
-typo — the set digest changes, and npm statements stop matching the ones written before them — so it
-is recorded rather than quietly patched. See [`16`](16-findings.md) §3.28.
+`npm-install-fields-v2`, like the id before it, has never run on anything this tool has verified.
+`trigon stabilizers --list-profiles` names it: the profile exists, and nothing selects it. Fixing it
+is a decision about verdicts rather than a typo — the set digest changes, and npm statements stop
+matching the ones written before them — so it is recorded rather than quietly patched. See
+[`16`](16-findings.md) §3.28.
 
 ### Nondeterminism
 Mostly **dependency drift**. A floating `^` or `~` range resolves to different versions today than
@@ -163,13 +165,15 @@ We set `SOURCE_DATE_EPOCH` to the publish timestamp and set `umask 022`. Between
 lines account for most of PyPI's historical irreproducibility.
 
 ### Output and stabilizer profile
-A `.whl` (zip) or a `.tar.gz` (sdist). The wheel profile is the zip set plus `wheel-record-v2` at
-**`StageFinalize`** plus `pyc-header`. `RECORD` regeneration runs last, because earlier stabilizers
-change archive membership (any `exclude_path` in particular) and `RECORD` is a manifest of
-membership.
+A `.whl` (zip) or a `.tar.gz` (sdist). The wheel profile is the zip set plus `wheel-direct-url`,
+`pyc-header-v2`, `wheel-metadata-eol`, and `wheel-record-v3` at **`StageFinalize`**. `RECORD`
+regeneration runs last, because earlier stabilizers change archive membership (any `exclude_path` in
+particular) and `RECORD` is a manifest of membership.
 
-`RECORD` regeneration recomputes each line as `path,sha256=<urlsafe-b64-unpadded>,<size>`, sorts
-lexicographically, applies PEP 376 CSV quoting, and writes the `RECORD,,` self-line last.
+`RECORD` regeneration rewrites the wheel's own `RECORD`, the one in the `.dist-info` directory at
+the root: it recomputes each line as `path,sha256=<urlsafe-b64-unpadded>,<size>`, sorts
+lexicographically, applies PEP 376 CSV quoting, and writes the `RECORD,,` self-line last. A vendored
+distribution's `RECORD` is a member like any other.
 
 ### Nondeterminism
 Timestamps account for 87.7% of historical failures. Then umask-dependent file modes, `.pyc` header
@@ -178,10 +182,14 @@ timestamps, `RECORD` ordering, and `direct_url.json`. Build backends differ shar
 the long tail.
 
 ### Expected outcome
-`Normalized` for pure-Python wheels at a high rate. Platform-specific binary wheels built by
-`cibuildwheel` across manylinux images form the hard tail. We rebuild the ones whose manylinux image
-we can pin and run. The rest report `Unsupported { PlatformSpecificBinary }`, which states scope
-rather than failure.
+A match for pure-Python wheels at a high rate, and usually `NormalizedWithCaveats` rather than
+`Normalized`: `wheel-record-v3` is `Content` and fires whenever the published `RECORD` is not
+already in the form it writes, which it never is once another pass has changed a member. A wheel
+that gives the wheel passes nothing to do, two differing only in their zip timestamps say, matches
+as a clean `Normalized` ([`stabilizers.md`](stabilizers.md) §1.4). Platform-specific binary wheels
+built by `cibuildwheel` across manylinux images form the hard tail. We rebuild the ones whose
+manylinux image we can pin and run. The rest report `Unsupported { PlatformSpecificBinary }`, which
+states scope rather than failure.
 
 ---
 
@@ -262,7 +270,7 @@ is normally superseded by one it would pick anyway.
 output in `target/package/{name}-{version}.crate`.
 
 ### Output and stabilizer profile
-tar and gzip. The profile is the tar set plus the gzip set plus `cargo-vcs-hash`, which replaces
+tar and gzip. The profile is the tar set plus the gzip set plus `cargo-vcs-hash-v2`, which replaces
 `git.sha1` in `.cargo_vcs_info.json` with a fixed placeholder. Drop that one stabilizer and no crate
 rebuild ever compares, because the commit hash embeds the exact checkout.
 
@@ -272,8 +280,11 @@ the main gap. The `cc` crate brings back C-toolchain variability. Since RFC 3127
 handles path remapping in release profiles.
 
 ### Expected outcome
-`Normalized` at a high rate for pure-Rust crates. Crates whose build scripts embed environment data
-form the tail.
+A match at a high rate for pure-Rust crates, and `NormalizedWithCaveats` rather than `Normalized`
+for nearly all of them: `cargo-vcs-hash-v2` is `Content` and fires on every crate `cargo package`
+packaged from a git checkout. A crate with no commit hash in `.cargo_vcs_info.json` can match as a
+clean `Normalized` ([`stabilizers.md`](stabilizers.md) §1.4). Crates whose build scripts embed
+environment data form the tail.
 
 ---
 
@@ -315,8 +326,10 @@ than any other ecosystem:
 - **recursion into `data.tar.gz`**, which lives in the archive model as structure rather than as a
   stabilizer. See [`05`](05-archive-and-normalization.md), and note the prior art's swallowed-error
   bug here.
-- `gem-metadata-yaml-normalize`, for canonical YAML key ordering in `metadata.gz`,
-- `gem-metadata-date`, `gem-metadata-rubygems-version`, `gem-metadata-cert-chain`,
+- `gem-metadata-date-v2`, `gem-metadata-rubygems-version-v2`, `gem-metadata-cert-chain-v2`, which
+  rewrite three lines of the gemspec in `metadata.gz` and nothing around them. The design also
+  listed `gem-metadata-yaml-normalize`, to reformat the whole gemspec; it was not built, and
+  `corpora/deviations.toml` (`gem-metadata-yaml`) says why,
 - `gem-exclude-checksums` and `gem-exclude-signatures`, both **`RiskTier::Structural`**. They remove
   archive members, and those members are a hash of, and a signature over, the content we are
   rebuilding. Neither can differ while the content matches, and neither is content a consumer reads,
@@ -345,7 +358,7 @@ Measured rather than reasoned about: two `dotnet pack` runs over identical sourc
 **The good news is the payload.** The compiled assembly was byte-identical across two packs minutes
 apart. Roslyn's deterministic compilation is on by default for SDK-style projects, so the part of
 this ecosystem that looked hardest is already solved upstream. What is left is packaging
-bookkeeping, and the `nupkg` stabilizer profile is exactly that list:
+bookkeeping, and the `nupkg` stabilizer profile begins with that list:
 
 | Pass | Risk | What it is for |
 |---|---|---|
@@ -353,8 +366,11 @@ bookkeeping, and the `nupkg` stabilizer profile is exactly that list:
 | `nupkg-packaging-names` | structural | The core-properties part is named after a **fresh GUID every pack**, and `_rels/.rels` carries that name as a `Target` — plus relationship `Id` attributes that are themselves random and differ in case between NuGet 4.5 and 7.0. |
 | `nupkg-packager-version` | metadata | `<lastModifiedBy>`, which for Newtonsoft.Json 11.0.1 reads `NuGet.Build.Tasks.Pack, Version=4.5.0.4, …;Microsoft Windows NT 10.0.16299.0`. It names a Windows machine in 2018. |
 
-With those, two independent packs of one source reconcile to `normalized` with every member
-identical.
+With those, two independent packs of one source reconcile with every member identical. The verdict
+is `normalized_with_caveats`, not `normalized`: the profile also runs `dotnet-il-canonical-v3`,
+which is `Lossy` and replaces every managed assembly it can read with the canonical form of its
+code, identical or not. A `.nupkg` holding such an assembly reaches a clean verdict only as `exact`
+([`stabilizers.md`](stabilizers.md) §1.4).
 
 ### 5.0.1 The mirror serves a V3 feed
 
@@ -531,19 +547,30 @@ packages we tried and could not reproduce.
 mirror.
 
 ### Output and stabilizer profile
-A `.nupkg` is a zip, in the OPC packaging form. The profile is the zip set plus:
-- `nupkg-opc-ordering`, for `_rels/.rels` and `[Content_Types].xml` element ordering,
-- `nuspec-normalize`, for element ordering and whitespace in the `.nuspec`,
-- `nupkg-exclude-signature`, which drops `.signature.p7s`. It is `RiskTier::Structural`, because the
+A `.nupkg` is a zip, in the OPC packaging form. The profile is the zip set plus eight packaging
+passes and two over managed assemblies, each documented in [`stabilizers.md`](stabilizers.md):
+- `nupkg-signature`, which drops `.signature.p7s`. It is `RiskTier::Structural`, because the
   signature covers content we are rebuilding and cannot differ while that content matches.
-- `pe-deterministic`, which zeroes the PE header timestamp (a content hash under deterministic
-  builds) and normalizes the **MVID** in the assembly's module table,
-- `pdb-normalize`, for embedded portable PDBs.
+- `nupkg-packaging-names` and `nupkg-portable-folder-name`, which rename the core-properties part
+  and a portable framework's folder to one spelling, and `nupkg-doc-member-order-v2`, which sorts
+  the members of a generated XML doc, all `Structural`;
+- `nupkg-packager-version` and `nupkg-repository-branch-v2`, which drop the packing tool's name and
+  the `<repository>` branch, both `Metadata`;
+- `nupkg-text-eol` and `nupkg-readme-markers-v2`, which rewrite line endings and NuGetizer's readme
+  markers, both `Content`;
+- `dotnet-assembly-identity-v2`, `Metadata`, which zeroes an assembly's PE timestamp and checksum,
+  its strong-name signature, its debug data and its MVID, each once it is shown to be what its
+  header calls it;
+- `dotnet-il-canonical-v3`, `Lossy`, which replaces each assembly it can read with the canonical
+  form of its code, and leaves one carrying native code (ReadyToRun or mixed-mode) as it is.
 
-The PE and PDB stabilizers carry `RiskTier::Content`, because they rewrite bytes inside executable
-images. A NuGet match that needs them reports `NormalizedWithCaveats`, and we leave it there.
-Signature exclusion is `Structural` for the same reason it is on gems, so a deterministic build with
-no PE rewriting can still reach a clean `Normalized`.
+The design listed `nupkg-opc-ordering`, `nuspec-normalize`, `nupkg-exclude-signature`,
+`pe-deterministic` and `pdb-normalize` instead; `stabilizers.md` §5 maps each to what was built.
+
+The IL pass fires on every managed assembly it can read, so a `.nupkg` holding one reaches
+`NormalizedWithCaveats` at best unless its bytes are `exact`. Signature exclusion is `Structural`
+for the same reason it is on gems, and a package with no managed assembly the IL pass reads can
+still reach a clean `Normalized`.
 
 ### Nondeterminism
 Publishers who leave `ContinuousIntegrationBuild` unset, absolute source paths baked into PDBs,
@@ -551,8 +578,9 @@ MVIDs, signature files, and `dotnet pack` output that depends on the exact SDK p
 than most toolchains do.
 
 ### Expected outcome
-Lower than the other five, and reported that way. The near-term win for NuGet is **source
-attribution through SourceLink**, which works even where a byte-level rebuild does not.
+Lower than the other five, and reported that way. A match for a package that holds a managed
+assembly is `NormalizedWithCaveats` at best, short of `Exact` (§5.0). The near-term win for NuGet is
+**source attribution through SourceLink**, which works even where a byte-level rebuild does not.
 
 ---
 
@@ -579,8 +607,9 @@ runner.
 
 ### Output and stabilizer profile
 Whatever the release publishes. Format sniffing selects the profile: tar, zip, gzip, or `raw` for a
-single binary. A raw binary leaves us with format-specific stabilizers only, meaning
-`pe-deterministic` and ELF `build-id` normalization, both `RiskTier::Content`.
+single binary. `raw` has no passes, so a raw binary compares `Exact` or `Divergent` and nothing
+between. The format-specific stabilizers the design named for one, `pe-deterministic` and ELF
+`build-id` normalization, were not built.
 
 ### Expected outcome
 Variable. Release assets built inside a pinned container reproduce well. Assets built on
@@ -636,10 +665,11 @@ broken — every one of those edits is additive and most are three lines — but
 ### 7.3 Where the seam holds, and where it leaks
 
 **It holds completely in the judgement half.** For crates.io the stabilizer and archive diff is
-*empty*: `.crate` sniffs to `tar+gzip`, the filename selects the `crate` profile, `cargo-vcs-hash`
-is implemented and tested, and nineteen `pkg:cargo/` targets already run through the golden
-differential corpus. Nothing below the judgement line needs touching to add crates.io — which is
-the half that was hardest to get right and the half a wrong answer would be most expensive in.
+*empty*: `.crate` sniffs to `tar+gzip`, the filename selects the `crate` profile,
+`cargo-vcs-hash-v2` is implemented and tested, and nineteen `pkg:cargo/` targets already run through
+the golden differential corpus. Nothing below the judgement line needs touching to add crates.io —
+which is the half that was hardest to get right and the half a wrong answer would be most expensive
+in.
 
 **It leaks in the acquisition half**, and one of those leaks was silent. `ladder()` matched `Npm`,
 `PyPI` and `_ => {}`, so an ecosystem with no rung produced a `no-strategy` verdict indistinguishable

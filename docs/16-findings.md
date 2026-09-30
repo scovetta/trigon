@@ -3598,6 +3598,14 @@ Two smaller residuals closed with it, both build provenance rather than code: `n
 
 **Correction.** "A real code change still shows" was true only of the method's own bytes. The form kept each method's name, signature and IL, and an IL token is a row number or a `#US` offset — `ldstr` names its literal, `call` a MemberRef row — so a same-length string literal, a MemberRef renamed or moved to another type under the same token, a method's Flags and ImplFlags, the fat header's MaxStack and locals, and the exception-handling sections after the IL (a catch clause's type) all compared equal: a changed program could read as a caveated match. So could one that changed only what no token names but the runtime acts on — a P/Invoke's entry point (`puts` made `system`, same signature), the method that implements an explicit override, the interfaces a type implements. And it read a body or heap as the file holds it, past the `SizeOfRawData` after which the loader maps zeros, so an exception table the runtime never sees was in the form. The form now keeps every method's flags, first parameter row and whole body — header, IL and sections — and, row by row and resolved to values, every table a token or a signature can name (TypeRef, TypeDef, Field, MemberRef, StandAloneSig, ModuleRef, TypeSpec, MethodSpec) with the AssemblyRef rows a TypeRef resolves in; the declarations that decide how the code runs (Param, Constant, FieldMarshal, InterfaceImpl, MethodImpl, ImplMap, ClassLayout, FieldLayout, NestedClass, GenericParam, GenericParamConstraint, EventMap, Event, PropertyMap, Property, MethodSemantics, ExportedType); the pointer tables of the uncompressed layout; and the `#US` heap whole. Whatever a token names is in the form at that position, so a retarget under an unchanged token shows, and so does a changed declaration. Everything is read from the bytes the file backs of the section an address falls in; a body or blob that runs past them declines the assembly. Checked against `System.Reflection.Metadata` over the 6,707 PE files in a local NuGet cache and SDK: of the 6,659 the form reads, every method's name, signature, flags, first parameter row and IL, every kept row and every `#US` heap read identically, apart from two places the reference normalises what the form keeps raw (a nil ResolutionScope's tag, a ClassLayout row of zeros). The form is at most 2.2× its assembly. Ten it no longer reads are the mixed-mode C++/CLI `System.EnterpriseServices.Wrapper.dll`s, whose native method bodies were never IL the form could hold; the other 38 carry no metadata. On the rebuilds kept on disk, `moq`'s four assemblies, `castle.core`'s four from the rebuild that reproduced and the twelve in the three `polly` packages still reduce to identical forms, and `Newtonsoft.Json`'s and the stale `castle.core` rebuild's still differ. What the form still drops is named in `ilcanon.rs`: resources, custom attributes and security declarations, the data a field is initialized from (FieldRVA), the Module and Assembly rows, and the exact metadata encoding. The pass is `dotnet-il-canonical-v2`: the set digest covers pass ids and not pass code ([`19`](19-distribution-and-lookup.md) §11, open question 1), so the new form under the old id would have changed what old records re-derive to under the digest they were signed with, and a new id is a new digest that sends them to their archived set.
 
+**Correction** (2026-09-29,
+[3.106](#3106-stabilizer-defects-found-while-documenting-every-pass-two-false-matches-first)). It
+does not run last in the nupkg set, and never did. A set runs its passes by stage and then by id,
+whatever order `profiles.rs` lists them in, and `dotnet-il-canonical-v2` sorts second: it runs
+straight after `dotnet-assembly-identity`, before the packaging and zip passes. Nothing it does
+depends on running last, since no pass after it reads an assembly, and the comment in `profiles.rs`
+that called it last now says where it runs.
+
 ### 3.90 `trigon serve` shows what the stabilizers did, and how a member was reconciled
 
 A normalized verdict is only as trustworthy as a reader's ability to see what earned it. The corpus browser stated *that* passes fired; it now shows *what* each did and, where the record allows, *how* it erased a specific member's divergence.
@@ -5876,3 +5884,214 @@ note from `serve` (`seam_publishable.rs`), `attest` and `publish` (`publish.rs`)
 worker`'s start-up line still says only whether `same_host_confirmation` is on. And the threat model
 still calls the two-agreeing-attempts policy designed and not built (§1.3, D17), which §3.97 made
 stale; D37 and D38 describe it as built, and the rest is left to a pass over the model.
+
+### 3.106 Stabilizer defects found while documenting every pass: two false matches first
+
+On 2026-09-29, writing [`stabilizers.md`](stabilizers.md) from `crates/trigon-stabilize`, one pass
+at a time and each with what it changes, what it can hide and where it declines, turned up defects
+in twelve passes. Two were false matches, the one failure this project cannot have. The rest made a
+digest depend on something other than what a package holds. Every fix that changes what a pass
+writes gave the pass a new id, since the set digest covers pass ids and not pass code
+([`19`](19-distribution-and-lookup.md) §11, open question 1): twelve new ids, and a new set digest
+for every profile but `zip` and `raw`. A review of the fixes then found more false matches: in the
+checks the first fix added, in the IL pass beside it, in the branch pass, and in the parser and
+serializer under every pass. They are under **Found in review** below, and one took a thirteenth id.
+
+**The first false match: a debug entry could name code.** `dotnet-assembly-identity` zeroed whatever
+range each PE debug-directory entry named, and nothing tied the range to debug data. Two one-member
+`.nupkg` files built to show it, their `Demo.dll`s differing in 220 bytes of IL and each carrying a
+debug entry that names every byte of the file but the first, stabilized to the same bytes: the pass
+zeroed all but the `M`, `dotnet-il-canonical-v2` could read neither and declined, nothing capped,
+and `trigon verify` said `normalized`. An entry naming the `#US` heap did it more quietly: the
+literals `ldstr` reads were zeroed on both sides, the IL pass read the same zeros into its form, and
+two assemblies that differed only in a string literal verified `normalized_with_caveats`.
+`dotnet-assembly-identity-v2` zeroes a region only once it is shown to be identity. `occupied`, in
+`ilcanon.rs`, delimits everything the assembly holds, from the walk the canonical form already
+makes: the headers, each PE data directory but the debug directory, the CLI header and the
+directories it names, the metadata root and every stream but `#GUID`, every table's rows, every
+method body with its exception sections, the data FieldRVA rows name (as long as the field's type
+says, or to the end of the section), and the entry point's stub. The strong-name signature, the
+debug directory, each entry's data and `#GUID` must lie in the file, clear of all of that and of one
+another; each debug entry must be a CodeView record, a PDB checksum, an embedded portable PDB or a
+Reproducible entry, laid out as that type is; and every heap index must stay inside its heap, so
+nothing but a GUID column reads what is zeroed. An assembly with native code, which has no extent
+the metadata states, or any one region that fails, is left whole: never zeroed in part.
+
+**The second: invalid UTF-8 became U+FFFD.** Seven passes edited text they decoded with
+`String::from_utf8_lossy` (`cargo-vcs-hash`, `npm-install-fields`, the three `gem-metadata-*`,
+`nupkg-repository-branch`, `nupkg-readme-markers`), and wrote the replacement characters back when
+they rewrote a member. Two gems whose gemspecs differ in one byte, 0xFF against 0xFE, each with a
+`date:` line, verified `normalized`. Each now takes the member's text only if it is valid UTF-8
+(`text_of`), and otherwise leaves the member exactly as it is.
+
+**The others.**
+
+- `pyc-header` never read the magic number and took every header for PEP 552's. In a `.pyc` from
+  before 3.7 the second word is the mtime itself, so the pass zeroed bytes 8 to 12, the source size
+  on 3.3 to 3.6 and the first bytes of the code object on Python 2, whenever the mtime was even, and
+  nothing when it was odd. Two 3.6 `.pyc`s with one code object and different recorded source sizes
+  verified `normalized_with_caveats`. `pyc-header-v2` recognises the header by its magic (Python 2's
+  by name, Python 3's by range: 8 bytes to 3209, 12 to 3391, PEP 552's 16 from 3392) and zeroes the
+  mtime where that header puts it; a hash-based `.pyc`, undefined flags and an unknown magic are
+  left alone.
+- `wheel-record-v2` rewrote the first `.dist-info/RECORD` in path order, which in
+  `zzz-1.0-py3-none-any.whl` is `aaa/_vendor/dep-1.0.dist-info/RECORD`: the vendored one was
+  regenerated and the wheel's own compared as published, so two such wheels whose own RECORDs
+  differed were `divergent`. `wheel-record-v3` rewrites the RECORD of the one `.dist-info` at the
+  root, as the wheel format places it, and none when the root holds two, which pip refuses.
+- `tar-entry-order` sorted without marking anything changed, so a nested tar no other pass touched
+  went out as it arrived, unsorted. Two `.tgz` files built to show it, `x.tgz` and `y.tgz`, each
+  ship one `pkg/inner.tar.gz` whose two entries are in the form the tar passes leave, sorted in `x`
+  and not in `y`: `divergent`, with the pass in `applied`. Marking only a sort was not enough for
+  that pair, since `x`'s inner archive then still went out as it arrived, deflated by Python at
+  level 9, and `y`'s was written again uncompressed. `tar-entry-order-v2` marks an archive it sorts,
+  and every nested tar besides, so a nested tar's bytes are the serializer's whether or not any tar
+  pass had work in it.
+- A gzip layer no pass changed went out as it arrived, so its compression level reached the digest.
+  The code says which layers are meant to be written again: the serializer writes gzip at no
+  compression "so that no encoder's behaviour reaches a signed digest", `gem-exclude-checksums`
+  rests on "framing that `gzip-meta` and re-serialization normalize", and `has_gzip` gives
+  `gzip-meta` only the outermost layer and the three the gem format defines. `flatten` and
+  [`05`](05-archive-and-normalization.md) §2.2 (4a) say as plainly that a `.gz` a package ships is a
+  deliverable, written back as it arrived. So `gzip-meta-v2` marks each gem framing layer and it is
+  written again, and a shipped `.gz` of anything but a tar keeps its bytes: a limit on purpose,
+  documented in `stabilizers.md` §1.2. Two wheels shipping one `pkg/data.gz` at levels 1 and 9 are
+  still `divergent`.
+- Documentation that contradicted the code, now in line with `stabilizers.md`: docs/03 §1 (no pass
+  normalizes the `package/` prefix), §4 (`gem-metadata-yaml-normalize` was not built), §5 (the five
+  NuGet passes it listed do not exist; the real ones are listed), §5.0 and the expected outcomes of
+  wheels, crates and NuGet (the verdict ceilings), §6 (`raw` has no passes); docs/05's §2.2 (7)
+  table (`tar-owners` zeroes the owners of an unrecognised entry), its tier table (the PE timestamp
+  and MVID are zeroed at `Metadata`), (4a), and §3, whose passes "emit a note" but have nowhere to
+  put one and decline silently, as `lib.rs` rule 3 now says too; §3.89 above, whose IL pass runs
+  second and not last; the UI's descriptions (`STABILIZER_DOCS`) of eleven passes, and an entry for
+  `wheel-direct-url-drop`, which never existed; comments in `profiles.rs` and `passes.rs`; and
+  `main.rs`, where the doc comments of `resolve_profile` and `BY_EXTENSION` had drifted onto
+  `MIRROR_IMAGE`. The profile coverage test's reverse list now names `nupkg`.
+
+**Found in review.**
+
+- The identity pass's new checks left content out of what `occupied` holds, and the pass zeroed it.
+  A ClassLayout `ClassSize` of 0, which ECMA-335 §II.22.8 makes no `.size` at all, was read as a
+  length of no bytes, so the data a FieldRVA row names for a `Pack=1` struct with no `Size` was not
+  held. The review laid a strong-name signature over such data and gave the assembly 8,000 MethodDef
+  rows naming one 64 KB name, so that the IL form outgrew four times the file and the IL pass
+  declined: two packages of different static data stabilized to one, a clean `normalized`. A size
+  is now read only from a `ClassSize` that is not 0, of a type with no fields, named by one row.
+  Three more holes were of the same kind. An address below `SizeOfHeaders` that no section maps was
+  taken to be nowhere, where the loader reads it from the headers, so a FieldRVA row or a directory
+  could name the timestamp or checksum the pass zeroes; such an address is now placed in the
+  headers, and one nothing places declines the assembly. A `#GUID` heap laid over the metadata root
+  or the stream directory was zeroed as an MVID, those bytes with it; it now has to lie after the
+  directory, inside the metadata the CLI header states. And what the import and resource directories
+  point at (DLL and function names, lookup tables, resource data) and the slots VTable fixups name
+  were not held; they are now, and exports, exception data, TLS, load configuration, bound and delay
+  imports, which point at native code or tables of their own and which no managed compiler writes,
+  decline the assembly.
+- The identity pass read each debug record as the entry naming it came, and only then checked the
+  records for overlap, so 2,000 entries naming one 64 KB record read 128 MB before the pass
+  declined, a cost that grows with the square of the file. Every entry's data is placed first now,
+  and an overlap declines before a record is read.
+- **What it does not do**, below, said the identity pass's zeroing reached a digest only in a set
+  narrowed without the IL pass. That was not so: the IL pass declines a form past four times the
+  file, and the identity pass acted on such an assembly alone, which is how the static-data pair
+  above reached a clean verdict. The identity pass now acts only where the IL pass reads the zeroed
+  assembly to the same form as the published one, so in the `nupkg` profile its zeroing never
+  reaches a digest: the IL pass replaces the assembly with a form the zeroing did not change.
+- `dotnet-il-canonical-v2` declined a method whose body was native, and read the rest of an image
+  that carried native code no method named: a ReadyToRun image, whose precompiled methods the
+  runtime runs in place of their IL, and a mixed-mode image with a native entry point. Two such
+  images of one IL and different native code matched as `normalized_with_caveats`, the class of the
+  `#US` case above. `dotnet-il-canonical-v3` declines on the CLI header's word: ILONLY clear,
+  NATIVE_ENTRYPOINT set, or a ManagedNativeHeader. Of the 6,356 managed assemblies in the local
+  NuGet cache and SDK, 414 say so and are now left as they are: the SDK's 394 ReadyToRun
+  assemblies, the ten `System.EnterpriseServices.Wrapper.dll` files `-v2` already declined, and ten
+  mixed-mode .NET Framework assemblies from reference packages that `-v2` read.
+- A gzip file was read as every member's content, as gunzip, Node and Python read one, and RubyGems
+  and Cargo read the first member alone. A gem whose `data.tar.gz` put its last entry in a second
+  member stabilized to the same bytes as an honest build of both entries, a clean `normalized`, and
+  RubyGems installs it without the second. `gzip::read` now refuses a file whose members after the
+  first hold data: nested, the member stays as the bytes it is, with a note; as the artifact, it
+  reaches no verdict. The cause predates this round, but `gzip-meta-v2` and `tar-entry-order-v2`,
+  which write every gem framing layer and nested tar again, no longer needed another pass to have
+  changed something for the collapse to reach the digest.
+- The tar writer put a name or link target over 100 bytes into its PAX record through a lossy
+  decode, and the reader decoded every PAX value the same way, so two entries whose long names
+  differed only in bytes that are not UTF-8 wrote the same bytes, and two records became one. Names,
+  link targets and record values are bytes end to end now, and a PAX keyword that is not UTF-8 is
+  refused. Neither this nor the gzip change is a pass, so neither has an id; every profile whose
+  output they can change took a new set digest in this round, and `zip` and `raw` write a nested
+  tar or gzip file back as it arrived, before and after.
+- `nupkg-repository-branch`, and `-v2` as first written, removed the text from the first
+  ` branch="` in the `<repository>` tag to the next quote, inside another attribute's value too:
+  `url="https://example.com/r branch=" commit="0123…"` lost its commit and matched a nuspec with
+  another URL and none, a clean `normalized`. `-v2` now reads the tag attribute by attribute. It had
+  not been published, so it kept its id; the superseded entry for the first records the defect.
+- Documentation still at odds with `stabilizers.md`: [`14`](14-worked-examples.md) built three
+  profiles from `npm-prefix`, `wheel-generator` and `gem-metadata-yaml-normalize`, which were never
+  built, and read the gem verdict past a `Content` pass it listed; docs/05's §3.1 called its table
+  the first design and listed `wheel-record-v2`; the §3.89 correction above linked an anchor that
+  does not exist; and `stabilizers.md` gave the first false match's repro as 240 bytes of code, the
+  test fixture's figure, where the repro's is 220.
+
+**The renames.**
+
+| Old id | New id |
+|---|---|
+| `dotnet-assembly-identity` | `dotnet-assembly-identity-v2` |
+| `cargo-vcs-hash`, `npm-install-fields`, `gem-metadata-date`, `gem-metadata-rubygems-version`, `gem-metadata-cert-chain`, `nupkg-repository-branch`, `nupkg-readme-markers` | each with `-v2` |
+| `pyc-header` | `pyc-header-v2` |
+| `wheel-record-v2` | `wheel-record-v3` |
+| `tar-entry-order` | `tar-entry-order-v2` |
+| `gzip-meta` | `gzip-meta-v2` |
+| `dotnet-il-canonical-v2` | `dotnet-il-canonical-v3` |
+
+| Profile | Set digest before | Set digest after |
+|---|---|---|
+| `tar` | `c294a4d0c8a7…` | `a1b74ac55ad4…` |
+| `tar-gzip` | `4598411b636d…` | `cadb3a863443…` |
+| `gzip` | `ef4835dee29e…` | `e7b47b1ed937…` |
+| `npm-tarball` | `562ce45ae605…` | `8b992c8410f0…` |
+| `crate` | `fcd80dd27bb9…` | `5ac2049396f6…` |
+| `gem` | `cc5a0b733412…` | `b7f07d65a95c…` |
+| `wheel` | `738725964c4a…` | `188d208b5a9e…` |
+| `nupkg` | `e473a7e21721…` | `d7edf6128800…` |
+
+Each old id keeps an entry in `stabilizers.md` marked superseded, with the last digests that carried
+it, and the UI keeps a description of each. `npm-install-fields` took a new id though nothing
+selects `npm-tarball` and no record names it (§3.28): the rule is kept without exceptions.
+`crates/trigon-attest/tests/renamed_pass.rs` rebuilds the `wheel` set published before 62781a8 by
+giving `wheel-record-v3` and `pyc-header-v2` their old ids back, and it still hashes to
+`58632c3c627d…`.
+
+**What the renames moved.** Every record signed under one of the eight old sets is now refused by
+today's as a set mismatch, which refutes nothing, and re-derives through its archived set. The
+repository's own fixtures show both. The golden evidence repository (`testdata/evidence/`), whose
+records name the `tar` set, was rewritten by its writer (`TRIGON_WRITE_GOLDEN=1`): record digests,
+set manifests, comparison reports, the index and the log moved, and the artifacts, subjects and
+outcomes did not. The v1 bundles signed at `255d2f5` name the `tar-gzip` set of then: the binary
+still verifies their signatures and now names that set rather than re-deriving them, and
+`crates/trigon-attest/tests/verdicts.rs` re-derives them through it, rebuilt from today's passes
+under the ids they had.
+
+**Checked.** Each repro through `trigon verify`, built from the commit before this change and from
+this one: the two `.nupkg` pairs, `normalized` and `normalized_with_caveats`, are now `divergent`;
+the gem pair, `normalized`, is `divergent`; the 3.6 `.pyc` pair, `normalized_with_caveats`, is
+`divergent`; `x.tgz` against `y.tgz`, `divergent`, is `normalized`; the `zzz` pair, `divergent`, is
+`normalized_with_caveats`. The tests that pin each defect (`dotnet_assembly.rs`, `invalid_utf8.rs`,
+`pyc_header.rs`, `archive_passes.rs`) were run against the stabilizer code of the commit before,
+with the ids mapped back: nineteen fail there and pass here. The 63 golden digests of `m0` and
+`m0-smoke` did not move; their `applied` lists name the new ids, which is the only change, so
+nothing was re-golded. Each fix the review asked for was then reverted on its own, and each time a
+test written for it failed: the static-data pair, the native-code pairs, the gem and crate of two
+members, the long names, the branch inside a URL, the directories' targets, the cost of the debug
+records by count of bytes read, and the `#GUID` placement, which the form check also covers, by a
+unit test of `occupied` alone.
+
+**What it does not do.** The identity pass's zeroing never reaches a `nupkg` digest now, by
+construction rather than by the argument this paragraph first made (above), so its checks stand
+between it and a digest only in a set narrowed without the IL pass, which `trigon stabilize
+--disable-passes` makes and no verdict is reached under. A shipped `.gz` of anything but a tar, and
+any archive inside a wheel, a `.nupkg` or a zip, still reaches the digest as it was compressed. A
+gzip file whose later members hold data, rare in a package and legal by RFC 1952, reaches no verdict
+as an artifact, where it had one.

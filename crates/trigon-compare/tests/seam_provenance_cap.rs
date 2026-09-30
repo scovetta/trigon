@@ -89,7 +89,7 @@ fn leaves_normalized_reachable(risk: RiskTier, provenance: &Provenance) -> bool 
         RiskTier::Structural => true,
         // Timestamps, modes, owners: the benign nondeterminism this project exists to absorb.
         RiskTier::Metadata => true,
-        // Rewrites bytes inside a distributed file. `wheel-record-v2` is the builtin example, and
+        // Rewrites bytes inside a distributed file. `wheel-record-v3` is the builtin example, and
         // it is why a wheel that needed its RECORD regenerated cannot present as a clean match.
         RiskTier::Content => false,
         // Discards information outright.
@@ -342,7 +342,7 @@ fn the_outcome_is_the_same_whichever_artifact_is_called_upstream() {
 /// that every crates.io artifact carries.
 ///
 /// Built from the shipped `crate` profile rather than from a test-only stabilizer on purpose.
-/// `cargo-vcs-hash` is a **builtin** pass at `Content` risk (`passes.rs`), and it fires on every
+/// `cargo-vcs-hash-v2` is a **builtin** pass at `Content` risk (`passes.rs`), and it fires on every
 /// `.crate` there is, so the behaviour below is not a contrivance that needs a model-authored pass
 /// to reach — it is what `trigon verify` does on the crates.io path today.
 fn crate_file(body: &[u8], sha1: &str) -> Vec<u8> {
@@ -439,7 +439,7 @@ fn cap_reason_speaks_exactly_when_the_cap_actually_decided_the_outcome() {
         divergent
             .applied()
             .iter()
-            .any(|a| a.id.as_str() == "cargo-vcs-hash"),
+            .any(|a| a.id.as_str() == "cargo-vcs-hash-v2"),
         "the builtin content-risk pass has to have fired for this to be the case it looks like"
     );
     if let Some(r) = divergent.cap_reason() {
@@ -455,7 +455,7 @@ fn cap_reason_speaks_exactly_when_the_cap_actually_decided_the_outcome() {
         exact
             .applied()
             .iter()
-            .any(|a| a.id.as_str() == "cargo-vcs-hash"),
+            .any(|a| a.id.as_str() == "cargo-vcs-hash-v2"),
         "the builtin content-risk pass has to have fired for this to be the case it looks like"
     );
     if let Some(r) = exact.cap_reason() {

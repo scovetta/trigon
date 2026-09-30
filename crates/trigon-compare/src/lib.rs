@@ -195,9 +195,9 @@ impl Comparison {
     /// whatever the outcome was, and `trigon verify` prints the answer — so a `divergent` run was
     /// told "capped below `normalized`: cargo-vcs-hash is Builtin at Content risk" when nothing had
     /// been capped and the artifacts simply differed, and an `exact` run was told the same when
-    /// `Exact` outranks `Normalized` and nothing was below anything. `cargo-vcs-hash` is `Content`
-    /// risk and fires on any crate carrying `.cargo_vcs_info.json`, so that was every crates.io
-    /// artifact the tool has ever looked at.
+    /// `Exact` outranks `Normalized` and nothing was below anything. `cargo-vcs-hash-v2` is
+    /// `Content` risk and fires on any crate carrying `.cargo_vcs_info.json`, so that was every
+    /// crates.io artifact the tool has ever looked at.
     pub fn cap_reason(&self) -> Option<String> {
         if self.outcome != Match::NormalizedWithCaveats {
             return None;
@@ -224,7 +224,7 @@ pub fn caps_normalized(a: &Applied) -> bool {
 /// Distinct from [`Comparison::cap_reason`], which is gated on an outcome that has already been
 /// capped and so says nothing about a run that diverged. This answers the question a reader of a
 /// `divergent` run actually has: *if the remaining differences were fixed, what would this get?*
-/// For a crate that is `normalized_with_caveats` and not `normalized`, because `cargo-vcs-hash`
+/// For a crate that is `normalized_with_caveats` and not `normalized`, because `cargo-vcs-hash-v2`
 /// fires at `Content` risk on every crates.io artifact there has ever been.
 ///
 /// [`Match::Exact`] is not among the answers and that is not an omission: identical bytes are

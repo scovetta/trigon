@@ -70,24 +70,31 @@ pub fn read(src: Arc<SourceMap>, limits: &Limits, notes: &mut Vec<Note>) -> Resu
         }
 
         // PAX records: the ones we synthesize on the way out are lifted into typed fields, the
-        // rest are preserved verbatim and re-emitted in keyword order.
-        let mut pax: BTreeMap<String, String> = BTreeMap::new();
-        let mut pax_mtime: Option<String> = None;
-        let mut pax_atime: Option<String> = None;
-        let mut pax_ctime: Option<String> = None;
+        // rest are preserved verbatim and re-emitted in keyword order. A value is kept as its
+        // bytes, which POSIX lets be binary; a keyword is text, and one that is not is refused
+        // rather than decoded into one another keyword could decode into too.
+        let mut pax: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut pax_mtime: Option<Vec<u8>> = None;
+        let mut pax_atime: Option<Vec<u8>> = None;
+        let mut pax_ctime: Option<Vec<u8>> = None;
         let mut had_pax_path = false;
         if let Ok(Some(exts)) = e.pax_extensions() {
             for ext in exts.flatten() {
-                let key = String::from_utf8_lossy(ext.key_bytes()).into_owned();
-                let val = String::from_utf8_lossy(ext.value_bytes()).into_owned();
-                match key.as_str() {
+                let Ok(key) = std::str::from_utf8(ext.key_bytes()) else {
+                    return Err(ArchiveError::Malformed {
+                        format: "tar",
+                        detail: format!("entry {ordinal}: a PAX keyword that is not UTF-8"),
+                    });
+                };
+                let val = ext.value_bytes().to_vec();
+                match key {
                     "path" => had_pax_path = true,
                     "linkpath" | "size" => {}
                     "mtime" => pax_mtime = Some(val),
                     "atime" => pax_atime = Some(val),
                     "ctime" => pax_ctime = Some(val),
                     _ => {
-                        pax.insert(key, val);
+                        pax.insert(key.to_string(), val);
                     }
                 }
             }
@@ -243,8 +250,8 @@ fn classify(typeflag: u8, linkname: &[u8], major: u32, minor: u32) -> EntryKind 
 
 /// PAX times are decimal seconds with an optional fraction. We keep whole seconds; a fraction is
 /// dropped, and the record is regenerated from the integer on the way out.
-fn parse_pax_time(s: Option<&str>) -> Option<i64> {
-    let s = s?;
+fn parse_pax_time(s: Option<&[u8]>) -> Option<i64> {
+    let s = std::str::from_utf8(s?).ok()?;
     let whole = s.split_once('.').map(|(a, _)| a).unwrap_or(s);
     whole.parse::<i64>().ok()
 }
@@ -305,7 +312,7 @@ fn write_entry<W: Write>(e: &Entry, w: &mut W) -> Result<()> {
         body.len() as u64
     };
 
-    let mut pax: BTreeMap<String, String> = raw.pax.clone();
+    let mut pax: BTreeMap<String, Vec<u8>> = raw.pax.clone();
 
     // `path`: a name over 100 bytes always takes a PAX record, and the ustar `prefix` field is
     // never used. ustar could carry some of these names as a 155-byte prefix plus a 100-byte name,
@@ -313,40 +320,42 @@ fn write_entry<W: Write>(e: &Entry, w: &mut W) -> Result<()> {
     // the slashes fall. Two paths of the same length would then be framed differently. Emitting
     // PAX for every long name removes that per-entry choice from a signed digest, and it is what a
     // writer pinned to the PAX format does. See docs/05 §2.1.
+    //
+    // The name and the link target go into their records as the bytes they are, as the reader
+    // took them. Decoded lossily, two names that differed past their hundredth byte only in bytes
+    // that are not UTF-8 became one record, and with the header field holding the first hundred
+    // bytes of each, two entries wrote the same bytes (`docs/16-findings.md` §3.106). POSIX would
+    // put `hdrcharset=BINARY` ahead of such a value; the `tar` crate, which reads it back, takes the
+    // bytes either way, and a record written here would come back as one the archive carried.
     let name_bytes = e.path.as_bytes();
     if name_bytes.len() > NAME_LEN {
-        pax.insert(
-            "path".into(),
-            String::from_utf8_lossy(name_bytes).into_owned(),
-        );
+        pax.insert("path".into(), name_bytes.to_vec());
     }
 
     if raw.linkname.len() > NAME_LEN {
-        pax.insert(
-            "linkpath".into(),
-            String::from_utf8_lossy(&raw.linkname).into_owned(),
-        );
+        pax.insert("linkpath".into(), raw.linkname.clone());
     }
+    let mut number = |key: &str, n: String| pax.insert(key.into(), n.into_bytes());
     if size > MAX_OCTAL_12 {
-        pax.insert("size".into(), size.to_string());
+        number("size", size.to_string());
     }
     if raw.uid > MAX_OCTAL_8 {
-        pax.insert("uid".into(), raw.uid.to_string());
+        number("uid", raw.uid.to_string());
     }
     if raw.gid > MAX_OCTAL_8 {
-        pax.insert("gid".into(), raw.gid.to_string());
+        number("gid", raw.gid.to_string());
     }
     // ustar has no atime or ctime field, so a value there is only representable as PAX. This is why
     // `tar-time` "forces PAX": it sets atime, and atime cannot survive otherwise.
     if let Some(t) = raw.atime {
-        pax.insert("atime".into(), t.to_string());
+        number("atime", t.to_string());
     }
     if let Some(t) = raw.ctime {
-        pax.insert("ctime".into(), t.to_string());
+        number("ctime", t.to_string());
     }
     let mtime = e.meta.mtime.unwrap_or(0);
     if mtime < 0 || mtime as u64 > MAX_OCTAL_12 {
-        pax.insert("mtime".into(), mtime.to_string());
+        number("mtime", mtime.to_string());
     }
 
     if !pax.is_empty() {
@@ -406,7 +415,7 @@ fn write_entry<W: Write>(e: &Entry, w: &mut W) -> Result<()> {
 
 /// A PAX extended header is itself a tar entry with typeflag `x`, whose body is the records.
 fn write_pax_header<W: Write>(
-    pax: &BTreeMap<String, String>,
+    pax: &BTreeMap<String, Vec<u8>>,
     for_name: &[u8],
     w: &mut W,
 ) -> Result<()> {
@@ -442,7 +451,7 @@ fn write_pax_header<W: Write>(
 
 /// `"%d %s=%s\n"`, where the length counts itself. Adding a digit can push the length over a power
 /// of ten, so the length is a fixpoint rather than a calculation.
-fn pax_record(key: &str, value: &str) -> Vec<u8> {
+fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
     let payload = key.len() + 1 + value.len() + 1; // key=value\n
     let mut len = payload + 1; // one digit for the length, plus the space
     loop {
@@ -453,7 +462,10 @@ fn pax_record(key: &str, value: &str) -> Vec<u8> {
         }
         len = candidate;
     }
-    format!("{len} {key}={value}\n").into_bytes()
+    let mut out = format!("{len} {key}=").into_bytes();
+    out.extend_from_slice(value);
+    out.push(b'\n');
+    out
 }
 
 /// `dir/PaxHeaders.0/file`, truncated to the name field. Matching the convention Go and GNU tar use
@@ -533,10 +545,10 @@ mod tests {
     #[test]
     fn pax_record_length_is_a_fixpoint() {
         // "9 x=y\n" is 6 bytes, so the length is 6, not 9.
-        assert_eq!(pax_record("x", "y"), b"6 x=y\n".to_vec());
+        assert_eq!(pax_record("x", b"y"), b"6 x=y\n".to_vec());
         // A record whose length crosses a power of ten has to grow its own digit count.
         let long = "a".repeat(92);
-        let r = pax_record("path", &long);
+        let r = pax_record("path", long.as_bytes());
         let len: usize = String::from_utf8_lossy(&r)
             .split(' ')
             .next()

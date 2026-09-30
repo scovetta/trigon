@@ -18,8 +18,8 @@ pub struct Archive {
     /// (`container:tar.trailing`), and no pass clears them. They live here and not in the trailer
     /// because a `.tar.gz`'s trailer is its gzip header. See [`crate::tar::read`].
     pub tar_trailing: Vec<u8>,
-    /// Set when a pass changes the container itself, as distinct from any of its members. Only the
-    /// trailer lives there, so only a trailer pass sets it.
+    /// Set when a pass changes the container itself, as distinct from any of its members: its
+    /// trailer, or the order its members are written in, which no one member holds.
     pub(crate) trailer_dirty: bool,
 }
 
@@ -191,8 +191,10 @@ pub struct TarRaw {
     pub atime: Option<i64>,
     pub ctime: Option<i64>,
     /// Extended records other than the ones the writer synthesizes (`path`, `linkpath`, `size`,
-    /// `mtime`, `atime`, `ctime`). Sorted, because PAX records are emitted in keyword order.
-    pub pax: BTreeMap<String, String>,
+    /// `mtime`, `atime`, `ctime`). Sorted, because PAX records are emitted in keyword order. A value
+    /// is the bytes the record holds: an extended attribute's is binary as often as not, and two
+    /// values decoded lossily into one string were one record.
+    pub pax: BTreeMap<String, Vec<u8>>,
     /// The input encoded a long name using a GNU `L` entry rather than a PAX record. We always emit
     /// PAX, so this drives `NoteCode::LongNameReencoded`.
     pub long_name_was_gnu: bool,
@@ -381,6 +383,13 @@ impl Archive {
     /// Mark the container itself as changed. A pass that edits the trailer calls this; a pass that
     /// edits a member marks the entry instead.
     pub fn mark_trailer_dirty(&mut self) {
+        self.trailer_dirty = true;
+    }
+
+    /// Mark the order of the members as changed. A pass that sorts calls this: the order belongs
+    /// to the container rather than to any member, so marking no entry left a nested archive whose
+    /// only change was its order written back as it arrived, unsorted.
+    pub fn mark_order_dirty(&mut self) {
         self.trailer_dirty = true;
     }
 

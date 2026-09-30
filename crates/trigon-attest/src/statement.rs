@@ -214,7 +214,7 @@ fn digests(m: &trigon_core::MultiDigest, bytes: Option<u64>) -> serde_json::Valu
 pub(crate) fn equivalence_predicate(c: &Comparison) -> serde_json::Value {
     // **Both sides.** `apply` returns only the stabilizers that actually changed something, so the
     // two sides routinely differ: a wheel whose `RECORD` needed regenerating on the rebuild and not
-    // upstream produces a `wheel-record-v2` entry on one side only, and that pass is `Content`
+    // upstream produces a `wheel-record-v3` entry on one side only, and that pass is `Content`
     // risk. Reading `c.upstream.applied` here — as this did — left such a pass out of the signed
     // document while `compare()` correctly counted it in the cap, so the statement could read
     // `allBuiltin: true` and `maxRiskApplied: metadata` beside an outcome of

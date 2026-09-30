@@ -482,7 +482,7 @@ fn the_archived_set_reads_an_assembly_whose_offsets_overflow_32_bits_as_the_nati
         ("with its metadata off a 4-byte boundary", &skewed),
     ] {
         let applied = native_applied("nupkg", nupkg(dll));
-        for id in ["dotnet-assembly-identity", "dotnet-il-canonical-v2"] {
+        for id in ["dotnet-assembly-identity-v2", "dotnet-il-canonical-v3"] {
             assert!(
                 applied.iter().any(|a| a == id),
                 "{what}: `{id}` did not read the fixture: {applied:?}"
@@ -559,13 +559,12 @@ fn the_archived_set_reads_an_assembly_whose_offsets_overflow_32_bits_as_the_nati
             patched(&base, &[(blob, 0xffff_ff00)]),
         ),
         (
-            // `dotnet-il-canonical-v2` would replace whatever the identity pass zeroed, so it is
-            // made to decline, and the identity pass's own reading is what reaches the bytes.
-            "a #GUID stream 0xffff_ff00 past the metadata, in an assembly read only for identity",
-            patched(
-                &base,
-                &[(guid, 0xffff_ff00), (at.typeref_count, 0x3000_0000)],
-            ),
+            // Only the identity pass reads `#GUID`, where it adds the stream's offset to the
+            // metadata's to place the heap it would zero. Placed past the file, the heap is not
+            // shown to be one and the pass declines, and `dotnet-il-canonical-v3`, which never
+            // reads `#GUID`, reads the assembly as it would without it.
+            "a #GUID stream 0xffff_ff00 past the metadata",
+            patched(&base, &[(guid, 0xffff_ff00)]),
         ),
     ];
     for (what, dll) in cases {

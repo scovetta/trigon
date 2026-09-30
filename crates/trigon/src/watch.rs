@@ -2000,8 +2000,8 @@ async fn compare(
 ///
 /// The question a reader of a `divergent` run actually has, and one no page has answered: *if the
 /// remaining differences went away, what would this get?* For a crate, never `normalized` —
-/// `cargo-vcs-hash` fires at `Content` risk on every crates.io artifact there has ever been, so a
-/// perfect crate rebuild is `normalized_with_caveats` and the caveat is structural rather than
+/// `cargo-vcs-hash-v2` fires at `Content` risk on every crates.io artifact there has ever been, so
+/// a perfect crate rebuild is `normalized_with_caveats` and the caveat is structural rather than
 /// anything about that package.
 ///
 /// The ceiling is asked of `trigon-compare`, not computed here. The cap rule has one home by
@@ -2064,7 +2064,7 @@ fn ceiling_panel(applied: &[trigon_stabilize::Applied], outcome: Option<&str>) -
 
 /// Which passes did the work, how much, and under whose authority.
 ///
-/// Bar length is `entries_touched`, which `docs/02` calls the triage number: "wheel-record-v2
+/// Bar length is `entries_touched`, which `docs/02` calls the triage number: "wheel-record-v3
 /// touched 412 entries" is a diagnosis. Risk is the colour. Provenance is a column, and it is new —
 /// the field has existed as long as `Applied` has and no page had ever rendered it.
 fn ledger_table(applied: &[trigon_stabilize::Applied]) -> String {
@@ -2596,7 +2596,7 @@ fn member_diffs(
 /// published in 2018 and one built this morning is exactly the fields this hashes.
 ///
 /// **`ordinal` is deliberately out.** It is the member's position *as parsed*, kept as a sort
-/// tiebreaker and never rewritten — so it survives the very reordering `tar-entry-order` and
+/// tiebreaker and never rewritten — so it survives the very reordering `tar-entry-order-v2` and
 /// `zip-entry-order` exist to normalize. Including it made every member of a reordered archive
 /// differ forever: `py-cpuinfo` read as nine of nine still differing where the comparison that
 /// decides the verdict says three. Overstating a divergence is the expensive direction, because a
@@ -6901,7 +6901,12 @@ mod tests {
         use trigon_core::{Provenance, RiskTier};
         [
             applied("tar-time", RiskTier::Metadata, Provenance::Builtin, 3),
-            applied("cargo-vcs-hash", RiskTier::Content, Provenance::Builtin, 1),
+            applied(
+                "cargo-vcs-hash-v2",
+                RiskTier::Content,
+                Provenance::Builtin,
+                1,
+            ),
             applied(
                 "model-pass",
                 RiskTier::Metadata,
@@ -6938,7 +6943,10 @@ mod tests {
         );
         assert!(p.contains("It read <strong>divergent</strong>"), "{p}");
         assert!(
-            p.contains("<code>cargo-vcs-hash</code></td><td>Content risk is above Metadata</td>"),
+            p.contains(concat!(
+                "<code>cargo-vcs-hash-v2</code></td>",
+                "<td>Content risk is above Metadata</td>"
+            )),
             "{p}"
         );
         let row = |id: &str| {
@@ -6990,7 +6998,7 @@ mod tests {
             "{p}"
         );
         assert!(
-            p.contains("<code>cargo-vcs-hash</code> <span class=\"diff\">caps</span>"),
+            p.contains("<code>cargo-vcs-hash-v2</code> <span class=\"diff\">caps</span>"),
             "{p}"
         );
         assert!(
@@ -7024,7 +7032,7 @@ mod tests {
         );
         // Risk is the colour: grey for a structural pass, the verdict palette for the rest.
         let structural = ledger_table(&[applied(
-            "tar-entry-order",
+            "tar-entry-order-v2",
             trigon_core::RiskTier::Structural,
             trigon_core::Provenance::Builtin,
             4,

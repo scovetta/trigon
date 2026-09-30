@@ -306,11 +306,13 @@ fn with_crc_of(mut member: Vec<u8>, content: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn a_second_gzip_member_is_part_of_the_artifact_and_never_skipped() {
+fn a_second_gzip_member_holding_data_is_never_skipped_and_never_matched() {
     // Node's zlib and Python's gzip read every member of a `.tgz` or an sdist, so tar entries in
     // a second member are part of what installs. The reader took the file's last eight bytes as
     // the first member's trailer, and a second member whose CRC was forged to the first's made
     // the published artifact stabilize to the digest of an honest rebuild of the first alone.
+    // Cargo and RubyGems read the first member and stop, so the readers disagree about what such a
+    // file holds, and it is refused however it is framed (`docs/16-findings.md` §3.106).
     let p = tar(1, 1, b"same");
     // Without its end-of-archive blocks, so the second member's tar carries straight on from it.
     let p_open = &p[..p.len() - 1024];
@@ -319,23 +321,29 @@ fn a_second_gzip_member_is_part_of_the_artifact_and_never_skipped() {
     let judge = |upstream: Vec<u8>| {
         compare_bytes(upstream, gz(&p), Format::TarGz, &set, &Limits::default())
     };
-
-    // Forged: the second member's CRC is not its own, so it is not read as that content.
-    match judge([gz(p_open), with_crc_of(gz(&q), p_open)].concat()) {
-        Err(CompareError::Archive(trigon_archive::ArchiveError::Malformed { detail, .. })) => {
-            assert!(detail.starts_with("crc32 mismatch"), "{detail}")
+    for (how, upstream) in [
+        // Forged: the second member's CRC is not its own.
+        ("forged", [gz(p_open), with_crc_of(gz(&q), p_open)].concat()),
+        // Honest framing, and still two readings of one file.
+        ("honest", [gz(p_open), gz(&q)].concat()),
+    ] {
+        match judge(upstream) {
+            Err(CompareError::Archive(trigon_archive::ArchiveError::Malformed {
+                format,
+                detail,
+            })) => {
+                assert_eq!(format, "gzip", "{how}");
+                assert!(
+                    detail.contains("holds data after a first member"),
+                    "{how}: {detail}"
+                )
+            }
+            other => panic!(
+                "{how}: expected a refusal, got {:?}",
+                other.map(|c| c.outcome)
+            ),
         }
-        other => panic!("expected a refusal, got {:?}", other.map(|c| c.outcome)),
     }
-
-    // Honest framing: both members are read, and the member only the second one holds is named.
-    let c = judge([gz(p_open), gz(&q)].concat()).unwrap();
-    assert_eq!(c.outcome, Match::Divergent);
-    let codes = &c.diff.as_ref().unwrap().codes;
-    assert!(
-        codes.contains("member-only-in-reference@pkg/extra.js"),
-        "{codes:?}"
-    );
 }
 
 #[test]
@@ -368,16 +376,25 @@ fn a_lone_zero_block_ahead_of_more_entries_is_refused_rather_than_read_as_the_en
     // on past one. The `tar` crate, GNU tar and Python stop at the first. So entries after a lone
     // zero block installed from npm and were never seen here, and the published artifact matched an
     // honest rebuild without them. Readers that disagree on what an archive holds leave no one
-    // answer to compare. A gzip member boundary before the zero block changes nothing.
+    // answer to compare. Put behind a gzip member boundary, the zero block is refused sooner, by
+    // the gzip reader, for the same reason: a second member that holds data is read by some
+    // readers and not by others.
     let p = tar(1, 1, b"same");
     let p_open = &p[..p.len() - 1024];
     let q = injected();
     let set = profile("npm-tarball").unwrap();
-    for (upstream, how) in [
-        (gz(&[p_open, &[0; 512], &q].concat()), "one member"),
+    for (upstream, how, refused_by, why) in [
+        (
+            gz(&[p_open, &[0; 512], &q].concat()),
+            "one member",
+            "tar",
+            "lone zero block",
+        ),
         (
             [gz(p_open), gz(&[&[0; 512], &q[..]].concat())].concat(),
             "the zero block opening a second member",
+            "gzip",
+            "holds data after a first member",
         ),
     ] {
         match compare_bytes(upstream, gz(&p), Format::TarGz, &set, &Limits::default()) {
@@ -385,8 +402,8 @@ fn a_lone_zero_block_ahead_of_more_entries_is_refused_rather_than_read_as_the_en
                 format,
                 detail,
             })) => {
-                assert_eq!(format, "tar", "{how}");
-                assert!(detail.contains("lone zero block"), "{how}: {detail}");
+                assert_eq!(format, refused_by, "{how}");
+                assert!(detail.contains(why), "{how}: {detail}");
             }
             other => panic!(
                 "{how}: expected a refusal, got {:?}",
@@ -400,11 +417,11 @@ fn a_lone_zero_block_ahead_of_more_entries_is_refused_rather_than_read_as_the_en
 fn bytes_after_the_tar_end_of_archive_marker_are_a_named_difference_and_not_a_match() {
     // After two zero blocks every reader has stopped, node-tar too, so a whole second tar there is
     // in no archive anyone lists. It is still in the file, and a verdict that dropped it would call
-    // two different files one. Here it arrives as a second gzip member, which is read, and ends up
-    // after the first tar's end.
+    // two different files one. Here it follows the first tar's end in the same gzip member; in a
+    // second member it would be refused before the tar was read, as the test above shows.
     let p = tar(1, 1, b"same");
     let c = compare_bytes(
-        [gz(&p), gz(&injected())].concat(),
+        gz(&[&p[..], &injected()].concat()),
         gz(&p),
         Format::TarGz,
         &profile("npm-tarball").unwrap(),

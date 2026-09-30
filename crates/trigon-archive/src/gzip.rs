@@ -28,12 +28,19 @@ pub const OS_UNKNOWN: u8 = 255;
 /// which is every npm package, went through this path. The ceiling has to be enforced against what
 /// comes out, because what goes in is a number the attacker wrote.
 ///
-/// **Every member, the way gunzip reads them.** RFC 1952 makes a gzip file a series of members,
-/// and gunzip, Node's zlib and Python's gzip inflate all of them into one stream. This used to
-/// inflate the first and take the file's last eight bytes as its trailer, so nothing between was
-/// ever looked at: a second member whose stored CRC was forged to the first's content read as the
-/// first alone, and an npm tarball carrying extra tar entries in one stabilized to the digest of an
-/// honest rebuild without them. A member's trailer is now the eight bytes after its own deflate
+/// **Every member is read, and only the first may hold anything.** RFC 1952 makes a gzip file a
+/// series of members, and the readers packages are installed with disagree about them: gunzip,
+/// Node's zlib and Python's gzip inflate every member into one stream, and RubyGems
+/// (`Zlib::GzipReader`) and Cargo (`flate2`'s `GzDecoder`) inflate the first and stop. A file whose
+/// later members hold data has no one content to compare, so it is refused, as `tar::read` refuses
+/// a tar that readers end in different places. Read as every member's content, a gem whose
+/// `data.tar.gz` put its last entries in a second member matched an honest build of all of them,
+/// though RubyGems installs it without them (`docs/16-findings.md` §3.106). A later member that
+/// inflates to nothing says the same to every reader, and is read and checked like the first.
+///
+/// This used to inflate the first member and take the file's last eight bytes as its trailer, so
+/// nothing between was ever looked at: a second member whose stored CRC was forged to the first's
+/// content read as the first alone. A member's trailer is the eight bytes after its own deflate
 /// stream, and CRC-32 and ISIZE both have to agree with what inflated or the member is refused
 /// rather than read as that content. The header returned is the first member's; the others'
 /// headers are checked and set aside, as gunzip sets them aside.
@@ -69,6 +76,9 @@ pub fn read(bytes: &[u8], budget: u64, members: &mut u32) -> Result<(GzipHeader,
     let mut z = flate2::bufread::DeflateDecoder::new(&bytes[..0]);
     count()?;
     let (mut header, mut p) = member(bytes, &mut z, &mut out, budget)?;
+    // What the first member holds is all a later one may leave: a budget of it lets a later member
+    // inflate one byte and no more, so a large one is refused at its first byte, not its last.
+    let first = out.len() as u64;
     while p < bytes.len() {
         let rest = &bytes[p..];
         if !rest.starts_with(&MAGIC) {
@@ -76,7 +86,21 @@ pub fn read(bytes: &[u8], budget: u64, members: &mut u32) -> Result<(GzipHeader,
             break;
         }
         count()?;
-        p += member(rest, &mut z, &mut out, budget)?.1;
+        p += match member(rest, &mut z, &mut out, first) {
+            Ok((_, n)) => n,
+            Err(ArchiveError::LimitExceeded { .. }) => {
+                return Err(ArchiveError::Malformed {
+                    format: "gzip",
+                    detail: format!(
+                        "the member at offset {p} holds data after a first member of {first} \
+                         bytes: RubyGems and Cargo read a gzip file's first member alone, and \
+                         gunzip, Node and Python read every member, so the file holds no one \
+                         content to compare"
+                    ),
+                });
+            }
+            Err(e) => return Err(e),
+        };
     }
     Ok((header, out))
 }

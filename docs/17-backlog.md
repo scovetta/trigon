@@ -1860,7 +1860,7 @@ Two follow-ons past the major-level fix, both smaller than it was:
 
 ## B46. A .NET assembly's debug layout is structural, and closes only with a matching build environment
 
-**Resolved for the code-identical case by [3.89](16-findings.md): `dotnet-il-canonical-v2`
+**Resolved for the code-identical case by [3.89](16-findings.md): `dotnet-il-canonical-v3`
 compares a managed assembly by its code — its methods, every row and literal their tokens and
 signatures name, and the declarations that decide how they run — rather than its layout, so the
 structural residual below no longer holds a divergence when the code is the same — it lands

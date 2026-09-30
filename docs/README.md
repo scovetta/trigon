@@ -43,7 +43,8 @@ is, how it works and how to use it.
 | [`02-domain-model.md`](02-domain-model.md) | The types: `Target`, `Verdict`, `Match`, `Comparison`, `Run`, `Evidence` |
 | [`03-ecosystems.md`](03-ecosystems.md) | One chapter per ecosystem: resolution, source discovery, build, nondeterminism, expected rates |
 | [`04-strategies.md`](04-strategies.md) | The strategy schema, the flow DSL, template rules, versioning, the definitions repo |
-| [`05-archive-and-normalization.md`](05-archive-and-normalization.md) | The mutable archive model, the stabilizer catalogue, the comparison outcomes |
+| [`05-archive-and-normalization.md`](05-archive-and-normalization.md) | The mutable archive model, the stabilizer design, the comparison outcomes |
+| [`stabilizers.md`](stabilizers.md) | Every profile and pass as built: what each changes, its risk tier and stage, how a profile is chosen, and how the passes that fired cap a verdict |
 | [`06-ci-awareness.md`](06-ci-awareness.md) | Reading GitHub Actions, action allowlists, ingesting trusted-publishing provenance |
 | [`07-ai.md`](07-ai.md) | Provider abstraction, the three AI roles, caching keys, the repair flywheel, evaluation |
 | [`08-execution.md`](08-execution.md) | Sandboxing, image policy, egress tiers, dependency-state pinning, observability tiers |

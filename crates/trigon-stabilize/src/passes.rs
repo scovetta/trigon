@@ -89,22 +89,48 @@ fn is_sorted(a: &Archive) -> bool {
 
 // --- tar ---------------------------------------------------------------------------------------
 
-archive_pass!(
-    TarEntryOrder,
-    "tar-entry-order",
-    RiskTier::Structural,
-    is_tar,
-    |a| {
+/// Sort a tar's entries by path, and by the order they were read where two share one.
+///
+/// A nested tar is written again whether or not it had to move anything. The tar passes normalize
+/// its entries at every depth; were it written back as it arrived whenever none of them found
+/// anything to change, its bytes — its compressed stream above all — would depend on whether it
+/// arrived already in their form. Two `.tgz` files that shipped one `.tar.gz`, sorted in one and not in the
+/// other, stayed `divergent` for that alone. Writing it again is not reported: it changes no entry,
+/// and a run over the pass's own output must find nothing to do. The outermost archive is always
+/// written again anyway.
+///
+/// `-v2` because the first sorted without saying so to the archive. The order is the container's
+/// rather than any member's, so it marked no entry changed, and a nested tar in which no other pass
+/// changed anything went out as it arrived, unsorted, with the pass in `applied`
+/// (`docs/16-findings.md` §3.106).
+#[derive(Debug)]
+pub struct TarEntryOrder;
+
+impl Stabilizer for TarEntryOrder {
+    fn id(&self) -> StabilizerId {
+        StabilizerId::new("tar-entry-order-v2")
+    }
+    fn risk(&self) -> RiskTier {
+        RiskTier::Structural
+    }
+    fn applies(&self, cx: &Cx) -> bool {
+        is_tar(cx)
+    }
+    fn on_archive(&self, a: &mut Archive, cx: &Cx) -> Touched {
+        if !cx.at_depth(0) {
+            a.mark_order_dirty();
+        }
         if is_sorted(a) {
             return Touched::NONE;
         }
         a.sort_entries();
+        a.mark_order_dirty();
         Touched {
             entries: a.entries.len() as u32,
             bytes: 0,
         }
     }
-);
+}
 
 entry_pass!(TarTime, "tar-time", RiskTier::Metadata, is_tar, |e| {
     let RawMeta::Tar(raw) = &mut e.raw else {
@@ -310,45 +336,81 @@ archive_pass!(
 
 // --- gzip --------------------------------------------------------------------------------------
 
-archive_pass!(GzipMeta, "gzip-meta", RiskTier::Metadata, has_gzip, |a| {
-    let Trailer::Gzip(h) = &mut a.trailer else {
-        return Touched::NONE;
-    };
-    // MTIME 0 is how gzip spells "no timestamp available", so absent and zero are the same bytes.
-    if h.mtime.is_none()
-        && h.name.is_none()
-        && h.comment.is_none()
-        && h.extra.is_none()
-        && h.os == trigon_archive::gzip::OS_UNKNOWN
-    {
-        return Touched::NONE;
+/// Clear the gzip header: when the compressor ran, on which system, and the name of the file it
+/// read.
+///
+/// `-v2` because a gzip layer the format defines is now always written again. A gem's
+/// `data.tar.gz`, `metadata.gz` and `checksums.yaml.gz` are framing rather than files the gem ships
+/// (`is_structural`), and the serializer writes framing at no compression so that no encoder's
+/// behaviour reaches a digest. It wrote a nested layer again only once something in it had changed,
+/// though, so a layer with a clean header and nothing to change inside went out as it arrived, and
+/// two gems that differed only in the compression level of `data.tar.gz` came out `divergent`
+/// (`docs/16-findings.md` §3.106). The outermost layer was always written again. A `.tar.gz` a
+/// package ships keeps its header, which is bytes the package delivers, and is written again by
+/// `tar-entry-order-v2`, since the tar passes normalize what it holds; a `.gz` of anything else a
+/// package ships is left as it arrived, compressed stream and all, because nothing normalizes it.
+#[derive(Debug)]
+pub struct GzipMeta;
+
+impl Stabilizer for GzipMeta {
+    fn id(&self) -> StabilizerId {
+        StabilizerId::new("gzip-meta-v2")
     }
-    h.mtime = None;
-    h.name = None;
-    h.comment = None;
-    h.extra = None;
-    h.os = trigon_archive::gzip::OS_UNKNOWN;
-    // The trailer is the container, not a member, so the archive carries the dirty bit. It decides
-    // whether a nested archive is re-serialized or written back byte for byte.
-    a.mark_trailer_dirty();
-    Touched::entry()
-});
+    fn risk(&self) -> RiskTier {
+        RiskTier::Metadata
+    }
+    fn applies(&self, cx: &Cx) -> bool {
+        has_gzip(cx)
+    }
+    fn on_archive(&self, a: &mut Archive, cx: &Cx) -> Touched {
+        if !matches!(a.trailer, Trailer::Gzip(_)) {
+            return Touched::NONE;
+        }
+        // Framing below the top is written again whether or not its header needs anything, so its
+        // compressed bytes are the serializer's, as the outermost layer's always are. It is not
+        // reported: no field changed, and a run over the pass's own output must find nothing to do.
+        if !cx.at_depth(0) {
+            a.mark_trailer_dirty();
+        }
+        let Trailer::Gzip(h) = &mut a.trailer else {
+            return Touched::NONE;
+        };
+        // MTIME 0 is how gzip spells "no timestamp available", so absent and zero are the same
+        // bytes.
+        if h.mtime.is_none()
+            && h.name.is_none()
+            && h.comment.is_none()
+            && h.extra.is_none()
+            && h.os == trigon_archive::gzip::OS_UNKNOWN
+        {
+            return Touched::NONE;
+        }
+        h.mtime = None;
+        h.name = None;
+        h.comment = None;
+        h.extra = None;
+        h.os = trigon_archive::gzip::OS_UNKNOWN;
+        // The trailer is the container, not a member, so the archive carries the dirty bit. It
+        // decides whether a nested archive is re-serialized or written back byte for byte.
+        a.mark_trailer_dirty();
+        Touched::entry()
+    }
+}
 
 // --- ecosystem-specific --------------------------------------------------------------------------
 
+// `-v2`: a file that is not valid UTF-8 is left as it is, where the first decoded it lossily
+// (`text_of`).
 entry_pass!(
     CargoVcsHash,
-    "cargo-vcs-hash",
+    "cargo-vcs-hash-v2",
     RiskTier::Content,
     is_tar,
     |e| {
         if !e.path.ends_with(b".cargo_vcs_info.json") {
             return Touched::NONE;
         }
-        let Ok(text) = e
-            .body_bytes()
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-        else {
+        let Some(text) = text_of(e) else {
             return Touched::NONE;
         };
         let Some(replaced) = replace_sha1_field(&text) else {
@@ -388,19 +450,20 @@ fn replace_sha1_field(text: &str) -> Option<String> {
     ))
 }
 
+// `-v2`: a file that is not valid UTF-8 is left as it is, where the first decoded it lossily
+// (`text_of`). Nothing selects `npm-tarball`, so no record names the old id; the rule that a
+// changed pass takes a new id is kept anyway, since a rule with exceptions is one somebody has to
+// remember the exceptions to.
 entry_pass!(
     NpmInstallFields,
-    "npm-install-fields",
+    "npm-install-fields-v2",
     RiskTier::Metadata,
     is_tar,
     |e| {
         if e.path.file_name() != b"package.json" {
             return Touched::NONE;
         }
-        let Ok(text) = e
-            .body_bytes()
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-        else {
+        let Some(text) = text_of(e) else {
             return Touched::NONE;
         };
         const DROP: [&str; 4] = ["\"_resolved\"", "\"_integrity\"", "\"_from\"", "\"_id\""];
@@ -503,12 +566,25 @@ fn u32le(b: &[u8], o: usize) -> Option<u32> {
 }
 
 /// The byte ranges of a managed assembly that a rebuild cannot reproduce and a consumer does not
-/// read as logic: the PE timestamp and checksum, the module's MVID, and the strong-name signature.
+/// read as logic: the PE timestamp and checksum, the strong-name signature, the debug directory's
+/// slot in the optional header, each debug entry's timestamp and the data it names, and the
+/// `#GUID` heap that holds the module's MVID.
 ///
-/// `None` when the bytes are not a managed PE — a native `.dll`, a data file that happens to end
-/// `.dll`, anything malformed or truncated — which the caller reads as "not ours, leave it whole".
-/// Every field is reached by walking the headers rather than scanning for values, so nothing but
-/// these four regions is ever named.
+/// `None` declines the whole assembly, which the caller leaves exactly as it arrived: a member
+/// that is not a managed PE, and one in which any of those regions cannot be shown to be what its
+/// header calls it. Every region but the three fixed header fields is named by a pointer the
+/// publisher wrote, and a pointer can name code as readily as a signature. So each must lie wholly
+/// in the file, clear of the headers, of everything [`crate::ilcanon::occupied`] finds the
+/// assembly holds, and of every other such region, and each debug entry must be a type this knows,
+/// laid out as that type is. Nothing is zeroed on a guess, and nothing is zeroed in part.
+///
+/// Last, the zeroing must leave the assembly's canonical form ([`crate::ilcanon`]) as it was, with
+/// the form readable at all. `dotnet-il-canonical-v3` runs next in the `nupkg` profile and replaces
+/// the assembly with that form, so there nothing this zeroes reaches a digest: it acts only where
+/// the IL pass reads the same code from the zeroed bytes as from the published ones. Before this, an
+/// assembly whose form the IL pass declined, one grown past its size limit, was left to this pass
+/// alone, and its zeroing decided a clean `normalized` with nothing to check it but `occupied`
+/// (`docs/16-findings.md` §3.106).
 fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
     if b.get(0..2)? != b"MZ" {
         return None;
@@ -518,8 +594,6 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
         return None;
     }
     let coff = pe + 4;
-    let num_sections = u16le(b, coff + 2)? as usize;
-    let opt_size = u16le(b, coff + 16)? as usize;
     let opt = coff + 20;
     // The checksum sits at optional-header offset 64 in both PE32 and PE32+; only the data
     // directories move, because the two headers differ in the fields before them.
@@ -528,136 +602,207 @@ fn dotnet_build_identity_regions(b: &[u8]) -> Option<Vec<(usize, usize)>> {
         0x20b => (opt + 112, opt + 64),
         _ => return None,
     };
-    // Data directory 14 is the CLI header. A zero RVA there is a native image: nothing to do.
-    let cli_dir = dir_off + 14 * 8;
-    let cli_rva = u32le(b, cli_dir)? as usize;
-    if cli_rva == 0 {
-        return None;
-    }
-    let sec = opt + opt_size;
-    let rva_to_off = |rva: usize| -> Option<usize> {
-        (0..num_sections).find_map(|i| {
-            let s = sec + i * 40;
-            let vsize = u32le(b, s + 8)? as usize;
-            let vaddr = u32le(b, s + 12)? as usize;
-            let praw = u32le(b, s + 20)? as usize;
-            // `then`, not `then_some`: an eager `rva - vaddr` panics on any RVA below the section.
-            // A difference rather than `vaddr + vsize`, and an offset past the file clamped to its
-            // end, because the archived wasm32 guest runs this with a 32-bit `usize` and traps on
-            // overflow; every caller reads the end of the file as nothing there, as it reads any
-            // offset past it.
-            (rva >= vaddr && rva - vaddr < vsize.max(1)).then(|| {
-                praw.checked_add(rva - vaddr)
-                    .map_or(b.len(), |o| o.min(b.len()))
-            })
-        })
-    };
+    // Where the assembly's content lies. `None` for a native image, which has no CLI header, for
+    // one whose metadata or method bodies cannot be placed, and for one carrying native code,
+    // which has no extent to keep clear of.
+    let held = crate::ilcanon::occupied(b)?;
 
-    let mut regions = Vec::new();
     // The PE timestamp and checksum: a date and a hash of the file, neither reproducible nor read
-    // as logic. `Metadata` risk, the tier `tar-time`/`zip-time` already sit at.
-    regions.push((coff + 4, 4));
-    regions.push((checksum_off, 4));
+    // as logic. `Metadata` risk, the tier `tar-time`/`zip-time` already sit at. Fields at fixed
+    // places in the headers, where every other region is found through a pointer.
+    let mut zeroed = vec![(coff + 4, 4), (checksum_off, 4)];
+    // Every region a pointer names, each of which has to be shown to be what it is called.
+    let mut pointed: Vec<(usize, usize)> = Vec::new();
 
-    let cli = rva_to_off(cli_rva)?;
     // The strong-name signature: an RSA signature over the assembly, made with a private key we do
     // not have, exactly the ".sig over content we are rebuilding" the `Structural` tier and
     // `nupkg-signature` are about.
-    let sn_rva = u32le(b, cli + 32)? as usize;
-    let sn_size = u32le(b, cli + 36)? as usize;
+    let sn_rva = u32le(b, held.cli + 32)? as usize;
+    let sn_size = u32le(b, held.cli + 36)? as usize;
     if sn_rva != 0 && sn_size != 0 {
-        let sn = rva_to_off(sn_rva)?;
-        if sn.checked_add(sn_size).is_some_and(|end| end <= b.len()) {
-            regions.push((sn, sn_size));
-        }
+        let sn = (held.file_range(b.len(), sn_rva, sn_size)?, sn_size);
+        pointed.push(sn);
+        zeroed.push(sn);
     }
 
-    // The debug directory (data directory 6): a table of entries, each with a build timestamp, and
-    // the CodeView/PDB-checksum data they point at — the PDB's GUID (the MVID again), its age, the
-    // path it was written to, and a hash of a `.pdb` the package does not even ship. All build
-    // identity, none of it read as behaviour. Zero the directory's own RVA/size in the header, each
-    // entry's timestamp, and each entry's pointed data, so two builds that differ only in where
-    // and when they wrote their debug info agree.
+    // The debug directory (data directory 6): a table of entries, each with a build timestamp and
+    // the data it names — the CodeView record (the PDB's GUID, which is the MVID again, its age,
+    // and the path it was written to), a hash of a `.pdb` the package does not even ship, an
+    // embedded portable PDB. All build identity, none of it read as behaviour. Zero the
+    // directory's own RVA/size in the header, each entry's timestamp, and each entry's data, so
+    // two builds that differ only in where and when they wrote their debug info agree.
     let dbg_dir = dir_off + 6 * 8;
     let dbg_rva = u32le(b, dbg_dir)? as usize;
     let dbg_size = u32le(b, dbg_dir + 4)? as usize;
     if dbg_rva != 0 && dbg_size != 0 {
         // The 8-byte directory entry itself (RVA + size): it moves between builds.
-        regions.push((dbg_dir, 8));
-        if let Some(dbg) = rva_to_off(dbg_rva) {
-            let entries = dbg_size / 28;
-            for i in 0..entries {
-                let ent = dbg + i * 28;
-                // Each entry's TimeDateStamp.
-                if ent + 8 <= b.len() {
-                    regions.push((ent + 4, 4));
-                }
-                // The data it points at, by file offset (PointerToRawData), not RVA.
-                let size_of_data = u32le(b, ent + 16)? as usize;
-                let ptr_raw = u32le(b, ent + 24)? as usize;
-                if ptr_raw != 0
-                    && size_of_data != 0
-                    && ptr_raw
-                        .checked_add(size_of_data)
-                        .is_some_and(|e| e <= b.len())
-                {
-                    regions.push((ptr_raw, size_of_data));
-                }
+        zeroed.push((dbg_dir, 8));
+        if dbg_size % 28 != 0 {
+            return None;
+        }
+        // The table is kept clear of everything else, though only its stamps are zeroed: data
+        // that overlapped it would zero the entries that name it.
+        let dbg = held.file_range(b.len(), dbg_rva, dbg_size)?;
+        pointed.push((dbg, dbg_size));
+        let mut records = Vec::new();
+        for ent in (dbg..dbg + dbg_size).step_by(28) {
+            zeroed.push((ent + 4, 4));
+            if let Some(r) = debug_record(b, &held, ent)? {
+                records.push(r);
             }
+        }
+        // Every entry's data is placed before any of it is read, and two that share a byte decline
+        // the assembly there. Each record is then read once, so reading them costs the file's
+        // length at most. Read as each entry came, a directory of entries all naming one large
+        // record read it once per entry, entries times record, before anything noticed they
+        // overlapped.
+        records.sort_unstable_by_key(|r| r.at);
+        if !records.windows(2).all(|w| w[0].at + w[0].len <= w[1].at) {
+            return None;
+        }
+        for r in records {
+            if !r.laid_out(b) {
+                return None;
+            }
+            pointed.push((r.at, r.len));
+            zeroed.push((r.at, r.len));
         }
     }
 
     // The MVID: a per-compilation GUID the runtime never reads for behaviour, in the `#GUID` heap.
     // Zero the whole heap rather than parse the tables to reach `Module.Mvid`: the heap holds only
-    // GUIDs, all of them build identifiers, so zeroing it names nothing a consumer runs.
-    let md_rva = u32le(b, cli + 8)? as usize;
-    if md_rva != 0
-        && let Some(md) = rva_to_off(md_rva)
-        && b.get(md..md + 4) == Some(&[0x42, 0x53, 0x4a, 0x42])
-    {
-        let ver_len = u32le(b, md + 12)? as usize;
-        let ver_padded = ver_len.checked_add(3)? & !3;
-        let after_ver = (md + 16).checked_add(ver_padded)?;
-        let streams = u16le(b, after_ver.checked_add(2)?)? as usize;
-        let mut q = after_ver + 4;
-        for _ in 0..streams {
-            let s_off = u32le(b, q)? as usize;
-            let s_size = u32le(b, q + 4)? as usize;
-            let name_start = q + 8;
-            let name_end = name_start + b.get(name_start..)?.iter().position(|&c| c == 0)?;
-            let name = b.get(name_start..name_end)?;
-            let name_padded = (name_end - name_start + 1).checked_add(3)? & !3;
-            // A heap too far out for `md + s_off` to name is past the file like any other, and
-            // skipped like one: a `?` here declined the whole assembly on 32 bits alone.
-            if name == b"#GUID"
-                && let Some(heap) = md.checked_add(s_off)
-                && heap.checked_add(s_size).is_some_and(|end| end <= b.len())
-            {
-                regions.push((heap, s_size));
-            }
-            q = name_start + name_padded;
+    // GUIDs, all of them build identifiers, and `occupied` has checked that nothing but a GUID
+    // column reads it.
+    if let Some(guid) = held.guid.filter(|&(_, n)| n > 0) {
+        pointed.push(guid);
+        zeroed.push(guid);
+    }
+
+    // Each region a pointer names, clear of the headers, of what the assembly holds, and of every
+    // other; and the fixed fields clear of what it holds, which a section mapped over the headers
+    // could place there.
+    pointed.sort_unstable();
+    let clear = pointed.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0)
+        && pointed
+            .iter()
+            .all(|&(o, n)| o >= held.headers_end && !held.overlaps(o, n))
+        && zeroed.iter().all(|&(o, n)| !held.overlaps(o, n));
+    if !clear {
+        return None;
+    }
+    zeroed.sort_unstable();
+    let mut after = b.to_vec();
+    for &(o, n) in &zeroed {
+        after.get_mut(o..o.checked_add(n)?)?.fill(0);
+    }
+    let form = crate::ilcanon::canonical_managed(b)?;
+    (crate::ilcanon::canonical_managed(&after)? == form).then_some(zeroed)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The bytes of debug records read to check their layout, so a test can hold the check to the
+    /// file's length by counting rather than by timing it.
+    static RECORD_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The data a debug directory entry names, placed but not yet read.
+struct DebugRecord {
+    kind: u32,
+    at: usize,
+    len: usize,
+}
+
+impl DebugRecord {
+    /// Whether the data is laid out as its type's is.
+    fn laid_out(&self, b: &[u8]) -> bool {
+        #[cfg(test)]
+        RECORD_BYTES.with(|n| n.set(n.get() + self.len as u64));
+        let d = &b[self.at..self.at + self.len];
+        match self.kind {
+            2 => codeview(d),
+            17 => embedded_pdb(d),
+            19 => pdb_checksum(d),
+            _ => false,
         }
     }
-    // Merged before they are returned. Each debug entry names a region the file states, so a
-    // crafted directory can name the whole file once per entry, and zeroed one region at a time
-    // that is entries × file: 2000 entries over a 65 KB file took half a second in a debug build,
-    // growing with the square of the file. The union names exactly the same bytes. A region past
-    // the end was never zeroed, so it is dropped first rather than merged into one in range.
-    regions.retain(|&(o, l)| o + l <= b.len());
-    regions.sort_unstable();
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(regions.len());
-    for (o, l) in regions {
-        match merged.last_mut() {
-            Some((mo, ml)) if o <= *mo + *ml => *ml = (*ml).max(o + l - *mo),
-            _ => merged.push((o, l)),
-        }
+}
+
+/// The data debug directory entry `ent` names, when the entry is of a type this knows and its
+/// data lies wholly in the file, where its address, if it gives one, maps it too: `Some(None)` for
+/// an entry that names no data, and `None`, which declines the assembly, for anything else. The
+/// data's layout is [`DebugRecord::laid_out`]'s to check, once no two entries' data overlap.
+fn debug_record(
+    b: &[u8],
+    held: &crate::ilcanon::Occupied,
+    ent: usize,
+) -> Option<Option<DebugRecord>> {
+    // IMAGE_DEBUG_DIRECTORY: Characteristics, TimeDateStamp, the two version words, Type,
+    // SizeOfData, AddressOfRawData, PointerToRawData.
+    let kind = u32le(b, ent + 12)?;
+    let size = u32le(b, ent + 16)? as usize;
+    let rva = u32le(b, ent + 20)? as usize;
+    let ptr = u32le(b, ent + 24)? as usize;
+    // Reproducible: it says the build was deterministic, and it names no data at all.
+    if kind == 16 {
+        return (size == 0 && rva == 0 && ptr == 0).then_some(None);
     }
-    Some(merged)
+    // CodeView, an embedded portable PDB, a PDB checksum: what a managed compiler writes.
+    if !matches!(kind, 2 | 17 | 19) {
+        return None;
+    }
+    // A pointer of 0 is how an entry says its data is not in the file. Read as an offset it would
+    // name the DOS header, and a record of a type that has data cannot be checked without it.
+    if size == 0 || ptr == 0 {
+        return None;
+    }
+    b.get(ptr..ptr.checked_add(size)?)?;
+    // Where the loader maps it and where the file holds it have to be one place, or the two
+    // readers would each find a different record.
+    if rva != 0 && held.file_range(b.len(), rva, size)? != ptr {
+        return None;
+    }
+    Some(Some(DebugRecord {
+        kind,
+        at: ptr,
+        len: size,
+    }))
+}
+
+/// A CodeView record as a managed compiler writes it: `RSDS`, the PDB's GUID and age, then the
+/// path it was written to, NUL-terminated, with nothing after the NUL but zeros.
+fn codeview(d: &[u8]) -> bool {
+    d.starts_with(b"RSDS")
+        && d.get(24..)
+            .and_then(|path| path.iter().position(|&c| c == 0))
+            .is_some_and(|nul| d[24 + nul..].iter().all(|&c| c == 0))
+}
+
+/// An embedded portable PDB: `MPDB`, the size it inflates to, then the deflated PDB.
+fn embedded_pdb(d: &[u8]) -> bool {
+    d.len() > 8 && d.starts_with(b"MPDB") && u32le(d, 4).is_some_and(|n| n != 0)
+}
+
+/// A PDB checksum: the name of the hash, NUL-terminated, then a digest exactly as long as that
+/// hash's.
+fn pdb_checksum(d: &[u8]) -> bool {
+    let Some(nul) = d.iter().position(|&c| c == 0) else {
+        return false;
+    };
+    let digest = match &d[..nul] {
+        b"SHA256" => 32,
+        b"SHA384" => 48,
+        b"SHA512" => 64,
+        _ => return false,
+    };
+    d.len() == nul + 1 + digest
 }
 
 entry_pass!(
-    /// Zero a managed assembly's build- and signing-identity fields: PE timestamp and checksum,
-    /// the module MVID, and the strong-name signature.
+    /// Zero a managed assembly's build and signing identity: the PE timestamp and checksum, the
+    /// strong-name signature, the debug directory's slot in the optional header, each debug
+    /// entry's timestamp and the debug data it names, and the `#GUID` heap that holds the module
+    /// MVID.
     ///
     /// **The residual after the code already matches.** With the version reconstructed and the SDK
     /// close, `castle.core`'s assemblies decompile identically and differ only here — a signature
@@ -668,16 +813,28 @@ entry_pass!(
     ///
     /// `Metadata` risk: the signature alone would be `Structural` (integrity metadata over content
     /// we rebuild), the MVID and timestamp are `Metadata` like the archive timestamps, and a pass
-    /// carries the higher of what it does. Both are builtin and at or below `Metadata`, so a match
-    /// reached through this is `Normalized`, not caveated — the honest tier, because what is zeroed
-    /// is bookkeeping, not the assembly's behaviour.
+    /// carries the higher of what it does. Builtin and at `Metadata`, so it caps nothing itself.
+    /// In the `nupkg` profile nothing it zeroes reaches a digest: it acts only on an assembly that
+    /// `dotnet-il-canonical-v3` reads to the same form from the zeroed bytes as from the published
+    /// ones, and that pass, which runs next, replaces the assembly with the form. A match there is
+    /// `normalized_with_caveats` whatever this pass did. Its checks are what stand between its
+    /// zeroing and a digest only in a set narrowed without the IL pass, which `trigon stabilize
+    /// --disable-passes` makes and no verdict is reached under.
     ///
-    /// Reached by walking the PE and CLI headers, so it touches exactly those four regions and
-    /// nothing else; a native `.dll` or a mislabelled data file parses as "not a managed image"
-    /// and is left whole. Zeroed in place, so the member's length and the archive's framing do not
-    /// move.
+    /// Every region is reached by walking the PE and CLI headers and the metadata, and zeroed only
+    /// once it is shown to be what its header calls it (`dotnet_build_identity_regions`). A native
+    /// `.dll`, a mislabelled data file, and an assembly any one region of which cannot be shown are
+    /// left whole. Zeroed in place, so the member's length and the archive's framing do not move.
+    ///
+    /// `-v2` because what it zeroes narrowed. The first zeroed whatever range each debug entry
+    /// named, and nothing tied the range to debug data: an entry could name the whole file, and two
+    /// assemblies of different code, each carrying such an entry, stabilized to the same bytes,
+    /// which the IL pass could then not read, so nothing capped a clean `normalized`
+    /// (`docs/16-findings.md` §3.106). The set digest covers pass ids, not pass code
+    /// (`docs/19-distribution-and-lookup.md` §11, open question 1), so the narrower pass under the
+    /// old id would have re-derived old records differently under the digest they were signed with.
     DotnetAssemblyIdentity,
-    "dotnet-assembly-identity",
+    "dotnet-assembly-identity-v2",
     RiskTier::Metadata,
     is_zip,
     |e| {
@@ -703,7 +860,7 @@ entry_pass!(
         match e.body_mut() {
             Ok(b) => {
                 let mut n = 0u64;
-                for (o, l) in dotnet_build_identity_regions(b).unwrap_or_default() {
+                for (o, l) in regions {
                     if let Some(s) = b.get_mut(o..o + l) {
                         for x in s.iter_mut() {
                             if *x != 0 {
@@ -720,10 +877,10 @@ entry_pass!(
     }
 );
 
-// **The last resort for a managed assembly, and a lossy one.** `dotnet-assembly-identity` zeroes
-// the fixed-location build identity, but a rebuild whose SourceLink URL, source-generator document
-// order or a heap's length differs from the publisher's lays its metadata and embedded PDB out at
-// shifted offsets that a byte-zeroing pass cannot align ([B46](../../../docs/17-backlog.md),
+// **The last resort for a managed assembly, and a lossy one.** `dotnet-assembly-identity-v2`
+// zeroes the fixed-location build identity, but a rebuild whose SourceLink URL, source-generator
+// document order or a heap's length differs from the publisher's lays its metadata and embedded PDB
+// out at shifted offsets that a byte-zeroing pass cannot align ([B46](../../../docs/17-backlog.md),
 // `docs/16-findings.md` §3.87). None of that is code: `moq@4.20.72`'s four assemblies decompile
 // identically and their method IL is byte-for-byte equal.
 //
@@ -737,7 +894,7 @@ entry_pass!(
 // a field is initialized from does not. Those it drops, so it is `Lossy`: a match it produces is
 // `normalized_with_caveats`, never a clean `normalized` — the honest tier for "the code is the
 // same, and we did not check the rest." An assembly it cannot read whole, as the runtime reads
-// it, is left exactly as it was.
+// it, is left exactly as it was, and so is one carrying native code the form cannot hold.
 //
 // `-v2` because the form changed. The first kept each method's name, signature and IL and nothing
 // its tokens named, so a changed string literal, a MemberRef renamed under its token, a method's
@@ -746,9 +903,16 @@ entry_pass!(
 // new form under the old id would have re-derived old records differently under the digest they
 // were signed with. A new id is a new set digest, and a record made under the old one is
 // re-derived under its archived set.
+//
+// `-v3` because what it reads narrowed. The second declined a method whose body was native, and
+// read the rest of an image that carried native code no method named: a ReadyToRun image's
+// precompiled methods, which the runtime runs in place of their IL, and a mixed-mode image's native
+// entry point. Two such images of one IL and different native code shared a form and matched
+// (`docs/16-findings.md` §3.106). Now the CLI header's word decides: ILONLY clear, a native entry
+// point or a ManagedNativeHeader, and the image is left as it is.
 entry_pass!(
     DotnetIlCanonical,
-    "dotnet-il-canonical-v2",
+    "dotnet-il-canonical-v3",
     RiskTier::Lossy,
     is_zip,
     |e| {
@@ -779,10 +943,13 @@ entry_pass!(
 // `branch="v4.20.72"`; trigon checks the same commit out detached, so the ref is nameless and the
 // attribute is absent — `moq@4.20.72`'s nuspec differed in exactly this and nothing else. The commit
 // is the identity and is kept; the branch is a label on how the commit was reached, so it is
-// dropped from both sides. `Metadata`, the tier the other provenance stamps sit at.
+// dropped from both sides. `Metadata`, the tier the other provenance stamps sit at. `-v2`: a
+// `.nuspec` that is not valid UTF-8 is left as it is, where the first decoded it lossily
+// (`text_of`); and the element is read attribute by attribute, where the first cut from the first
+// ` branch="` in it, inside another attribute's value too (`drop_repository_branch`).
 entry_pass!(
     NupkgRepositoryBranch,
-    "nupkg-repository-branch",
+    "nupkg-repository-branch-v2",
     RiskTier::Metadata,
     is_zip,
     |e| {
@@ -793,14 +960,68 @@ entry_pass!(
     }
 );
 
-/// Remove ` branch="…"` from the `<repository …>` element, or `None` when there is none.
+/// Remove the `branch` attribute, and the whitespace before it, from the first `<repository …>`
+/// element: `None` when it has none, and when this cannot read the element's tag whole, to its `>`.
+///
+/// Attribute by attribute, each value stepped over to its closing quote, so only an attribute named
+/// `branch` goes. A search for ` branch="` found one inside another attribute's value as readily:
+/// in `url="https://example.com/r branch=" commit="0123…"` it cut from inside the URL through the
+/// opening quote of `commit`, and the nuspec read as one with another URL and no commit, which is the
+/// identity this pass exists to keep (`docs/16-findings.md` §3.106).
 fn drop_repository_branch(t: &str) -> Option<String> {
-    let open = t.find("<repository")?;
-    let close = t[open..].find('>')? + open;
-    let attr = t[open..close].find(" branch=\"")? + open;
-    let val = attr + " branch=\"".len();
-    let end = t[val..close].find('"')? + val;
-    Some(format!("{}{}", &t[..attr], &t[end + 1..]))
+    const TAG: &str = "<repository";
+    let open = t.find(TAG)?;
+    // Inside a comment it is text, not an element.
+    if t[..open]
+        .rfind("<!--")
+        .is_some_and(|c| !t[c..open].contains("-->"))
+    {
+        return None;
+    }
+    let s = t.as_bytes();
+    let space = |i: usize| s.get(i).is_some_and(u8::is_ascii_whitespace);
+    let mut i = open + TAG.len();
+    let mut branch = None;
+    loop {
+        // Whitespace, then an attribute, or the end of the tag; `<repositoryUrl` is another element.
+        let before = i;
+        while space(i) {
+            i += 1;
+        }
+        match s.get(i)? {
+            b'>' => break,
+            b'/' if s.get(i + 1) == Some(&b'>') => break,
+            _ if i == before => return None,
+            _ => {}
+        }
+        let name = i;
+        while s
+            .get(i)
+            .is_some_and(|&c| !c.is_ascii_whitespace() && !matches!(c, b'=' | b'>' | b'/'))
+        {
+            i += 1;
+        }
+        let name = &t[name..i];
+        while space(i) {
+            i += 1;
+        }
+        if s.get(i) != Some(&b'=') {
+            return None;
+        }
+        i += 1;
+        while space(i) {
+            i += 1;
+        }
+        let quote = *s.get(i).filter(|&&q| q == b'"' || q == b'\'')?;
+        i += 1 + t[i + 1..].find(char::from(quote))? + 1;
+        // An element names an attribute once, and one naming it twice is no element an XML reader
+        // reads, so which of the two was meant is not guessed at.
+        if name == "branch" && branch.replace((before, i)).is_some() {
+            return None;
+        }
+    }
+    let (from, to) = branch?;
+    Some(format!("{}{}", &t[..from], &t[to..]))
 }
 
 // NuGetizer (devlooped) assembles a package readme from `<!-- include <path-or-url> -->` directives
@@ -811,10 +1032,13 @@ fn drop_repository_branch(t: &str) -> Option<String> {
 // list itself, which comes from a *local* include, reproduces byte for byte; only the invisible
 // markers and the whitespace around them differ. So strip the single-token marker comments from
 // both, squeeze the blank runs that removing them leaves, and trim trailing space. `Content`: it
-// edits the readme's bytes, though not a glyph a reader sees.
+// edits the bytes of every `.md` in the package, not only NuGetizer's readme, and trimming trailing
+// whitespace removes Markdown's hard line break (two trailing spaces), which changes how a file
+// renders. `-v2`: a file that is not valid UTF-8 is left as it is, where the first decoded it
+// lossily (`text_of`).
 entry_pass!(
     NupkgReadmeMarkers,
-    "nupkg-readme-markers",
+    "nupkg-readme-markers-v2",
     RiskTier::Content,
     is_zip,
     |e| {
@@ -942,20 +1166,55 @@ archive_pass!(
     }
 );
 
+/// Where a `.pyc`'s source mtime sits, read off the magic number that says which CPython wrote it:
+/// `None` for a magic this does not recognise, a header too short for the layout it implies, and a
+/// header with no mtime to zero.
+///
+/// The magic is a two-byte number, then `\r\n`. CPython 1.5 to 2.7 wrote an 8-byte header, the
+/// magic and then the mtime, and so did 3.0 to 3.2. 3.3 (3210) added the source size after the
+/// mtime, 12 bytes. 3.7 (3392, PEP 552) put a flags word between the magic and the rest, 16 bytes:
+/// with the flags clear the mtime and the size follow it, with bit 0 set eight bytes of the
+/// source's hash do and there is no mtime, and any other flags are a header PEP 552 does not
+/// define. Python 3 numbers its magics upward from 3000 and 3.14's are in the 3600s, so everything
+/// from 3392 to 3999 is read as PEP 552's; Python 2's are listed, since they jump.
+fn pyc_mtime(b: &[u8]) -> Option<usize> {
+    if b.get(2..4)? != b"\r\n" {
+        return None;
+    }
+    let (at, header) = match u16::from_le_bytes([b[0], b[1]]) {
+        20121 | 50428 | 50823 | 60202 | 60717 | 62011 | 62021 | 62041 | 62051 | 62061 | 62071
+        | 62081 | 62091 | 62092 | 62101 | 62111 | 62121 | 62131 | 62151 | 62161 | 62171 | 62181
+        | 62191 | 62201 | 62211 => (4, 8),
+        3000..=3209 => (4, 8),
+        3210..=3391 => (4, 12),
+        3392..=3999 => {
+            if u32le(b, 4)? != 0 {
+                return None;
+            }
+            (8, 16)
+        }
+        _ => return None,
+    };
+    (b.len() >= header).then_some(at)
+}
+
 entry_pass!(
-    /// Zero the source mtime embedded in a timestamp-validated `.pyc`.
-    ///
-    /// A PEP 552 header is 16 bytes: a 4-byte magic, a 4-byte flags word, and 8 bytes whose meaning
-    /// bit 0 of the flags selects. Clear, and they are a 4-byte source mtime and a 4-byte source
-    /// size. Set, and they are an 8-byte hash of the source.
+    /// Zero the source mtime embedded in a timestamp-validated `.pyc`, wherever the header the
+    /// magic names puts it (`pyc_mtime`).
     ///
     /// Only the mtime is touched. The magic identifies the bytecode version. The flags word says
     /// how to read the rest, so zeroing it changes what the file means. The source size and the
     /// source hash are both derived from the source: neither can differ while the source matches,
-    /// so zeroing them removes a signal and normalizes nothing. The reference has no `.pyc` pass at
-    /// all, which is why this one is a listed deviation.
+    /// so zeroing them removes a signal and normalizes nothing. A hash-based `.pyc` has no mtime,
+    /// and a magic this does not recognise leaves the file as it is. The reference has no `.pyc`
+    /// pass at all, which is why this one is a listed deviation.
+    ///
+    /// `-v2` because the first never read the magic. It took every header for PEP 552's, so in a
+    /// `.pyc` from before 3.7, whose second word is the mtime itself, it zeroed bytes 8 to 12 —
+    /// the source size on 3.3 to 3.6, the start of the code object on Python 2 — when that mtime
+    /// was even, and did nothing when it was odd (`docs/16-findings.md` §3.106).
     PycHeader,
-    "pyc-header",
+    "pyc-header-v2",
     RiskTier::Content,
     is_zip,
     |e| {
@@ -965,17 +1224,15 @@ entry_pass!(
         let Ok(body) = e.body_bytes() else {
             return Touched::NONE;
         };
-        if body.len() < 16 {
+        let Some(at) = pyc_mtime(&body) else {
             return Touched::NONE;
-        }
-        let flags = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
-        let hash_based = flags & 1 == 1;
-        if hash_based || body[8..12].iter().all(|b| *b == 0) {
+        };
+        if body[at..at + 4].iter().all(|b| *b == 0) {
             return Touched::NONE;
         }
         match e.body_mut() {
             Ok(b) => {
-                b[8..12].fill(0);
+                b[at..at + 4].fill(0);
                 Touched::entry_bytes(4)
             }
             Err(_) => Touched::NONE,
@@ -1000,9 +1257,10 @@ entry_pass!(
     /// distinction this pass rests on, and it is why the list is explicit rather than a glob over
     /// `dist-info/`: a wheel may ship arbitrary files there, including licences the author wrote.
     ///
-    /// `Content` risk, because it rewrites bytes inside a file. Wheels are already capped below
-    /// `Normalized` by `wheel-record-v2`, so this costs no outcome that was otherwise reachable,
-    /// and it runs at `Default` so `RECORD` is regenerated over the normalized bytes at `Finalize`.
+    /// `Content` risk, because it rewrites bytes inside a file. A file it rewrites is one the
+    /// wheel's `RECORD` digests, so `wheel-record-v3`, `Content` too, regenerates `RECORD` beside
+    /// it, and this costs an outcome only where the wheel has no `RECORD` of its own to regenerate.
+    /// It runs at `Default` so `RECORD` is regenerated over the normalized bytes at `Finalize`.
     ///
     /// Measured impact when added: one wheel in the seventeen-package M1 PyPI corpus carries CRLF
     /// metadata at all. It is a rare case that recurs rather than a common one.
@@ -1052,7 +1310,7 @@ entry_pass!(
     }
 );
 
-/// Regenerate `*.dist-info/RECORD` from the members that are actually present.
+/// Regenerate the wheel's own `RECORD` from the members that are actually present.
 ///
 /// This is why `Stage::Finalize` exists. `RECORD` is a manifest *of* membership, and earlier passes
 /// change membership: `wheel-direct-url` removes a file, and a definitions-supplied `exclude_path`
@@ -1066,12 +1324,19 @@ entry_pass!(
 /// the set digest it was published with, and read as a disagreement. The set digest covers pass ids
 /// and not pass code (`docs/19-distribution-and-lookup.md` §11, open question 1), so a new id is
 /// what sends such a record to its archived set.
+///
+/// `-v3` because which `RECORD` it rewrites changed. It took the first member whose path ended
+/// `.dist-info/RECORD`, in path order once `zip-entry-order` had sorted them, and a wheel that
+/// vendors a distribution can carry that distribution's `.dist-info` too: under `aaa/_vendor/`, it
+/// sorts before the wheel's own, so the vendored `RECORD` was regenerated and the wheel's own
+/// compared as published (`docs/16-findings.md` §3.106). Now it is the wheel's own or none
+/// (`own_record`).
 #[derive(Debug)]
 pub struct WheelRecord;
 
 impl Stabilizer for WheelRecord {
     fn id(&self) -> StabilizerId {
-        StabilizerId::new("wheel-record-v2")
+        StabilizerId::new("wheel-record-v3")
     }
     fn stage(&self) -> Stage {
         Stage::Finalize
@@ -1083,11 +1348,7 @@ impl Stabilizer for WheelRecord {
         is_zip(cx)
     }
     fn on_archive(&self, a: &mut Archive, _cx: &Cx) -> Touched {
-        let Some(idx) = a
-            .entries
-            .iter()
-            .position(|e| e.path.ends_with(b".dist-info/RECORD"))
-        else {
+        let Some(idx) = own_record(a) else {
             return Touched::NONE;
         };
         let record_path = a.entries[idx].path.clone();
@@ -1142,6 +1403,27 @@ impl Stabilizer for WheelRecord {
             Err(_) => Touched::NONE,
         }
     }
+}
+
+/// The wheel's own `RECORD`: the one in the `.dist-info` directory at the root of the archive,
+/// which the wheel format names `{distribution}-{version}.dist-info`. `None` when the root holds no
+/// such directory, or more than one, which pip refuses to install: then no `RECORD` is the wheel's
+/// by the format, and every one stays as it arrived. A `.dist-info` below the root is a vendored
+/// distribution's, and its `RECORD` is content the wheel ships like any other file.
+fn own_record(a: &Archive) -> Option<usize> {
+    let mut dirs = a.entries.iter().filter_map(|e| {
+        let p = e.path.as_bytes();
+        let top = &p[..p.iter().position(|&c| c == b'/')?];
+        top.ends_with(b".dist-info").then_some(top)
+    });
+    let own = dirs.next()?;
+    if dirs.any(|d| d != own) {
+        return None;
+    }
+    let record = [own, b"/RECORD"].concat();
+    a.entries
+        .iter()
+        .position(|e| e.path.as_bytes() == record.as_slice())
 }
 
 /// PEP 376 quotes a path only when it has to, which keeps the common case byte-identical to what
@@ -1214,11 +1496,23 @@ fn replace_line(text: &str, prefix: &str, replacement: &str) -> Option<String> {
     Some(out)
 }
 
+/// A member's bytes as text, or `None` when they are not valid UTF-8, which every pass that edits
+/// text takes as its cue to leave the member exactly as it is.
+///
+/// The seven text passes decoded lossily before their `-v2` ids: each invalid sequence became
+/// U+FFFD, and a pass that rewrote the member wrote the replacement back. Two members that
+/// differed only in an invalid byte then stabilized to the same bytes: two gemspecs, one with 0xFF
+/// where the other had 0xFE, matched as a clean `normalized` through `gem-metadata-date`
+/// (`docs/16-findings.md` §3.106). A pass that needs text and is not given any has nothing it can
+/// normalize, and the bytes compare as they are. Each pass took a new id because its output on
+/// such a member changed, and the set digest covers pass ids, not pass code
+/// (`docs/19-distribution-and-lookup.md` §11, open question 1).
+fn text_of(e: &Entry) -> Option<String> {
+    String::from_utf8(e.body_bytes().ok()?.into_owned()).ok()
+}
+
 fn rewrite_body(e: &mut Entry, f: impl Fn(&str) -> Option<String>) -> Touched {
-    let Ok(text) = e
-        .body_bytes()
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-    else {
+    let Some(text) = text_of(e) else {
         return Touched::NONE;
     };
     let Some(new) = f(&text) else {
@@ -1236,9 +1530,10 @@ fn rewrite_body(e: &mut Entry, f: impl Fn(&str) -> Option<String>) -> Touched {
 }
 
 entry_pass!(
-    /// The date the gem was packaged.
+    /// The date the gem was packaged. `-v2`: a gemspec that is not valid UTF-8 is left as it is
+    /// (`text_of`).
     GemMetadataDate,
-    "gem-metadata-date",
+    "gem-metadata-date-v2",
     RiskTier::Metadata,
     in_gem_metadata,
     |e| {
@@ -1249,9 +1544,10 @@ entry_pass!(
 );
 
 entry_pass!(
-    /// The RubyGems version that packaged the gem, which is a property of the build host.
+    /// The RubyGems version that packaged the gem, which is a property of the build host. `-v2`: a
+    /// gemspec that is not valid UTF-8 is left as it is (`text_of`).
     GemMetadataRubygemsVersion,
-    "gem-metadata-rubygems-version",
+    "gem-metadata-rubygems-version-v2",
     RiskTier::Metadata,
     in_gem_metadata,
     |e| { rewrite_body(e, |t| replace_line(t, "rubygems_version:", "rubygems_version: 0.0.0")) }
@@ -1259,8 +1555,9 @@ entry_pass!(
 
 entry_pass!(
     /// A certificate chain over members we are rebuilding, made with a key we will never hold.
+    /// `-v2`: a gemspec that is not valid UTF-8 is left as it is (`text_of`).
     GemMetadataCertChain,
-    "gem-metadata-cert-chain",
+    "gem-metadata-cert-chain-v2",
     RiskTier::Structural,
     in_gem_metadata,
     |e| {
@@ -1463,7 +1760,7 @@ entry_pass!(
     /// 10.0.16299.0;.NET Framework 4.5`, naming a Windows machine in 2018. No rebuild on any other
     /// machine can match it, and it says nothing about the package's contents.
     ///
-    /// `Metadata`, for the same reason `gem-metadata-rubygems-version` is: this records the
+    /// `Metadata`, for the same reason `gem-metadata-rubygems-version-v2` is: this records the
     /// packaging tool, not the payload.
     NupkgPackagerVersion,
     "nupkg-packager-version",
@@ -1873,7 +2170,71 @@ mod nupkg_text_tests {
 
 #[cfg(test)]
 mod dotnet_assembly_tests {
-    use super::dotnet_build_identity_regions;
+    use super::{
+        RECORD_BYTES, codeview, dotnet_build_identity_regions, embedded_pdb, pdb_checksum,
+    };
+
+    /// `ilcanon`'s one-method fixture with a debug directory appended to its section: `entries`
+    /// entries, each naming one CodeView record of `record` bytes appended after them.
+    fn with_debug_entries(entries: usize, record: usize) -> Vec<u8> {
+        use crate::ilcanon::tests::{RVA, assembly_with_sections};
+        let put =
+            |f: &mut Vec<u8>, at: usize, x: u32| f[at..at + 4].copy_from_slice(&x.to_le_bytes());
+        // The fixture's one section header, where its bytes start, and the debug directory's slot.
+        let (header, raw, slot) = (0x178, 0x200, 0x128);
+        let mut f = assembly_with_sections(1, 1);
+        let rva = |o: usize| RVA + (o - raw) as u32;
+        let table = f.len();
+        let at = table + 28 * entries;
+        f.resize(at, 0);
+        for e in (table..at).step_by(28) {
+            put(&mut f, e + 12, 2); // CodeView
+            put(&mut f, e + 16, record as u32);
+            put(&mut f, e + 20, rva(at));
+            put(&mut f, e + 24, at as u32);
+        }
+        let mut cv = b"RSDS".to_vec();
+        cv.extend_from_slice(&[0x33; 20]);
+        cv.extend_from_slice(b"x.pdb\0");
+        cv.resize(record, 0);
+        f.extend_from_slice(&cv);
+        let len = (f.len() - raw) as u32;
+        put(&mut f, header + 8, len); // VirtualSize
+        put(&mut f, header + 16, len); // SizeOfRawData
+        put(&mut f, slot, rva(table));
+        put(&mut f, slot + 4, (28 * entries) as u32);
+        f
+    }
+
+    #[test]
+    fn a_debug_record_is_read_once_however_many_entries_name_it() {
+        // Each entry's record was read as the entry came, and only then were they checked for
+        // overlap: two thousand entries naming one 64 KB record read it two thousand times, 128 MB,
+        // before the pass declined, a cost that grows with the square of the file, in a verifier
+        // and in the archived wasm set, which has no fuel limit. Placed first, the overlap is seen
+        // before a byte of any record is read.
+        let one = with_debug_entries(1, 64 * 1024);
+        RECORD_BYTES.with(|n| n.set(0));
+        assert!(
+            dotnet_build_identity_regions(&one).is_some(),
+            "one entry is zeroed"
+        );
+        assert_eq!(
+            RECORD_BYTES.with(|n| n.get()),
+            64 * 1024,
+            "its record read once"
+        );
+
+        let many = with_debug_entries(2000, 64 * 1024);
+        RECORD_BYTES.with(|n| n.set(0));
+        assert!(dotnet_build_identity_regions(&many).is_none());
+        let read = RECORD_BYTES.with(|n| n.get());
+        assert!(
+            read <= many.len() as u64,
+            "{read} bytes of records read in a file of {}",
+            many.len()
+        );
+    }
 
     /// The whole point, against two real assemblies: with the code already identical, zeroing the
     /// build/signing identity makes the bytes equal. Gated on two paths so the suite runs without
@@ -1916,58 +2277,52 @@ mod dotnet_assembly_tests {
         assert!(dotnet_build_identity_regions(b"MZ").is_none());
     }
 
-    /// The regions come back merged: sorted, apart, and inside the file. A crafted debug directory
-    /// names the whole file from each of its entries, and zeroing those one at a time costs entries
-    /// × file. Zeroing either list reaches the same bytes, so only the list can show the merge.
+    /// A debug entry's data is zeroed only when it is laid out as its type's is. A record that runs
+    /// on past its terminator, a digest of the wrong length, a hash this does not know, and bytes
+    /// that only begin like a record are none of them.
     #[test]
-    fn the_regions_come_back_merged_so_each_byte_is_named_once() {
-        fn set16(f: &mut [u8], at: usize, x: u16) {
-            f[at..at + 2].copy_from_slice(&x.to_le_bytes());
-        }
-        fn set32(f: &mut [u8], at: usize, x: u32) {
-            f[at..at + 4].copy_from_slice(&x.to_le_bytes());
-        }
-        // A PE32 image with one section at RVA 0x2000, file offset 0x200: a CLI header, then the
-        // debug entries, each naming every byte of the file but the first.
-        const ENTRIES: usize = 2000;
-        let len = 0x200 + 72 + 28 * ENTRIES;
-        let mut f = vec![0u8; len];
-        f[0..2].copy_from_slice(b"MZ");
-        set32(&mut f, 0x3c, 0x80);
-        f[0x80..0x84].copy_from_slice(b"PE\0\0");
-        let coff = 0x84;
-        set16(&mut f, coff + 2, 1);
-        set32(&mut f, coff + 4, 0x6543_2100);
-        set16(&mut f, coff + 16, 96 + 16 * 8);
-        let opt = coff + 20;
-        set16(&mut f, opt, 0x10b);
-        set32(&mut f, opt + 64, 0x0001_2345);
-        let dir = opt + 96;
-        set32(&mut f, dir + 6 * 8, 0x2000 + 72);
-        set32(&mut f, dir + 6 * 8 + 4, (28 * ENTRIES) as u32);
-        set32(&mut f, dir + 14 * 8, 0x2000);
-        set32(&mut f, dir + 14 * 8 + 4, 72);
-        let sh = dir + 16 * 8;
-        set32(&mut f, sh + 8, (len - 0x200) as u32);
-        set32(&mut f, sh + 12, 0x2000);
-        set32(&mut f, sh + 16, (len - 0x200) as u32);
-        set32(&mut f, sh + 20, 0x200);
-        set32(&mut f, 0x200, 72);
-        for i in 0..ENTRIES {
-            let e = 0x200 + 72 + 28 * i;
-            set32(&mut f, e + 4, 1);
-            set32(&mut f, e + 16, (len - 1) as u32);
-            set32(&mut f, e + 24, 1);
-        }
+    fn each_debug_record_is_recognised_by_its_layout_and_nothing_else() {
+        let mut cv = b"RSDS".to_vec();
+        cv.extend_from_slice(&[0x33; 20]);
+        cv.extend_from_slice(b"/src/obj/Demo.pdb\0");
+        assert!(codeview(&cv));
+        let mut padded = cv.clone();
+        padded.extend_from_slice(&[0; 3]);
+        assert!(codeview(&padded), "zeros after the terminator are padding");
+        let mut more = cv.clone();
+        more.push(0x2a);
+        assert!(
+            !codeview(&more),
+            "a byte after the path is not the record's"
+        );
+        assert!(!codeview(&cv[..24]), "no path, so no terminator");
+        let mut nb10 = cv.clone();
+        nb10[..4].copy_from_slice(b"NB10");
+        assert!(!codeview(&nb10), "a signature no managed compiler writes");
 
-        let regions = dotnet_build_identity_regions(&f).expect("a managed image");
-        for w in regions.windows(2) {
-            let ((o1, l1), (o2, _)) = (w[0], w[1]);
-            assert!(o2 > o1 + l1, "{:?} and {:?} overlap or touch", w[0], w[1]);
-        }
-        assert!(regions.iter().all(|&(o, l)| o + l <= len), "{regions:?}");
-        // The timestamp, the checksum, the directory slot and every entry's own stamp lie inside
-        // what the entries name, so the union is that one region.
-        assert_eq!(regions, [(1, len - 1)]);
+        let mut sum = b"SHA256\0".to_vec();
+        sum.extend_from_slice(&[0xee; 32]);
+        assert!(pdb_checksum(&sum));
+        assert!(!pdb_checksum(&sum[..sum.len() - 1]), "one byte short");
+        let mut long = sum.clone();
+        long.push(0);
+        assert!(!pdb_checksum(&long), "one byte over");
+        let mut md5 = b"MD5\0".to_vec();
+        md5.extend_from_slice(&[0xee; 16]);
+        assert!(
+            !pdb_checksum(&md5),
+            "a hash this does not know the length of"
+        );
+
+        assert!(embedded_pdb(b"MPDB\x10\0\0\0\x78\x9c"));
+        assert!(
+            !embedded_pdb(b"MPDB\0\0\0\0\x78"),
+            "a PDB that inflates to nothing"
+        );
+        assert!(!embedded_pdb(b"MPDB\x10\0\0\0"), "no deflated bytes");
+        assert!(
+            !embedded_pdb(b"BSJB\x10\0\0\0\x78"),
+            "metadata is not a PDB"
+        );
     }
 }

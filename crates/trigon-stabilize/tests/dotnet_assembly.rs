@@ -1,4 +1,4 @@
-//! Managed (.NET) assemblies: `dotnet-assembly-identity` and `dotnet-il-canonical-v2`.
+//! Managed (.NET) assemblies: `dotnet-assembly-identity-v2` and `dotnet-il-canonical-v3`.
 //!
 //! Both passes walk a PE by hand, through bytes the publisher wrote, and one of them decides
 //! whether two assemblies are the same code. So the fixtures here are real managed PEs, assembled
@@ -106,6 +106,8 @@ struct Asm {
     types: Vec<(String, u32, u32)>,
     /// Field rows, written (and FieldPtr rows too, in the uncompressed layout).
     field_rows: u32,
+    /// Every Field row's signature, or none: an empty one is written as the empty blob.
+    field_sig: Vec<u8>,
     /// MemberRef rows: Class (a MemberRefParent coded index), the name and the signature.
     member_refs: Vec<(u32, String, Vec<u8>)>,
     /// StandAloneSig rows, each the signature it holds.
@@ -122,6 +124,11 @@ struct Asm {
     /// ImplMap rows: MappingFlags, MemberForwarded (a coded index), the entry point's name, and the
     /// ModuleRef row it is imported from.
     impl_maps: Vec<(u16, u32, String, u32)>,
+    /// FieldRVA rows: the RVA of the data a field is initialized from, and the Field row. The form
+    /// drops them, so `canonical` writes none of this.
+    field_rvas: Vec<(u32, u32)>,
+    /// ClassLayout rows: PackingSize, ClassSize and Parent (a TypeDef row).
+    class_layouts: Vec<(u16, u32, u32)>,
     /// The `#US` literals, in order, the first at offset 1.
     user_strings: Vec<String>,
     /// Every fat body's header: the flags word, whose top four bits are the header's own size in
@@ -141,7 +148,8 @@ struct Asm {
     timestamp: u32,
     checksum: u32,
     strong_name: Option<Vec<u8>>,
-    /// Debug directory entries: each one's TimeDateStamp and the data it points at.
+    /// Debug directory entries: each one's TimeDateStamp and the data it points at, whose type
+    /// the builder reads off the data ([`debug_type`]).
     debug: Vec<(u32, Vec<u8>)>,
 }
 
@@ -176,6 +184,7 @@ impl Default for Asm {
             typeref_names: vec!["Object".into(), "Exception".into()],
             types: vec![("<Module>".into(), 0, 1)],
             field_rows: 1,
+            field_sig: Vec::new(),
             // What `.ctor`'s `call 0x0a000001` calls: `Object::.ctor`.
             member_refs: vec![(
                 member_parent_typeref(1),
@@ -188,6 +197,8 @@ impl Default for Asm {
             method_impls: Vec::new(),
             module_refs: Vec::new(),
             impl_maps: Vec::new(),
+            field_rvas: Vec::new(),
+            class_layouts: Vec::new(),
             user_strings: vec!["Hello, world".into()],
             // Three dwords of header, fat, InitLocals; MaxStack 8; the first StandAloneSig.
             fat_header: (0x3013, 8, 0x1100_0001),
@@ -264,6 +275,37 @@ fn codeview(path: &[u8]) -> Vec<u8> {
     v
 }
 
+/// A PDB checksum: `SHA256`, NUL, and a digest of the `.pdb` the package does not ship.
+fn pdb_checksum(fill: u8) -> Vec<u8> {
+    let mut v = b"SHA256\0".to_vec();
+    v.extend_from_slice(&[fill; 32]);
+    v
+}
+
+/// An embedded portable PDB: `MPDB`, the size it inflates to, and the deflated bytes.
+fn embedded_pdb(fill: u8) -> Vec<u8> {
+    let mut v = b"MPDB".to_vec();
+    v.extend_from_slice(&4096u32.to_le_bytes());
+    v.extend_from_slice(&[fill; 40]);
+    v
+}
+
+/// The debug directory type the builder writes for an entry's data, read off the data as
+/// `dotnet-assembly-identity-v2` reads it: CodeView, embedded portable PDB, PDB checksum, or, for
+/// no data at all, Reproducible. Anything else is written as CodeView, which is what it claims to
+/// be.
+fn debug_type(data: &[u8]) -> u32 {
+    if data.is_empty() {
+        16
+    } else if data.starts_with(b"MPDB") {
+        17
+    } else if data.starts_with(b"SHA") {
+        19
+    } else {
+        2
+    }
+}
+
 /// Where the builder put things, so a test can name a region without re-parsing the file.
 #[derive(Debug, Default)]
 struct Layout {
@@ -283,6 +325,8 @@ struct Layout {
     metadata: usize,
     /// The file offset of each stream header's name.
     stream_names: Vec<(String, usize)>,
+    /// The `#US` heap, as a file range.
+    us_heap: (usize, usize),
     /// The file offset of `MethodDef`'s row count in the table stream's header.
     method_count: usize,
     method_rows: usize,
@@ -464,7 +508,7 @@ fn columns(t: usize) -> &'static [Col] {
     }
 }
 
-/// The tables `dotnet-il-canonical-v2` keeps after the methods, in the order it writes them.
+/// The tables `dotnet-il-canonical-v3` keeps after the methods, in the order it writes them.
 const KEPT: [usize; 31] = [
     0x01, 0x02, 0x03, 0x04, 0x05, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0d, 0x0f, 0x10, 0x11, 0x12, 0x13,
     0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x23, 0x27, 0x29, 0x2a, 0x2b, 0x2c,
@@ -514,6 +558,8 @@ impl Asm {
         counts[0x19] = self.method_impls.len() as u32;
         counts[0x1a] = self.module_refs.len() as u32;
         counts[0x1c] = self.impl_maps.len() as u32;
+        counts[0x0f] = self.class_layouts.len() as u32;
+        counts[0x1d] = self.field_rvas.len() as u32;
         counts[0x23] = self.assembly_refs.len() as u32;
         for &(t, n) in &self.declared {
             assert!(
@@ -595,10 +641,13 @@ impl Asm {
             sec.extend_from_slice(data);
             let e = dbg + 28 * i;
             set32(&mut sec, e + 4, *ts);
-            set32(&mut sec, e + 12, 2); // IMAGE_DEBUG_TYPE_CODEVIEW
+            set32(&mut sec, e + 12, debug_type(data));
             set32(&mut sec, e + 16, data.len() as u32);
-            set32(&mut sec, e + 20, SECTION_RVA + at as u32);
-            set32(&mut sec, e + 24, (SECTION_RAW + at) as u32);
+            // An entry with no data names none, and says so with both of its addresses at zero.
+            if !data.is_empty() {
+                set32(&mut sec, e + 20, SECTION_RVA + at as u32);
+                set32(&mut sec, e + 24, (SECTION_RAW + at) as u32);
+            }
             lay.debug_entries.push(SECTION_RAW + e);
             lay.debug_data.push((SECTION_RAW + at, data.len()));
         }
@@ -675,6 +724,11 @@ impl Asm {
             .map(|sig| put_blob(&mut blob, sig))
             .collect();
         let token = put_blob(&mut blob, PUBLIC_KEY_TOKEN);
+        let field_sig = if self.field_sig.is_empty() {
+            0
+        } else {
+            put_blob(&mut blob, &self.field_sig)
+        };
         let guid = self.mvid.to_vec();
         let us = self.user_string_heap();
 
@@ -734,7 +788,7 @@ impl Asm {
         for _ in 0..self.field_rows {
             put16(&mut t, 0x0001);
             put_idx(&mut t, field_name, s);
-            put_idx(&mut t, 0, bw);
+            put_idx(&mut t, field_sig, bw);
         }
         if self.uncompressed {
             for i in 0..self.methods.len() as u32 {
@@ -783,6 +837,19 @@ impl Asm {
                         put_idx(&mut t, member, coded(MEMBER_FORWARDED, 1));
                         put_idx(&mut t, import_names[i], s);
                         put_idx(&mut t, scope, idx(0x1a));
+                    }
+                }
+                0x1d if !self.field_rvas.is_empty() => {
+                    for &(rva, field) in &self.field_rvas {
+                        put32(&mut t, rva);
+                        put_idx(&mut t, field, idx(0x04));
+                    }
+                }
+                0x0f if !self.class_layouts.is_empty() => {
+                    for &(packing, size, parent) in &self.class_layouts {
+                        put16(&mut t, packing);
+                        put32(&mut t, size);
+                        put_idx(&mut t, parent, idx(0x02));
                     }
                 }
                 0x0a => {
@@ -866,6 +933,7 @@ impl Asm {
         lay.method_rows = file_md + offsets[0] + method_rows_at;
         lay.member_ref_rows = file_md + offsets[0] + member_ref_rows_at;
         lay.guid_heap = (file_md + offsets[3], 16);
+        lay.us_heap = (file_md + offsets[2], streams[2].1.len());
         sec.extend_from_slice(&md);
 
         // The CLI header (§II.25.3.3).
@@ -905,6 +973,7 @@ impl Asm {
         set16(&mut f, coff + 18, 0x2102);
         set16(&mut f, opt, magic);
         lay.opt_magic = opt;
+        set32(&mut f, opt + 60, SECTION_RAW as u32); // SizeOfHeaders
         set32(&mut f, opt + 64, self.checksum);
         lay.checksum = opt + 64;
         let dir = opt + dirs;
@@ -942,7 +1011,7 @@ impl Asm {
         us
     }
 
-    /// The canonical form `dotnet-il-canonical-v2` documents, every number little-endian: `0x06`
+    /// The canonical form `dotnet-il-canonical-v3` documents, every number little-endian: `0x06`
     /// and the method count, then per method in table order its name and its signature, each
     /// behind its length as a u32, its ImplFlags and Flags, its ParamList as a u32, and `0` for a
     /// method without a body or `1` and the body's header, IL and exception-handling sections, each
@@ -1020,7 +1089,7 @@ impl Asm {
                     for _ in 0..self.field_rows {
                         put16(&mut out, 0x0001);
                         field(&mut out, b"state");
-                        field(&mut out, b"");
+                        field(&mut out, &self.field_sig);
                     }
                 }
                 0x0a => {
@@ -1073,6 +1142,13 @@ impl Asm {
                         put32(&mut out, *scope);
                     }
                 }
+                0x0f if !self.class_layouts.is_empty() => {
+                    for &(packing, size, parent) in &self.class_layouts {
+                        put16(&mut out, packing);
+                        put32(&mut out, size);
+                        put32(&mut out, parent);
+                    }
+                }
                 // A table the fixture only declares is rows of zeros: every integer 0, and every
                 // string and blob the empty one at offset 0.
                 _ => {
@@ -1120,8 +1196,8 @@ fn only(pass: &str) -> StabilizerSet {
     set
 }
 
-const IDENTITY: &str = "dotnet-assembly-identity";
-const CANONICAL: &str = "dotnet-il-canonical-v2";
+const IDENTITY: &str = "dotnet-assembly-identity-v2";
+const CANONICAL: &str = "dotnet-il-canonical-v3";
 
 /// One member after a set ran over a package holding it.
 #[derive(Debug)]
@@ -1188,7 +1264,7 @@ fn assert_left_whole(out: &Out, input: &[u8], why: &str) {
     );
 }
 
-// --- dotnet-il-canonical-v2: what the form is ----------------------------------------------------
+// --- dotnet-il-canonical-v3: what the form is ----------------------------------------------------
 
 #[test]
 fn an_assembly_reduces_to_its_methods_and_what_their_tokens_name() {
@@ -1269,9 +1345,9 @@ fn stabilizing_a_package_twice_changes_nothing_the_second_time() {
     assert!(again.is_empty(), "a second pass reported work: {again:?}");
 }
 
-// --- dotnet-il-canonical-v2: a real code difference still shows ----------------------------------
+// --- dotnet-il-canonical-v3: a real code difference still shows ----------------------------------
 
-/// Two assemblies, laid out identically, that `dotnet-il-canonical-v2` must still tell apart.
+/// Two assemblies, laid out identically, that `dotnet-il-canonical-v3` must still tell apart.
 fn assert_code_difference_shows(what: &str, edit: impl Fn(&mut Asm)) {
     assert_code_difference_shows_against(&Asm::default(), what, edit);
 }
@@ -1512,7 +1588,7 @@ fn a_method_folded_into_its_neighbours_body_still_shows() {
     });
 }
 
-// --- dotnet-il-canonical-v2: every layout ECMA-335 allows is read at its real widths -------------
+// --- dotnet-il-canonical-v3: every layout ECMA-335 allows is read at its real widths -------------
 
 /// Read through the pass, `asm` must reduce to exactly its own methods: a row or index read at
 /// the wrong width lands on the wrong bytes, and the names that come out are garbage.
@@ -1677,7 +1753,7 @@ fn an_assembly_with_no_methods_reduces_to_a_form_with_no_method_records() {
     assert_eq!(out.applied.len(), 1, "{:?}", out.applied);
 }
 
-// --- dotnet-il-canonical-v2: an assembly it cannot read whole is left exactly as it was ----------
+// --- dotnet-il-canonical-v3: an assembly it cannot read whole is left exactly as it was ----------
 
 #[test]
 fn a_member_named_like_something_else_is_not_read_as_an_assembly() {
@@ -1777,6 +1853,23 @@ fn an_assembly_it_cannot_read_whole_is_left_exactly_as_it_was() {
             let at = stream("#GUID");
             Box::new(move |b: &mut Vec<u8>| b.truncate(at))
         }),
+        // Native code no method names: the CLI header says the image carries it, and the form
+        // cannot hold it.
+        (
+            "an image that is not IL only",
+            Box::new(|b: &mut Vec<u8>| set32(b, SECTION_RAW + 16, 0)),
+        ),
+        (
+            "an image with a native entry point",
+            Box::new(|b: &mut Vec<u8>| set32(b, SECTION_RAW + 16, 0x11)),
+        ),
+        (
+            "an image carrying ReadyToRun code",
+            Box::new(|b: &mut Vec<u8>| {
+                set32(b, SECTION_RAW + 64, SECTION_RVA + 72);
+                set32(b, SECTION_RAW + 68, 72);
+            }),
+        ),
     ];
     for (what, corrupt) in cases {
         let mut bad = good.clone();
@@ -1850,6 +1943,46 @@ fn a_body_is_read_only_as_far_as_the_file_backs_its_section() {
     assert_left_whole(&out, &bad, "SizeOfRawData ending inside #Blob");
 }
 
+/// Native code no method names, read past as the IL pass read it before `-v3`: a ReadyToRun
+/// image's precompiled methods, which the runtime runs in place of their IL, and a mixed-mode
+/// image's native entry point, which runs at load. Two images of one IL and different native code
+/// shared a form and matched as `normalized_with_caveats`. Now both passes leave such an image as it
+/// is, and the two stay apart.
+#[test]
+fn native_code_no_method_names_keeps_two_images_of_one_il_apart() {
+    let native = |fill: u8, ready_to_run: bool| {
+        let (mut b, _) = Asm {
+            code_pad: 64,
+            ..Asm::default()
+        }
+        .build();
+        let code = SECTION_RAW + 72;
+        b[code..code + 64].fill(fill);
+        if ready_to_run {
+            set32(&mut b, SECTION_RAW + 64, SECTION_RVA + 72);
+            set32(&mut b, SECTION_RAW + 68, 64);
+        } else {
+            // NATIVE_ENTRYPOINT, ILONLY clear, and the entry point an RVA rather than a token.
+            set32(&mut b, SECTION_RAW + 16, 0x10);
+            set32(&mut b, SECTION_RAW + 20, SECTION_RVA + 72);
+        }
+        b
+    };
+    for (what, ready_to_run) in [("ReadyToRun", true), ("a native entry point", false)] {
+        let (a, b) = (native(0x90, ready_to_run), native(0xcc, ready_to_run));
+        assert_eq!(a.iter().zip(&b).filter(|(x, y)| x != y).count(), 64);
+        for bytes in [&a, &b] {
+            assert_left_whole(&run(&only(CANONICAL), DLL, bytes), bytes, what);
+        }
+        let (sa, applied) = nupkg_stabilized(&a);
+        let (sb, _) = nupkg_stabilized(&b);
+        assert!(
+            sa != sb,
+            "{what}: two images of one IL and different native code matched: {applied:?}"
+        );
+    }
+}
+
 #[test]
 fn a_method_whose_body_is_native_code_is_not_read_as_il() {
     // A mixed-mode assembly's C++ methods carry machine code, which the runtime runs as it stands.
@@ -1907,9 +2040,13 @@ fn records_that_repeat_one_heap_entry_without_bound_are_declined() {
     );
     let out = run(&only(CANONICAL), DLL, &bad);
     assert_left_whole(&out, &bad, "rows that all name one 64 KB string");
+    // And the identity pass leaves it too: it acts only where the IL pass reads the assembly, so
+    // its zeroing never decides a digest the IL pass does not replace.
+    let out = run(&only(IDENTITY), DLL, &bad);
+    assert_left_whole(&out, &bad, "an assembly the IL pass declines");
 }
 
-// --- dotnet-assembly-identity --------------------------------------------------------------------
+// --- dotnet-assembly-identity-v2 -----------------------------------------------------------------
 
 #[test]
 fn builds_differing_only_in_build_identity_agree_after_the_identity_pass() {
@@ -1951,13 +2088,59 @@ fn builds_differing_only_in_build_identity_agree_after_the_identity_pass() {
 }
 
 #[test]
+fn every_kind_of_debug_entry_a_compiler_writes_is_zeroed_and_two_builds_agree() {
+    // What a deterministic Roslyn build writes: a CodeView record, a checksum of the PDB, the PDB
+    // itself embedded, and a Reproducible entry that names no data. Two builds of one source
+    // differ in all of them, and in nothing else.
+    let debug = |ts: u32, fill: u8, path: &[u8]| {
+        vec![
+            (ts, codeview(path)),
+            (ts, pdb_checksum(fill)),
+            (ts, embedded_pdb(fill)),
+            (0, Vec::new()),
+        ]
+    };
+    let a = Asm {
+        debug: debug(0x6543_2100, 0x11, b"/home/alice/src/Demo/obj/Demo.pdb"),
+        ..Asm::default()
+    };
+    let b = Asm {
+        mvid: [0x22; 16],
+        timestamp: 0x7000_0001,
+        checksum: 0x000f_eeee,
+        strong_name: Some(vec![0xa5; 128]),
+        debug: debug(0x7000_0001, 0x22, b"/home/carol/src/Demo/obj/Demo.pdb"),
+        ..a.clone()
+    };
+    let (ra, rb) = (a.bytes(), b.bytes());
+    assert_eq!(ra.len(), rb.len());
+    let oa = run(&only(IDENTITY), DLL, &ra);
+    let ob = run(&only(IDENTITY), DLL, &rb);
+    assert!(oa.body == ob.body, "a debug entry's data survived");
+    assert_eq!(oa.applied.len(), 1, "{:?}", oa.applied);
+
+    // And through the whole profile, the verdict it reaches: a match, capped by the IL pass that
+    // runs after this one, whatever this one did.
+    let (sa, applied) = nupkg_stabilized(&ra);
+    let (sb, _) = nupkg_stabilized(&rb);
+    assert!(sa == sb, "two builds of one source did not agree");
+    let ids: Vec<&str> = applied.iter().map(|x| x.id.as_str()).collect();
+    assert!(
+        ids.contains(&IDENTITY) && ids.contains(&CANONICAL),
+        "{ids:?}"
+    );
+}
+
+#[test]
 fn the_identity_pass_zeroes_its_named_regions_and_nothing_else() {
     for pe32_plus in [false, true] {
         let asm = Asm {
             pe32_plus,
             debug: vec![
                 (0x6543_2100, codeview(b"/src/obj/Demo.pdb")),
-                (0x6543_2101, vec![0xee; 24]),
+                (0x6543_2101, pdb_checksum(0xee)),
+                (0x6543_2102, embedded_pdb(0x78)),
+                (0x6543_2103, Vec::new()),
             ],
             ..Asm::default()
         };
@@ -2090,50 +2273,333 @@ fn a_member_named_like_something_else_is_not_zeroed() {
     assert_left_whole(&out, &bytes, "a non-assembly member");
 }
 
+// --- dotnet-assembly-identity-v2: only what is provably identity ---------------------------------
+
+/// The case `docs/16-findings.md` §3.106 records, built as its repro was: two assemblies of one
+/// length whose code differs, here in 240 bytes, each with a debug entry that names every byte of
+/// the file but the first. The first identity pass zeroed that range on both sides, the IL pass
+/// could not read what was left and declined, and two one-member packages holding different
+/// programs verified as a clean `normalized`. The range is not a debug record, so the assembly is
+/// left whole, the IL pass reads both, and the stabilized packages differ: the verdict is
+/// `divergent`.
 #[test]
-fn a_region_that_runs_past_the_file_is_skipped_and_the_rest_still_zeroed() {
-    // A strong-name signature or debug data the headers place beyond the end is not zeroed —
-    // there is nothing there — and must not stop the regions that are there from being zeroed.
-    let (mut bytes, lay) = Asm::default().build();
-    set32(&mut bytes, lay.cli_strong_name + 4, 0x0100_0000);
+fn a_debug_entry_naming_the_whole_file_is_not_debug_data() {
+    let program = |il: u8| Asm {
+        methods: vec![Method {
+            name: "Run".into(),
+            sig: SIG_VOID.to_vec(),
+            flags: PUBLIC_HIDEBYSIG,
+            impl_flags: 0,
+            code: Code::Fat(vec![il; 240]),
+        }],
+        ..Asm::default()
+    };
+    let whole = |asm: &Asm| {
+        let (mut bytes, lay) = asm.build();
+        let e = lay.debug_entries[0];
+        let len = bytes.len() as u32;
+        set32(&mut bytes, e + 16, len - 1);
+        set32(&mut bytes, e + 20, 0);
+        set32(&mut bytes, e + 24, 1);
+        bytes
+    };
+    let (ra, rb) = (whole(&program(0x00)), whole(&program(0x14)));
+    assert_eq!(ra.len(), rb.len());
+    assert_eq!(ra.iter().zip(&rb).filter(|(x, y)| x != y).count(), 240);
+
+    for bytes in [&ra, &rb] {
+        let out = run(&only(IDENTITY), DLL, bytes);
+        assert_left_whole(&out, bytes, "a debug entry naming the whole file");
+    }
+    let (sa, applied) = nupkg_stabilized(&ra);
+    let (sb, _) = nupkg_stabilized(&rb);
+    assert!(
+        sa != sb,
+        "two programs stabilized to one package, a false match: {applied:?}"
+    );
+    assert!(
+        applied.iter().any(|x| x.id.as_str() == CANONICAL),
+        "the IL pass reads the assembly the identity pass left whole: {applied:?}"
+    );
+}
+
+/// A `#US` literal that is, byte for byte, a CodeView record whose GUID is the literal's text:
+/// `RSDS`, sixteen bytes of `fill`, an age of 1, the path `pq` and its NUL, as UTF-16.
+fn literal_laid_out_as_codeview(fill: u8) -> String {
+    let unit = |lo: u8, hi: u8| u16::from_le_bytes([lo, hi]);
+    let mut units = vec![unit(b'R', b'S'), unit(b'D', b'S')];
+    units.extend(std::iter::repeat_n(unit(fill, fill), 8));
+    units.extend([unit(1, 0), unit(0, 0), unit(b'p', b'q'), unit(0, b'A')]);
+    String::from_utf16(&units).unwrap()
+}
+
+/// The literal `ldstr` reads, named by a debug entry. The first identity pass zeroed it on both
+/// sides, the IL pass read the same zeros into its form, and two assemblies that differed only in
+/// the literal matched as `normalized_with_caveats`. It is the metadata's whether the entry merely
+/// claims to be a CodeView record, or the literal is laid out as one so the claim holds, and the
+/// assembly is left whole either way.
+#[test]
+fn a_debug_entry_naming_a_string_literal_is_not_debug_data() {
+    let aimed = |asm: &Asm, record: bool| {
+        let (mut bytes, lay) = asm.build();
+        let (us, us_len) = lay.us_heap;
+        // The heap's empty entry, then the literal's one-byte length, then its UTF-16.
+        let (at, len) = if record { (us + 2, 27) } else { (us, us_len) };
+        let e = lay.debug_entries[0];
+        set32(&mut bytes, e + 16, len as u32);
+        set32(&mut bytes, e + 20, SECTION_RVA + (at - SECTION_RAW) as u32);
+        set32(&mut bytes, e + 24, at as u32);
+        bytes
+    };
+    for record in [false, true] {
+        let what = if record {
+            "a literal laid out as a CodeView record"
+        } else {
+            "the #US heap claimed as a CodeView record"
+        };
+        let with = |fill: u8| Asm {
+            user_strings: vec![literal_laid_out_as_codeview(fill)],
+            ..Asm::default()
+        };
+        let (ra, rb) = (aimed(&with(0x33), record), aimed(&with(0x44), record));
+        for bytes in [&ra, &rb] {
+            let out = run(&only(IDENTITY), DLL, bytes);
+            assert_left_whole(&out, bytes, what);
+        }
+        let (sa, _) = nupkg_stabilized(&ra);
+        let (sb, _) = nupkg_stabilized(&rb);
+        assert!(sa != sb, "{what}: a changed literal matched");
+    }
+}
+
+/// A method body is code whatever it looks like. One whose IL happens to spell a CodeView record,
+/// named by a debug entry, is left alone.
+#[test]
+fn a_debug_entry_naming_a_method_body_is_not_debug_data() {
+    let mut il = codeview(b"pq");
+    il.push(0x2a);
+    let asm = Asm {
+        methods: vec![Method {
+            name: "Run".into(),
+            sig: SIG_VOID.to_vec(),
+            flags: PUBLIC_HIDEBYSIG,
+            impl_flags: 0,
+            code: Code::Fat(il.clone()),
+        }],
+        ..Asm::default()
+    };
+    let (mut bytes, lay) = asm.build();
+    let at = bytes
+        .windows(il.len())
+        .position(|w| w == il.as_slice())
+        .unwrap();
     let e = lay.debug_entries[0];
-    set32(&mut bytes, e + 24, 0x0100_0000);
+    set32(&mut bytes, e + 16, (il.len() - 1) as u32);
+    set32(&mut bytes, e + 20, SECTION_RVA + (at - SECTION_RAW) as u32);
+    set32(&mut bytes, e + 24, at as u32);
     let out = run(&only(IDENTITY), DLL, &bytes);
+    assert_left_whole(&out, &bytes, "a debug entry naming a method's IL");
+}
 
-    let zero = |(o, l): (usize, usize)| out.body[o..o + l].iter().all(|&x| x == 0);
-    assert!(zero((lay.timestamp, 4)) && zero((lay.checksum, 4)) && zero(lay.guid_heap));
-    assert!(zero((e + 4, 4)), "the debug entry's own timestamp");
-    let (sn, sn_len) = lay.strong_name.unwrap();
-    assert!(
-        !zero((sn, sn_len)),
-        "a signature the header says runs past the file was zeroed"
-    );
-    assert!(
-        !zero(lay.debug_data[0]),
-        "debug data the entry says is past the file was zeroed"
-    );
+#[test]
+fn each_way_a_region_can_fail_to_be_identity_declines_the_whole_assembly() {
+    // Any one region that cannot be shown to be what its header calls it leaves the assembly
+    // exactly as it arrived: never zeroed in part, stamp and MVID included.
+    let asm = Asm {
+        debug: vec![
+            (0x6543_2100, codeview(b"/src/obj/Demo.pdb")),
+            (0x6543_2101, pdb_checksum(0xee)),
+        ],
+        ..Asm::default()
+    };
+    let (good, lay) = asm.build();
+    let out = run(&only(IDENTITY), DLL, &good);
+    assert!(!out.applied.is_empty(), "the unaltered fixture is zeroed");
 
-    // The #GUID heap likewise: a size running past the end names no heap, and the rest holds.
-    let (mut bytes, lay) = Asm::default().build();
-    let guid = lay
-        .stream_names
-        .iter()
-        .find(|(n, _)| n == "#GUID")
-        .unwrap()
-        .1;
-    set32(&mut bytes, guid - 4, 0x0100_0000);
+    let (e0, e1) = (lay.debug_entries[0], lay.debug_entries[1]);
+    let (d0, d0_len) = lay.debug_data[0];
+    let cli = SECTION_RAW;
+    let rva_of = |file: usize| SECTION_RVA + (file - SECTION_RAW) as u32;
+    type Corrupt = Box<dyn Fn(&mut Vec<u8>)>;
+    let cases: Vec<(&str, Corrupt)> = vec![
+        (
+            "an entry of a type no managed compiler writes",
+            Box::new(move |b: &mut Vec<u8>| set32(b, e0 + 12, 13)), // IMAGE_DEBUG_TYPE_POGO
+        ),
+        (
+            "an entry whose data is not what its type says",
+            Box::new(move |b: &mut Vec<u8>| set32(b, e1 + 12, 2)), // a checksum called CodeView
+        ),
+        (
+            "a CodeView record that runs on past its terminator",
+            Box::new(move |b: &mut Vec<u8>| set32(b, e0 + 16, d0_len as u32 + 1)),
+        ),
+        (
+            "two entries naming the same bytes",
+            Box::new(move |b: &mut Vec<u8>| {
+                let first = b[e0..e0 + 28].to_vec();
+                b[e1..e1 + 28].copy_from_slice(&first);
+            }),
+        ),
+        (
+            "an entry whose address and file offset disagree",
+            Box::new(move |b: &mut Vec<u8>| set32(b, e0 + 20, rva_of(d0) + 4)),
+        ),
+        (
+            "an entry that says its data is not in the file",
+            Box::new(move |b: &mut Vec<u8>| set32(b, e0 + 24, 0)),
+        ),
+        (
+            "an entry whose data runs past the end of the file",
+            Box::new(move |b: &mut Vec<u8>| set32(b, e0 + 24, 0x0100_0000)),
+        ),
+        ("a debug directory that is not a whole number of entries", {
+            let dir = lay.debug_dir;
+            Box::new(move |b: &mut Vec<u8>| set32(b, dir + 4, 28 * 2 - 1))
+        }),
+        ("a debug directory in no section", {
+            let dir = lay.debug_dir;
+            Box::new(move |b: &mut Vec<u8>| set32(b, dir, 0x00a0_0000))
+        }),
+        ("a CodeView record in the DOS stub", {
+            let record = codeview(b"x");
+            Box::new(move |b: &mut Vec<u8>| {
+                b[0x40..0x40 + record.len()].copy_from_slice(&record);
+                set32(b, e0 + 16, record.len() as u32);
+                set32(b, e0 + 20, 0);
+                set32(b, e0 + 24, 0x40);
+            })
+        }),
+        ("managed resources over a debug entry's data", {
+            Box::new(move |b: &mut Vec<u8>| {
+                set32(b, cli + 24, rva_of(d0));
+                set32(b, cli + 28, d0_len as u32);
+            })
+        }),
+        ("field data of no readable size before the debug data", {
+            // No size can be read for its field, so it is taken to run to the end of the section.
+            let mut with = asm.clone();
+            with.field_rvas = vec![(SECTION_RVA + 72, 1)];
+            let bytes = with.bytes();
+            Box::new(move |b: &mut Vec<u8>| *b = bytes.clone())
+        }),
+        ("a strong-name signature over the metadata", {
+            let md = lay.metadata;
+            Box::new(move |b: &mut Vec<u8>| set32(b, cli + 32, rva_of(md)))
+        }),
+        ("a strong-name signature past the end of the file", {
+            let at = lay.cli_strong_name;
+            Box::new(move |b: &mut Vec<u8>| set32(b, at + 4, 0x0100_0000))
+        }),
+        ("a #GUID heap that runs past the end of the file", {
+            let guid = lay
+                .stream_names
+                .iter()
+                .find(|(n, _)| n == "#GUID")
+                .unwrap()
+                .1;
+            Box::new(move |b: &mut Vec<u8>| set32(b, guid - 4, 0x0100_0000))
+        }),
+        ("a #GUID heap that is not a whole number of GUIDs", {
+            let guid = lay
+                .stream_names
+                .iter()
+                .find(|(n, _)| n == "#GUID")
+                .unwrap()
+                .1;
+            Box::new(move |b: &mut Vec<u8>| set32(b, guid - 4, 12))
+        }),
+        ("a string index that runs out of #Strings", {
+            // MemberRef 1's name, after its two-byte Class.
+            let at = lay.member_ref_rows + 2;
+            Box::new(move |b: &mut Vec<u8>| set16(b, at, 0xfff0))
+        }),
+        (
+            "an image that is not IL only",
+            Box::new(move |b: &mut Vec<u8>| set32(b, cli + 16, 0)),
+        ),
+        (
+            "an image carrying precompiled native code",
+            Box::new(move |b: &mut Vec<u8>| set32(b, cli + 64, SECTION_RVA)),
+        ),
+        ("metadata without its signature", {
+            let md = lay.metadata;
+            Box::new(move |b: &mut Vec<u8>| b[md] = b'X')
+        }),
+    ];
+    for (what, corrupt) in cases {
+        let mut bad = good.clone();
+        corrupt(&mut bad);
+        let out = run(&only(IDENTITY), DLL, &bad);
+        assert_left_whole(&out, &bad, what);
+    }
+}
+
+#[test]
+fn data_a_field_is_initialized_from_is_kept_clear_of_only_as_far_as_its_type_runs() {
+    // The FieldRVA check does not decline every assembly with field data: an `int32`'s four bytes
+    // ahead of the method bodies are the field's, and the debug data after them is still zeroed.
+    let asm = Asm {
+        code_pad: 8,
+        field_sig: vec![0x06, 0x08], // FIELD int32
+        field_rvas: vec![(SECTION_RVA + 72, 1)],
+        ..Asm::default()
+    };
+    let (bytes, lay) = asm.build();
     let out = run(&only(IDENTITY), DLL, &bytes);
-    let (g, gl) = lay.guid_heap;
-    assert_eq!(
-        out.body[g..g + gl],
-        bytes[g..g + gl],
-        "a heap past the end was zeroed"
-    );
-    assert!(
-        out.body[lay.timestamp..lay.timestamp + 4]
-            .iter()
-            .all(|&x| x == 0)
-    );
+    for (o, l) in lay.identity_regions() {
+        assert!(
+            out.body[o..o + l].iter().all(|&x| x == 0),
+            "region {o:#x}+{l} was not zeroed"
+        );
+    }
+    assert_eq!(out.body[SECTION_RAW + 72..SECTION_RAW + 80], [0xcc; 8]);
+
+    // The same data with no type to size it by is taken to run to the end of its section, over
+    // the debug data, and the assembly is left whole.
+    let unsized_ = Asm {
+        field_sig: Vec::new(),
+        ..asm.clone()
+    }
+    .bytes();
+    let out = run(&only(IDENTITY), DLL, &unsized_);
+    assert_left_whole(&out, &unsized_, "field data of no size this can read");
+
+    // A value type a ClassLayout row sizes whole: no fields of its own, as the struct a compiler
+    // declares field data with has none, and a ClassSize. TypeDef 1 owns no field here, since
+    // TypeDef 2 starts at the same FieldList and owns the one there is.
+    let layout = |parent: u32, rows: Vec<(u16, u32, u32)>| Asm {
+        types: vec![("<Module>".into(), 0, 1), ("Holder".into(), 0, 5)],
+        field_sig: vec![0x06, 0x11, (parent << 2) as u8], // FIELD valuetype TypeDef `parent`
+        class_layouts: rows,
+        ..asm.clone()
+    };
+    let (bytes, lay) = layout(1, vec![(1, 8, 1)]).build();
+    let out = run(&only(IDENTITY), DLL, &bytes);
+    for (o, l) in lay.identity_regions() {
+        assert!(
+            out.body[o..o + l].iter().all(|&x| x == 0),
+            "sized by its ClassLayout: region {o:#x}+{l} was not zeroed"
+        );
+    }
+    assert_eq!(out.body[SECTION_RAW + 72..SECTION_RAW + 80], [0xcc; 8]);
+
+    // Anything else says nothing of how long a value is, and the data runs to the end of its
+    // section. A ClassSize of 0 is no `.size` at all (ECMA-335 §II.22.8), and read as a length of
+    // no bytes it held nothing, and the pass zeroed what lay over the data. A type with fields is
+    // as long as they lay out, if that is longer. A second row may be the one the runtime reads.
+    for (what, asm) in [
+        ("a ClassSize of 0", layout(1, vec![(1, 0, 1)])),
+        ("a sized type that owns a field", layout(2, vec![(1, 8, 2)])),
+        (
+            "two ClassLayout rows for one type",
+            layout(1, vec![(1, 8, 1), (1, 4, 1)]),
+        ),
+    ] {
+        let bytes = asm.bytes();
+        let out = run(&only(IDENTITY), DLL, &bytes);
+        assert_left_whole(&out, &bytes, what);
+    }
 }
 
 #[test]
@@ -2173,28 +2639,6 @@ fn an_image_the_identity_pass_cannot_walk_is_left_whole() {
 }
 
 #[test]
-fn a_debug_directory_outside_every_section_clears_only_its_own_slot() {
-    let (mut bytes, lay) = Asm::default().build();
-    set32(&mut bytes, lay.debug_dir, 0x00a0_0000);
-    let out = run(&only(IDENTITY), DLL, &bytes);
-    assert!(
-        out.body[lay.debug_dir..lay.debug_dir + 8]
-            .iter()
-            .all(|&x| x == 0)
-    );
-    assert_eq!(
-        out.body[lay.debug_entries[0] + 4..lay.debug_entries[0] + 8],
-        bytes[lay.debug_entries[0] + 4..lay.debug_entries[0] + 8],
-        "an entry the directory no longer reaches was zeroed"
-    );
-    assert!(
-        out.body[lay.timestamp..lay.timestamp + 4]
-            .iter()
-            .all(|&x| x == 0)
-    );
-}
-
-#[test]
 fn a_debug_directory_slot_naming_no_bytes_is_not_a_debug_directory() {
     // A data directory is present when it has both an address and a size. A slot with only one
     // names nothing to zero, so it is not build identity this pass may clear; the regions the
@@ -2223,18 +2667,28 @@ fn a_debug_directory_slot_naming_no_bytes_is_not_a_debug_directory() {
 }
 
 #[test]
-fn a_debug_entry_with_no_data_in_the_file_names_no_bytes() {
-    // PointerToRawData 0 is how an entry says its data is not in the file. Read as an offset it
-    // would name the DOS header, and zero the `MZ` that makes this a PE at all.
-    let (mut bytes, lay) = Asm::default().build();
+fn a_reproducible_entry_names_no_bytes_and_keeps_none_of_the_file() {
+    // Reproducible says the build was deterministic and names no data: both addresses zero. Read
+    // as an offset, PointerToRawData 0 would name the DOS header and zero the `MZ` that makes this
+    // a PE at all; the entry's own stamp is still build identity.
+    let (bytes, lay) = Asm {
+        debug: vec![(0x6543_2100, Vec::new())],
+        ..Asm::default()
+    }
+    .build();
     let e = lay.debug_entries[0];
-    set32(&mut bytes, e + 24, 0);
     let out = run(&only(IDENTITY), DLL, &bytes);
     assert_eq!(out.body[..0x40], bytes[..0x40], "the DOS header was zeroed");
     assert!(
         out.body[e + 4..e + 8].iter().all(|&x| x == 0),
         "the entry's own timestamp is still build identity"
     );
+
+    // One that says it names data does not get to name none.
+    let mut bad = bytes.clone();
+    set32(&mut bad, e + 16, 24);
+    let out = run(&only(IDENTITY), DLL, &bad);
+    assert_left_whole(&out, &bad, "a Reproducible entry with a size");
 }
 
 #[test]
@@ -2254,22 +2708,6 @@ fn a_debug_directory_mapped_onto_the_files_first_bytes_is_walked_without_a_panic
 }
 
 #[test]
-fn metadata_without_its_signature_keeps_its_guid_heap() {
-    // The #GUID heap is found through the metadata root. Where the root is not one, no heap is
-    // named — the other identity regions are still found by their headers.
-    let (mut bytes, lay) = Asm::default().build();
-    bytes[lay.metadata] = b'X';
-    let out = run(&only(IDENTITY), DLL, &bytes);
-    let (g, gl) = lay.guid_heap;
-    assert_eq!(out.body[g..g + gl], bytes[g..g + gl]);
-    assert!(
-        out.body[lay.checksum..lay.checksum + 4]
-            .iter()
-            .all(|&x| x == 0)
-    );
-}
-
-#[test]
 fn an_rva_below_its_section_is_declined_rather_than_a_panic() {
     // Stabilizers are total. An RVA the headers place below the only section mapped nowhere, and
     // computing its offset anyway underflowed — a panic under the overflow checks release builds
@@ -2281,64 +2719,264 @@ fn an_rva_below_its_section_is_declined_rather_than_a_panic() {
     let out = run(&only(IDENTITY), DLL, &bad);
     assert_left_whole(&out, &bad, "a CLI header below its section");
 
-    // The metadata root and the debug directory are looked up the same way. Neither is found, so
-    // neither's regions are named; the regions the headers do reach are still zeroed.
+    // The metadata root and the debug directory are looked up the same way. Neither is found, and
+    // without them nothing in the assembly can be told apart from its code.
     let mut bad = good.clone();
     set32(&mut bad, SECTION_RAW + 8, 0x10);
     set32(&mut bad, lay.debug_dir, 0x10);
     let out = run(&only(IDENTITY), DLL, &bad);
-    let (g, gl) = lay.guid_heap;
-    assert_eq!(
-        out.body[g..g + gl],
-        bad[g..g + gl],
-        "an unreachable #GUID heap was zeroed"
-    );
-    let e = lay.debug_entries[0];
-    assert_eq!(
-        out.body[e + 4..e + 8],
-        bad[e + 4..e + 8],
-        "an unreachable entry was zeroed"
-    );
-    assert!(
-        out.body[lay.debug_dir..lay.debug_dir + 8]
-            .iter()
-            .all(|&x| x == 0)
-    );
-    assert!(
-        out.body[lay.timestamp..lay.timestamp + 4]
-            .iter()
-            .all(|&x| x == 0)
+    assert_left_whole(
+        &out,
+        &bad,
+        "metadata and a debug directory below their section",
     );
 }
 
 #[test]
-fn debug_entries_naming_the_same_bytes_zero_them_and_count_each_byte_once() {
+fn debug_entries_naming_the_whole_file_decline_the_assembly() {
     // A debug directory names regions by file offset, and a crafted one can name the whole file
-    // from every entry. Zeroed region by region that cost entries × file — half a second for this
-    // 65 KB fixture in a debug build, growing with the square of the file — for the same bytes as
-    // zeroing it once. This test holds the bytes and the count, which zeroing region by region
-    // produced too; the merge that keeps it fast is held beside `dotnet_build_identity_regions`.
+    // from every entry. Zeroed region by region that once cost entries × file — half a second for
+    // this 65 KB fixture in a debug build, growing with the square of the file. None of it is a
+    // debug record, so the assembly is left whole, and the first entry already says so.
     let (mut bad, lay) = Asm {
-        debug: vec![(1, vec![0xee; 4]); 2000],
+        debug: vec![(1, codeview(b"x")); 2000],
         ..Asm::default()
     }
     .build();
     let len = bad.len() as u32;
     for &e in &lay.debug_entries {
         set32(&mut bad, e + 16, len - 1);
+        set32(&mut bad, e + 20, 0);
         set32(&mut bad, e + 24, 1);
     }
     let out = run(&only(IDENTITY), DLL, &bad);
-    assert_eq!(out.body[0], b'M', "the one byte no entry names");
-    assert!(
-        out.body[1..].iter().all(|&x| x == 0),
-        "every named byte is zeroed"
-    );
-    let nonzero = bad[1..].iter().filter(|&&x| x != 0).count() as u64;
+    assert_left_whole(&out, &bad, "2000 entries naming the whole file");
+}
+
+/// Where the builder put `file`, as the address the section maps it at.
+fn rva_of(file: usize) -> u32 {
+    SECTION_RVA + (file - SECTION_RAW) as u32
+}
+
+/// The false match review found in this pass's checks. A static field's data lies under the
+/// strong-name signature, and its type is a struct whose ClassLayout row states no size (`ClassSize`
+/// 0: a `Pack=1` struct with no `Size`), which was read as a length of no bytes, so nothing held the
+/// data and the signature over it was zeroed. With the IL pass declining the assembly, every
+/// MethodDef row naming one 64 KB name so the form would pass four times the file, two packages
+/// whose static data differed stabilized to one, `normalized` and uncapped. Now the data runs to the
+/// end of its section, over the signature, and the identity pass acts only where the IL pass reads
+/// the assembly: either alone keeps the two apart.
+#[test]
+fn static_data_under_a_signature_keeps_two_packages_apart_when_the_il_pass_declines() {
+    let long = "L".repeat(64 * 1024);
+    let mut methods = vec![tiny(&long, SIG_VOID, &[0x2a])];
+    methods.extend((1..8000).map(|_| tiny("m", SIG_VOID, &[0x2a])));
+    let base = Asm {
+        methods,
+        heap_sizes: 0x01,
+        types: vec![("<Module>".into(), 0, 1), ("Holder".into(), 0, 8001)],
+        field_sig: vec![0x06, 0x11, 0x04], // FIELD valuetype TypeDef 1
+        class_layouts: vec![(0, 0, 1)],
+        field_rvas: vec![(SECTION_RVA + 72, 1)],
+        ..Asm::default()
+    };
+    // The builder places the signature, and a second build names it from the one FieldRVA row.
+    let (signature, _) = base.build().1.strong_name.unwrap();
+    let crafted = |fill: u8| {
+        let (mut bad, lay) = Asm {
+            field_rvas: vec![(rva_of(signature), 1)],
+            strong_name: Some(vec![fill; 128]),
+            ..base.clone()
+        }
+        .build();
+        let first = lay.method_rows + 8;
+        let name = u32::from_le_bytes(bad[first..first + 4].try_into().unwrap());
+        for i in 1..8000 {
+            set32(
+                &mut bad,
+                lay.method_rows + i * lay.method_row_size + 8,
+                name,
+            );
+        }
+        bad
+    };
+    let (a, b) = (crafted(0x5a), crafted(0xa5));
     assert_eq!(
-        out.applied[0].bytes_changed, nonzero,
-        "each byte counted once"
+        a.iter().zip(&b).filter(|(x, y)| x != y).count(),
+        128,
+        "the two differ in the field's data alone"
     );
+    for bytes in [&a, &b] {
+        let out = run(&only(CANONICAL), DLL, bytes);
+        assert_left_whole(&out, bytes, "a form past four times the file");
+        let out = run(&only(IDENTITY), DLL, bytes);
+        assert_left_whole(&out, bytes, "a signature laid over static data");
+    }
+    let (sa, applied) = nupkg_stabilized(&a);
+    let (sb, _) = nupkg_stabilized(&b);
+    assert!(
+        sa != sb,
+        "two packages of different static data matched: {applied:?}"
+    );
+}
+
+/// Below `SizeOfHeaders` an address no section maps is read from the headers, which the loader
+/// maps at the image's base, so there an address is its own file offset. Data a FieldRVA row or a
+/// directory named there was taken to be nowhere, and the timestamp and checksum the pass zeroes
+/// could be a static field's initial value or a managed resource, unchecked.
+#[test]
+fn data_named_below_size_of_headers_is_held_where_the_runtime_reads_it() {
+    let lay = Asm::default().build().1;
+    let with_field_at = |rva: usize| {
+        Asm {
+            field_sig: vec![0x06, 0x08], // FIELD int32
+            field_rvas: vec![(rva as u32, 1)],
+            ..Asm::default()
+        }
+        .bytes()
+    };
+    for (what, at) in [
+        ("an int32 on the timestamp", lay.timestamp),
+        ("an int32 on the checksum", lay.checksum),
+        // Past the headers, in no section: the runtime reads it wherever its layout of the file
+        // puts it, and nothing here can say where that is.
+        ("an int32 at an address nothing maps", 0x0080_0000),
+    ] {
+        let bytes = with_field_at(at);
+        let out = run(&only(IDENTITY), DLL, &bytes);
+        assert_left_whole(&out, &bytes, what);
+    }
+    // In the DOS stub, over nothing the pass zeroes, the data is held and the pass acts.
+    let bytes = with_field_at(0x40);
+    let out = run(&only(IDENTITY), DLL, &bytes);
+    assert!(!out.applied.is_empty(), "data in the DOS stub declined it");
+    assert_eq!(out.body[0x40..0x44], bytes[0x40..0x44]);
+
+    // Managed resources, which the CLI header names, laid over the checksum.
+    let (mut bytes, lay) = Asm::default().build();
+    set32(&mut bytes, SECTION_RAW + 24, lay.checksum as u32);
+    set32(&mut bytes, SECTION_RAW + 28, 4);
+    let out = run(&only(IDENTITY), DLL, &bytes);
+    assert_left_whole(&out, &bytes, "managed resources on the checksum");
+}
+
+/// The pass zeroes `#GUID` whole, as the MVID, so it has to lie among the heaps. Laid over the
+/// metadata root or the stream directory, it is the signature, the version and the headers that say
+/// where every table and heap is: zeroed, two images whose directories named different streams
+/// shared one set of zeros, and the IL pass could read neither.
+#[test]
+fn a_guid_heap_anywhere_but_among_the_heaps_declines_the_assembly() {
+    let (good, lay) = Asm::default().build();
+    let header = |name: &str| lay.stream_names.iter().find(|(n, _)| n == name).unwrap().1 - 8;
+    let offset = |at: usize| u32::from_le_bytes(good[at..at + 4].try_into().unwrap());
+    let (guid, blob) = (header("#GUID"), header("#Blob"));
+    // The root's sixteen bytes, the version string's twelve, then the flags and the stream count.
+    let directory = 16 + 12 + 4;
+    for (what, off, size) in [
+        ("over the metadata root", 0, 32),
+        ("over the stream directory", directory, 16),
+        ("over #Blob", offset(blob), 16),
+        (
+            "past the metadata the CLI header states",
+            offset(SECTION_RAW + 12),
+            16,
+        ),
+    ] {
+        let mut bad = good.clone();
+        set32(&mut bad, guid, off);
+        set32(&mut bad, guid + 4, size);
+        let out = run(&only(IDENTITY), DLL, &bad);
+        assert_left_whole(&out, &bad, &format!("#GUID {what}"));
+    }
+}
+
+/// What the import and resource directories point at is read by the loader and lies outside their
+/// own ranges: the name of the DLL imported from, the lookup and address tables, each import's hint
+/// and name, a resource's data. A debug record laid over any of it was zeroed with it, and two
+/// images that imported from different DLLs, or shipped different Win32 resources, matched.
+#[test]
+fn what_the_import_and_resource_directories_point_at_is_held() {
+    let (plain, lay) = Asm {
+        code_pad: 96,
+        ..Asm::default()
+    }
+    .build();
+    let pad = SECTION_RAW + 72;
+    let dirs = lay.debug_dir - 6 * 8;
+    let (record, record_len) = lay.debug_data[0];
+
+    // A managed image's imports as a compiler lays them out, here in the padding before the
+    // bodies: a descriptor and the empty one that ends the list, the lookup and address tables,
+    // the hint and name of `_CorDllMain`, and the name of the DLL, wherever `dll` says.
+    let with_imports = |dll: usize| {
+        let mut b = plain.clone();
+        b[pad..pad + 96].fill(0);
+        set32(&mut b, pad, rva_of(pad + 40)); // OriginalFirstThunk
+        set32(&mut b, pad + 12, rva_of(dll)); // Name
+        set32(&mut b, pad + 16, rva_of(pad + 48)); // FirstThunk
+        set32(&mut b, pad + 40, rva_of(pad + 56));
+        set32(&mut b, pad + 48, rva_of(pad + 56));
+        b[pad + 58..pad + 70].copy_from_slice(b"_CorDllMain\0");
+        b[pad + 72..pad + 84].copy_from_slice(b"mscoree.dll\0");
+        set32(&mut b, dirs + 8, rva_of(pad));
+        set32(&mut b, dirs + 8 + 4, 40);
+        set32(&mut b, dirs + 12 * 8, rva_of(pad + 48));
+        set32(&mut b, dirs + 12 * 8 + 4, 8);
+        b
+    };
+    let bytes = with_imports(pad + 72);
+    let out = run(&only(IDENTITY), DLL, &bytes);
+    for (o, l) in lay.identity_regions() {
+        assert!(
+            out.body[o..o + l].iter().all(|&x| x == 0),
+            "imports laid out apart: region {o:#x}+{l} was not zeroed"
+        );
+    }
+    assert_eq!(out.body[pad..pad + 96], bytes[pad..pad + 96]);
+    let bytes = with_imports(record + 24);
+    let out = run(&only(IDENTITY), DLL, &bytes);
+    assert_left_whole(&out, &bytes, "a DLL name inside a CodeView record");
+
+    // One resource: a table of one numbered entry, and the data entry it names.
+    let with_resource = |data: usize, len: usize| {
+        let mut b = plain.clone();
+        b[pad..pad + 96].fill(0);
+        set16(&mut b, pad + 14, 1); // one numbered entry
+        set32(&mut b, pad + 16, 16); // RT_VERSION
+        set32(&mut b, pad + 20, 24); // a data entry, 24 bytes into the tree
+        set32(&mut b, pad + 24, rva_of(data));
+        set32(&mut b, pad + 28, len as u32);
+        set32(&mut b, dirs + 2 * 8, rva_of(pad));
+        set32(&mut b, dirs + 2 * 8 + 4, 40);
+        b
+    };
+    let bytes = with_resource(pad + 48, 16);
+    let out = run(&only(IDENTITY), DLL, &bytes);
+    assert!(!out.applied.is_empty(), "a resource apart declined it");
+    assert_eq!(out.body[pad..pad + 96], bytes[pad..pad + 96]);
+    let bytes = with_resource(record, record_len);
+    let out = run(&only(IDENTITY), DLL, &bytes);
+    assert_left_whole(&out, &bytes, "a resource whose data is a debug record");
+}
+
+/// Exports, exception data, TLS, load configuration, bound and delay imports point at native code
+/// or at tables of their own, and a managed compiler writes none of them: an image carrying one is
+/// not one this can delimit.
+#[test]
+fn directories_that_point_at_native_code_or_further_tables_decline_the_assembly() {
+    let (good, lay) = Asm {
+        code_pad: 16,
+        ..Asm::default()
+    }
+    .build();
+    let dirs = lay.debug_dir - 6 * 8;
+    for i in [0, 3, 9, 10, 11, 13] {
+        let mut bad = good.clone();
+        set32(&mut bad, dirs + 8 * i, SECTION_RVA + 72);
+        set32(&mut bad, dirs + 8 * i + 4, 16);
+        let out = run(&only(IDENTITY), DLL, &bad);
+        assert_left_whole(&out, &bad, &format!("data directory {i}"));
+    }
 }
 
 // --- totality over input nobody wrote by hand ----------------------------------------------------

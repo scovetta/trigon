@@ -3826,23 +3826,6 @@ fn resolve_format(path: &Path, explicit: Option<&str>) -> Result<Format> {
     })
 }
 
-/// Which stabilizer set to use.
-///
-/// The container format is not enough. A wheel and an arbitrary zip are both `Format::Zip`, and
-/// the wheel needs `wheel-record-v2` and `pyc-header` on top of the zip set: without them a rebuilt
-/// wheel's RECORD is compared against the published one line for line rather than regenerated from
-/// the members that are actually there, so one differing member reports as two. The artifact kind
-/// is what selects the profile, and for these extensions the filename carries it unambiguously.
-///
-/// `.tgz` deliberately stays generic. An npm tarball is a `.tgz` and so is a great deal else, and
-/// nothing in the name says which. The registry knows, and will say so once it exists; guessing
-/// here would apply npm-specific passes to whatever happened to share the extension.
-/// Which profile a filename selects, and the only table that decides it.
-///
-/// One table, used by [`resolve_profile`] and printed by [`show_profiles`]. It was a `match` arm
-/// and nothing else, so a profile the selector could not reach was invisible from outside — and
-/// `npm-tarball` is exactly that: it exists, `docs/03-ecosystems.md` says npm uses it, and every
-/// npm rebuild in the store carries the set digest of plain `tar-gzip`.
 /// The mirror image every command that builds defaults to.
 ///
 /// **One constant, because five copies drifted.** `worker` was added with `:dev` while `rebuild`,
@@ -3855,6 +3838,12 @@ fn resolve_format(path: &Path, explicit: Option<&str>) -> Result<Format> {
 #[cfg(feature = "build")]
 const MIRROR_IMAGE: &str = "localhost/trigon-mirror:latest";
 
+/// Which profile a filename selects, and the only table that decides it.
+///
+/// One table, used by [`resolve_profile`] and printed by [`show_profiles`]. It was a `match` arm
+/// and nothing else, so a profile the selector could not reach was invisible from outside — and
+/// `npm-tarball` is exactly that: it exists, `docs/03-ecosystems.md` says npm uses it, and every
+/// npm rebuild in the store carries the set digest of plain `tar-gzip`.
 const BY_EXTENSION: &[(&str, &str)] = &[
     (".whl", "wheel"),
     (".crate", "crate"),
@@ -3887,6 +3876,18 @@ const _: () = {
     assert!(covered(Format::Tar));
 };
 
+/// Which stabilizer set to use.
+///
+/// The container format is not enough. A wheel and an arbitrary zip are both `Format::Zip`, and
+/// the wheel needs `wheel-record-v3` and `pyc-header-v2` on top of the zip set: without them a
+/// rebuilt wheel's RECORD is compared against the published one line for line rather than
+/// regenerated from the members that are actually there, so one differing member reports as two.
+/// The artifact kind is what selects the profile, and for these extensions the filename carries it
+/// unambiguously.
+///
+/// `.tgz` deliberately stays generic. An npm tarball is a `.tgz` and so is a great deal else, and
+/// nothing in the name says which. The registry knows, and will say so once it exists; guessing
+/// here would apply npm-specific passes to whatever happened to share the extension.
 fn resolve_profile(
     artifact: &Path,
     requested: Option<&str>,
@@ -4763,10 +4764,11 @@ mod profile_listing {
 
     #[test]
     fn a_profile_nothing_selects_is_named_rather_than_listed_like_the_rest() {
-        // `npm-tarball` exists, `docs/03-ecosystems.md` §1 says npm's profile is "tar set + gzip
-        // set + npm-tarball", and every npm run in the store carries the set digest of plain
-        // `tar-gzip`: an artifact named `.tgz` matches no extension arm and falls to the format's
-        // fallback. So `npm-install-fields` has never run on anything this tool has verified.
+        // `npm-tarball` exists, `docs/03-ecosystems.md` §1 says npm's profile should be it, and
+        // every npm run in the store carries the set digest of plain `tar-gzip`: an artifact named
+        // `.tgz` matches no extension arm and falls to the format's fallback. So
+        // `npm-install-fields-v2`, like the id before it, has never run on anything this tool has
+        // verified.
         //
         // Pinned as a list rather than asserted empty, because emptying it is a decision about
         // verdicts — the set digest changes and npm statements stop matching the ones before them.
@@ -4804,7 +4806,7 @@ mod profile_listing {
         assert!(
             capping_passes(&profile("wheel").unwrap())
                 .iter()
-                .any(|c| c.starts_with("wheel-record-v2 (content)"))
+                .any(|c| c.starts_with("wheel-record-v3 (content)"))
         );
         assert!(capping_passes(&profile("gem").unwrap()).is_empty());
     }
@@ -4843,8 +4845,8 @@ fn stabilizers(prof: &str) -> Result<()> {
         style::muted(&format!("({})", set.digest()))
     );
     println!();
-    // Sized to the longest id present rather than to a guess: `gem-metadata-rubygems-version` is
-    // 29 characters and a fixed width silently breaks the alignment of every row after it.
+    // Sized to the longest id present rather than to a guess: `gem-metadata-rubygems-version-v2`
+    // is 32 characters and a fixed width silently breaks the alignment of every row after it.
     let w = set
         .members
         .iter()
